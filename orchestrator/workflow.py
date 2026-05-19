@@ -2462,6 +2462,52 @@ def _check_and_increment_retry_budget(
 # fresh-spawn retry slot on a poisoned session that's not coming back.
 _SILENT_PARKS_BEFORE_FRESH_SESSION = 2
 
+# Substrings Claude's CLI prints to stderr when `--resume <sid>` references a
+# session that no longer exists (transcript GC'd, a different host, a
+# mid-stream kill, etc.). This is a deterministic, recoverable failure --
+# unlike a transient API blip -- so `_resume_dev_with_text` retries once
+# immediately with a cleared session id instead of waiting for the silent-
+# park counter to climb to `_SILENT_PARKS_BEFORE_FRESH_SESSION`.
+#
+# Kept as a tuple of lowercase substrings so phrasing tweaks across Claude
+# CLI releases ("No conversation found ..." / "No conversation with ID ..."
+# / "Conversation ... not found") still match.
+_CLAUDE_STALE_SESSION_STDERR_MARKERS: Tuple[str, ...] = (
+    "no conversation found with session id",
+    "no conversation found with id",
+    "no conversation with session id",
+    "conversation not found",
+)
+
+
+def _is_stale_session_failure(backend: str, result: AgentResult) -> bool:
+    """True iff `result` is a deterministic stale-session resume failure.
+
+    Only claude is matched today: codex's resume CLI does not expose a
+    comparable stable stderr marker, so codex still relies on the silent-
+    park-count fallback. If/when codex grows one, add it here.
+    """
+    if backend != "claude":
+        return False
+    stderr = (result.stderr or "").lower()
+    if not stderr:
+        return False
+    return any(marker in stderr for marker in _CLAUDE_STALE_SESSION_STDERR_MARKERS)
+
+
+def _drop_poisoned_dev_session(state: PinnedState, dev_agent: str) -> None:
+    """Clear the pinned dev session id (and legacy `codex_session_id`).
+
+    Writing `dev_agent` here overrides the legacy fallback path:
+    `_read_dev_session` returns `(dev_agent, dev_session_id)` once
+    `dev_agent` is set, ignoring the legacy field. Clearing the legacy
+    field too leaves no trace of the dropped session anywhere.
+    """
+    state.set("dev_agent", dev_agent)
+    state.set("dev_session_id", None)
+    state.set("codex_session_id", None)
+    state.set("silent_park_count", 0)
+
 
 def _resume_dev_with_text(
     gh: GitHubClient,
@@ -2484,6 +2530,14 @@ def _resume_dev_with_text(
     Claude rate limit) consistently return empty results on every subsequent
     resume; without this fallback every human "retry" comment burns another
     fresh-spawn retry slot on the same poisoned session.
+
+    A Claude resume that comes back with `No conversation found with session
+    ID` (or a sibling marker) is treated as the same poisoned-session
+    condition but recognized immediately: the pinned session id is cleared
+    and the call is retried once as a fresh spawn in the same worktree, so
+    a `resolving_conflict` awaiting-human resume on a Claude session whose
+    transcript was GC'd doesn't park `agent_silent` for two ticks before
+    recovering.
     """
     wt = _worktree_path(spec, issue.number)
     if not wt.exists():
@@ -2501,20 +2555,36 @@ def _resume_dev_with_text(
             issue.number, dev_sid, silent_count,
         )
         dev_sid = None
-        state.set("silent_park_count", 0)
         # Clear the poisoned session from pinned state BEFORE the spawn.
         # If the fresh spawn returns no `session_id` (or its persistence
         # is racy), the next tick must see a cleared session -- not the
         # old poisoned id, which `_read_dev_session` would otherwise
-        # return again and burn another retry. Writing `dev_agent` here
-        # also overrides the legacy `codex_session_id` fallback path:
-        # `_read_dev_session` returns `(dev_agent, dev_session_id)` once
-        # `dev_agent` is set, ignoring the legacy field. Clear the legacy
-        # field too so the dropped session leaves no trace anywhere.
-        state.set("dev_agent", dev_agent)
-        state.set("dev_session_id", None)
-        state.set("codex_session_id", None)
+        # return again and burn another retry.
+        _drop_poisoned_dev_session(state, dev_agent)
     result = run_agent(dev_agent, followup_text, wt, resume_session_id=dev_sid)
+
+    # Deterministic stale-session recovery: if we resumed with a session id
+    # and Claude responded with the "no conversation found" marker, the
+    # pinned session is dead. Drop it and retry once as a fresh spawn in the
+    # same worktree so the caller (typically resolving_conflict awaiting-
+    # human) sees a real agent result on this tick instead of a silent park.
+    # Bounded to one retry: if the fresh spawn ALSO trips a stale-session
+    # marker something deeper is wrong (e.g. a misconfigured CLI) and we
+    # surface that result rather than looping.
+    if (
+        dev_sid is not None
+        and not fresh_spawn
+        and _is_stale_session_failure(dev_agent, result)
+    ):
+        log.info(
+            "issue=#%d dropping poisoned dev session %r after stale-session "
+            "stderr marker; retrying once as a fresh spawn",
+            issue.number, dev_sid,
+        )
+        _drop_poisoned_dev_session(state, dev_agent)
+        fresh_spawn = True
+        result = run_agent(dev_agent, followup_text, wt, resume_session_id=None)
+
     if fresh_spawn and result.session_id:
         # Fresh spawn produced a session id -- record it so subsequent
         # resumes pick up the live session. Mirrors the persistence done

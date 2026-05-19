@@ -5957,6 +5957,187 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNone(state.get("codex_session_id"))
 
 
+class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """When Claude's `--resume <sid>` lands on a transcript that no longer
+    exists, the CLI prints `No conversation found with session ID` on stderr
+    and exits with empty stdout. Without an immediate retry, the resume
+    would park `agent_silent` and the `_SILENT_PARKS_BEFORE_FRESH_SESSION`
+    threshold path would wait for a second silent park before recovering.
+    `_resume_dev_with_text` short-circuits that by detecting the marker and
+    retrying once with a cleared session id in the same worktree.
+    """
+
+    STALE_STDERR = "Error: No conversation found with session ID: poisoned-sess\n"
+
+    def _seeded_issue(self, *, dev_agent: str = "claude"):
+        gh = FakeGitHubClient()
+        issue = make_issue(960, label="resolving_conflict")
+        gh.add_issue(issue)
+        gh.seed_state(
+            960,
+            dev_agent=dev_agent,
+            dev_session_id="poisoned-sess",
+            silent_park_count=0,
+        )
+        return gh, issue
+
+    def test_marker_detector_matches_known_phrasings(self) -> None:
+        # The detector is keyed off lowercase substrings so phrasing tweaks
+        # across Claude CLI releases still trip the recovery path.
+        for stderr in (
+            "Error: No conversation found with session ID: abc-123",
+            "no conversation found with id abc",
+            "No conversation with session ID xyz",
+            "Conversation not found.",
+            # Mixed casing still matches.
+            "NO CONVERSATION FOUND WITH SESSION ID foo",
+        ):
+            with self.subTest(stderr=stderr):
+                result = _agent(session_id="", last_message="", stderr=stderr)
+                self.assertTrue(
+                    workflow._is_stale_session_failure("claude", result),
+                    f"{stderr!r} should be classified stale-session",
+                )
+
+    def test_marker_detector_ignores_unrelated_stderr(self) -> None:
+        result = _agent(
+            session_id="", last_message="",
+            stderr="Error: rate limited, please retry shortly",
+        )
+        self.assertFalse(
+            workflow._is_stale_session_failure("claude", result)
+        )
+
+    def test_marker_detector_only_triggers_for_claude(self) -> None:
+        # Codex has no analogous stable marker today; the detector must
+        # not misfire on a codex resume whose stderr happens to share text.
+        result = _agent(
+            session_id="", last_message="",
+            stderr="No conversation found with session ID: xyz",
+        )
+        self.assertFalse(
+            workflow._is_stale_session_failure("codex", result)
+        )
+
+    def test_claude_stale_session_retries_once_with_fresh_spawn(self) -> None:
+        # Two calls expected: the first one resumes the poisoned session and
+        # comes back with the marker; the second is a fresh spawn (no resume
+        # session id) in the same worktree, with the new session id
+        # persisted on success.
+        gh, issue = self._seeded_issue()
+        state = gh.read_pinned_state(issue)
+
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+            calls.append(resume_session_id)
+            if resume_session_id == "poisoned-sess":
+                return _agent(
+                    session_id="", last_message="",
+                    stderr=self.STALE_STDERR,
+                )
+            return _agent(session_id="fresh-sess", last_message="ok")
+
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+             patch.object(workflow, "run_agent", fake_run):
+            workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
+
+        self.assertEqual(
+            calls, ["poisoned-sess", None],
+            "expected one resume with the poisoned id then one fresh spawn",
+        )
+        self.assertEqual(
+            state.get("dev_session_id"), "fresh-sess",
+            "fresh spawn's session id must be persisted",
+        )
+        self.assertEqual(state.get("dev_agent"), "claude")
+        self.assertIsNone(state.get("codex_session_id"))
+        # Silent-park streak resets so a future blip does not immediately
+        # re-drop the new session.
+        self.assertEqual(state.get("silent_park_count"), 0)
+
+    def test_stale_session_retry_clears_pinned_even_if_retry_empty(self) -> None:
+        # If the fresh-spawn retry returns no session id (CLI hiccup), the
+        # poisoned id must still be cleared from pinned state -- otherwise
+        # the next tick's `_read_dev_session` resurrects it.
+        gh, issue = self._seeded_issue()
+        state = gh.read_pinned_state(issue)
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+            if resume_session_id == "poisoned-sess":
+                return _agent(
+                    session_id="", last_message="",
+                    stderr=self.STALE_STDERR,
+                )
+            return _agent(session_id="", last_message="")
+
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+             patch.object(workflow, "run_agent", fake_run):
+            workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
+
+        self.assertIsNone(
+            state.get("dev_session_id"),
+            "poisoned session id must be cleared even when the retry "
+            "returns no session id",
+        )
+
+    def test_stale_session_retry_does_not_loop_when_retry_also_stale(self) -> None:
+        # If the fresh spawn ALSO trips a stale-session marker something
+        # deeper is broken (e.g. a misconfigured CLI). Surface that result
+        # to the caller instead of looping infinitely.
+        gh, issue = self._seeded_issue()
+        state = gh.read_pinned_state(issue)
+
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+            calls.append(resume_session_id)
+            return _agent(
+                session_id="", last_message="", stderr=self.STALE_STDERR,
+            )
+
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+             patch.object(workflow, "run_agent", fake_run):
+            _, result = workflow._resume_dev_with_text(
+                gh, _TEST_SPEC, issue, state, "go",
+            )
+
+        self.assertEqual(
+            calls, ["poisoned-sess", None],
+            "retry must be bounded to a single fresh spawn",
+        )
+        # Result reflects the still-failing retry; caller's downstream
+        # `_on_question` will handle the agent_silent park.
+        self.assertEqual(result.stderr, self.STALE_STDERR)
+
+    def test_codex_stale_stderr_does_not_trigger_immediate_retry(self) -> None:
+        # Codex falls back to the silent-park-count path. A first resume
+        # whose stderr happens to contain the marker must NOT retry
+        # immediately for the codex backend.
+        gh, issue = self._seeded_issue(dev_agent="codex")
+        state = gh.read_pinned_state(issue)
+
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+            calls.append(resume_session_id)
+            return _agent(
+                session_id="", last_message="", stderr=self.STALE_STDERR,
+            )
+
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+             patch.object(workflow, "run_agent", fake_run):
+            workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
+
+        self.assertEqual(
+            calls, ["poisoned-sess"],
+            "codex backend must NOT trigger the claude-only immediate retry",
+        )
+        # Poisoned id remains; the existing silent-park-count path is what
+        # will eventually drop it.
+        self.assertEqual(state.get("dev_session_id"), "poisoned-sess")
+
+
 class HandoffConsumedThroughIssueThreadOnlyTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
@@ -9081,6 +9262,82 @@ class HandleResolvingConflictTest(
         self.assertIn((200, "validating"), gh.label_history)
         # Watermark advanced past the consumed comment.
         self.assertEqual(data.get("last_action_comment_id"), 2000)
+
+    def test_awaiting_human_resume_recovers_from_stale_claude_session(self) -> None:
+        # Regression: a `resolving_conflict` issue parked awaiting human
+        # whose pinned `dev_session_id` references a Claude transcript that
+        # no longer exists. The first `--resume <sid>` call comes back with
+        # `No conversation found with session ID` on stderr and empty
+        # stdout. Without immediate detection the resume would surface as
+        # an `agent_silent` park, the silent-park counter would tick to 1
+        # (still below the threshold), and the human would have to comment
+        # twice more before recovery. With the fix, `_resume_dev_with_text`
+        # transparently retries with a fresh spawn in the same worktree;
+        # the merge commit produced by the retry pushes and the issue
+        # flips back to validating in a single tick.
+        gh, issue, pr = self._seed(
+            extra_state={
+                "awaiting_human": True,
+                "conflict_round": 1,
+                "last_action_comment_id": 1000,
+                "dev_session_id": "poisoned-sess",
+            },
+        )
+        issue.comments.append(
+            FakeComment(
+                id=2000, body="please retry the conflict resolution",
+                user=FakeUser("alice"),
+            )
+        )
+
+        stale_stderr = "Error: No conversation found with session ID: poisoned-sess"
+
+        calls: list = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+            calls.append(resume_session_id)
+            if resume_session_id == "poisoned-sess":
+                return _agent(
+                    session_id="", last_message="", stderr=stale_stderr,
+                )
+            return _agent(session_id="fresh-sess", last_message="resolved")
+
+        from unittest.mock import MagicMock
+        merge_mock = MagicMock(return_value=(True, []))
+        git_mock = MagicMock(
+            return_value=MagicMock(returncode=0, stdout="", stderr="")
+        )
+        with patch.object(
+            workflow, "_merge_base_into_worktree", merge_mock,
+        ), patch.object(workflow, "_git", git_mock), patch.object(
+            workflow, "_git_hardened", git_mock,
+        ):
+            mocks = self._run(
+                lambda: workflow._handle_resolving_conflict(
+                    gh, _TEST_SPEC, issue,
+                ),
+                run_agent=fake_run,
+                push_branch=True,
+                head_shas=["beforehead", "merged"],
+            )
+
+        # Two run_agent calls: the poisoned resume + the fresh-spawn retry.
+        self.assertEqual(
+            calls, ["poisoned-sess", None],
+            "stale-session resume must be transparently retried as fresh",
+        )
+        # Successful retry pushes the branch and flips back to validating
+        # WITHOUT parking agent_silent.
+        mocks["_push_branch"].assert_called_once()
+        self.assertIn((200, "validating"), gh.label_history)
+        data = gh.pinned_data(200)
+        self.assertFalse(
+            data.get("awaiting_human"),
+            "awaiting_human must be cleared on a recovered resume",
+        )
+        self.assertNotEqual(data.get("park_reason"), "agent_silent")
+        self.assertEqual(data.get("conflict_round"), 2)
+        self.assertEqual(data.get("dev_session_id"), "fresh-sess")
 
     def test_awaiting_human_resume_with_question_parks_again(self) -> None:
         # Resumed agent that produces no new commit (asks another
