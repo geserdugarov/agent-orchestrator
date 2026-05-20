@@ -102,7 +102,7 @@ Pinned in [`pyproject.toml`](pyproject.toml):
    ./run.sh
    ```
 
-   The wrapper does `git pull --ff-only origin main` and re-launches the orchestrator after each clean exit (so a self-modifying merge picks up the new code automatically).
+   The wrapper does `git pull --ff-only origin main` and re-launches the orchestrator after each clean exit (so a self-modifying merge picks up the new code automatically). Ctrl+C (or `SIGTERM`) stops the wrapper too: the orchestrator exits with `128 + signum` and `run.sh` skips the restart loop. A second Ctrl+C terminates immediately.
 
    On first start the orchestrator creates the 9 workflow labels on the repo and begins polling open issues every 60 seconds.
 

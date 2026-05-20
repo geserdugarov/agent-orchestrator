@@ -24,12 +24,26 @@ from .github import GitHubClient
 log = logging.getLogger("orchestrator")
 
 _running = True
+_received_signal: Optional[int] = None
 
 
 def _shutdown(signum, _frame) -> None:
-    global _running
+    """Stop after the current tick, and re-arm the kernel default handler so a
+    second Ctrl+C kills the process immediately. Recording `_received_signal`
+    lets `main()` return `128 + signum`, which `run.sh` keys on to skip the
+    restart loop -- otherwise a graceful SIGINT exit (code 0) is
+    indistinguishable from a self-modifying-merge restart.
+    """
+    global _running, _received_signal
+    if _received_signal is not None:
+        return
+    _received_signal = signum
     log.info("signal %s received; will stop after this tick", signum)
     _running = False
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+    except (OSError, ValueError):
+        pass
 
 
 def _configure_logging(level: str) -> None:
@@ -116,20 +130,22 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.once:
         _run_tick(clients)
-        return 0
+    else:
+        own_sha = _own_head_sha()
+        log.info("own HEAD=%s", own_sha)
 
-    own_sha = _own_head_sha()
-    log.info("own HEAD=%s", own_sha)
+        while _running:
+            if own_sha and _self_modifying_merge_happened(own_sha):
+                log.info("self-modifying merge detected; exiting for restart")
+                return 0
+            _run_tick(clients)
+            for _ in range(config.POLL_INTERVAL):
+                if not _running:
+                    break
+                time.sleep(1)
 
-    while _running:
-        if own_sha and _self_modifying_merge_happened(own_sha):
-            log.info("self-modifying merge detected; exiting for restart")
-            return 0
-        _run_tick(clients)
-        for _ in range(config.POLL_INTERVAL):
-            if not _running:
-                break
-            time.sleep(1)
+    if _received_signal is not None:
+        return 128 + _received_signal
     return 0
 
 
@@ -143,6 +159,11 @@ def _run_tick(
     the polling loop so both paths fan out identically.
     """
     for spec, gh in clients:
+        if not _running:
+            # A signal arrived mid-tick: skip the rest of this tick so the
+            # process exits promptly instead of grinding through every repo.
+            log.info("shutdown requested; skipping remaining repos this tick")
+            return
         log.info("tick: repo=%s", spec.slug)
         try:
             workflow.tick(gh, spec)

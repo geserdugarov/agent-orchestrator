@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import signal
 import sys
 import tempfile
 import unittest
@@ -139,6 +140,62 @@ class PollingLoopFanOutTest(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertEqual(tick_calls, ["owner/legacy"])
+
+
+class SignalHandlingTest(unittest.TestCase):
+    """A signal that arrives mid-tick must (a) propagate as a non-zero exit
+    code so `run.sh` skips its restart loop, and (b) skip the remaining repos
+    in the current tick instead of grinding through every one before exiting.
+    """
+
+    def test_sigint_during_tick_yields_signal_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as td, _reload_main({
+            "REPOS": (
+                f"alpha/one|{td}|main\n"
+                f"beta/two|{td}|develop"
+            ),
+        }) as main_mod:
+            ticked: list[str] = []
+
+            def fake_tick(gh, spec):
+                ticked.append(spec.slug)
+                # Simulate the user pressing Ctrl+C mid-tick.
+                main_mod._shutdown(signal.SIGINT, None)
+
+            def fake_client(*, repo_spec):
+                m = MagicMock()
+                m.slug = repo_spec.slug
+                return m
+
+            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
+                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+                rc = main_mod.main(["--once"])
+
+            # 128 + SIGINT(2) = 130. run.sh keys on this to skip restart.
+            self.assertEqual(rc, 128 + signal.SIGINT)
+            # The remaining repo in this tick must be skipped so the process
+            # exits promptly instead of running every spec to completion.
+            self.assertEqual(ticked, ["alpha/one"])
+
+    def test_sigterm_yields_signal_exit_code(self) -> None:
+        with _reload_main({
+            "REPO": "owner/legacy",
+            "TARGET_REPO_ROOT": "/tmp",
+            "BASE_BRANCH": "trunk",
+        }) as main_mod:
+            def fake_tick(gh, spec):
+                main_mod._shutdown(signal.SIGTERM, None)
+
+            def fake_client(*, repo_spec):
+                m = MagicMock()
+                m.slug = repo_spec.slug
+                return m
+
+            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
+                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+                rc = main_mod.main(["--once"])
+
+            self.assertEqual(rc, 128 + signal.SIGTERM)
 
 
 if __name__ == "__main__":
