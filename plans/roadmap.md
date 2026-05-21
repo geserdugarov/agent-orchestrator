@@ -12,9 +12,9 @@ running in per-issue git worktrees. State lives in GitHub Issues themselves
 (one workflow label plus one pinned JSON comment), so the loop stays
 stateless and progress is observable on github.com.
 
-See `docs/workflow.md` for the design and stage semantics and
-`docs/architecture.md` for the implementation walk-through. This file
-tracks what shipped and what is still open.
+See `docs/architecture.md` for the design, stage semantics, and
+implementation walk-through. This file tracks what shipped and what is
+still open.
 
 ## Shipped
 
@@ -141,24 +141,32 @@ checks must pass before merge.
   the first version fixed-schema and file-backed; richer search,
   exemplars, or lesson mining can wait until the simple signal proves
   useful.
+- **Project tests/linters during `validating`.** Run project-specific
+  verification locally before the reviewer-approved branch can flip to
+  `in_review`. Today `_handle_validating` only runs the reviewer agent;
+  `ruff`, `pytest`, `mypy`, or target-repo scripts run externally in PR
+  CI and are consulted later by the auto-merge gate. Add a configurable
+  verify-command list and park with actionable output on failure, while
+  keeping CI as the final merge gate.
 - **Dockerfile / systemd / GitHub App migration.** The current deployment
   is a `run.sh` wrapper around `python -m orchestrator.main` on a single
-  host. The design doc flags container / VM isolation as an open
-  question. Moving to a long-running VPS deployment also lets `systemd
+  host. Container / VM isolation remains an open deployment question.
+  Moving to a long-running VPS deployment also lets `systemd
   Restart=always` replace the `run.sh` self-restart wrapper, and the
   GitHub App migration lets the orchestrator drop the per-repo PAT in
   favor of an installation token.
-- **Architectural review at `validating`.** `docs/workflow.md` flags
-  this as optional: a reviewer pass that flags structural issues (e.g.
-  oversized files that should be split). Not yet implemented.
-- **Documentation stage.** `docs/workflow.md` lists this under "Next
-  steps": an extra stage that keeps `docs/` in sync as code changes
-  land.
-- **Dynamic workflow.** `docs/workflow.md` lists this under
-  "Alternatives": a planner agent ahead of execution that picks the
-  stages a given issue needs (extra architectural exploration, skip
-  acceptance for trivial fixes, etc.). Judged excessive for the original
-  2-week budget; revisit once the static flow is fully dogfooded.
+- **Architectural review at `validating`.** Add an optional reviewer pass
+  that flags structural issues such as oversized files that should be
+  split. Not yet implemented.
+- **Documentation stage.** Add an explicit stage that keeps README,
+  `docs/`, and `plans/` in sync as code changes land. The decomposer
+  prompt currently asks split issues to create a final docs child, but a
+  stage would make that expectation visible and enforceable.
+- **Dynamic workflow.** Add a planner agent ahead of execution that picks
+  the stages a given issue needs, such as extra architectural
+  exploration or skipping acceptance for trivial fixes. Judged excessive
+  for the original 2-week budget; revisit once the static flow is fully
+  dogfooded.
 
 ## Risks
 

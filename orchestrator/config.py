@@ -348,7 +348,7 @@ AUTO_MERGE: bool = os.environ.get("AUTO_MERGE", "off").strip().lower() in (
     "1", "true", "on", "yes",
 )
 # Quiet window after the most recent PR/issue comment before resuming the dev
-# session in `in_review`. Matches the 10-minute target in docs/workflow.md.
+# session in `in_review`.
 IN_REVIEW_DEBOUNCE_SECONDS: int = int(
     os.environ.get("IN_REVIEW_DEBOUNCE_SECONDS", "600")
 )

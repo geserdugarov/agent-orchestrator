@@ -6,7 +6,7 @@ Orchestrator for automatic issues resolving utilizing agents.
 
 The orchestrator watches GitHub Issues, drives them through a label-based state machine, and spawns local CLI agents (`codex`, `claude`) to implement them and open PRs. State lives in GitHub Issues themselves (one workflow label + one pinned JSON comment), so the orchestrator stays stateless and progress is observable on github.com.
 
-For the design and stage definitions, see [`docs/workflow.md`](docs/workflow.md) (in Russian).
+For the design and stage definitions, see [`docs/architecture.md`](docs/architecture.md).
 For the implementation roadmap, see [`plans/roadmap.md`](plans/roadmap.md).
 
 ## Requirements
@@ -104,7 +104,7 @@ Pinned in [`pyproject.toml`](pyproject.toml):
 
    The wrapper does `git pull --ff-only origin main` and re-launches the orchestrator after each clean exit (so a self-modifying merge picks up the new code automatically). Ctrl+C (or `SIGTERM`) stops the wrapper too: the orchestrator exits with `128 + signum` and `run.sh` skips the restart loop. A second Ctrl+C terminates immediately.
 
-   On first start the orchestrator creates the 9 workflow labels on the repo and begins polling open issues every 60 seconds.
+   On first start the orchestrator creates the 10 workflow labels on the repo and begins polling open issues every 60 seconds.
 
 6. **File a bootstrap test issue** to verify the path works end-to-end:
 
@@ -169,7 +169,7 @@ Tokens are resolved per slug: `GitHubClient` reads `GITHUB_TOKEN` from the envir
 
 ## Current scope
 
-The orchestrator currently drives (no label) → `decomposing` → `ready`/`blocked` → `implementing` → `validating` → `in_review` → `done`/`rejected`, with configurable dev/review/decompose backend splits, a per-issue retry budget (`MAX_RETRIES_PER_DAY`), a review/fix loop capped by `MAX_REVIEW_ROUNDS`, and a debounced PR-comment-resume loop in `in_review`. The decomposer asks the agent for a fenced `orchestrator-manifest` JSON block; on `decision=single` the parent flips straight to `ready`, on `decision=split` it creates child issues, persists the dep graph, and parks on `blocked` until `_handle_blocked` walks the children. Auto-merge on approve+green-CI is gated by `AUTO_MERGE` (default `off`); enable it once dogfooded. The decomposer can be disabled with `DECOMPOSE=off`, which reverts to the legacy direct-to-`implementing` pickup; the same flag also routes any issue already labeled `decomposing` (e.g. parked there awaiting a human) to `implementing` on the next tick, so the kill switch applies to in-flight issues, not just new ones. See [`plans/roadmap.md`](plans/roadmap.md).
+The orchestrator currently drives (no label) → `decomposing` → `ready`/`blocked`/`umbrella` → `implementing` → `validating` → `in_review` → `resolving_conflict` (optional) → `done`/`rejected`, with configurable dev/review/decompose backend splits, a per-issue retry budget (`MAX_RETRIES_PER_DAY`), a review/fix loop capped by `MAX_REVIEW_ROUNDS`, and a debounced PR-comment-resume loop in `in_review`. The decomposer asks the agent for a fenced `orchestrator-manifest` JSON block; on `decision=single` the parent flips straight to `ready`, on `decision=split` it creates child issues, persists the dep graph, and parks on `blocked` or `umbrella` until the child issues resolve. Auto-merge on approve+green-CI is gated by `AUTO_MERGE` (default `off`); enable it once dogfooded. The decomposer can be disabled with `DECOMPOSE=off`, which reverts to the legacy direct-to-`implementing` pickup; the same flag also routes any issue already labeled `decomposing` (e.g. parked there awaiting a human) to `implementing` on the next tick, so the kill switch applies to in-flight issues, not just new ones. See [`plans/roadmap.md`](plans/roadmap.md).
 
 ## License
 

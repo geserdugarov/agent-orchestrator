@@ -259,7 +259,6 @@ class InReviewDebounceConfigTest(unittest.TestCase):
             return config
 
     def test_default_is_ten_minutes(self) -> None:
-        # Matches the "10 минут (debounce)" in docs/workflow.md:142.
         config = self._load_config()
         self.assertEqual(config.IN_REVIEW_DEBOUNCE_SECONDS, 600)
 
