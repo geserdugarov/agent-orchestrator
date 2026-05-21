@@ -25,6 +25,14 @@ from orchestrator.github import (
 @dataclass
 class FakeUser:
     login: str = "human"
+    # GitHub's account-type flag exposed as `user.type` on the REST API:
+    # "User" for normal accounts, "Bot" for GitHub-App-installed bots
+    # (Dependabot, Renovate, etc.). `_compute_user_content_hash` reads
+    # this to filter automated-bot comments out of the drift hash so a
+    # weekly Dependabot bump doesn't re-fire drift detection every tick.
+    # Default "User" so existing tests keep treating fake comments as
+    # human-authored.
+    type: str = "User"
 
 
 @dataclass

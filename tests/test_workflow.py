@@ -913,11 +913,18 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
         gh = FakeGitHubClient()
         issue = make_issue(2, label="implementing")
         gh.add_issue(issue)
+        # Pre-seed `user_content_hash` so the durability-fix branch in
+        # `_detect_user_content_change` doesn't trigger an extra
+        # baseline-seeding write; this test specifically verifies the
+        # awaiting-human no-reply path produces zero state churn.
         gh.seed_state(
             2,
             awaiting_human=True,
             last_action_comment_id=900,
             codex_session_id="sess-old",
+            user_content_hash=workflow._compute_user_content_hash(
+                issue, set()
+            ),
         )
         before = gh.write_state_calls
 
@@ -10748,6 +10755,1906 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertIn((7, "resolving_conflict"), self.gh.label_history)
 
 
+class ComputeUserContentHashTest(unittest.TestCase):
+    """The hash must include user-visible content (title, body, human
+    comments) and exclude orchestrator-authored content (pinned-state
+    marker comments, anything in `orchestrator_comment_ids`). Author-login
+    matching is intentionally avoided because the orchestrator PAT is
+    often shared with a human reviewer's GitHub account."""
+
+    def test_hash_changes_when_body_changes(self) -> None:
+        issue_a = make_issue(1, body="old body")
+        issue_b = make_issue(1, body="new body")
+        self.assertNotEqual(
+            workflow._compute_user_content_hash(issue_a, set()),
+            workflow._compute_user_content_hash(issue_b, set()),
+        )
+
+    def test_hash_changes_when_title_changes(self) -> None:
+        issue_a = make_issue(1, title="old", body="b")
+        issue_b = make_issue(1, title="new", body="b")
+        self.assertNotEqual(
+            workflow._compute_user_content_hash(issue_a, set()),
+            workflow._compute_user_content_hash(issue_b, set()),
+        )
+
+    def test_orchestrator_comments_filtered_by_id(self) -> None:
+        # A human comment with the same body as a bot comment must still
+        # affect the hash; only the recorded bot id is filtered.
+        human = FakeComment(id=100, body="please retry", user=FakeUser("alice"))
+        bot = FakeComment(id=200, body="picking this up", user=FakeUser("alice"))
+        issue_with_human = make_issue(1, comments=[human])
+        issue_with_both = make_issue(1, comments=[human, bot])
+        self.assertEqual(
+            workflow._compute_user_content_hash(issue_with_human, {200}),
+            workflow._compute_user_content_hash(issue_with_both, {200}),
+        )
+        # Without filtering 200, the hash differs.
+        self.assertNotEqual(
+            workflow._compute_user_content_hash(issue_with_human, set()),
+            workflow._compute_user_content_hash(issue_with_both, set()),
+        )
+
+    def test_pinned_state_marker_comment_is_filtered_by_marker(self) -> None:
+        pinned = FakeComment(
+            id=300, body="<!--orchestrator-state {\"k\": 1}-->",
+        )
+        issue = make_issue(1)
+        issue_with_pinned = make_issue(1, comments=[pinned])
+        # Pinned-state comment id is NOT in orchestrator_ids but its marker
+        # body causes it to be filtered.
+        self.assertEqual(
+            workflow._compute_user_content_hash(issue, set()),
+            workflow._compute_user_content_hash(issue_with_pinned, set()),
+        )
+
+
+class DetectUserContentChangeTest(unittest.TestCase):
+    def test_first_call_persists_durably_and_returns_none(self) -> None:
+        # The first encounter has no baseline; we record the current value
+        # AND write pinned state immediately so a parked/idle tick can't
+        # silently absorb a later edit as the new baseline.
+        gh = FakeGitHubClient()
+        issue = make_issue(1)
+        gh.add_issue(issue)
+        state = gh.read_pinned_state(issue)
+        before = gh.write_state_calls
+        result = workflow._detect_user_content_change(gh, issue, state)
+        self.assertIsNone(result)
+        self.assertEqual(
+            state.get("user_content_hash"),
+            workflow._compute_user_content_hash(issue, set()),
+        )
+        # Durably written so a later edit after an early-return tick is
+        # correctly classified as drift, not absorbed as the new baseline.
+        self.assertEqual(gh.write_state_calls, before + 1)
+        self.assertEqual(
+            gh.pinned_data(1).get("user_content_hash"),
+            state.get("user_content_hash"),
+        )
+
+    def test_unchanged_returns_none(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(1)
+        gh.add_issue(issue)
+        prior_hash = workflow._compute_user_content_hash(issue, set())
+        gh.seed_state(1, user_content_hash=prior_hash)
+        state = gh.read_pinned_state(issue)
+        before = gh.write_state_calls
+        self.assertIsNone(
+            workflow._detect_user_content_change(gh, issue, state)
+        )
+        # No extra write when the baseline already matches.
+        self.assertEqual(gh.write_state_calls, before)
+
+    def test_body_change_returns_new_hash_without_auto_persist(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue_a = make_issue(1, body="old")
+        prior = workflow._compute_user_content_hash(issue_a, set())
+        issue_b = make_issue(1, body="new body")
+        gh.add_issue(issue_b)
+        gh.seed_state(1, user_content_hash=prior)
+        state = gh.read_pinned_state(issue_b)
+        before = gh.write_state_calls
+        result = workflow._detect_user_content_change(gh, issue_b, state)
+        self.assertEqual(
+            result, workflow._compute_user_content_hash(issue_b, set())
+        )
+        self.assertNotEqual(result, prior)
+        # The helper does NOT auto-persist on a real change; the caller
+        # decides whether to act and persist (so the routing branches can
+        # use the comparison without committing to a state write).
+        self.assertEqual(gh.write_state_calls, before)
+        self.assertEqual(state.get("user_content_hash"), prior)
+
+
+class HandlePickupInitializesUserContentHashTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    def test_pickup_with_decompose_off_seeds_hash(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(1)
+        gh.add_issue(issue)
+
+        with patch.object(config, "DECOMPOSE", False):
+            self._run(
+                lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
+                run_agent=_agent(last_message="q"),
+                has_new_commits=False,
+            )
+
+        data = gh.pinned_data(1)
+        self.assertIn("user_content_hash", data)
+        # Hash filters the pickup comment by id (it has been recorded in
+        # `orchestrator_comment_ids`), so it should match a re-computation
+        # over the same set.
+        orch_ids = set(data.get("orchestrator_comment_ids") or [])
+        self.assertEqual(
+            data["user_content_hash"],
+            workflow._compute_user_content_hash(issue, orch_ids),
+        )
+
+    def test_pickup_with_decompose_on_seeds_hash(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(2)
+        gh.add_issue(issue)
+
+        with patch.object(config, "DECOMPOSE", True):
+            mocks = self._run(
+                lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dec-sess",
+                    last_message=(
+                        "fits one\n\n```orchestrator-manifest\n"
+                        '{"decision": "single", "rationale": "small"}\n'
+                        "```"
+                    ),
+                ),
+            )
+
+        data = gh.pinned_data(2)
+        self.assertIn("user_content_hash", data)
+
+
+class HandleReadyRoutesBackOnHashChangeTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    def test_body_drift_routes_ready_back_to_decomposing(self) -> None:
+        # `ready` is reached only after a `single` decomposition decision
+        # (no children created), so re-decomposing is safe. The handler
+        # must clear the locked decomposer session so the next tick spawns
+        # a fresh manifest derived against the new body.
+        gh = FakeGitHubClient()
+        issue = make_issue(50, label="ready", body="updated body")
+        gh.add_issue(issue)
+        gh.seed_state(
+            50,
+            user_content_hash="stale-hash-from-prior-tick",
+            decomposer_agent="claude",
+            decomposer_session_id="old-sess",
+            pickup_comment_id=900,
+        )
+
+        self._run(
+            lambda: workflow._handle_ready(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        # Routed back to decomposing; the implementer must NOT have run
+        # this tick.
+        self.assertIn((50, "decomposing"), gh.label_history)
+        data = gh.pinned_data(50)
+        # Session id dropped so the next tick spawns fresh, but the
+        # recorded `decomposer_agent` spec is PRESERVED -- the
+        # lock-on-first-spawn rule (see FullSpecPersistenceTest) means
+        # a mid-flight config flip must not retarget the issue's
+        # recorded role identity. The fresh spawn uses the recorded
+        # spec via `_read_decomposer_session`.
+        self.assertIsNone(data.get("decomposer_session_id"))
+        self.assertEqual(data.get("decomposer_agent"), "claude")
+        # New hash now persisted so the next decomposing tick sees a
+        # stable baseline.
+        self.assertNotEqual(
+            data.get("user_content_hash"), "stale-hash-from-prior-tick",
+        )
+        # A human-visible notice is posted.
+        self.assertTrue(any(
+            "issue content changed" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_unchanged_ready_does_not_route_back(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(51, label="ready", body="stable body")
+        gh.add_issue(issue)
+        current = workflow._compute_user_content_hash(issue, set())
+        gh.seed_state(
+            51,
+            user_content_hash=current,
+            pickup_comment_id=900,
+        )
+
+        self._run(
+            lambda: workflow._handle_ready(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="done"
+            ),
+            has_new_commits=[False, True],
+            push_branch=True,
+        )
+
+        # Falls through to the normal `ready` -> `implementing` flow.
+        self.assertIn((51, "implementing"), gh.label_history)
+        self.assertNotIn((51, "decomposing"), gh.label_history)
+
+
+class HandleImplementingResumeOnHashChangeTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    def test_body_drift_resumes_dev_session_not_re_decompose(self) -> None:
+        # The spec rules out re-decomposing mid-implementation. Once a dev
+        # session exists, the handler must instead notify the human and
+        # resume the locked dev session with the new body so it can decide
+        # whether more work is needed.
+        gh = FakeGitHubClient()
+        issue = make_issue(60, label="implementing", body="new requirements")
+        gh.add_issue(issue)
+        gh.seed_state(
+            60,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            awaiting_human=True,
+            last_action_comment_id=500,
+            branch="orchestrator/issue-60",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="addressed it"
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            # Two SHAs so the drift branch's "did THIS resume commit?"
+            # head-SHA delta check sees a real change (the original
+            # `_has_new_commits` check would have falsely accepted
+            # pre-existing unpushed commits on a recovered worktree).
+            head_shas=["before-resume", "after-resume"],
+        )
+
+        # Dev session resumed; the prompt mentions the updated body.
+        mocks["run_agent"].assert_called_once()
+        prompt = mocks["run_agent"].call_args[0][1]
+        self.assertIn("new requirements", prompt)
+        self.assertIn("Updated issue", prompt)
+        # The label still flipped via _on_commits -> validating because
+        # the resume produced a commit; the issue is NOT routed to
+        # decomposing.
+        self.assertNotIn((60, "decomposing"), gh.label_history)
+        self.assertIn((60, "validating"), gh.label_history)
+        data = gh.pinned_data(60)
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertTrue(any(
+            "issue body changed" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_no_dev_session_falls_through_to_fresh_spawn(self) -> None:
+        # Pre-spawn implementing (ready -> implementing on the same tick,
+        # but the dev hasn't run yet): a hash change should just persist
+        # the new value and let the fresh-spawn path pick up the new body
+        # via `_build_implement_prompt`. There is no "stale dev session"
+        # to notify about.
+        gh = FakeGitHubClient()
+        issue = make_issue(61, label="implementing", body="brand new body")
+        gh.add_issue(issue)
+        gh.seed_state(
+            61,
+            user_content_hash="stale-hash",
+            pickup_comment_id=900,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="new-sess", last_message="implemented"
+            ),
+            # Three `_has_new_commits` calls: (1) the drift-no-session
+            # "are there recovered commits to park on?" check
+            # (False -- fall through), (2) the regular fresh-spawn-
+            # branch's "recovered worktree?" check (False), (3) the
+            # post-agent "did the spawn commit?" check (True).
+            has_new_commits=[False, False, True],
+            push_branch=True,
+        )
+
+        # Fresh spawn ran; the implement prompt was built (not the
+        # "issue body changed" resume prompt).
+        prompt = mocks["run_agent"].call_args[0][1]
+        self.assertIn("You are the implementer", prompt)
+        # No "issue body changed" notice was posted (we fell through to
+        # the normal fresh-spawn path).
+        self.assertFalse(any(
+            "issue body changed" in body
+            for _, body in gh.posted_comments
+        ))
+        # But the new hash is persisted.
+        data = gh.pinned_data(61)
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+
+
+class HandleValidatingResumeOnHashChangeTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    def test_body_drift_resumes_dev_and_stays_in_validating(self) -> None:
+        # While validating (PR is open), a human edit must not discard the
+        # dev's already-pushed work. Notify and resume; on a successful
+        # pushed fix, stay in `validating` so the reviewer agent re-runs
+        # next tick on the new diff.
+        gh = FakeGitHubClient()
+        issue = make_issue(70, label="validating", body="updated criteria")
+        gh.add_issue(issue)
+        pr = FakePR(number=700, head_branch="orchestrator/issue-70")
+        gh.add_pr(pr)
+        gh.seed_state(
+            70,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_number=pr.number,
+            review_round=0,
+            branch="orchestrator/issue-70",
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="fixed"
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["before-sha", "after-sha"],
+        )
+
+        # Label stayed at `validating` (or was never flipped away). The
+        # reviewer is NOT spawned this tick -- the only run_agent call was
+        # the dev resume.
+        self.assertNotIn((70, "in_review"), gh.label_history)
+        # Notice posted on the issue thread.
+        self.assertTrue(any(
+            "issue body changed" in body
+            for _, body in gh.posted_comments
+        ))
+        # review_round incremented so the validating cap stays accurate.
+        data = gh.pinned_data(70)
+        self.assertEqual(data.get("review_round"), 1)
+
+
+class HandleInReviewResumeOnHashChangeTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    def test_body_drift_resumes_dev_and_bounces_to_validating(self) -> None:
+        # The in_review handler must mirror the comment-driven dev resume:
+        # post a notice on the PR (not just the issue), resume the locked
+        # dev session with the new body, push the fix, and bounce back to
+        # `validating` so the reviewer re-runs.
+        gh = FakeGitHubClient()
+        issue = make_issue(80, label="in_review", body="new acceptance")
+        gh.add_issue(issue)
+        pr = FakePR(number=800, head_branch="orchestrator/issue-80")
+        gh.add_pr(pr)
+        gh.seed_state(
+            80,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_number=pr.number,
+            pr_last_comment_id=0,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/issue-80",
+        )
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="addressed"
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["before", "after"],
+        )
+
+        # Bounced back to validating after a successful resume.
+        self.assertIn((80, "validating"), gh.label_history)
+        # Notice posted on the PR conversation surface.
+        self.assertTrue(any(
+            "issue body changed" in body
+            for _, body in gh.posted_pr_comments
+        ))
+        data = gh.pinned_data(80)
+        # New hash persisted.
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        # review_round reset because this is a new diff.
+        self.assertEqual(data.get("review_round"), 0)
+
+
+class HandleDecomposingResetsSessionOnHashChangeTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    def test_hash_drift_drops_session_and_spawns_fresh_decomposer(
+        self,
+    ) -> None:
+        # An issue parked at `decomposing awaiting_human` whose body the
+        # human edited mid-thread should NOT resume the decomposer's
+        # prior session (which would only see the human's reply, not the
+        # new body). Drop the session id, clear the park flags, force a
+        # fresh spawn against the new body.
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            90, label="decomposing", body="updated decomposition input",
+        )
+        # A pre-existing human comment so the resume path would otherwise
+        # consume it; we want to verify the hash branch wins.
+        issue.comments.append(FakeComment(
+            id=2000, body="please reconsider", user=FakeUser("alice"),
+        ))
+        gh.add_issue(issue)
+        gh.seed_state(
+            90,
+            user_content_hash="stale-hash",
+            decomposer_agent="claude",
+            decomposer_session_id="old-sess",
+            awaiting_human=True,
+            park_reason=None,
+            last_action_comment_id=1500,
+            pickup_comment_id=900,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="new-sess",
+                last_message=(
+                    "fits one\n\n```orchestrator-manifest\n"
+                    '{"decision": "single", "rationale": "small"}\n'
+                    "```"
+                ),
+            ),
+            has_new_commits=False,
+        )
+
+        # The decomposer ran fresh (no resume of the stale session).
+        mocks["run_agent"].assert_called_once()
+        kwargs = mocks["run_agent"].call_args.kwargs
+        self.assertIsNone(kwargs.get("resume_session_id"))
+        data = gh.pinned_data(90)
+        # The new session id from the fresh spawn was persisted, not the
+        # stale one.
+        self.assertEqual(data.get("decomposer_session_id"), "new-sess")
+        # Notice posted.
+        self.assertTrue(any(
+            "issue content changed" in body
+            for _, body in gh.posted_comments
+        ))
+
+
+class UserContentChangePromptIncludesCommentsTest(unittest.TestCase):
+    """A drift triggered by a NEW human comment (not a body edit) must
+    surface that comment to the dev. Quoting only title/body would leave
+    the dev unaware of the acceptance criterion the human just posted."""
+
+    def test_recent_comments_are_quoted_in_resume_prompt(self) -> None:
+        issue = make_issue(1, title="t", body="b")
+        issue.comments.append(FakeComment(
+            id=500, body="new acceptance criterion: handle empty input",
+            user=FakeUser("alice"),
+        ))
+        comments_text = workflow._recent_comments_text(issue)
+        prompt = workflow._build_user_content_change_prompt(
+            issue, comments_text,
+        )
+        self.assertIn("new acceptance criterion", prompt)
+        self.assertIn("Conversation so far", prompt)
+        self.assertIn("Updated issue body", prompt)
+
+
+class FirstTimeHashSeedingIsDurableTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 3: `_detect_user_content_change` must persist the
+    first-time baseline via `gh.write_pinned_state` immediately, so a
+    later edit after a parked/idle tick is not silently absorbed as the
+    new baseline."""
+
+    def test_validating_awaiting_human_no_reply_persists_baseline(
+        self,
+    ) -> None:
+        # Legacy state (no `user_content_hash`) parked on awaiting_human
+        # with no new comments. `_handle_validating`'s awaiting-human
+        # path returns without writing state on a real no-reply tick;
+        # the durability fix in `_detect_user_content_change` must still
+        # have written the baseline by then.
+        gh = FakeGitHubClient()
+        issue = make_issue(100, label="validating", body="initial body")
+        gh.add_issue(issue)
+        pr = FakePR(number=1000, head_branch="orchestrator/issue-100")
+        gh.add_pr(pr)
+        gh.seed_state(
+            100,
+            pr_number=pr.number,
+            awaiting_human=True,
+            last_action_comment_id=500,
+            review_round=1,
+        )
+
+        # Tick: no new comments and no hash baseline. Park branch
+        # returns early without writing state.
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        # Baseline durably persisted by the first-call branch in
+        # `_detect_user_content_change`.
+        data = gh.pinned_data(100)
+        self.assertIsNotNone(data.get("user_content_hash"))
+
+    def test_blocked_child_no_op_persists_baseline(self) -> None:
+        # A `blocked` child waiting on a sibling is a per-tick no-op.
+        # Without the durability fix, a later edit during the wait would
+        # silently become the new baseline because the no-op branch
+        # returns without `write_pinned_state`.
+        gh = FakeGitHubClient()
+        child = make_issue(200, label="blocked", body="child body")
+        gh.add_issue(child)
+        gh.seed_state(200, parent_number=199)
+
+        self._run(
+            lambda: workflow._handle_blocked(gh, _TEST_SPEC, child),
+            run_agent=_agent(),
+        )
+
+        data = gh.pinned_data(200)
+        self.assertIsNotNone(data.get("user_content_hash"))
+
+
+class HandleBlockedHashDriftTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 2: `blocked` must route back to `decomposing` per
+    the spec so a later `_handle_ready` does not skip the re-decomposer
+    when the edited body now needs splitting. Both parent (children
+    listed as orphans) and child (no orphans) cases route."""
+
+    def test_parent_with_children_routes_to_decomposing(self) -> None:
+        gh = FakeGitHubClient()
+        parent = make_issue(300, label="blocked", body="updated parent body")
+        gh.add_issue(parent)
+        # An in-flight child -- routing the parent orphans it on the
+        # GitHub side; the notice must call this out so the operator can
+        # close any obsolete children manually.
+        child = make_issue(301, label="implementing")
+        gh.add_issue(child)
+        gh.seed_state(
+            300,
+            children=[301],
+            decomposer_session_id="old-sess",
+            user_content_hash="stale-hash",
+        )
+
+        self._run(
+            lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
+            run_agent=_agent(),
+        )
+
+        # Routed back to decomposing per spec ("Before validating: route
+        # back to decomposing"). The next tick spawns a fresh decomposer
+        # against the new body.
+        self.assertIn((300, "decomposing"), gh.label_history)
+        data = gh.pinned_data(300)
+        self.assertFalse(data.get("awaiting_human"))
+        # Manifest state cleared so half-finished-recovery does not fire.
+        self.assertEqual(data.get("children"), [])
+        self.assertIsNone(data.get("decomposer_session_id"))
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        # Notice explicitly lists the now-orphaned child so the operator
+        # knows to close it manually if it no longer applies.
+        notice = next(
+            body for _, body in gh.posted_comments
+            if "re-running decomposer" in body
+        )
+        self.assertIn("#301", notice)
+        self.assertIn("ORPHANED", notice)
+
+    def test_child_waiting_routes_to_decomposing(self) -> None:
+        # A blocked child waiting on a sibling. Without routing to
+        # `decomposing`, `_handle_ready` would later see the matching
+        # baseline (because we silently absorbed the new hash) and skip
+        # the re-decomposer, even if the edited child now needs
+        # splitting -- the explicit reviewer concern.
+        gh = FakeGitHubClient()
+        child = make_issue(310, label="blocked", body="updated child body")
+        gh.add_issue(child)
+        gh.seed_state(
+            310,
+            parent_number=309,
+            user_content_hash="stale-hash",
+        )
+
+        self._run(
+            lambda: workflow._handle_blocked(gh, _TEST_SPEC, child),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((310, "decomposing"), gh.label_history)
+        data = gh.pinned_data(310)
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        # Notice posted; no orphans for a child with no own children.
+        notice = next(
+            body for _, body in gh.posted_comments
+            if "re-running decomposer" in body
+        )
+        self.assertNotIn("ORPHANED", notice)
+
+
+class HandleUmbrellaHashDriftTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 2: `umbrella` parents never enter implementation,
+    so a body edit cannot be picked up by any later stage's drift check.
+    Route back to `decomposing` per spec so the new manifest is derived
+    against the updated body; the previously-tracked children become
+    orphans and are listed in the notice."""
+
+    def test_edited_umbrella_routes_to_decomposing_before_closing(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        umbrella = make_issue(
+            400, label="umbrella", body="updated umbrella body",
+        )
+        gh.add_issue(umbrella)
+        # Children all done -- without the drift route, the umbrella
+        # would close to `done` against the stale manifest on this
+        # very tick.
+        c1 = make_issue(401, label="done")
+        c2 = make_issue(402, label="done")
+        gh.add_issue(c1)
+        gh.add_issue(c2)
+        gh.seed_state(
+            400,
+            children=[401, 402],
+            umbrella=True,
+            user_content_hash="stale-hash",
+        )
+
+        self._run(
+            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, umbrella),
+            run_agent=_agent(),
+        )
+
+        data = gh.pinned_data(400)
+        # Routed back to decomposing per spec.
+        self.assertIn((400, "decomposing"), gh.label_history)
+        # Crucially: did NOT close the umbrella to `done`.
+        self.assertNotIn((400, "done"), gh.label_history)
+        self.assertFalse(umbrella.closed)
+        # Manifest state cleared so half-finished-recovery does not fire
+        # against the stale children list / umbrella flag.
+        self.assertEqual(data.get("children"), [])
+        self.assertIsNone(data.get("umbrella"))
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        # Orphans listed in the notice.
+        notice = next(
+            body for _, body in gh.posted_comments
+            if "re-running decomposer" in body
+        )
+        self.assertIn("#401", notice)
+        self.assertIn("#402", notice)
+        self.assertIn("ORPHANED", notice)
+
+
+class HandleResolvingConflictHashDriftTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 2: `resolving_conflict` is dispatched per tick too,
+    so a body edit while the dev is resolving conflicts must surface to
+    the dev. Mirrors the in_review pattern: post a PR notice and resume."""
+
+    def test_drift_posts_pr_notice_and_resumes_dev(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            500, label="resolving_conflict", body="updated body",
+        )
+        gh.add_issue(issue)
+        pr = FakePR(number=5000, head_branch="orchestrator/issue-500")
+        gh.add_pr(pr)
+        gh.seed_state(
+            500,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            conflict_round=0,
+            branch="orchestrator/issue-500",
+            user_content_hash="stale-hash",
+        )
+
+        self._run(
+            lambda: workflow._handle_resolving_conflict(
+                gh, _TEST_SPEC, issue,
+            ),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="resolved with edit"
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["before", "after"],
+        )
+
+        # Pushed fix -> bounce to validating.
+        self.assertIn((500, "validating"), gh.label_history)
+        # Notice posted on the PR.
+        self.assertTrue(any(
+            "issue body changed" in body
+            for _, body in gh.posted_pr_comments
+        ))
+
+
+class NoCommitAckDoesNotParkTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 4: a harmless clarification edit can elicit a
+    no-commit reply from the dev ('existing work satisfies'). The
+    validating / in_review / resolving_conflict drift paths must treat
+    that as an ack rather than parking awaiting_human."""
+
+    def test_validating_ack_without_commit_does_not_park(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(600, label="validating", body="clarified body")
+        gh.add_issue(issue)
+        pr = FakePR(number=6000, head_branch="orchestrator/issue-600")
+        gh.add_pr(pr)
+        gh.seed_state(
+            600,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            review_round=1,
+            branch="orchestrator/issue-600",
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message=(
+                    "Reviewed the clarified body.\n\n"
+                    "ACK: existing commits already cover the clarified body"
+                ),
+            ),
+            has_new_commits=False,
+            dirty_files=(),
+            head_shas=["same-sha", "same-sha"],
+        )
+
+        data = gh.pinned_data(600)
+        # Crucial: must NOT park as a question.
+        self.assertFalse(data.get("awaiting_human"))
+        # Dev's ACK justification was posted on the issue as an FYI.
+        self.assertTrue(any(
+            "existing work satisfies the edit" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_in_review_ack_without_commit_bounces_to_validating(
+        self,
+    ) -> None:
+        # A no-commit "ack" reply from the dev on an in_review drift
+        # MUST bounce back to `validating` and invalidate the stale
+        # `agent_approved_sha`. Leaving the issue at `in_review` would
+        # let the AUTO_MERGE gate land the PR against a review that
+        # never saw the changed requirements.
+        gh = FakeGitHubClient()
+        issue = make_issue(700, label="in_review", body="clarified body")
+        gh.add_issue(issue)
+        pr = FakePR(number=7000, head_branch="orchestrator/issue-700")
+        gh.add_pr(pr)
+        gh.seed_state(
+            700,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            agent_approved_sha="stale-approval-sha",
+            pr_last_comment_id=0,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/issue-700",
+        )
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="ACK: no additional code change needed",
+            ),
+            has_new_commits=False,
+            dirty_files=(),
+            head_shas=["same", "same"],
+        )
+
+        data = gh.pinned_data(700)
+        # Must NOT park (the dev acknowledged, not asked a question).
+        self.assertFalse(data.get("awaiting_human"))
+        # MUST bounce back to validating so the reviewer re-evaluates
+        # against the updated requirements before AUTO_MERGE can land.
+        self.assertIn((700, "validating"), gh.label_history)
+        # Stale agent_approved_sha cleared so AUTO_MERGE cannot pass on
+        # the pre-edit snapshot if it somehow re-enters in_review before
+        # the reviewer re-runs.
+        self.assertIsNone(data.get("agent_approved_sha"))
+        # review_round reset so the validating cap counts fresh rounds.
+        self.assertEqual(data.get("review_round"), 0)
+        # Dev's reply still posted on the issue as an FYI.
+        self.assertTrue(any(
+            "existing work satisfies the edit" in body
+            for _, body in gh.posted_comments
+        ))
+
+
+class DriftMarksCommentsConsumedTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 1: the drift paths feed the dev session the full
+    issue thread via `_recent_comments_text`, so `last_action_comment_id`
+    must advance past every visible comment. Otherwise the next
+    validating->in_review handoff's `_seed_watermark_past_self` stops at
+    the same human comment and replays it as fresh PR feedback,
+    triggering a duplicate dev resume."""
+
+    def test_validating_drift_bumps_last_action_past_human_comment(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(900, label="validating", body="new body")
+        # Pre-existing human comment with a high id -- representing the
+        # comment that arrived at the same time as the body edit.
+        human = FakeComment(
+            id=5000, body="add this acceptance criterion",
+            user=FakeUser("alice"),
+        )
+        issue.comments.append(human)
+        gh.add_issue(issue)
+        pr = FakePR(number=9000, head_branch="orchestrator/issue-900")
+        gh.add_pr(pr)
+        gh.seed_state(
+            900,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            review_round=1,
+            branch="orchestrator/issue-900",
+            last_action_comment_id=100,
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="fixed"
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["before", "after"],
+        )
+
+        data = gh.pinned_data(900)
+        # last_action_comment_id advanced past the human comment so the
+        # eventual handoff to in_review does not classify it as fresh
+        # feedback.
+        self.assertGreaterEqual(
+            int(data.get("last_action_comment_id")), 5000,
+        )
+
+    def test_in_review_drift_bumps_watermarks_past_human_comment(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(910, label="in_review", body="new body")
+        human = FakeComment(
+            id=6000, body="please also handle X",
+            user=FakeUser("alice"),
+        )
+        issue.comments.append(human)
+        gh.add_issue(issue)
+        pr = FakePR(number=9100, head_branch="orchestrator/issue-910")
+        gh.add_pr(pr)
+        gh.seed_state(
+            910,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            pr_last_comment_id=0,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/issue-910",
+            last_action_comment_id=100,
+        )
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="addressed"
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["before", "after"],
+        )
+
+        data = gh.pinned_data(910)
+        # Both watermarks bumped past the human comment so the eventual
+        # bounce back to in_review (after the validating reviewer
+        # approves) does not replay it.
+        self.assertGreaterEqual(
+            int(data.get("last_action_comment_id")), 6000,
+        )
+        self.assertGreaterEqual(
+            int(data.get("pr_last_comment_id")), 6000,
+        )
+
+    def test_implementing_drift_bumps_last_action_past_human_comment(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(920, label="implementing", body="new body")
+        human = FakeComment(
+            id=7000, body="here are more requirements",
+            user=FakeUser("alice"),
+        )
+        issue.comments.append(human)
+        gh.add_issue(issue)
+        gh.seed_state(
+            920,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            awaiting_human=True,
+            last_action_comment_id=100,
+            branch="orchestrator/issue-920",
+        )
+
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="implemented"
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["before-resume", "after-resume"],
+        )
+
+        data = gh.pinned_data(920)
+        # The dev's commit goes through `_on_commits` which flips to
+        # validating; the validating->in_review handoff later reads
+        # last_action_comment_id, so we must have bumped past 7000.
+        self.assertGreaterEqual(
+            int(data.get("last_action_comment_id")), 7000,
+        )
+
+    def test_resolving_conflict_drift_bumps_last_action(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            930, label="resolving_conflict", body="new body",
+        )
+        human = FakeComment(
+            id=8000, body="more context", user=FakeUser("alice"),
+        )
+        issue.comments.append(human)
+        gh.add_issue(issue)
+        pr = FakePR(number=9300, head_branch="orchestrator/issue-930")
+        gh.add_pr(pr)
+        gh.seed_state(
+            930,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            conflict_round=0,
+            branch="orchestrator/issue-930",
+            last_action_comment_id=100,
+        )
+
+        self._run(
+            lambda: workflow._handle_resolving_conflict(
+                gh, _TEST_SPEC, issue,
+            ),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="resolved"
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["before", "after"],
+        )
+
+        data = gh.pinned_data(930)
+        # After the pushed resolution flips to validating, the
+        # subsequent handoff back to in_review must not replay the human
+        # comment that arrived during conflict resolution.
+        self.assertGreaterEqual(
+            int(data.get("last_action_comment_id")), 8000,
+        )
+
+
+class ReadyDriftClearsStaleManifestStateTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 1: a non-umbrella parent reaches `ready` after all
+    its children finish (`_handle_blocked`'s all-done branch flips
+    `blocked` -> `ready`), so the parent still carries `children` /
+    `dep_graph` from the prior manifest. The drift branch in
+    `_handle_ready` must clear that manifest state, otherwise the next
+    `_handle_decomposing` tick's half-finished recovery would fire and
+    flip back to `blocked` WITHOUT re-running the decomposer."""
+
+    def test_ready_drift_clears_children_and_orphans_them(self) -> None:
+        gh = FakeGitHubClient()
+        parent = make_issue(800, label="ready", body="updated parent body")
+        gh.add_issue(parent)
+        gh.seed_state(
+            800,
+            user_content_hash="stale-hash",
+            # Children list survived from blocked->ready transition; the
+            # children are all in `done` (which is how the parent
+            # reached `ready` in the first place).
+            children=[801, 802],
+            dep_graph={"1": [0]},
+            expected_children_count=2,
+            pickup_comment_id=100,
+        )
+
+        self._run(
+            lambda: workflow._handle_ready(gh, _TEST_SPEC, parent),
+            run_agent=_agent(),
+        )
+
+        # Routed back to decomposing AND manifest state cleared so
+        # `_handle_decomposing`'s recovery branch (which keys on
+        # `expected_children_count is not None OR children is non-empty`)
+        # cannot fire and short-circuit the re-decompose.
+        self.assertIn((800, "decomposing"), gh.label_history)
+        data = gh.pinned_data(800)
+        self.assertEqual(data.get("children"), [])
+        self.assertIsNone(data.get("expected_children_count"))
+        self.assertEqual(data.get("dep_graph"), {})
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        # Orphaned children listed in the notice so the operator can
+        # close any that no longer apply.
+        notice = next(
+            body for _, body in gh.posted_comments
+            if "re-running decomposer" in body
+        )
+        self.assertIn("#801", notice)
+        self.assertIn("#802", notice)
+        self.assertIn("ORPHANED", notice)
+
+
+class ImplementingDriftHeadShaDeltaTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 2: the implementing drift branch must compare HEAD
+    SHA before/after the resume, not `_has_new_commits` (which only
+    compares against `origin/<base>`). A worktree carrying pre-existing
+    unpushed commits from a previous tick would otherwise mask an empty
+    or failed resume and walk into `_on_commits` -> push -> open PR
+    against commits that never had a chance to address the edited
+    requirements."""
+
+    def test_recovered_unpushed_commits_do_not_mask_empty_resume(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            850, label="implementing", body="new requirements",
+        )
+        gh.add_issue(issue)
+        gh.seed_state(
+            850,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            awaiting_human=True,
+            last_action_comment_id=100,
+            branch="orchestrator/issue-850",
+        )
+
+        # The drift resume returns no new commit (`last_message=""` so
+        # not an ack either -- this is a silent-failure shape). HEAD is
+        # the same before and after, simulating a recovered worktree
+        # carrying pre-existing unpushed commits from a prior tick: the
+        # old SHA-agnostic `_has_new_commits` check would have returned
+        # True (commits ahead of origin/base) and pushed a PR.
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message=""
+            ),
+            # has_new_commits would return True for the recovered
+            # worktree; the drift branch must NOT consult it.
+            has_new_commits=True,
+            push_branch=True,
+            head_shas=["recovered-sha", "recovered-sha"],
+        )
+
+        # The handler must NOT have opened a PR or flipped to
+        # validating: the empty resume gave the dev no chance to
+        # address the edited requirements.
+        self.assertEqual(gh.opened_prs, [])
+        self.assertNotIn((850, "validating"), gh.label_history)
+        # Should fall to the silent-failure park via `_on_question`.
+        data = gh.pinned_data(850)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "agent_silent")
+
+
+class OrchCommentMarkerSurvivesIdCapTest(unittest.TestCase):
+    """Reviewer point 3: `orchestrator_comment_ids` is capped, but the
+    hash scans every comment. Once an old orchestrator-comment id is
+    evicted from the cap, an id-only filter would start including the
+    bot comment in the hash and trigger false drift each tick. The body
+    marker (`_ORCH_COMMENT_MARKER`) must keep the hash stable."""
+
+    def test_marker_excludes_orchestrator_comment_even_when_id_unknown(
+        self,
+    ) -> None:
+        # Simulate an orchestrator comment whose id has been evicted
+        # from the bounded cap. Its body still carries the marker
+        # (because every orchestrator comment is posted with it), so
+        # the hash filter must drop it.
+        bot_body = "picking this up\n\n" + workflow._ORCH_COMMENT_MARKER
+        bot = FakeComment(id=12345, body=bot_body, user=FakeUser("alice"))
+        human = FakeComment(
+            id=12346, body="please reconsider", user=FakeUser("alice"),
+        )
+        issue_with_just_human = make_issue(1, comments=[human])
+        issue_with_both = make_issue(1, comments=[bot, human])
+        # `orchestrator_ids` is EMPTY (the id was evicted from the cap),
+        # but the hash must still match because the marker identifies
+        # the bot comment.
+        self.assertEqual(
+            workflow._compute_user_content_hash(
+                issue_with_just_human, set()
+            ),
+            workflow._compute_user_content_hash(
+                issue_with_both, set()
+            ),
+        )
+
+    def test_marker_is_appended_by_post_helpers(self) -> None:
+        # Every orchestrator-posted comment must carry the marker so
+        # the hash filter survives id-cap eviction.
+        gh = FakeGitHubClient()
+        issue = make_issue(1)
+        gh.add_issue(issue)
+        state = workflow.PinnedState()
+        workflow._post_issue_comment(gh, issue, state, "hello")
+        # The body actually written to the issue carries the marker.
+        last_body = issue.comments[-1].body
+        self.assertIn(workflow._ORCH_COMMENT_MARKER, last_body)
+        # And it starts with the original body text.
+        self.assertTrue(last_body.startswith("hello"))
+
+    def test_marker_is_idempotent_on_double_wrap(self) -> None:
+        # Defensive: a caller that already passes a body containing the
+        # marker (e.g. a future helper forwards a pre-built body) must
+        # not get the marker appended twice -- two markers in one body
+        # is harmless but ugly, and an idempotent wrap also keeps
+        # `_with_orch_marker` safe to call from helper chains.
+        marked = workflow._with_orch_marker("hi")
+        twice = workflow._with_orch_marker(marked)
+        self.assertEqual(marked, twice)
+        self.assertEqual(twice.count(workflow._ORCH_COMMENT_MARKER), 1)
+
+
+class ImplementingDriftNoDevSessionRecoveredCommitsTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 1: when implementing drift fires with NO recorded
+    dev session AND the worktree carries recovered unpushed commits, the
+    handler must refuse to push those commits and open a PR -- no agent
+    has seen the edited issue body. Park awaiting human and let the
+    operator decide whether to discard the recovered work or accept it."""
+
+    def test_drift_with_recovered_commits_and_no_session_parks(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            860, label="implementing", body="updated requirements",
+        )
+        gh.add_issue(issue)
+        # No `dev_session_id` recorded: legacy/recovered state. Pre-seed
+        # `user_content_hash` so the drift detection fires (vs. silently
+        # initializing the baseline on first encounter).
+        gh.seed_state(
+            860,
+            user_content_hash="stale-hash",
+            branch="orchestrator/issue-860",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+            # Recovered worktree has unpushed commits ahead of base.
+            has_new_commits=True,
+            push_branch=True,
+        )
+
+        # Crucial: must NOT push or open a PR against commits the dev
+        # never authored against the edited body.
+        mocks["_push_branch"].assert_not_called()
+        self.assertEqual(gh.opened_prs, [])
+        self.assertNotIn((860, "validating"), gh.label_history)
+        # Parked so the operator can adjudicate.
+        data = gh.pinned_data(860)
+        self.assertTrue(data.get("awaiting_human"))
+        last_comment = gh.posted_comments[-1][1]
+        self.assertIn("never saw the edited requirements", last_comment)
+        # New hash baseline persisted so subsequent ticks don't keep
+        # re-firing the drift park on the same edit.
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+
+    def test_drift_no_session_no_recovered_commits_falls_through(
+        self,
+    ) -> None:
+        # The fall-through path is still correct when there are NO
+        # recovered commits: a fresh spawn picks up the new body via
+        # `_build_implement_prompt`.
+        gh = FakeGitHubClient()
+        issue = make_issue(861, label="implementing", body="new body")
+        gh.add_issue(issue)
+        gh.seed_state(
+            861,
+            user_content_hash="stale-hash",
+            pickup_comment_id=900,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="new-sess", last_message="implemented"
+            ),
+            # Three `_has_new_commits` calls: (1) drift-no-session park
+            # check returns False -> fall through; (2) recovered-worktree
+            # check in the regular path returns False; (3) post-agent
+            # check returns True -> push + open PR.
+            has_new_commits=[False, False, True],
+            push_branch=True,
+        )
+
+        # Fresh implement prompt ran (not the drift resume prompt).
+        prompt = mocks["run_agent"].call_args[0][1]
+        self.assertIn("You are the implementer", prompt)
+        # PR opened from the fresh spawn.
+        self.assertEqual(len(gh.opened_prs), 1)
+
+
+class HashFiltersBotUsersTest(unittest.TestCase):
+    """Reviewer point 2: third-party Bot/App accounts (Dependabot,
+    Renovate, CI bots) post comments structurally on long-lived issues.
+    The hash must filter them by GitHub's `user.type == "Bot"` flag so
+    a periodic bot comment doesn't re-trigger drift on every tick it
+    posts. Login matching is intentionally avoided because the
+    orchestrator PAT may be shared with a human reviewer's account."""
+
+    def test_bot_authored_comment_is_filtered(self) -> None:
+        # A Dependabot-style comment must NOT affect the hash even
+        # though its body is unique and its id is not tracked.
+        human = FakeComment(
+            id=900, body="real human comment", user=FakeUser("alice"),
+        )
+        bot_comment = FakeComment(
+            id=901,
+            body="Bumps `requests` from 2.31.0 to 2.32.0",
+            user=FakeUser("dependabot[bot]", type="Bot"),
+        )
+        issue_with_just_human = make_issue(1, comments=[human])
+        issue_with_bot = make_issue(1, comments=[human, bot_comment])
+        self.assertEqual(
+            workflow._compute_user_content_hash(
+                issue_with_just_human, set()
+            ),
+            workflow._compute_user_content_hash(
+                issue_with_bot, set()
+            ),
+        )
+
+    def test_user_type_human_still_contributes(self) -> None:
+        # A regular human user's `type == "User"` must NOT be filtered.
+        comment = FakeComment(
+            id=910,
+            body="adds an acceptance criterion",
+            user=FakeUser("alice", type="User"),
+        )
+        empty = make_issue(1)
+        with_human = make_issue(1, comments=[comment])
+        self.assertNotEqual(
+            workflow._compute_user_content_hash(empty, set()),
+            workflow._compute_user_content_hash(with_human, set()),
+        )
+
+
+class ValidatingDriftDefersToReviewerRecoveryTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 1: when validating is parked with a reviewer-side
+    park reason (`reviewer_timeout` / `reviewer_failed`), a human "retry"
+    comment must re-spawn the REVIEWER, not the dev session. The drift
+    check fires first because the human's comment also flips the hash;
+    the drift handler must defer to the awaiting-human branch in this
+    case so the reviewer re-runs naturally."""
+
+    def test_reviewer_timeout_drift_respawns_reviewer_not_dev(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            1000, label="validating", body="initial body",
+        )
+        # Pre-existing human "retry" comment that triggers the drift
+        # detection (the hash includes non-orchestrator comments).
+        human = FakeComment(
+            id=4000, body="retry the reviewer please",
+            user=FakeUser("alice"),
+        )
+        issue.comments.append(human)
+        gh.add_issue(issue)
+        pr = FakePR(number=10000, head_branch="orchestrator/issue-1000")
+        gh.add_pr(pr)
+        # Pre-seed a real `user_content_hash` (the bug surfaces only
+        # when the hash is already set; first-tick auto-seeding hides it).
+        seed_hash = workflow._compute_user_content_hash(
+            make_issue(1000, body="initial body"), set(),
+        )
+        gh.seed_state(
+            1000,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            review_round=1,
+            branch="orchestrator/issue-1000",
+            awaiting_human=True,
+            park_reason="reviewer_timeout",
+            last_action_comment_id=100,
+            user_content_hash=seed_hash,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="rev-sess",
+                last_message="Looks fine.\n\nVERDICT: APPROVED",
+            ),
+            has_new_commits=False,
+            head_shas=["head"],
+        )
+
+        # The reviewer (REVIEW_AGENT) ran, NOT the dev session. The
+        # agent invocation should have been against the review agent
+        # binary, with a review-style prompt.
+        call_args = mocks["run_agent"].call_args
+        self.assertEqual(call_args[0][0], config.REVIEW_AGENT)
+        self.assertIn("automated code reviewer", call_args[0][1])
+        # No drift-style ":pencil2: issue body changed; resuming dev
+        # session" notice was posted -- the drift was deferred.
+        self.assertFalse(any(
+            ":pencil2:" in body and "resuming dev session" in body
+            for _, body in gh.posted_comments
+        ))
+        # The reviewer recovery consumed the human comment and cleared
+        # the park flags.
+        data = gh.pinned_data(1000)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertIsNone(data.get("park_reason"))
+        # The new hash baseline was persisted so the next tick doesn't
+        # loop on the same drift.
+        new_hash = workflow._compute_user_content_hash(issue, set())
+        self.assertEqual(data.get("user_content_hash"), new_hash)
+
+
+class DecomposingDriftBeforeHalfFinishedRecoveryTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point 2: `_handle_decomposing` checks half-finished
+    recovery before user-content drift. If the issue was edited while
+    `expected_children_count` / `children` are present, the recovery
+    branch finalizes to `blocked` / `umbrella` against the stale
+    manifest. The drift check must run FIRST so the manifest gets
+    re-derived against the new body."""
+
+    def test_drift_with_children_clears_manifest_and_re_runs_decomposer(
+        self,
+    ) -> None:
+        # Simulate the recovery shape: parent label is still
+        # `decomposing` and `children` is non-empty (a crash between
+        # child creation and the parent label flip), but the human has
+        # since edited the body. Without the fix, the recovery branch
+        # would finalize to `blocked` against the stale manifest.
+        gh = FakeGitHubClient()
+        parent = make_issue(
+            1100, label="decomposing", body="updated body",
+        )
+        gh.add_issue(parent)
+        # A real child issue so the orphan listing has something to
+        # reference.
+        child = make_issue(1101, label="blocked")
+        gh.add_issue(child)
+        gh.seed_state(
+            1100,
+            user_content_hash="stale-hash",
+            children=[1101],
+            expected_children_count=1,
+            decomposer_session_id="old-sess",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, parent),
+            run_agent=_agent(
+                session_id="new-sess",
+                last_message=(
+                    "fits one\n\n```orchestrator-manifest\n"
+                    '{"decision": "single", "rationale": "small"}\n'
+                    "```"
+                ),
+            ),
+            has_new_commits=False,
+        )
+
+        # The decomposer ran fresh against the new body (the recovery
+        # branch did NOT short-circuit to `blocked`).
+        mocks["run_agent"].assert_called_once()
+        # Manifest tracking cleared so the recovery branch cannot
+        # fire on subsequent ticks against the stale state.
+        data = gh.pinned_data(1100)
+        self.assertEqual(data.get("children"), [])
+        self.assertIsNone(data.get("expected_children_count"))
+        self.assertEqual(data.get("dep_graph"), {})
+        # New hash baseline persisted.
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        # Parent did NOT finalize to `blocked` against the stale
+        # manifest; instead the fresh decomposer voted `single` -> `ready`.
+        self.assertNotIn((1100, "blocked"), gh.label_history)
+        self.assertIn((1100, "ready"), gh.label_history)
+        # Orphans listed in the notice.
+        notice = next(
+            body for _, body in gh.posted_comments
+            if "re-running decomposer" in body
+        )
+        self.assertIn("#1101", notice)
+        self.assertIn("ORPHANED", notice)
+
+
+class ImplementingDriftAwaitingHumanNoDevSessionTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer point: implementing drift with no recorded `dev_session_id`
+    can still be `awaiting_human=True` (manual relabel, drift on a
+    freshly-picked-up issue parked before its first spawn, etc.).
+    Without the fix:
+      * body-edit-only: falls through to `_resume_developer_on_human_reply`,
+        finds no new comments, returns -- and the new hash is never
+        written, so the drift loops every tick.
+      * with new comment: fresh-spawns via `_resume_dev_with_text` with
+        ONLY the new-comment text as the prompt, never quoting the
+        updated body that triggered the drift.
+    Fix: clear the park flags so the fresh-spawn path below fires with
+    the full implement prompt (which quotes `issue.body` and the
+    conversation via `_recent_comments_text`)."""
+
+    def test_body_edit_only_clears_park_and_fresh_spawns(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            1200, label="implementing", body="updated requirements",
+        )
+        # No prior dev session, but parked. Pre-seed `user_content_hash`
+        # to a stale value so the drift detection fires (auto-seeding on
+        # first encounter would hide the bug).
+        gh.seed_state(
+            1200,
+            user_content_hash="stale-hash",
+            awaiting_human=True,
+            park_reason=None,
+            last_action_comment_id=100,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="new-sess", last_message="implemented"
+            ),
+            # Three `_has_new_commits` calls: (1) the drift-no-session
+            # park-on-recovered-commits check returns False; (2) the
+            # else-branch recovered-worktree check returns False;
+            # (3) the post-agent commit detection returns True.
+            has_new_commits=[False, False, True],
+            push_branch=True,
+        )
+
+        data = gh.pinned_data(1200)
+        # The new hash is durably persisted -- the drift does NOT loop.
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        # Park flags cleared so the fresh-spawn branch fired.
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertIsNone(data.get("park_reason"))
+        # The fresh implement prompt was used (NOT the resume-with-just-
+        # comments prompt), so the dev sees the updated body.
+        mocks["run_agent"].assert_called_once()
+        prompt = mocks["run_agent"].call_args[0][1]
+        self.assertIn("You are the implementer", prompt)
+        self.assertIn("updated requirements", prompt)
+        # PR opened from the fresh spawn.
+        self.assertEqual(len(gh.opened_prs), 1)
+
+    def test_body_edit_with_new_comment_uses_full_implement_prompt(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            1210, label="implementing", body="updated body",
+        )
+        # New human comment that triggers comment-driven resume in the
+        # legacy code path -- the bug there fresh-spawns with ONLY the
+        # comment text, missing the body context.
+        human = FakeComment(
+            id=500, body="here's more detail",
+            user=FakeUser("alice"),
+        )
+        issue.comments.append(human)
+        gh.add_issue(issue)
+        gh.seed_state(
+            1210,
+            user_content_hash="stale-hash",
+            awaiting_human=True,
+            last_action_comment_id=100,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="new-sess", last_message="implemented"
+            ),
+            has_new_commits=[False, False, True],
+            push_branch=True,
+        )
+
+        # Fresh implement prompt with the updated body AND the new
+        # comment quoted via `_recent_comments_text`.
+        prompt = mocks["run_agent"].call_args[0][1]
+        self.assertIn("You are the implementer", prompt)
+        self.assertIn("updated body", prompt)
+        self.assertIn("here's more detail", prompt)
+        # Comment marked consumed so the validating->in_review handoff
+        # later won't classify it as fresh PR feedback.
+        data = gh.pinned_data(1210)
+        self.assertGreaterEqual(
+            int(data.get("last_action_comment_id")), 500,
+        )
+
+
+class InReviewDriftForwardsUnreadPrConversationTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """Reviewer concern: the in_review drift path resumes the dev with
+    `_recent_comments_text(issue)` (issue thread only), then
+    `_bump_in_review_watermarks` advances the shared `pr_last_comment_id`
+    based on the issue-thread max. A PR-conversation comment whose id
+    falls between the prior watermark and the issue-thread max would be
+    silently consumed by the bump and never forwarded to the dev. The
+    drift path must capture unread PR comments BEFORE the bump and
+    include them in the followup prompt."""
+
+    def test_unread_pr_comment_below_issue_max_is_forwarded(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            1300, label="in_review", body="updated body",
+        )
+        # Issue-thread comment with id 200 (the body-edit signal).
+        issue.comments.append(FakeComment(
+            id=200, body="adds an acceptance criterion",
+            user=FakeUser("alice"),
+        ))
+        gh.add_issue(issue)
+        pr = FakePR(number=13000, head_branch="orchestrator/issue-1300")
+        # Concurrent PR-conversation comment at id 150 (between the
+        # prior watermark and the issue-thread max). Without the fix,
+        # the watermark bump leaps to 200 and this comment is lost.
+        pr.issue_comments.append(FakeComment(
+            id=150, body="please also handle empty input",
+            user=FakeUser("alice"),
+        ))
+        gh.add_pr(pr)
+        gh.seed_state(
+            1300,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            pr_last_comment_id=100,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/issue-1300",
+            last_action_comment_id=100,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="addressed both",
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["before", "after"],
+        )
+
+        # The dev's prompt must include the unread PR-conversation
+        # comment so it is not lost to the watermark bump.
+        prompt = mocks["run_agent"].call_args[0][1]
+        self.assertIn("please also handle empty input", prompt)
+        # The bump advanced past BOTH the issue-thread max AND the PR
+        # comment, so the next tick won't replay either.
+        data = gh.pinned_data(1300)
+        self.assertGreaterEqual(
+            int(data.get("pr_last_comment_id")), 200,
+        )
+
+    def test_unread_pr_comment_above_issue_max_also_consumed(
+        self,
+    ) -> None:
+        # Symmetric guard: a PR-conversation comment whose id is HIGHER
+        # than every issue-thread id must also be consumed by the bump
+        # (we forward it to the dev AND include it in `issue_space_new`
+        # so the bump's candidate set extends past it).
+        gh = FakeGitHubClient()
+        issue = make_issue(1310, label="in_review", body="updated body")
+        gh.add_issue(issue)
+        pr = FakePR(number=13100, head_branch="orchestrator/issue-1310")
+        pr.issue_comments.append(FakeComment(
+            id=600, body="additional ask",
+            user=FakeUser("alice"),
+        ))
+        gh.add_pr(pr)
+        gh.seed_state(
+            1310,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            pr_last_comment_id=100,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/issue-1310",
+            last_action_comment_id=100,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="done"
+            ),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["before", "after"],
+        )
+
+        prompt = mocks["run_agent"].call_args[0][1]
+        self.assertIn("additional ask", prompt)
+        data = gh.pinned_data(1310)
+        self.assertGreaterEqual(
+            int(data.get("pr_last_comment_id")), 600,
+        )
+
+
+class DriftAckRequiresExplicitMarkerTest(unittest.TestCase):
+    """Reviewer point: a generic non-empty no-commit response is OFTEN a
+    clarification question, not an ack. Only an explicit `ACK: ...`
+    marker should be treated as acknowledgement; everything else parks
+    awaiting human via `_on_question`."""
+
+    def test_explicit_ack_marker_extracts_reason(self) -> None:
+        msg = (
+            "I reviewed the change.\n\n"
+            "ACK: existing tests already cover the new requirement"
+        )
+        self.assertEqual(
+            workflow._drift_ack_reason(msg),
+            "existing tests already cover the new requirement",
+        )
+
+    def test_ack_is_case_insensitive_and_last_wins(self) -> None:
+        # Case insensitive (mirrors VERDICT parsing) and the LAST marker
+        # wins so a sample/template `ACK:` quoted earlier in the message
+        # doesn't override the agent's real concluding marker.
+        msg = (
+            "I considered ack: stale-template-text but on re-reading\n\n"
+            "ack: real final justification"
+        )
+        self.assertEqual(
+            workflow._drift_ack_reason(msg),
+            "real final justification",
+        )
+
+    def test_no_marker_returns_none(self) -> None:
+        # Generic "satisfied" prose without the marker is NOT an ack.
+        # `_post_user_content_change_result` parks via `_on_question`
+        # on this branch so a real question isn't swallowed.
+        msg = "Existing code already covers this; no change needed."
+        self.assertIsNone(workflow._drift_ack_reason(msg))
+
+    def test_clarification_question_returns_none(self) -> None:
+        msg = "Should I also handle the empty-input case?"
+        self.assertIsNone(workflow._drift_ack_reason(msg))
+
+
+class DriftNonAckResponseParksTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """A non-empty no-commit response WITHOUT the `ACK:` marker -- e.g.
+    a clarification question -- must park awaiting human, not silently
+    advance the workflow with a misleading "satisfies" comment."""
+
+    def test_validating_drift_clarification_question_parks(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(601, label="validating", body="clarified body")
+        gh.add_issue(issue)
+        pr = FakePR(number=6001, head_branch="orchestrator/issue-601")
+        gh.add_pr(pr)
+        gh.seed_state(
+            601,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            review_round=1,
+            branch="orchestrator/issue-601",
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message=(
+                    "Should the empty-input case also raise, or return "
+                    "an empty list? Need clarification."
+                ),
+            ),
+            has_new_commits=False,
+            dirty_files=(),
+            head_shas=["same-sha", "same-sha"],
+        )
+
+        data = gh.pinned_data(601)
+        # Must park awaiting human so the real question isn't lost.
+        self.assertTrue(data.get("awaiting_human"))
+        # Must NOT have posted the misleading "satisfies" comment.
+        self.assertFalse(any(
+            "existing work satisfies the edit" in body
+            for _, body in gh.posted_comments
+        ))
+        # The question text was surfaced via `_on_question`.
+        self.assertTrue(any(
+            "Should the empty-input case" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_in_review_drift_clarification_question_parks(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(701, label="in_review", body="clarified body")
+        gh.add_issue(issue)
+        pr = FakePR(number=7001, head_branch="orchestrator/issue-701")
+        gh.add_pr(pr)
+        gh.seed_state(
+            701,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            user_content_hash="stale-hash",
+            agent_approved_sha="prior-approval",
+            pr_last_comment_id=0,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/issue-701",
+        )
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message=(
+                    "Does the updated body imply I should also rename "
+                    "`old_fn`? Please confirm."
+                ),
+            ),
+            has_new_commits=False,
+            dirty_files=(),
+            head_shas=["same", "same"],
+        )
+
+        data = gh.pinned_data(701)
+        # Park flagged.
+        self.assertTrue(data.get("awaiting_human"))
+        # NOT bounced to validating: the dev didn't ack OR commit, so
+        # the in_review label is preserved and the human resolves the
+        # question.
+        self.assertNotIn((701, "validating"), gh.label_history)
+        # Misleading "satisfies" comment NOT posted.
+        self.assertFalse(any(
+            "existing work satisfies the edit" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_implementing_drift_clarification_question_parks(
+        self,
+    ) -> None:
+        # The implementing-stage inline drift handler shares the same
+        # contract: non-empty + no-commit + no ACK -> park as question.
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            602, label="implementing", body="updated requirements",
+        )
+        gh.add_issue(issue)
+        gh.seed_state(
+            602,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            awaiting_human=False,
+            branch="orchestrator/issue-602",
+        )
+
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message=(
+                    "I'd like to clarify: should the schema migration "
+                    "run forward-only or also support rollback?"
+                ),
+            ),
+            has_new_commits=False,
+            dirty_files=(),
+            head_shas=["sha-before", "sha-before"],
+        )
+
+        data = gh.pinned_data(602)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertFalse(any(
+            "existing work satisfies the edit" in body
+            for _, body in gh.posted_comments
+        ))
+        # The dev's question was surfaced.
+        self.assertTrue(any(
+            "schema migration" in body
+            for _, body in gh.posted_comments
+        ))
+
+
 class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
     """Issue #67: the pinned `dev_agent`/`decomposer_agent`/`review_agent`
     fields must store the full configured agent command (backend + CLI
@@ -11348,6 +13255,15 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             has_new_commits=[True],
             dirty_files=(),
             push_branch=True,
+            # The user-content-drift branch (which fires here because the
+            # human's "ok proceed" comment changes the issue hash from
+            # tick 1) snapshots HEAD before and after the resume to decide
+            # whether THIS resume committed, so we need two SHA values
+            # (different ones, so the post-resume "did the agent commit"
+            # check goes through `_on_commits`). The drift path still
+            # calls `_resume_dev_with_text` with the recorded codex spec,
+            # so the call-arg assertions below still hold.
+            head_shas=["before-sha", "after-sha"],
         )
 
         call = mocks["run_agent"].call_args
@@ -11444,6 +13360,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             "recorded, NOT the new DECOMPOSE_AGENT after the flip",
         )
         self.assertEqual(call.kwargs.get("extra_args"), self._CODEX_ARGS)
+
+
 
 
 if __name__ == "__main__":
