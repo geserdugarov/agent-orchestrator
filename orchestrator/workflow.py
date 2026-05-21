@@ -12,6 +12,7 @@ are observed and logged as not-yet-implemented.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -27,7 +28,7 @@ from github.Issue import Issue
 from . import config
 from .agents import AgentResult, run_agent
 from .config import RepoSpec
-from .github import GitHubClient, PinnedState
+from .github import PINNED_STATE_MARKER, GitHubClient, PinnedState
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,19 @@ def _now_iso() -> str:
 # bound list growth on long-lived issues, not for correctness.
 _ORCH_COMMENT_ID_CAP = 500
 
+# Hidden HTML-comment marker embedded in the body of every issue / PR
+# comment the orchestrator posts. Used by `_compute_user_content_hash` to
+# identify orchestrator-authored comments WITHOUT relying on
+# `orchestrator_comment_ids`, which is capped at `_ORCH_COMMENT_ID_CAP`
+# and therefore evicts old ids on long-lived issues. Once an old id falls
+# off the cap, an id-only filter would start including that bot comment
+# in the hash and trigger false drift every tick; the body marker
+# survives indefinitely on the GitHub side and is invisible in rendered
+# Markdown. Kept distinct from `PINNED_STATE_MARKER` so the pinned-state
+# filter (which uses `<!--orchestrator-state ... -->`) and the
+# orchestrator-comment filter are independent identifiers.
+_ORCH_COMMENT_MARKER = "<!--orchestrator-comment-->"
+
 
 def _orchestrator_ids(state: PinnedState) -> set[int]:
     """Set of comment ids the orchestrator itself posted on this issue/PR.
@@ -84,6 +98,19 @@ def _track_orchestrator_comment(state: PinnedState, comment_id: int) -> None:
     state.set("orchestrator_comment_ids", ids)
 
 
+def _with_orch_marker(body: str) -> str:
+    """Append the hidden orchestrator-comment marker to `body` (idempotent).
+
+    Every orchestrator-posted comment carries this marker so the
+    user-content hash can identify bot comments even after their id has
+    been evicted from the bounded `orchestrator_comment_ids` cap. The
+    marker is an HTML comment, invisible in rendered Markdown.
+    """
+    if _ORCH_COMMENT_MARKER in body:
+        return body
+    return f"{body}\n\n{_ORCH_COMMENT_MARKER}"
+
+
 def _post_issue_comment(
     gh: GitHubClient, issue: Issue, state: PinnedState, body: str,
 ):
@@ -91,12 +118,248 @@ def _post_issue_comment(
     `_handle_in_review` ticks recognize it as orchestrator-authored even when
     the PAT login is shared with a human reviewer. Caller is still responsible
     for `gh.write_pinned_state` -- this only mutates the in-memory state.
+
+    The body is augmented with `_ORCH_COMMENT_MARKER` so the user-content
+    hash can identify bot comments by marker (id-cap-resistant) in
+    addition to by id (works for tracked-and-not-yet-evicted comments).
     """
-    c = gh.comment(issue, body)
+    c = gh.comment(issue, _with_orch_marker(body))
     cid = getattr(c, "id", None)
     if cid is not None:
         _track_orchestrator_comment(state, int(cid))
     return c
+
+
+def _compute_user_content_hash(
+    issue: Issue, orchestrator_ids: set[int]
+) -> str:
+    """SHA-256 over title + body + human-authored comments.
+
+    Used by `_detect_user_content_change` so the orchestrator can react
+    when a human edits the issue body or adds acceptance criteria after
+    the workflow has already picked it up. Non-human content is filtered
+    four ways:
+
+    * pinned-state comment by `PINNED_STATE_MARKER`;
+    * orchestrator-posted comments by `_ORCH_COMMENT_MARKER` embedded in
+      the body (id-cap-resistant -- the marker stays on the GitHub side
+      forever even after the comment's id has been evicted from
+      `orchestrator_comment_ids`);
+    * legacy orchestrator comments (posted before the marker was
+      introduced) by id from `orchestrator_comment_ids`;
+    * third-party Bot / App accounts (Dependabot, Renovate, CI bots, ...)
+      by GitHub's `user.type == "Bot"` flag. These accounts cannot be
+      filtered by the id-list or marker because we never post them, and
+      they post structurally (e.g. weekly Dependabot bumps) which would
+      otherwise re-trigger drift detection on every tick they post.
+
+    Author-login matching is deliberately avoided because the orchestrator
+    PAT is often shared with a human reviewer's GitHub account; a login
+    filter would falsely drop the human's real review comments. The
+    `user.type` flag is a structural GitHub-account property and does not
+    conflict with that constraint.
+    """
+    parts = [issue.title or "", issue.body or ""]
+    for c in issue.get_comments():
+        body = c.body or ""
+        if PINNED_STATE_MARKER in body:
+            continue
+        if _ORCH_COMMENT_MARKER in body:
+            continue
+        cid = getattr(c, "id", None)
+        if cid is not None and int(cid) in orchestrator_ids:
+            continue
+        user = getattr(c, "user", None)
+        if user is not None and getattr(user, "type", None) == "Bot":
+            continue
+        parts.append(body)
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def _detect_user_content_change(
+    gh: GitHubClient, issue: Issue, state: PinnedState
+) -> Optional[str]:
+    """Return the new hash if the user-visible content drifted since the
+    prior stored value, or None when unchanged.
+
+    On the FIRST call for an issue (no prior hash in pinned state), persist
+    the current value via `gh.write_pinned_state` immediately. Doing it
+    in-memory only would lose the baseline whenever the calling handler's
+    early-return path (awaiting-human-with-no-new-comments, debounce,
+    child-waiting-on-deps, …) skips its own state write; the very next
+    edit would then be classified as the new baseline and silently
+    absorbed. The cost is one extra write per legacy issue still missing
+    the field on first encounter; in steady state the hash is already set
+    and this branch never fires.
+    """
+    orchestrator_ids = _orchestrator_ids(state)
+    current = _compute_user_content_hash(issue, orchestrator_ids)
+    prior = state.get("user_content_hash")
+    if not isinstance(prior, str):
+        state.set("user_content_hash", current)
+        gh.write_pinned_state(issue, state)
+        return None
+    if current == prior:
+        return None
+    return current
+
+
+def _build_user_content_change_prompt(
+    issue: Issue, comments_text: str,
+) -> str:
+    """Resume prompt that quotes the updated title, body, AND the current
+    conversation so the dev session can re-evaluate against the new
+    requirements.
+
+    Used by handlers that detect a user content drift mid-implementation:
+    the dev session is locked to whichever backend wrote `dev_session_id`,
+    so we cannot re-decompose, but we CAN feed the new context to the
+    existing session and let it commit any additional work. Including the
+    comments thread matters because the hash also drifts when the human
+    adds acceptance criteria as a NEW comment (not just a body edit), and
+    quoting only title/body would leave the dev unaware of the new comment
+    it's supposed to react to.
+    """
+    title = (issue.title or "").strip() or f"#{issue.number}"
+    body = (issue.body or "").strip() or "(no body)"
+    quoted = "> " + body.replace("\n", "\n> ")
+    convo = comments_text or "(no prior comments)"
+    return (
+        "The human edited the issue while you were working on it. Re-read the "
+        "updated title, body, and conversation below, decide whether your "
+        "existing work still satisfies the new requirements, and COMMIT any "
+        "additional changes needed in your current worktree. Do NOT push -- "
+        "the orchestrator pushes and re-runs the reviewer.\n\n"
+        f"Updated issue title: {title!r}\n\n"
+        f"Updated issue body:\n\n{quoted}\n\n"
+        f"Conversation so far:\n{convo}\n\n"
+        "Before committing, run `git log --oneline -20` to see how recent "
+        "commit subjects are formatted, and follow the same convention. Use "
+        "`git commit -m \"<type>: <subject>\"` with a single `-m`.\n\n"
+        "If your existing commits already satisfy the new requirements and "
+        "no further code change is needed, end your final message with "
+        "EXACTLY this marker, alone on its own line:\n\n"
+        "  ACK: <one-line justification>\n\n"
+        "Use `ACK:` ONLY when you are certain the existing work covers the "
+        "edit -- the orchestrator treats it as an explicit acknowledgement "
+        "and stays on the current label without parking. If you have a "
+        "clarification question or are unsure, do NOT use `ACK:`; reply "
+        "with the question and the orchestrator will park awaiting a human "
+        "reply (same as a regular agent question)."
+    )
+
+
+# Marker the dev session emits to explicitly acknowledge that the existing
+# work satisfies a user-content-drift edit. Matched on its own line,
+# anywhere in the message; the last occurrence wins (mirrors how
+# `_VERDICT_RE` accepts the reviewer's final marker even when earlier
+# references appear in the body). Without this marker the no-commit
+# response is treated as a clarification question via `_on_question`, NOT
+# silently swallowed as an ack -- a misleading "existing work satisfies"
+# comment on a real question would leave the issue stuck without
+# `awaiting_human` set.
+_DRIFT_ACK_RE = re.compile(r"^\s*ACK:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _drift_ack_reason(last_message: str) -> Optional[str]:
+    """Return the dev's ACK justification if `last_message` carries the
+    explicit `ACK: ...` marker, or None when no marker is present.
+
+    Takes the LAST match (matches `_parse_review_verdict`'s convention) so
+    a stray reference earlier in the message loses to the concluding line.
+    """
+    if not last_message:
+        return None
+    matches = list(_DRIFT_ACK_RE.finditer(last_message))
+    if not matches:
+        return None
+    return matches[-1].group(1).strip() or None
+
+
+def _mark_drift_comments_consumed(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> None:
+    """Advance `last_action_comment_id` past every comment visible on the
+    issue thread right now.
+
+    Used by the user-content-drift paths after they resume the dev session
+    with `_recent_comments_text(issue)` quoted in the prompt: the dev has
+    been fed the full conversation, so the next validating->in_review
+    handoff (via `_seed_watermark_past_self`) must NOT classify those same
+    comments as fresh, unconsumed feedback and replay them as a duplicate
+    dev resume on the next in_review tick. Mirrors the pre-resume bump in
+    `_resume_developer_on_human_reply`; the post here uses
+    `latest_comment_id` rather than the `comments_after` walk because the
+    drift prompt feeds the full thread (`_recent_comments_text`), not just
+    a single new-comments slice. One-way ratchet so a higher prior value
+    (e.g. a recent park comment id) is never lowered.
+    """
+    latest = gh.latest_comment_id(issue)
+    if not isinstance(latest, int):
+        return
+    prior = state.get("last_action_comment_id")
+    if not isinstance(prior, int) or latest > prior:
+        state.set("last_action_comment_id", latest)
+
+
+def _route_drift_to_decomposing(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    new_hash: str,
+    orphan_children: list,
+) -> None:
+    """Route an issue back to `decomposing` after a pre-implementation
+    user-content drift, clearing the locked decomposer session and any
+    in-flight manifest state so the next tick spawns a fresh decomposer
+    against the updated body.
+
+    `orphan_children` is the parent's previously-tracked children list
+    (empty for `ready` / blocked-child cases): existing children are NOT
+    closed on GitHub by this helper, but their record is dropped from the
+    parent's pinned state so the new manifest does not collide with them.
+    The notice posted on the issue lists the orphan numbers explicitly so
+    the operator can close any that no longer apply.
+
+    Caller writes pinned state (`gh.write_pinned_state`) after returning.
+    """
+    if orphan_children:
+        orphan_list = ", ".join(f"#{n}" for n in orphan_children)
+        notice = (
+            ":pencil2: issue content changed; re-running decomposer "
+            "against the updated body. The previously-tracked children "
+            f"({orphan_list}) will be ORPHANED -- the orchestrator no "
+            "longer tracks them; please close any that no longer apply to "
+            "the updated requirements."
+        )
+    else:
+        notice = (
+            ":pencil2: issue content changed; re-running decomposer "
+            "against the updated body."
+        )
+    _post_issue_comment(gh, issue, state, notice)
+    state.set("user_content_hash", new_hash)
+    # Clear `decomposer_session_id` so the next tick spawns a FRESH
+    # decomposer session (deriving a new manifest against the updated
+    # body, not resuming the prior session with only the human's reply).
+    # Deliberately PRESERVE `decomposer_agent`: once the role's spec has
+    # been recorded on this issue it is locked for the rest of its
+    # lifecycle, even across drift events. A config flip (e.g.
+    # `DECOMPOSE_AGENT=codex -> claude`) between ticks must not retarget
+    # an in-flight issue at a different backend; `_read_decomposer_session`
+    # uses the recorded spec, so the fresh spawn picks up where the old
+    # one left off and the FullSpecPersistenceTest contract holds.
+    state.set("decomposer_session_id", None)
+    # Wipe the manifest tracking so `_handle_decomposing`'s half-finished
+    # recovery branch does not fire on the next tick (it keys on
+    # `expected_children_count` or a non-empty `children` list).
+    state.set("children", [])
+    state.set("dep_graph", {})
+    state.set("expected_children_count", None)
+    state.set("umbrella", None)
+    state.set("awaiting_human", False)
+    state.set("park_reason", None)
+    gh.set_workflow_label(issue, "decomposing")
 
 
 # Cap the stderr tail surfaced in park comments. A multi-MB Cloudflare
@@ -212,8 +475,17 @@ def _post_pr_comment(
     surfaces share the IssueComment id namespace, so a single id list covers
     them. Inline review comments and PR review summaries live in different id
     spaces but the orchestrator never posts to those, so they need no entry.
+
+    The body is augmented with `_ORCH_COMMENT_MARKER` for the same reason
+    as `_post_issue_comment`: the user-content hash needs to identify
+    bot comments even after their id has been evicted from the bounded
+    `orchestrator_comment_ids` cap. PR-conversation comments do not feed
+    into `_compute_user_content_hash` directly (the hash reads
+    `issue.get_comments()`, not the PR's), but marker symmetry across
+    surfaces keeps the filter rules uniform and avoids accidental
+    inconsistency when a future tweak does start reading PR comments.
     """
-    c = gh.pr_comment(pr_number, body)
+    c = gh.pr_comment(pr_number, _with_orch_marker(body))
     cid = getattr(c, "id", None)
     if cid is not None:
         _track_orchestrator_comment(state, int(cid))
@@ -1485,6 +1757,16 @@ def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         pickup_id = getattr(pickup, "id", None)
         if pickup_id is not None:
             state.set("pickup_comment_id", int(pickup_id))
+        # Snapshot the user-visible content so future ticks can detect a
+        # human edit to the title/body mid-flight. Computed AFTER recording
+        # the pickup comment id so the pickup itself is filtered out by
+        # `_orchestrator_ids` -- otherwise the next tick would include it
+        # and the hash would flap once the orchestrator_comment_ids set is
+        # consulted there.
+        state.set(
+            "user_content_hash",
+            _compute_user_content_hash(issue, _orchestrator_ids(state)),
+        )
         gh.set_workflow_label(issue, "decomposing")
         gh.write_pinned_state(issue, state)
         _handle_decomposing(gh, spec, issue)
@@ -1507,6 +1789,10 @@ def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     pickup_id = getattr(pickup, "id", None)
     if pickup_id is not None:
         state.set("pickup_comment_id", int(pickup_id))
+    state.set(
+        "user_content_hash",
+        _compute_user_content_hash(issue, _orchestrator_ids(state)),
+    )
     gh.set_workflow_label(issue, "implementing")
     gh.write_pinned_state(issue, state)
     _handle_implementing(gh, spec, issue)
@@ -1792,6 +2078,55 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # number starts from current `origin/<base>`.
     keep_worktree = False
     try:
+        # User-content drift FIRST. The spec requires "at the start of
+        # every per-tick handler"; running this before the half-finished
+        # recovery below is what stops the recovery branch from
+        # finalizing to `blocked` / `umbrella` against a stale manifest
+        # when the human edited the issue body during a crash window.
+        # When drift IS detected we wipe the manifest tracking (children,
+        # dep_graph, expected_children_count, umbrella) so the recovery
+        # branch is bypassed and the fresh-spawn path below derives a
+        # new manifest against the updated body. Previously-created
+        # children are listed as orphans in the notice -- they remain
+        # on GitHub but the orchestrator no longer tracks them.
+        new_hash = _detect_user_content_change(gh, issue, state)
+        if new_hash is not None:
+            orphans = list(state.get("children") or [])
+            if orphans:
+                orphan_list = ", ".join(f"#{n}" for n in orphans)
+                notice = (
+                    ":pencil2: issue content changed; re-running "
+                    "decomposer against the updated body. The "
+                    f"previously-tracked children ({orphan_list}) "
+                    "will be ORPHANED -- the orchestrator no longer "
+                    "tracks them; please close any that no longer "
+                    "apply to the updated requirements."
+                )
+            else:
+                notice = (
+                    ":pencil2: issue content changed; re-running "
+                    "decomposer against the updated body."
+                )
+            _post_issue_comment(gh, issue, state, notice)
+            state.set("user_content_hash", new_hash)
+            # Drop only the SESSION id -- preserve `decomposer_agent`
+            # (the locked role spec). Lock-on-first-spawn means a
+            # mid-flight `DECOMPOSE_AGENT` env flip must not retarget
+            # an in-flight issue at a different backend; the fresh
+            # spawn below picks up the recorded spec via
+            # `_read_decomposer_session`.
+            state.set("decomposer_session_id", None)
+            state.set("children", [])
+            state.set("dep_graph", {})
+            state.set("expected_children_count", None)
+            state.set("umbrella", None)
+            state.set("awaiting_human", False)
+            state.set("park_reason", None)
+            # Fall through: state is now clean (no children, no session),
+            # so the half-finished recovery below is bypassed, the
+            # awaiting-human branch is bypassed, and the fresh-spawn
+            # branch runs the decomposer this tick.
+
         # Half-finished decomposition recovery. Two persistent markers
         # signal a prior tick crashed mid-split:
         #   * `expected_children_count` is written BEFORE any child is
@@ -1926,6 +2261,11 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh.write_pinned_state(issue, state)
             _handle_implementing(gh, spec, issue)
             return
+
+        # (User-content drift handled at the top of the try block above
+        # so it runs BEFORE half-finished recovery -- otherwise the
+        # recovery branch would finalize against a stale manifest when
+        # the issue was edited during a crash window.)
 
         if state.get("awaiting_human"):
             result = _resume_decomposer_on_human_reply(gh, spec, issue, state)
@@ -2206,6 +2546,25 @@ def _handle_ready(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     legacy migration have an anchor comment they can key on.
     """
     state = gh.read_pinned_state(issue)
+    # User-content drift before implementation has started: route back to
+    # decomposing so the manifest is re-derived against the new body. A
+    # non-umbrella parent can reach `ready` after every child resolves
+    # (`_handle_blocked`'s all-done branch flips `blocked` -> `ready`),
+    # so the parent may STILL carry `children` / `dep_graph` /
+    # `expected_children_count` from the prior manifest. Without clearing
+    # those, the next `_handle_decomposing` tick's half-finished
+    # recovery branch would fire and just flip the issue back to
+    # `blocked` without re-running the decomposer. Route via
+    # `_route_drift_to_decomposing` so the manifest tracking is wiped
+    # alongside the locked decomposer session; the now-resolved children
+    # are listed in the notice as orphans so the operator can close any
+    # that no longer apply to the updated requirements.
+    new_hash = _detect_user_content_change(gh, issue, state)
+    if new_hash is not None:
+        orphans = list(state.get("children") or [])
+        _route_drift_to_decomposing(gh, issue, state, new_hash, orphans)
+        gh.write_pinned_state(issue, state)
+        return
     if state.get("pickup_comment_id") is None:
         if not state.get("created_at"):
             state.set("created_at", _now_iso())
@@ -2249,6 +2608,27 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     """
     state = gh.read_pinned_state(issue)
     children = state.get("children") or []
+
+    # User-content drift detection. The hash baseline is initialized by
+    # `_detect_user_content_change` itself on the first encounter, so a
+    # legacy `blocked` issue still missing the field is durably seeded
+    # here (via the helper's own `write_pinned_state`) rather than
+    # silently absorbing the next edit as the new baseline. Per the spec
+    # ("Before validating: route back to decomposing"), both parent and
+    # child cases route to decomposing -- silently persisting the new
+    # baseline for a child would let `_handle_ready` later see a matching
+    # hash and skip the re-decomposer, even when the edited body now
+    # needs splitting. Parents with in-flight children list those
+    # children as orphans in the notice (the new manifest may overlap
+    # with them; the operator closes the obsolete ones manually).
+    new_hash = _detect_user_content_change(gh, issue, state)
+    if new_hash is not None:
+        _route_drift_to_decomposing(
+            gh, issue, state, new_hash, list(children),
+        )
+        gh.write_pinned_state(issue, state)
+        return
+
     if not children:
         # A blocked issue with `parent_number` recorded is a child waiting
         # on a sibling. The parent's `_handle_blocked` walks the dep graph
@@ -2379,6 +2759,25 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     only terminal path is "every child resolved -> close".
     """
     state = gh.read_pinned_state(issue)
+
+    # User-content drift detection. An umbrella parent NEVER enters
+    # implementation -- it just closes when every child resolves -- so a
+    # body edit cannot be picked up by any later stage's drift check.
+    # Per the spec ("Before validating: route back to decomposing"), the
+    # umbrella is routed back to decomposing so the new manifest is
+    # re-derived against the updated body. The previously-tracked
+    # children become orphans on GitHub (the orchestrator no longer
+    # tracks them); the notice lists them explicitly so the operator can
+    # close any that no longer apply. Without this route-back, an
+    # edited umbrella would silently close to `done` against the stale
+    # manifest once the old children finished.
+    new_hash = _detect_user_content_change(gh, issue, state)
+    if new_hash is not None:
+        orphans = list(state.get("children") or [])
+        _route_drift_to_decomposing(gh, issue, state, new_hash, orphans)
+        gh.write_pinned_state(issue, state)
+        return
+
     children = state.get("children") or []
     if not children:
         # An umbrella with no recorded children is corrupt state (the
@@ -2754,6 +3153,170 @@ def _resume_developer_on_human_reply(
 def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     state = gh.read_pinned_state(issue)
 
+    # User-content drift: a human edited the issue title/body after the dev
+    # session was spawned. The issue spec ("don't re-decompose mid-
+    # implementation -- too disruptive") rules out routing back to
+    # `decomposing` here; instead notify the human and resume the locked
+    # dev session with the new body so it can decide what to do. When no
+    # dev session exists yet (fresh `ready` -> `implementing` bounce that
+    # hasn't spawned), just persist the new hash and let the fresh-spawn
+    # branch below pick the new body up via `_build_implement_prompt`.
+    new_hash = _detect_user_content_change(gh, issue, state)
+    if new_hash is not None:
+        state.set("user_content_hash", new_hash)
+        # "Has a dev session ever spawned" is keyed off the persisted
+        # role identity (`dev_agent`, or the legacy `codex_session_id`),
+        # NOT off `dev_session_id` alone -- a first spawn whose
+        # subprocess returned no session id (CLI hiccup, missing output
+        # file) still recorded `dev_agent` and is a valid resume target.
+        # `_resume_dev_with_text` handles `dev_sid=None` by spawning
+        # fresh against the recorded spec, which is exactly what we
+        # want here (the recorded spec also survives a config flip
+        # between ticks).
+        has_dev_session = bool(
+            state.get("dev_agent") or state.get("codex_session_id")
+        )
+        if has_dev_session:
+            _post_issue_comment(
+                gh, issue, state,
+                ":pencil2: issue body changed; resuming dev session with "
+                "the updated requirements.",
+            )
+            # Mark every issue-thread comment visible right now as
+            # consumed: the dev session sees the full conversation via
+            # `_recent_comments_text` in the resume prompt, so the next
+            # validating->in_review handoff (via
+            # `_seed_watermark_past_self`) must NOT replay those comments
+            # as fresh PR feedback and re-resume the dev on input it has
+            # already handled.
+            _mark_drift_comments_consumed(gh, issue, state)
+            wt = _worktree_path(spec, issue.number)
+            if not wt.exists():
+                wt = _ensure_worktree(spec, issue.number)
+            # Snapshot HEAD BEFORE the resume so the post-result check
+            # below can tell whether THIS resume produced a new commit.
+            # `_has_new_commits` only compares against `origin/<base>`,
+            # so a recovered worktree carrying pre-existing unpushed
+            # commits from a previous tick would mask an empty / failed
+            # resume here: an empty dev response would still walk into
+            # `_on_commits` and open a PR against commits that never
+            # got a chance to address the edited requirements.
+            before_sha = _head_sha(wt)
+            followup = _build_user_content_change_prompt(
+                issue, _recent_comments_text(issue),
+            )
+            wt, result = _resume_dev_with_text(
+                gh, spec, issue, state, followup,
+            )
+            state.set("last_agent_action_at", _now_iso())
+            state.set("branch", _branch_name(issue.number))
+            after_sha = _head_sha(wt)
+            this_resume_committed = (
+                bool(after_sha) and after_sha != before_sha
+            )
+            if result.timed_out:
+                _park_awaiting_human(
+                    gh, issue, state,
+                    f"{config.HITL_MENTIONS} agent timed out after "
+                    f"{config.AGENT_TIMEOUT}s, manual intervention needed.",
+                )
+            elif this_resume_committed:
+                dirty = _worktree_dirty_files(wt)
+                if dirty:
+                    _on_dirty_worktree(gh, issue, state, result, dirty)
+                else:
+                    _on_commits(gh, spec, issue, state, result)
+            else:
+                # The dev produced no new commit on THIS resume. Accept
+                # it as an acknowledgement ONLY when the message ends
+                # with the explicit `ACK: <reason>` marker emitted by
+                # `_build_user_content_change_prompt`. Any other
+                # no-commit response (a real clarification question, an
+                # ambiguous comment, or an empty message) falls back to
+                # `_on_question` so the issue parks awaiting human --
+                # treating a clarification as an ack would post a
+                # misleading "existing work satisfies" comment AND
+                # leave `awaiting_human=False`, stranding the real
+                # question. Recovered pre-existing commits from a prior
+                # tick are deliberately NOT pushed here either: the dev
+                # must explicitly commit again (or ACK) for the
+                # orchestrator to treat the body change as handled.
+                ack_reason = _drift_ack_reason(result.last_message or "")
+                if ack_reason:
+                    quoted = "> " + ack_reason.replace("\n", "\n> ")
+                    _post_issue_comment(
+                        gh, issue, state,
+                        ":speech_balloon: dev session reports the existing "
+                        f"work satisfies the edit:\n\n{quoted}",
+                    )
+                    state.set("silent_park_count", 0)
+                else:
+                    _on_question(gh, issue, state, result)
+            gh.write_pinned_state(issue, state)
+            return
+        # No dev session yet. If the worktree carries recovered unpushed
+        # commits from a previous tick, those commits were authored
+        # BEFORE the human edited the issue and no agent has seen the
+        # new body. Falling through would let the recovered-worktree
+        # shortcut below push them and open a PR against requirements
+        # the agent never read. Park awaiting human so the operator
+        # decides whether to discard the recovered work and start over
+        # or accept it as-is by relabeling. Without this guard, an
+        # orchestrator restart between commit and PR open followed by a
+        # body edit would silently publish stale work.
+        #
+        # We rely on `_has_new_commits` alone, not a `Path.exists()`
+        # pre-check, because `_has_new_commits` already returns False
+        # when the worktree is absent (the underlying `git rev-list`
+        # fails) -- and the fake worktree paths used by tests never
+        # exist on disk, so an `exists()` gate would short-circuit the
+        # park branch in the regression test below.
+        wt = _worktree_path(spec, issue.number)
+        if _has_new_commits(spec, wt):
+            _park_awaiting_human(
+                gh, issue, state,
+                f"{config.HITL_MENTIONS} issue body changed but the "
+                "worktree carries unpushed commits from a previous tick "
+                "and no dev session is recorded. Refusing to push commits "
+                "that never saw the edited requirements; decide whether "
+                "to discard the recovered work (reset the branch) and "
+                "let a fresh agent run, or accept it as-is.",
+            )
+            gh.write_pinned_state(issue, state)
+            return
+        # No recovered commits. If the issue is parked awaiting human
+        # WITHOUT a recorded dev session (unusual but possible: a manual
+        # relabel, or drift detected on a freshly-picked-up issue that
+        # parked before its first spawn), the awaiting-human branch
+        # below would route to `_resume_developer_on_human_reply`. Two
+        # failure modes there:
+        #   (a) no new comments -- returns None and the handler returns
+        #       WITHOUT writing the new hash, looping the drift detection
+        #       on every subsequent tick;
+        #   (b) new comments -- `_resume_dev_with_text` fresh-spawns with
+        #       ONLY the new-comments followup text as the prompt, never
+        #       quoting the updated body that triggered the drift in the
+        #       first place.
+        # Clear the park flags here so the fresh-spawn branch below
+        # fires this tick with the full implement prompt (which quotes
+        # the current `issue.body` and the full conversation via
+        # `_recent_comments_text`). Mark every visible issue-thread
+        # comment as consumed so the validating->in_review handoff
+        # doesn't later replay them as fresh PR feedback.
+        if state.get("awaiting_human"):
+            _post_issue_comment(
+                gh, issue, state,
+                ":pencil2: issue content changed; clearing the park and "
+                "spawning a fresh dev run against the updated "
+                "requirements.",
+            )
+            _mark_drift_comments_consumed(gh, issue, state)
+            state.set("awaiting_human", False)
+            state.set("park_reason", None)
+        # Fall through to the fresh-spawn path, which builds the
+        # implement prompt from the current `issue.body` so the new
+        # requirements are picked up naturally.
+
     if state.get("awaiting_human"):
         resumed = _resume_developer_on_human_reply(gh, spec, issue, state)
         if resumed is None:
@@ -2903,9 +3466,160 @@ def _handle_dev_fix_result(
     return True
 
 
+def _post_user_content_change_result(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+    wt: Path,
+    result: AgentResult,
+    before_sha: str,
+) -> str:
+    """Post-resume handling for a user-content-change dev resume.
+
+    Returns one of:
+
+    * ``"ack"`` -- the dev produced no commit but explicitly signaled
+      acknowledgement via the `ACK: ...` marker emitted by
+      `_build_user_content_change_prompt`. The reply is posted on the
+      issue as an FYI and the handler does NOT park `awaiting_human`.
+      Caller stays on the current label.
+    * ``"pushed"`` -- new commit landed and the push succeeded. Caller
+      advances the label per its own rules (in_review bounces to
+      validating; validating stays with `review_round++`).
+    * ``"parked"`` -- timeout, dirty tree, push fail, silent crash
+      (empty `last_message`), OR a no-commit response WITHOUT the
+      `ACK:` marker (treated as a clarification question via
+      `_on_question`). State already carries the park flags.
+
+    The explicit `ACK:` marker is required because a generic non-empty
+    no-commit response is often a clarification question, not an
+    acknowledgement; swallowing it as an ack would post a misleading
+    "existing work satisfies" comment AND continue the workflow with
+    `awaiting_human=False`, stranding the real question.
+    """
+    if result.timed_out:
+        _park_awaiting_human(
+            gh, issue, state,
+            f"{config.HITL_MENTIONS} agent timed out after "
+            f"{config.AGENT_TIMEOUT}s, manual intervention needed.",
+        )
+        state.set("park_reason", "agent_timeout")
+        state.set("pre_dev_fix_sha", before_sha or "")
+        return "parked"
+
+    after_sha = _head_sha(wt)
+    if not after_sha or after_sha == before_sha:
+        ack_reason = _drift_ack_reason(result.last_message or "")
+        if ack_reason:
+            quoted = "> " + ack_reason.replace("\n", "\n> ")
+            _post_issue_comment(
+                gh, issue, state,
+                ":speech_balloon: dev session reports the existing work "
+                f"satisfies the edit:\n\n{quoted}",
+            )
+            # The session is alive and producing output, so the silent-
+            # park streak must reset (mirrors `_handle_dev_fix_result`'s
+            # reset on a successful commit) -- otherwise a future blip
+            # would tip a healthy session past the fresh-session threshold.
+            state.set("silent_park_count", 0)
+            return "ack"
+        # No commit and no explicit ACK marker. The reply may be a real
+        # clarification question; falling through to `_on_question`
+        # parks the issue awaiting human so a misleading "satisfies"
+        # comment isn't posted over a real question. Empty messages
+        # land in the same branch and surface as the silent-failure
+        # park (`_resume_dev_with_text` uses the streak counter to
+        # eventually drop a poisoned session id).
+        _on_question(gh, issue, state, result)
+        return "parked"
+
+    state.set("silent_park_count", 0)
+    dirty = _worktree_dirty_files(wt)
+    if dirty:
+        _on_dirty_worktree(gh, issue, state, result, dirty)
+        return "parked"
+
+    branch = _branch_name(issue.number)
+    if not _push_branch(spec, wt, branch):
+        _park_awaiting_human(
+            gh, issue, state,
+            f"{config.HITL_MENTIONS} git push failed; see orchestrator logs.",
+        )
+        state.set("park_reason", "push_failed")
+        return "parked"
+
+    return "pushed"
+
+
 def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")
+
+    # User-content drift: a human edited the issue title/body while the
+    # reviewer was running. Re-decomposing now would discard the dev's
+    # already-pushed work, so notify the human, resume the dev session on
+    # its locked backend with the new body, and on a successful pushed fix
+    # stay in `validating` so the reviewer re-runs on the new diff next
+    # tick. On a failed resume (timeout, dirty, no commit), the standard
+    # park flags land via `_handle_dev_fix_result`.
+    #
+    # Exception: when the issue is parked with a reviewer-side park reason
+    # (`reviewer_timeout` / `reviewer_failed`), defer to the awaiting-human
+    # branch below. A human "retry" comment on a reviewer-side park must
+    # re-spawn the REVIEWER, not the dev: the failure produced no review
+    # output for the dev to act on, and the reviewer naturally re-reads
+    # the updated `issue.body` + comments via `_build_review_prompt` when
+    # it runs. We still persist the new baseline here so the next tick's
+    # drift check sees a stable comparison point (otherwise the drift
+    # would loop on every subsequent tick).
+    new_hash = _detect_user_content_change(gh, issue, state)
+    if new_hash is not None:
+        state.set("user_content_hash", new_hash)
+        reviewer_side_park = (
+            state.get("awaiting_human")
+            and state.get("park_reason")
+            in ("reviewer_timeout", "reviewer_failed")
+        )
+        if not reviewer_side_park:
+            _post_issue_comment(
+                gh, issue, state,
+                ":pencil2: issue body changed; resuming dev session.",
+            )
+            # Mark the full issue thread as consumed: the dev sees it via
+            # `_recent_comments_text` in the resume prompt, so the eventual
+            # handoff to in_review must not replay those comments as fresh
+            # feedback. Mirrors `_resume_developer_on_human_reply`'s
+            # pre-spawn bump.
+            _mark_drift_comments_consumed(gh, issue, state)
+            wt = _worktree_path(spec, issue.number)
+            if not wt.exists():
+                wt = _ensure_worktree(spec, issue.number)
+            before_sha = _head_sha(wt)
+            followup = _build_user_content_change_prompt(
+                issue, _recent_comments_text(issue),
+            )
+            wt, result = _resume_dev_with_text(
+                gh, spec, issue, state, followup,
+            )
+            state.set("last_agent_action_at", _now_iso())
+            # Custom result handler: a no-commit-with-message reply is the
+            # dev confirming the existing work already satisfies the edit,
+            # and the resume prompt explicitly invites that response.
+            # `_handle_dev_fix_result` would park on it via `_on_question`;
+            # use the user-content-specific helper so a harmless clarification
+            # does not stall the issue.
+            outcome = _post_user_content_change_result(
+                gh, spec, issue, state, wt, result, before_sha,
+            )
+            if outcome == "pushed":
+                round_n = int(state.get("review_round") or 0)
+                state.set("review_round", round_n + 1)
+            gh.write_pinned_state(issue, state)
+            return
+        # reviewer-side park: fall through to the awaiting_human branch
+        # below, which will consume the human's "retry" comment, clear
+        # the park flags, and re-spawn the reviewer.
 
     # Awaiting-human path: human replied after a park; resume the developer
     # codex with their feedback. Identical mechanic to implementing's resume,
@@ -3783,6 +4497,115 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         gh.write_pinned_state(issue, state)
         return
 
+    # User-content drift: a human edited the issue title/body after the PR
+    # opened. Notify on both surfaces, resume the dev session on its locked
+    # backend with the new body, and on a successful pushed fix bounce back
+    # to `validating` so the reviewer agent re-runs on the new diff next
+    # tick (mirrors the comment-driven dev-resume path below).
+    new_hash = _detect_user_content_change(gh, issue, state)
+    if new_hash is not None:
+        state.set("user_content_hash", new_hash)
+        # Gather unread PR-conversation comments BEFORE posting the
+        # orchestrator's drift notice. The issue thread and PR
+        # conversation share the IssueComment id space, so the
+        # subsequent `_bump_in_review_watermarks` bump (driven by
+        # `latest_comment_id(issue)` and `last_action_comment_id`,
+        # both of which only reflect the ISSUE thread) can leap past
+        # a PR-conversation comment whose id falls between the prior
+        # `pr_last_comment_id` and the new issue-thread max -- the
+        # dev would never see it. Capturing those PR comments here
+        # and quoting them in the followup prompt is what stops a
+        # concurrent PR comment from being silently dropped by the
+        # watermark bump. Filtering by `orchestrator_comment_ids` and
+        # `_ORCH_COMMENT_MARKER` mirrors the regular in_review
+        # comment-driven scan; a PR comment whose id is recorded as
+        # orchestrator-authored or whose body carries the marker is
+        # not real feedback and stays out of the followup.
+        issue_wm = state.get("pr_last_comment_id")
+        if issue_wm is None:
+            issue_wm = state.get("last_action_comment_id")
+        orchestrator_ids = _orchestrator_ids(state)
+        unread_pr_conv = [
+            c for c in gh.pr_conversation_comments_after(pr, issue_wm)
+            if c.id not in orchestrator_ids
+            and _ORCH_COMMENT_MARKER not in (c.body or "")
+        ]
+        _post_pr_comment(
+            gh, int(pr_number), state,
+            ":pencil2: issue body changed; resuming dev session.",
+        )
+        # Mark every issue-thread comment as consumed AND bump the
+        # in_review watermarks past anything posted on this tick. The
+        # dev sees the full thread via `_recent_comments_text` in the
+        # resume prompt, so a later validating->in_review handoff (after
+        # the "pushed" branch flips to validating and the reviewer
+        # approves) and the in_review's own watermark check must not
+        # replay these comments as fresh feedback.
+        _mark_drift_comments_consumed(gh, issue, state)
+        wt = _worktree_path(spec, issue.number)
+        if not wt.exists():
+            wt = _ensure_worktree(spec, issue.number)
+        before_sha = _head_sha(wt)
+        # Combine the issue-thread context with the unread PR-conversation
+        # comments so the dev sees both surfaces before the watermark
+        # bump below consumes them.
+        comments_text = _recent_comments_text(issue)
+        if unread_pr_conv:
+            pr_block = "\n\n".join(
+                f"@{c.user.login if c.user else 'user'} (PR comment): "
+                f"{c.body or ''}"
+                for c in unread_pr_conv
+            )
+            prefix = f"{comments_text}\n\n" if comments_text else ""
+            comments_text = (
+                f"{prefix}Unread PR conversation comments:\n\n{pr_block}"
+            )
+        followup = _build_user_content_change_prompt(issue, comments_text)
+        wt, dev_result = _resume_dev_with_text(
+            gh, spec, issue, state, followup,
+        )
+        state.set("last_agent_action_at", _now_iso())
+        # The user-content-change result handler treats a no-commit reply
+        # as an ack rather than parking on it; a harmless clarification
+        # edit (the dev confirms the PR already satisfies it) must not
+        # stall the issue with an "agent needs your input" park.
+        outcome = _post_user_content_change_result(
+            gh, spec, issue, state, wt, dev_result, before_sha,
+        )
+        # Always bump in_review watermarks past the orchestrator's notice
+        # and any comments we just consumed, regardless of outcome. On
+        # "pushed" the next tick will be in validating, but if the
+        # reviewer later approves and bounces back to in_review,
+        # `_seed_watermark_past_self` would otherwise stop at the
+        # original human comment and trigger a duplicate resume. Passing
+        # `unread_pr_conv` ensures PR-conversation ids ABOVE the
+        # issue-thread max are also included in the candidate set;
+        # without it, a PR comment with id higher than every issue-thread
+        # id would survive past the bump and re-fire as fresh feedback.
+        _bump_in_review_watermarks(
+            gh, issue, state, issue_space_new=unread_pr_conv,
+        )
+        if outcome in ("pushed", "ack"):
+            # The drift invalidated the prior validation: the reviewer
+            # agent approved against the OLD requirements, so its
+            # `agent_approved_sha` snapshot is stale. Bounce back to
+            # `validating` (reset `review_round=0`) so the reviewer
+            # re-evaluates against the updated body/comments before
+            # AUTO_MERGE is allowed to land the PR.
+            #
+            # An "ack" outcome (no commit; dev said the existing work
+            # already satisfies the edit) MUST also bounce: leaving the
+            # issue at `in_review` with the old `agent_approved_sha`
+            # would let the AUTO_MERGE gate pass on the next tick even
+            # though the reviewer never saw the changed requirements.
+            # Clear `agent_approved_sha` defensively in case any future
+            # auto-merge path reads it before the reviewer re-snapshots.
+            state.set("review_round", 0)
+            state.set("agent_approved_sha", None)
+            gh.set_workflow_label(issue, "validating")
+        gh.write_pinned_state(issue, state)
+        return
+
     # PR is open. Look for new human activity. Three watermarks because the
     # three comment surfaces live in distinct id namespaces in GitHub's REST
     # API: issue/PR-conversation comments share the IssueComment id space,
@@ -4328,6 +5151,46 @@ def _handle_resolving_conflict(
     if getattr(issue, "state", "open") == "closed":
         state.set("closed_without_merge_at", _now_iso())
         gh.set_workflow_label(issue, "rejected")
+        gh.write_pinned_state(issue, state)
+        return
+
+    # User-content drift: a human edited the issue body while the dev
+    # was resolving conflicts. Resuming with the new body+comments lets
+    # the dev decide whether the edit affects the conflict resolution.
+    # On a successful pushed fix we bounce to `validating` so the
+    # reviewer re-runs on the updated branch; on an ack (no commit but a
+    # reply) we stay in `resolving_conflict` without parking so a
+    # harmless clarification doesn't stall the merge.
+    new_hash = _detect_user_content_change(gh, issue, state)
+    if new_hash is not None:
+        state.set("user_content_hash", new_hash)
+        _post_pr_comment(
+            gh, int(pr_number), state,
+            ":pencil2: issue body changed; resuming dev session.",
+        )
+        # Mark issue-thread comments as consumed: the dev sees the full
+        # thread via `_recent_comments_text`, and the eventual
+        # validating->in_review handoff (after a successful pushed
+        # resolution flips back to validating) must not replay them.
+        _mark_drift_comments_consumed(gh, issue, state)
+        wt = _worktree_path(spec, issue.number)
+        if not wt.exists():
+            wt = _ensure_pr_worktree(spec, issue.number)
+        before_sha = _head_sha(wt)
+        followup = _build_user_content_change_prompt(
+            issue, _recent_comments_text(issue),
+        )
+        wt, result = _resume_dev_with_text(gh, spec, issue, state, followup)
+        state.set("last_agent_action_at", _now_iso())
+        outcome = _post_user_content_change_result(
+            gh, spec, issue, state, wt, result, before_sha,
+        )
+        if outcome == "pushed":
+            conflict_round = int(state.get("conflict_round") or 0)
+            state.set("review_round", 0)
+            state.set("conflict_round", conflict_round + 1)
+            state.set("last_conflict_resolved_at", _now_iso())
+            gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
 
