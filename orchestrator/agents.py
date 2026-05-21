@@ -175,6 +175,7 @@ def _run_codex(
     resume_session_id: Optional[str] = None,
     extra_env: Optional[dict[str, str]] = None,
     timeout: Optional[int] = None,
+    extra_args: tuple[str, ...] = (),
 ) -> AgentResult:
     timeout = timeout or config.AGENT_TIMEOUT
     # The -o file lives outside the worktree (per-spawn tempfile) so the
@@ -194,15 +195,26 @@ def _run_codex(
     cwd_abs = Path(cwd).resolve()
     try:
         # `codex exec resume` does not accept -C; we rely on subprocess cwd for it.
+        # Configured `extra_args` (e.g. `-m gpt-5.5 -c '...'`) are codex global
+        # options, so they go BEFORE the `exec` subcommand. The safety/output
+        # flags (`--dangerously-...`, `--json`, `-o`) and the prompt itself
+        # stay where they are -- operator-provided args must not be able to
+        # silently displace them.
         common = [
             "--dangerously-bypass-approvals-and-sandbox",
             "--json",
             "-o", str(last_msg_path),
         ]
         if resume_session_id:
-            cmd = [config.CODEX_BIN, "exec", "resume", *common, resume_session_id, prompt]
+            cmd = [
+                config.CODEX_BIN, *extra_args, "exec", "resume",
+                *common, resume_session_id, prompt,
+            ]
         else:
-            cmd = [config.CODEX_BIN, "exec", "-C", str(cwd_abs), *common, prompt]
+            cmd = [
+                config.CODEX_BIN, *extra_args, "exec", "-C", str(cwd_abs),
+                *common, prompt,
+            ]
 
         env = _agent_env(extra_env)
         log.info(
@@ -287,11 +299,19 @@ def _run_claude(
     resume_session_id: Optional[str] = None,
     extra_env: Optional[dict[str, str]] = None,
     timeout: Optional[int] = None,
+    extra_args: tuple[str, ...] = (),
 ) -> AgentResult:
     timeout = timeout or config.AGENT_TIMEOUT
 
+    # Configured `extra_args` (e.g. `--model claude-opus-4-7 --effort high`)
+    # go right after the binary, before our own flags and the prompt. The
+    # safety/output flags (`-p`, `--dangerously-skip-permissions`,
+    # `--output-format stream-json`, `--include-partial-messages`,
+    # `--verbose`) and the prompt itself stay where they are so operator
+    # args cannot silently override them.
     cmd = [
         config.CLAUDE_BIN,
+        *extra_args,
         "-p",
         "--dangerously-skip-permissions",
         "--output-format", "stream-json",
@@ -331,10 +351,20 @@ def run_agent(
     resume_session_id: Optional[str] = None,
     extra_env: Optional[dict[str, str]] = None,
     timeout: Optional[int] = None,
+    extra_args: tuple[str, ...] = (),
 ) -> AgentResult:
     """Dispatch to the per-backend runner. Config validates `backend` at
     import time, but we re-check here so a misuse from non-config call sites
     fails loudly instead of silently no-opping.
+
+    `extra_args` are forwarded verbatim to the backend CLI (e.g. `-m
+    gpt-5.5` for codex, `--model claude-opus-4-7` for claude). Callers
+    typically pull these from the role-specific config entries
+    (`DEV_AGENT_ARGS`, `REVIEW_AGENT_ARGS`, `DECOMPOSE_AGENT_ARGS`) so a
+    role like "implement with codex at xhigh reasoning" stays declarative
+    in env. They are injected for both fresh spawns and resumes; the
+    backend's own session store carries forward model/effort selection
+    across resumes, but explicit args keep the contract identical.
     """
     if backend == "codex":
         runner = _run_codex
@@ -350,4 +380,5 @@ def run_agent(
         resume_session_id=resume_session_id,
         extra_env=extra_env,
         timeout=timeout,
+        extra_args=extra_args,
     )

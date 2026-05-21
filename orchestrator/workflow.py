@@ -238,6 +238,28 @@ def _read_dev_session(state: PinnedState) -> Tuple[str, Optional[str]]:
     return config.DEV_AGENT, None
 
 
+def _dev_extra_args(backend: str) -> tuple[str, ...]:
+    """Backend-CLI args to inject for a dev-role spawn.
+
+    Returns `DEV_AGENT_ARGS` only when the current config still names this
+    backend. A locked session whose backend differs from the current
+    config gets `()` -- the configured args belong to the new backend's
+    CLI and would be rejected (or worse, silently misinterpreted) by the
+    old one.
+    """
+    return config.DEV_AGENT_ARGS if backend == config.DEV_AGENT else ()
+
+
+def _decompose_extra_args(backend: str) -> tuple[str, ...]:
+    """Backend-CLI args to inject for a decomposer-role spawn. See
+    `_dev_extra_args` for the locked-session contract."""
+    return (
+        config.DECOMPOSE_AGENT_ARGS
+        if backend == config.DECOMPOSE_AGENT
+        else ()
+    )
+
+
 def _branch_name(issue_number: int) -> str:
     return f"orchestrator/issue-{issue_number}"
 
@@ -1722,7 +1744,9 @@ def _resume_decomposer_on_human_reply(
         wt = _ensure_decompose_worktree(spec, issue.number)
     decomposer_agent, decomposer_sid = _read_decomposer_session(state)
     result = run_agent(
-        decomposer_agent, followup, wt, resume_session_id=decomposer_sid
+        decomposer_agent, followup, wt,
+        resume_session_id=decomposer_sid,
+        extra_args=_decompose_extra_args(decomposer_agent),
     )
     state.set("awaiting_human", False)
     return result
@@ -1892,7 +1916,10 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             wt = _ensure_decompose_worktree(spec, issue.number)
             decomposer_agent, _ = _read_decomposer_session(state)
             prompt = _build_decompose_prompt(issue, _recent_comments_text(issue))
-            result = run_agent(decomposer_agent, prompt, wt)
+            result = run_agent(
+                decomposer_agent, prompt, wt,
+                extra_args=_decompose_extra_args(decomposer_agent),
+            )
             if result.session_id:
                 state.set("decomposer_agent", decomposer_agent)
                 state.set("decomposer_session_id", result.session_id)
@@ -2596,7 +2623,11 @@ def _resume_dev_with_text(
         # old poisoned id, which `_read_dev_session` would otherwise
         # return again and burn another retry.
         _drop_poisoned_dev_session(state, dev_agent)
-    result = run_agent(dev_agent, followup_text, wt, resume_session_id=dev_sid)
+    result = run_agent(
+        dev_agent, followup_text, wt,
+        resume_session_id=dev_sid,
+        extra_args=_dev_extra_args(dev_agent),
+    )
 
     # Deterministic stale-session recovery: if we resumed with a session id
     # and Claude responded with the "no conversation found" marker, the
@@ -2618,7 +2649,11 @@ def _resume_dev_with_text(
         )
         _drop_poisoned_dev_session(state, dev_agent)
         fresh_spawn = True
-        result = run_agent(dev_agent, followup_text, wt, resume_session_id=None)
+        result = run_agent(
+            dev_agent, followup_text, wt,
+            resume_session_id=None,
+            extra_args=_dev_extra_args(dev_agent),
+        )
 
     if fresh_spawn and result.session_id:
         # Fresh spawn produced a session id -- record it so subsequent
@@ -2696,7 +2731,10 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 return
             dev_agent, _ = _read_dev_session(state)
             prompt = _build_implement_prompt(issue, _recent_comments_text(issue))
-            result = run_agent(dev_agent, prompt, wt)
+            result = run_agent(
+                dev_agent, prompt, wt,
+                extra_args=_dev_extra_args(dev_agent),
+            )
             if result.session_id:
                 state.set("dev_agent", dev_agent)
                 state.set("dev_session_id", result.session_id)
@@ -2898,7 +2936,9 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     reviewed_sha = _head_sha(wt)
     review_prompt = _build_review_prompt(spec, issue, _recent_comments_text(issue))
     review = run_agent(
-        config.REVIEW_AGENT, review_prompt, wt, timeout=config.REVIEW_TIMEOUT
+        config.REVIEW_AGENT, review_prompt, wt,
+        timeout=config.REVIEW_TIMEOUT,
+        extra_args=config.REVIEW_AGENT_ARGS,
     )
     state.set("review_agent", config.REVIEW_AGENT)
     if review.session_id:
@@ -3125,7 +3165,9 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     before_sha = _head_sha(wt)
     dev_agent, dev_sid = _read_dev_session(state)
     dev_result = run_agent(
-        dev_agent, fix_prompt, wt, resume_session_id=dev_sid
+        dev_agent, fix_prompt, wt,
+        resume_session_id=dev_sid,
+        extra_args=_dev_extra_args(dev_agent),
     )
     state.set("last_agent_action_at", _now_iso())
 

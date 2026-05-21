@@ -149,6 +149,245 @@ class AgentBackendConfigTest(unittest.TestCase):
         self.assertIn("DECOMPOSE_AGENT", str(cm.exception))
 
 
+class AgentSpecConfigTest(unittest.TestCase):
+    """`DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` accept shell-like
+    command specs: a backend name optionally followed by backend-CLI args
+    (`codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`). Bare backend
+    names keep working unchanged.
+    """
+
+    def _load_config(self, env: dict[str, str] | None = None):
+        full_env = {
+            "ORCHESTRATOR_SKIP_DOTENV": "1",
+            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
+        }
+        if env:
+            full_env.update(env)
+        with patch.dict(os.environ, full_env, clear=True):
+            sys.modules.pop("orchestrator.config", None)
+            import orchestrator.config as config
+
+            return config
+
+    def test_bare_backend_has_no_extra_args(self) -> None:
+        config = self._load_config()
+        self.assertEqual(config.DEV_AGENT, "claude")
+        self.assertEqual(config.DEV_AGENT_ARGS, ())
+        self.assertEqual(config.REVIEW_AGENT, "codex")
+        self.assertEqual(config.REVIEW_AGENT_ARGS, ())
+        self.assertEqual(config.DECOMPOSE_AGENT, "claude")
+        self.assertEqual(config.DECOMPOSE_AGENT_ARGS, ())
+
+    def test_parses_quoted_codex_spec(self) -> None:
+        # Exact spec shape from the issue body. shlex must keep the
+        # `-c key="value"` token whole even though it contains both
+        # quotes and an `=`; if the parser splits on whitespace naively
+        # the value half would be dropped.
+        config = self._load_config({
+            "DEV_AGENT": "codex -m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'",
+        })
+        self.assertEqual(config.DEV_AGENT, "codex")
+        self.assertEqual(
+            config.DEV_AGENT_ARGS,
+            ("-m", "gpt-5.5", "-c", 'model_reasoning_effort="xhigh"'),
+        )
+
+    def test_parses_claude_spec_with_flags(self) -> None:
+        config = self._load_config({
+            "REVIEW_AGENT": "claude --model claude-opus-4-7 --effort high",
+        })
+        self.assertEqual(config.REVIEW_AGENT, "claude")
+        self.assertEqual(
+            config.REVIEW_AGENT_ARGS,
+            ("--model", "claude-opus-4-7", "--effort", "high"),
+        )
+
+    def test_per_role_args_are_independent(self) -> None:
+        # Two roles sharing a backend keep distinct args so a deployment
+        # can run e.g. `codex -m gpt-5.5` for dev and `codex` for review.
+        config = self._load_config({
+            "DEV_AGENT": "codex -m gpt-5.5",
+            "REVIEW_AGENT": "codex",
+            "DECOMPOSE_AGENT": "claude --model claude-opus-4-7",
+        })
+        self.assertEqual(config.DEV_AGENT_ARGS, ("-m", "gpt-5.5"))
+        self.assertEqual(config.REVIEW_AGENT_ARGS, ())
+        self.assertEqual(
+            config.DECOMPOSE_AGENT_ARGS,
+            ("--model", "claude-opus-4-7"),
+        )
+
+    def test_first_token_case_normalized(self) -> None:
+        # The bare-form parser tolerates ` CODEX `; the spec form should
+        # behave identically so legacy values like `DEV_AGENT=Codex` keep
+        # parsing the same way after the shell-spec rollout.
+        config = self._load_config({"DEV_AGENT": "  CODEX -m foo"})
+        self.assertEqual(config.DEV_AGENT, "codex")
+        self.assertEqual(config.DEV_AGENT_ARGS, ("-m", "foo"))
+
+    def test_empty_spec_aborts_at_import(self) -> None:
+        with self.assertRaises(SystemExit) as cm:
+            self._load_config({"DEV_AGENT": "   "})
+        msg = str(cm.exception)
+        self.assertIn("DEV_AGENT", msg)
+        self.assertIn("empty", msg)
+
+    def test_unknown_first_token_aborts_at_import(self) -> None:
+        with self.assertRaises(SystemExit) as cm:
+            self._load_config({"DEV_AGENT": "gemini --model g-1"})
+        msg = str(cm.exception)
+        self.assertIn("DEV_AGENT", msg)
+        self.assertIn("gemini", msg)
+
+    def test_unterminated_quote_aborts_at_import(self) -> None:
+        # shlex.split raises ValueError on an unbalanced quote; the
+        # importer must surface that as a SystemExit so the orchestrator
+        # never starts with an unparseable spec.
+        with self.assertRaises(SystemExit) as cm:
+            self._load_config({"DEV_AGENT": "codex -c 'unterminated"})
+        self.assertIn("DEV_AGENT", str(cm.exception))
+
+
+class DotenvQuoteStrippingTest(unittest.TestCase):
+    """`_load_dotenv` previously stripped quote chars off both ends of a
+    value with `value.strip('"').strip("'")`, which corrupted any value
+    whose payload legitimately ended in a quote. The documented
+    `DEV_AGENT=codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`
+    spec hit exactly that bug -- the trailing `'` got eaten, and
+    `_parse_agent_spec` then died on `No closing quotation`.
+
+    The fix is to only strip a single matched outer quote pair, so quoted
+    segments inside the value survive verbatim.
+    """
+
+    # Keys the dotenv path is allowed to write. Stripped from the patched
+    # env before calling `_load_dotenv` so `os.environ.setdefault` in the
+    # loader actually writes the temp .env's values (instead of silently
+    # no-opping against a real value inherited from the developer's
+    # shell or repo .env).
+    _DOTENV_OWNED_KEYS = (
+        "DEV_AGENT",
+        "REVIEW_AGENT",
+        "DECOMPOSE_AGENT",
+    )
+
+    def _reload_with_dotenv(
+        self, dotenv_body: str, *, extra_env: dict[str, str] | None = None
+    ):
+        """Reload config hermetically against an isolated temp REPO_ROOT
+        containing the given `.env` contents.
+
+        Hermeticity matters: the previous version of this helper imported
+        `orchestrator.config` with `ORCHESTRATOR_SKIP_DOTENV` unset and
+        before patching `REPO_ROOT`, so the import-time `_load_dotenv()`
+        ran against the developer's real REPO_ROOT/.env. That had two
+        failure modes:
+          * `os.environ.setdefault` populated `DEV_AGENT` / `REVIEW_AGENT`
+            from the real .env, and the later `_load_dotenv` against
+            the tmp dir silently no-op'd on those keys -- the temp
+            fixture had no effect.
+          * If the real .env carried an invalid value the initial
+            import would abort, killing the test for reasons unrelated
+            to the fixture under test.
+
+        Fix: import with dotenv skipped, clear the keys the fixture
+        owns, then manually run `_load_dotenv()` under the patched
+        REPO_ROOT.
+        """
+        env = {
+            "ORCHESTRATOR_SKIP_DOTENV": "1",
+            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
+        }
+        if extra_env:
+            env.update(extra_env)
+        with tempfile.TemporaryDirectory() as td:
+            dotenv_path = Path(td) / ".env"
+            dotenv_path.write_text(dotenv_body)
+
+            with patch.dict(os.environ, env, clear=True):
+                # Initial import is dotenv-skipped, so it cannot read the
+                # real REPO_ROOT/.env (or any other host file). Module
+                # constants get their default values; the fixture
+                # rebinds them below from the temp dotenv.
+                sys.modules.pop("orchestrator.config", None)
+                import orchestrator.config as config
+
+                # Drop the skip flag and any owned keys we want the
+                # tmp .env to populate. `_load_dotenv`'s `setdefault`
+                # respects existing values, so anything left set here
+                # would prevent the fixture from taking effect.
+                os.environ.pop("ORCHESTRATOR_SKIP_DOTENV", None)
+                for key in self._DOTENV_OWNED_KEYS:
+                    os.environ.pop(key, None)
+
+                with patch.object(config, "REPO_ROOT", Path(td)):
+                    config._load_dotenv()
+
+                config.DEV_AGENT, config.DEV_AGENT_ARGS = config._parse_agent_spec(
+                    "DEV_AGENT", os.environ.get("DEV_AGENT", "claude")
+                )
+                config.REVIEW_AGENT, config.REVIEW_AGENT_ARGS = config._parse_agent_spec(
+                    "REVIEW_AGENT", os.environ.get("REVIEW_AGENT", "codex")
+                )
+                return config
+
+    def test_strip_dotenv_quotes_keeps_inner_quote_pairs(self) -> None:
+        from orchestrator.config import _strip_dotenv_quotes
+
+        # Inner double-quote pair stays intact; the trailing `'` is the
+        # closing half of an outer single-quote pair so it should NOT be
+        # eaten by a naive .strip("'").
+        raw = "codex -m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'"
+        self.assertEqual(_strip_dotenv_quotes(raw), raw)
+
+    def test_strip_dotenv_quotes_unwraps_matched_outer_pair(self) -> None:
+        from orchestrator.config import _strip_dotenv_quotes
+
+        # Operator-written `KEY="value with spaces"` -- a single matched
+        # outer pair IS unwrapped so existing dotenv conventions keep
+        # working.
+        self.assertEqual(
+            _strip_dotenv_quotes('"value with spaces"'),
+            "value with spaces",
+        )
+        self.assertEqual(
+            _strip_dotenv_quotes("'single quoted'"),
+            "single quoted",
+        )
+
+    def test_strip_dotenv_quotes_leaves_mismatched_pair_alone(self) -> None:
+        from orchestrator.config import _strip_dotenv_quotes
+
+        # A `"...'` mismatch is more likely a typo than a quoting
+        # convention; leaving it intact surfaces the problem at the
+        # downstream parser instead of silently corrupting the value.
+        self.assertEqual(_strip_dotenv_quotes("\"mismatched'"), "\"mismatched'")
+
+    def test_quoted_codex_spec_round_trips_through_dotenv(self) -> None:
+        # The exact spec shape advertised in .env.example and the issue
+        # body must parse cleanly when supplied through .env, not just
+        # when injected directly into os.environ.
+        body = (
+            "DEV_AGENT=codex -m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'\n"
+        )
+        config = self._reload_with_dotenv(body)
+        self.assertEqual(config.DEV_AGENT, "codex")
+        self.assertEqual(
+            config.DEV_AGENT_ARGS,
+            ("-m", "gpt-5.5", "-c", 'model_reasoning_effort="xhigh"'),
+        )
+
+    def test_outer_double_quoted_dotenv_value_still_unwraps(self) -> None:
+        # Backward-compat for operators who wrap their values in outer
+        # double quotes (a common dotenv convention).
+        body = 'REVIEW_AGENT="claude --model claude-opus-4-7"\n'
+        config = self._reload_with_dotenv(body)
+        self.assertEqual(config.REVIEW_AGENT, "claude")
+        self.assertEqual(
+            config.REVIEW_AGENT_ARGS, ("--model", "claude-opus-4-7"),
+        )
+
+
 class DecomposeKillSwitchConfigTest(unittest.TestCase):
     """The DECOMPOSE kill switch defaults on; truthy spellings keep it on,
     explicit off / typos disable it. Mirrors AUTO_MERGE's strict parser

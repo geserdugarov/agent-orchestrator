@@ -210,5 +210,98 @@ class RunClaudeResumeTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--resume") + 1], sid)
 
 
+class RunAgentExtraArgsTest(unittest.TestCase):
+    """`extra_args` lets a role-specific config inject backend-CLI flags
+    (e.g. `-m gpt-5.5` for codex, `--model X --effort high` for claude)
+    into the spawned argv on both fresh and resumed runs while keeping the
+    safety/output flags and prompt where they already are.
+    """
+
+    def _argv_for(
+        self,
+        backend: str,
+        *,
+        extra_args: tuple[str, ...],
+        resume_session_id=None,
+    ) -> list[str]:
+        with patch(
+            "orchestrator.agents.subprocess.Popen",
+            return_value=_completed(),
+        ) as run_mock:
+            run_agent(
+                backend, "p", _CWD,
+                resume_session_id=resume_session_id,
+                extra_args=extra_args,
+            )
+        return list(run_mock.call_args.args[0])
+
+    def test_codex_fresh_injects_extra_args_before_exec(self) -> None:
+        # Codex global options (`-m`, `-c`) must appear BEFORE the `exec`
+        # subcommand; the parser rejects them after the subcommand. The
+        # safety/output flags and prompt must remain on the argv tail.
+        argv = self._argv_for(
+            "codex",
+            extra_args=("-m", "gpt-5.5", "-c", 'model_reasoning_effort="xhigh"'),
+        )
+        self.assertEqual(argv[1:5], [
+            "-m", "gpt-5.5", "-c", 'model_reasoning_effort="xhigh"',
+        ])
+        self.assertEqual(argv[5], "exec")
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", argv)
+        self.assertIn("--json", argv)
+        self.assertEqual(argv[-1], "p")
+
+    def test_codex_resume_injects_extra_args_before_exec(self) -> None:
+        sid = "11111111-2222-3333-4444-555555555555"
+        argv = self._argv_for(
+            "codex",
+            extra_args=("-m", "gpt-5.5"),
+            resume_session_id=sid,
+        )
+        self.assertEqual(argv[1:3], ["-m", "gpt-5.5"])
+        self.assertEqual(argv[3:5], ["exec", "resume"])
+        # Resume session id and prompt are still the last two tokens; the
+        # extra args must NOT have displaced them.
+        self.assertEqual(argv[-2:], [sid, "p"])
+
+    def test_claude_fresh_injects_extra_args_before_safety_flags(self) -> None:
+        argv = self._argv_for(
+            "claude",
+            extra_args=("--model", "claude-opus-4-7", "--effort", "high"),
+        )
+        self.assertEqual(argv[1:5], [
+            "--model", "claude-opus-4-7", "--effort", "high",
+        ])
+        # Safety + output flags survive immediately after the extra args.
+        self.assertEqual(argv[5], "-p")
+        self.assertIn("--dangerously-skip-permissions", argv)
+        self.assertIn("--output-format", argv)
+        self.assertEqual(argv[-1], "p")
+
+    def test_claude_resume_keeps_extra_args_and_resume_flag(self) -> None:
+        sid = "deadbeef-1234-1234-1234-1234deadbeef"
+        argv = self._argv_for(
+            "claude",
+            extra_args=("--model", "claude-opus-4-7"),
+            resume_session_id=sid,
+        )
+        self.assertEqual(argv[1:3], ["--model", "claude-opus-4-7"])
+        # `--resume <sid>` is appended after the safety flags and right
+        # before the prompt, regardless of extra_args.
+        self.assertIn("--resume", argv)
+        self.assertEqual(argv[argv.index("--resume") + 1], sid)
+        self.assertEqual(argv[-1], "p")
+
+    def test_default_empty_extra_args_leaves_argv_unchanged(self) -> None:
+        # Backward compat: callers that don't pass `extra_args` still get
+        # the legacy argv with no inserted tokens. Sanity-checks both
+        # backends so a future refactor that changes argv shape under
+        # default callers fails this test loudly.
+        codex_argv = self._argv_for("codex", extra_args=())
+        self.assertEqual(codex_argv[1], "exec")
+        claude_argv = self._argv_for("claude", extra_args=())
+        self.assertEqual(claude_argv[1], "-p")
+
+
 if __name__ == "__main__":
     unittest.main()
