@@ -170,6 +170,11 @@ def _parse_agent_spec(name: str, value: str) -> tuple[str, tuple[str, ...]]:
     type the command in a shell. The first token must be `codex` or
     `claude`; anything else aborts at import so a typo cannot silently
     fall back to a default backend on next restart.
+
+    The same parser is reused at runtime by `workflow.py` to re-parse a
+    spec that was previously persisted to pinned state, so a legacy bare-
+    backend value (`"codex"` / `"claude"`) round-trips cleanly to
+    `(backend, ())` and a full spec with args round-trips to its tokens.
     """
     raw = (value or "").strip()
     if not raw:
@@ -204,18 +209,24 @@ def _parse_agent_spec(name: str, value: str) -> tuple[str, tuple[str, ...]]:
 # Each spec is shell-like: the first token names the backend (`codex` /
 # `claude`), and any remaining tokens are forwarded as backend-CLI args
 # (model selection, reasoning effort, etc.) on every spawn for that role.
-DEV_AGENT, DEV_AGENT_ARGS = _parse_agent_spec(
-    "DEV_AGENT", os.environ.get("DEV_AGENT", "claude")
-)
+# The `*_SPEC` constant holds the raw configured string -- workflow.py
+# persists it verbatim in pinned state so a config flip mid-flight cannot
+# change what backend+args run on an in-flight issue (the stored spec is
+# re-parsed on every resume; current config is only consulted for fresh
+# spawns).
+DEV_AGENT_SPEC: str = os.environ.get("DEV_AGENT", "claude")
+DEV_AGENT, DEV_AGENT_ARGS = _parse_agent_spec("DEV_AGENT", DEV_AGENT_SPEC)
+REVIEW_AGENT_SPEC: str = os.environ.get("REVIEW_AGENT", "codex")
 REVIEW_AGENT, REVIEW_AGENT_ARGS = _parse_agent_spec(
-    "REVIEW_AGENT", os.environ.get("REVIEW_AGENT", "codex")
+    "REVIEW_AGENT", REVIEW_AGENT_SPEC
 )
 # Decomposer is a separate role from implementing/reviewing -- it reads the
 # issue and produces a structured manifest. Parsed at import time even when
 # DECOMPOSE=off so flipping the kill switch back on does not introduce a
 # fresh "that env var was always invalid" failure.
+DECOMPOSE_AGENT_SPEC: str = os.environ.get("DECOMPOSE_AGENT", "claude")
 DECOMPOSE_AGENT, DECOMPOSE_AGENT_ARGS = _parse_agent_spec(
-    "DECOMPOSE_AGENT", os.environ.get("DECOMPOSE_AGENT", "claude")
+    "DECOMPOSE_AGENT", DECOMPOSE_AGENT_SPEC
 )
 
 # git identity injected into each agent spawn via GIT_AUTHOR_*/GIT_COMMITTER_*

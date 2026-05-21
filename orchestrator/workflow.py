@@ -220,43 +220,51 @@ def _post_pr_comment(
     return c
 
 
-def _read_dev_session(state: PinnedState) -> Tuple[str, Optional[str]]:
-    """Return (dev_agent, dev_session_id) for an issue.
+def _read_dev_session(
+    state: PinnedState,
+) -> Tuple[str, str, tuple[str, ...], Optional[str]]:
+    """Return (spec, backend, extra_args, dev_session_id) for an issue.
 
-    Prefers the new `dev_agent`/`dev_session_id` keys. Falls back to the
-    legacy `codex_session_id` (which is always codex by definition) so
-    in-flight issues written before the configurable-backend rollout keep
-    using codex even if `DEV_AGENT` flips to claude on the next restart.
-    Returns (config.DEV_AGENT, None) when the issue has never been spawned.
+    `spec` is the full configured agent command string the next run
+    will use -- callers persist it verbatim BEFORE invoking `run_agent`
+    so the recorded role identity survives a spawn that returns no
+    session id (CLI hiccup, missing output file, etc.). Without that,
+    a fresh spawn that nevertheless commits would leave `dev_agent`
+    unset and a later `DEV_AGENT` flip would silently retarget the next
+    resume at a backend that never ran on this issue.
+
+    The pinned `dev_agent` field stores that spec -- e.g. `"codex"`,
+    `"claude"`, or `"codex -m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'"`
+    -- as the durable role identity. Re-parsing it here means in-flight
+    resumes use the same backend AND args the fresh spawn used, even
+    after a `DEV_AGENT` env flip between ticks.
+
+    Backward compatibility:
+      * Legacy bare-backend values (`"codex"` / `"claude"`) re-parse to
+        `(backend, ())` -- no args -- which is what those deployments
+        had at the time they were spawned. `spec` is the same bare
+        string; persisting it again is a no-op rewrite.
+      * Legacy `codex_session_id` (written before `dev_agent` existed)
+        yields `spec="codex"`. A config flip to claude cannot strand
+        that session -- it stays on codex with no args.
+      * When the issue has never been spawned, returns the current
+        config's `(DEV_AGENT_SPEC, DEV_AGENT, DEV_AGENT_ARGS, None)`
+        for the imminent fresh spawn to use AND persist.
     """
-    if state.get("dev_agent"):
+    stored = state.get("dev_agent")
+    if stored:
+        spec = str(stored)
+        backend, args = config._parse_agent_spec("dev_agent", spec)
         sid = state.get("dev_session_id")
-        return str(state.get("dev_agent")), str(sid) if sid is not None else None
+        return spec, backend, args, str(sid) if sid is not None else None
     legacy = state.get("codex_session_id")
     if legacy is not None:
-        return "codex", str(legacy)
-    return config.DEV_AGENT, None
-
-
-def _dev_extra_args(backend: str) -> tuple[str, ...]:
-    """Backend-CLI args to inject for a dev-role spawn.
-
-    Returns `DEV_AGENT_ARGS` only when the current config still names this
-    backend. A locked session whose backend differs from the current
-    config gets `()` -- the configured args belong to the new backend's
-    CLI and would be rejected (or worse, silently misinterpreted) by the
-    old one.
-    """
-    return config.DEV_AGENT_ARGS if backend == config.DEV_AGENT else ()
-
-
-def _decompose_extra_args(backend: str) -> tuple[str, ...]:
-    """Backend-CLI args to inject for a decomposer-role spawn. See
-    `_dev_extra_args` for the locked-session contract."""
+        return "codex", "codex", (), str(legacy)
     return (
-        config.DECOMPOSE_AGENT_ARGS
-        if backend == config.DECOMPOSE_AGENT
-        else ()
+        config.DEV_AGENT_SPEC,
+        config.DEV_AGENT,
+        config.DEV_AGENT_ARGS,
+        None,
     )
 
 
@@ -1017,13 +1025,18 @@ def _build_implement_prompt(issue: Issue, comments_text: str) -> str:
     )
 
 
-def _build_review_prompt(spec: RepoSpec, issue: Issue, comments_text: str) -> str:
+def _build_review_prompt(
+    spec: RepoSpec,
+    issue: Issue,
+    comments_text: str,
+    dev_backend: str = "agent",
+) -> str:
     body = issue.body or "(no body)"
     convo = comments_text or "(no prior comments)"
     base_ref = f"{spec.remote_name}/{spec.base_branch}"
     return (
         f"You are an automated code reviewer for GitHub issue #{issue.number}: {issue.title!r}. "
-        "A separate codex session has implemented this issue and committed to the current "
+        f"A separate {dev_backend} session has implemented this issue and committed to the current "
         f"branch. The base branch is `{base_ref}`.\n\n"
         f"Issue body:\n{body}\n\n"
         f"Conversation so far:\n{convo}\n\n"
@@ -1700,20 +1713,35 @@ def _build_decompose_prompt(issue: Issue, comments_text: str) -> str:
 
 def _read_decomposer_session(
     state: PinnedState,
-) -> Tuple[str, Optional[str]]:
-    """Return (decomposer_agent, decomposer_session_id) for an issue.
+) -> Tuple[str, str, tuple[str, ...], Optional[str]]:
+    """Return (spec, backend, extra_args, decomposer_session_id) for an issue.
 
-    Mirrors `_read_dev_session`: once `decomposer_agent` is written by a
-    fresh spawn, the backend is locked for any future resumes on this issue
-    so flipping `DECOMPOSE_AGENT` mid-flight cannot strand the session.
+    Mirrors `_read_dev_session`: `spec` is the full configured agent
+    command string the next run will use, returned so callers can
+    persist it verbatim BEFORE invoking `run_agent` -- a fresh
+    decomposer that produces a manifest without surfacing a session id
+    (a backend hiccup in the JSONL output, an empty `-o` file) would
+    otherwise leave `decomposer_agent` unset and a later
+    `DECOMPOSE_AGENT` env flip could retarget the awaiting-human
+    resume at a backend that never ran on this issue.
+
+    Legacy bare-backend values (`"codex"` / `"claude"`) re-parse to
+    `(backend, ())` and round-trip cleanly. When the issue has never
+    been spawned, returns the current config's
+    `(DECOMPOSE_AGENT_SPEC, DECOMPOSE_AGENT, DECOMPOSE_AGENT_ARGS, None)`.
     """
-    if state.get("decomposer_agent"):
+    stored = state.get("decomposer_agent")
+    if stored:
+        spec = str(stored)
+        backend, args = config._parse_agent_spec("decomposer_agent", spec)
         sid = state.get("decomposer_session_id")
-        return (
-            str(state.get("decomposer_agent")),
-            str(sid) if sid is not None else None,
-        )
-    return config.DECOMPOSE_AGENT, None
+        return spec, backend, args, str(sid) if sid is not None else None
+    return (
+        config.DECOMPOSE_AGENT_SPEC,
+        config.DECOMPOSE_AGENT,
+        config.DECOMPOSE_AGENT_ARGS,
+        None,
+    )
 
 
 def _resume_decomposer_on_human_reply(
@@ -1742,11 +1770,13 @@ def _resume_decomposer_on_human_reply(
     wt = _decompose_worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _ensure_decompose_worktree(spec, issue.number)
-    decomposer_agent, decomposer_sid = _read_decomposer_session(state)
+    _, decomposer_backend, decomposer_args, decomposer_sid = (
+        _read_decomposer_session(state)
+    )
     result = run_agent(
-        decomposer_agent, followup, wt,
+        decomposer_backend, followup, wt,
         resume_session_id=decomposer_sid,
-        extra_args=_decompose_extra_args(decomposer_agent),
+        extra_args=decomposer_args,
     )
     state.set("awaiting_human", False)
     return result
@@ -1914,14 +1944,24 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 gh.write_pinned_state(issue, state)
                 return
             wt = _ensure_decompose_worktree(spec, issue.number)
-            decomposer_agent, _ = _read_decomposer_session(state)
+            decomposer_spec, decomposer_backend, decomposer_args, _ = (
+                _read_decomposer_session(state)
+            )
+            # Persist the spec BEFORE the spawn so a backend hiccup
+            # that yields no `session_id` -- yet still produces a
+            # manifest in the worktree or parks awaiting human -- does
+            # not leave `decomposer_agent` unset. A later
+            # `DECOMPOSE_AGENT` flip would otherwise retarget the next
+            # awaiting-human resume at a backend that never ran on
+            # this issue. Storing the parsed backend alone would also
+            # strip configured CLI args on subsequent resumes.
+            state.set("decomposer_agent", decomposer_spec)
             prompt = _build_decompose_prompt(issue, _recent_comments_text(issue))
             result = run_agent(
-                decomposer_agent, prompt, wt,
-                extra_args=_decompose_extra_args(decomposer_agent),
+                decomposer_backend, prompt, wt,
+                extra_args=decomposer_args,
             )
             if result.session_id:
-                state.set("decomposer_agent", decomposer_agent)
                 state.set("decomposer_session_id", result.session_id)
 
         state.set("last_agent_action_at", _now_iso())
@@ -2557,15 +2597,27 @@ def _is_stale_session_failure(backend: str, result: AgentResult) -> bool:
     return any(marker in stderr for marker in _CLAUDE_STALE_SESSION_STDERR_MARKERS)
 
 
-def _drop_poisoned_dev_session(state: PinnedState, dev_agent: str) -> None:
+def _drop_poisoned_dev_session(state: PinnedState) -> None:
     """Clear the pinned dev session id (and legacy `codex_session_id`).
 
-    Writing `dev_agent` here overrides the legacy fallback path:
-    `_read_dev_session` returns `(dev_agent, dev_session_id)` once
-    `dev_agent` is set, ignoring the legacy field. Clearing the legacy
-    field too leaves no trace of the dropped session anywhere.
+    Preserves the stored `dev_agent` spec when one is already pinned --
+    a poisoned session is a transcript problem, not a backend-selection
+    problem, so the fresh spawn that follows must replay the exact same
+    backend+args. Writing the parsed backend back here would silently
+    strip the configured CLI args from the spec and switch a `codex -m
+    gpt-5.5 -c '...'` issue back to bare `codex` on the next resume.
+
+    When the issue is on the legacy `codex_session_id` schema (no
+    `dev_agent` ever written), pin `dev_agent="codex"` BEFORE clearing
+    the legacy field. Without this, the next `_read_dev_session` would
+    fall through to the config default and a `DEV_AGENT=claude` flip
+    would silently switch the issue from codex to claude on retry.
+
+    Clearing the legacy field too leaves no trace of the dropped
+    session anywhere.
     """
-    state.set("dev_agent", dev_agent)
+    if not state.get("dev_agent") and state.get("codex_session_id") is not None:
+        state.set("dev_agent", "codex")
     state.set("dev_session_id", None)
     state.set("codex_session_id", None)
     state.set("silent_park_count", 0)
@@ -2604,7 +2656,7 @@ def _resume_dev_with_text(
     wt = _worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _ensure_worktree(spec, issue.number)
-    dev_agent, dev_sid = _read_dev_session(state)
+    _, dev_backend, dev_args, dev_sid = _read_dev_session(state)
     silent_count = int(state.get("silent_park_count") or 0)
     fresh_spawn = (
         dev_sid is not None
@@ -2622,11 +2674,11 @@ def _resume_dev_with_text(
         # is racy), the next tick must see a cleared session -- not the
         # old poisoned id, which `_read_dev_session` would otherwise
         # return again and burn another retry.
-        _drop_poisoned_dev_session(state, dev_agent)
+        _drop_poisoned_dev_session(state)
     result = run_agent(
-        dev_agent, followup_text, wt,
+        dev_backend, followup_text, wt,
         resume_session_id=dev_sid,
-        extra_args=_dev_extra_args(dev_agent),
+        extra_args=dev_args,
     )
 
     # Deterministic stale-session recovery: if we resumed with a session id
@@ -2640,19 +2692,19 @@ def _resume_dev_with_text(
     if (
         dev_sid is not None
         and not fresh_spawn
-        and _is_stale_session_failure(dev_agent, result)
+        and _is_stale_session_failure(dev_backend, result)
     ):
         log.info(
             "issue=#%d dropping poisoned dev session %r after stale-session "
             "stderr marker; retrying once as a fresh spawn",
             issue.number, dev_sid,
         )
-        _drop_poisoned_dev_session(state, dev_agent)
+        _drop_poisoned_dev_session(state)
         fresh_spawn = True
         result = run_agent(
-            dev_agent, followup_text, wt,
+            dev_backend, followup_text, wt,
             resume_session_id=None,
-            extra_args=_dev_extra_args(dev_agent),
+            extra_args=dev_args,
         )
 
     if fresh_spawn and result.session_id:
@@ -2716,7 +2768,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 "issue=#%d skipping agent; worktree already has commits",
                 issue.number,
             )
-            _, dev_sid = _read_dev_session(state)
+            _, _, _, dev_sid = _read_dev_session(state)
             result = AgentResult(
                 session_id=dev_sid,
                 last_message="(orchestrator restart: pushing previously committed work)",
@@ -2729,14 +2781,25 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             if not _check_and_increment_retry_budget(gh, issue, state):
                 gh.write_pinned_state(issue, state)
                 return
-            dev_agent, _ = _read_dev_session(state)
+            dev_spec, dev_backend, dev_args, _ = _read_dev_session(state)
+            # Persist the spec BEFORE the spawn so a backend hiccup
+            # that produces commits without surfacing a session id (an
+            # empty codex `-o` file, an unparseable claude JSONL line)
+            # does not leave `dev_agent` unset. A later `DEV_AGENT` env
+            # flip would otherwise retarget the next resume at a
+            # backend that never ran on this issue. Storing the parsed
+            # backend alone would also strip any configured CLI args
+            # on subsequent resumes. `_read_dev_session` already chose
+            # `dev_spec` -- the current stored value when re-entering,
+            # else `config.DEV_AGENT_SPEC` for a first-ever spawn --
+            # so this is a no-op when state already carries the spec.
+            state.set("dev_agent", dev_spec)
             prompt = _build_implement_prompt(issue, _recent_comments_text(issue))
             result = run_agent(
-                dev_agent, prompt, wt,
-                extra_args=_dev_extra_args(dev_agent),
+                dev_backend, prompt, wt,
+                extra_args=dev_args,
             )
             if result.session_id:
-                state.set("dev_agent", dev_agent)
                 state.set("dev_session_id", result.session_id)
         state.set("branch", _branch_name(issue.number))
 
@@ -2934,13 +2997,23 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # which lets AUTO_MERGE land an unreviewed commit if the branch was
     # force-pushed or otherwise updated between the review and the handoff.
     reviewed_sha = _head_sha(wt)
-    review_prompt = _build_review_prompt(spec, issue, _recent_comments_text(issue))
+    _, dev_backend_for_prompt, _, _ = _read_dev_session(state)
+    review_prompt = _build_review_prompt(
+        spec, issue, _recent_comments_text(issue), dev_backend_for_prompt,
+    )
+    # Persist the full configured spec BEFORE the spawn so a reviewer
+    # backend hiccup that yields no session id still leaves a durable
+    # role-identity record. The trace reflects the reviewer's CLI args
+    # and a config flip mid-flight cannot retroactively rewrite which
+    # spec ran each round. The reviewer is spawned fresh each round
+    # (no resume), so always overwriting the field with the current
+    # config spec is the right behavior here.
+    state.set("review_agent", config.REVIEW_AGENT_SPEC)
     review = run_agent(
         config.REVIEW_AGENT, review_prompt, wt,
         timeout=config.REVIEW_TIMEOUT,
         extra_args=config.REVIEW_AGENT_ARGS,
     )
-    state.set("review_agent", config.REVIEW_AGENT)
     if review.session_id:
         state.set("last_review_session_id", review.session_id)
     state.set("last_review_at", _now_iso())
@@ -2965,7 +3038,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             try:
                 _post_pr_comment(
                     gh, int(pr_number), state,
-                    ":white_check_mark: codex review approved.",
+                    f":white_check_mark: {config.REVIEW_AGENT} review approved.",
                 )
             except Exception:
                 log.exception(
@@ -3152,7 +3225,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         try:
             _post_pr_comment(
                 gh, int(pr_number), state,
-                f":eyes: codex review (round {round_n + 1}/"
+                f":eyes: {config.REVIEW_AGENT} review (round {round_n + 1}/"
                 f"{config.MAX_REVIEW_ROUNDS}) requested changes:\n\n{feedback}",
             )
         except Exception:
@@ -3163,11 +3236,11 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     fix_prompt = _build_fix_prompt(feedback)
     before_sha = _head_sha(wt)
-    dev_agent, dev_sid = _read_dev_session(state)
+    _, dev_backend, dev_args, dev_sid = _read_dev_session(state)
     dev_result = run_agent(
-        dev_agent, fix_prompt, wt,
+        dev_backend, fix_prompt, wt,
         resume_session_id=dev_sid,
-        extra_args=_dev_extra_args(dev_agent),
+        extra_args=dev_args,
     )
     state.set("last_agent_action_at", _now_iso())
 
@@ -4592,11 +4665,11 @@ def _on_commits(
     pr = gh.find_open_pr(branch=branch, base=spec.base_branch)
     if pr is None:
         title = _pr_title_from_commit_or_issue(issue, _first_commit_subject(spec, wt))
-        dev_agent, dev_sid = _read_dev_session(state)
+        _, dev_backend, _, dev_sid = _read_dev_session(state)
         body_parts = [
             f"Resolves #{issue.number}",
             "",
-            f"Generated by orchestrator ({dev_agent} session `{dev_sid or '?'}`).",
+            f"Generated by orchestrator ({dev_backend} session `{dev_sid or '?'}`).",
         ]
         if result.last_message.strip():
             body_parts += ["", "---", "_Last agent message:_", "", result.last_message[:2000]]
