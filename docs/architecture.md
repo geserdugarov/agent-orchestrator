@@ -152,12 +152,12 @@ Per-issue durable state lives in a single **"pinned" comment** on the issue (`<!
 - **Internal flow**:
   1. If `pr_number` is missing (manual relabel suspected), park awaiting human and return; subsequent ticks no-op until the human relabels.
   2. Read the PR via `gh.get_pr`. Branch on `gh.pr_state(pr)`:
-     - `merged` → set label `done`, stamp `merged_at`, write pinned state, then `issue.edit(state="closed")`. (Pinned-state write before close so PyGithub caching cannot serve a stale issue body to the writer.)
-     - `closed` (without merge) → set label `rejected`, stamp `closed_without_merge_at`, write state, close.
+     - `merged` → set label `done`, stamp `merged_at`, write pinned state, then `issue.edit(state="closed")`. (Pinned-state write before close so PyGithub caching cannot serve a stale issue body to the writer.) Cleanup follows via `_cleanup_terminal_branch`.
+     - `closed` (without merge) → set label `rejected`, stamp `closed_without_merge_at`, write state, close, then call `_cleanup_terminal_branch`. The branch name is derived from the issue number (`orchestrator/issue-<n>`) so cleanup cannot touch an arbitrary branch.
      - `open` → fall through.
   3. **PR-comment debounce → dev resume → bounce back to validating.** Read four sources independently, one per id namespace: `gh.comments_after(issue, pr_last_comment_id)` (issue thread), `gh.pr_conversation_comments_after(pr, pr_last_comment_id)` (PR conversation; shares id space with the issue thread, so one watermark suffices), `gh.pr_inline_comments_after(pr, pr_last_review_comment_id)` (inline review comments), and `gh.pr_reviews_after(pr, pr_last_review_summary_id)` (PR review summary bodies submitted with `CHANGES_REQUESTED` or `COMMENTED` — `APPROVED` bodies are filtered out as informational, dismissed/pending never count, empty bodies are dropped). Without the `pr_reviews_after` surface, a "Comment" review with a request in the body would be silently ignored (and may be auto-merged over), and a `CHANGES_REQUESTED` review with body but no inline comments would block merge via `pr_has_changes_requested` without ever reaching the dev agent. If any source is newer than its watermark and the most recent one is older than `IN_REVIEW_DEBOUNCE_SECONDS` (default 600s), build a follow-up prompt that quotes them and call `_resume_dev_with_text` on the dev's locked backend. On a successful pushed commit (clean tree + push ok), bump each watermark to the newest seen in its own id space, reset `review_round=0`, and flip the label back to `validating` so the reviewer agent re-runs on the new diff next tick. If still inside the debounce window, return — the human may still be typing.
   4. **Auto-merge gate** (only reached when there are no new comments to act on). Off unless `AUTO_MERGE=on`. Sequence: **standing CHANGES_REQUESTED veto** — `gh.pr_has_changes_requested(pr, head_sha=head_sha)` runs *before* the approval check and silently returns on True, so a human `CHANGES_REQUESTED` review on the current head SHA blocks merge even when `agent_approved_sha == head_sha`, the PR is mergeable, and checks are green (the agent's APPROVED would otherwise short-circuit `pr_is_approved`); approval check (either `agent_approved_sha == pr.head.sha`, snapshotted by validating when the reviewer agent emitted `VERDICT: APPROVED`, OR `gh.pr_is_approved(pr, head_sha=pr.head.sha)` — only counts human/bot reviews submitted on the *current* head SHA, so a stale APPROVED from before a later push does not unlock auto-merge); `pr_is_mergeable` (`None` means GitHub still computing — try next tick; `False` with `AUTO_MERGE=on` does NOT park anymore — it routes the issue to the new `resolving_conflict` stage (post a notice on the PR, seed `conflict_round=0` only when absent so a re-entry preserves the cap counter, flip the label, return), where `_handle_resolving_conflict` attempts the auto-merge of `origin/<base>` on the next tick. Under `AUTO_MERGE=off` the legacy unmergeable park still fires here); `pr_combined_check_state` (`success` proceeds; `pending` waits; `failure`/`none` parks awaiting human — `none` means no checks at all, ambiguous). Finally `gh.merge_pr(pr, sha=head_sha)` — pinned to the *captured* `head_sha` from the start of the gate sequence, **not** `pr.head.sha`. `pr_is_mergeable` calls `pr.update()` to resolve a `None` mergeable, which can refresh `pr.head.sha`; the explicit `head_sha` pin (combined with the earlier `pr.head.sha != head_sha` bail) ensures a commit landing during the refresh either bails the tick or causes GitHub to return 409/422 rather than merge an unreviewed head. PyGithub's 405/409/422 are returned as `False` and the next tick retries.
-  5. On a successful merge, set label `done`, stamp `merged_at`, write pinned state, close the issue, then call `_cleanup_merged_branch` (best-effort: remove the per-issue worktree, delete the local branch, and call `gh.delete_remote_branch`). The cleanup is also run on the external-merge terminal so a human-merged PR does not leave a stale branch on the remote.
+  5. On a successful merge, set label `done`, stamp `merged_at`, write pinned state, close the issue, then call `_cleanup_terminal_branch` (best-effort: remove the per-issue worktree, delete the local branch, and call `gh.delete_remote_branch`). Cleanup runs on every PR-state terminal where the PR itself is gone (external merge, AUTO_MERGE, and closed-without-merge) so neither merged nor declined PRs leave stale `orchestrator/issue-<n>` branches on the remote. A manually closed issue with an *open* PR is conservative on purpose: the label flips to `rejected` but the branch is left alone, since the operator may still want to inspect or salvage the PR. **Caveat:** once that flip lands, the issue is closed AND labeled `rejected`, so it falls outside `list_pollable_issues` (which only sweeps closed issues still labeled `in_review` or `resolving_conflict`) and the terminal-label dispatcher is a no-op. If the operator subsequently closes the PR, the orchestrator will never observe it and `_cleanup_terminal_branch` will not run — the worktree, local branch, and remote branch must be removed by hand for that ordering. The reverse ordering (close the PR first, then the issue) is fully automated by the `pr_status == "closed"` arc above.
   6. Every park inside this handler bumps the in_review watermarks past the orchestrator's own park comment via `_bump_in_review_watermarks`, so the next tick does not see the HITL ping as fresh PR feedback and resume the dev agent against it.
 - **Output**: label moved to `done` / `rejected` (terminal) OR a fix push and label bounce to `validating` OR a relabel to `resolving_conflict` (under `AUTO_MERGE=on` when the PR is unmergeable past the approval gates) OR a HITL park OR a no-op tick.
 
@@ -168,8 +168,8 @@ The "back to validating on a new PR comment" arc is intentional: validating is t
 - **Input**: pinned `pr_number`, `branch`, `dev_agent`/`dev_session_id` (or legacy `codex_session_id`), `conflict_round`. `MAX_CONFLICT_ROUNDS` from config.
 - **Internal flow**:
   1. If `pr_number` is missing (manual relabel suspected), park awaiting human and return.
-  2. Read the PR via `gh.get_pr`. Branch on `gh.pr_state(pr)`: `merged` → `done` (close issue, stamp `merged_at`, clean up the merged branch); `closed` (without merge) → `rejected` (close issue, stamp `closed_without_merge_at`); `open` → fall through. Mirrors the in_review terminal arcs for the case where a human resolves manually mid-stage.
-  3. If the issue itself was closed manually while the PR is still open, treat as a hard human stop: flip to `rejected` rather than continuing to spawn the dev agent.
+  2. Read the PR via `gh.get_pr`. Branch on `gh.pr_state(pr)`: `merged` → `done` (close issue, stamp `merged_at`, call `_cleanup_terminal_branch`); `closed` (without merge) → `rejected` (close issue, stamp `closed_without_merge_at`, call `_cleanup_terminal_branch`); `open` → fall through. Mirrors the in_review terminal arcs for the case where a human resolves manually mid-stage. Cleanup runs whenever the PR itself is gone so a declined PR doesn't leave its `orchestrator/issue-<n>` branch behind either.
+  3. If the issue itself was closed manually while the PR is still open, treat as a hard human stop: flip to `rejected` rather than continuing to spawn the dev agent. Deliberately do NOT clean up the branch here — the PR is still open and may be useful for inspection or salvage. Same caveat as the in_review counterpart: once the label flips to `rejected` the closed-issue sweep no longer surfaces this issue, so a subsequent PR close is not observed and the operator must clean up the worktree, local branch, and remote branch by hand. Cleanup fires automatically only when the PR is closed *before* the orchestrator flips the label to `rejected`.
   4. **Awaiting-human resume path**: when parked from a previous round and a new human comment has arrived since `last_action_comment_id`, resume the dev session on the in-progress merge worktree with the human's text (mirrors `_handle_implementing`'s awaiting-human branch — the park messages explicitly invite that flow). The post-agent step uses the same `_post_conflict_resolution_result` helper as the fresh-merge path.
   5. **Cap check**: if `conflict_round >= MAX_CONFLICT_ROUNDS`, park awaiting human with the round count and the cap quoted. To escape the park the human must either (a) relabel the issue back to `validating` (or any other workflow label) so the dispatcher leaves `_handle_resolving_conflict` entirely, or (b) post a new issue comment, which the awaiting-human resume branch (item 4) picks up to drive another dev-agent round. A bare branch push or manual rebase alone does NOT unpark — `awaiting_human` stays set and step 4 returns until a comment lands or the label changes.
   6. Ensure the per-issue worktree. `_ensure_pr_worktree` (PR-aware, restores from `origin/<branch>`) is used in place of `_ensure_worktree`, which would rebuild from `origin/<base>` and silently discard the PR's commits.
@@ -307,10 +307,11 @@ The orchestrator (not the agent) pushes. The push is hardened against the agent-
    │                       │                                         │    │
    │                       ├─ pr merged externally ─► label=done,    │    │
    │                       │     stamp merged_at, close issue,       │    │
-   │                       │     _cleanup_merged_branch              │    │
+   │                       │     _cleanup_terminal_branch            │    │
    │                       ├─ pr closed unmerged ─► label=rejected,  │    │
    │                       │     stamp closed_without_merge_at,      │    │
-   │                       │     close issue                         │    │
+   │                       │     close issue,                        │    │
+   │                       │     _cleanup_terminal_branch            │    │
    │                       ├─ new PR/issue comment past debounce:    │    │
    │                       │     resume dev (locked backend) ────────┘    │
    │                       │     push, ++pr_last_*_id watermarks,         │
@@ -318,7 +319,7 @@ The orchestrator (not the agent) pushes. The push is hardened against the agent-
    │                       ├─ AUTO_MERGE on, approved, mergeable,         │
    │                       │   green checks ─► merge_pr (sha pin),        │
    │                       │   label=done, close,                         │
-   │                       │   _cleanup_merged_branch                     │
+   │                       │   _cleanup_terminal_branch                   │
    │                       ├─ AUTO_MERGE on, approved, unmergeable        │
    │                       │   ─► label=resolving_conflict (seed          │
    │                       │      conflict_round=0 if absent)             │
@@ -436,8 +437,18 @@ The orchestrator (not the agent) pushes. The push is hardened against the agent-
 
    in_review terminals:
      pr merged (externally or by AUTO_MERGE) ─► done (issue closed,
-                                                _cleanup_merged_branch)
-     pr closed without merge                  ─► rejected (issue closed)
+                                                _cleanup_terminal_branch)
+     pr closed without merge                  ─► rejected (issue closed,
+                                                _cleanup_terminal_branch)
+     issue closed manually, PR still open     ─► rejected (issue closed,
+                                                no branch cleanup —
+                                                operator may salvage;
+                                                if the PR is later closed
+                                                after the label has flipped
+                                                to `rejected`, the closed-
+                                                issue sweep does not pick
+                                                it up so cleanup must be
+                                                done by hand)
 
    resolving_conflict (AUTO_MERGE only, capped by MAX_CONFLICT_ROUNDS):
      git merge origin/<base> clean ─► label=validating (++conflict_round)

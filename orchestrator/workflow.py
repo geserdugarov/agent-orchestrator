@@ -602,16 +602,21 @@ def _cleanup_decompose_worktree(spec: RepoSpec, issue_number: int) -> None:
         )
 
 
-def _cleanup_merged_branch(
+def _cleanup_terminal_branch(
     gh: GitHubClient, spec: RepoSpec, issue_number: int
 ) -> None:
     """Remove the per-issue worktree and delete the local + remote branches.
 
-    Called after the PR for `issue_number` has merged (either via AUTO_MERGE
-    or an external human merge). Best-effort: each step swallows its own
-    error so a leftover worktree or branch never raises out of the merge
-    handler -- by the time we reach here the issue has already flipped to
-    `done`, and a stale ref is tidiness, not correctness.
+    Called after the PR for `issue_number` reached a terminal state -- either
+    merged (via AUTO_MERGE or an external human merge) or closed without
+    merge. Best-effort: each step swallows its own error so a leftover
+    worktree or branch never raises out of the terminal handler -- by the
+    time we reach here the issue has already flipped to `done` or
+    `rejected`, and a stale ref is tidiness, not correctness.
+
+    The branch name is derived from the issue number and constrained to the
+    orchestrator-owned `orchestrator/issue-<n>` namespace, so this cleanup
+    cannot touch an arbitrary branch.
 
     Order matters: the worktree must come down before `git branch -D`,
     because git refuses to delete a branch that's still checked out in a
@@ -621,29 +626,45 @@ def _cleanup_merged_branch(
     `spec.target_root` so the multi-repo loop tidies the right clone.
     """
     branch = _branch_name(issue_number)
-    wt = _worktree_path(spec, issue_number)
-    if wt.exists():
-        r = _git(
-            "worktree", "remove", "--force", str(wt),
-            cwd=spec.target_root,
-        )
-        if r.returncode != 0:
-            log.warning(
-                "issue=#%d worktree remove failed: %s",
-                issue_number, (r.stderr or "").strip(),
-            )
 
-    have_local = _git(
-        "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
-        cwd=spec.target_root,
-    ).returncode == 0
-    if have_local:
-        r = _git("branch", "-D", branch, cwd=spec.target_root)
-        if r.returncode != 0:
-            log.warning(
-                "issue=#%d local branch %r delete failed: %s",
-                issue_number, branch, (r.stderr or "").strip(),
+    # Each step is wrapped individually: a raise from `_git` (missing
+    # `spec.target_root`, missing `git` binary, OSError) or from the
+    # `Path.exists()` probe must not skip the later steps, since the
+    # caller has already written the terminal pinned state and expects
+    # cleanup to never propagate.
+    try:
+        wt = _worktree_path(spec, issue_number)
+        if wt.exists():
+            r = _git(
+                "worktree", "remove", "--force", str(wt),
+                cwd=spec.target_root,
             )
+            if r.returncode != 0:
+                log.warning(
+                    "issue=#%d worktree remove failed: %s",
+                    issue_number, (r.stderr or "").strip(),
+                )
+    except Exception:
+        log.exception(
+            "issue=#%d worktree remove raised", issue_number,
+        )
+
+    try:
+        have_local = _git(
+            "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
+            cwd=spec.target_root,
+        ).returncode == 0
+        if have_local:
+            r = _git("branch", "-D", branch, cwd=spec.target_root)
+            if r.returncode != 0:
+                log.warning(
+                    "issue=#%d local branch %r delete failed: %s",
+                    issue_number, branch, (r.stderr or "").strip(),
+                )
+    except Exception:
+        log.exception(
+            "issue=#%d local branch %r delete raised", issue_number, branch,
+        )
 
     try:
         gh.delete_remote_branch(branch)
@@ -3601,7 +3622,7 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             log.exception(
                 "issue=#%s could not close after merge", issue.number,
             )
-        _cleanup_merged_branch(gh, spec, issue.number)
+        _cleanup_terminal_branch(gh, spec, issue.number)
         return
 
     if pr_status == "closed":  # closed without merge
@@ -3614,6 +3635,10 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             log.exception(
                 "issue=#%s could not close after reject", issue.number,
             )
+        # The PR is gone, so the orchestrator-owned branch and worktree
+        # are dead weight. Mirrors the merged-PR cleanup order: finalize
+        # GitHub state first, then tidy local + remote refs best-effort.
+        _cleanup_terminal_branch(gh, spec, issue.number)
         return
 
     # PR is open BUT the issue was closed manually (the closed-in_review sweep
@@ -3624,6 +3649,19 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # auto-close) is already handled by the `pr_status == "merged"` branch
     # above, so by the time we reach here a closed issue means the human
     # closed it directly.
+    #
+    # Deliberately NOT cleaning the branch here: the PR is still open and
+    # the operator may want to inspect, salvage commits, transfer, or
+    # reopen it. Deleting the branch would make the PR harder to review.
+    #
+    # Automatic cleanup-on-PR-close only happens if the PR is closed
+    # BEFORE this handler flips the issue to `rejected`. Once the label
+    # is `rejected` the dispatcher (workflow.py terminal-label branch)
+    # is a no-op AND `list_pollable_issues` only sweeps closed issues
+    # still labeled `in_review` / `resolving_conflict`, so a later PR
+    # close is never observed by the orchestrator. The operator must
+    # clean up the worktree, local branch, and remote branch manually
+    # for the "close issue first, then close PR" ordering.
     if getattr(issue, "state", "open") == "closed":
         state.set("closed_without_merge_at", _now_iso())
         gh.set_workflow_label(issue, "rejected")
@@ -3892,7 +3930,7 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         log.exception(
             "issue=#%s could not close after auto-merge", issue.number,
         )
-    _cleanup_merged_branch(gh, spec, issue.number)
+    _cleanup_terminal_branch(gh, spec, issue.number)
 
 
 def _git_hardened(*args: str, cwd: Path) -> subprocess.CompletedProcess:
@@ -4138,7 +4176,7 @@ def _handle_resolving_conflict(
             log.exception(
                 "issue=#%s could not close after merge", issue.number,
             )
-        _cleanup_merged_branch(gh, spec, issue.number)
+        _cleanup_terminal_branch(gh, spec, issue.number)
         return
 
     if pr_status == "closed":
@@ -4151,13 +4189,27 @@ def _handle_resolving_conflict(
             log.exception(
                 "issue=#%s could not close after reject", issue.number,
             )
+        # The PR is gone; clean up the orchestrator-owned branch and
+        # worktree. Mirrors the merged-PR cleanup order: finalize GitHub
+        # state first, then tidy local + remote refs best-effort.
+        _cleanup_terminal_branch(gh, spec, issue.number)
         return
 
     # PR is open but the issue itself was closed manually (the closed
     # sweep in `list_pollable_issues` yielded it). Mirror in_review's
     # human-stop handling: closing the issue while its PR is still open
     # is a deliberate human signal; flip to `rejected` rather than
-    # continuing to spawn the dev agent.
+    # continuing to spawn the dev agent. Deliberately NOT cleaning the
+    # branch here -- the PR is still open and the operator may want to
+    # inspect or salvage it.
+    #
+    # Same caveat as the in_review counterpart: once this flips the
+    # label to `rejected`, the dispatcher is a no-op AND the closed-
+    # issue sweep in `list_pollable_issues` only covers `in_review` /
+    # `resolving_conflict`, so a later PR close is never observed by
+    # the orchestrator. The operator must clean up the worktree, local
+    # branch, and remote branch manually for the "close issue first,
+    # then close PR" ordering.
     if getattr(issue, "state", "open") == "closed":
         state.set("closed_without_merge_at", _now_iso())
         gh.set_workflow_label(issue, "rejected")
