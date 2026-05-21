@@ -13,6 +13,7 @@ ORCHESTRATOR_TOKEN_FILE).
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,28 @@ _SECRET_KEYS = frozenset({
 })
 
 
+def _strip_dotenv_quotes(value: str) -> str:
+    """Strip a single matched outer quote pair off a dotenv value.
+
+    The legacy form (`value.strip('"').strip("'")`) stripped quote
+    characters off both ends independently and across both quote types,
+    which corrupted any value whose payload legitimately ended in a
+    quote -- e.g. the shell-spec form
+    ``codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`` would have
+    its trailing `'` stripped by `.strip("'")` even though it is the
+    closing half of an inner quote pair, leaving `shlex.split` to choke
+    on `No closing quotation`.
+
+    Only a single matched outer pair (`"..."` or `'...'`) is unwrapped;
+    anything else is returned verbatim so quoted segments inside the
+    value survive untouched.
+    """
+    v = value.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+        return v[1:-1]
+    return v
+
+
 def _load_dotenv() -> None:
     if os.environ.get("ORCHESTRATOR_SKIP_DOTENV", "").strip().lower() in (
         "1", "true", "on", "yes",
@@ -46,7 +69,7 @@ def _load_dotenv() -> None:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.strip().strip('"').strip("'")
+        value = _strip_dotenv_quotes(value)
         if key in _SECRET_KEYS:
             print(
                 f"orchestrator: ignoring {key} in {env_path}; the implementer "
@@ -138,25 +161,60 @@ CODEX_BIN: str = os.environ.get("CODEX_BIN", "codex")
 CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", "claude")
 
 
-def _parse_backend(name: str, value: str) -> str:
-    v = (value or "").strip().lower()
-    if v not in ("codex", "claude"):
+def _parse_agent_spec(name: str, value: str) -> tuple[str, tuple[str, ...]]:
+    """Parse a shell-like backend spec into (backend, extra_args).
+
+    Accepts a bare backend (`claude`) or a backend with backend-CLI args
+    (`codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`). Tokens are
+    split with `shlex` so quoting works the same way an operator would
+    type the command in a shell. The first token must be `codex` or
+    `claude`; anything else aborts at import so a typo cannot silently
+    fall back to a default backend on next restart.
+    """
+    raw = (value or "").strip()
+    if not raw:
         raise SystemExit(
-            f"orchestrator: {name}={value!r} is invalid; "
-            "expected 'codex' or 'claude'"
+            f"orchestrator: {name}={value!r} is empty; expected 'codex' "
+            "or 'claude' (optionally followed by CLI args)"
         )
-    return v
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as e:
+        raise SystemExit(
+            f"orchestrator: {name}={value!r} is not a valid shell-like "
+            f"command spec ({e}); expected 'codex' or 'claude' "
+            "(optionally followed by CLI args)"
+        )
+    if not tokens:
+        raise SystemExit(
+            f"orchestrator: {name}={value!r} parses to no tokens; expected "
+            "'codex' or 'claude' (optionally followed by CLI args)"
+        )
+    backend = tokens[0].lower()
+    if backend not in ("codex", "claude"):
+        raise SystemExit(
+            f"orchestrator: {name}={value!r} first token {tokens[0]!r} is "
+            "invalid; expected 'codex' or 'claude'"
+        )
+    return backend, tuple(tokens[1:])
 
 
 # Default split: claude implements, codex reviews. Validated at import so a
 # typo in the deployment env aborts the process before the first GitHub call.
-DEV_AGENT: str = _parse_backend("DEV_AGENT", os.environ.get("DEV_AGENT", "claude"))
-REVIEW_AGENT: str = _parse_backend("REVIEW_AGENT", os.environ.get("REVIEW_AGENT", "codex"))
+# Each spec is shell-like: the first token names the backend (`codex` /
+# `claude`), and any remaining tokens are forwarded as backend-CLI args
+# (model selection, reasoning effort, etc.) on every spawn for that role.
+DEV_AGENT, DEV_AGENT_ARGS = _parse_agent_spec(
+    "DEV_AGENT", os.environ.get("DEV_AGENT", "claude")
+)
+REVIEW_AGENT, REVIEW_AGENT_ARGS = _parse_agent_spec(
+    "REVIEW_AGENT", os.environ.get("REVIEW_AGENT", "codex")
+)
 # Decomposer is a separate role from implementing/reviewing -- it reads the
 # issue and produces a structured manifest. Parsed at import time even when
 # DECOMPOSE=off so flipping the kill switch back on does not introduce a
 # fresh "that env var was always invalid" failure.
-DECOMPOSE_AGENT: str = _parse_backend(
+DECOMPOSE_AGENT, DECOMPOSE_AGENT_ARGS = _parse_agent_spec(
     "DECOMPOSE_AGENT", os.environ.get("DECOMPOSE_AGENT", "claude")
 )
 

@@ -5931,7 +5931,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         captured: dict = {}
 
-        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             captured["resume_session_id"] = resume_session_id
             return _agent(session_id="ignored", last_message="ok")
 
@@ -5959,7 +5959,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         captured: dict = {}
 
-        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             captured["agent"] = agent
             captured["resume_session_id"] = resume_session_id
             return _agent(session_id="fresh-sess", last_message="ok")
@@ -6023,7 +6023,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         captured: dict = {}
 
-        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             captured["agent"] = agent
             captured["resume_session_id"] = resume_session_id
             return _agent(session_id="fresh-legacy", last_message="ok")
@@ -6116,7 +6116,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         calls: list[Optional[str]] = []
 
-        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             calls.append(resume_session_id)
             if resume_session_id == "poisoned-sess":
                 return _agent(
@@ -6150,7 +6150,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded_issue()
         state = gh.read_pinned_state(issue)
 
-        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             if resume_session_id == "poisoned-sess":
                 return _agent(
                     session_id="", last_message="",
@@ -6177,7 +6177,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         calls: list[Optional[str]] = []
 
-        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             calls.append(resume_session_id)
             return _agent(
                 session_id="", last_message="", stderr=self.STALE_STDERR,
@@ -6206,7 +6206,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         calls: list[Optional[str]] = []
 
-        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             calls.append(resume_session_id)
             return _agent(
                 session_id="", last_message="", stderr=self.STALE_STDERR,
@@ -9418,7 +9418,7 @@ class HandleResolvingConflictTest(
 
         calls: list = []
 
-        def fake_run(agent, prompt, wt, *, resume_session_id=None):
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             calls.append(resume_session_id)
             if resume_session_id == "poisoned-sess":
                 return _agent(
