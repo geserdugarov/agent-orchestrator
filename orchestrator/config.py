@@ -129,6 +129,17 @@ AGENT_TIMEOUT: int = int(os.environ.get("AGENT_TIMEOUT", "1800"))
 # the existing stderr stream, so post-mortems don't depend on the terminal
 # `run.sh` was started in. Already covered by the `*.log` .gitignore rule.
 LOG_DIR: Path = Path(os.environ.get("LOG_DIR", str(REPO_ROOT / "logs")))
+
+# Optional JSONL sink for structured stage-transition events. When set,
+# `GitHubClient` (and `FakeGitHubClient`) append one JSON object per line
+# -- `{ts, repo, issue, stage, event}` -- on every `set_workflow_label`
+# call with a non-None label, so downstream tooling can tail the file to
+# follow the workflow without scraping logs. Unset (the default) leaves
+# the legacy behavior in place: no file is opened, no IO happens. Synchronous
+# append is intentional: tick volume is low and ordering matters for the
+# operator reading the file.
+_EVENT_LOG_PATH_RAW: str = os.environ.get("EVENT_LOG_PATH", "").strip()
+EVENT_LOG_PATH = Path(_EVENT_LOG_PATH_RAW) if _EVENT_LOG_PATH_RAW else None
 REVIEW_TIMEOUT: int = int(os.environ.get("REVIEW_TIMEOUT", str(AGENT_TIMEOUT)))
 MAX_REVIEW_ROUNDS: int = int(os.environ.get("MAX_REVIEW_ROUNDS", "3"))
 # Cap on how many auto-conflict-resolution attempts one PR can use before

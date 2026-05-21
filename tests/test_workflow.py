@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -650,6 +651,102 @@ class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         self.assertIn((1, "implementing"), gh.label_history)
+
+
+class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """`set_workflow_label` is the single chokepoint for stage transitions,
+    so a hook there gives every workflow handler a `stage_enter` event for
+    free. The fake mirrors the real client's `recorded_events` capture and
+    JSONL sink so workflow tests can assert on either surface.
+    """
+
+    def test_set_workflow_label_records_stage_enter_event(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(1)
+        gh.add_issue(issue)
+        gh.set_workflow_label(issue, "implementing")
+        self.assertEqual(len(gh.recorded_events), 1)
+        ev = gh.recorded_events[0]
+        self.assertEqual(ev["event"], "stage_enter")
+        self.assertEqual(ev["stage"], "implementing")
+        self.assertEqual(ev["issue"], 1)
+        self.assertEqual(ev["repo"], "geserdugarov/agent-orchestrator")
+        self.assertIn("ts", ev)
+        # UTC timestamp, ISO 8601 with offset.
+        datetime.fromisoformat(ev["ts"])
+
+    def test_none_label_does_not_emit(self) -> None:
+        # Clearing the workflow label is not a stage; the helper must
+        # short-circuit so downstream consumers don't see a phantom
+        # `stage_enter` with stage=None.
+        gh = FakeGitHubClient()
+        issue = make_issue(1, label="implementing")
+        gh.add_issue(issue)
+        gh.set_workflow_label(issue, None)
+        self.assertEqual(gh.recorded_events, [])
+
+    def test_pickup_emits_decomposing_stage_enter(self) -> None:
+        # The hook is centralized: a real handler call (no manual label
+        # flip in the test) still produces the event because
+        # `_handle_pickup` routes through `gh.set_workflow_label`.
+        gh = FakeGitHubClient()
+        issue = make_issue(1)
+        gh.add_issue(issue)
+        with patch.object(config, "DECOMPOSE", True):
+            self._run(
+                lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
+                run_agent=_agent(last_message="need clarification"),
+                has_new_commits=False,
+            )
+        stages = [e["stage"] for e in gh.recorded_events if e["event"] == "stage_enter"]
+        self.assertIn("decomposing", stages)
+
+    def test_event_log_path_writes_one_jsonl_object_per_line(self) -> None:
+        # End-to-end: a configured EVENT_LOG_PATH receives one parseable
+        # JSONL object per transition, with the documented schema.
+        with tempfile.TemporaryDirectory(prefix="evlog-") as td:
+            path = Path(td) / "events.jsonl"
+            with patch.object(config, "EVENT_LOG_PATH", path):
+                gh = FakeGitHubClient()
+                issue = make_issue(7)
+                gh.add_issue(issue)
+                gh.set_workflow_label(issue, "implementing")
+                gh.set_workflow_label(issue, "validating")
+                gh.set_workflow_label(issue, "in_review")
+            # File closed on context exit -- read it back, parse line by line.
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 3)
+            records = [json.loads(line) for line in lines]
+            self.assertEqual(
+                [r["stage"] for r in records],
+                ["implementing", "validating", "in_review"],
+            )
+            for r in records:
+                self.assertEqual(r["event"], "stage_enter")
+                self.assertEqual(r["issue"], 7)
+                self.assertEqual(r["repo"], "geserdugarov/agent-orchestrator")
+                # ts must be a valid ISO-8601 UTC timestamp.
+                ts = datetime.fromisoformat(r["ts"])
+                self.assertEqual(ts.tzinfo, timezone.utc)
+            # JSONL invariant: exactly one object per line, no blank lines.
+            for line in lines:
+                self.assertTrue(line.strip())
+                self.assertFalse(line.startswith(" "))
+
+    def test_event_log_path_unset_writes_no_file(self) -> None:
+        # The legacy behavior is that no event file exists; flipping a
+        # label must not create one when EVENT_LOG_PATH is unset.
+        with tempfile.TemporaryDirectory(prefix="evlog-off-") as td:
+            sentinel = Path(td) / "should-not-be-created.jsonl"
+            with patch.object(config, "EVENT_LOG_PATH", None):
+                gh = FakeGitHubClient()
+                issue = make_issue(1)
+                gh.add_issue(issue)
+                gh.set_workflow_label(issue, "implementing")
+            self.assertFalse(sentinel.exists())
+            # In-memory capture still works even with the file sink disabled,
+            # so tests don't need a temp file to inspect transitions.
+            self.assertEqual(len(gh.recorded_events), 1)
 
 
 class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):

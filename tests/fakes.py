@@ -17,6 +17,8 @@ from orchestrator.github import (
     PINNED_STATE_MARKER,
     PinnedState,
     WORKFLOW_LABELS,
+    _write_event_record,
+    build_event_record,
 )
 
 
@@ -149,7 +151,20 @@ class FakeGitHubClient:
     inspect it directly.
     """
 
-    def __init__(self, issues: Iterable[FakeIssue] = ()) -> None:
+    def __init__(
+        self,
+        issues: Iterable[FakeIssue] = (),
+        *,
+        repo_slug: str = "geserdugarov/agent-orchestrator",
+    ) -> None:
+        self._repo_slug = repo_slug
+        # Mirrors GitHubClient.recorded_events: every `set_workflow_label`
+        # call with a non-None label appends a `stage_enter` event here so
+        # workflow tests can assert on the sequence without scraping the
+        # JSONL sink. When `config.EVENT_LOG_PATH` is set, the fake also
+        # writes to disk via the same helper the real client uses, so a
+        # single test can cover both surfaces.
+        self.recorded_events: list[dict] = []
         self._issues: dict[int, FakeIssue] = {i.number: i for i in issues}
         self._pinned: dict[int, PinnedState] = {}
         self._comment_id = count(start=1000)
@@ -231,6 +246,15 @@ class FakeGitHubClient:
             keep.append(FakeLabel(new_label))
         issue.labels = keep
         self.label_history.append((issue.number, new_label))
+        if new_label:
+            record = build_event_record(
+                repo=self._repo_slug,
+                issue_number=issue.number,
+                stage=new_label,
+                event="stage_enter",
+            )
+            self.recorded_events.append(record)
+            _write_event_record(record)
 
     def comment(self, issue: FakeIssue, body: str) -> FakeComment:
         c = FakeComment(id=next(self._comment_id), body=body)

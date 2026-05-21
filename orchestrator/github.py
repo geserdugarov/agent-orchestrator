@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from github import Auth, Github, GithubException
@@ -43,6 +43,38 @@ WORKFLOW_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("rejected", "5c0000", "Issue rejected / closed without merge"),
 )
 WORKFLOW_LABELS = frozenset(name for name, _, _ in WORKFLOW_LABEL_SPECS)
+
+
+def _write_event_record(record: dict) -> None:
+    """Append one JSONL line to `config.EVENT_LOG_PATH` if configured.
+
+    Shared by the real client and the test fake so a temp-file-backed
+    assertion against the fake exercises the same write path the
+    production sink uses. No-op when EVENT_LOG_PATH is unset, preserving
+    the legacy "no event file is touched" behavior.
+    """
+    path = config.EVENT_LOG_PATH
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError as e:
+        log.warning("could not write event log %s: %s", path, e)
+
+
+def build_event_record(
+    *, repo: str, issue_number: int, stage: str, event: str,
+) -> dict:
+    """Build a stage-transition event record. UTC timestamp, second precision."""
+    return {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "repo": repo,
+        "issue": int(issue_number),
+        "stage": stage,
+        "event": event,
+    }
 
 
 @dataclass
@@ -91,6 +123,13 @@ class GitHubClient:
             )
         self._gh = Github(auth=Auth.Token(token))
         self.repo: Repository = self._gh.get_repo(slug)
+        self._repo_slug = slug
+        # In-memory tail of recently-emitted stage-transition events. Capped
+        # so a long-running process can't grow this list unbounded; the file
+        # at `config.EVENT_LOG_PATH` (when configured) is the durable record.
+        # FakeGitHubClient mirrors this attribute so workflow tests can read
+        # captured events without touching disk.
+        self.recorded_events: list[dict] = []
 
     def list_pollable_issues(self, since: Optional[datetime] = None) -> Iterable[Issue]:
         """Open issues plus closed issues still labeled `in_review` or
@@ -171,6 +210,30 @@ class GitHubClient:
         if new_label:
             keep.append(new_label)
         issue.set_labels(*keep)
+        if new_label:
+            self._emit_stage_enter(issue, new_label)
+
+    _RECORDED_EVENTS_CAP = 500
+
+    def _emit_stage_enter(self, issue: Issue, stage: str) -> None:
+        """Record a `stage_enter` event for `issue` transitioning to `stage`.
+
+        Centralized hook called from `set_workflow_label` so every callsite
+        emits identically without per-handler bookkeeping. Always appends
+        to the in-memory `recorded_events` tail and -- when
+        `config.EVENT_LOG_PATH` is configured -- to the JSONL sink. The
+        in-memory tail is capped (the file is the durable record).
+        """
+        record = build_event_record(
+            repo=self._repo_slug,
+            issue_number=getattr(issue, "number", 0) or 0,
+            stage=stage,
+            event="stage_enter",
+        )
+        self.recorded_events.append(record)
+        if len(self.recorded_events) > self._RECORDED_EVENTS_CAP:
+            self.recorded_events = self.recorded_events[-self._RECORDED_EVENTS_CAP:]
+        _write_event_record(record)
 
     def comment(self, issue: Issue, body: str) -> IssueComment:
         return issue.create_comment(body)
