@@ -27,10 +27,22 @@ bootstrap.
 **Agent invocation.** `agents.run_agent` dispatches to `_run_codex` /
 `_run_claude` returning a unified `AgentResult`; session ids are harvested
 from JSONL events for resumes. `DEV_AGENT` / `REVIEW_AGENT` /
-`DECOMPOSE_AGENT` independently configurable; the in-flight backend is
-locked in pinned state so flipping the env var does not migrate live work.
-`AGENT_TIMEOUT` / `REVIEW_TIMEOUT` wall-clock caps with grandchild reaper;
-`MAX_RETRIES_PER_DAY` per-issue fresh-spawn budget over 24h.
+`DECOMPOSE_AGENT` are independently configurable shell-like command specs
+parsed by `config._parse_agent_spec`: the first token names the backend
+(`codex` / `claude`, mapped to `CODEX_BIN` / `CLAUDE_BIN`) and any
+remaining tokens are forwarded verbatim as backend-CLI args on every
+spawn — so roles like "implement with codex at xhigh reasoning"
+(`DEV_AGENT=codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`),
+"review with claude opus at high effort"
+(`REVIEW_AGENT=claude --model claude-opus-4-7 --effort high`), or
+"review with codex at high reasoning"
+(`REVIEW_AGENT=codex -m gpt-5.5-codex -c 'model_reasoning_effort="high"'`)
+all stay declarative in env. The full spec (backend + args) is persisted to
+pinned state and re-parsed on every resume, so in-flight issues keep
+using the pinned spec until the session ends and an env-var flip cannot
+migrate live work. `AGENT_TIMEOUT` / `REVIEW_TIMEOUT` wall-clock caps
+with grandchild reaper; `MAX_RETRIES_PER_DAY` per-issue fresh-spawn
+budget over 24h.
 
 **Security hardening.** `agents._agent_env` strips all GitHub tokens from
 the agent environment; PAT is rejected if found in `REPO_ROOT/.env` and
@@ -55,7 +67,8 @@ once all children resolve. Children link via `Parent: #<n>` (never
 worktree at `<WORKTREES_DIR>/<owner>__<name>/issue-<n>` from
 `origin/<base>`. New commits + clean tree → push, open / reuse PR, flip
 to `validating`; dirty tree or no commits → park. Awaiting-human replies
-resume the locked-backend dev session. PR titles and commits follow
+resume the dev session on its locked spec (backend + args, re-parsed
+from `dev_agent`). PR titles and commits follow
 Conventional Commits, reusing the agent's first commit subject when
 conformant.
 

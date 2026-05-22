@@ -20,7 +20,7 @@ For the implementation roadmap, see [`plans/roadmap.md`](plans/roadmap.md).
 
 ### CLI agents
 
-The orchestrator spawns these as subprocesses; both must be installed and authenticated on the host before the orchestrator starts. Roles are configurable via `DEV_AGENT` / `REVIEW_AGENT` (default: `claude` implements, `codex` reviews).
+The orchestrator spawns these as subprocesses. Only the backends actually selected by the first token of `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` need to be installed and authenticated on the host before the orchestrator starts — the defaults (`claude` implements and decomposes, `codex` reviews) use both, so most setups need both, but a single-backend deployment can skip the other. Roles are configurable via those three shell-like command specs; see [Agent command specs](#agent-command-specs) below for the format and the in-flight session lock semantics.
 
 - [`codex`](https://github.com/openai/codex) — invoked with `--dangerously-bypass-approvals-and-sandbox`. Run `codex login` once. The host is the sandbox boundary.
 - [`claude`](https://docs.anthropic.com/en/docs/claude-code) — invoked with `--dangerously-skip-permissions`. Authenticate via `claude` once.
@@ -94,7 +94,7 @@ Pinned in [`pyproject.toml`](pyproject.toml):
    claude --version
    ```
 
-   If a backend is not logged in, run its `login` flow (`codex login` / `claude /login`). Only the backends you actually route to via `DEV_AGENT` / `REVIEW_AGENT` need to be authenticated, but the defaults use both.
+   If a backend is not logged in, run its `login` flow (`codex login` / `claude /login`). Only the backends you actually route to via `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` (the first token of each spec) need to be authenticated, but the defaults use both.
 
 5. **Run**
 
@@ -139,19 +139,45 @@ All settings load from `.env` (or process environment). See [`.env.example`](.en
 | `MAX_REVIEW_ROUNDS`       | `3`                                           | review/fix iterations before parking on `awaiting_human` |
 | `MAX_CONFLICT_ROUNDS`     | `3`                                           | auto-conflict-resolution rounds before parking on `awaiting_human` |
 | `MAX_RETRIES_PER_DAY`     | `3`                                           | fresh implementer spawns per issue per 24h window (`0` = unbounded) |
-| `DEV_AGENT`               | `claude`                                      | implementer backend; one of `codex` / `claude`            |
-| `REVIEW_AGENT`            | `codex`                                       | reviewer backend; one of `codex` / `claude`               |
-| `DECOMPOSE_AGENT`         | `claude`                                      | decomposer backend; one of `codex` / `claude` (validated even when `DECOMPOSE=off`) |
+| `DEV_AGENT`               | `claude`                                      | implementer command spec; first token `codex` / `claude`, remaining tokens forwarded as backend-CLI args (see [Agent command specs](#agent-command-specs)) |
+| `REVIEW_AGENT`            | `codex`                                       | reviewer command spec; first token `codex` / `claude`, remaining tokens forwarded as backend-CLI args |
+| `DECOMPOSE_AGENT`         | `claude`                                      | decomposer command spec; first token `codex` / `claude`, remaining tokens forwarded as backend-CLI args (validated even when `DECOMPOSE=off`) |
 | `DECOMPOSE`               | `on`                                          | enable the `decomposing` stage; `off` reverts to the legacy "no label → implementing" pickup |
 | `HITL_HANDLE`             | `geserdugarov`                                | comma-separated GitHub logins to @-mention when a human is needed |
 | `WORKTREES_DIR`           | `../wt-orchestrator`                          | where per-issue git worktrees are created; per-repo subdir keeps them isolated, so the on-disk layout is `WORKTREES_DIR/<owner>__<name>/issue-N` |
-| `CODEX_BIN`               | `codex`                                       | override only if `codex` is not on `$PATH`                |
-| `CLAUDE_BIN`              | `claude`                                      | override only if `claude` is not on `$PATH`               |
+| `CODEX_BIN`               | `codex`                                       | executable launched when a role's first token is `codex`; override only if `codex` is not on `$PATH` |
+| `CLAUDE_BIN`              | `claude`                                      | executable launched when a role's first token is `claude`; override only if `claude` is not on `$PATH` |
 | `AGENT_GIT_NAME`          | `agent-orchestrator`                          | `GIT_AUTHOR_NAME`/`GIT_COMMITTER_NAME` injected into agent spawns |
 | `AGENT_GIT_EMAIL`         | `agent-orchestrator@users.noreply.github.com` | `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL` injected into agent spawns |
 | `BASE_BRANCH`             | `main`                                        | branch PRs target                                         |
 | `AUTO_MERGE`              | `off`                                         | merge approved PRs (green CI + mergeable) from `in_review`; flip to `on` once dogfooded |
 | `IN_REVIEW_DEBOUNCE_SECONDS` | `600`                                       | quiet window after the latest PR/issue comment before resuming the dev session |
+
+## Agent command specs
+
+`DEV_AGENT`, `REVIEW_AGENT`, and `DECOMPOSE_AGENT` are not bare backend names — they are full shell-like command specs parsed with `shlex.split`. The **first token** names the backend and must match `codex` or `claude` **case-insensitively** (`CODEX`, `Claude`, and `codex` all parse to the same backend; the lowercased form is used only for dispatch in `agents.py`, while pinned state keeps the raw full spec verbatim, so `DEV_AGENT=CODEX -m gpt-5.5` is stored as the literal `CODEX -m gpt-5.5` and re-lowercased on every resume by `_parse_agent_spec`). Any remaining tokens are forwarded verbatim as backend-CLI args on every spawn for that role. Anything else (unknown first token, empty value, unbalanced quotes) aborts at startup so a typo cannot silently fall back.
+
+Examples:
+
+```dotenv
+# bare backends (defaults)
+DEV_AGENT=claude
+REVIEW_AGENT=codex
+DECOMPOSE_AGENT=claude
+
+# claude with model / effort selection
+DEV_AGENT=claude --model claude-opus-4-7
+REVIEW_AGENT=claude --model claude-sonnet-4-6 --effort high
+
+# codex with model and reasoning effort
+DEV_AGENT=codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'
+REVIEW_AGENT=codex -m gpt-5.5-codex
+DECOMPOSE_AGENT=codex -m gpt-5.5
+```
+
+`CODEX_BIN` / `CLAUDE_BIN` interact with the first token as a backend selector: the first token only picks the codex vs. claude runner, while the actual executable launched is `CODEX_BIN` for `codex` and `CLAUDE_BIN` for `claude`. Override those when the CLI is not on `$PATH`; writing the full path as the first token of `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` is rejected.
+
+**In-flight issues keep using the pinned full spec until the agent session ends.** The dev/decomposer spec (backend + args) is persisted to the issue's pinned state (`dev_agent` / `decomposer_agent`) on the first spawn, and `_handle_implementing` / `_handle_decomposing` re-parse that stored spec on every resume. Flipping `DEV_AGENT` or `DECOMPOSE_AGENT` in env therefore only affects fresh issues — any issue with a live session keeps the original backend AND args (including model / effort flags) until it reaches a terminal label (`done` / `rejected`). The reviewer is spawned fresh every round, so `REVIEW_AGENT` changes take effect on the next validating round; the most recent value is recorded in `review_agent` for traceability. `DECOMPOSE_AGENT` is validated at import even when `DECOMPOSE=off`, so toggling `DECOMPOSE` back on never surfaces a fresh "that env var was always invalid" failure.
 
 ## Managing multiple repositories
 
