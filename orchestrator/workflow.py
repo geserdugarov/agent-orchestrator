@@ -12,8 +12,6 @@ are observed and logged as not-yet-implemented.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import os
 import re
@@ -29,22 +27,56 @@ from github.Issue import Issue
 from . import config
 from .agents import AgentResult, run_agent
 from .config import RepoSpec
-from .github import PINNED_STATE_MARKER, GitHubClient, PinnedState
+from .github import GitHubClient, PinnedState
+from .workflow_drift import (
+    _build_user_content_change_prompt,
+    _compute_user_content_hash,
+    _detect_user_content_change,
+    _mark_drift_comments_consumed,
+    _route_drift_to_decomposing,
+)
+from .workflow_messages import (
+    _ORCH_COMMENT_MARKER,
+    _build_conflict_resolution_prompt,
+    _build_decompose_prompt,
+    _build_fix_prompt,
+    _build_implement_prompt,
+    _build_pr_comment_followup,
+    _build_review_prompt,
+    _drift_ack_reason,
+    _format_stderr_diagnostics,
+    _orchestrator_ids,
+    _parse_manifest,
+    _parse_review_verdict,
+    _post_issue_comment,
+    _post_pr_comment,
+    _recent_comments_text,
+    _stderr_log_tail,
+)
+# Re-exports for backward-compatible `workflow._foo` references in the test
+# suite. Each name is the helper module's authoritative definition; the
+# redundant `as <name>` aliasing is the pyflakes/ruff convention for marking
+# an import as an intentional re-export so F401 does not flag it.
+from .workflow_messages import _DRIFT_ACK_RE as _DRIFT_ACK_RE
+from .workflow_messages import _has_dep_cycle as _has_dep_cycle
+from .workflow_messages import _MANIFEST_RE as _MANIFEST_RE
+from .workflow_messages import _MAX_CHILDREN as _MAX_CHILDREN
+from .workflow_messages import _ORCH_COMMENT_ID_CAP as _ORCH_COMMENT_ID_CAP
+from .workflow_messages import _redact_secrets as _redact_secrets
+from .workflow_messages import _REDACT_MIN_VALUE_LEN as _REDACT_MIN_VALUE_LEN
+from .workflow_messages import _SECRET_KEY_NAMES as _SECRET_KEY_NAMES
+from .workflow_messages import _SECRET_KEY_SUFFIXES as _SECRET_KEY_SUFFIXES
+from .workflow_messages import _STDERR_TAIL_BUDGET as _STDERR_TAIL_BUDGET
+from .workflow_messages import (
+    _track_orchestrator_comment as _track_orchestrator_comment,
+)
+from .workflow_messages import _VERDICT_RE as _VERDICT_RE
+from .workflow_messages import _with_orch_marker as _with_orch_marker
 
 log = logging.getLogger(__name__)
 
 # Disable git's /dev/tty fallback prompts in any subprocess we spawn.
 _GIT_NO_PROMPT_ENV = {"GIT_TERMINAL_PROMPT": "0"}
-
-# The reviewer prompt asks for the marker alone on its own line, but real
-# codex output isn't always that disciplined: prefixes like "Final verdict:"
-# or trailing punctuation appear in practice. Match anywhere and take the
-# last occurrence, so a stray reference earlier in the text loses to the
-# concluding one.
-_VERDICT_RE = re.compile(
-    r"VERDICT:\s*(APPROVED|CHANGES_REQUESTED)\b",
-    re.IGNORECASE,
-)
 
 # Conventional Commits subject: `<type>[(scope)][!]: <subject>`. The type
 # allowlist matches the ones the implement/fix prompts teach plus the broader
@@ -58,439 +90,6 @@ _CONVENTIONAL_RE = re.compile(
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-# Cap on `orchestrator_comment_ids`. The watermark always advances, so older
-# ids are no longer in any `comments_after` window -- the cap exists only to
-# bound list growth on long-lived issues, not for correctness.
-_ORCH_COMMENT_ID_CAP = 500
-
-# Hidden HTML-comment marker embedded in the body of every issue / PR
-# comment the orchestrator posts. Used by `_compute_user_content_hash` to
-# identify orchestrator-authored comments WITHOUT relying on
-# `orchestrator_comment_ids`, which is capped at `_ORCH_COMMENT_ID_CAP`
-# and therefore evicts old ids on long-lived issues. Once an old id falls
-# off the cap, an id-only filter would start including that bot comment
-# in the hash and trigger false drift every tick; the body marker
-# survives indefinitely on the GitHub side and is invisible in rendered
-# Markdown. Kept distinct from `PINNED_STATE_MARKER` so the pinned-state
-# filter (which uses `<!--orchestrator-state ... -->`) and the
-# orchestrator-comment filter are independent identifiers.
-_ORCH_COMMENT_MARKER = "<!--orchestrator-comment-->"
-
-
-def _orchestrator_ids(state: PinnedState) -> set[int]:
-    """Set of comment ids the orchestrator itself posted on this issue/PR.
-    Used to filter the orchestrator's own messages out of "new feedback"
-    scans without falling back to author-login matching -- a PAT shared
-    with a human reviewer's GitHub account would otherwise have its real
-    review comments swallowed as bot noise (and auto-merged over).
-    """
-    raw = state.get("orchestrator_comment_ids") or []
-    return {int(x) for x in raw}
-
-
-def _track_orchestrator_comment(state: PinnedState, comment_id: int) -> None:
-    raw = state.get("orchestrator_comment_ids")
-    ids = list(raw) if isinstance(raw, list) else []
-    ids.append(int(comment_id))
-    if len(ids) > _ORCH_COMMENT_ID_CAP:
-        ids = ids[-_ORCH_COMMENT_ID_CAP:]
-    state.set("orchestrator_comment_ids", ids)
-
-
-def _with_orch_marker(body: str) -> str:
-    """Append the hidden orchestrator-comment marker to `body` (idempotent).
-
-    Every orchestrator-posted comment carries this marker so the
-    user-content hash can identify bot comments even after their id has
-    been evicted from the bounded `orchestrator_comment_ids` cap. The
-    marker is an HTML comment, invisible in rendered Markdown.
-    """
-    if _ORCH_COMMENT_MARKER in body:
-        return body
-    return f"{body}\n\n{_ORCH_COMMENT_MARKER}"
-
-
-def _post_issue_comment(
-    gh: GitHubClient, issue: Issue, state: PinnedState, body: str,
-):
-    """Post an issue comment AND record its id in pinned state so future
-    `_handle_in_review` ticks recognize it as orchestrator-authored even when
-    the PAT login is shared with a human reviewer. Caller is still responsible
-    for `gh.write_pinned_state` -- this only mutates the in-memory state.
-
-    The body is augmented with `_ORCH_COMMENT_MARKER` so the user-content
-    hash can identify bot comments by marker (id-cap-resistant) in
-    addition to by id (works for tracked-and-not-yet-evicted comments).
-    """
-    c = gh.comment(issue, _with_orch_marker(body))
-    cid = getattr(c, "id", None)
-    if cid is not None:
-        _track_orchestrator_comment(state, int(cid))
-    return c
-
-
-def _compute_user_content_hash(
-    issue: Issue, orchestrator_ids: set[int]
-) -> str:
-    """SHA-256 over title + body + human-authored comments.
-
-    Used by `_detect_user_content_change` so the orchestrator can react
-    when a human edits the issue body or adds acceptance criteria after
-    the workflow has already picked it up. Non-human content is filtered
-    four ways:
-
-    * pinned-state comment by `PINNED_STATE_MARKER`;
-    * orchestrator-posted comments by `_ORCH_COMMENT_MARKER` embedded in
-      the body (id-cap-resistant -- the marker stays on the GitHub side
-      forever even after the comment's id has been evicted from
-      `orchestrator_comment_ids`);
-    * legacy orchestrator comments (posted before the marker was
-      introduced) by id from `orchestrator_comment_ids`;
-    * third-party Bot / App accounts (Dependabot, Renovate, CI bots, ...)
-      by GitHub's `user.type == "Bot"` flag. These accounts cannot be
-      filtered by the id-list or marker because we never post them, and
-      they post structurally (e.g. weekly Dependabot bumps) which would
-      otherwise re-trigger drift detection on every tick they post.
-
-    Author-login matching is deliberately avoided because the orchestrator
-    PAT is often shared with a human reviewer's GitHub account; a login
-    filter would falsely drop the human's real review comments. The
-    `user.type` flag is a structural GitHub-account property and does not
-    conflict with that constraint.
-    """
-    parts = [issue.title or "", issue.body or ""]
-    for c in issue.get_comments():
-        body = c.body or ""
-        if PINNED_STATE_MARKER in body:
-            continue
-        if _ORCH_COMMENT_MARKER in body:
-            continue
-        cid = getattr(c, "id", None)
-        if cid is not None and int(cid) in orchestrator_ids:
-            continue
-        user = getattr(c, "user", None)
-        if user is not None and getattr(user, "type", None) == "Bot":
-            continue
-        parts.append(body)
-    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
-
-
-def _detect_user_content_change(
-    gh: GitHubClient, issue: Issue, state: PinnedState
-) -> Optional[str]:
-    """Return the new hash if the user-visible content drifted since the
-    prior stored value, or None when unchanged.
-
-    On the FIRST call for an issue (no prior hash in pinned state), persist
-    the current value via `gh.write_pinned_state` immediately. Doing it
-    in-memory only would lose the baseline whenever the calling handler's
-    early-return path (awaiting-human-with-no-new-comments, debounce,
-    child-waiting-on-deps, …) skips its own state write; the very next
-    edit would then be classified as the new baseline and silently
-    absorbed. The cost is one extra write per legacy issue still missing
-    the field on first encounter; in steady state the hash is already set
-    and this branch never fires.
-    """
-    orchestrator_ids = _orchestrator_ids(state)
-    current = _compute_user_content_hash(issue, orchestrator_ids)
-    prior = state.get("user_content_hash")
-    if not isinstance(prior, str):
-        state.set("user_content_hash", current)
-        gh.write_pinned_state(issue, state)
-        return None
-    if current == prior:
-        return None
-    return current
-
-
-def _build_user_content_change_prompt(
-    issue: Issue, comments_text: str,
-) -> str:
-    """Resume prompt that quotes the updated title, body, AND the current
-    conversation so the dev session can re-evaluate against the new
-    requirements.
-
-    Used by handlers that detect a user content drift mid-implementation:
-    the dev session is locked to whichever backend wrote `dev_session_id`,
-    so we cannot re-decompose, but we CAN feed the new context to the
-    existing session and let it commit any additional work. Including the
-    comments thread matters because the hash also drifts when the human
-    adds acceptance criteria as a NEW comment (not just a body edit), and
-    quoting only title/body would leave the dev unaware of the new comment
-    it's supposed to react to.
-    """
-    title = (issue.title or "").strip() or f"#{issue.number}"
-    body = (issue.body or "").strip() or "(no body)"
-    quoted = "> " + body.replace("\n", "\n> ")
-    convo = comments_text or "(no prior comments)"
-    return (
-        "The human edited the issue while you were working on it. Re-read the "
-        "updated title, body, and conversation below, decide whether your "
-        "existing work still satisfies the new requirements, and COMMIT any "
-        "additional changes needed in your current worktree. Do NOT push -- "
-        "the orchestrator pushes and re-runs the reviewer.\n\n"
-        f"Updated issue title: {title!r}\n\n"
-        f"Updated issue body:\n\n{quoted}\n\n"
-        f"Conversation so far:\n{convo}\n\n"
-        "Before committing, run `git log --oneline -20` to see how recent "
-        "commit subjects are formatted, and follow the same convention. Use "
-        "`git commit -m \"<type>: <subject>\"` with a single `-m`.\n\n"
-        "If your existing commits already satisfy the new requirements and "
-        "no further code change is needed, end your final message with "
-        "EXACTLY this marker, alone on its own line:\n\n"
-        "  ACK: <one-line justification>\n\n"
-        "Use `ACK:` ONLY when you are certain the existing work covers the "
-        "edit -- the orchestrator treats it as an explicit acknowledgement "
-        "and stays on the current label without parking. If you have a "
-        "clarification question or are unsure, do NOT use `ACK:`; reply "
-        "with the question and the orchestrator will park awaiting a human "
-        "reply (same as a regular agent question)."
-    )
-
-
-# Marker the dev session emits to explicitly acknowledge that the existing
-# work satisfies a user-content-drift edit. Matched on its own line,
-# anywhere in the message; the last occurrence wins (mirrors how
-# `_VERDICT_RE` accepts the reviewer's final marker even when earlier
-# references appear in the body). Without this marker the no-commit
-# response is treated as a clarification question via `_on_question`, NOT
-# silently swallowed as an ack -- a misleading "existing work satisfies"
-# comment on a real question would leave the issue stuck without
-# `awaiting_human` set.
-_DRIFT_ACK_RE = re.compile(r"^\s*ACK:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
-
-
-def _drift_ack_reason(last_message: str) -> Optional[str]:
-    """Return the dev's ACK justification if `last_message` carries the
-    explicit `ACK: ...` marker, or None when no marker is present.
-
-    Takes the LAST match (matches `_parse_review_verdict`'s convention) so
-    a stray reference earlier in the message loses to the concluding line.
-    """
-    if not last_message:
-        return None
-    matches = list(_DRIFT_ACK_RE.finditer(last_message))
-    if not matches:
-        return None
-    return matches[-1].group(1).strip() or None
-
-
-def _mark_drift_comments_consumed(
-    gh: GitHubClient, issue: Issue, state: PinnedState,
-) -> None:
-    """Advance `last_action_comment_id` past every comment visible on the
-    issue thread right now.
-
-    Used by the user-content-drift paths after they resume the dev session
-    with `_recent_comments_text(issue)` quoted in the prompt: the dev has
-    been fed the full conversation, so the next validating->in_review
-    handoff (via `_seed_watermark_past_self`) must NOT classify those same
-    comments as fresh, unconsumed feedback and replay them as a duplicate
-    dev resume on the next in_review tick. Mirrors the pre-resume bump in
-    `_resume_developer_on_human_reply`; the post here uses
-    `latest_comment_id` rather than the `comments_after` walk because the
-    drift prompt feeds the full thread (`_recent_comments_text`), not just
-    a single new-comments slice. One-way ratchet so a higher prior value
-    (e.g. a recent park comment id) is never lowered.
-    """
-    latest = gh.latest_comment_id(issue)
-    if not isinstance(latest, int):
-        return
-    prior = state.get("last_action_comment_id")
-    if not isinstance(prior, int) or latest > prior:
-        state.set("last_action_comment_id", latest)
-
-
-def _route_drift_to_decomposing(
-    gh: GitHubClient,
-    issue: Issue,
-    state: PinnedState,
-    new_hash: str,
-    orphan_children: list,
-) -> None:
-    """Route an issue back to `decomposing` after a pre-implementation
-    user-content drift, clearing the locked decomposer session and any
-    in-flight manifest state so the next tick spawns a fresh decomposer
-    against the updated body.
-
-    `orphan_children` is the parent's previously-tracked children list
-    (empty for `ready` / blocked-child cases): existing children are NOT
-    closed on GitHub by this helper, but their record is dropped from the
-    parent's pinned state so the new manifest does not collide with them.
-    The notice posted on the issue lists the orphan numbers explicitly so
-    the operator can close any that no longer apply.
-
-    Caller writes pinned state (`gh.write_pinned_state`) after returning.
-    """
-    if orphan_children:
-        orphan_list = ", ".join(f"#{n}" for n in orphan_children)
-        notice = (
-            ":pencil2: issue content changed; re-running decomposer "
-            "against the updated body. The previously-tracked children "
-            f"({orphan_list}) will be ORPHANED -- the orchestrator no "
-            "longer tracks them; please close any that no longer apply to "
-            "the updated requirements."
-        )
-    else:
-        notice = (
-            ":pencil2: issue content changed; re-running decomposer "
-            "against the updated body."
-        )
-    _post_issue_comment(gh, issue, state, notice)
-    state.set("user_content_hash", new_hash)
-    # Clear `decomposer_session_id` so the next tick spawns a FRESH
-    # decomposer session (deriving a new manifest against the updated
-    # body, not resuming the prior session with only the human's reply).
-    # Deliberately PRESERVE `decomposer_agent`: once the role's spec has
-    # been recorded on this issue it is locked for the rest of its
-    # lifecycle, even across drift events. A config flip (e.g.
-    # `DECOMPOSE_AGENT=codex -> claude`) between ticks must not retarget
-    # an in-flight issue at a different backend; `_read_decomposer_session`
-    # uses the recorded spec, so the fresh spawn picks up where the old
-    # one left off and the FullSpecPersistenceTest contract holds.
-    state.set("decomposer_session_id", None)
-    # Wipe the manifest tracking so `_handle_decomposing`'s half-finished
-    # recovery branch does not fire on the next tick (it keys on
-    # `expected_children_count` or a non-empty `children` list).
-    state.set("children", [])
-    state.set("dep_graph", {})
-    state.set("expected_children_count", None)
-    state.set("umbrella", None)
-    state.set("awaiting_human", False)
-    state.set("park_reason", None)
-    gh.set_workflow_label(issue, "decomposing")
-
-
-# Cap the stderr tail surfaced in park comments. A multi-MB Cloudflare
-# anti-bot interstitial (the original motivation for surfacing stderr at
-# all -- see #36) would otherwise bloat the issue body past GitHub's limit.
-_STDERR_TAIL_BUDGET = 1024
-
-# Provider auth (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...) is intentionally
-# left in the agent's environment by agents._agent_env -- the agent CLI
-# needs it to talk to its own model. A noisy backend, a buggy test, or a
-# prompt-injected command that echoed one of those values to stderr would
-# otherwise be republished verbatim in the park comment we post to the
-# issue. Match by suffix to cover the long tail of provider names
-# (HF_TOKEN, GEMINI_API_KEY, ...) without an explicit enumeration. The
-# orchestrator's own GITHUB_TOKEN is stripped from the agent env upstream
-# but still lives in this process; env-derived ones are caught by the
-# loop below, and the token-file path (ORCHESTRATOR_TOKEN_FILE / default
-# ~/.config/<repo>/token) is caught by the explicit config.GITHUB_TOKEN
-# pass in `_redact_secrets` -- without that pass the file-loaded token
-# would never appear in os.environ and would leak unredacted.
-_SECRET_KEY_SUFFIXES = ("_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PAT", "_CREDENTIAL")
-# Exact names cover two cases the suffix predicate misses: GitHub-token
-# aliases that don't end in any suffix above, and bare-named secrets
-# (`TOKEN`, `PASSWORD`, ...) some build systems still set unprefixed --
-# those would otherwise pass through _agent_env and leak unredacted if a
-# prompt-injected stderr echoed `$TOKEN`.
-_SECRET_KEY_NAMES = frozenset({
-    "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT",
-    "TOKEN", "KEY", "SECRET", "PASSWORD", "PAT", "CREDENTIAL",
-})
-# Short values produce too many false-positive replacements (a 4-char dev
-# key masks incidental substrings like "true"/"main") for too little
-# protection. Real provider keys are well above this floor.
-_REDACT_MIN_VALUE_LEN = 8
-
-
-def _redact_secrets(text: str) -> str:
-    """Replace values of secret-shaped env vars in `text` with `***`.
-
-    Called before any stderr is surfaced to GitHub or the log so a
-    prompt-injected agent that echoes its own provider key cannot exfiltrate
-    it via a park comment. Snapshot of os.environ at call time, so a key
-    that was unset between subprocess spawn and the post is no longer
-    redacted -- acceptable since it also no longer leaks anything reachable
-    from the agent.
-    """
-    if not text:
-        return text
-    redacted = text
-    for key, value in os.environ.items():
-        if not value or len(value) < _REDACT_MIN_VALUE_LEN:
-            continue
-        upper = key.upper()
-        if upper in _SECRET_KEY_NAMES or any(
-            upper.endswith(suffix) for suffix in _SECRET_KEY_SUFFIXES
-        ):
-            redacted = redacted.replace(value, "***")
-    # GITHUB_TOKEN may have been resolved from ORCHESTRATOR_TOKEN_FILE (or
-    # the default ~/.config/<repo>/token path) rather than the process env,
-    # in which case the env loop above never sees it. Without this explicit
-    # pass, a prompt-injected command that cat'd that file -- or any git/gh
-    # subprocess stderr quoting the token -- would publish it unredacted.
-    token = config.GITHUB_TOKEN
-    if token and len(token) >= _REDACT_MIN_VALUE_LEN:
-        redacted = redacted.replace(token, "***")
-    return redacted
-
-
-def _format_stderr_diagnostics(result: AgentResult, label: str = "Agent") -> str:
-    """Render a stderr/exit-code diagnostic block to append to a park comment.
-
-    Returns "" when the agent produced no stderr -- callers can concatenate
-    unconditionally without a trailing dead section. Otherwise returns a
-    block beginning with two newlines so it slots cleanly after an existing
-    `_Last … message:_` body.
-
-    Redaction happens on the raw stderr before any trimming: a multi-line
-    secret env value (e.g. an SSH/PEM key whose env-var value ends in `\\n`)
-    echoed at the end of stderr would otherwise have its trailing newline
-    stripped first, so `str.replace` would no longer find the env value
-    verbatim and the secret would leak.
-    """
-    tail = _redact_secrets(result.stderr or "").rstrip()
-    if not tail:
-        return ""
-    if len(tail) > _STDERR_TAIL_BUDGET:
-        tail = tail[-_STDERR_TAIL_BUDGET:]
-    quoted = "> " + tail.replace("\n", "\n> ")
-    return (
-        f"\n\n_{label} stderr (last 1KB):_\n\n{quoted}\n\n"
-        f"_{label} exit code:_ {result.exit_code}"
-    )
-
-
-def _stderr_log_tail(result: AgentResult, max_chars: int = 400) -> str:
-    """Short stderr tail for log lines -- tighter than the park-comment cap
-    so a single WARNING fits on one screen.
-
-    Redact before trimming for the same reason as `_format_stderr_diagnostics`:
-    a multi-line secret value ending in `\\n` would not match `str.replace`
-    if `rstrip` ate the trailing newline first.
-    """
-    tail = _redact_secrets(result.stderr or "").rstrip()
-    if len(tail) > max_chars:
-        tail = tail[-max_chars:]
-    return tail
-
-
-def _post_pr_comment(
-    gh: GitHubClient, pr_number: int, state: PinnedState, body: str,
-):
-    """PR-conversation comment counterpart to `_post_issue_comment`. Both
-    surfaces share the IssueComment id namespace, so a single id list covers
-    them. Inline review comments and PR review summaries live in different id
-    spaces but the orchestrator never posts to those, so they need no entry.
-
-    The body is augmented with `_ORCH_COMMENT_MARKER` for the same reason
-    as `_post_issue_comment`: the user-content hash needs to identify
-    bot comments even after their id has been evicted from the bounded
-    `orchestrator_comment_ids` cap. PR-conversation comments do not feed
-    into `_compute_user_content_hash` directly (the hash reads
-    `issue.get_comments()`, not the PR's), but marker symmetry across
-    surfaces keeps the filter rules uniform and avoids accidental
-    inconsistency when a future tweak does start reading PR comments.
-    """
-    c = gh.pr_comment(pr_number, _with_orch_marker(body))
-    cid = getattr(c, "id", None)
-    if cid is not None:
-        _track_orchestrator_comment(state, int(cid))
-    return c
 
 
 def _run_agent_tracked(
@@ -1341,112 +940,6 @@ def _squash_and_force_push(
     return True, new_sha, len(subjects), None
 
 
-def _build_implement_prompt(issue: Issue, comments_text: str) -> str:
-    body = issue.body or "(no body)"
-    convo = comments_text or "(no prior comments)"
-    return (
-        f"You are the implementer for GitHub issue #{issue.number}: {issue.title!r}.\n\n"
-        f"Issue body:\n{body}\n\n"
-        f"Conversation so far:\n{convo}\n\n"
-        "Implement the change in the current working directory (a fresh git worktree on a "
-        "new branch). When done, COMMIT your changes with a clear message. Do NOT push - "
-        "the orchestrator pushes and opens the PR.\n\n"
-        "Before committing, run `git log --oneline -20` to see how recent commit subjects "
-        "are formatted, and follow the same convention. This repo uses Conventional Commits "
-        "of the form `<type>: <subject>` (e.g. `feat:`, `fix:`, `chore:`, `docs:`, "
-        "`refactor:`, `test:`); pick the type that best fits your change and keep the "
-        "subject short and imperative.\n\n"
-        "The commit message MUST be the subject line only -- no extended description / "
-        "body and no `Co-Authored-By:` (or other) trailer. Use `git commit -m \"<type>: "
-        "<subject>\"` with a single `-m`.\n\n"
-        "If you cannot proceed because of missing information, leave the working tree "
-        "uncommitted (no commits) and end your response with a clear question for the human."
-    )
-
-
-def _build_review_prompt(
-    spec: RepoSpec,
-    issue: Issue,
-    comments_text: str,
-    dev_backend: str = "agent",
-) -> str:
-    body = issue.body or "(no body)"
-    convo = comments_text or "(no prior comments)"
-    base_ref = f"{spec.remote_name}/{spec.base_branch}"
-    return (
-        f"You are an automated code reviewer for GitHub issue #{issue.number}: {issue.title!r}. "
-        f"A separate {dev_backend} session has implemented this issue and committed to the current "
-        f"branch. The base branch is `{base_ref}`.\n\n"
-        f"Issue body:\n{body}\n\n"
-        f"Conversation so far:\n{convo}\n\n"
-        "Inspect the change with:\n"
-        f"  git log --oneline {base_ref}..HEAD\n"
-        f"  git diff {base_ref}...HEAD\n\n"
-        "Review the change against the issue requirements. Flag correctness bugs, missing "
-        "tests, scope creep, obvious style issues, and anything that would block a human "
-        "approver. Do NOT edit or commit anything -- you are a reviewer only.\n\n"
-        "Your final message MUST end with exactly one of these markers, alone on its own line:\n"
-        "  VERDICT: APPROVED\n"
-        "  VERDICT: CHANGES_REQUESTED\n\n"
-        "If CHANGES_REQUESTED, list the specific items above the verdict line as a numbered "
-        "list so the implementer can address them one by one. If the change is acceptable as "
-        "is, write VERDICT: APPROVED with a one-line justification above it."
-    )
-
-
-def _build_fix_prompt(review_feedback: str) -> str:
-    feedback = review_feedback.strip() or "(reviewer left no detail)"
-    quoted = "> " + feedback.replace("\n", "\n> ")
-    return (
-        "An automated reviewer requested changes on your implementation. Address each item "
-        "below, then COMMIT the fix in your current worktree. Do NOT push -- the orchestrator "
-        "pushes and re-runs the review.\n\n"
-        f"Review feedback:\n\n{quoted}\n\n"
-        "Before committing, run `git log --oneline -20` to see how recent commit subjects "
-        "are formatted, and follow the same convention. This repo uses Conventional Commits "
-        "of the form `<type>: <subject>` (e.g. `feat:`, `fix:`, `chore:`, `docs:`, "
-        "`refactor:`, `test:`); for a review fix `fix:` is usually the right type.\n\n"
-        "The commit message MUST be the subject line only -- no extended description / "
-        "body and no `Co-Authored-By:` (or other) trailer. Use `git commit -m \"<type>: "
-        "<subject>\"` with a single `-m`.\n\n"
-        "If you genuinely disagree with a point, end your final message with a question for "
-        "the human and leave that item un-fixed; the orchestrator will park the issue for "
-        "human review. Otherwise, fix all items (a single commit is fine)."
-    )
-
-
-def _parse_review_verdict(last_message: str) -> Tuple[str, str]:
-    """Find the last 'VERDICT: APPROVED|CHANGES_REQUESTED' marker.
-
-    Returns (verdict, body_above_marker). verdict is one of "approved",
-    "changes_requested", or "unknown" (no marker found). body_above_marker is
-    the slice of last_message before the marker, used as PR-comment text for
-    the changes-requested case.
-    """
-    if not last_message:
-        return "unknown", ""
-    matches = list(_VERDICT_RE.finditer(last_message))
-    if not matches:
-        return "unknown", last_message
-    last = matches[-1]
-    word = last.group(1).upper()
-    verdict = "approved" if word == "APPROVED" else "changes_requested"
-    body = last_message[: last.start()].rstrip()
-    return verdict, body
-
-
-def _recent_comments_text(issue: Issue, max_chars: int = 4000) -> str:
-    chunks: list[str] = []
-    for c in issue.get_comments():
-        body = c.body or ""
-        if "<!--orchestrator-state" in body:
-            continue
-        login = c.user.login if c.user else "user"
-        chunks.append(f"@{login}: {body}")
-    text = "\n\n".join(chunks)
-    return text[-max_chars:] if len(text) > max_chars else text
-
-
 def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
     """Fetch `origin/<base>` once for the spec and bring every existing
     per-issue worktree up to date.
@@ -1874,205 +1367,6 @@ def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     gh.set_workflow_label(issue, "implementing")
     gh.write_pinned_state(issue, state)
     _handle_implementing(gh, spec, issue)
-
-
-# Captures the JSON payload between a fenced ```orchestrator-manifest block.
-# We deliberately match everything up to the next ``` rather than trying to
-# bound braces in the regex itself: nested objects in the JSON body would
-# trip a `\{.*?\}` non-greedy match without rescuing well, while a fence
-# delimiter is a single token that the agent prompt forces it to emit.
-_MANIFEST_RE = re.compile(
-    r"```orchestrator-manifest\s*\n(.*?)\n```",
-    re.DOTALL,
-)
-# Hard cap on children per parent. A buggy decomposer that emits 100 children
-# would otherwise create 100 GitHub issues before anyone notices. Configurable
-# later if needed; not surfaced as an env var initially.
-_MAX_CHILDREN = 10
-
-
-def _parse_manifest(
-    last_message: str,
-) -> Tuple[Optional[dict], Optional[str]]:
-    """Parse a fenced `orchestrator-manifest` block.
-
-    Returns `(manifest, error_reason)`:
-      * `(dict, None)` -- a valid manifest. `decision` is `"single"` or
-        `"split"`; for `"split"`, `children` is non-empty and each entry has
-        `title`/`body` and a structurally-valid `depends_on` index list.
-      * `(None, error)` -- a fence was present but the payload was invalid.
-        `error` is a short human-readable reason (used in the HITL park
-        message).
-      * `(None, None)` -- no fenced block at all. The caller treats this as
-        "agent ended without a manifest" and parks as a question.
-    """
-    if not last_message:
-        return None, None
-    matches = list(_MANIFEST_RE.finditer(last_message))
-    if not matches:
-        return None, None
-    # The decompose prompt mandates "EXACTLY ONE fenced JSON block ...
-    # and nothing else after it". `re.search` would silently accept the
-    # first fence and ignore the rest, so a decomposer that quotes a
-    # sample/template manifest before its real final answer would have
-    # the orchestrator act on the sample -- creating wrong child issues
-    # or routing the parent on a stale decision. Reject multiple fences
-    # and require the accepted one to be the final block (whitespace
-    # after the closing fence only).
-    if len(matches) > 1:
-        return None, (
-            f"expected exactly one orchestrator-manifest block, "
-            f"found {len(matches)}"
-        )
-    m = matches[0]
-    if last_message[m.end():].strip():
-        return None, (
-            "orchestrator-manifest must be the final block; "
-            "found content after the closing fence"
-        )
-    try:
-        data = json.loads(m.group(1))
-    except json.JSONDecodeError as e:
-        return None, f"invalid JSON: {e.msg}"
-    if not isinstance(data, dict):
-        return None, "manifest is not a JSON object"
-    decision = data.get("decision")
-    if decision not in ("single", "split"):
-        return None, "decision must be 'single' or 'split'"
-    if decision == "single":
-        return data, None
-    children = data.get("children")
-    if not isinstance(children, list) or not children:
-        return None, "split decision requires non-empty children list"
-    if len(children) > _MAX_CHILDREN:
-        return None, (
-            f"too many children ({len(children)} > {_MAX_CHILDREN})"
-        )
-    # Optional umbrella flag: when true, the parent issue itself has no
-    # implementation work -- it's a tracking issue whose only purpose is
-    # to aggregate children. Reject non-bool values rather than coercing
-    # so a typo like `"umbrella": "yes"` surfaces via the standard
-    # invalid-manifest HITL loop instead of silently being treated as
-    # truthy.
-    umbrella = data.get("umbrella")
-    if umbrella is not None and not isinstance(umbrella, bool):
-        return None, "umbrella must be a boolean"
-    for idx, child in enumerate(children):
-        if not isinstance(child, dict):
-            return None, f"child {idx} is not an object"
-        title = child.get("title")
-        body = child.get("body")
-        # Truthiness alone is not enough: `"body": 42` is truthy but
-        # would later blow up `create_child_issue` (which calls
-        # `body.rstrip()`) AFTER `expected_children_count` is persisted,
-        # forcing the half-finished-recovery path. Reject non-string
-        # values up front so the standard "invalid manifest" HITL/resume
-        # loop handles it cleanly.
-        if (
-            not isinstance(title, str) or not title
-            or not isinstance(body, str) or not body
-        ):
-            return None, f"child {idx} missing title or body"
-        # Treat missing key and explicit JSON null as "no dependencies"
-        # (same intent), but reject any other non-list value. The
-        # earlier `child.get("depends_on") or []` collapsed every
-        # falsy scalar (0, False, "") to [] before the list-type
-        # check, so a manifest like `{"depends_on": 0}` -- a clear
-        # malformed list -- was silently accepted as no-deps and the
-        # child activated out of dependency order.
-        deps = child.get("depends_on")
-        if deps is None:
-            deps = []
-        elif not isinstance(deps, list):
-            return None, f"child {idx} depends_on must be a list"
-        for d in deps:
-            if (
-                not isinstance(d, int)
-                or isinstance(d, bool)
-                or d < 0
-                or d >= len(children)
-                or d == idx
-            ):
-                return None, f"child {idx} has invalid dependency {d!r}"
-    if _has_dep_cycle(children):
-        return None, "dependency graph has a cycle"
-    return data, None
-
-
-def _has_dep_cycle(children: list[dict]) -> bool:
-    """DFS for back-edges in the children dep graph (white/gray/black)."""
-    n = len(children)
-    color = [0] * n  # 0=unvisited, 1=on-stack, 2=finished
-
-    def visit(u: int) -> bool:
-        color[u] = 1
-        for v in (children[u].get("depends_on") or []):
-            if color[v] == 1:
-                return True
-            if color[v] == 0 and visit(v):
-                return True
-        color[u] = 2
-        return False
-
-    for u in range(n):
-        if color[u] == 0 and visit(u):
-            return True
-    return False
-
-
-def _build_decompose_prompt(issue: Issue, comments_text: str) -> str:
-    body = issue.body or "(no body)"
-    convo = comments_text or "(no prior comments)"
-    return (
-        f"You are the decomposer for GitHub issue #{issue.number}: {issue.title!r}.\n\n"
-        f"Issue body:\n{body}\n\n"
-        f"Conversation so far:\n{convo}\n\n"
-        "Decide whether this issue can be implemented in ONE coding-agent "
-        "context window. If yes, return decision='single'. If no, propose a "
-        "list of smaller child issues each one-shottable on its own.\n\n"
-        "Sizing rule of thumb: if the change touches more than ~5 files or "
-        "needs more than one logical commit, propose splitting; otherwise "
-        "keep it as a single child. Use `git ls-files`, `wc -l`, or other "
-        "read-only commands to inspect the codebase. You MUST NOT commit, "
-        "push, or modify any file -- you are read-only.\n\n"
-        "If you genuinely need a clarification, end your message with a "
-        "question for the human and DO NOT emit a manifest. Otherwise, end "
-        "your final message with EXACTLY ONE fenced JSON block in this "
-        "format (and nothing else after it):\n\n"
-        "```orchestrator-manifest\n"
-        "{\n"
-        "  \"decision\": \"split\",\n"
-        "  \"rationale\": \"<<= 2 sentences why>\",\n"
-        "  \"umbrella\": false,\n"
-        "  \"children\": [\n"
-        "    {\"title\": \"...\", \"body\": \"...\", \"depends_on\": []}\n"
-        "  ]\n"
-        "}\n"
-        "```\n\n"
-        "The block must be valid JSON parseable by `json.loads`. The "
-        "`decision` value must be exactly the string `\"single\"` or "
-        "`\"split\"` (no other values, no union syntax). On `\"single\"`, "
-        "omit the `children` field entirely.\n\n"
-        "Rules for the children list (omit entirely on 'single'):\n"
-        f"- At most {_MAX_CHILDREN} children.\n"
-        "- `depends_on` is a list of 0-based indexes into THIS children "
-        "array (not GitHub issue numbers; the orchestrator allocates those).\n"
-        "- Self-dependencies and cycles are rejected.\n"
-        "- Each child must be small enough to implement in one context "
-        "(do not propose a child that itself needs decomposition).\n"
-        "- The LAST child must always be a documentation-update task that "
-        "refreshes the relevant docs (README, docs/, plans/) to reflect the "
-        "changes made by the preceding children. Its `depends_on` should "
-        "list every preceding child index so the docs update lands after "
-        "the code changes it describes.\n\n"
-        "The optional `umbrella` boolean (default false) signals that the "
-        "parent issue itself has NO implementation work of its own and exists "
-        "only to aggregate the children. Set it to true when every line of "
-        "the parent's intent is covered by the children you are creating; "
-        "leave it false when the parent still needs its own coding pass after "
-        "the children land. An umbrella parent auto-resolves to `done` once "
-        "every child resolves; a non-umbrella parent re-enters implementation."
-    )
 
 
 def _read_decomposer_session(
@@ -4148,38 +3442,6 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     gh.write_pinned_state(issue, state)
 
 
-def _build_pr_comment_followup(comments: list) -> str:
-    """Compose a dev-fix prompt from new PR-side comments.
-
-    The dev session has not seen any PR comment before (those live on a
-    different surface than the issue thread it was fed at spawn time), so a
-    short preamble is needed to frame the request -- otherwise a comment like
-    "rename foo to bar" reads as freeform chatter without context.
-    """
-    body = "\n\n".join(
-        f"@{c.user.login if c.user else 'user'}: {c.body or ''}"
-        for c in comments
-    )
-    quoted = "> " + body.replace("\n", "\n> ")
-    return (
-        "New comments arrived on the open PR for this issue. Address each item, "
-        "then COMMIT the fix in your current worktree. Do NOT push -- the "
-        "orchestrator pushes and re-runs the reviewer.\n\n"
-        f"PR comments:\n\n{quoted}\n\n"
-        "Before committing, run `git log --oneline -20` to see how recent commit "
-        "subjects are formatted, and follow the same convention. This repo uses "
-        "Conventional Commits of the form `<type>: <subject>` (e.g. `feat:`, "
-        "`fix:`, `chore:`, `docs:`, `refactor:`, `test:`); for a review fix "
-        "`fix:` is usually the right type.\n\n"
-        "The commit message MUST be the subject line only -- no extended "
-        "description / body and no `Co-Authored-By:` (or other) trailer. Use "
-        "`git commit -m \"<type>: <subject>\"` with a single `-m`.\n\n"
-        "If you genuinely disagree with a point, end your final message with a "
-        "question for the human and leave that item un-fixed; the orchestrator "
-        "will park the issue for human review."
-    )
-
-
 def _seed_watermark_past_self(
     issue_thread_comments: list,
     pr_conversation_comments: list,
@@ -5282,29 +4544,6 @@ def _authed_fetch(
             text=True,
             env=env,
         )
-
-
-def _build_conflict_resolution_prompt(
-    base_ref: str, files: list[str]
-) -> str:
-    shown = files[:20]
-    files_md = "\n".join(f"- `{p}`" for p in shown)
-    if len(files) > len(shown):
-        files_md += f"\n- ... ({len(files) - len(shown)} more)"
-    return (
-        f"`git merge {base_ref}` left {len(files)} conflicted "
-        "file(s) in your worktree. Resolve each conflict and COMMIT the "
-        "merge in your current worktree. Do NOT push -- the orchestrator "
-        "pushes and re-runs the reviewer.\n\n"
-        f"Conflicted paths:\n\n{files_md}\n\n"
-        "Workflow: edit each file to a coherent resolution, `git add` it, "
-        "then commit (`git commit --no-edit` accepts the default merge "
-        "commit message). Use `git status` to inspect the in-progress "
-        "merge.\n\n"
-        "If you genuinely cannot resolve a conflict, end your final "
-        "message with a question for the human and leave the worktree "
-        "mid-merge; the orchestrator will park the issue for human review."
-    )
 
 
 def _emit_conflict_round_incremented(
