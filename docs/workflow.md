@@ -2,7 +2,7 @@
 
 This file documents the agent-role side of the workflow: which stage invokes which role, how the role command specs (`DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT`) are parsed, and how the spec used by an in-flight issue is pinned for the life of its session.
 
-For the full stage-by-stage state machine (label semantics, per-stage handler internals, multi-repo dispatch, push hardening), see [`architecture.md`](architecture.md). For the user-facing summary and the configuration reference, see [`../README.md`](../README.md).
+For the full stage-by-stage state machine (label semantics, per-stage handler internals, multi-repo dispatch, push hardening), see [`architecture.md`](architecture.md). For the env-var reference and run modes, see [`configuration.md`](configuration.md). For the user-facing summary, see [`../README.md`](../README.md).
 
 ## Roles and the workflow stages that invoke them
 
