@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import config, workflow
+from orchestrator import config, workflow, worktrees
 from orchestrator.agents import AgentResult
 from orchestrator.workflow import _parse_review_verdict
 
@@ -1954,7 +1954,7 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
             base_branch="master",
         )
         fake_git, captured = self._capture_git("feat: hello\n")
-        with patch.object(workflow, "_git", fake_git):
+        with patch.object(worktrees, "_git", fake_git):
             subj = workflow._first_commit_subject(
                 master_spec, Path("/tmp/wt-not-real")
             )
@@ -1970,7 +1970,7 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
         # Sanity check: legacy single-repo deployments keep using `main`
         # because `_TEST_SPEC.base_branch` is `main`.
         fake_git, captured = self._capture_git("")
-        with patch.object(workflow, "_git", fake_git):
+        with patch.object(worktrees, "_git", fake_git):
             workflow._first_commit_subject(_TEST_SPEC, Path("/tmp/wt-not-real"))
         args, _cwd = captured[0]
         self.assertIn("origin/main..HEAD", args)
@@ -1985,7 +1985,7 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
             remote_name="private",
         )
         fake_git, captured = self._capture_git("feat: hi\n")
-        with patch.object(workflow, "_git", fake_git):
+        with patch.object(worktrees, "_git", fake_git):
             workflow._first_commit_subject(
                 private_spec, Path("/tmp/wt-not-real")
             )
@@ -2019,7 +2019,7 @@ class HasNewCommitsRemoteNameTest(unittest.TestCase):
             base_branch="main",
             remote_name="private",
         )
-        with patch.object(workflow, "_git", fake_git):
+        with patch.object(worktrees, "_git", fake_git):
             workflow._has_new_commits(private_spec, Path("/tmp/wt-not-real"))
         args, _cwd = captured[0]
         self.assertIn("private/main..HEAD", args)
@@ -3659,7 +3659,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # so the squash subject reuses it; body lists all three.
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(workflow, "_push_branch", return_value=True):
+             patch.object(worktrees, "_push_branch", return_value=True):
             success, new_sha, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
@@ -3701,7 +3701,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
 
         issue = self._make_issue(title="rename frobnicator")
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(workflow, "_push_branch", return_value=True):
+             patch.object(worktrees, "_push_branch", return_value=True):
             success, _, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
@@ -3729,7 +3729,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         ).strip()
 
         issue = self._make_issue()
-        push_mock = patch.object(workflow, "_push_branch", return_value=True)
+        push_mock = patch.object(worktrees, "_push_branch", return_value=True)
         with patch.object(config, "BASE_BRANCH", "main"), push_mock as pm:
             success, sha, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
@@ -3758,7 +3758,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
 
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(workflow, "_push_branch", return_value=False):
+             patch.object(worktrees, "_push_branch", return_value=False):
             success, sha, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
@@ -3786,7 +3786,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # matches the agent-spawn `_agent_env` behavior.
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(workflow, "_push_branch", return_value=True), \
+             patch.object(worktrees, "_push_branch", return_value=True), \
              patch.object(config, "AGENT_GIT_NAME", "orch-bot"), \
              patch.object(
                  config, "AGENT_GIT_EMAIL", "orch-bot@example.com"
@@ -3818,7 +3818,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
 
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(workflow, "_push_branch", return_value=True) as pm:
+             patch.object(worktrees, "_push_branch", return_value=True) as pm:
             success, _, _, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
@@ -3856,7 +3856,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
 
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(workflow, "_push_branch", return_value=True) as pm:
+             patch.object(worktrees, "_push_branch", return_value=True) as pm:
             success, sha, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
@@ -9304,9 +9304,9 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         wt_path = MagicMock()
         wt_path.exists.return_value = False  # worktree dir absent too
 
-        with patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_worktree_path", return_value=wt_path), \
-             patch.object(workflow, "_repo_worktrees_root", return_value=MagicMock()):
+        with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_worktree_path", return_value=wt_path), \
+             patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
 
         # Find the `worktree add` invocation and verify it anchored on
@@ -9333,9 +9333,9 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         wt_path = MagicMock()
         wt_path.exists.return_value = False
 
-        with patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_worktree_path", return_value=wt_path), \
-             patch.object(workflow, "_repo_worktrees_root", return_value=MagicMock()):
+        with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_worktree_path", return_value=wt_path), \
+             patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
 
         worktree_adds = [
@@ -9358,9 +9358,9 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         wt_path = MagicMock()
         wt_path.exists.return_value = False
 
-        with patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_worktree_path", return_value=wt_path), \
-             patch.object(workflow, "_repo_worktrees_root", return_value=MagicMock()):
+        with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_worktree_path", return_value=wt_path), \
+             patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
 
         for args, cwd in calls:
@@ -9383,9 +9383,9 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         wt_path = MagicMock()
         wt_path.exists.return_value = False
 
-        with patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_worktree_path", return_value=wt_path), \
-             patch.object(workflow, "_repo_worktrees_root", return_value=MagicMock()):
+        with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_worktree_path", return_value=wt_path), \
+             patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
 
         # Find the per-branch fetch (not the base-branch fetch).
@@ -9709,7 +9709,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         with mock_patch("subprocess.run", side_effect=fake_run), \
              mock_patch.object(
                  workflow.config, "_resolve_github_token", return_value=""
-             ), self.assertLogs(workflow.log, level="ERROR") as cm:
+             ), self.assertLogs(worktrees.log, level="ERROR") as cm:
             r = workflow._authed_fetch(
                 other_spec,
                 "+refs/heads/main:refs/remotes/origin/main",
@@ -10677,8 +10677,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         wt_path.exists.return_value = worktree_exists
         wt_path.__str__ = lambda self: f"/tmp/issue-{CleanupTerminalBranchTest.ISSUE_NUMBER}"
 
-        with patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_worktree_path", return_value=wt_path):
+        with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_worktree_path", return_value=wt_path):
             workflow._cleanup_terminal_branch(gh, _TEST_SPEC, self.ISSUE_NUMBER)
         return gh, git_mock
 
@@ -10760,8 +10760,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         wt_path.exists.return_value = True
         wt_path.__str__ = lambda self: f"/tmp/issue-{CleanupTerminalBranchTest.ISSUE_NUMBER}"
 
-        with patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_worktree_path", return_value=wt_path):
+        with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_worktree_path", return_value=wt_path):
             # Must NOT raise even though every sub-step failed.
             workflow._cleanup_terminal_branch(
                 gh, _TEST_SPEC, self.ISSUE_NUMBER,
@@ -10782,8 +10782,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         wt_path.exists.return_value = True
         wt_path.__str__ = lambda self: f"/tmp/issue-{CleanupTerminalBranchTest.ISSUE_NUMBER}"
 
-        with patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_worktree_path", return_value=wt_path):
+        with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_worktree_path", return_value=wt_path):
             # Must NOT raise even though every `_git` invocation throws.
             workflow._cleanup_terminal_branch(
                 gh, _TEST_SPEC, self.ISSUE_NUMBER,
@@ -10857,8 +10857,8 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             )
         )
         sync = MagicMock()
-        with patch.object(workflow, "_git", fetch_fail), \
-             patch.object(workflow, "_sync_worktree_with_base", sync):
+        with patch.object(worktrees, "_git", fetch_fail), \
+             patch.object(worktrees, "_sync_worktree_with_base", sync):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
         sync.assert_not_called()
 
@@ -10870,12 +10870,12 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             )
         )
         sync = MagicMock()
-        with patch.object(workflow, "_git", fetch_ok), \
+        with patch.object(worktrees, "_git", fetch_ok), \
              patch.object(
-                workflow, "_repo_worktrees_root",
+                worktrees, "_repo_worktrees_root",
                 return_value=self.tmpdir / "missing",
              ), \
-             patch.object(workflow, "_sync_worktree_with_base", sync):
+             patch.object(worktrees, "_sync_worktree_with_base", sync):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
         sync.assert_not_called()
 
@@ -10897,11 +10897,11 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             )
         )
         sync = MagicMock()
-        with patch.object(workflow, "_git", fetch_ok), \
+        with patch.object(worktrees, "_git", fetch_ok), \
              patch.object(
-                workflow, "_repo_worktrees_root", return_value=wt_root,
+                worktrees, "_repo_worktrees_root", return_value=wt_root,
              ), \
-             patch.object(workflow, "_sync_worktree_with_base", sync):
+             patch.object(worktrees, "_sync_worktree_with_base", sync):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
 
         called_numbers = sorted(c.args[3] for c in sync.call_args_list)
@@ -10919,11 +10919,11 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             )
         )
         sync = MagicMock(side_effect=[RuntimeError("kaboom"), None])
-        with patch.object(workflow, "_git", fetch_ok), \
+        with patch.object(worktrees, "_git", fetch_ok), \
              patch.object(
-                workflow, "_repo_worktrees_root", return_value=wt_root,
+                worktrees, "_repo_worktrees_root", return_value=wt_root,
              ), \
-             patch.object(workflow, "_sync_worktree_with_base", sync):
+             patch.object(worktrees, "_sync_worktree_with_base", sync):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
         # Both worktrees attempted despite the first raising.
         self.assertEqual(sync.call_count, 2)
@@ -10981,9 +10981,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge = MagicMock()
         # Behind base by 3 commits.
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_merge_base_into_worktree", merge), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         # Local merge MUST NOT have happened on the PR worktree.
         merge.assert_not_called()
@@ -11006,8 +11006,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
         self._add_pr()
         git_mock = MagicMock(return_value=self._git_result(stdout="2\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         self.assertIn((7, "resolving_conflict"), self.gh.label_history)
 
@@ -11019,8 +11019,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
         self._add_pr()
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         # No new label flip (the issue was already labeled
         # `resolving_conflict` at fixture time, not by us).
@@ -11035,8 +11035,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
         self._add_pr()
         git_mock = MagicMock(return_value=self._git_result(stdout="0\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         self.assertEqual(self.gh.label_history, [])
         self.assertEqual(self.gh.posted_pr_comments, [])
@@ -11053,8 +11053,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         )
         self._add_pr()
         git_mock = MagicMock(return_value=self._git_result(stdout="1\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         data = self.gh.pinned_data(7)
         self.assertEqual(data.get("conflict_round"), 2)
@@ -11073,8 +11073,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
         self._add_pr(merged=True, state="closed")
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         self.assertEqual(self.gh.label_history, [])
         self.assertEqual(self.gh.posted_pr_comments, [])
@@ -11088,8 +11088,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
         self._add_pr(merged=False, state="closed")
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         self.assertEqual(self.gh.label_history, [])
         self.assertEqual(self.gh.posted_pr_comments, [])
@@ -11103,8 +11103,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
         # No PR added -- get_pr will raise KeyError on the FakeGitHubClient.
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         self.assertEqual(self.gh.label_history, [])
         self.assertEqual(self.gh.posted_pr_comments, [])
@@ -11133,8 +11133,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             id=500, body="do not merge yet", user=FakeUser("human"),
         ))
         git_mock = MagicMock(return_value=self._git_result(stdout="1\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         data = self.gh.pinned_data(7)
         # Watermark stayed at 100 -- the unread human comment at id=500 is
@@ -11157,8 +11157,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             awaiting_human=True, park_reason="unmergeable",
         )
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
-        with patch.object(workflow, "_worktree_dirty_files", return_value=[]), \
-             patch.object(workflow, "_git", git_mock):
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         # No relabel: park left intact.
         self.assertEqual(self.gh.label_history, [])
@@ -11170,8 +11170,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         merge = MagicMock()
         with patch.object(
-            workflow, "_worktree_dirty_files", return_value=["a.py"],
-        ), patch.object(workflow, "_merge_base_into_worktree", merge):
+            worktrees, "_worktree_dirty_files", return_value=["a.py"],
+        ), patch.object(worktrees, "_merge_base_into_worktree", merge):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         merge.assert_not_called()
 
@@ -11180,9 +11180,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge = MagicMock()
         git_mock = MagicMock(return_value=self._git_result(stdout="0\n"))
         with patch.object(
-            workflow, "_worktree_dirty_files", return_value=[],
-        ), patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_merge_base_into_worktree", merge):
+            worktrees, "_worktree_dirty_files", return_value=[],
+        ), patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_merge_base_into_worktree", merge):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         merge.assert_not_called()
 
@@ -11191,9 +11191,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge = MagicMock()
         git_mock = MagicMock(return_value=self._git_result(returncode=128))
         with patch.object(
-            workflow, "_worktree_dirty_files", return_value=[],
-        ), patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_merge_base_into_worktree", merge):
+            worktrees, "_worktree_dirty_files", return_value=[],
+        ), patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_merge_base_into_worktree", merge):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         merge.assert_not_called()
 
@@ -11203,10 +11203,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         hardened = MagicMock(return_value=self._git_result())
         with patch.object(
-            workflow, "_worktree_dirty_files", return_value=[],
-        ), patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_merge_base_into_worktree", merge), \
-             patch.object(workflow, "_git_hardened", hardened):
+            worktrees, "_worktree_dirty_files", return_value=[],
+        ), patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_git_hardened", hardened):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         merge.assert_called_once()
         # No abort issued on success.
@@ -11220,10 +11220,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         git_mock = MagicMock(return_value=self._git_result(stdout="2\n"))
         hardened = MagicMock(return_value=self._git_result())
         with patch.object(
-            workflow, "_worktree_dirty_files", return_value=[],
-        ), patch.object(workflow, "_git", git_mock), \
-             patch.object(workflow, "_merge_base_into_worktree", merge), \
-             patch.object(workflow, "_git_hardened", hardened):
+            worktrees, "_worktree_dirty_files", return_value=[],
+        ), patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_git_hardened", hardened):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         # Abort issued exactly once.
         abort_calls = [
@@ -11237,7 +11237,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # must not crash the refresh -- skip silently.
         from unittest.mock import MagicMock
         merge = MagicMock()
-        with patch.object(workflow, "_merge_base_into_worktree", merge):
+        with patch.object(worktrees, "_merge_base_into_worktree", merge):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 9999)
         merge.assert_not_called()
 
