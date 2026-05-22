@@ -1072,6 +1072,350 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
         self.assertEqual(self._parks(gh), [])
 
 
+class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """`pr_opened`, `merge_attempt`, `conflict_round`, `pr_merged`, and
+    `pr_closed_without_merge` are emitted from the in_review and
+    resolving_conflict handlers so an operator tailing the JSONL sink sees
+    the PR-side of each issue's lifecycle (open / auto-merge attempt /
+    conflict round / terminal merge / terminal reject) without scraping the
+    orchestrator log.
+    """
+
+    BRANCH = "orchestrator/issue-50"
+    PR_NUMBER = 500
+
+    @staticmethod
+    def _events_of(gh, event_name: str) -> list[dict]:
+        return [e for e in gh.recorded_events if e["event"] == event_name]
+
+    def _open_pr(self, **kwargs):
+        defaults = dict(
+            number=self.PR_NUMBER,
+            head_branch=self.BRANCH,
+            head=FakePRRef(sha="abc12345"),
+        )
+        defaults.update(kwargs)
+        return FakePR(**defaults)
+
+    def _seed_in_review(self, issue_number=50, *, pr=None, extra_state=None):
+        gh = FakeGitHubClient()
+        issue = make_issue(issue_number, label="in_review")
+        gh.add_issue(issue)
+        if pr is not None:
+            gh.add_pr(pr)
+        state = dict(
+            branch=self.BRANCH,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            review_round=1,
+        )
+        if pr is not None:
+            state["pr_number"] = pr.number
+        if extra_state:
+            state.update(extra_state)
+        gh.seed_state(issue_number, **state)
+        return gh, issue
+
+    def test_pr_opened_event_on_fresh_pr_open(self) -> None:
+        # _handle_implementing -> _on_commits opens a new PR and emits
+        # `pr_opened` with the pr number and branch.
+        gh = FakeGitHubClient()
+        issue = make_issue(50, label="implementing")
+        gh.add_issue(issue)
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-1", last_message="implemented"),
+            # First call: recovered-worktree check (False) -> agent runs;
+            # second call: post-agent _has_new_commits check (True) -> push path.
+            has_new_commits=[False, True],
+            dirty_files=(),
+            push_branch=True,
+        )
+        opened = self._events_of(gh, "pr_opened")
+        self.assertEqual(len(opened), 1)
+        ev = opened[0]
+        self.assertEqual(ev["stage"], "implementing")
+        self.assertEqual(ev["issue"], 50)
+        self.assertEqual(ev["pr_number"], gh.opened_prs[0].number)
+        self.assertEqual(ev["branch"], "orchestrator/issue-50")
+        # `sha` carries the PR head sha from `pr.head.sha` so the audit
+        # sink can correlate the open event with later merge / review IDs.
+        self.assertEqual(ev["sha"], gh.opened_prs[0].head.sha)
+
+    def test_pr_opened_not_emitted_when_reusing_existing_pr(self) -> None:
+        # Recovery path: an existing open PR is reused rather than opened
+        # again. The PR was already announced on its earlier tick, so no
+        # `pr_opened` event should fire here.
+        gh = FakeGitHubClient()
+        issue = make_issue(51, label="implementing")
+        gh.add_issue(issue)
+        existing = FakePR(number=123, head_branch="orchestrator/issue-51")
+        gh.existing_open_pr["orchestrator/issue-51"] = existing
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-1", last_message="implemented"),
+            has_new_commits=[False, True],
+            push_branch=True,
+        )
+        self.assertEqual(self._events_of(gh, "pr_opened"), [])
+
+    def test_merge_attempt_and_pr_merged_on_auto_merge_success(self) -> None:
+        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
+        gh, issue = self._seed_in_review(pr=pr)
+
+        with patch.object(config, "AUTO_MERGE", True):
+            self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        attempts = self._events_of(gh, "merge_attempt")
+        merged = self._events_of(gh, "pr_merged")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["pr_number"], self.PR_NUMBER)
+        self.assertEqual(attempts[0]["sha"], "abc12345")
+        self.assertEqual(attempts[0]["method"], "squash")
+        self.assertEqual(attempts[0]["result"], "success")
+        self.assertEqual(attempts[0]["check_state"], "success")
+        self.assertEqual(attempts[0]["review_round"], 1)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["stage"], "in_review")
+        self.assertEqual(merged[0]["pr_number"], self.PR_NUMBER)
+        self.assertEqual(merged[0]["sha"], "abc12345")
+        self.assertEqual(merged[0]["merge_method"], "squash")
+        self.assertEqual(merged[0]["check_state"], "success")
+        self.assertEqual(merged[0]["review_round"], 1)
+
+    def test_merge_attempt_failed_does_not_emit_pr_merged(self) -> None:
+        # PyGithub returning False (405 / 409 / 422) records a failed
+        # attempt; no `pr_merged` event fires until the next tick succeeds.
+        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
+        gh, issue = self._seed_in_review(pr=pr)
+        gh.merge_returns_ok = False
+
+        with patch.object(config, "AUTO_MERGE", True):
+            self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        attempts = self._events_of(gh, "merge_attempt")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["result"], "failed")
+        self.assertEqual(self._events_of(gh, "pr_merged"), [])
+
+    def test_pr_merged_event_on_external_merge_terminal(self) -> None:
+        # A human (or another bot) merged the PR while we were in_review.
+        # The terminal handler stamps `merged_at` and emits `pr_merged`
+        # with `merge_method=external`.
+        pr = self._open_pr(merged=True, state="closed")
+        gh, issue = self._seed_in_review(
+            pr=pr, extra_state={"conflict_round": 2},
+        )
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+        merged = self._events_of(gh, "pr_merged")
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["merge_method"], "external")
+        self.assertEqual(merged[0]["pr_number"], self.PR_NUMBER)
+        self.assertEqual(merged[0]["sha"], "abc12345")
+        # In-review terminals carry the round counters from state so an
+        # operator tailing the sink can attribute merges to the round count
+        # that produced them, not just the issue number.
+        self.assertEqual(merged[0]["review_round"], 1)
+        self.assertEqual(merged[0]["conflict_round"], 2)
+        # The auto-merge surface never ran, so there is no `merge_attempt`.
+        self.assertEqual(self._events_of(gh, "merge_attempt"), [])
+
+    def test_pr_closed_without_merge_event_on_terminal(self) -> None:
+        pr = self._open_pr(merged=False, state="closed")
+        gh, issue = self._seed_in_review(pr=pr)
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+        closed = self._events_of(gh, "pr_closed_without_merge")
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0]["stage"], "in_review")
+        self.assertEqual(closed[0]["pr_number"], self.PR_NUMBER)
+
+    def test_conflict_round_entered_when_in_review_routes_to_resolving(self) -> None:
+        # AUTO_MERGE on + unmergeable: in_review seeds conflict_round=0
+        # and flips the label to resolving_conflict. A `conflict_round`
+        # event with action=entered surfaces the transition on the sink.
+        pr = self._open_pr(approved=True, mergeable=False, check_state="success")
+        gh, issue = self._seed_in_review(pr=pr)
+        with patch.object(config, "AUTO_MERGE", True):
+            self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+        rounds = self._events_of(gh, "conflict_round")
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["stage"], "in_review")
+        self.assertEqual(rounds[0]["action"], "entered")
+        self.assertEqual(rounds[0]["conflict_round"], 0)
+        self.assertEqual(rounds[0]["pr_number"], self.PR_NUMBER)
+        # SHA is the gated head_sha the auto-merge route captured; the
+        # audit record carries it so the operator can correlate the
+        # conflict cycle with the head that triggered it.
+        self.assertEqual(rounds[0]["sha"], "abc12345")
+
+
+class ResolvingConflictEventEmissionTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """`_handle_resolving_conflict` emits `merge_attempt` for each base-
+    merge attempt, `conflict_round` whenever the counter ticks, and the
+    same `pr_merged` / `pr_closed_without_merge` terminals as in_review.
+    """
+
+    BRANCH = "orchestrator/issue-300"
+    PR_NUMBER = 900
+
+    @staticmethod
+    def _events_of(gh, event_name: str) -> list[dict]:
+        return [e for e in gh.recorded_events if e["event"] == event_name]
+
+    def _seed(self, *, pr_state="open", pr_merged=False, extra_state=None):
+        gh = FakeGitHubClient()
+        issue = make_issue(300, label="resolving_conflict")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            head=FakePRRef(sha="feed1234"),
+            mergeable=False, check_state="success",
+            merged=pr_merged, state=pr_state,
+        )
+        gh.add_pr(pr)
+        state = dict(
+            pr_number=self.PR_NUMBER, branch=self.BRANCH,
+            dev_agent="claude", dev_session_id="dev-sess",
+            review_round=2, conflict_round=0,
+        )
+        if extra_state:
+            state.update(extra_state)
+        gh.seed_state(300, **state)
+        return gh, issue, pr
+
+    def _run_with_merge(
+        self, gh, issue, *,
+        merge_succeeded=True, conflicted_files=(),
+        head_shas=("before", "after"), push_branch=True,
+        run_agent_result=None,
+    ):
+        from unittest.mock import MagicMock
+
+        agent = run_agent_result or _agent(
+            session_id="dev-sess", last_message="resolved",
+        )
+        merge_mock = MagicMock(
+            return_value=(merge_succeeded, list(conflicted_files))
+        )
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch.object(workflow, "_merge_base_into_worktree", merge_mock), \
+             patch.object(workflow, "_git", MagicMock(return_value=ok)), \
+             patch.object(workflow, "_git_hardened", MagicMock(return_value=ok)):
+            return self._run(
+                lambda: workflow._handle_resolving_conflict(
+                    gh, _TEST_SPEC, issue,
+                ),
+                run_agent=agent,
+                push_branch=push_branch,
+                head_shas=head_shas,
+            )
+
+    def test_merge_attempt_success_on_clean_base_merge(self) -> None:
+        gh, issue, pr = self._seed()
+        self._run_with_merge(
+            gh, issue, merge_succeeded=True,
+            head_shas=["before", "merged"],
+        )
+        attempts = self._events_of(gh, "merge_attempt")
+        self.assertEqual(len(attempts), 1)
+        ev = attempts[0]
+        self.assertEqual(ev["stage"], "resolving_conflict")
+        self.assertEqual(ev["pr_number"], self.PR_NUMBER)
+        self.assertEqual(ev["method"], "base_merge")
+        self.assertEqual(ev["result"], "success")
+        self.assertEqual(ev["conflict_round"], 0)
+
+    def test_merge_attempt_conflict_when_base_merge_leaves_unmerged_paths(self) -> None:
+        gh, issue, pr = self._seed()
+        self._run_with_merge(
+            gh, issue, merge_succeeded=False,
+            conflicted_files=["a.py", "b.py"],
+            head_shas=["before", "merged"],
+        )
+        attempts = self._events_of(gh, "merge_attempt")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["result"], "conflict")
+
+    def test_conflict_round_incremented_on_clean_base_merge_push(self) -> None:
+        gh, issue, pr = self._seed()
+        self._run_with_merge(
+            gh, issue, merge_succeeded=True,
+            head_shas=["before", "merged"], push_branch=True,
+        )
+        rounds = [
+            e for e in self._events_of(gh, "conflict_round")
+            if e["action"] == "incremented"
+        ]
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["conflict_round"], 1)
+        self.assertEqual(rounds[0]["outcome"], "base_merged_clean")
+        # SHA is the after-merge HEAD captured before the push.
+        self.assertEqual(rounds[0]["sha"], "merged")
+
+    def test_conflict_round_incremented_on_base_up_to_date_no_op(self) -> None:
+        gh, issue, pr = self._seed()
+        self._run_with_merge(
+            gh, issue, merge_succeeded=True,
+            head_shas=["samehead", "samehead"],
+        )
+        rounds = [
+            e for e in self._events_of(gh, "conflict_round")
+            if e["action"] == "incremented"
+        ]
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["outcome"], "base_up_to_date")
+
+    def test_conflict_round_incremented_after_agent_resolves(self) -> None:
+        gh, issue, pr = self._seed()
+        self._run_with_merge(
+            gh, issue, merge_succeeded=False,
+            conflicted_files=["a.py"],
+            head_shas=["before", "merged"],
+            push_branch=True,
+        )
+        rounds = [
+            e for e in self._events_of(gh, "conflict_round")
+            if e["action"] == "incremented"
+        ]
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["outcome"], "agent_resolved")
+
+    def test_pr_merged_event_on_resolving_conflict_external_merge(self) -> None:
+        gh, issue, pr = self._seed(pr_state="closed", pr_merged=True)
+        self._run_with_merge(gh, issue)
+        merged = self._events_of(gh, "pr_merged")
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["stage"], "resolving_conflict")
+        self.assertEqual(merged[0]["pr_number"], self.PR_NUMBER)
+        # No base-merge attempted on the terminal path.
+        self.assertEqual(self._events_of(gh, "merge_attempt"), [])
+
+    def test_pr_closed_without_merge_event_on_resolving_conflict_closed(self) -> None:
+        gh, issue, pr = self._seed(pr_state="closed", pr_merged=False)
+        self._run_with_merge(gh, issue)
+        closed = self._events_of(gh, "pr_closed_without_merge")
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0]["stage"], "resolving_conflict")
+        self.assertEqual(closed[0]["pr_number"], self.PR_NUMBER)
+
+
 class EventEmissionDisabledTest(unittest.TestCase, _PatchedWorkflowMixin):
     """When EVENT_LOG_PATH is unset (the default), no JSONL file is opened
     and the orchestrator's observable behavior -- comments posted, labels
@@ -11851,7 +12195,10 @@ class HandleResolvingConflictHashDriftTest(
             has_new_commits=True,
             dirty_files=(),
             push_branch=True,
-            head_shas=["before", "after"],
+            # Three SHAs: drift before/after for the post-resume head
+            # delta, plus the third for the `conflict_round` audit emit
+            # that records the pushed worktree HEAD.
+            head_shas=["before", "after", "after"],
         )
 
         # Pushed fix -> bounce to validating.
@@ -12142,7 +12489,7 @@ class DriftMarksCommentsConsumedTest(
             has_new_commits=True,
             dirty_files=(),
             push_branch=True,
-            head_shas=["before", "after"],
+            head_shas=["before", "after", "after"],
         )
 
         data = gh.pinned_data(930)

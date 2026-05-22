@@ -1746,6 +1746,17 @@ def _route_pr_worktree_to_resolving_conflict(
             issue.number, pr_number,
         )
 
+    gh.emit_event(
+        "conflict_round",
+        issue_number=issue.number,
+        stage=label,
+        pr_number=pr_number,
+        sha=getattr(pr.head, "sha", None) or None,
+        action="entered",
+        conflict_round=int(state.get("conflict_round") or 0),
+        review_round=int(state.get("review_round") or 0),
+        retry_count=state.get("retry_count"),
+    )
     gh.set_workflow_label(issue, "resolving_conflict")
     gh.write_pinned_state(issue, state)
 
@@ -4615,6 +4626,17 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         state.set("merged_at", _now_iso())
         gh.set_workflow_label(issue, "done")
         gh.write_pinned_state(issue, state)
+        gh.emit_event(
+            "pr_merged",
+            issue_number=issue.number,
+            stage="in_review",
+            pr_number=int(pr_number),
+            sha=getattr(pr.head, "sha", None) or None,
+            merge_method="external",
+            review_round=int(state.get("review_round") or 0),
+            conflict_round=state.get("conflict_round"),
+            retry_count=state.get("retry_count"),
+        )
         try:
             issue.edit(state="closed")
         except Exception:
@@ -4628,6 +4650,16 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         state.set("closed_without_merge_at", _now_iso())
         gh.set_workflow_label(issue, "rejected")
         gh.write_pinned_state(issue, state)
+        gh.emit_event(
+            "pr_closed_without_merge",
+            issue_number=issue.number,
+            stage="in_review",
+            pr_number=int(pr_number),
+            sha=getattr(pr.head, "sha", None) or None,
+            review_round=int(state.get("review_round") or 0),
+            conflict_round=state.get("conflict_round"),
+            retry_count=state.get("retry_count"),
+        )
         try:
             issue.edit(state="closed")
         except Exception:
@@ -4665,6 +4697,9 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         state.set("closed_without_merge_at", _now_iso())
         gh.set_workflow_label(issue, "rejected")
         gh.write_pinned_state(issue, state)
+        # Deliberately no `pr_closed_without_merge` emit here: the PR is
+        # still open and may be reopened / salvaged. That event is reserved
+        # for the actual closed-PR rejection arc above.
         return
 
     # User-content drift: a human edited the issue title/body after the PR
@@ -5000,6 +5035,17 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 "PR #%s", issue.number, pr_number,
             )
         _bump_in_review_watermarks(gh, issue, state)
+        gh.emit_event(
+            "conflict_round",
+            issue_number=issue.number,
+            stage="in_review",
+            pr_number=int(pr_number),
+            sha=head_sha,
+            action="entered",
+            conflict_round=int(state.get("conflict_round") or 0),
+            review_round=int(state.get("review_round") or 0),
+            retry_count=state.get("retry_count"),
+        )
         gh.set_workflow_label(issue, "resolving_conflict")
         gh.write_pinned_state(issue, state)
         return
@@ -5027,13 +5073,39 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # already bails when this happens, but pinning to `head_sha` here is
     # belt-and-suspenders: GitHub returns 409 for a SHA mismatch so a
     # missed shift cannot merge an unreviewed head.
-    if not gh.merge_pr(pr, sha=head_sha):
+    merged_ok = gh.merge_pr(pr, sha=head_sha)
+    gh.emit_event(
+        "merge_attempt",
+        issue_number=issue.number,
+        stage="in_review",
+        pr_number=int(pr_number),
+        sha=head_sha,
+        method="squash",
+        result="success" if merged_ok else "failed",
+        check_state=check,
+        review_round=int(state.get("review_round") or 0),
+        conflict_round=state.get("conflict_round"),
+        retry_count=state.get("retry_count"),
+    )
+    if not merged_ok:
         # 405/409/422 -- next tick will re-evaluate; if it still won't merge,
         # the GH UI shows why.
         return
     state.set("merged_at", _now_iso())
     gh.set_workflow_label(issue, "done")
     gh.write_pinned_state(issue, state)
+    gh.emit_event(
+        "pr_merged",
+        issue_number=issue.number,
+        stage="in_review",
+        pr_number=int(pr_number),
+        sha=head_sha,
+        merge_method="squash",
+        check_state=check,
+        review_round=int(state.get("review_round") or 0),
+        conflict_round=state.get("conflict_round"),
+        retry_count=state.get("retry_count"),
+    )
     try:
         issue.edit(state="closed")
     except Exception:
@@ -5235,6 +5307,38 @@ def _build_conflict_resolution_prompt(
     )
 
 
+def _emit_conflict_round_incremented(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    *,
+    pr_number: int,
+    new_round: int,
+    outcome: str,
+    sha: Optional[str] = None,
+) -> None:
+    """Record a `conflict_round` audit event when the counter ticks.
+
+    Centralizes the bookkeeping so every increment site -- ahead-of-remote
+    push recovery, up-to-date no-op flip, clean base-merge push, agent-
+    resolved conflict push, drift-pushed bounce -- emits the same shape.
+    `outcome` distinguishes the increment cause so a tail of the JSONL sink
+    can attribute rounds without re-reading the surrounding code.
+    """
+    gh.emit_event(
+        "conflict_round",
+        issue_number=issue.number,
+        stage="resolving_conflict",
+        pr_number=int(pr_number),
+        sha=sha or None,
+        action="incremented",
+        conflict_round=int(new_round),
+        outcome=outcome,
+        review_round=int(state.get("review_round") or 0),
+        retry_count=state.get("retry_count"),
+    )
+
+
 def _handle_resolving_conflict(
     gh: GitHubClient, spec: RepoSpec, issue: Issue
 ) -> None:
@@ -5281,6 +5385,17 @@ def _handle_resolving_conflict(
         state.set("merged_at", _now_iso())
         gh.set_workflow_label(issue, "done")
         gh.write_pinned_state(issue, state)
+        gh.emit_event(
+            "pr_merged",
+            issue_number=issue.number,
+            stage="resolving_conflict",
+            pr_number=int(pr_number),
+            sha=getattr(pr.head, "sha", None) or None,
+            merge_method="external",
+            conflict_round=int(state.get("conflict_round") or 0),
+            review_round=int(state.get("review_round") or 0),
+            retry_count=state.get("retry_count"),
+        )
         try:
             issue.edit(state="closed")
         except Exception:
@@ -5294,6 +5409,16 @@ def _handle_resolving_conflict(
         state.set("closed_without_merge_at", _now_iso())
         gh.set_workflow_label(issue, "rejected")
         gh.write_pinned_state(issue, state)
+        gh.emit_event(
+            "pr_closed_without_merge",
+            issue_number=issue.number,
+            stage="resolving_conflict",
+            pr_number=int(pr_number),
+            sha=getattr(pr.head, "sha", None) or None,
+            conflict_round=int(state.get("conflict_round") or 0),
+            review_round=int(state.get("review_round") or 0),
+            retry_count=state.get("retry_count"),
+        )
         try:
             issue.edit(state="closed")
         except Exception:
@@ -5325,6 +5450,9 @@ def _handle_resolving_conflict(
         state.set("closed_without_merge_at", _now_iso())
         gh.set_workflow_label(issue, "rejected")
         gh.write_pinned_state(issue, state)
+        # Deliberately no `pr_closed_without_merge` emit here: the PR is
+        # still open. That event is reserved for the actual closed-PR
+        # rejection arc above.
         return
 
     # User-content drift: a human edited the issue body while the dev
@@ -5363,6 +5491,13 @@ def _handle_resolving_conflict(
             state.set("review_round", 0)
             state.set("conflict_round", conflict_round + 1)
             state.set("last_conflict_resolved_at", _now_iso())
+            _emit_conflict_round_incremented(
+                gh, issue, state,
+                pr_number=int(pr_number),
+                new_round=conflict_round + 1,
+                outcome="drift_resolved",
+                sha=_head_sha(wt) or None,
+            )
             gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
@@ -5511,6 +5646,13 @@ def _handle_resolving_conflict(
         state.set("review_round", 0)
         state.set("conflict_round", conflict_round + 1)
         state.set("last_conflict_resolved_at", _now_iso())
+        _emit_conflict_round_incremented(
+            gh, issue, state,
+            pr_number=int(pr_number),
+            new_round=conflict_round + 1,
+            outcome="recovered_push",
+            sha=_head_sha(wt) or None,
+        )
         gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
@@ -5540,6 +5682,20 @@ def _handle_resolving_conflict(
 
     before_sha = _head_sha(wt)
     succeeded, conflicted_files = _merge_base_into_worktree(spec, wt)
+    gh.emit_event(
+        "merge_attempt",
+        issue_number=issue.number,
+        stage="resolving_conflict",
+        pr_number=int(pr_number),
+        sha=before_sha or None,
+        method="base_merge",
+        result="success" if succeeded else (
+            "conflict" if conflicted_files else "failed"
+        ),
+        conflict_round=conflict_round,
+        review_round=int(state.get("review_round") or 0),
+        retry_count=state.get("retry_count"),
+    )
 
     if succeeded:
         # Dirty check before EITHER clean-merge exit (no-op flip OR
@@ -5584,6 +5740,13 @@ def _handle_resolving_conflict(
             )
             state.set("review_round", 0)
             state.set("conflict_round", conflict_round + 1)
+            _emit_conflict_round_incremented(
+                gh, issue, state,
+                pr_number=int(pr_number),
+                new_round=conflict_round + 1,
+                outcome="base_up_to_date",
+                sha=after_sha,
+            )
             gh.set_workflow_label(issue, "validating")
             gh.write_pinned_state(issue, state)
             return
@@ -5600,6 +5763,13 @@ def _handle_resolving_conflict(
         state.set("review_round", 0)
         state.set("conflict_round", conflict_round + 1)
         state.set("last_conflict_resolved_at", _now_iso())
+        _emit_conflict_round_incremented(
+            gh, issue, state,
+            pr_number=int(pr_number),
+            new_round=conflict_round + 1,
+            outcome="base_merged_clean",
+            sha=after_sha,
+        )
         gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
@@ -5684,6 +5854,15 @@ def _post_conflict_resolution_result(
     state.set("review_round", 0)
     state.set("conflict_round", conflict_round + 1)
     state.set("last_conflict_resolved_at", _now_iso())
+    pr_number = state.get("pr_number")
+    if pr_number is not None:
+        _emit_conflict_round_incremented(
+            gh, issue, state,
+            pr_number=int(pr_number),
+            new_round=conflict_round + 1,
+            outcome="agent_resolved",
+            sha=after_sha,
+        )
     gh.set_workflow_label(issue, "validating")
     gh.write_pinned_state(issue, state)
 
@@ -5725,6 +5904,15 @@ def _on_commits(
             branch=branch, base=spec.base_branch, title=title, body="\n".join(body_parts)
         )
         _post_issue_comment(gh, issue, state, f":sparkles: PR opened: #{pr.number}")
+        gh.emit_event(
+            "pr_opened",
+            issue_number=issue.number,
+            stage="implementing",
+            pr_number=pr.number,
+            branch=branch,
+            sha=getattr(pr.head, "sha", None) or None,
+            retry_count=state.get("retry_count"),
+        )
     else:
         log.info("issue=#%s reusing existing PR #%d for %s", issue.number, pr.number, branch)
     state.set("pr_number", pr.number)
