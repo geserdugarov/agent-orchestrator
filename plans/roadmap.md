@@ -120,6 +120,18 @@ and `tests/test_main.py` cover their respective modules.
 the auto-merge gate consults `pr_combined_check_state` so project-level
 checks must pass before merge.
 
+**Audit event log.** Optional opt-in JSONL sink at `EVENT_LOG_PATH`:
+`GitHubClient.emit_event` appends one `{ts, repo, issue, event, stage, …}`
+record per workflow event (`stage_enter`, `agent_spawn` / `agent_exit`,
+`review_verdict`, `park_awaiting_human`, `pr_opened`, `pr_merged`,
+`pr_closed_without_merge`, `merge_attempt`, `conflict_round`) via the
+shared `_write_event_record` helper. Unset by default — observable
+behavior matches a deployment without the sink. Pinned state on the
+issue remains the authoritative source for every dispatch decision;
+the log is append-only audit / observability and is safe to truncate
+or rotate (no built-in rotation — pair with `logrotate` for long-lived
+deployments).
+
 ## Future work
 
 - **Spec-first split / separate test writer.** Add a `specifying` stage

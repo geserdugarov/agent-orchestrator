@@ -240,6 +240,30 @@ The orchestrator (not the agent) pushes. The push is hardened against the agent-
 - Refuses to push if the worktree's local config has any `url.*.insteadOf`/`pushInsteadOf` rewrite.
 - Pushes via explicit refspec `HEAD:refs/heads/<branch>` (no upstream stored).
 
+## Audit event log (`EVENT_LOG_PATH`)
+
+Optional, opt-in JSONL sink. When `config.EVENT_LOG_PATH` is set (parsed at import from the `EVENT_LOG_PATH` env var), `github._write_event_record` appends one JSON object per audit event to that file inside `GitHubClient.emit_event`; when unset (the default) the helper short-circuits to a no-op and no file is opened. The fake `GitHubClient` in `tests/fakes.py` calls the same `_write_event_record` helper so a single test can cover both the in-memory `recorded_events` capture and the on-disk surface.
+
+**Schema.** Every record is built by `github.build_event_record` and carries `ts` (UTC ISO-8601 at second precision), `repo` (the slug `owner/name`), `issue` (issue number, int), and `event` (the kind). `stage` is included when the emitter passes one (effectively always today). Extras whose value is `None` are dropped, so callers can pass optional context (`session_id`, `review_round`, `retry_count`, ...) unconditionally without polluting records that don't carry them. `json.dumps` is called with `sort_keys=True` so the on-disk order is stable across writers.
+
+**Event kinds.** Every kind is emitted through the single `GitHubClient.emit_event` chokepoint, which also appends to a capped in-memory tail (`recorded_events`, `_RECORDED_EVENTS_CAP = 500`) for tests and short-window debugging — the file is the durable record.
+
+| `event` | Emitter | Notable extras |
+|---|---|---|
+| `stage_enter` | `set_workflow_label` (via `_emit_stage_enter`) for every label flip | `stage` |
+| `agent_spawn` / `agent_exit` | `_run_agent_with_tracking` wraps every `run_agent` call (decomposer, implementer, reviewer, dev-resume, conflict-resolution dev) | both: `agent` (backend), `agent_role`, `review_round`, `retry_count`. On `agent_spawn`, `session_id` is the resume session id and is OMITTED for fresh spawns (the caller passes `resume_session_id=None` and `build_event_record` drops `None`-valued extras, so a fresh-spawn record has no `session_id` key at all). On `agent_exit`, `session_id` is the result id from `AgentResult`; `agent_exit` additionally carries `duration_s`, `exit_code`, and `timed_out`, computed from the `run_agent` return value, and these three are NOT emitted on `agent_spawn` |
+| `review_verdict` | `_handle_validating` after `_parse_review_verdict` reads the reviewer's last message | `verdict` (`approved` / `changes_requested` / `unknown`), `review_round`, `pr_number`, `session_id` |
+| `park_awaiting_human` | every `_park_awaiting_human` call site, plus `_on_question` and `_on_dirty_worktree` | `stage` (read from the current workflow label, not passed in), `reason` (`agent_timeout`, `push_failed`, `failed_checks`, `agent_question`, `agent_silent`, `dirty_worktree`, `reviewer_timeout` / `reviewer_failed`, `missing_pr_number`, ...) |
+| `pr_opened` | `_on_commits` after `gh.open_pr` succeeds | `pr_number`, `branch`, `sha`, `retry_count` |
+| `pr_merged` | `_handle_in_review` and `_handle_resolving_conflict` terminal arcs (external merge OR successful `gh.merge_pr` under AUTO_MERGE) | `pr_number`, `sha`, `merge_method` (`external` / `squash`), `check_state`, `review_round`, `conflict_round`, `retry_count` |
+| `pr_closed_without_merge` | `_handle_in_review` and `_handle_resolving_conflict` when the PR is closed without merge | `pr_number`, `sha`, `review_round`, `conflict_round`, `retry_count` |
+| `merge_attempt` | AUTO_MERGE `gh.merge_pr` call AND every `git merge origin/<base>` inside `_handle_resolving_conflict` | `method` (`squash` / `base_merge`), `result` (`success` / `failed` / `conflict`), `pr_number`, `sha`, `conflict_round`, `review_round`, `retry_count` |
+| `conflict_round` | `_route_pr_worktree_to_resolving_conflict` and the in_review unmergeable arc emit `action="entered"`; every increment site (`_emit_conflict_round_incremented`) emits `action="incremented"` with `outcome` | `pr_number`, `conflict_round`, `review_round`, `retry_count`, `outcome` (for increments), `sha` |
+
+**No built-in rotation.** `_write_event_record` reopens the file in append mode for every event (`path.open("a", ...)` after `path.parent.mkdir(parents=True, exist_ok=True)`); there is no long-lived file descriptor, no size cap, no rename, and no compression. External rotation and recreation are operator-managed — pair `EVENT_LOG_PATH` with `logrotate` (or equivalent) for long-running deployments. Because each append re-resolves the path, create/rename-style rotation is as safe as `copytruncate`: the next event picks up the new inode without any `SIGHUP` or restart. An `OSError` during the append is caught and downgraded to a `log.warning` so a misconfigured path (read-only mount, disk full, permission failure) cannot stop the per-issue tick from making progress; the missing record is silently dropped and the pinned state on GitHub remains correct.
+
+**Pinned state is authoritative.** The event log is append-only and observation-only. The orchestrator never reads it back; every dispatch decision keys off the pinned `<!--orchestrator-state ...-->` JSON comment on the issue (and the issue's workflow label). If the two disagree — a write failed and was logged-and-swallowed, the file was truncated by `logrotate`, events were lost during a disk-full window, or a crash interleaved partially-flushed lines — trust pinned state. The append-only log is therefore safe to truncate or delete at any time without affecting workflow correctness; it does not contribute to durability.
+
 ## Summary of "what runs when"
 
 | Component | Type | Trigger | Cadence |

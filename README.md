@@ -152,6 +152,7 @@ All settings load from `.env` (or process environment). See [`.env.example`](.en
 | `BASE_BRANCH`             | `main`                                        | branch PRs target                                         |
 | `AUTO_MERGE`              | `off`                                         | merge approved PRs (green CI + mergeable) from `in_review`; flip to `on` once dogfooded |
 | `IN_REVIEW_DEBOUNCE_SECONDS` | `600`                                       | quiet window after the latest PR/issue comment before resuming the dev session |
+| `EVENT_LOG_PATH`          | _(unset)_                                     | optional JSONL audit sink; one event per line, no built-in rotation. See [Audit event log](#audit-event-log) |
 
 ## Agent command specs
 
@@ -178,6 +179,36 @@ DECOMPOSE_AGENT=codex -m gpt-5.5
 `CODEX_BIN` / `CLAUDE_BIN` interact with the first token as a backend selector: the first token only picks the codex vs. claude runner, while the actual executable launched is `CODEX_BIN` for `codex` and `CLAUDE_BIN` for `claude`. Override those when the CLI is not on `$PATH`; writing the full path as the first token of `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` is rejected.
 
 **In-flight issues keep using the pinned full spec until the agent session ends.** The dev/decomposer spec (backend + args) is persisted to the issue's pinned state (`dev_agent` / `decomposer_agent`) on the first spawn, and `_handle_implementing` / `_handle_decomposing` re-parse that stored spec on every resume. Flipping `DEV_AGENT` or `DECOMPOSE_AGENT` in env therefore only affects fresh issues — any issue with a live session keeps the original backend AND args (including model / effort flags) until it reaches a terminal label (`done` / `rejected`). The reviewer is spawned fresh every round, so `REVIEW_AGENT` changes take effect on the next validating round; the most recent value is recorded in `review_agent` for traceability. `DECOMPOSE_AGENT` is validated at import even when `DECOMPOSE=off`, so toggling `DECOMPOSE` back on never surfaces a fresh "that env var was always invalid" failure.
+
+## Audit event log
+
+Setting `EVENT_LOG_PATH` enables an opt-in JSONL audit sink: the orchestrator appends one JSON object per workflow event to that file. Leave it unset (default) and no file is opened — observable behavior is identical to a deployment without the sink. The parent directory is created on demand; writes are synchronous so order matches the tick.
+
+Every record has the same envelope:
+
+```json
+{"event":"stage_enter","issue":42,"repo":"acme/api","stage":"implementing","ts":"2026-05-22T14:03:11+00:00"}
+```
+
+`ts` is UTC at second precision, keys are emitted sorted, and optional fields are omitted entirely when their value is `None` (so a stage-less event has no `"stage":null` and a record without a `session_id` simply lacks the key).
+
+Event kinds:
+
+| `event` | Emitted when | Notable extras |
+|---|---|---|
+| `stage_enter` | `set_workflow_label` flips an issue to a workflow label | `stage` |
+| `agent_spawn` / `agent_exit` | bookend every decomposer / implementer / reviewer / resume / conflict-resolution `run_agent` call | both: `agent`, `agent_role`, `review_round`, `retry_count`. `agent_spawn` only on resumes: `session_id` (the resume id; omitted for fresh spawns since `None` extras are dropped). `agent_exit` always: `session_id` (the result id), `duration_s`, `exit_code`, `timed_out` |
+| `review_verdict` | `_handle_validating` parses the reviewer's final message | `verdict` (`approved` / `changes_requested` / `unknown`), `review_round`, `pr_number`, `session_id` |
+| `park_awaiting_human` | every `_park_awaiting_human` / `_on_question` / `_on_dirty_worktree` call site | `stage`, `reason` (`agent_timeout`, `push_failed`, `failed_checks`, `agent_question`, `agent_silent`, `dirty_worktree`, `reviewer_*`, `missing_pr_number`, …) |
+| `pr_opened` | implementer's clean-tree push opens the PR | `pr_number`, `branch`, `sha`, `retry_count` |
+| `pr_merged` | PR merged externally or by AUTO_MERGE | `pr_number`, `sha`, `merge_method` (`external` / `squash`), `check_state`, `review_round`, `conflict_round` |
+| `pr_closed_without_merge` | PR closed unmerged from `in_review` or `resolving_conflict` (issue lands on `rejected`) | `pr_number`, `sha`, `review_round`, `conflict_round` |
+| `merge_attempt` | AUTO_MERGE `gh.merge_pr` call, or a `git merge origin/<base>` inside `_handle_resolving_conflict` | `method` (`squash` / `base_merge`), `result` (`success` / `failed` / `conflict`), `pr_number`, `sha`, `conflict_round` |
+| `conflict_round` | entered `resolving_conflict` (`action="entered"`) or bumped the per-PR counter (`action="incremented"` with `outcome`) | `pr_number`, `conflict_round`, `review_round`, `retry_count` |
+
+**No built-in rotation.** The orchestrator only appends; it never truncates, renames, or compresses the file. External rotation and recreation are operator-managed — pair `EVENT_LOG_PATH` with `logrotate` (or your platform's equivalent) if you leave the orchestrator running long enough that file size matters.
+
+**Pinned state is authoritative.** The append-only log is for audit and observability only. Per-issue state lives in the pinned `<!--orchestrator-state ...-->` comment on each issue (see [`docs/architecture.md`](docs/architecture.md)), and that is the only source the orchestrator reads on the next tick. If the log and pinned state disagree — a write failed and was logged-and-swallowed, the file was truncated by rotation, the disk filled, or events landed out-of-order during a crash — trust pinned state and treat the log as a lossy tail.
 
 ## Managing multiple repositories
 
