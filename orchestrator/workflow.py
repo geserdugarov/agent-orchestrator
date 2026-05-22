@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -490,6 +491,72 @@ def _post_pr_comment(
     if cid is not None:
         _track_orchestrator_comment(state, int(cid))
     return c
+
+
+def _run_agent_tracked(
+    gh: GitHubClient,
+    issue_number: int,
+    *,
+    agent_role: str,
+    stage: str,
+    backend: str,
+    prompt: str,
+    cwd: Path,
+    resume_session_id: Optional[str] = None,
+    timeout: Optional[int] = None,
+    extra_args: tuple[str, ...] = (),
+    review_round: Optional[int] = None,
+    retry_count: Optional[int] = None,
+) -> AgentResult:
+    """Run an agent, bookending the spawn with `agent_spawn` / `agent_exit`
+    audit events.
+
+    Thin wrapper around `run_agent` -- the spawn behaviour is unchanged.
+    Optional context (`review_round`, `retry_count`, resume session id) is
+    forwarded so downstream consumers can correlate spawns with retry
+    budgets and reviewer rounds. The exit record carries
+    `exit_code`/`timed_out`/`duration_s` from the AgentResult so an
+    operator tailing the JSONL sink sees timeouts and crashes without
+    needing the orchestrator log too. An exception out of `run_agent`
+    propagates -- the audit log will show a spawn without a matching
+    exit, which is intentional (the per-issue `tick()` catch above logs
+    the traceback).
+    """
+    start = time.monotonic()
+    gh.emit_event(
+        "agent_spawn",
+        issue_number=issue_number,
+        stage=stage,
+        agent=backend,
+        agent_role=agent_role,
+        session_id=resume_session_id,
+        review_round=review_round,
+        retry_count=retry_count,
+    )
+    # Forward only the kwargs the original call sites set so the
+    # wrapper's run_agent invocation matches the pre-tracking signature
+    # call-for-call (test fakes assert on `call.kwargs`).
+    run_agent_kwargs: dict[str, Any] = {"extra_args": extra_args}
+    if resume_session_id is not None:
+        run_agent_kwargs["resume_session_id"] = resume_session_id
+    if timeout is not None:
+        run_agent_kwargs["timeout"] = timeout
+    result = run_agent(backend, prompt, cwd, **run_agent_kwargs)
+    duration_s = round(time.monotonic() - start, 3)
+    gh.emit_event(
+        "agent_exit",
+        issue_number=issue_number,
+        stage=stage,
+        agent=backend,
+        agent_role=agent_role,
+        session_id=result.session_id,
+        duration_s=duration_s,
+        exit_code=result.exit_code,
+        timed_out=result.timed_out,
+        review_round=review_round,
+        retry_count=retry_count,
+    )
+    return result
 
 
 def _read_dev_session(
@@ -2059,10 +2126,16 @@ def _resume_decomposer_on_human_reply(
     _, decomposer_backend, decomposer_args, decomposer_sid = (
         _read_decomposer_session(state)
     )
-    result = run_agent(
-        decomposer_backend, followup, wt,
+    result = _run_agent_tracked(
+        gh, issue.number,
+        agent_role="decomposer",
+        stage="decomposing",
+        backend=decomposer_backend,
+        prompt=followup,
+        cwd=wt,
         resume_session_id=decomposer_sid,
         extra_args=decomposer_args,
+        retry_count=state.get("retry_count"),
     )
     state.set("awaiting_human", False)
     return result
@@ -2163,6 +2236,7 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                     "and the parent state write); manual intervention needed "
                     "(close any partial children and re-decompose, or finish "
                     "creating the missing ones).",
+                    reason="decomposition_crash",
                 )
                 gh.write_pinned_state(issue, state)
                 return
@@ -2198,6 +2272,7 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                         f"#{child_number} during decomposition recovery "
                         "(seed `parent_number` on its pinned state); manual "
                         "intervention needed (check orchestrator logs).",
+                        reason="child_seed_failed",
                     )
                     gh.write_pinned_state(issue, state)
                     return
@@ -2297,9 +2372,15 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             # strip configured CLI args on subsequent resumes.
             state.set("decomposer_agent", decomposer_spec)
             prompt = _build_decompose_prompt(issue, _recent_comments_text(issue))
-            result = run_agent(
-                decomposer_backend, prompt, wt,
+            result = _run_agent_tracked(
+                gh, issue.number,
+                agent_role="decomposer",
+                stage="decomposing",
+                backend=decomposer_backend,
+                prompt=prompt,
+                cwd=wt,
                 extra_args=decomposer_args,
+                retry_count=state.get("retry_count"),
             )
             if result.session_id:
                 state.set("decomposer_session_id", result.session_id)
@@ -2311,6 +2392,7 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 gh, issue, state,
                 f"{config.HITL_MENTIONS} decomposer timed out after "
                 f"{config.AGENT_TIMEOUT}s, manual intervention needed.",
+                reason="decomposer_timeout",
             )
             gh.write_pinned_state(issue, state)
             return
@@ -2328,6 +2410,7 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 f"{config.HITL_MENTIONS} decomposer left commits or uncommitted "
                 "changes in the worktree, but it must be read-only. Reset the "
                 "worktree before resuming.",
+                reason="decomposer_dirty",
             )
             gh.write_pinned_state(issue, state)
             return
@@ -2346,6 +2429,7 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                     f"{config.HITL_MENTIONS} decomposer manifest invalid "
                     f"({error}); manual adjudication needed.\n\n"
                     f"_Last decomposer message:_\n\n{quoted}",
+                    reason="decomposer_invalid_manifest",
                 )
             else:
                 stripped = last_msg.strip()
@@ -2362,6 +2446,7 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                     gh, issue, state,
                     f"{config.HITL_MENTIONS} decomposer needs your input to "
                     f"proceed:\n\n{quoted}{diag}",
+                    reason="decomposer_silent" if not stripped else "decomposer_question",
                 )
                 if not stripped:
                     log.warning(
@@ -2440,6 +2525,7 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                     f"{config.HITL_MENTIONS} could not create child issue "
                     f"index={idx} ({child.get('title')!r}); manual intervention "
                     "needed (check orchestrator logs).",
+                    reason="child_create_failed",
                 )
                 gh.write_pinned_state(issue, state)
                 return
@@ -2485,6 +2571,7 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                     f"({child.get('title')!r}) but could not seed its pinned "
                     "state with `parent_number`; manual intervention needed "
                     "(seed parent_number on the child or close it).",
+                    reason="child_seed_failed",
                 )
                 gh.write_pinned_state(issue, state)
                 return
@@ -2646,6 +2733,7 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh, issue, state,
             f"{config.HITL_MENTIONS} `blocked` without recorded children; "
             "manual relabel suspected.",
+            reason="blocked_no_children",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -2672,6 +2760,7 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             f"{config.HITL_MENTIONS} child issue(s) rejected: "
             f"{', '.join(f'#{n}' for n in rejected)}; "
             "decide whether to re-decompose or close.",
+            reason="child_rejected",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -2702,6 +2791,7 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             f"`done` or `rejected`: "
             f"{', '.join(f'#{n}' for n in manually_closed)}; "
             "decide whether to re-decompose or close.",
+            reason="child_manually_closed",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -2790,6 +2880,7 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh, issue, state,
             f"{config.HITL_MENTIONS} `umbrella` without recorded children; "
             "manual relabel suspected.",
+            reason="umbrella_no_children",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -2816,6 +2907,7 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             f"{config.HITL_MENTIONS} child issue(s) rejected: "
             f"{', '.join(f'#{n}' for n in rejected)}; "
             "decide whether to re-decompose or close.",
+            reason="child_rejected",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -2834,6 +2926,7 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             f"`done` or `rejected`: "
             f"{', '.join(f'#{n}' for n in manually_closed)}; "
             "decide whether to re-decompose or close.",
+            reason="child_manually_closed",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -2879,7 +2972,9 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
 
 def _park_awaiting_human(
-    gh: GitHubClient, issue: Issue, state: PinnedState, message: str
+    gh: GitHubClient, issue: Issue, state: PinnedState, message: str,
+    *,
+    reason: Optional[str] = None,
 ) -> None:
     """Post `message` and mark the issue as awaiting a human reply.
 
@@ -2891,6 +2986,11 @@ def _park_awaiting_human(
     auto-merge over the dev's standing question on the next tick. Callers
     that re-park for a transient reason (the AUTO_MERGE failed-checks /
     unmergeable paths) re-set `park_reason` immediately after this call.
+
+    `reason` is recorded only in the emitted `park_awaiting_human` audit
+    event; the durable `park_reason` field in pinned state is still cleared
+    here (callers that need a transient reason re-set it themselves -- see
+    above), so passing a reason does not change observable behavior.
     """
     _post_issue_comment(gh, issue, state, message)
     state.set("awaiting_human", True)
@@ -2898,6 +2998,16 @@ def _park_awaiting_human(
     latest = gh.latest_comment_id(issue)
     if latest is not None:
         state.set("last_action_comment_id", latest)
+    # Read the label AFTER the comment post and state writes so the
+    # captured stage reflects the handler that drove the park (the label
+    # itself is unchanged by this call -- callers relabel only after the
+    # `write_pinned_state` they do next).
+    gh.emit_event(
+        "park_awaiting_human",
+        issue_number=issue.number,
+        stage=gh.workflow_label(issue),
+        reason=reason,
+    )
 
 
 def _check_and_increment_retry_budget(
@@ -2949,6 +3059,7 @@ def _check_and_increment_retry_budget(
             f"{config.HITL_MENTIONS} hit retry cap ({cap}/day) for "
             f"{stage}; manual intervention needed. "
             f"Window opened at {window_start_raw}.",
+            reason="retry_cap",
         )
         return False
 
@@ -3074,10 +3185,21 @@ def _resume_dev_with_text(
         # old poisoned id, which `_read_dev_session` would otherwise
         # return again and burn another retry.
         _drop_poisoned_dev_session(state)
-    result = run_agent(
-        dev_backend, followup_text, wt,
+    # Stage context reflects the current label so events from validating /
+    # in_review / resolving_conflict resumes (or implementing awaiting-human
+    # resumes) are tagged with the handler that triggered the resume.
+    resume_stage = gh.workflow_label(issue) or "implementing"
+    result = _run_agent_tracked(
+        gh, issue.number,
+        agent_role="developer",
+        stage=resume_stage,
+        backend=dev_backend,
+        prompt=followup_text,
+        cwd=wt,
         resume_session_id=dev_sid,
         extra_args=dev_args,
+        review_round=state.get("review_round"),
+        retry_count=state.get("retry_count"),
     )
 
     # Deterministic stale-session recovery: if we resumed with a session id
@@ -3100,10 +3222,17 @@ def _resume_dev_with_text(
         )
         _drop_poisoned_dev_session(state)
         fresh_spawn = True
-        result = run_agent(
-            dev_backend, followup_text, wt,
+        result = _run_agent_tracked(
+            gh, issue.number,
+            agent_role="developer",
+            stage=resume_stage,
+            backend=dev_backend,
+            prompt=followup_text,
+            cwd=wt,
             resume_session_id=None,
             extra_args=dev_args,
+            review_round=state.get("review_round"),
+            retry_count=state.get("retry_count"),
         )
 
     if fresh_spawn and result.session_id:
@@ -3219,6 +3348,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                     gh, issue, state,
                     f"{config.HITL_MENTIONS} agent timed out after "
                     f"{config.AGENT_TIMEOUT}s, manual intervention needed.",
+                    reason="agent_timeout",
                 )
             elif this_resume_committed:
                 dirty = _worktree_dirty_files(wt)
@@ -3281,6 +3411,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 "that never saw the edited requirements; decide whether "
                 "to discard the recovered work (reset the branch) and "
                 "let a fresh agent run, or accept it as-is.",
+                reason="stale_recovered_work",
             )
             gh.write_pinned_state(issue, state)
             return
@@ -3358,9 +3489,15 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             # so this is a no-op when state already carries the spec.
             state.set("dev_agent", dev_spec)
             prompt = _build_implement_prompt(issue, _recent_comments_text(issue))
-            result = run_agent(
-                dev_backend, prompt, wt,
+            result = _run_agent_tracked(
+                gh, issue.number,
+                agent_role="developer",
+                stage="implementing",
+                backend=dev_backend,
+                prompt=prompt,
+                cwd=wt,
                 extra_args=dev_args,
+                retry_count=state.get("retry_count"),
             )
             if result.session_id:
                 state.set("dev_session_id", result.session_id)
@@ -3376,6 +3513,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             gh, issue, state,
             f"{config.HITL_MENTIONS} agent timed out after {config.AGENT_TIMEOUT}s, "
             "manual intervention needed.",
+            reason="agent_timeout",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -3414,6 +3552,7 @@ def _handle_dev_fix_result(
             gh, issue, state,
             f"{config.HITL_MENTIONS} agent timed out after {config.AGENT_TIMEOUT}s, "
             "manual intervention needed.",
+            reason="agent_timeout",
         )
         # Tag as transient: a stuck dev fix-loop (validating CHANGES_REQUESTED
         # or comment-driven resume) clears on the next tick when the validating
@@ -3456,6 +3595,7 @@ def _handle_dev_fix_result(
         _park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} git push failed; see orchestrator logs.",
+            reason="push_failed",
         )
         # Tag as transient so a self-resolving condition (the next push
         # succeeds under --force-with-lease once the remote settles) can
@@ -3503,6 +3643,7 @@ def _post_user_content_change_result(
             gh, issue, state,
             f"{config.HITL_MENTIONS} agent timed out after "
             f"{config.AGENT_TIMEOUT}s, manual intervention needed.",
+            reason="agent_timeout",
         )
         state.set("park_reason", "agent_timeout")
         state.set("pre_dev_fix_sha", before_sha or "")
@@ -3545,6 +3686,7 @@ def _post_user_content_change_result(
         _park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} git push failed; see orchestrator logs.",
+            reason="push_failed",
         )
         state.set("park_reason", "push_failed")
         return "parked"
@@ -3699,6 +3841,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh, issue, state,
             f"{config.HITL_MENTIONS} review still has comments after "
             f"{round_n} round(s); manual intervention needed.",
+            reason="review_cap",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -3723,10 +3866,17 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # (no resume), so always overwriting the field with the current
     # config spec is the right behavior here.
     state.set("review_agent", config.REVIEW_AGENT_SPEC)
-    review = run_agent(
-        config.REVIEW_AGENT, review_prompt, wt,
+    review = _run_agent_tracked(
+        gh, issue.number,
+        agent_role="reviewer",
+        stage="validating",
+        backend=config.REVIEW_AGENT,
+        prompt=review_prompt,
+        cwd=wt,
         timeout=config.REVIEW_TIMEOUT,
         extra_args=config.REVIEW_AGENT_ARGS,
+        review_round=round_n,
+        retry_count=state.get("retry_count"),
     )
     if review.session_id:
         state.set("last_review_session_id", review.session_id)
@@ -3737,6 +3887,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh, issue, state,
             f"{config.HITL_MENTIONS} reviewer timed out after "
             f"{config.REVIEW_TIMEOUT}s; manual intervention needed.",
+            reason="reviewer_timeout",
         )
         # Tag as transient so the next tick re-spawns the reviewer instead
         # of waiting for a human comment that the timeout itself does not
@@ -3746,6 +3897,15 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         return
 
     verdict, body = _parse_review_verdict(review.last_message)
+    gh.emit_event(
+        "review_verdict",
+        issue_number=issue.number,
+        stage="validating",
+        verdict=verdict,
+        review_round=round_n,
+        pr_number=int(pr_number) if pr_number is not None else None,
+        session_id=review.session_id,
+    )
 
     if verdict == "approved":
         if pr_number is not None:
@@ -3787,6 +3947,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                     "intervention needed (squash + force-push by hand, "
                     "or set `SQUASH_ON_APPROVAL=off` and re-run the "
                     "reviewer).",
+                    reason="squash_failed",
                 )
                 gh.write_pinned_state(issue, state)
                 return
@@ -3915,6 +4076,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             f"{config.HITL_MENTIONS} reviewer did not emit a VERDICT line; "
             f"manual adjudication needed.\n\n_Last reviewer message:_\n\n"
             f"{quoted}{diag}",
+            reason="reviewer_failed" if silent_crash else "reviewer_no_verdict",
         )
         if silent_crash:
             # Tag as transient so the next tick re-spawns the reviewer
@@ -3951,10 +4113,17 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     fix_prompt = _build_fix_prompt(feedback)
     before_sha = _head_sha(wt)
     _, dev_backend, dev_args, dev_sid = _read_dev_session(state)
-    dev_result = run_agent(
-        dev_backend, fix_prompt, wt,
+    dev_result = _run_agent_tracked(
+        gh, issue.number,
+        agent_role="developer",
+        stage="validating",
+        backend=dev_backend,
+        prompt=fix_prompt,
+        cwd=wt,
         resume_session_id=dev_sid,
         extra_args=dev_args,
+        review_round=round_n,
+        retry_count=state.get("retry_count"),
     )
     state.set("last_agent_action_at", _now_iso())
 
@@ -4434,6 +4603,7 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             f"{config.HITL_MENTIONS} `in_review` without a pinned `pr_number`; "
             "manual relabeling suspected. Set the workflow label back to "
             "`validating` (or `implementing`) after fixing.",
+            reason="missing_pr_number",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -4754,6 +4924,7 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 f"{config.HITL_MENTIONS} PR #{pr_number} is not mergeable "
                 "(branch protection, conflicts, or out-of-date base); "
                 "manual merge needed.",
+                reason="unmergeable",
             )
             state.set("park_reason", "unmergeable")
             _bump_in_review_watermarks(gh, issue, state)
@@ -4841,6 +5012,7 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh, issue, state,
             f"{config.HITL_MENTIONS} PR #{pr_number} checks are {check!r}; "
             "refusing to auto-merge.",
+            reason="failed_checks",
         )
         state.set("park_reason", "failed_checks")
         _bump_in_review_watermarks(gh, issue, state)
@@ -5095,6 +5267,7 @@ def _handle_resolving_conflict(
             f"{config.HITL_MENTIONS} `resolving_conflict` without a pinned "
             "`pr_number`; manual relabeling suspected. Set the workflow "
             "label back to `validating` after fixing.",
+            reason="missing_pr_number",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -5233,6 +5406,7 @@ def _handle_resolving_conflict(
             f"after {conflict_round} round(s) "
             f"(`MAX_CONFLICT_ROUNDS={config.MAX_CONFLICT_ROUNDS}`); manual "
             "intervention needed.",
+            reason="conflict_cap",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -5265,6 +5439,7 @@ def _handle_resolving_conflict(
             gh, issue, state,
             f"{config.HITL_MENTIONS} `git fetch {spec.remote_name} {branch}` "
             "failed during conflict resolution; see orchestrator logs.",
+            reason="fetch_failed",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -5295,6 +5470,7 @@ def _handle_resolving_conflict(
             f"(PR head `{pr.head.sha[:8]}`); refusing to merge a stale "
             "or diverged branch -- force-pushing the local state would "
             "clobber the real PR head. Manual intervention needed.",
+            reason="diverged_branch",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -5314,6 +5490,7 @@ def _handle_resolving_conflict(
                 "uncommitted change(s) alongside recovered conflict "
                 "resolution; refusing to push an incomplete branch. "
                 "Resolve the dirty tree manually before resuming.",
+                reason="dirty_worktree",
             )
             gh.write_pinned_state(issue, state)
             return
@@ -5327,6 +5504,7 @@ def _handle_resolving_conflict(
                 gh, issue, state,
                 f"{config.HITL_MENTIONS} git push of recovered conflict "
                 "resolution failed; see orchestrator logs.",
+                reason="push_failed",
             )
             gh.write_pinned_state(issue, state)
             return
@@ -5355,6 +5533,7 @@ def _handle_resolving_conflict(
             f"{config.HITL_MENTIONS} "
             f"`git fetch {spec.remote_name} {spec.base_branch}` "
             "failed during conflict resolution; see orchestrator logs.",
+            reason="fetch_failed",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -5382,6 +5561,7 @@ def _handle_resolving_conflict(
                 f"uncommitted change(s) after `git merge "
                 f"{spec.remote_name}/{spec.base_branch}`; refusing to "
                 "push or hand back to validating with a dirty tree.",
+                reason="dirty_worktree",
             )
             gh.write_pinned_state(issue, state)
             return
@@ -5413,6 +5593,7 @@ def _handle_resolving_conflict(
                 f"{config.HITL_MENTIONS} git push failed after auto-merging "
                 f"`{spec.remote_name}/{spec.base_branch}`; "
                 "see orchestrator logs.",
+                reason="push_failed",
             )
             gh.write_pinned_state(issue, state)
             return
@@ -5430,6 +5611,7 @@ def _handle_resolving_conflict(
             f"`git merge {spec.remote_name}/{spec.base_branch}` "
             "failed without listing conflicted files; manual intervention "
             "needed.",
+            reason="merge_failed_no_files",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -5470,6 +5652,7 @@ def _post_conflict_resolution_result(
             f"{config.HITL_MENTIONS} dev agent timed out resolving merge "
             f"conflicts after {config.AGENT_TIMEOUT}s; manual intervention "
             "needed.",
+            reason="agent_timeout",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -5493,6 +5676,7 @@ def _post_conflict_resolution_result(
             gh, issue, state,
             f"{config.HITL_MENTIONS} git push failed after conflict "
             "resolution; see orchestrator logs.",
+            reason="push_failed",
         )
         gh.write_pinned_state(issue, state)
         return
@@ -5520,6 +5704,7 @@ def _on_commits(
         _park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} git push failed; see orchestrator logs.",
+            reason="push_failed",
         )
         # _handle_implementing writes pinned state after we return.
         return
@@ -5575,6 +5760,7 @@ def _on_question(
         # unmergeable park, and reset the silent-park streak.
         state.set("park_reason", None)
         state.set("silent_park_count", 0)
+        park_reason = "agent_question"
     else:
         # No commits AND no final message -- the agent produced literally
         # nothing. Callers only invoke `_on_question` when the worktree has
@@ -5604,9 +5790,16 @@ def _on_question(
             "silent_park_count",
             int(state.get("silent_park_count") or 0) + 1,
         )
+        park_reason = "agent_silent"
     latest = gh.latest_comment_id(issue)
     if latest is not None:
         state.set("last_action_comment_id", latest)
+    gh.emit_event(
+        "park_awaiting_human",
+        issue_number=issue.number,
+        stage=gh.workflow_label(issue),
+        reason=park_reason,
+    )
 
 
 def _on_dirty_worktree(
@@ -5649,3 +5842,10 @@ def _on_dirty_worktree(
     latest = gh.latest_comment_id(issue)
     if latest is not None:
         state.set("last_action_comment_id", latest)
+    gh.emit_event(
+        "park_awaiting_human",
+        issue_number=issue.number,
+        stage=gh.workflow_label(issue),
+        reason="dirty_worktree",
+        dirty_files=len(dirty),
+    )

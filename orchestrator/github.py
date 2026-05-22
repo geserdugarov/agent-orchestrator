@@ -65,16 +65,30 @@ def _write_event_record(record: dict) -> None:
 
 
 def build_event_record(
-    *, repo: str, issue_number: int, stage: str, event: str,
+    *, repo: str, issue_number: int, event: str,
+    stage: Optional[str] = None,
+    **extras: Any,
 ) -> dict:
-    """Build a stage-transition event record. UTC timestamp, second precision."""
-    return {
+    """Build a structured event record. UTC timestamp, second precision.
+
+    `stage` is omitted when None so audit-only events that have no natural
+    stage (rare; today every emitter passes one) do not carry a `null`
+    field. Extra fields whose value is None are likewise dropped so callers
+    can pass optional context (`session_id`, `review_round`, `retry_count`,
+    ...) unconditionally without polluting records that don't carry them.
+    """
+    rec: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "repo": repo,
         "issue": int(issue_number),
-        "stage": stage,
         "event": event,
     }
+    if stage is not None:
+        rec["stage"] = stage
+    for k, v in extras.items():
+        if v is not None:
+            rec[k] = v
+    return rec
 
 
 @dataclass
@@ -215,25 +229,47 @@ class GitHubClient:
 
     _RECORDED_EVENTS_CAP = 500
 
-    def _emit_stage_enter(self, issue: Issue, stage: str) -> None:
-        """Record a `stage_enter` event for `issue` transitioning to `stage`.
+    def emit_event(
+        self,
+        event: str,
+        *,
+        issue_number: int,
+        stage: Optional[str] = None,
+        **extras: Any,
+    ) -> None:
+        """Record a structured event and -- when EVENT_LOG_PATH is set --
+        append it to the JSONL sink.
 
-        Centralized hook called from `set_workflow_label` so every callsite
-        emits identically without per-handler bookkeeping. Always appends
-        to the in-memory `recorded_events` tail and -- when
-        `config.EVENT_LOG_PATH` is configured -- to the JSONL sink. The
-        in-memory tail is capped (the file is the durable record).
+        Generalizes `_emit_stage_enter` so workflow handlers can emit
+        per-stage audit events (`agent_spawn`, `agent_exit`,
+        `review_verdict`, `park_awaiting_human`) through a single
+        chokepoint without per-handler file IO. The in-memory tail is
+        capped so a long-running process can't grow it unbounded; the
+        file is the durable record.
         """
         record = build_event_record(
             repo=self._repo_slug,
-            issue_number=getattr(issue, "number", 0) or 0,
+            issue_number=issue_number,
+            event=event,
             stage=stage,
-            event="stage_enter",
+            **extras,
         )
         self.recorded_events.append(record)
         if len(self.recorded_events) > self._RECORDED_EVENTS_CAP:
             self.recorded_events = self.recorded_events[-self._RECORDED_EVENTS_CAP:]
         _write_event_record(record)
+
+    def _emit_stage_enter(self, issue: Issue, stage: str) -> None:
+        """Record a `stage_enter` event for `issue` transitioning to `stage`.
+
+        Centralized hook called from `set_workflow_label` so every callsite
+        emits identically without per-handler bookkeeping.
+        """
+        self.emit_event(
+            "stage_enter",
+            issue_number=getattr(issue, "number", 0) or 0,
+            stage=stage,
+        )
 
     def comment(self, issue: Issue, body: str) -> IssueComment:
         return issue.create_comment(body)

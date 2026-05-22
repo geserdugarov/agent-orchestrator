@@ -255,14 +255,33 @@ class FakeGitHubClient:
         issue.labels = keep
         self.label_history.append((issue.number, new_label))
         if new_label:
-            record = build_event_record(
-                repo=self._repo_slug,
+            self.emit_event(
+                "stage_enter",
                 issue_number=issue.number,
                 stage=new_label,
-                event="stage_enter",
             )
-            self.recorded_events.append(record)
-            _write_event_record(record)
+
+    def emit_event(
+        self,
+        event: str,
+        *,
+        issue_number: int,
+        stage: Optional[str] = None,
+        **extras: Any,
+    ) -> None:
+        """Mirror `GitHubClient.emit_event`: append to `recorded_events` and
+        -- when EVENT_LOG_PATH is set -- write to disk via the same helper
+        the real client uses, so a single test can cover both surfaces.
+        """
+        record = build_event_record(
+            repo=self._repo_slug,
+            issue_number=issue_number,
+            event=event,
+            stage=stage,
+            **extras,
+        )
+        self.recorded_events.append(record)
+        _write_event_record(record)
 
     def comment(self, issue: FakeIssue, body: str) -> FakeComment:
         c = FakeComment(id=next(self._comment_id), body=body)

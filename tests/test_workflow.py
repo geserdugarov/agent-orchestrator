@@ -749,6 +749,361 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(len(gh.recorded_events), 1)
 
 
+class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """`_run_agent_tracked` bookends every agent invocation with
+    `agent_spawn` / `agent_exit` events carrying the role, stage, session
+    id, duration, and timeout/exit metadata. Optional context fields
+    (review_round, retry_count) are recorded when present.
+
+    These tests exercise the in-memory `recorded_events` capture on the
+    fake; the same records are written to disk when EVENT_LOG_PATH is set
+    (the StageEventEmissionTest covers the on-disk surface).
+    """
+
+    @staticmethod
+    def _events(gh, event_name: str) -> list[dict]:
+        return [e for e in gh.recorded_events if e["event"] == event_name]
+
+    def test_fresh_developer_spawn_emits_paired_lifecycle_events(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(1, label="implementing")
+        gh.add_issue(issue)
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-dev", last_message="q?"),
+            has_new_commits=False,
+        )
+        spawns = self._events(gh, "agent_spawn")
+        exits = self._events(gh, "agent_exit")
+        self.assertEqual(len(spawns), 1)
+        self.assertEqual(len(exits), 1)
+        spawn = spawns[0]
+        ex = exits[0]
+        self.assertEqual(spawn["stage"], "implementing")
+        self.assertEqual(spawn["agent_role"], "developer")
+        self.assertEqual(spawn["agent"], config.DEV_AGENT)
+        self.assertNotIn("session_id", spawn)  # fresh spawn -- no resume id
+        self.assertEqual(ex["session_id"], "sess-dev")
+        self.assertEqual(ex["exit_code"], 0)
+        self.assertFalse(ex["timed_out"])
+        self.assertIn("duration_s", ex)
+        self.assertGreaterEqual(ex["duration_s"], 0)
+        # retry_count is incremented to 1 by `_check_and_increment_retry_budget`
+        # BEFORE the spawn, so the recorded value is what the agent ran under.
+        self.assertEqual(spawn["retry_count"], 1)
+        self.assertEqual(ex["retry_count"], 1)
+
+    def test_reviewer_spawn_carries_review_round_and_retry_count(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(2, label="validating")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=42,
+            head_branch="orchestrator/issue-2",
+            base_branch="main",
+            mergeable=True,
+            check_state="success",
+            approved=False,
+        )
+        gh.add_pr(pr)
+        # Seed both `review_round` and `retry_count` so both optional
+        # context fields ride along on the reviewer's spawn/exit events.
+        gh.seed_state(2, pr_number=42, review_round=1, retry_count=2)
+        # Patch _latest_pr_comment_ids so it doesn't touch real GitHub.
+        with patch.object(
+            workflow, "_latest_pr_comment_ids", return_value=(None, None)
+        ):
+            self._run(
+                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="sess-review", last_message="VERDICT: APPROVED",
+                ),
+                head_shas=[pr.head.sha, pr.head.sha],
+            )
+        spawns = self._events(gh, "agent_spawn")
+        exits = self._events(gh, "agent_exit")
+        reviewer_spawns = [s for s in spawns if s["agent_role"] == "reviewer"]
+        reviewer_exits = [e for e in exits if e["agent_role"] == "reviewer"]
+        self.assertEqual(len(reviewer_spawns), 1)
+        self.assertEqual(len(reviewer_exits), 1)
+        self.assertEqual(reviewer_spawns[0]["stage"], "validating")
+        self.assertEqual(reviewer_spawns[0]["agent"], config.REVIEW_AGENT)
+        self.assertEqual(reviewer_spawns[0]["review_round"], 1)
+        self.assertEqual(reviewer_spawns[0]["retry_count"], 2)
+        self.assertEqual(reviewer_exits[0]["review_round"], 1)
+        self.assertEqual(reviewer_exits[0]["retry_count"], 2)
+        self.assertEqual(reviewer_exits[0]["session_id"], "sess-review")
+
+    def test_dev_resume_spawn_carries_session_id(self) -> None:
+        # A resume hands the spawn event the existing session id; the exit
+        # event records the (same) live id from the AgentResult.
+        gh = FakeGitHubClient()
+        issue = make_issue(3, label="implementing")
+        issue.comments.append(FakeComment(id=2000, body="please retry"))
+        gh.add_issue(issue)
+        gh.seed_state(
+            3, awaiting_human=True, last_action_comment_id=1500,
+            dev_agent="codex", dev_session_id="sess-resume",
+        )
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-resume", last_message="q?"),
+            has_new_commits=False,
+        )
+        spawns = self._events(gh, "agent_spawn")
+        self.assertEqual(len(spawns), 1)
+        self.assertEqual(spawns[0]["agent_role"], "developer")
+        self.assertEqual(spawns[0]["session_id"], "sess-resume")
+
+    def test_timeout_records_timed_out_flag_on_exit(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(4, label="implementing")
+        gh.add_issue(issue)
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(timed_out=True, last_message=""),
+            has_new_commits=False,
+        )
+        exits = self._events(gh, "agent_exit")
+        self.assertEqual(len(exits), 1)
+        self.assertTrue(exits[0]["timed_out"])
+        self.assertEqual(exits[0]["exit_code"], -1)
+
+
+class ReviewVerdictEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """`_handle_validating` emits a `review_verdict` event after parsing the
+    reviewer agent's final message, so an operator tailing the JSONL sink
+    sees approve/changes-requested decisions inline with the rest of the
+    workflow trace.
+    """
+
+    def _seeded(self, last_message: str):
+        gh = FakeGitHubClient()
+        issue = make_issue(5, label="validating")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=99,
+            head_branch="orchestrator/issue-5",
+            base_branch="main",
+            mergeable=True,
+            check_state="success",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(5, pr_number=99, review_round=0)
+        return gh, issue, pr, last_message
+
+    def _run_validating(self, gh, issue, pr, last_message: str):
+        # Enough head_shas to cover both the approved branch (reviewed_sha +
+        # squash inputs) and the changes_requested branch (before/after the
+        # dev fix). Identical SHAs across the sequence mean the dev fix is
+        # treated as a no-op question (we only care about the verdict event).
+        with patch.object(
+            workflow, "_latest_pr_comment_ids", return_value=(None, None)
+        ):
+            self._run(
+                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="sess-review", last_message=last_message,
+                ),
+                head_shas=[pr.head.sha] * 6,
+            )
+
+    def test_approved_verdict_emits_event(self) -> None:
+        gh, issue, pr, last = self._seeded("LGTM\n\nVERDICT: APPROVED")
+        self._run_validating(gh, issue, pr, last)
+        verdicts = [e for e in gh.recorded_events if e["event"] == "review_verdict"]
+        self.assertEqual(len(verdicts), 1)
+        v = verdicts[0]
+        self.assertEqual(v["verdict"], "approved")
+        self.assertEqual(v["stage"], "validating")
+        self.assertEqual(v["review_round"], 0)
+        self.assertEqual(v["pr_number"], 99)
+        self.assertEqual(v["session_id"], "sess-review")
+
+    def test_changes_requested_verdict_emits_event(self) -> None:
+        gh, issue, pr, last = self._seeded(
+            "1. Add a test\n\nVERDICT: CHANGES_REQUESTED",
+        )
+        self._run_validating(gh, issue, pr, last)
+        verdicts = [e for e in gh.recorded_events if e["event"] == "review_verdict"]
+        self.assertEqual(len(verdicts), 1)
+        self.assertEqual(verdicts[0]["verdict"], "changes_requested")
+
+    def test_unknown_verdict_emits_event(self) -> None:
+        gh, issue, pr, last = self._seeded("no marker here")
+        self._run_validating(gh, issue, pr, last)
+        verdicts = [e for e in gh.recorded_events if e["event"] == "review_verdict"]
+        self.assertEqual(len(verdicts), 1)
+        self.assertEqual(verdicts[0]["verdict"], "unknown")
+
+
+class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """Every park path (the shared `_park_awaiting_human` helper plus the
+    inline `_on_question` / `_on_dirty_worktree` helpers) emits a
+    `park_awaiting_human` event tagged with the current stage and an
+    optional `reason` so the JSONL sink mirrors the durable `park_reason`
+    field for the operator.
+    """
+
+    @staticmethod
+    def _parks(gh) -> list[dict]:
+        return [e for e in gh.recorded_events if e["event"] == "park_awaiting_human"]
+
+    def test_agent_question_emits_park_event_with_reason_and_stage(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(6, label="implementing")
+        gh.add_issue(issue)
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="please clarify the scope"),
+            has_new_commits=False,
+        )
+        parks = self._parks(gh)
+        self.assertEqual(len(parks), 1)
+        self.assertEqual(parks[0]["stage"], "implementing")
+        self.assertEqual(parks[0]["reason"], "agent_question")
+
+    def test_agent_silent_emits_park_event_with_reason(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(7, label="implementing")
+        gh.add_issue(issue)
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="", exit_code=1),
+            has_new_commits=False,
+        )
+        parks = self._parks(gh)
+        self.assertEqual(len(parks), 1)
+        self.assertEqual(parks[0]["reason"], "agent_silent")
+
+    def test_reviewer_timeout_emits_park_event_with_reason(self) -> None:
+        # Reviewer agent timeout during validating routes through
+        # `_park_awaiting_human(reason="reviewer_timeout")` directly.
+        gh = FakeGitHubClient()
+        issue = make_issue(8, label="validating")
+        gh.add_issue(issue)
+        gh.seed_state(8, pr_number=42, review_round=1)
+        pr = FakePR(
+            number=42, head_branch="orchestrator/issue-8",
+            base_branch="main", mergeable=True, check_state="success",
+        )
+        gh.add_pr(pr)
+        with patch.object(
+            workflow, "_latest_pr_comment_ids", return_value=(None, None)
+        ):
+            self._run(
+                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+                run_agent=_agent(timed_out=True, last_message=""),
+                head_shas=[pr.head.sha],
+            )
+        parks = self._parks(gh)
+        self.assertEqual(len(parks), 1)
+        self.assertEqual(parks[0]["stage"], "validating")
+        self.assertEqual(parks[0]["reason"], "reviewer_timeout")
+
+    def test_shared_helper_park_carries_reason_for_review_cap(self) -> None:
+        # `_handle_validating`'s review-cap exhaustion calls
+        # `_park_awaiting_human(reason="review_cap")` directly -- a pure
+        # shared-helper park path (no transient `state.set("park_reason",
+        # ...)` follow-up like the timeout sites have). The emitted event
+        # must still carry the reason.
+        gh = FakeGitHubClient()
+        issue = make_issue(10, label="validating")
+        gh.add_issue(issue)
+        # Seed review_round at the cap so the very first tick parks.
+        gh.seed_state(
+            10, pr_number=33, review_round=config.MAX_REVIEW_ROUNDS,
+        )
+        pr = FakePR(
+            number=33, head_branch="orchestrator/issue-10",
+            base_branch="main", mergeable=True, check_state="success",
+        )
+        gh.add_pr(pr)
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="should not run"),
+        )
+        parks = self._parks(gh)
+        self.assertEqual(len(parks), 1)
+        self.assertEqual(parks[0]["stage"], "validating")
+        self.assertEqual(parks[0]["reason"], "review_cap")
+
+    def test_push_failed_in_on_commits_carries_reason(self) -> None:
+        # `_on_commits` is reached via `_handle_implementing` after the
+        # agent committed; a failing push routes through
+        # `_park_awaiting_human(reason="push_failed")`. Representative
+        # test for a helper-only park outside the validating handler.
+        gh = FakeGitHubClient()
+        issue = make_issue(11, label="implementing")
+        gh.add_issue(issue)
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-x", last_message="done"),
+            has_new_commits=True,
+            push_branch=False,  # simulate push failure
+        )
+        parks = self._parks(gh)
+        self.assertEqual(len(parks), 1)
+        self.assertEqual(parks[0]["stage"], "implementing")
+        self.assertEqual(parks[0]["reason"], "push_failed")
+
+    def test_no_park_event_when_run_does_not_park(self) -> None:
+        # A clean approval run flips to in_review without parking; no
+        # `park_awaiting_human` event should be recorded.
+        gh = FakeGitHubClient()
+        issue = make_issue(9, label="validating")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=11, head_branch="orchestrator/issue-9",
+            base_branch="main", mergeable=True, check_state="success",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(9, pr_number=11, review_round=0)
+        with patch.object(
+            workflow, "_latest_pr_comment_ids", return_value=(None, None)
+        ):
+            self._run(
+                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="sess-r", last_message="ok\n\nVERDICT: APPROVED",
+                ),
+                head_shas=[pr.head.sha, pr.head.sha],
+            )
+        self.assertEqual(self._parks(gh), [])
+
+
+class EventEmissionDisabledTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """When EVENT_LOG_PATH is unset (the default), no JSONL file is opened
+    and the orchestrator's observable behavior -- comments posted, labels
+    set, pinned state written -- is identical to a deployment without the
+    audit sink. The in-memory `recorded_events` capture is always populated
+    so workflow tests can assert on it without configuring a sink.
+    """
+
+    def test_disabled_sink_does_not_change_behavior(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="evlog-disabled-") as td:
+            sentinel = Path(td) / "should-not-exist.jsonl"
+            with patch.object(config, "EVENT_LOG_PATH", None):
+                gh = FakeGitHubClient()
+                issue = make_issue(20, label="implementing")
+                gh.add_issue(issue)
+                self._run(
+                    lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+                    run_agent=_agent(last_message="q?"),
+                    has_new_commits=False,
+                )
+            # Disk file is never created.
+            self.assertFalse(sentinel.exists())
+            # Behavior unchanged: a comment was posted, awaiting_human set,
+            # and the various lifecycle events captured in-memory.
+            self.assertEqual(len(gh.posted_comments), 1)
+            self.assertTrue(gh.pinned_data(20).get("awaiting_human"))
+            event_names = {e["event"] for e in gh.recorded_events}
+            self.assertIn("agent_spawn", event_names)
+            self.assertIn("agent_exit", event_names)
+            self.assertIn("park_awaiting_human", event_names)
+
+
 class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
     def _seeded(self, label="implementing"):
         gh = FakeGitHubClient()
