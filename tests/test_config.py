@@ -694,12 +694,13 @@ class MultiRepoConfigTest(unittest.TestCase):
             self.assertIn("remote_name", str(cm.exception))
 
     def test_too_many_pipe_segments_aborts_at_import(self) -> None:
-        # Five fields is malformed -- prevents a silent typo like
-        # `owner/repo|/path|main|origin|extra` from being misinterpreted.
+        # Six fields is malformed -- five (with the optional remote_name and
+        # parallel_limit) is the upper bound. Prevents a silent typo like
+        # `owner/repo|/path|main|origin|3|extra` from being misinterpreted.
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as cm:
                 self._load_config(
-                    {"REPOS": f"alpha/one|{td}|main|origin|extra"}
+                    {"REPOS": f"alpha/one|{td}|main|origin|3|extra"}
                 )
             self.assertIn("malformed", str(cm.exception))
 
@@ -792,6 +793,178 @@ class MultiRepoConfigTest(unittest.TestCase):
         self.assertEqual(len(specs), 1)
         self.assertIn("does not exist", buf.getvalue())
         self.assertIn("alpha/one", buf.getvalue())
+
+
+class ParallelLimitsConfigTest(unittest.TestCase):
+    """Per-repo and global parallel issue-processing caps. Defaults preserve
+    legacy single-issue-per-repo behavior (per-repo=1) while bounding total
+    spawn fan-out across all configured repos (global=3). Each `REPOS` entry
+    can override its per-repo limit via the optional fifth pipe field.
+    """
+
+    def _load_config(self, env: dict[str, str] | None = None):
+        full_env = {
+            "ORCHESTRATOR_SKIP_DOTENV": "1",
+            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
+        }
+        if env:
+            full_env.update(env)
+        with patch.dict(os.environ, full_env, clear=True):
+            sys.modules.pop("orchestrator.config", None)
+            import orchestrator.config as config
+
+            return config
+
+    def test_defaults_one_per_repo_three_global(self) -> None:
+        config = self._load_config()
+        self.assertEqual(config.MAX_PARALLEL_ISSUES_PER_REPO, 1)
+        self.assertEqual(config.MAX_PARALLEL_ISSUES_GLOBAL, 3)
+
+    def test_env_overrides_take_effect(self) -> None:
+        config = self._load_config({
+            "MAX_PARALLEL_ISSUES_PER_REPO": "2",
+            "MAX_PARALLEL_ISSUES_GLOBAL": "10",
+        })
+        self.assertEqual(config.MAX_PARALLEL_ISSUES_PER_REPO, 2)
+        self.assertEqual(config.MAX_PARALLEL_ISSUES_GLOBAL, 10)
+
+    def test_legacy_single_repo_inherits_default_per_repo_limit(self) -> None:
+        # When REPOS is unset, the legacy single-repo RepoSpec must adopt
+        # whatever MAX_PARALLEL_ISSUES_PER_REPO is set to (default 1).
+        config = self._load_config()
+        specs = config.default_repo_specs()
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0].parallel_limit, 1)
+
+    def test_legacy_single_repo_picks_up_env_override(self) -> None:
+        config = self._load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "4"})
+        specs = config.default_repo_specs()
+        self.assertEqual(specs[0].parallel_limit, 4)
+
+    def test_three_field_entries_inherit_env_default(self) -> None:
+        # Backward-compat: existing three-field REPOS configs inherit the
+        # MAX_PARALLEL_ISSUES_PER_REPO env default (or 1 if unset).
+        with tempfile.TemporaryDirectory() as td:
+            config = self._load_config({
+                "MAX_PARALLEL_ISSUES_PER_REPO": "2",
+                "REPOS": f"alpha/one|{td}|main",
+            })
+            specs = config.default_repo_specs()
+            self.assertEqual(specs[0].parallel_limit, 2)
+
+    def test_four_field_entries_inherit_env_default(self) -> None:
+        # The existing four-field (with remote_name) shape stays backward-
+        # compatible: parallel_limit falls back to the env default.
+        with tempfile.TemporaryDirectory() as td:
+            config = self._load_config({
+                "MAX_PARALLEL_ISSUES_PER_REPO": "5",
+                "REPOS": f"alpha/one|{td}|main|private",
+            })
+            specs = config.default_repo_specs()
+            self.assertEqual(specs[0].remote_name, "private")
+            self.assertEqual(specs[0].parallel_limit, 5)
+
+    def test_fifth_field_overrides_per_repo_limit(self) -> None:
+        # Per-entry override takes precedence over the global env default,
+        # so a busy repo can run more issues in parallel than its peers.
+        with tempfile.TemporaryDirectory() as td:
+            config = self._load_config({
+                "MAX_PARALLEL_ISSUES_PER_REPO": "1",
+                "REPOS": (
+                    f"alpha/one|{td}|main|origin|3\n"
+                    f"beta/two|{td}|main|origin|7"
+                ),
+            })
+            specs = config.default_repo_specs()
+            self.assertEqual(
+                [(s.slug, s.parallel_limit) for s in specs],
+                [("alpha/one", 3), ("beta/two", 7)],
+            )
+
+    def test_mixed_entries_three_four_five_fields(self) -> None:
+        # All three legacy field counts coexist; only the five-field entry
+        # overrides the per-repo default.
+        with tempfile.TemporaryDirectory() as td:
+            config = self._load_config({
+                "MAX_PARALLEL_ISSUES_PER_REPO": "2",
+                "REPOS": (
+                    f"alpha/one|{td}|main\n"
+                    f"beta/two|{td}|main|private\n"
+                    f"gamma/three|{td}|main|origin|6"
+                ),
+            })
+            specs = config.default_repo_specs()
+            self.assertEqual(
+                [(s.slug, s.remote_name, s.parallel_limit) for s in specs],
+                [
+                    ("alpha/one", "origin", 2),
+                    ("beta/two", "private", 2),
+                    ("gamma/three", "origin", 6),
+                ],
+            )
+
+    def test_non_numeric_per_repo_env_aborts_at_import(self) -> None:
+        with self.assertRaises(SystemExit) as cm:
+            self._load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "lots"})
+        msg = str(cm.exception)
+        self.assertIn("MAX_PARALLEL_ISSUES_PER_REPO", msg)
+        self.assertIn("lots", msg)
+
+    def test_zero_per_repo_env_aborts_at_import(self) -> None:
+        with self.assertRaises(SystemExit) as cm:
+            self._load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "0"})
+        self.assertIn("MAX_PARALLEL_ISSUES_PER_REPO", str(cm.exception))
+
+    def test_negative_per_repo_env_aborts_at_import(self) -> None:
+        with self.assertRaises(SystemExit) as cm:
+            self._load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "-1"})
+        self.assertIn("MAX_PARALLEL_ISSUES_PER_REPO", str(cm.exception))
+
+    def test_non_numeric_global_env_aborts_at_import(self) -> None:
+        with self.assertRaises(SystemExit) as cm:
+            self._load_config({"MAX_PARALLEL_ISSUES_GLOBAL": "many"})
+        msg = str(cm.exception)
+        self.assertIn("MAX_PARALLEL_ISSUES_GLOBAL", msg)
+
+    def test_zero_global_env_aborts_at_import(self) -> None:
+        with self.assertRaises(SystemExit) as cm:
+            self._load_config({"MAX_PARALLEL_ISSUES_GLOBAL": "0"})
+        self.assertIn("MAX_PARALLEL_ISSUES_GLOBAL", str(cm.exception))
+
+    def test_malformed_parallel_limit_in_repos_aborts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit) as cm:
+                self._load_config({
+                    "REPOS": f"alpha/one|{td}|main|origin|seven",
+                })
+            msg = str(cm.exception)
+            self.assertIn("parallel_limit", msg)
+            self.assertIn("seven", msg)
+
+    def test_zero_parallel_limit_in_repos_aborts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit) as cm:
+                self._load_config({
+                    "REPOS": f"alpha/one|{td}|main|origin|0",
+                })
+            self.assertIn("parallel_limit", str(cm.exception))
+            self.assertIn(">= 1", str(cm.exception))
+
+    def test_negative_parallel_limit_in_repos_aborts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit) as cm:
+                self._load_config({
+                    "REPOS": f"alpha/one|{td}|main|origin|-2",
+                })
+            self.assertIn("parallel_limit", str(cm.exception))
+
+    def test_empty_parallel_limit_field_aborts(self) -> None:
+        # An explicit empty fifth field is a misconfiguration -- omit the
+        # trailing '|' to get the default. Surface the mistake at startup.
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit) as cm:
+                self._load_config({"REPOS": f"alpha/one|{td}|main|origin|"})
+            self.assertIn("parallel_limit", str(cm.exception))
 
 
 if __name__ == "__main__":
