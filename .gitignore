@@ -27,6 +27,7 @@ bin/
 obj/
 
 # logs and temp
+logs/
 *.log
 *.tmp
 *.bak
