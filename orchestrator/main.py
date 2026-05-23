@@ -15,7 +15,9 @@ import logging.handlers
 import signal
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 from . import config, workflow
@@ -128,8 +130,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         gh.ensure_workflow_labels()
         clients.append((spec, gh))
 
+    # One semaphore is built once and reused across every tick so it bounds
+    # concurrent per-issue work across ALL repos simultaneously -- the
+    # global cap that the issue tracks. Each `workflow.tick` worker thread
+    # acquires it around its `_process_issue` call; threads from different
+    # repos contend on the same semaphore so total in-flight per-issue
+    # handlers never exceed `MAX_PARALLEL_ISSUES_GLOBAL` regardless of
+    # how many `parallel_limit` slots each repo declares. BoundedSemaphore
+    # surfaces double-release bugs as ValueError instead of silently
+    # raising the effective cap.
+    global_semaphore = threading.BoundedSemaphore(
+        max(1, config.MAX_PARALLEL_ISSUES_GLOBAL)
+    )
+
     if args.once:
-        _run_tick(clients)
+        _run_tick(clients, global_semaphore)
     else:
         own_sha = _own_head_sha()
         log.info("own HEAD=%s", own_sha)
@@ -138,7 +153,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             if own_sha and _self_modifying_merge_happened(own_sha):
                 log.info("self-modifying merge detected; exiting for restart")
                 return 0
-            _run_tick(clients)
+            _run_tick(clients, global_semaphore)
             for _ in range(config.POLL_INTERVAL):
                 if not _running:
                     break
@@ -151,24 +166,76 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 def _run_tick(
     clients: list[tuple[config.RepoSpec, GitHubClient]],
+    global_semaphore: threading.BoundedSemaphore,
 ) -> None:
     """Drive a single tick across every configured repo.
 
+    With one configured repo the call stays in-thread to keep the legacy
+    single-repo deployment unchanged (no executor, no extra thread). With
+    multiple configured repos the per-repo `workflow.tick` invocations are
+    fanned out across a ThreadPoolExecutor so a slow repo does not delay
+    the others' progress -- the orchestrator's whole point is to keep
+    advancing every configured repo each tick.
+
     Per-repo exceptions are caught and logged so one failing repo cannot
-    stop the others from advancing this tick. Shared between `--once` and
-    the polling loop so both paths fan out identically.
+    stop the others from advancing this tick; `global_semaphore` is
+    threaded through so the cross-repo cap on in-flight per-issue
+    handlers stays enforced even as the per-repo ticks run concurrently.
+    Shared between `--once` and the polling loop so both paths fan out
+    identically.
     """
-    for spec, gh in clients:
+    if not clients:
+        return
+
+    if len(clients) == 1:
+        spec, gh = clients[0]
         if not _running:
-            # A signal arrived mid-tick: skip the rest of this tick so the
-            # process exits promptly instead of grinding through every repo.
-            log.info("shutdown requested; skipping remaining repos this tick")
+            log.info("shutdown requested; skipping tick")
             return
         log.info("tick: repo=%s", spec.slug)
         try:
-            workflow.tick(gh, spec)
+            workflow.tick(gh, spec, global_semaphore=global_semaphore)
         except Exception:
             log.exception("tick failed for repo=%s; continuing", spec.slug)
+        return
+
+    def _tick_one(spec: config.RepoSpec, gh: GitHubClient) -> None:
+        # Re-check shutdown inside the worker: a signal that arrived
+        # between submission and the worker actually starting still skips
+        # the tick instead of forcing the user to wait through a slow
+        # `workflow.tick` after they hit Ctrl+C.
+        if not _running:
+            log.info(
+                "repo=%s shutdown requested before tick start; skipping",
+                spec.slug,
+            )
+            return
+        log.info("tick: repo=%s", spec.slug)
+        try:
+            workflow.tick(gh, spec, global_semaphore=global_semaphore)
+        except Exception:
+            log.exception("tick failed for repo=%s; continuing", spec.slug)
+
+    with ThreadPoolExecutor(
+        max_workers=len(clients),
+        thread_name_prefix="orch-repo",
+    ) as ex:
+        futures = {
+            ex.submit(_tick_one, spec, gh): spec.slug for spec, gh in clients
+        }
+        # `as_completed` so the loop logs a stuck repo as soon as the
+        # others finish, instead of waiting for the slowest. Each future's
+        # body already catches its own exceptions; reaching the
+        # `fut.result()` raise here indicates a programming-level failure
+        # in `_tick_one` itself, which we still want to log loudly.
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception:
+                log.exception(
+                    "repo=%s tick worker raised unexpectedly",
+                    futures[fut],
+                )
 
 
 if __name__ == "__main__":

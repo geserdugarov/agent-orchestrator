@@ -11671,13 +11671,12 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
                 with counter_lock:
                     fanout_in_flight -= 1
 
-        # parallel_limit=5 plus global=5 means every submission gets its
-        # own worker thread; the family lock is the ONLY thing preventing
-        # family-aware handlers from overlapping with each other, and
-        # the fanout worker is free to run alongside whichever family
-        # handler currently holds the lock.
-        with patch.object(workflow.config, "MAX_PARALLEL_ISSUES_GLOBAL", 5), \
-             patch.object(workflow, "_refresh_base_and_worktrees"), \
+        # parallel_limit=5 and no `global_semaphore` means every submission
+        # gets its own worker thread; the family lock is the ONLY thing
+        # preventing family-aware handlers from overlapping with each
+        # other, and the fanout worker is free to run alongside whichever
+        # family handler currently holds the lock.
+        with patch.object(workflow, "_refresh_base_and_worktrees"), \
              patch.object(workflow, "_process_issue", side_effect=fake_process):
             workflow.tick(gh, self._spec(parallel_limit=5))
 
@@ -12040,13 +12039,13 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             workflow.tick(gh, self._spec(parallel_limit=4))
         process.assert_not_called()
 
-    def test_global_cap_overrides_higher_per_repo_limit(self) -> None:
-        # `config.MAX_PARALLEL_ISSUES_GLOBAL` is the host-wide ceiling and
-        # must clamp the per-repo executor regardless of how high
-        # `spec.parallel_limit` was configured. Without enforcement, a
-        # spec with parallel_limit=4 could spawn 4 worker threads even
-        # with the host budget set to 2, defeating the documented safety
-        # cap.
+    def test_global_semaphore_clamps_concurrent_in_flight(self) -> None:
+        # The `global_semaphore` parameter is the host-wide ceiling threaded
+        # in by `main._run_tick`. It must clamp concurrent `_process_issue`
+        # calls regardless of how high `spec.parallel_limit` was
+        # configured: a spec with parallel_limit=4 plus a semaphore sized
+        # 2 must never have more than 2 issues in flight at once, even
+        # though the per-repo executor admits 4 worker threads.
         import threading
         gh = FakeGitHubClient()
         for n in (1, 2, 3, 4):
@@ -12079,46 +12078,53 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         releaser = threading.Thread(target=release_when_two_admitted)
         releaser.start()
         try:
-            with patch.object(workflow.config, "MAX_PARALLEL_ISSUES_GLOBAL", 2), \
-                 patch.object(workflow, "_refresh_base_and_worktrees"), \
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
                  patch.object(workflow, "_process_issue", side_effect=fake_process):
-                workflow.tick(gh, self._spec(parallel_limit=4))
+                workflow.tick(
+                    gh,
+                    self._spec(parallel_limit=4),
+                    global_semaphore=threading.BoundedSemaphore(2),
+                )
         finally:
             release.set()
             releaser.join(timeout=5.0)
 
         # Even though parallel_limit=4 would otherwise let 4 issues run in
-        # parallel, the global cap of 2 must hold.
+        # parallel, the semaphore cap of 2 must hold.
         self.assertEqual(max_in_flight, 2)
 
-    def test_global_cap_one_uses_legacy_streaming_path(self) -> None:
-        # With `MAX_PARALLEL_ISSUES_GLOBAL=1`, the effective limit is 1
-        # regardless of `parallel_limit`. The legacy streaming path must
-        # be taken so a generator-style enumeration that raises
-        # mid-iteration still processes the issues yielded BEFORE the
-        # failure (mirrors the parallel_limit=1 streaming contract).
+    def test_global_semaphore_size_one_serializes_processing(self) -> None:
+        # With a size-1 semaphore the `_process_issue` calls must run one
+        # at a time regardless of `parallel_limit`. This is the workflow-
+        # level guarantee that backs `MAX_PARALLEL_ISSUES_GLOBAL=1`: even
+        # with multiple worker threads spun up, only one is ever inside
+        # `_process_issue`.
+        import threading
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
             gh.add_issue(make_issue(n, label="implementing"))
+        in_flight = 0
+        max_in_flight = 0
+        lock = threading.Lock()
 
-        def flaky_list_pollable_issues():
-            yield gh.get_issue(1)
-            yield gh.get_issue(2)
-            raise RuntimeError("simulated pagination failure")
+        def fake_process(_gh, _spec, _issue) -> None:
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.02)
+            with lock:
+                in_flight -= 1
 
-        processed: list[int] = []
-
-        def fake_process(_gh, _spec, issue) -> None:
-            processed.append(issue.number)
-
-        with patch.object(gh, "list_pollable_issues", flaky_list_pollable_issues), \
-             patch.object(workflow.config, "MAX_PARALLEL_ISSUES_GLOBAL", 1), \
-             patch.object(workflow, "_refresh_base_and_worktrees"), \
+        with patch.object(workflow, "_refresh_base_and_worktrees"), \
              patch.object(workflow, "_process_issue", side_effect=fake_process):
-            with self.assertRaises(RuntimeError):
-                workflow.tick(gh, self._spec(parallel_limit=5))
+            workflow.tick(
+                gh,
+                self._spec(parallel_limit=5),
+                global_semaphore=threading.BoundedSemaphore(1),
+            )
 
-        self.assertEqual(processed, [1, 2])
+        self.assertEqual(max_in_flight, 1)
 
     def test_parallel_path_uses_per_worker_clients_and_refetches_issues(
         self,

@@ -12,8 +12,10 @@ are observed and logged as not-yet-implemented.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import subprocess  # noqa: F401 -- re-exported so tests can `patch.object(workflow.subprocess, "run", ...)`
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -344,7 +346,22 @@ def _run_agent_tracked(
     return result
 
 
-def tick(gh: GitHubClient, spec: RepoSpec) -> None:
+def tick(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    *,
+    global_semaphore: Optional[threading.BoundedSemaphore] = None,
+) -> None:
+    """Drive a single tick for one repo.
+
+    `global_semaphore` is the cross-repo bound on concurrent per-issue
+    handlers (`MAX_PARALLEL_ISSUES_GLOBAL`). It is acquired around every
+    `_process_issue` call so workers from different repo ticks running
+    concurrently contend on the same semaphore. None falls back to a
+    no-op context manager so direct test invocations of `tick(gh, spec)`
+    keep working unchanged; production code threads the shared semaphore
+    in from `main._run_tick` so the cap is actually enforced.
+    """
     try:
         _refresh_base_and_worktrees(gh, spec)
     except Exception:
@@ -364,23 +381,23 @@ def tick(gh: GitHubClient, spec: RepoSpec) -> None:
     # serialize only at the PyGithub HTTP layer, which is already
     # thread-safe.
     #
-    # The effective cap is the smaller of the per-repo `parallel_limit` and
-    # the host-wide `config.MAX_PARALLEL_ISSUES_GLOBAL`. The global ceiling
-    # is documented as applying regardless of any one repo's per-repo cap
-    # so an operator can configure a high `parallel_limit` per repo
-    # without exceeding the host's CPU/memory budget for agent CLIs.
-    # `main._run_tick` already runs the per-repo ticks sequentially, so
-    # capping inside `tick()` is sufficient to bound concurrent worker
-    # threads at any given moment to `MAX_PARALLEL_ISSUES_GLOBAL`.
-    per_repo_limit = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
-    global_limit = max(
-        1, int(getattr(config, "MAX_PARALLEL_ISSUES_GLOBAL", 1) or 1)
+    # `parallel_limit` is the local cap on worker threads this tick will
+    # spin up. The host-wide `MAX_PARALLEL_ISSUES_GLOBAL` cap is enforced
+    # by `global_semaphore` around each `_process_issue` call, not by
+    # shrinking the worker pool: with multiple repos ticking in parallel,
+    # workers from different repos may queue on the semaphore until a
+    # global slot frees up, which is the whole point of a cross-repo cap.
+    # Shrinking the pool here would mean a single quiet repo could
+    # under-utilize the budget even when other repos have nothing to do.
+    limit = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
+    semaphore_cm = (
+        global_semaphore if global_semaphore is not None else contextlib.nullcontext()
     )
-    limit = min(per_repo_limit, global_limit)
     if limit == 1:
         for issue in gh.list_pollable_issues():
             try:
-                _process_issue(gh, spec, issue)
+                with semaphore_cm:
+                    _process_issue(gh, spec, issue)
             except Exception:
                 log.exception(
                     "repo=%s issue=#%s processing failed",
@@ -485,7 +502,8 @@ def tick(gh: GitHubClient, spec: RepoSpec) -> None:
             try:
                 worker_gh = gh._for_worker_thread()
                 worker_issue = worker_gh.get_issue(issue_number)
-                _process_issue(worker_gh, spec, worker_issue)
+                with semaphore_cm:
+                    _process_issue(worker_gh, spec, worker_issue)
             except Exception:
                 log.exception(
                     "repo=%s issue=#%s processing failed",
@@ -495,7 +513,8 @@ def tick(gh: GitHubClient, spec: RepoSpec) -> None:
     def _run_fanout_in_worker(issue_number: int) -> None:
         worker_gh = gh._for_worker_thread()
         worker_issue = worker_gh.get_issue(issue_number)
-        _process_issue(worker_gh, spec, worker_issue)
+        with semaphore_cm:
+            _process_issue(worker_gh, spec, worker_issue)
 
     with ThreadPoolExecutor(
         max_workers=workers,
