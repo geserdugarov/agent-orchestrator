@@ -31,7 +31,9 @@ orchestrator/
 
 ## Workflow labels
 
-An issue should have at most one workflow label at a time. Non-workflow labels such as `bug` or `enhancement` are preserved; orchestrator label writes only swap labels from its own workflow set. Label names are part of the public contract because live GitHub issues carry them, so renaming or repurposing one is a migration. The orchestrator also creates the non-workflow control label `hold_base_sync`; while present on an issue, it pauses per-tick base sync, `in_review` auto-merge/unmergeable handling, and `resolving_conflict` base merges until the label is removed.
+An issue should have at most one workflow label at a time. Non-workflow labels such as `bug` or `enhancement` are preserved; orchestrator label writes only swap labels from its own workflow set. Label names are part of the public contract because live GitHub issues carry them, so renaming or repurposing one is a migration.
+
+The orchestrator also creates the non-workflow control label `hold_base_sync`; while present on an issue, it pauses per-tick base sync, `in_review` auto-merge/unmergeable handling, and `resolving_conflict` base merges until the label is removed.
 
 | Label | Meaning |
 |---|---|
@@ -60,7 +62,9 @@ The coding agent runs as a **transient child subprocess**, not a daemon — spaw
 
 ## Per-tick flow (`workflow.tick`)
 
-Each tick the polling loop fans out across **every configured repo**. `config.default_repo_specs()` returns a list of `RepoSpec(slug, target_root, base_branch)` — one entry per `REPOS` line, or a single entry derived from the legacy `REPO` / `TARGET_REPO_ROOT` / `BASE_BRANCH` trio when `REPOS` is unset. `main._run_tick` iterates every `(spec, gh)` pair and calls `workflow.tick(gh, spec)` once per repo; a per-repo exception is logged and swallowed so one wedged repo cannot stop the others from advancing this tick. Each `GitHubClient` is constructed once at startup with `repo_spec=spec` and `ensure_workflow_labels` runs per repo so a fresh target repo bootstraps its labels on first connect.
+Each tick the polling loop fans out across **every configured repo**. `config.default_repo_specs()` returns a list of `RepoSpec(slug, target_root, base_branch)` — one entry per `REPOS` line, or a single entry derived from the legacy `REPO` / `TARGET_REPO_ROOT` / `BASE_BRANCH` trio when `REPOS` is unset.
+
+`main._run_tick` iterates every `(spec, gh)` pair and calls `workflow.tick(gh, spec)` once per repo; a per-repo exception is logged and swallowed so one wedged repo cannot stop the others from advancing this tick. Each `GitHubClient` is constructed once at startup with `repo_spec=spec` and `ensure_workflow_labels` runs per repo so a fresh target repo bootstraps its labels on first connect.
 
 Inside `workflow.tick(gh, spec)`, before any issue is dispatched the tick runs `_refresh_base_and_worktrees(gh, spec)`: a single `git fetch origin <base>` in `spec.target_root`, then per-issue dispatch on each existing worktree under `<WORKTREES_DIR>/<owner>__<name>/issue-*`. The per-stage `_ensure_*_worktree` helpers only fetch base on (re)creation, so a worktree that survives across ticks would otherwise stay anchored at whatever `origin/<base>` looked like when it was first added.
 
@@ -77,7 +81,9 @@ The detour deliberately does NOT call `_bump_in_review_watermarks` (the `_handle
 
 The detour also skips when `awaiting_human=True` because `_handle_resolving_conflict`'s awaiting-human branch returns early without merging unless a new human comment arrived; relabeling here would just hide the existing park behind a `resolving_conflict` label without progress, including the documented `AUTO_MERGE=off` unmergeable-park case.
 
-Before relabeling, the detour fetches `gh.get_pr(pr_number)` and skips when `pr_state != "open"`: a just-merged PR advances `origin/<base>`, so the still-validating / still-in_review worktree pointed at the now-stale branch is naturally behind base; without this gate the refresh would post an "auto-resolution" notice and relabel to `resolving_conflict` on a PR the next handler call would finalize to `done` (or `rejected` for a closed-without-merge PR). A `gh.get_pr` failure is treated as "leave alone" so the handler retries from a stable label rather than racing a half-known PR state. Issues already labeled `resolving_conflict` are also skipped (the handler runs this tick anyway).
+Before relabeling, the detour fetches `gh.get_pr(pr_number)` and skips when `pr_state != "open"`: a just-merged PR advances `origin/<base>`, so the still-validating / still-in_review worktree pointed at the now-stale branch is naturally behind base; without this gate the refresh would post an "auto-resolution" notice and relabel to `resolving_conflict` on a PR the next handler call would finalize to `done` (or `rejected` for a closed-without-merge PR).
+
+A `gh.get_pr` failure is treated as "leave alone" so the handler retries from a stable label rather than racing a half-known PR state. Issues already labeled `resolving_conflict` are also skipped (the handler runs this tick anyway).
 
 Merge over rebase across both paths matches `_handle_resolving_conflict`'s standing contract: rebase rewrites every commit's SHA, which would invalidate `agent_approved_sha` and force the reviewer to re-approve even when only the base content changed. Dirty worktrees (in-flight agent edits, crash-recovered trees) are skipped, and on a pre-PR content conflict the merge is aborted so the worktree stays on its pre-merge SHA. Failures are logged and swallowed; keeping every issue moving matters more than perfect base sync.
 
@@ -102,7 +108,11 @@ Per-issue durable state lives in a single **"pinned" comment** on the issue (`<!
 - `awaiting_human`, `last_action_comment_id`.
 - `pr_last_comment_id` — in_review high-watermark across the issue thread + PR conversation comments, which share the IssueComment id space. Seeded at validating → in_review handoff so the orchestrator's own automated comments don't replay as fresh feedback, and bumped past any park comment so an HITL ping doesn't replay either.
 - `pr_last_review_comment_id` — separate watermark for inline PR review comments, which live in their own id space.
-- `pr_last_review_summary_id` — separate watermark in the PullRequestReview id space, distinct from both IssueComment and PullRequestComment ids. The watermark *only* advances from review IDs that survived `gh.pr_reviews_after`'s state/body filter — non-empty `CHANGES_REQUESTED` or `COMMENTED` — so `APPROVED`, `DISMISSED`, `PENDING`, and empty-body reviews **never** bump it. `_bump_in_review_watermarks` mirrors the same filter and advances strictly from the filtered list. This is safe because the same filter runs on every scan, so an `APPROVED` review id sitting above the watermark is harmlessly re-skipped each tick rather than re-forwarded.
+- `pr_last_review_summary_id` — separate watermark in the PullRequestReview id space, distinct from both IssueComment and PullRequestComment ids.
+
+  The watermark *only* advances from review IDs that survived `gh.pr_reviews_after`'s state/body filter — non-empty `CHANGES_REQUESTED` or `COMMENTED` — so `APPROVED`, `DISMISSED`, `PENDING`, and empty-body reviews **never** bump it. `_bump_in_review_watermarks` mirrors the same filter and advances strictly from the filtered list.
+
+  This is safe because the same filter runs on every scan, so an `APPROVED` review id sitting above the watermark is harmlessly re-skipped each tick rather than re-forwarded.
 - `agent_approved_sha` — the head SHA the reviewer agent OK'd; `_handle_in_review` keys AUTO_MERGE on this since the agent posts an issue comment, not a real PR review.
 - `merged_at` / `closed_without_merge_at` — terminal stamps.
 - etc. (see `github.PINNED_STATE_MARKER` / `PINNED_STATE_RE` and `read_pinned_state` / `write_pinned_state`).
@@ -137,14 +147,24 @@ Author-login matching is intentionally avoided because the orchestrator PAT is o
 
     For parents with previously-tracked children (in-flight in `blocked`, all-done after the `blocked` -> `ready` transition, or any state for `umbrella`), the child issue numbers are listed in the notice as ORPHANED — the orchestrator no longer tracks them, so the operator must close any that no longer apply.
 
-    Wiping the manifest tracking is what stops `_handle_decomposing`'s half-finished recovery branch from firing on the next tick (it keys on `expected_children_count is not None OR children non-empty`); without it a `ready` parent whose children all finished would loop back to `blocked` without ever re-running the decomposer. This is deliberately destructive over "park awaiting human" because silently absorbing a child edit (the old behavior) would let `_handle_ready` later see the new baseline as already consumed and skip the re-decomposer even when the edited child now needs splitting; and an edited umbrella with done children would close to `done` against the stale manifest.
-  - `implementing` / `validating` / `in_review` / `resolving_conflict` (a dev session exists and possibly a PR) → post a `:pencil2: issue body changed; resuming dev session` notice (on the issue for implementing/validating, on the PR conversation for in_review and resolving_conflict), advance `last_action_comment_id` past every visible issue-thread comment via `_mark_drift_comments_consumed` (and bump the in_review watermarks via `_bump_in_review_watermarks` in the in_review case), resume the locked dev session with `_build_user_content_change_prompt` (which quotes the updated title, body, AND the current conversation so a new acceptance criterion posted as a comment is surfaced to the dev), and route the result through `_post_user_content_change_result`.
+    Wiping the manifest tracking is what stops `_handle_decomposing`'s half-finished recovery branch from firing on the next tick (it keys on `expected_children_count is not None OR children non-empty`); without it a `ready` parent whose children all finished would loop back to `blocked` without ever re-running the decomposer.
+
+    This is deliberately destructive over "park awaiting human" because silently absorbing a child edit (the old behavior) would let `_handle_ready` later see the new baseline as already consumed and skip the re-decomposer even when the edited child now needs splitting; and an edited umbrella with done children would close to `done` against the stale manifest.
+  - `implementing` / `validating` / `in_review` / `resolving_conflict` (a dev session exists and possibly a PR) → on drift the handler:
+    1. posts a `:pencil2: issue body changed; resuming dev session` notice — on the issue for implementing/validating, on the PR conversation for in_review and resolving_conflict;
+    2. advances `last_action_comment_id` past every visible issue-thread comment via `_mark_drift_comments_consumed`, and bumps the in_review watermarks via `_bump_in_review_watermarks` in the in_review case;
+    3. resumes the locked dev session with `_build_user_content_change_prompt`, which quotes the updated title, body, AND the current conversation so a new acceptance criterion posted as a comment is surfaced to the dev;
+    4. routes the result through `_post_user_content_change_result`.
 
     Result routing in `_post_user_content_change_result`:
 
     - a clean pushed fix flips back to `validating` from `in_review` / `resolving_conflict`, stays in `validating` with `review_round++` from `validating`, or runs the implementing `_on_commits` path to open/push the PR from `implementing`;
-    - a no-commit reply is treated as an ack ONLY when it carries the explicit `ACK: <reason>` marker the resume prompt instructs the dev to emit when the existing work already satisfies the edit — the dev's justification is posted on the issue as an FYI and the handler does NOT park awaiting_human, so a harmless clarification doesn't stall the issue;
-    - any other no-commit response (a real clarification question, an ambiguous comment, an empty message) falls back to `_on_question` and parks awaiting human; without the explicit marker requirement, a clarification question would be silently swallowed as "existing work satisfies" and the issue would advance with `awaiting_human=False`, stranding the question.
+    - a no-commit reply is treated as an ack ONLY when it carries the explicit `ACK: <reason>` marker the resume prompt instructs the dev to emit when the existing work already satisfies the edit.
+
+      The dev's justification is posted on the issue as an FYI and the handler does NOT park awaiting_human, so a harmless clarification doesn't stall the issue;
+    - any other no-commit response (a real clarification question, an ambiguous comment, an empty message) falls back to `_on_question` and parks awaiting human.
+
+      Without the explicit marker requirement, a clarification question would be silently swallowed as "existing work satisfies" and the issue would advance with `awaiting_human=False`, stranding the question.
 
     The watermark advance is what prevents the validating → in_review handoff from later replaying the same human comment via `_seed_watermark_past_self` and triggering a duplicate dev resume.
 
@@ -157,7 +177,9 @@ Author-login matching is intentionally avoided because the orchestrator PAT is o
 
       When there is NO dev session but the worktree carries recovered unpushed commits, the handler parks awaiting human rather than falling through to the recovered-worktree shortcut — those commits were authored before the edit and pushing them would publish a PR no agent ever read against the new requirements.
 
-      When there is no dev session AND no recovered commits AND the issue is `awaiting_human` (manual relabel, drift on a freshly-picked-up issue parked before its first spawn), the handler explicitly clears the park flags so the fresh-spawn branch fires this tick with the full implement prompt (which quotes the current `issue.body` and the conversation via `_recent_comments_text`); without this clear, the awaiting-human branch would route to `_resume_developer_on_human_reply` and either return without writing the new hash (looping the drift) or fresh-spawn with only the new-comment text instead of the body-and-conversation context.
+      When there is no dev session AND no recovered commits AND the issue is `awaiting_human` (manual relabel, drift on a freshly-picked-up issue parked before its first spawn), the handler explicitly clears the park flags so the fresh-spawn branch fires this tick with the full implement prompt (which quotes the current `issue.body` and the conversation via `_recent_comments_text`).
+
+      Without this clear, the awaiting-human branch would route to `_resume_developer_on_human_reply` and either return without writing the new hash (looping the drift) or fresh-spawn with only the new-comment text instead of the body-and-conversation context.
     - For `validating` specifically, drift handling DEFERS to the awaiting-human branch when `park_reason` is reviewer-side (`reviewer_timeout` / `reviewer_failed`): a human "retry" comment after a reviewer failure must re-spawn the REVIEWER, not the dev (the failure produced no review output for the dev to act on, and the reviewer naturally re-reads the updated body/comments via `_build_review_prompt`).
 
       The new baseline is still persisted in the defer branch so the next tick doesn't loop.
@@ -191,9 +213,13 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      - **no fenced block** → treat as a question; park with the message quoted (mirrors `_on_question` from implementing).
      - **decision == "single"** → post a one-line "fits in one context" comment with the rationale, set label `ready`, stamp `decomposed_at`. `_handle_ready` picks it up next tick.
      - **decision == "split"** → crash-safe creation in three phases. The decomposer prompt requires the last child to be a documentation-update task whose `depends_on` lists every preceding child, so docs updates land after the code changes they describe.
-       1. For each child call `gh.create_child_issue(...)` (which prepends `Parent: #<n>` to the body, no auto-close keyword) with label `blocked` regardless of dependencies, and seed the child's pinned state with `parent_number`; child-state seeding is mandatory — failure persists the partial `children` list and parks awaiting human (no orphan child is left runnable).
-       2. Persist `children`, `dep_graph` (`{child_idx_str: [child_idx, ...]}`), and `umbrella` (from the manifest's optional boolean, default false) on the parent, post the summary comment, set parent label `umbrella` when the flag is true and otherwise `blocked`, stamp `decomposed_at`.
-       3. Activate no-dep children by flipping their label `blocked` → `ready`; this is best-effort because `_handle_blocked`'s / `_handle_umbrella`'s walk also treats no-dep children as deps-satisfied, so a crashed activation step is recovered on the next tick.
+       1. For each child call `gh.create_child_issue(...)` with label `blocked` regardless of dependencies, and seed the child's pinned state with `parent_number`. `create_child_issue` prepends `Parent: #<n>` to the body (no auto-close keyword).
+
+          Child-state seeding is mandatory — failure persists the partial `children` list and parks awaiting human, so no orphan child is left runnable.
+       2. Persist `children`, `dep_graph` (`{child_idx_str: [child_idx, ...]}`), and `umbrella` (from the manifest's optional boolean, default false) on the parent. Post the summary comment, set parent label `umbrella` when the flag is true and otherwise `blocked`, stamp `decomposed_at`.
+       3. Activate no-dep children by flipping their label `blocked` → `ready`.
+
+          This is best-effort because `_handle_blocked`'s / `_handle_umbrella`'s walk also treats no-dep children as deps-satisfied, so a crashed activation step is recovered on the next tick.
 - **Pre-flight (half-finished recovery)**: if `children` is already set on the parent but the label is still `decomposing`, a prior tick crashed between child creation and the parent label flip. Re-running the decomposer would create duplicates, so the handler short-circuits:
   - when not awaiting_human, flip the parent to `umbrella` (when the persisted `umbrella` flag is true) or `blocked` and let the matching handler activate children;
   - when awaiting_human (parent state was parked mid-creation), hold and require manual intervention.
@@ -275,9 +301,13 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
   4. Parse last `VERDICT:` marker (`_parse_review_verdict`):
      - `approved` → in this order:
        1. Post `:white_check_mark: codex review approved.` on the PR (so the comment exists even when squash later fails).
-       2. When `SQUASH_ON_APPROVAL` is on (default), call `_squash_and_force_push` to collapse the dev's commits into one (subject reuses the first commit when already conventional-commit-shaped, otherwise `feat: <issue title>`; body lists the original subjects; pushed with `--force-with-lease` against the pre-squash SHA). On squash or force-push failure, **park awaiting human and stay on `validating`** (no relabel) so the original commits remain on the branch for manual triage — the approval comment has already landed on the PR.
+       2. When `SQUASH_ON_APPROVAL` is on (default), call `_squash_and_force_push` to collapse the dev's commits into one. Subject reuses the first commit when already conventional-commit-shaped, otherwise `feat: <issue title>`; body lists the original subjects; pushed with `--force-with-lease` against the pre-squash SHA.
+
+          On squash or force-push failure, **park awaiting human and stay on `validating`** (no relabel) so the original commits remain on the branch for manual triage — the approval comment has already landed on the PR.
        3. On success, if `squashed_count > 1` post `:package: squashed N commits to 1 after approval` to the PR before seeding the in_review watermarks, so the seed walks past it.
-       4. Snapshot `agent_approved_sha` from the **local SHA the reviewer (or the squash) produced** — explicitly *not* the current remote PR head; if the remote moves out from under us, `agent_approved_sha != pr.head.sha` in the auto-merge gate and AUTO_MERGE waits for a fresh review round. With `SQUASH_ON_APPROVAL=off`, the snapshot is the pre-review local HEAD (`reviewed_sha` captured before `run_agent`).
+       4. Snapshot `agent_approved_sha` from the **local SHA the reviewer (or the squash) produced** — explicitly *not* the current remote PR head. If the remote moves out from under us, `agent_approved_sha != pr.head.sha` in the auto-merge gate and AUTO_MERGE waits for a fresh review round.
+
+          With `SQUASH_ON_APPROVAL=off`, the snapshot is the pre-review local HEAD (`reviewed_sha` captured before `run_agent`).
        5. Seed the in_review comment watermarks, then set label `in_review`.
      - `unknown` (no marker) → park.
      - `changes_requested` → post the feedback to the PR, then **resume the developer's session** on its locked spec (backend + args) with the fix prompt; if it produces a new commit on a clean tree, push and increment `review_round` for next tick.
@@ -288,7 +318,13 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 - **Input**: pinned `pr_number`, `branch`, `dev_agent`/`dev_session_id` (or legacy `codex_session_id`), and three watermarks — one per id namespace GitHub uses for PR feedback:
   - `pr_last_comment_id` (issue thread + PR conversation, shared IssueComment id space; falls back to `last_action_comment_id` for back-compat).
   - `pr_last_review_comment_id` (inline review comments, PullRequestComment id space).
-  - `pr_last_review_summary_id` (PR review summaries in the PullRequestReview id space). Only the *bodies* of non-empty `CHANGES_REQUESTED` or `COMMENTED` reviews are forwarded to the dev, and only those review IDs ever advance this watermark — `APPROVED`, `DISMISSED`, `PENDING`, and empty-body reviews are filtered out by `gh.pr_reviews_after` *before* the id watermark is applied, and `_bump_in_review_watermarks` mirrors the same filter, so excluded review IDs never enter the candidate set. Re-scanning is harmless: the filter runs each tick, so an `APPROVED` id above the watermark is silently re-skipped rather than re-forwarded.
+  - `pr_last_review_summary_id` (PR review summaries in the PullRequestReview id space).
+
+    Only the *bodies* of non-empty `CHANGES_REQUESTED` or `COMMENTED` reviews are forwarded to the dev, and only those review IDs ever advance this watermark.
+
+    `APPROVED`, `DISMISSED`, `PENDING`, and empty-body reviews are filtered out by `gh.pr_reviews_after` *before* the id watermark is applied, and `_bump_in_review_watermarks` mirrors the same filter, so excluded review IDs never enter the candidate set.
+
+    Re-scanning is harmless: the filter runs each tick, so an `APPROVED` id above the watermark is silently re-skipped rather than re-forwarded.
 
   Mixing any two namespaces under one watermark would silently drop or replay one side.
 - **Internal flow**:
@@ -311,11 +347,17 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 
      If still inside the debounce window, return — the human may still be typing.
   4. **Auto-merge gate** (only reached when there are no new comments to act on). Off unless `AUTO_MERGE=on`. Sequence:
-     - **Standing CHANGES_REQUESTED veto** — `gh.pr_has_changes_requested(pr, head_sha=head_sha)` runs *before* the approval check and silently returns on True, so a human `CHANGES_REQUESTED` review on the current head SHA blocks merge even when `agent_approved_sha == head_sha`, the PR is mergeable, and checks are green (the agent's APPROVED would otherwise short-circuit `pr_is_approved`).
+     - **Standing CHANGES_REQUESTED veto** — `gh.pr_has_changes_requested(pr, head_sha=head_sha)` runs *before* the approval check and silently returns on True.
+
+       A human `CHANGES_REQUESTED` review on the current head SHA blocks merge even when `agent_approved_sha == head_sha`, the PR is mergeable, and checks are green (the agent's APPROVED would otherwise short-circuit `pr_is_approved`).
      - **Approval check** — either `agent_approved_sha == pr.head.sha` (snapshotted by validating when the reviewer agent emitted `VERDICT: APPROVED`), OR `gh.pr_is_approved(pr, head_sha=pr.head.sha)` — only counts human/bot reviews submitted on the *current* head SHA, so a stale APPROVED from before a later push does not unlock auto-merge.
-     - **`pr_is_mergeable`** — `None` means GitHub still computing, try next tick; `False` with `AUTO_MERGE=on` does NOT park anymore — it routes the issue to the new `resolving_conflict` stage (post a notice on the PR, seed `conflict_round=0` only when absent so a re-entry preserves the cap counter, flip the label, return), where `_handle_resolving_conflict` attempts the auto-merge of `origin/<base>` on the next tick. Under `AUTO_MERGE=off` the legacy unmergeable park still fires here.
+     - **`pr_is_mergeable`** — `None` means GitHub still computing, try next tick.
+
+       `False` with `AUTO_MERGE=on` does NOT park anymore — it routes the issue to the new `resolving_conflict` stage (post a notice on the PR, seed `conflict_round=0` only when absent so a re-entry preserves the cap counter, flip the label, return), where `_handle_resolving_conflict` attempts the auto-merge of `origin/<base>` on the next tick. Under `AUTO_MERGE=off` the legacy unmergeable park still fires here.
      - **`pr_combined_check_state`** — `success` proceeds; `pending` waits; `failure`/`none` parks awaiting human — `none` means no checks at all, ambiguous.
-     - **`gh.merge_pr(pr, sha=head_sha)`** — pinned to the *captured* `head_sha` from the start of the gate sequence, **not** `pr.head.sha`. `pr_is_mergeable` calls `pr.update()` to resolve a `None` mergeable, which can refresh `pr.head.sha`; the explicit `head_sha` pin (combined with the earlier `pr.head.sha != head_sha` bail) ensures a commit landing during the refresh either bails the tick or causes GitHub to return 409/422 rather than merge an unreviewed head. PyGithub's 405/409/422 are returned as `False` and the next tick retries.
+     - **`gh.merge_pr(pr, sha=head_sha)`** — pinned to the *captured* `head_sha` from the start of the gate sequence, **not** `pr.head.sha`.
+
+       `pr_is_mergeable` calls `pr.update()` to resolve a `None` mergeable, which can refresh `pr.head.sha`; the explicit `head_sha` pin (combined with the earlier `pr.head.sha != head_sha` bail) ensures a commit landing during the refresh either bails the tick or causes GitHub to return 409/422 rather than merge an unreviewed head. PyGithub's 405/409/422 are returned as `False` and the next tick retries.
   5. On a successful merge, set label `done`, stamp `merged_at`, write pinned state, close the issue, then call `_cleanup_terminal_branch` (best-effort: remove the per-issue worktree, delete the local branch, and call `gh.delete_remote_branch`). Cleanup runs on every PR-state terminal where the PR itself is gone (external merge, AUTO_MERGE, and closed-without-merge) so neither merged nor declined PRs leave stale `orchestrator/issue-<n>` branches on the remote.
 
      A manually closed issue with an *open* PR is conservative on purpose: the label flips to `rejected` but the branch is left alone, since the operator may still want to inspect or salvage the PR.
@@ -382,7 +424,9 @@ Merge over rebase by design: rebase rewrites every commit's SHA, which would inv
   Pinned state (`dev_agent` / `review_agent` / `decomposer_agent`) stores the **raw spec string verbatim** (whatever the env had at first spawn, including the original casing — `DEV_AGENT=CODEX -m gpt-5.5` is persisted as the literal `"CODEX -m gpt-5.5"`); the re-lowercase happens again on every resume when `_parse_agent_spec` re-parses the stored string.
 
   Any other first token value (full path, alias, typo, empty string, unbalanced quotes) aborts at import with a SystemExit so a misconfiguration cannot silently fall back to a default backend on the next restart. `DECOMPOSE_AGENT` is parsed at import even when `DECOMPOSE=off`, so toggling the kill switch back on never surfaces a fresh "that env var was always invalid" failure.
-- **Remaining tokens**: forwarded verbatim as backend-CLI args on every spawn for that role — typically model / reasoning-effort selection. Quoting follows shell rules, so values containing `=`, spaces, or nested quotes survive the round-trip (e.g. `codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`). For codex these are placed BEFORE the `exec` subcommand (they are codex global options); for claude they are placed right after the binary, before the orchestrator's own `-p` / `--dangerously-skip-permissions` / `--output-format` flags. The safety/output flags and the prompt stay where they are so operator-provided args cannot silently displace them.
+- **Remaining tokens**: forwarded verbatim as backend-CLI args on every spawn for that role — typically model / reasoning-effort selection. Quoting follows shell rules, so values containing `=`, spaces, or nested quotes survive the round-trip (e.g. `codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`).
+
+  For codex these are placed BEFORE the `exec` subcommand (they are codex global options); for claude they are placed right after the binary, before the orchestrator's own `-p` / `--dangerously-skip-permissions` / `--output-format` flags. The safety/output flags and the prompt stay where they are so operator-provided args cannot silently displace them.
 - **`CODEX_BIN` / `CLAUDE_BIN` interaction**: the first token is only a backend selector — it picks `_run_codex` vs. `_run_claude` in `agents.py`. The actual executable launched is `config.CODEX_BIN` when the first token is `codex` and `config.CLAUDE_BIN` when it is `claude`, so override those when the CLI is not on `$PATH`. Writing the full path as the first token is rejected (it would not match `codex` / `claude`).
 
 Examples (any of these is a valid value for any of the three role env vars):
@@ -432,14 +476,16 @@ The orchestrator (not the agent) pushes. The push is hardened against the agent-
 
 Optional, opt-in JSONL sink. When `config.EVENT_LOG_PATH` is set (parsed at import from the `EVENT_LOG_PATH` env var), `github._write_event_record` appends one JSON object per audit event to that file inside `GitHubClient.emit_event`; when unset (the default) the helper short-circuits to a no-op and no file is opened. The fake `GitHubClient` in `tests/fakes.py` calls the same `_write_event_record` helper so a single test can cover both the in-memory `recorded_events` capture and the on-disk surface.
 
-**Schema.** Every record is built by `github.build_event_record` and carries `ts` (UTC ISO-8601 at second precision), `repo` (the slug `owner/name`), `issue` (issue number, int), and `event` (the kind). `stage` is included when the emitter passes one (effectively always today). Extras whose value is `None` are dropped, so callers can pass optional context (`session_id`, `review_round`, `retry_count`, ...) unconditionally without polluting records that don't carry them. `json.dumps` is called with `sort_keys=True` so the on-disk order is stable across writers.
+**Schema.** Every record is built by `github.build_event_record` and carries `ts` (UTC ISO-8601 at second precision), `repo` (the slug `owner/name`), `issue` (issue number, int), and `event` (the kind). `stage` is included when the emitter passes one (effectively always today).
+
+Extras whose value is `None` are dropped, so callers can pass optional context (`session_id`, `review_round`, `retry_count`, ...) unconditionally without polluting records that don't carry them. `json.dumps` is called with `sort_keys=True` so the on-disk order is stable across writers.
 
 **Event kinds.** Every kind is emitted through the single `GitHubClient.emit_event` chokepoint, which also appends to a capped in-memory tail (`recorded_events`, `_RECORDED_EVENTS_CAP = 500`) for tests and short-window debugging — the file is the durable record.
 
 | `event` | Emitter | Notable extras |
 |---|---|---|
 | `stage_enter` | `set_workflow_label` (via `_emit_stage_enter`) for every label flip | `stage` |
-| `agent_spawn` / `agent_exit` | `_run_agent_with_tracking` wraps every `run_agent` call (decomposer, implementer, reviewer, dev-resume, conflict-resolution dev) | both: `agent` (backend), `agent_role`, `review_round`, `retry_count`. On `agent_spawn`, `session_id` is the resume session id and is OMITTED for fresh spawns (the caller passes `resume_session_id=None` and `build_event_record` drops `None`-valued extras, so a fresh-spawn record has no `session_id` key at all). On `agent_exit`, `session_id` is the result id from `AgentResult`; `agent_exit` additionally carries `duration_s`, `exit_code`, and `timed_out`, computed from the `run_agent` return value, and these three are NOT emitted on `agent_spawn` |
+| `agent_spawn` / `agent_exit` | `_run_agent_with_tracking` wraps every `run_agent` call (decomposer, implementer, reviewer, dev-resume, conflict-resolution dev) | both carry `agent` (backend), `agent_role`, `review_round`, `retry_count`. `session_id` and the `agent_exit`-only fields are described below the table. |
 | `review_verdict` | `_handle_validating` after `_parse_review_verdict` reads the reviewer's last message | `verdict` (`approved` / `changes_requested` / `unknown`), `review_round`, `pr_number`, `session_id` |
 | `park_awaiting_human` | every `_park_awaiting_human` call site, plus `_on_question` and `_on_dirty_worktree` | `stage` (read from the current workflow label, not passed in), `reason` (`agent_timeout`, `push_failed`, `failed_checks`, `agent_question`, `agent_silent`, `dirty_worktree`, `reviewer_timeout` / `reviewer_failed`, `missing_pr_number`, ...) |
 | `pr_opened` | `_on_commits` after `gh.open_pr` succeeds | `pr_number`, `branch`, `sha`, `retry_count` |
@@ -448,13 +494,21 @@ Optional, opt-in JSONL sink. When `config.EVENT_LOG_PATH` is set (parsed at impo
 | `merge_attempt` | AUTO_MERGE `gh.merge_pr` call AND every `git merge origin/<base>` inside `_handle_resolving_conflict` | `method` (`squash` / `base_merge`), `result` (`success` / `failed` / `conflict`), `pr_number`, `sha`, `conflict_round`, `review_round`, `retry_count` |
 | `conflict_round` | `_route_pr_worktree_to_resolving_conflict` and the in_review unmergeable arc emit `action="entered"`; every increment site (`_emit_conflict_round_incremented`) emits `action="incremented"` with `outcome` | `pr_number`, `conflict_round`, `review_round`, `retry_count`, `outcome` (for increments), `sha` |
 
+**`agent_spawn` / `agent_exit` extras.** On top of the shared fields above:
+
+- On `agent_spawn`, `session_id` is the resume session id and is OMITTED for fresh spawns — the caller passes `resume_session_id=None` and `build_event_record` drops `None`-valued extras, so a fresh-spawn record has no `session_id` key at all.
+- On `agent_exit`, `session_id` is the result id from `AgentResult`.
+- `agent_exit` additionally carries `duration_s`, `exit_code`, and `timed_out`, computed from the `run_agent` return value; none of these three are emitted on `agent_spawn`.
+
 **No built-in rotation.** `_write_event_record` reopens the file in append mode for every event (`path.open("a", ...)` after `path.parent.mkdir(parents=True, exist_ok=True)`); there is no long-lived file descriptor, no size cap, no rename, and no compression. External rotation and recreation are operator-managed — pair `EVENT_LOG_PATH` with `logrotate` (or equivalent) for long-running deployments.
 
 Because each append re-resolves the path, create/rename-style rotation is as safe as `copytruncate`: the next event picks up the new inode without any `SIGHUP` or restart.
 
 An `OSError` during the append is caught and downgraded to a `log.warning` so a misconfigured path (read-only mount, disk full, permission failure) cannot stop the per-issue tick from making progress; the missing record is silently dropped and the pinned state on GitHub remains correct.
 
-**Pinned state is authoritative.** The event log is append-only and observation-only. The orchestrator never reads it back; every dispatch decision keys off the pinned `<!--orchestrator-state ...-->` JSON comment on the issue (and the issue's workflow label). If the two disagree — a write failed and was logged-and-swallowed, the file was truncated by `logrotate`, events were lost during a disk-full window, or a crash interleaved partially-flushed lines — trust pinned state. The append-only log is therefore safe to truncate or delete at any time without affecting workflow correctness; it does not contribute to durability.
+**Pinned state is authoritative.** The event log is append-only and observation-only. The orchestrator never reads it back; every dispatch decision keys off the pinned `<!--orchestrator-state ...-->` JSON comment on the issue (and the issue's workflow label).
+
+If the two disagree — a write failed and was logged-and-swallowed, the file was truncated by `logrotate`, events were lost during a disk-full window, or a crash interleaved partially-flushed lines — trust pinned state. The append-only log is therefore safe to truncate or delete at any time without affecting workflow correctness; it does not contribute to durability.
 
 ## Summary of "what runs when"
 
@@ -462,7 +516,7 @@ An `OSError` during the append is caught and downgraded to a `log.warning` so a 
 |---|---|---|---|
 | `main` polling loop | long-lived Python process | manual start (or wrapper) | every `POLL_INTERVAL`s |
 | `workflow.tick(gh, spec)` | function call | each loop iteration | once per tick **per configured `RepoSpec`** (single-repo legacy mode collapses to N=1) |
-| `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo (one `git fetch origin <base>`, then per-worktree dispatch: pre-PR worktrees get a clean-tree `git merge --no-edit origin/<base>` directly; PR-having `validating`/`in_review` worktrees that are behind base detour to `resolving_conflict` so the handler does merge + push + relabel — but only when the PR is still open (a merged/closed PR is left to its terminal handler since a just-merged PR naturally advances base), skip when `awaiting_human=True` to keep the park visible, and never bump in_review watermarks here so unread human comments stay in the unread queue; conflicts abort, dirty trees skip) |
+| `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo: one `git fetch origin <base>`, then per-worktree dispatch (pre-PR worktrees merge directly; PR-having worktrees behind base detour to `resolving_conflict`). See [Per-tick flow](#per-tick-flow-workflowtick) for the full open-PR / `awaiting_human` / watermark / conflict / dirty-tree rules. |
 | `_handle_*` per issue | function call | issue's workflow label | once per tick per open issue (within its repo's `tick`) |
 | decomposer agent (`DECOMPOSE_AGENT`) | subprocess (fresh or resumed, locked spec (backend + args)) | `_handle_decomposing` (retry budget OK) or HITL resume | one shot per tick when needed |
 | implementer agent (`DEV_AGENT`) | subprocess | `_handle_implementing` (no commits yet, retry budget OK) or HITL resume | one shot per tick when needed |

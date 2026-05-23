@@ -31,17 +31,20 @@ bootstrap.
 from JSONL events for resumes.
 
 `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` are independently
-configurable shell-like command specs parsed by `config._parse_agent_spec`:
-the first token names the backend (`codex` / `claude`, mapped to
+configurable shell-like command specs parsed by `config._parse_agent_spec`.
+
+The first token names the backend (`codex` / `claude`, mapped to
 `CODEX_BIN` / `CLAUDE_BIN`) and any remaining tokens are forwarded verbatim
-as backend-CLI args on every spawn — so roles like "implement with codex
-at xhigh reasoning"
-(`DEV_AGENT=codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`),
-"review with claude opus at high effort"
-(`REVIEW_AGENT=claude --model claude-opus-4-7 --effort high`), or
-"review with codex at high reasoning"
-(`REVIEW_AGENT=codex -m gpt-5.5-codex -c 'model_reasoning_effort="high"'`)
-all stay declarative in env.
+as backend-CLI args on every spawn.
+
+Roles stay declarative in env, e.g.:
+
+- "implement with codex at xhigh reasoning":
+  `DEV_AGENT=codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`
+- "review with claude opus at high effort":
+  `REVIEW_AGENT=claude --model claude-opus-4-7 --effort high`
+- "review with codex at high reasoning":
+  `REVIEW_AGENT=codex -m gpt-5.5-codex -c 'model_reasoning_effort="high"'`
 
 The full spec (backend + args) is persisted to pinned state and re-parsed
 on every resume, so in-flight issues keep using the pinned spec until the
