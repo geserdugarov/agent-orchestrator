@@ -44,6 +44,23 @@ WORKFLOW_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
 )
 WORKFLOW_LABELS = frozenset(name for name, _, _ in WORKFLOW_LABEL_SPECS)
 
+BASE_SYNC_HOLD_LABEL = "hold_base_sync"
+CONTROL_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
+    (
+        BASE_SYNC_HOLD_LABEL,
+        "5319e7",
+        "Pause automatic base sync, conflict resolution, and auto-merge",
+    ),
+)
+
+
+def issue_has_label(issue: Issue, label_name: str) -> bool:
+    wanted = (label_name or "").lower()
+    return any(
+        ((getattr(label, "name", "") or "").lower() == wanted)
+        for label in (issue.labels or [])
+    )
+
 
 def _write_event_record(record: dict) -> None:
     """Append one JSONL line to `config.EVENT_LOG_PATH` if configured.
@@ -654,7 +671,7 @@ class GitHubClient:
         return out
 
     def ensure_workflow_labels(self) -> None:
-        """Create any missing workflow labels on the repo. Idempotent.
+        """Create any missing workflow/control labels on the repo. Idempotent.
 
         Best-effort: a 403 (under-scoped PAT) logs a clear instruction and
         returns without raising, so the polling loop keeps running. The user
@@ -669,7 +686,9 @@ class GitHubClient:
                 e.status,
             )
             return
-        for name, color, description in WORKFLOW_LABEL_SPECS:
+        for name, color, description in (
+            WORKFLOW_LABEL_SPECS + CONTROL_LABEL_SPECS
+        ):
             if name in existing:
                 continue
             try:

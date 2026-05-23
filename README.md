@@ -97,7 +97,7 @@ Pinned in [`pyproject.toml`](pyproject.toml):
    ./run.sh
    ```
 
-   On first start the orchestrator creates the workflow labels on the repo and begins polling open issues every 60 seconds. For other launch options (single-tick, debug logging) see [`docs/configuration.md#run-modes`](docs/configuration.md#run-modes).
+   On first start the orchestrator creates its workflow/control labels on the repo and begins polling open issues every 60 seconds. For other launch options (single-tick, debug logging) see [`docs/configuration.md#run-modes`](docs/configuration.md#run-modes).
 
 6. **File a bootstrap test issue** to verify the path works end-to-end:
 

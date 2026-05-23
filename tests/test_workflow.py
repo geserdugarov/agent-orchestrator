@@ -17,6 +17,7 @@ os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow, worktrees
 from orchestrator.agents import AgentResult
+from orchestrator.github import BASE_SYNC_HOLD_LABEL
 from orchestrator.workflow import _parse_review_verdict
 
 from tests.fakes import (
@@ -2827,6 +2828,22 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh, _TEST_SPEC, 30,
         )
 
+    def test_in_review_hold_base_sync_pauses_auto_merge(self) -> None:
+        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
+        gh, issue = self._seed(pr=pr)
+        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
+
+        with patch.object(config, "AUTO_MERGE", True):
+            mocks = self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        mocks["run_agent"].assert_not_called()
+        self.assertEqual(gh.merge_calls, [])
+        self.assertEqual(gh.label_history, [])
+        self.assertNotIn("merged_at", gh.pinned_data(30))
+
     def test_in_review_auto_merge_blocked_on_pending_checks(self) -> None:
         pr = self._open_pr(approved=True, mergeable=True, check_state="pending")
         gh, issue = self._seed(pr=pr)
@@ -2895,6 +2912,25 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(gh.posted_pr_comments)
         last_pr_comment = gh.posted_pr_comments[-1][1]
         self.assertIn("auto-resolution", last_pr_comment)
+
+    def test_in_review_hold_base_sync_skips_unmergeable_route(self) -> None:
+        pr = self._open_pr(approved=True, mergeable=False, check_state="success")
+        gh, issue = self._seed(pr=pr)
+        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
+
+        with patch.object(config, "AUTO_MERGE", True):
+            mocks = self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        mocks["run_agent"].assert_not_called()
+        self.assertEqual(gh.merge_calls, [])
+        self.assertEqual(gh.posted_pr_comments, [])
+        self.assertNotIn((30, "resolving_conflict"), gh.label_history)
+        data = gh.pinned_data(30)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertNotIn("conflict_round", data)
 
     def test_in_review_unmergeable_preserves_existing_conflict_round(self) -> None:
         # A PR that already went through one auto-resolution round and
@@ -2994,6 +3030,25 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("not mergeable", last_comment)
         # AUTO_MERGE off does not seed the conflict_round budget.
         self.assertNotIn("conflict_round", data)
+
+    def test_in_review_hold_base_sync_skips_auto_merge_off_park(self) -> None:
+        pr = self._open_pr(approved=True, mergeable=False, check_state="success")
+        gh, issue = self._seed(pr=pr)
+        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
+
+        with patch.object(config, "AUTO_MERGE", False):
+            mocks = self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        mocks["run_agent"].assert_not_called()
+        self.assertEqual(gh.merge_calls, [])
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.label_history, [])
+        data = gh.pinned_data(30)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertIsNone(data.get("park_reason"))
 
     def test_in_review_auto_merge_mergeable_pending(self) -> None:
         # mergeable=None means GitHub is still computing. Don't merge, don't
@@ -9890,6 +9945,24 @@ class HandleResolvingConflictTest(
         self.assertEqual(data.get("conflict_round"), 1)
         self.assertIn("last_conflict_resolved_at", data)
 
+    def test_hold_base_sync_label_pauses_resolving_conflict(self) -> None:
+        gh, issue, pr = self._seed()
+        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
+        mocks, merge_mock, git_mock = self._run_with_merge(
+            gh, issue,
+            merge_succeeded=True,
+            head_shas=["beforehead", "merged"],
+            push_branch=True,
+        )
+
+        mocks["run_agent"].assert_not_called()
+        merge_mock.assert_not_called()
+        mocks["_push_branch"].assert_not_called()
+        self.assertEqual(gh.label_history, [])
+        data = gh.pinned_data(200)
+        self.assertEqual(data.get("conflict_round"), 0)
+        self.assertFalse(data.get("awaiting_human"))
+
     def test_clean_merge_already_up_to_date_skips_push_and_ticks_round(
         self,
     ) -> None:
@@ -11010,6 +11083,39 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
              patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         self.assertIn((7, "resolving_conflict"), self.gh.label_history)
+
+    def test_hold_base_sync_label_skips_pr_refresh_detour(self) -> None:
+        from unittest.mock import MagicMock
+        issue = make_issue(7, label="in_review")
+        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
+        self.gh.add_issue(issue)
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self._add_pr()
+        merge = MagicMock()
+        git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_git", git_mock):
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+
+        merge.assert_not_called()
+        self.assertEqual(self.gh.label_history, [])
+        self.assertEqual(self.gh.posted_pr_comments, [])
+
+    def test_hold_base_sync_label_skips_pre_pr_base_merge(self) -> None:
+        from unittest.mock import MagicMock
+        issue = make_issue(7, label="implementing")
+        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
+        self.gh.add_issue(issue)
+        merge = MagicMock()
+        git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_git", git_mock):
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+
+        merge.assert_not_called()
+        self.assertEqual(self.gh.label_history, [])
 
     def test_pr_having_resolving_conflict_label_does_not_re_route(self) -> None:
         # The handler runs this tick anyway and will do the merge -- a

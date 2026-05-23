@@ -24,7 +24,12 @@ from github.Issue import Issue
 from . import config
 from .agents import AgentResult, run_agent
 from .config import RepoSpec
-from .github import GitHubClient, PinnedState
+from .github import (
+    BASE_SYNC_HOLD_LABEL,
+    GitHubClient,
+    PinnedState,
+    issue_has_label,
+)
 from .workflow_drift import (
     _build_user_content_change_prompt,
     _compute_user_content_hash,
@@ -3169,6 +3174,13 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         gh.write_pinned_state(issue, state)
         return
 
+    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
+        log.info(
+            "issue=#%d has %r; holding in_review auto-merge/base-sync gates",
+            issue.number, BASE_SYNC_HOLD_LABEL,
+        )
+        return
+
     # No new comments. The two AUTO_MERGE branches diverge on what
     # "unmergeable" means:
     #
@@ -3497,6 +3509,13 @@ def _handle_resolving_conflict(
         # Deliberately no `pr_closed_without_merge` emit here: the PR is
         # still open. That event is reserved for the actual closed-PR
         # rejection arc above.
+        return
+
+    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
+        log.info(
+            "issue=#%d has %r; pausing resolving_conflict base merge",
+            issue.number, BASE_SYNC_HOLD_LABEL,
+        )
         return
 
     # User-content drift: a human edited the issue body while the dev

@@ -33,7 +33,12 @@ from github.Issue import Issue
 
 from . import config
 from .config import RepoSpec
-from .github import GitHubClient, PinnedState
+from .github import (
+    BASE_SYNC_HOLD_LABEL,
+    GitHubClient,
+    PinnedState,
+    issue_has_label,
+)
 from .workflow_messages import _post_pr_comment
 
 log = logging.getLogger(__name__)
@@ -981,7 +986,9 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
       AUTO_MERGE's `agent_approved_sha == pr.head.sha` gate. So instead
       we route the issue to `resolving_conflict`: the existing handler
       does the merge, pushes, and flips back to `validating` so the
-      reviewer re-runs on the merged head. This works under
+      reviewer re-runs on the merged head. Applying the `hold_base_sync`
+      label to an issue pauses both the pre-PR local merge and the PR
+      detour until the label is removed. This works under
       `AUTO_MERGE=off` too -- `_handle_resolving_conflict` never reads
       AUTO_MERGE, it just does the merge+push+relabel cycle. Issues
       already labeled `resolving_conflict` are left alone (the handler
@@ -1064,6 +1071,12 @@ def _sync_worktree_with_base(
     except Exception:
         log.debug(
             "issue=#%d not retrievable; skipping base sync", issue_number,
+        )
+        return
+    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
+        log.debug(
+            "issue=#%d has %r; skipping base sync",
+            issue_number, BASE_SYNC_HOLD_LABEL,
         )
         return
     state = gh.read_pinned_state(issue)
@@ -1166,6 +1179,10 @@ def _route_pr_worktree_to_resolving_conflict(
       `MAX_CONFLICT_ROUNDS` caps, which exist precisely to require human
       intervention after repeated failures.
 
+    * The issue has `hold_base_sync`, which is an explicit operator hold for
+      series work where base should be merged once after prerequisite PRs
+      land, not after every intermediate base advance.
+
     * The PR is no longer open. A merged PR advances `origin/<base>`, so
       the still-validating / still-in_review worktree pointed at the now-
       stale branch is naturally behind base; without this gate the detour
@@ -1204,6 +1221,14 @@ def _route_pr_worktree_to_resolving_conflict(
             "issue=#%d behind %s/%s by %d but awaiting_human=True; "
             "leaving park intact rather than relabeling without progress",
             issue.number, spec.remote_name, spec.base_branch, behind,
+        )
+        return
+
+    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
+        log.debug(
+            "issue=#%d behind %s/%s by %d but has %r; not detouring",
+            issue.number, spec.remote_name, spec.base_branch, behind,
+            BASE_SYNC_HOLD_LABEL,
         )
         return
 
