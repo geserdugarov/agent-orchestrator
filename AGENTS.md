@@ -4,9 +4,13 @@ This file is the entry point for AI coding agents (Codex, Claude, etc.) working 
 
 ## What this project is
 
-`agent-orchestrator` is a GitHub-Issue-driven workflow that watches issues on configured repos, drives them through a label-based state machine, and spawns local CLI agents (`codex`, `claude`) in per-issue git worktrees to implement them and open PRs. State lives entirely in GitHub (one workflow label + one pinned JSON comment per issue), so the orchestrator process is stateless.
+`agent-orchestrator` is a GitHub-Issue-driven workflow that watches issues on configured repos, drives them through a label-based state machine, and spawns local CLI agents (`codex`, `claude`) in per-issue git worktrees to implement them and open PRs.
 
-The user-facing overview is in [`README.md`](README.md). The design, architecture, and stage definitions are in [`docs/architecture.md`](docs/architecture.md). The roadmap lives at [`plans/roadmap.md`](plans/roadmap.md). Read these before making non-trivial changes to the state machine.
+State lives entirely in GitHub (one workflow label + one pinned JSON comment per issue), so the orchestrator process is stateless.
+
+The user-facing overview is in [`README.md`](README.md). The design, architecture, and stage definitions are in [`docs/architecture.md`](docs/architecture.md). The roadmap lives at [`plans/roadmap.md`](plans/roadmap.md).
+
+Read these before making non-trivial changes to the state machine.
 
 ## Repository layout
 
