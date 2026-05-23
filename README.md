@@ -4,7 +4,9 @@
 
 A GitHub-Issue-driven workflow runner that turns local coding-agent CLIs (`codex`, `claude`) into a hands-off implementer + reviewer loop.
 
-Filing an issue is the only handle: the orchestrator decomposes it if needed, spawns the dev agent in an isolated git worktree, opens a PR, runs a fresh reviewer pass, and (optionally) auto-merges. State lives entirely in the issue itself — one workflow label plus one pinned JSON comment — so progress is observable on github.com and the orchestrator can be restarted without losing context.
+Filing an issue is the only handle: the orchestrator decomposes it if needed, spawns the dev agent in an isolated git worktree, opens a PR, runs a fresh reviewer pass, and (optionally) auto-merges.
+
+State lives entirely in the issue itself — one workflow label plus one pinned JSON comment — so progress is observable on github.com and the orchestrator can be restarted without losing context.
 
 It is meant for solo or small-team setups that already have a `codex` or `claude` login and want autonomy without standing up a separate planner, queue, or database.
 
@@ -21,7 +23,9 @@ For design and stage definitions, see [`docs/architecture.md`](docs/architecture
 
 ### CLI agents
 
-The orchestrator spawns these as subprocesses on the host. The defaults are `claude` for implementation and decomposition, `codex` for review — so most setups need both authenticated. A single-backend deployment can skip the other; the role mapping is configured via `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` (see [`docs/workflow.md`](docs/workflow.md)).
+The orchestrator spawns these as subprocesses on the host. The defaults are `claude` for implementation and decomposition, `codex` for review — so most setups need both authenticated.
+
+A single-backend deployment can skip the other; the role mapping is configured via `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` (see [`docs/workflow.md`](docs/workflow.md)).
 
 - [`codex`](https://github.com/openai/codex) — invoked with `--dangerously-bypass-approvals-and-sandbox`. Run `codex login` once. The host is the sandbox boundary.
 - [`claude`](https://docs.anthropic.com/en/docs/claude-code) — invoked with `--dangerously-skip-permissions`. Authenticate via `claude` once.
@@ -104,7 +108,11 @@ Pinned in [`pyproject.toml`](pyproject.toml):
    > **Title:** Add a `hello()` function to the orchestrator package
    > **Body:** Add `hello()` to `orchestrator/__init__.py` returning the string `"hello, world"`. Add `tests/test_hello.py` asserting the return value. Don't change anything else.
 
-   Within ~1 minute the orchestrator should comment "picking this up" and label the issue `decomposing`. The decomposer agent declares the task fits one context, the label flips to `ready` and then `implementing`, and the dev agent runs in a fresh worktree at `../wt-orchestrator/geserdugarov__agent-orchestrator/issue-N`. The orchestrator then pushes the branch, opens a PR, labels the issue `validating`, runs a fresh reviewer session against the diff, and on `VERDICT: APPROVED` moves the issue to `in_review`. With `AUTO_MERGE=on`, the orchestrator then merges the PR itself once GitHub reports it mergeable with green checks, flips the label to `done`, and closes the issue. With `AUTO_MERGE=off` (the default), review and merge the PR manually.
+   Within ~1 minute the orchestrator should comment "picking this up" and label the issue `decomposing`. The decomposer agent declares the task fits one context, the label flips to `ready` and then `implementing`, and the dev agent runs in a fresh worktree at `../wt-orchestrator/geserdugarov__agent-orchestrator/issue-N`.
+
+   The orchestrator then pushes the branch, opens a PR, labels the issue `validating`, runs a fresh reviewer session against the diff, and on `VERDICT: APPROVED` moves the issue to `in_review`.
+
+   With `AUTO_MERGE=on`, the orchestrator then merges the PR itself once GitHub reports it mergeable with green checks, flips the label to `done`, and closes the issue. With `AUTO_MERGE=off` (the default), review and merge the PR manually.
 
 ## Continuous integration
 
@@ -116,7 +124,9 @@ Common knobs live in [`.env.example`](.env.example). The full reference — requ
 
 ## Managing multiple repositories
 
-Set `REPOS` to drive several target repositories from one orchestrator process. Each tick iterates every configured spec; a failure in one repo's tick is logged and skipped so the remaining repos still advance. Worktrees are namespaced under `WORKTREES_DIR/<owner>__<name>/issue-N` so two repos that share an issue number cannot collide. For the entry syntax and the available per-entry fields, see [`docs/configuration.md#multi-repo-repos-syntax`](docs/configuration.md#multi-repo-repos-syntax).
+Set `REPOS` to drive several target repositories from one orchestrator process. Each tick iterates every configured spec; a failure in one repo's tick is logged and skipped so the remaining repos still advance.
+
+Worktrees are namespaced under `WORKTREES_DIR/<owner>__<name>/issue-N` so two repos that share an issue number cannot collide. For the entry syntax and the available per-entry fields, see [`docs/configuration.md#multi-repo-repos-syntax`](docs/configuration.md#multi-repo-repos-syntax).
 
 ## License
 
