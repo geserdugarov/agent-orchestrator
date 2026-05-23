@@ -35,6 +35,8 @@ An issue should have at most one workflow label at a time. Non-workflow labels s
 
 The orchestrator also creates the non-workflow control label `hold_base_sync`; while present on an issue, it pauses per-tick base sync, `in_review` auto-merge/unmergeable handling, and `resolving_conflict` base merges until the label is removed.
 
+A second control label `backlog` is created for postponed work. While present on an issue, every per-tick handler skips it before the workflow label is even read, so the orchestrator does not pick up, decompose, or otherwise advance the issue. Removing the label hands control back to the state machine on the next tick — typically applied at issue creation to queue work that should sit until a human is ready.
+
 | Label | Meaning |
 |---|---|
 | _(none)_ | Open issue not yet picked up by the orchestrator. |

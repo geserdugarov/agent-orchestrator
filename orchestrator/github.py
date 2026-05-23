@@ -45,11 +45,17 @@ WORKFLOW_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
 WORKFLOW_LABELS = frozenset(name for name, _, _ in WORKFLOW_LABEL_SPECS)
 
 BASE_SYNC_HOLD_LABEL = "hold_base_sync"
+BACKLOG_LABEL = "backlog"
 CONTROL_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
     (
         BASE_SYNC_HOLD_LABEL,
         "5319e7",
         "Pause automatic base sync, conflict resolution, and auto-merge",
+    ),
+    (
+        BACKLOG_LABEL,
+        "c5def5",
+        "Skip orchestrator processing entirely until the label is removed",
     ),
 )
 

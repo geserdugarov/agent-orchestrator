@@ -26,6 +26,7 @@ from . import config
 from .agents import AgentResult, run_agent
 from .config import RepoSpec
 from .github import (
+    BACKLOG_LABEL,
     BASE_SYNC_HOLD_LABEL,
     GitHubClient,
     PinnedState,
@@ -534,6 +535,17 @@ def tick(gh: GitHubClient, spec: RepoSpec) -> None:
 
 
 def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+    # Postponed-task hold: applying `backlog` parks the issue outside the
+    # state machine entirely until the label is removed. Checked before
+    # reading the workflow label so the orchestrator never decomposes,
+    # spawns an agent, or otherwise reacts while the operator is using
+    # the label as a "not yet" signal.
+    if issue_has_label(issue, BACKLOG_LABEL):
+        log.info(
+            "repo=%s issue=#%s has %r; skipping",
+            spec.slug, issue.number, BACKLOG_LABEL,
+        )
+        return
     label = gh.workflow_label(issue)
     log.info("repo=%s issue=#%s label=%r", spec.slug, issue.number, label)
     if label is None:
