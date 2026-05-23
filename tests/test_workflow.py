@@ -18,7 +18,7 @@ os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow, worktrees
 from orchestrator.agents import AgentResult
-from orchestrator.github import BASE_SYNC_HOLD_LABEL
+from orchestrator.github import BACKLOG_LABEL, BASE_SYNC_HOLD_LABEL
 from orchestrator.workflow import _parse_review_verdict
 
 from tests.fakes import (
@@ -11121,6 +11121,42 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
 
+    def test_backlog_label_skips_pr_refresh_detour(self) -> None:
+        # `backlog` is a hard skip: the refresh path must not relabel the
+        # issue to `resolving_conflict` or post a PR notice while the
+        # operator has the issue postponed.
+        from unittest.mock import MagicMock
+        issue = make_issue(7, label="in_review")
+        issue.labels.append(FakeLabel(BACKLOG_LABEL))
+        self.gh.add_issue(issue)
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self._add_pr()
+        merge = MagicMock()
+        git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_git", git_mock):
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+
+        merge.assert_not_called()
+        self.assertEqual(self.gh.label_history, [])
+        self.assertEqual(self.gh.posted_pr_comments, [])
+
+    def test_backlog_label_skips_pre_pr_base_merge(self) -> None:
+        from unittest.mock import MagicMock
+        issue = make_issue(7, label="implementing")
+        issue.labels.append(FakeLabel(BACKLOG_LABEL))
+        self.gh.add_issue(issue)
+        merge = MagicMock()
+        git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_git", git_mock):
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+
+        merge.assert_not_called()
+        self.assertEqual(self.gh.label_history, [])
+
     def test_pr_having_resolving_conflict_label_does_not_re_route(self) -> None:
         # The handler runs this tick anyway and will do the merge -- a
         # second label flip is pointless and would re-post the PR notice.
@@ -15347,6 +15383,49 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
         for n, wt, _ in results:
             self.assertIsNotNone(wt)
             self.assertTrue(wt.exists(), f"worktree {wt} missing for issue #{n}")
+
+
+class BacklogLabelSkipsProcessingTest(unittest.TestCase):
+    """The `backlog` control label is a "not yet" hold: applied to an issue
+    (typically a freshly opened one), it prevents the orchestrator from
+    decomposing, picking up, or otherwise advancing the state machine until
+    a human removes the label.
+    """
+
+    def test_unlabeled_issue_with_backlog_skips_pickup(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(701)
+        issue.labels.append(FakeLabel(BACKLOG_LABEL))
+        gh.add_issue(issue)
+
+        with patch.object(workflow, "_handle_pickup") as pickup:
+            workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        pickup.assert_not_called()
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.label_history, [])
+
+    def test_in_flight_issue_with_backlog_skips_dispatch(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(702, label="implementing")
+        issue.labels.append(FakeLabel(BACKLOG_LABEL))
+        gh.add_issue(issue)
+
+        with patch.object(workflow, "_handle_implementing") as impl:
+            workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        impl.assert_not_called()
+        self.assertEqual(gh.label_history, [])
+
+    def test_removing_backlog_allows_pickup(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(703)
+        gh.add_issue(issue)
+
+        with patch.object(workflow, "_handle_pickup") as pickup:
+            workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        pickup.assert_called_once_with(gh, _TEST_SPEC, issue)
 
 
 if __name__ == "__main__":

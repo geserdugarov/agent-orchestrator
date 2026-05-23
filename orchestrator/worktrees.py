@@ -35,6 +35,7 @@ from github.Issue import Issue
 from . import config
 from .config import RepoSpec
 from .github import (
+    BACKLOG_LABEL,
     BASE_SYNC_HOLD_LABEL,
     GitHubClient,
     PinnedState,
@@ -1174,6 +1175,16 @@ def _sync_worktree_with_base(
     except Exception:
         log.debug(
             "issue=#%d not retrievable; skipping base sync", issue_number,
+        )
+        return
+    if issue_has_label(issue, BACKLOG_LABEL):
+        # Match the dispatcher's hard-skip: `backlog` means "the orchestrator
+        # should not touch this issue at all", so refresh must not merge
+        # base, post a PR comment, or detour the issue to
+        # `resolving_conflict` before `_process_issue` would have skipped it.
+        log.debug(
+            "issue=#%d has %r; skipping base sync",
+            issue_number, BACKLOG_LABEL,
         )
         return
     if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):

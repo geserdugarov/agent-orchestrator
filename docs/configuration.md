@@ -93,10 +93,11 @@ The first token of each role spec selects the backend (`codex` / `claude`); any 
 - `python -m orchestrator.main --once` — single tick then exit. Useful for tests and debugging.
 - `python -m orchestrator.main --log-level DEBUG` — verbose logs.
 
-On first start (any mode) the orchestrator creates the workflow labels and the `hold_base_sync` control label on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
+On first start (any mode) the orchestrator creates the workflow labels and the `hold_base_sync` / `backlog` control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
 
 ## Control labels
 
 | Label | Purpose |
 | ----- | ------- |
 | `hold_base_sync` | Apply to an issue to pause per-tick base merges, `in_review` auto-merge/unmergeable handling, and `resolving_conflict` base merges. Remove it when prerequisite PRs have landed; the next tick performs the accumulated base sync once. |
+| `backlog` | Apply to an issue (typically at creation) to keep the orchestrator from picking it up. The dispatcher skips the issue entirely while the label is present; remove the label to release the issue for processing. |
