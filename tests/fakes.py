@@ -202,6 +202,20 @@ class FakeGitHubClient:
         self.deleted_remote_branches: list[str] = []
         self.delete_remote_branch_returns_ok: bool = True
 
+    def _for_worker_thread(self) -> "FakeGitHubClient":
+        """Mirror `GitHubClient._for_worker_thread`.
+
+        The real client returns a fresh PyGithub-backed instance for
+        thread-isolation of `Requester` state; the fake's state lives in
+        plain dicts that tests inspect directly, so returning `self`
+        preserves the existing test ergonomics (one fake, one source of
+        truth for assertions) while letting the production parallel path
+        call this method unconditionally. Tests that specifically need to
+        verify the worker-clone contract patch this method to count calls
+        or hand out distinct instances.
+        """
+        return self
+
     def seed_state(self, issue_number: int, **data: Any) -> None:
         """Pre-populate pinned state for an issue. The next read_pinned_state
         returns a wrapper around this dict (with a synthetic comment_id)."""

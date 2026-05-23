@@ -660,9 +660,17 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     """Poll children to decide whether the parent unblocks (or one of the
     children unblocks).
 
-    Workers run sequentially in the polling loop today, so the child's
-    `in_review -> done` label flip and this tick cannot truly race; we read
-    each child's current label fresh here.
+    The orchestrator's parallel tick path (see
+    `workflow._FAMILY_AWARE_LABELS`) submits the whole family-aware
+    bucket as a single drain task on one worker thread, so only one of
+    `decomposing`, `blocked`, or `umbrella` runs at a time within a
+    tick -- even when other issues fan out across worker threads. A
+    child's `in_review -> done` label flip and this tick therefore
+    still cannot race the parent's child-state writes; we read each
+    child's current label fresh here. Issues outside the family-aware
+    bucket (`implementing`, `validating`, `in_review`,
+    `resolving_conflict`) may run concurrently alongside, but their
+    handlers do not write across parent/child boundaries.
     """
     from .. import workflow as _wf
 

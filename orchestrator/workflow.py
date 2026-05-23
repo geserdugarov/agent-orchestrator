@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import subprocess  # noqa: F401 -- re-exported so tests can `patch.object(workflow.subprocess, "run", ...)`
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -225,6 +226,53 @@ from .stages.in_review import (
 log = logging.getLogger(__name__)
 
 
+# Workflow labels whose handlers can read or write OTHER issues' pinned
+# state -- the cross-issue writers are:
+#   * `_handle_decomposing` -- creates child issues, seeds their pinned
+#     state, may flip their labels (`set_workflow_label(child, "ready")`),
+#     and the half-finished recovery branch seeds `parent_number` on each
+#     already-recorded child.
+#   * `_handle_blocked` -- the dep-graph walk flips no-longer-blocked
+#     children from `blocked` to `ready` (`set_workflow_label(child, ...)`).
+#   * `_handle_umbrella` -- the dep-graph walk plus the close-on-all-done
+#     branch can flip child labels too.
+#   * `_handle_pickup` (no label) -- routes straight into
+#     `_handle_decomposing`, so a freshly arrived unlabeled issue can
+#     create children on the same tick.
+# Running two of these in parallel can race a parent's child-state write
+# against the child's own handler on a sibling thread (the original
+# reproducer: a decomposing parent seeded `parent_number` on a child while
+# the same child's `_handle_blocked` parked `blocked_no_children` and
+# clobbered the seed).
+#
+# `_handle_ready` is NOT in this set. It writes only its own pinned state
+# and label, then recurses into `_handle_implementing` (also own-state
+# only). Multiple `ready` issues on the same tick must therefore be free
+# to fan out across worker threads so the long-running agent work is
+# actually concurrent under `parallel_limit > 1`. The earlier draft put
+# `ready` here and serialized those agent jobs, defeating the issue's
+# concurrency goal.
+#
+# `tick()` submits the family-aware bucket to the executor as ONE drain
+# task that processes its issues sequentially on a single worker thread;
+# each non-family-aware issue gets its own task. Folding the family
+# bucket into one task caps its executor footprint at exactly one slot
+# regardless of how many family-aware issues are pending, so the other
+# `limit - 1` slots stay free for fanout. (Submitting per-family-issue
+# futures with a shared lock would let waiting family futures occupy
+# additional worker slots and starve fanout under a small `limit`.)
+# This preserves the "no two cross-issue writers at once" invariant
+# while keeping a slow decomposing / unlabeled-pickup handler from
+# blocking unrelated implementing / validating issues on the same
+# tick. Stages outside this set (`ready`, `implementing`,
+# `validating`, `in_review`, `resolving_conflict`) only read and write
+# their own per-issue state + worktree, so they stay eligible for
+# unconditional parallel fan-out.
+_FAMILY_AWARE_LABELS = frozenset({
+    "decomposing", "blocked", "umbrella",
+})
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -302,13 +350,187 @@ def tick(gh: GitHubClient, spec: RepoSpec) -> None:
         log.exception(
             "repo=%s pre-tick base refresh failed; continuing", spec.slug,
         )
+    # parallel_limit==1 (the legacy default) keeps the sequential iteration
+    # in-thread AND keeps streaming directly over `gh.list_pollable_issues()`
+    # rather than materializing the list first. Materializing here would
+    # change observable behavior on a partial enumeration failure (e.g. a
+    # PyGithub pagination error mid-sweep): the legacy loop processes
+    # everything yielded BEFORE the failure, but a `list(...)` upfront
+    # would lose every already-yielded issue when the generator raises.
+    # limit>1 fans the per-issue work out across a bounded thread pool;
+    # each `_process_issue` is independent (per-issue worktree, per-issue
+    # PinnedState, per-issue GitHub label/comment surface) so threads
+    # serialize only at the PyGithub HTTP layer, which is already
+    # thread-safe.
+    #
+    # The effective cap is the smaller of the per-repo `parallel_limit` and
+    # the host-wide `config.MAX_PARALLEL_ISSUES_GLOBAL`. The global ceiling
+    # is documented as applying regardless of any one repo's per-repo cap
+    # so an operator can configure a high `parallel_limit` per repo
+    # without exceeding the host's CPU/memory budget for agent CLIs.
+    # `main._run_tick` already runs the per-repo ticks sequentially, so
+    # capping inside `tick()` is sufficient to bound concurrent worker
+    # threads at any given moment to `MAX_PARALLEL_ISSUES_GLOBAL`.
+    per_repo_limit = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
+    global_limit = max(
+        1, int(getattr(config, "MAX_PARALLEL_ISSUES_GLOBAL", 1) or 1)
+    )
+    limit = min(per_repo_limit, global_limit)
+    if limit == 1:
+        for issue in gh.list_pollable_issues():
+            try:
+                _process_issue(gh, spec, issue)
+            except Exception:
+                log.exception(
+                    "repo=%s issue=#%s processing failed",
+                    spec.slug, issue.number,
+                )
+        return
+    # Parallel path: the executor needs the full submission set up front to
+    # bound `max_workers` correctly, so the generator is materialized here.
+    # The trade-off is consistent with the parallel mode's intent (fan out
+    # the whole eligible set this tick); on an enumeration failure the
+    # whole tick aborts -- the next tick's enumeration will retry.
+    #
+    # Partition by `_FAMILY_AWARE_LABELS`: stages that read/write across
+    # parent/child boundaries must never run two at a time -- a parent's
+    # `_handle_decomposing` recovery seeds `parent_number` on a child
+    # while the child's `_handle_blocked` would otherwise clobber the
+    # same pinned-state comment. The remaining issues fan out across the
+    # worker pool because their handlers touch only per-issue state.
+    #
+    # Both buckets share a single executor capped at `limit`, and the
+    # family-aware workers acquire a tick-local lock around their
+    # `_process_issue` call so they cannot overlap with each other. They
+    # CAN overlap with non-family workers: a slow decomposing /
+    # unlabeled-pickup agent run on one worker no longer blocks the
+    # other `limit-1` workers from advancing unrelated implementing /
+    # validating issues in the same tick. Without this overlap a mixed
+    # tick with one long decomposing issue and several ready /
+    # implementing issues would still process those implementing issues
+    # serially after the decomposer finished -- the opposite of what
+    # `parallel_limit > 1` is supposed to deliver.
+    #
+    # Label is read on the caller thread to avoid an extra worker-side
+    # GitHub round-trip just to bucket the issue. Per-issue exception
+    # isolation extends to that label read: a PyGithub lazy-load failure
+    # on one issue's labels must not abort the whole tick before the
+    # other eligible issues are even classified. A failing read is
+    # logged and the issue is conservatively routed into the family
+    # bucket, where the per-issue try/except below catches any sustained
+    # failure with the same log line shape the rest of `tick` produces.
+    family_numbers: list[int] = []
+    fanout_numbers: list[int] = []
     for issue in gh.list_pollable_issues():
         try:
-            _process_issue(gh, spec, issue)
+            label = gh.workflow_label(issue)
         except Exception:
             log.exception(
-                "repo=%s issue=#%s processing failed", spec.slug, issue.number,
+                "repo=%s issue=#%s workflow_label read failed; routing to "
+                "family bucket so per-issue exception isolation can pick "
+                "up any sustained failure", spec.slug, issue.number,
             )
+            family_numbers.append(issue.number)
+            continue
+        if label is None or label in _FAMILY_AWARE_LABELS:
+            family_numbers.append(issue.number)
+        else:
+            fanout_numbers.append(issue.number)
+
+    if not family_numbers and not fanout_numbers:
+        return
+    # The family bucket is submitted as a SINGLE drain task that
+    # processes its issues sequentially on one worker thread. With
+    # `parallel_limit=2`, two family issues, and one fanout issue,
+    # submitting two family futures plus one fanout future would let a
+    # slow first family handler hold one worker slot while the second
+    # family future occupied the other worker slot blocking on a
+    # family lock -- the fanout issue would be queued and could not run
+    # until the slow family handler exited, defeating mixed-stage
+    # concurrency. Folding the whole family bucket into one drain task
+    # caps its footprint at exactly one executor slot regardless of how
+    # many family-aware issues there are, leaving the other `limit-1`
+    # slots free for fanout.
+    total_tasks = (1 if family_numbers else 0) + len(fanout_numbers)
+    # max_workers is capped at `limit` AND at the submitted-task count
+    # so a quiet tick (e.g. one fan-out issue) does not spin up idle
+    # worker threads.
+    workers = min(limit, total_tasks)
+
+    # Only issue NUMBERS cross the thread boundary. PyGithub's `Issue`
+    # and the parent `GitHubClient`/`Repository`/`Requester` chain hold
+    # mutable per-request state that is not documented as thread-safe;
+    # passing an Issue resolved on the caller thread into a worker
+    # thread would have that worker drive a shared `Requester` and
+    # could corrupt concurrent GitHub operations. Each worker instead
+    # calls `gh._for_worker_thread()` to mint a fresh client (= fresh
+    # Github + Requester + Repository) and refetches its Issue against
+    # THAT client, so every in-flight HTTP call is the sole consumer of
+    # its requester's state. The fake mirrors `_for_worker_thread` to
+    # return `self`, so tests keep their single-fake assertion model.
+
+    def _drain_family_bucket() -> None:
+        """Process every family-aware issue this tick sequentially.
+
+        Per-issue exception isolation lives INSIDE this function (one
+        try/except per issue) so the family bucket keeps draining if any
+        single family handler raises; without that, the as_completed
+        loop below would see one swallowed-or-raising future for the
+        whole bucket. The function itself never raises -- the outer
+        loop's `fut.result()` call therefore only ever logs a
+        programming-level failure for this future.
+        """
+        for issue_number in family_numbers:
+            try:
+                worker_gh = gh._for_worker_thread()
+                worker_issue = worker_gh.get_issue(issue_number)
+                _process_issue(worker_gh, spec, worker_issue)
+            except Exception:
+                log.exception(
+                    "repo=%s issue=#%s processing failed",
+                    spec.slug, issue_number,
+                )
+
+    def _run_fanout_in_worker(issue_number: int) -> None:
+        worker_gh = gh._for_worker_thread()
+        worker_issue = worker_gh.get_issue(issue_number)
+        _process_issue(worker_gh, spec, worker_issue)
+
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix=f"orch-{spec.slug.replace('/', '__')}",
+    ) as ex:
+        # Sentinel for the family bucket future so the as_completed loop
+        # can distinguish it from per-fanout-issue futures.
+        family_sentinel: object = object()
+        futures: dict[Any, Any] = {}
+        if family_numbers:
+            futures[ex.submit(_drain_family_bucket)] = family_sentinel
+        for n in fanout_numbers:
+            futures[ex.submit(_run_fanout_in_worker, n)] = n
+        # `as_completed` so a slow issue does not delay logging the failures
+        # of faster ones. Each `fut.result()` is wrapped individually so one
+        # raising issue cannot abort the remaining futures' result drain.
+        for fut in as_completed(futures):
+            tag = futures[fut]
+            try:
+                fut.result()
+            except Exception:
+                if tag is family_sentinel:
+                    # `_drain_family_bucket` catches per-issue exceptions
+                    # itself; reaching here means a programming error in
+                    # the drain loop. Log it loudly but don't kill the
+                    # remaining (fanout) futures' drain.
+                    log.exception(
+                        "repo=%s family bucket drain raised (programming "
+                        "error -- per-issue exceptions are handled inside "
+                        "the drain)", spec.slug,
+                    )
+                else:
+                    log.exception(
+                        "repo=%s issue=#%s processing failed",
+                        spec.slug, tag,
+                    )
 
 
 def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:

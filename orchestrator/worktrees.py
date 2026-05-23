@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -58,6 +59,45 @@ _CONVENTIONAL_RE = re.compile(
 
 def _branch_name(issue_number: int) -> str:
     return f"orchestrator/issue-{issue_number}"
+
+
+# Per-target_root locks that serialize git plumbing against the parent
+# clone. `git worktree add` / `worktree remove` / `branch -D` / authenticated
+# `fetch` all write to the parent repo's `.git/config` and grab its
+# `.git/config.lock`. Two `workflow.tick` worker threads driving
+# `_ensure_worktree` against the same `spec.target_root` can race that
+# lock file and surface as `error: could not lock config file .git/config:
+# File exists`, failing the worker before the agent even spawns. The
+# long-running agent work itself runs in the per-issue worktree (with its
+# own per-worktree config under `<git-dir>/worktrees/<name>/`) so we
+# release the lock as soon as the plumbing finishes -- agents stay
+# concurrent, only the parent-repo writes are serialized.
+#
+# Locks are keyed by the string form of `spec.target_root` so two
+# `RepoSpec` instances pointing at the same on-disk clone share a lock
+# (the case `_run_tick` produces when one Python process drives several
+# RepoSpec entries that happen to point at the same target_root for
+# operator convenience). `_TARGET_ROOT_LOCKS_LOCK` only guards the dict
+# lookup/insert; the per-key lock is acquired outside that guard so a
+# slow git operation can't block lookup for other repos.
+_TARGET_ROOT_LOCKS_LOCK = threading.Lock()
+_TARGET_ROOT_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _target_root_lock(target_root: Path) -> threading.Lock:
+    """Return the lock that serializes git plumbing against `target_root`.
+
+    Created lazily on first use so a single-repo deployment never pays
+    for a lock it doesn't need. The dict is process-global; clearing it
+    is a test-only concern handled inline (no public API).
+    """
+    key = str(target_root)
+    with _TARGET_ROOT_LOCKS_LOCK:
+        lock = _TARGET_ROOT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _TARGET_ROOT_LOCKS[key] = lock
+        return lock
 
 
 # Allowed characters in a worktree directory segment: alphanumerics plus
@@ -114,36 +154,51 @@ def _ensure_worktree(spec: RepoSpec, issue_number: int) -> Path:
     The reuse is what lets the orchestrator survive a crash between codex
     committing and the orchestrator pushing -- without it, the next tick would
     wipe the worktree and we'd burn another codex run on the same prompt.
+
+    All git operations target `spec.target_root` and therefore mutate the
+    parent clone's `.git/config`. The per-target_root lock (see
+    `_target_root_lock`) serializes concurrent workers so two tick fan-out
+    threads cannot collide on `.git/config.lock`. The lock is released
+    before the caller starts the long-running agent run.
     """
-    _repo_worktrees_root(spec).mkdir(parents=True, exist_ok=True)
-    wt = _worktree_path(spec, issue_number)
-    branch = _branch_name(issue_number)
+    with _target_root_lock(spec.target_root):
+        _repo_worktrees_root(spec).mkdir(parents=True, exist_ok=True)
+        wt = _worktree_path(spec, issue_number)
+        branch = _branch_name(issue_number)
 
-    if wt.exists():
-        if _has_new_commits(spec, wt):
-            log.info("issue=#%d worktree has unpushed commits; reusing", issue_number)
-            return wt
-        _git("worktree", "remove", "--force", str(wt), cwd=spec.target_root)
+        if wt.exists():
+            if _has_new_commits(spec, wt):
+                log.info(
+                    "issue=#%d worktree has unpushed commits; reusing",
+                    issue_number,
+                )
+                return wt
+            _git(
+                "worktree", "remove", "--force", str(wt),
+                cwd=spec.target_root,
+            )
 
-    _git(
-        "fetch", "--quiet", spec.remote_name, spec.base_branch,
-        cwd=spec.target_root,
-    )
-
-    have_branch = _git(
-        "rev-parse", "--verify", branch, cwd=spec.target_root
-    ).returncode == 0
-    if have_branch:
-        result = _git("worktree", "add", str(wt), branch, cwd=spec.target_root)
-    else:
-        result = _git(
-            "worktree", "add", "-b", branch, str(wt),
-            f"{spec.remote_name}/{spec.base_branch}",
+        _git(
+            "fetch", "--quiet", spec.remote_name, spec.base_branch,
             cwd=spec.target_root,
         )
-    if result.returncode != 0:
-        raise RuntimeError(f"git worktree add failed: {result.stderr}")
-    return wt
+
+        have_branch = _git(
+            "rev-parse", "--verify", branch, cwd=spec.target_root
+        ).returncode == 0
+        if have_branch:
+            result = _git(
+                "worktree", "add", str(wt), branch, cwd=spec.target_root,
+            )
+        else:
+            result = _git(
+                "worktree", "add", "-b", branch, str(wt),
+                f"{spec.remote_name}/{spec.base_branch}",
+                cwd=spec.target_root,
+            )
+        if result.returncode != 0:
+            raise RuntimeError(f"git worktree add failed: {result.stderr}")
+        return wt
 
 
 def _ensure_pr_worktree(spec: RepoSpec, issue_number: int) -> Path:
@@ -166,66 +221,74 @@ def _ensure_pr_worktree(spec: RepoSpec, issue_number: int) -> Path:
     uses the operator's git config / credential helpers / SSH keys
     directly. The hardening that `_push_branch` applies is unnecessary
     here because nothing in `target_root` is agent-writable.
+
+    Serialized by the per-target_root lock for the same `.git/config.lock`
+    reason described on `_ensure_worktree`.
     """
-    _repo_worktrees_root(spec).mkdir(parents=True, exist_ok=True)
-    wt = _worktree_path(spec, issue_number)
-    branch = _branch_name(issue_number)
+    with _target_root_lock(spec.target_root):
+        _repo_worktrees_root(spec).mkdir(parents=True, exist_ok=True)
+        wt = _worktree_path(spec, issue_number)
+        branch = _branch_name(issue_number)
 
-    if wt.exists():
-        if _has_new_commits(spec, wt):
-            log.info(
-                "issue=#%d worktree has unpushed commits; reusing",
-                issue_number,
+        if wt.exists():
+            if _has_new_commits(spec, wt):
+                log.info(
+                    "issue=#%d worktree has unpushed commits; reusing",
+                    issue_number,
+                )
+                return wt
+            _git(
+                "worktree", "remove", "--force", str(wt),
+                cwd=spec.target_root,
             )
-            return wt
-        _git("worktree", "remove", "--force", str(wt), cwd=spec.target_root)
 
-    # Fetch both base and the PR's remote branch so either path
-    # below has a fresh ref to anchor on.
-    _git(
-        "fetch", "--quiet", spec.remote_name, spec.base_branch,
-        cwd=spec.target_root,
-    )
-    # The PR branch fetch is best-effort: a freshly created PR may not
-    # have a remote ref yet (the orchestrator's own push opened it),
-    # but in that case the local branch must already exist (we just
-    # pushed it). Treat fetch failure as non-fatal and let the local
-    # ref check below decide.
-    #
-    # Use an explicit refspec so single-branch / narrowed clones still
-    # create the `refs/remotes/<remote>/<branch>` ref. A bare `git fetch
-    # <remote> <branch>` on a single-branch clone only updates FETCH_HEAD
-    # and leaves no `<remote>/<branch>` for the
-    # `worktree add ... <remote>/<branch>` fallback to anchor on. The `+`
-    # prefix forces non-fast-forward update, which we want because the
-    # orchestrator pushes with `--force-with-lease` and the local
-    # remote-tracking ref may be stale relative to the just-rewritten
-    # remote tip.
-    _git(
-        "fetch", "--quiet", spec.remote_name,
-        f"+refs/heads/{branch}:refs/remotes/{spec.remote_name}/{branch}",
-        cwd=spec.target_root,
-    )
-
-    have_local = _git(
-        "rev-parse", "--verify", branch, cwd=spec.target_root,
-    ).returncode == 0
-    if have_local:
-        result = _git(
-            "worktree", "add", str(wt), branch, cwd=spec.target_root,
-        )
-    else:
-        # Restore the local branch from the PR's remote head, NOT from
-        # `<remote>/<base>` -- the dev's commits live on `<remote>/<branch>`
-        # and rebuilding from base would discard them.
-        result = _git(
-            "worktree", "add", "-b", branch, str(wt),
-            f"{spec.remote_name}/{branch}",
+        # Fetch both base and the PR's remote branch so either path
+        # below has a fresh ref to anchor on.
+        _git(
+            "fetch", "--quiet", spec.remote_name, spec.base_branch,
             cwd=spec.target_root,
         )
-    if result.returncode != 0:
-        raise RuntimeError(f"git worktree add failed: {result.stderr}")
-    return wt
+        # The PR branch fetch is best-effort: a freshly created PR may not
+        # have a remote ref yet (the orchestrator's own push opened it),
+        # but in that case the local branch must already exist (we just
+        # pushed it). Treat fetch failure as non-fatal and let the local
+        # ref check below decide.
+        #
+        # Use an explicit refspec so single-branch / narrowed clones still
+        # create the `refs/remotes/<remote>/<branch>` ref. A bare `git fetch
+        # <remote> <branch>` on a single-branch clone only updates
+        # FETCH_HEAD and leaves no `<remote>/<branch>` for the
+        # `worktree add ... <remote>/<branch>` fallback to anchor on. The
+        # `+` prefix forces non-fast-forward update, which we want because
+        # the orchestrator pushes with `--force-with-lease` and the local
+        # remote-tracking ref may be stale relative to the just-rewritten
+        # remote tip.
+        _git(
+            "fetch", "--quiet", spec.remote_name,
+            f"+refs/heads/{branch}:refs/remotes/{spec.remote_name}/{branch}",
+            cwd=spec.target_root,
+        )
+
+        have_local = _git(
+            "rev-parse", "--verify", branch, cwd=spec.target_root,
+        ).returncode == 0
+        if have_local:
+            result = _git(
+                "worktree", "add", str(wt), branch, cwd=spec.target_root,
+            )
+        else:
+            # Restore the local branch from the PR's remote head, NOT
+            # from `<remote>/<base>` -- the dev's commits live on
+            # `<remote>/<branch>` and rebuilding from base would discard
+            # them.
+            result = _git(
+                "worktree", "add", "-b", branch, str(wt),
+                f"{spec.remote_name}/{branch}",
+                cwd=spec.target_root,
+            )
+        if result.returncode != 0:
+            raise RuntimeError(f"git worktree add failed: {result.stderr}")
+        return wt
 
 
 def _has_new_commits(spec: RepoSpec, worktree: Path) -> bool:
@@ -384,23 +447,30 @@ def _ensure_decompose_worktree(spec: RepoSpec, issue_number: int) -> Path:
     Force-removes any existing decomposer worktree first; the decomposer
     is read-only and stateless across runs, so we always want it to see
     the current base, not whatever was left over from a prior run.
+
+    Serialized by the per-target_root lock for the same `.git/config.lock`
+    reason described on `_ensure_worktree`.
     """
-    _repo_worktrees_root(spec).mkdir(parents=True, exist_ok=True)
-    wt = _decompose_worktree_path(spec, issue_number)
-    if wt.exists():
-        _git("worktree", "remove", "--force", str(wt), cwd=spec.target_root)
-    _git(
-        "fetch", "--quiet", spec.remote_name, spec.base_branch,
-        cwd=spec.target_root,
-    )
-    result = _git(
-        "worktree", "add", "--detach", str(wt),
-        f"{spec.remote_name}/{spec.base_branch}",
-        cwd=spec.target_root,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"git worktree add failed: {result.stderr}")
-    return wt
+    with _target_root_lock(spec.target_root):
+        _repo_worktrees_root(spec).mkdir(parents=True, exist_ok=True)
+        wt = _decompose_worktree_path(spec, issue_number)
+        if wt.exists():
+            _git(
+                "worktree", "remove", "--force", str(wt),
+                cwd=spec.target_root,
+            )
+        _git(
+            "fetch", "--quiet", spec.remote_name, spec.base_branch,
+            cwd=spec.target_root,
+        )
+        result = _git(
+            "worktree", "add", "--detach", str(wt),
+            f"{spec.remote_name}/{spec.base_branch}",
+            cwd=spec.target_root,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git worktree add failed: {result.stderr}")
+        return wt
 
 
 def _cleanup_decompose_worktree(spec: RepoSpec, issue_number: int) -> None:
@@ -409,11 +479,21 @@ def _cleanup_decompose_worktree(spec: RepoSpec, issue_number: int) -> None:
     Called at every `_handle_decomposing` exit except the dirty/commits
     park (where the operator may want to inspect before resuming). Failures
     are logged but never raised -- cleanup must not mask the real exit.
+
+    Serialized by the per-target_root lock because `worktree remove`
+    rewrites the parent clone's `.git/config` and its `worktrees/<name>/`
+    metadata directory; without it, a concurrent worker doing
+    `_ensure_worktree` against the same target_root can collide on
+    `.git/config.lock`.
     """
     try:
         wt = _decompose_worktree_path(spec, issue_number)
         if wt.exists():
-            _git("worktree", "remove", "--force", str(wt), cwd=spec.target_root)
+            with _target_root_lock(spec.target_root):
+                _git(
+                    "worktree", "remove", "--force", str(wt),
+                    cwd=spec.target_root,
+                )
     except Exception:
         log.exception(
             "issue=#%d failed to clean up decomposer worktree", issue_number,
@@ -442,6 +522,13 @@ def _cleanup_terminal_branch(
     cleaning up the GitHub side (which is what the operator actually sees
     in the repo's branch list). All local `_git` calls run from
     `spec.target_root` so the multi-repo loop tidies the right clone.
+
+    Both local-side steps are serialized by the per-target_root lock
+    because `worktree remove` and `branch -D` write to the parent
+    `.git/config` and `.git/refs`; without the lock a concurrent
+    `_ensure_worktree` on another worker thread races on
+    `.git/config.lock`. The remote delete is a GitHub-side HTTP call
+    (no local git plumbing) and stays outside the lock.
     """
     branch = _branch_name(issue_number)
 
@@ -453,10 +540,11 @@ def _cleanup_terminal_branch(
     try:
         wt = _worktree_path(spec, issue_number)
         if wt.exists():
-            r = _git(
-                "worktree", "remove", "--force", str(wt),
-                cwd=spec.target_root,
-            )
+            with _target_root_lock(spec.target_root):
+                r = _git(
+                    "worktree", "remove", "--force", str(wt),
+                    cwd=spec.target_root,
+                )
             if r.returncode != 0:
                 log.warning(
                     "issue=#%d worktree remove failed: %s",
@@ -468,17 +556,18 @@ def _cleanup_terminal_branch(
         )
 
     try:
-        have_local = _git(
-            "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
-            cwd=spec.target_root,
-        ).returncode == 0
-        if have_local:
-            r = _git("branch", "-D", branch, cwd=spec.target_root)
-            if r.returncode != 0:
-                log.warning(
-                    "issue=#%d local branch %r delete failed: %s",
-                    issue_number, branch, (r.stderr or "").strip(),
-                )
+        with _target_root_lock(spec.target_root):
+            have_local = _git(
+                "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
+                cwd=spec.target_root,
+            ).returncode == 0
+            if have_local:
+                r = _git("branch", "-D", branch, cwd=spec.target_root)
+                if r.returncode != 0:
+                    log.warning(
+                        "issue=#%d local branch %r delete failed: %s",
+                        issue_number, branch, (r.stderr or "").strip(),
+                    )
     except Exception:
         log.exception(
             "issue=#%d local branch %r delete raised", issue_number, branch,
@@ -897,6 +986,19 @@ def _authed_fetch(
     `+refs/heads/<branch>:refs/remotes/origin/<branch>` so single-branch
     clones still update the remote-tracking ref instead of leaving the
     fetched payload only in FETCH_HEAD.
+
+    The fetch updates the parent clone's `refs/remotes/<remote>/...`
+    namespace from inside an agent-writable worktree, which means it
+    grabs the parent's ref-update lock under `<git-dir>/packed-refs.lock`
+    and `<git-dir>/refs/remotes/<remote>/<branch>.lock`. Two concurrent
+    `_authed_fetch` calls from different worktrees of the same
+    `target_root` (the common shape during fan-out of multiple
+    `resolving_conflict` issues) race those lock files and one fails
+    with `Unable to create '...': File exists.`, parking the issue.
+    The actual subprocess call is therefore held under the
+    per-target_root lock; the pre-flight URL-rewrite check stays
+    outside the lock since it only reads the worktree's own
+    `.git/config`.
     """
     # Resolve the token from `spec.slug` rather than the cached
     # `config.GITHUB_TOKEN` (which was looked up once for `config.REPO`),
@@ -950,13 +1052,14 @@ def _authed_fetch(
             "-c", "credential.helper=",
             "-c", "core.fsmonitor=",
         ]
-        return subprocess.run(
-            [*git_prefix, "fetch", "--quiet", auth_url, refspec],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        with _target_root_lock(spec.target_root):
+            return subprocess.run(
+                [*git_prefix, "fetch", "--quiet", auth_url, refspec],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                env=env,
+            )
 
 
 def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:

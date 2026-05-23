@@ -155,12 +155,40 @@ class GitHubClient:
         self._gh = Github(auth=Auth.Token(token))
         self.repo: Repository = self._gh.get_repo(slug)
         self._repo_slug = slug
+        # Retained so `_for_worker_thread` can build a fresh client without
+        # re-reading the on-disk token file (which would mask a token rotation
+        # mid-tick anyway -- a tick is short, the token does not change under
+        # it). Treated as an internal detail; callers should not poke at it.
+        self._token = token
         # In-memory tail of recently-emitted stage-transition events. Capped
         # so a long-running process can't grow this list unbounded; the file
         # at `config.EVENT_LOG_PATH` (when configured) is the durable record.
         # FakeGitHubClient mirrors this attribute so workflow tests can read
         # captured events without touching disk.
         self.recorded_events: list[dict] = []
+
+    def _for_worker_thread(self) -> "GitHubClient":
+        """Build a fresh GitHubClient for a single worker thread.
+
+        PyGithub's `Requester` holds mutable per-request state (the URL,
+        headers and body being assembled for the next call, the active
+        connection, the last-seen rate-limit headers) and the library does
+        not document its objects as thread-safe. Sharing one GitHubClient
+        across `workflow.tick`'s parallel-path worker threads can interleave
+        two concurrent calls' request setup and corrupt the operations the
+        orchestrator issues against GitHub (the wrong issue's labels
+        updated, comment bodies cross-pollinated, rate-limit accounting
+        trampled). A fresh `Github` + `Requester` + `Repository` per worker
+        isolates each thread to its own requester so any in-flight HTTP
+        call is the sole consumer of that requester's state.
+
+        Token + slug are reused so the new instance has identical auth and
+        target repo. The in-memory `recorded_events` tail starts empty per
+        worker; the durable JSONL sink at `config.EVENT_LOG_PATH` is the
+        cross-worker record and write_event_record's open/append is what
+        carries event ordering across threads.
+        """
+        return GitHubClient(token=self._token, repo_slug=self._repo_slug)
 
     def list_pollable_issues(self, since: Optional[datetime] = None) -> Iterable[Issue]:
         """Open issues plus closed issues still labeled `in_review` or
