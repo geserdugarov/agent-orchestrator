@@ -278,6 +278,53 @@ BASE_BRANCH: str = os.environ.get("BASE_BRANCH", "main")
 REMOTE_NAME: str = os.environ.get("REMOTE_NAME", "origin")
 
 
+def _parse_positive_int(name: str, raw: str, default: int) -> int:
+    """Parse an env value as a positive int; abort at import on bad values.
+
+    Used by the parallel-limit knobs (`MAX_PARALLEL_ISSUES_PER_REPO`,
+    `MAX_PARALLEL_ISSUES_GLOBAL`). Empty/unset falls back to `default`;
+    non-numeric or non-positive values abort startup so a typo cannot
+    silently degrade the orchestrator to e.g. "process zero issues at a
+    time" without surfacing the misconfiguration.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise SystemExit(
+            f"orchestrator: {name}={raw!r} is not a valid integer; "
+            "expected a positive integer (>= 1)"
+        )
+    if parsed < 1:
+        raise SystemExit(
+            f"orchestrator: {name}={raw!r} must be >= 1 "
+            "(zero or negative would block all work)"
+        )
+    return parsed
+
+
+# Per-repo cap on how many issues the orchestrator may advance in parallel
+# within one repo on a single tick. Default 1 keeps the legacy "one issue
+# at a time per repo" behavior. Each `REPOS` entry can override this via
+# its optional fifth pipe-separated field.
+MAX_PARALLEL_ISSUES_PER_REPO: int = _parse_positive_int(
+    "MAX_PARALLEL_ISSUES_PER_REPO",
+    os.environ.get("MAX_PARALLEL_ISSUES_PER_REPO", ""),
+    1,
+)
+# Global cap across all configured repos. Default 3 limits concurrent
+# spawn fan-out when several `REPOS` entries are configured, regardless
+# of the per-repo cap each one declares. Set higher only on hosts with
+# the CPU / memory headroom to run that many agent CLIs at once.
+MAX_PARALLEL_ISSUES_GLOBAL: int = _parse_positive_int(
+    "MAX_PARALLEL_ISSUES_GLOBAL",
+    os.environ.get("MAX_PARALLEL_ISSUES_GLOBAL", ""),
+    3,
+)
+
+
 @dataclass(frozen=True)
 class RepoSpec:
     """Per-repo identity threaded through the workflow.
@@ -291,20 +338,31 @@ class RepoSpec:
     clone uses several remotes (e.g. a public `origin` and a private fork
     under a different remote name) and the orchestrator should drive the
     non-default one.
+
+    `parallel_limit` caps how many issues this repo may advance in parallel
+    on a single tick. Defaults to 1 (legacy one-at-a-time behavior); each
+    `REPOS` entry can override it via the optional fifth pipe-separated
+    field. The global `MAX_PARALLEL_ISSUES_GLOBAL` ceiling still applies
+    across all repos regardless of any one repo's `parallel_limit`.
     """
 
     slug: str
     target_root: Path
     base_branch: str
     remote_name: str = "origin"
+    parallel_limit: int = 1
 
 
 def _parse_repos_env(raw: str) -> list[RepoSpec]:
     """Parse the REPOS env value into a list of RepoSpecs.
 
-    Format: one entry per line, ``owner/name|target_root|base_branch`` with
-    an optional fourth ``|remote_name`` field (defaults to ``origin`` when
-    omitted, for backward compatibility with three-field configs).
+    Format: one entry per line,
+    ``owner/name|target_root|base_branch[|remote_name[|parallel_limit]]``.
+    The fourth (``remote_name``, defaults to ``origin``) and fifth
+    (``parallel_limit``, defaults to ``MAX_PARALLEL_ISSUES_PER_REPO``)
+    fields are optional. The fifth field is positional, so overriding
+    ``parallel_limit`` requires also writing the ``remote_name`` (use
+    ``origin`` explicitly to keep the default).
     Blank lines and lines starting with ``#`` are skipped. ``;`` is also
     accepted as an entry separator so the value fits on a single line in a
     ``.env`` file (the simple parser in `_load_dotenv` cannot represent
@@ -323,20 +381,35 @@ def _parse_repos_env(raw: str) -> list[RepoSpec]:
         if not line or line.startswith("#"):
             continue
         parts = line.split("|")
-        if len(parts) not in (3, 4):
+        if len(parts) not in (3, 4, 5):
             raise SystemExit(
                 f"orchestrator: REPOS entry #{entry_no} is malformed "
                 f"(expected 'owner/name|target_root|base_branch' "
-                f"or 'owner/name|target_root|base_branch|remote_name'): "
+                f"with optional '|remote_name' and '|parallel_limit'): "
                 f"{line!r}"
             )
+        parallel_limit_raw: str | None = None
         if len(parts) == 3:
             slug, target_root, base_branch = (p.strip() for p in parts)
             remote_name = "origin"
-        else:
+        elif len(parts) == 4:
             slug, target_root, base_branch, remote_name = (
                 p.strip() for p in parts
             )
+            if not remote_name:
+                raise SystemExit(
+                    f"orchestrator: REPOS entry #{entry_no} has empty "
+                    "remote_name (omit the trailing '|' to default to "
+                    "'origin')"
+                )
+        else:
+            (
+                slug,
+                target_root,
+                base_branch,
+                remote_name,
+                parallel_limit_raw,
+            ) = (p.strip() for p in parts)
             if not remote_name:
                 raise SystemExit(
                     f"orchestrator: REPOS entry #{entry_no} has empty "
@@ -367,6 +440,29 @@ def _parse_repos_env(raw: str) -> list[RepoSpec]:
                 "each repo can appear only once"
             )
         seen.add(slug)
+        if parallel_limit_raw is None:
+            parallel_limit = MAX_PARALLEL_ISSUES_PER_REPO
+        elif not parallel_limit_raw:
+            raise SystemExit(
+                f"orchestrator: REPOS entry #{entry_no} has empty "
+                "parallel_limit (omit the trailing '|' to default to "
+                f"MAX_PARALLEL_ISSUES_PER_REPO={MAX_PARALLEL_ISSUES_PER_REPO})"
+            )
+        else:
+            try:
+                parallel_limit = int(parallel_limit_raw)
+            except ValueError:
+                raise SystemExit(
+                    f"orchestrator: REPOS entry #{entry_no} parallel_limit "
+                    f"{parallel_limit_raw!r} is not a valid integer; expected "
+                    "a positive integer (>= 1)"
+                )
+            if parallel_limit < 1:
+                raise SystemExit(
+                    f"orchestrator: REPOS entry #{entry_no} parallel_limit "
+                    f"{parallel_limit_raw!r} must be >= 1 (zero or negative "
+                    "would block all work for this repo)"
+                )
         target_path = Path(target_root)
         if not target_path.exists():
             print(
@@ -380,6 +476,7 @@ def _parse_repos_env(raw: str) -> list[RepoSpec]:
                 target_root=target_path,
                 base_branch=base_branch,
                 remote_name=remote_name,
+                parallel_limit=parallel_limit,
             )
         )
     if not specs:
@@ -401,6 +498,7 @@ _REPO_SPECS: list[RepoSpec] = (
             target_root=TARGET_REPO_ROOT,
             base_branch=BASE_BRANCH,
             remote_name=REMOTE_NAME,
+            parallel_limit=MAX_PARALLEL_ISSUES_PER_REPO,
         )
     ]
 )
