@@ -9,7 +9,7 @@ re-check (`_auto_merge_gates_pass`), the first-tick watermark migration
 ratchet (`_bump_in_review_watermarks`), and the debounce timestamp
 accessor (`_comment_created_at`).
 
-`_handle_resolving_conflict` still lives in `workflow.py` -- the
+`_handle_resolving_conflict` lives in `stages/conflicts.py` -- the
 in_review handler only routes TO it (via the workflow label flip) and
 does not import it directly.
 
