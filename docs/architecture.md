@@ -298,7 +298,9 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 - **Input**: PR #, branch, `dev_agent`/`dev_session_id` (or legacy `codex_session_id`), pinned state, `review_round`.
 - **Internal flow**:
   1. Awaiting-human path: same resume mechanic as implementing (resume on the dev's locked spec (backend + args)); on a successful pushed fix, bump `review_round` and stay in `validating` so the reviewer runs next tick.
-  2. If `review_round >= MAX_REVIEW_ROUNDS` (default 3), park awaiting human.
+
+     Exception: on a `review_cap` park (`park_reason="review_cap"`), the human reply does **not** wake the dev session — resuming would just bump past the cap on the next tick. Instead, the operator must post `/orchestrator add-review-rounds N` on its own line; that resets `review_round` to `MAX_REVIEW_ROUNDS - N`, clears the park flags, and falls through to spawn the reviewer this same tick. A plain reply (or one with an invalid `N`) leaves the issue parked.
+  2. If `review_round >= MAX_REVIEW_ROUNDS` (default 3), park awaiting human. The park comment surfaces the `/orchestrator add-review-rounds N` escape hatch so the operator can grant more rounds without losing the PR/worktree.
   3. Otherwise persist `config.REVIEW_AGENT_SPEC` (the raw full spec, e.g. `"codex -m gpt-5.5-codex"`) to `review_agent` for traceability — the reviewer is spawned **fresh each round** with no resume, so always overwriting this field with the current config spec is the right behavior here; a `REVIEW_AGENT` flip mid-flight takes effect on the next round, but the field reflects the reviewer's CLI args and which spec ran each round.
 
      Then spawn a **fresh reviewer session** via `run_agent(config.REVIEW_AGENT, review_prompt, wt, timeout=config.REVIEW_TIMEOUT, extra_args=config.REVIEW_AGENT_ARGS)` with the **reviewer prompt** (read-only: `git log` / `git diff origin/<spec.base_branch>...HEAD`, must end with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`).

@@ -23,6 +23,7 @@ reference that test patches against `workflow.X` could not affect.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
@@ -32,6 +33,41 @@ from .. import config
 from ..agents import AgentResult
 from ..config import RepoSpec
 from ..github import GitHubClient, PinnedState
+
+
+# Operator escape hatch for `park_reason=review_cap`. Resets the review
+# loop without losing the PR/worktree (see `_handle_validating`). The
+# command lives in the issue thread because the cap-park message lands
+# there, and is anchored to start-of-line so prose like "we should run
+# `/orchestrator add-review-rounds 2`" cannot fire it accidentally.
+_ADD_REVIEW_ROUNDS_RE = re.compile(
+    r"^\s*/orchestrator\s+add-review-rounds\s+(\d+)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _parse_add_review_rounds(
+    comments: list,
+) -> Optional[Tuple[int, Optional[str]]]:
+    """Find the latest `/orchestrator add-review-rounds N` command across
+    `comments`.
+
+    Returns ``(n, None)`` for a valid positive `N`; ``(n, reason)`` when
+    the latest match has an invalid argument (caller posts `reason` and
+    stays parked); ``None`` when no comment carries the command. Walks
+    newest-first so a corrected command supersedes a stale one posted
+    earlier in the same batch.
+    """
+    for c in reversed(comments):
+        body = c.body or ""
+        m = _ADD_REVIEW_ROUNDS_RE.search(body)
+        if not m:
+            continue
+        n = int(m.group(1))
+        if n <= 0:
+            return (n, f"expected a positive integer (got `{n}`)")
+        return (n, None)
+    return None
 
 
 # Validating-side counterpart to in_review's `_TRANSIENT_PARK_REASONS`:
@@ -464,23 +500,30 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # park flags land via `_handle_dev_fix_result`.
     #
     # Exception: when the issue is parked with a reviewer-side park reason
-    # (`reviewer_timeout` / `reviewer_failed`), defer to the awaiting-human
-    # branch below. A human "retry" comment on a reviewer-side park must
-    # re-spawn the REVIEWER, not the dev: the failure produced no review
-    # output for the dev to act on, and the reviewer naturally re-reads
-    # the updated `issue.body` + comments via `_build_review_prompt` when
-    # it runs. We still persist the new baseline here so the next tick's
-    # drift check sees a stable comparison point (otherwise the drift
-    # would loop on every subsequent tick).
+    # (`reviewer_timeout` / `reviewer_failed`) OR on the review-round cap
+    # (`review_cap`), defer to the awaiting-human branch below. A human
+    # "retry" comment on a reviewer-side park must re-spawn the REVIEWER,
+    # not the dev: the failure produced no review output for the dev to
+    # act on, and the reviewer naturally re-reads the updated `issue.body`
+    # + comments via `_build_review_prompt` when it runs. For `review_cap`,
+    # the cap has consumed every round, so resuming the dev would re-park
+    # on the cap next tick (the original bug); the operator's
+    # `/orchestrator add-review-rounds` command lives in the awaiting-human
+    # branch, and the operator's command comment itself is a non-orchestrator
+    # comment that bumps the user-content hash, so without this bypass the
+    # drift block fires first and the command never gets parsed. We still
+    # persist the new baseline here so the next tick's drift check sees a
+    # stable comparison point (otherwise the drift would loop on every
+    # subsequent tick).
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is not None:
         state.set("user_content_hash", new_hash)
-        reviewer_side_park = (
+        defer_to_awaiting_human = (
             state.get("awaiting_human")
             and state.get("park_reason")
-            in ("reviewer_timeout", "reviewer_failed")
+            in ("reviewer_timeout", "reviewer_failed", "review_cap")
         )
-        if not reviewer_side_park:
+        if not defer_to_awaiting_human:
             _wf._post_issue_comment(
                 gh, issue, state,
                 ":pencil2: issue body changed; resuming dev session.",
@@ -516,9 +559,10 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 state.set("review_round", round_n + 1)
             gh.write_pinned_state(issue, state)
             return
-        # reviewer-side park: fall through to the awaiting_human branch
-        # below, which will consume the human's "retry" comment, clear
-        # the park flags, and re-spawn the reviewer.
+        # reviewer-side park OR review_cap: fall through to the
+        # awaiting-human branch below, which will consume the human's
+        # "retry" / `/orchestrator add-review-rounds` comment, clear the
+        # park flags, and re-spawn the reviewer.
 
     # Awaiting-human path: human replied after a park; resume the developer
     # codex with their feedback. Identical mechanic to implementing's resume,
@@ -537,7 +581,47 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         last_action_id = state.get("last_action_comment_id")
         new_comments = gh.comments_after(issue, last_action_id)
         park_reason = state.get("park_reason")
-        if (
+        # `/orchestrator add-review-rounds N` operator command. Only honored
+        # on a `review_cap` park: the cap has consumed every review round and
+        # plain resuming the dev would re-park on the same cap next tick (the
+        # original bug -- the round bump in the resume branch just trips
+        # `round_n >= MAX_REVIEW_ROUNDS` again). On other parks the human's
+        # reply IS the input the dev / reviewer needs, so we don't intercept
+        # it. On a non-command reply while parked on the cap we stay parked
+        # silently rather than waking the dev on a do-nothing prompt.
+        if park_reason == "review_cap":
+            if not new_comments:
+                return
+            cmd = _parse_add_review_rounds(new_comments)
+            if cmd is None:
+                return
+            consumed_max = max(c.id for c in new_comments)
+            state.set("last_action_comment_id", consumed_max)
+            n, err = cmd
+            if err is not None:
+                _wf._post_issue_comment(
+                    gh, issue, state,
+                    f":warning: `/orchestrator add-review-rounds` ignored: "
+                    f"{err}.",
+                )
+                gh.write_pinned_state(issue, state)
+                return
+            new_round = max(0, config.MAX_REVIEW_ROUNDS - n)
+            state.set("review_round", new_round)
+            state.set("awaiting_human", False)
+            state.set("park_reason", None)
+            _wf._post_issue_comment(
+                gh, issue, state,
+                f":arrows_counterclockwise: review-cap reset: granting {n} "
+                f"more round(s) "
+                f"(`review_round`={new_round}/{config.MAX_REVIEW_ROUNDS}); "
+                "rerunning reviewer.",
+            )
+            # Fall through to the reviewer-spawn block below so the
+            # reviewer reruns on the same tick (parity with the
+            # reviewer_timeout / reviewer_failed branch). The block reads
+            # `review_round` again from state.
+        elif (
             not new_comments
             and park_reason in _VALIDATING_TRANSIENT_PARK_REASONS
         ):
@@ -556,7 +640,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             state.set("park_reason", None)
             gh.write_pinned_state(issue, state)
             return
-        if (
+        elif (
             new_comments
             and park_reason in ("reviewer_timeout", "reviewer_failed")
         ):
@@ -597,9 +681,20 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         _wf._park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} review still has comments after "
-            f"{round_n} round(s); manual intervention needed.",
+            f"{round_n} round(s); manual intervention needed. To grant "
+            "more rounds without losing the PR/worktree, reply with "
+            "`/orchestrator add-review-rounds N` "
+            "(N = additional rounds, e.g. `1`).",
             reason="review_cap",
         )
+        # Persist the park reason so the next tick's awaiting-human
+        # branch can route the operator's `/orchestrator add-review-rounds`
+        # comment through the cap-reset path (it gates on
+        # `park_reason == "review_cap"`). `_park_awaiting_human` clears
+        # `park_reason` to None by contract (the `reason=` kwarg only
+        # feeds the audit event), so callers that need a transient or
+        # cap-specific reason re-set it themselves.
+        state.set("park_reason", "review_cap")
         gh.write_pinned_state(issue, state)
         return
 

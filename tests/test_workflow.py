@@ -2445,6 +2445,370 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
         )
 
 
+class HandleValidatingReviewCapAddRoundsCommandTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """`/orchestrator add-review-rounds N` operator command.
+
+    Honored only while parked with `park_reason == "review_cap"`. Resets
+    `review_round` to `MAX_REVIEW_ROUNDS - N` so the reviewer reruns from
+    validating without losing the PR/worktree. Posting a plain reply on a
+    cap park no longer wakes the dev session (that was the original bug:
+    the resume just bumped past the cap again on the next tick).
+    """
+
+    def _seeded(self, *, comment_body: Optional[str] = None, **state):
+        gh = FakeGitHubClient()
+        issue = make_issue(80, label="validating")
+        if comment_body is not None:
+            issue.comments.append(
+                FakeComment(id=1100, body=comment_body, user=FakeUser("alice"))
+            )
+        gh.add_issue(issue)
+        defaults = dict(
+            awaiting_human=True,
+            park_reason="review_cap",
+            last_action_comment_id=950,
+            review_round=config.MAX_REVIEW_ROUNDS,
+            dev_session_id="dev-sess",
+            dev_agent="codex",
+            pr_number=15,
+            branch="orchestrator/issue-80",
+        )
+        defaults.update(state)
+        gh.seed_state(80, **defaults)
+        return gh, issue
+
+    def test_command_resets_round_clears_park_and_reruns_reviewer(self) -> None:
+        # Granting 1 more round on a 3-cap means review_round becomes 2.
+        # The reviewer-spawn block fires on the SAME tick (fall-through
+        # parity with the reviewer_timeout / reviewer_failed branches) so
+        # the operator does not have to wait an extra poll for the
+        # reviewer to actually rerun.
+        gh, issue = self._seeded(
+            comment_body="/orchestrator add-review-rounds 1",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                last_message="LGTM\n\nVERDICT: APPROVED",
+            ),
+            head_shas=["aaa"],
+        )
+
+        data = gh.pinned_data(80)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertIsNone(data.get("park_reason"))
+        self.assertEqual(
+            data.get("review_round"),
+            config.MAX_REVIEW_ROUNDS - 1,
+        )
+        # Watermark advanced past the operator's command comment so the
+        # next tick doesn't re-fire the same command.
+        self.assertEqual(data.get("last_action_comment_id"), 1100)
+        # Reviewer ran THIS tick (parity with reviewer_timeout fall-through).
+        self.assertEqual(mocks["run_agent"].call_count, 1)
+        reviewer_spawns = [
+            e for e in gh.recorded_events
+            if e["event"] == "agent_spawn"
+            and e.get("agent_role") == "reviewer"
+        ]
+        self.assertEqual(len(reviewer_spawns), 1)
+        self.assertEqual(
+            reviewer_spawns[0]["review_round"],
+            config.MAX_REVIEW_ROUNDS - 1,
+        )
+        # Confirmation comment posted on the issue.
+        self.assertTrue(any(
+            "review-cap reset" in body and "granting 1 more round" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_command_grants_full_reset_when_n_meets_or_exceeds_max(
+        self,
+    ) -> None:
+        # `N >= MAX_REVIEW_ROUNDS` clamps review_round to 0 -- the full
+        # reset. The reviewer-spawn block then runs with a fresh budget.
+        gh, issue = self._seeded(
+            comment_body=(
+                f"/orchestrator add-review-rounds {config.MAX_REVIEW_ROUNDS + 5}"
+            ),
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            head_shas=["aaa"],
+        )
+
+        self.assertEqual(gh.pinned_data(80).get("review_round"), 0)
+
+    def test_command_picks_latest_when_multiple_present(self) -> None:
+        # Two commands in the same batch: the later one wins so a
+        # corrected post supersedes a stale typo without needing the
+        # operator to delete the first comment.
+        gh, issue = self._seeded()
+        issue.comments.append(
+            FakeComment(
+                id=1100,
+                body="/orchestrator add-review-rounds 1",
+                user=FakeUser("alice"),
+            )
+        )
+        issue.comments.append(
+            FakeComment(
+                id=1101,
+                body="actually scratch that\n"
+                "/orchestrator add-review-rounds 2",
+                user=FakeUser("alice"),
+            )
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            head_shas=["aaa"],
+        )
+
+        self.assertEqual(
+            gh.pinned_data(80).get("review_round"),
+            config.MAX_REVIEW_ROUNDS - 2,
+        )
+        self.assertEqual(gh.pinned_data(80).get("last_action_comment_id"), 1101)
+
+    def test_command_with_zero_is_rejected_stays_parked(self) -> None:
+        gh, issue = self._seeded(
+            comment_body="/orchestrator add-review-rounds 0",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        # No agent ran: the error path stays parked, doesn't fall through.
+        mocks["run_agent"].assert_not_called()
+        data = gh.pinned_data(80)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "review_cap")
+        # Round is unchanged.
+        self.assertEqual(
+            data.get("review_round"), config.MAX_REVIEW_ROUNDS,
+        )
+        # Watermark advanced so the operator can post a corrected command
+        # in a new comment without re-tripping the same rejection.
+        self.assertEqual(data.get("last_action_comment_id"), 1100)
+        last_comment = gh.posted_comments[-1][1]
+        self.assertIn("ignored", last_comment)
+        self.assertIn("positive integer", last_comment)
+
+    def test_plain_human_reply_stays_parked_no_dev_resume(self) -> None:
+        # The original bug: on a `review_cap` park, a plain human reply
+        # used to wake the dev session and the reviewer rebumped past
+        # the cap on the next tick. The new behavior is to stay parked
+        # silently when no command is present; only the explicit command
+        # can restart the loop.
+        gh, issue = self._seeded(comment_body="any luck on this?")
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        mocks["run_agent"].assert_not_called()
+        data = gh.pinned_data(80)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "review_cap")
+        # Watermark NOT advanced -- the operator may still post the
+        # command later in a follow-up comment, and we need to see it.
+        self.assertEqual(data.get("last_action_comment_id"), 950)
+
+    def test_command_only_fires_on_review_cap_park(self) -> None:
+        # A command posted under a different park reason (here: a
+        # standard dev-question park with `park_reason=None`) must NOT
+        # take the cap-reset branch. The dev resume runs as usual.
+        gh, issue = self._seeded(
+            comment_body="/orchestrator add-review-rounds 1",
+            park_reason=None,
+            review_round=1,
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dev-sess", last_message="fixed"),
+            head_shas=["aaa", "bbb"],
+            dirty_files=(),
+            push_branch=True,
+        )
+
+        data = gh.pinned_data(80)
+        # Dev resume bumped the round; no cap-reset semantics applied.
+        self.assertEqual(data.get("review_round"), 2)
+        # No reset confirmation comment was posted.
+        self.assertFalse(any(
+            "review-cap reset" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_command_inline_in_prose_does_not_fire(self) -> None:
+        # The regex requires the command at the start of a line, so a
+        # quote of the syntax in regular prose (e.g. the operator asking
+        # someone else how to use it) does not trigger the reset.
+        gh, issue = self._seeded(
+            comment_body=(
+                "do we just run `/orchestrator add-review-rounds 1` here?"
+            ),
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        mocks["run_agent"].assert_not_called()
+        data = gh.pinned_data(80)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "review_cap")
+        self.assertEqual(
+            data.get("review_round"), config.MAX_REVIEW_ROUNDS,
+        )
+
+    def test_review_cap_park_message_advertises_command(self) -> None:
+        # When the orchestrator first parks on the cap, the park comment
+        # itself surfaces the command so an operator who has never seen
+        # the syntax can copy/paste it from the issue thread.
+        gh = FakeGitHubClient()
+        issue = make_issue(81, label="validating")
+        gh.add_issue(issue)
+        gh.seed_state(
+            81,
+            review_round=config.MAX_REVIEW_ROUNDS,
+            pr_number=16,
+            branch="orchestrator/issue-81",
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        last_comment = gh.posted_comments[-1][1]
+        self.assertIn("/orchestrator add-review-rounds", last_comment)
+
+    def test_cap_park_persists_park_reason_for_next_tick(self) -> None:
+        # `_park_awaiting_human` always clears `park_reason` to None (its
+        # `reason=` kwarg only feeds the audit event), so the cap branch
+        # must re-set the durable field itself. Without this, the next
+        # tick's awaiting-human dispatch sees `park_reason=None` and the
+        # `/orchestrator add-review-rounds` parser never runs -- the
+        # command would silently fall through to the dev-resume branch.
+        gh = FakeGitHubClient()
+        issue = make_issue(82, label="validating")
+        gh.add_issue(issue)
+        gh.seed_state(
+            82,
+            review_round=config.MAX_REVIEW_ROUNDS,
+            pr_number=17,
+            branch="orchestrator/issue-82",
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        data = gh.pinned_data(82)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "review_cap")
+
+    def test_command_fires_after_real_cap_park_two_ticks(self) -> None:
+        # End-to-end regression for the original bug: the FIRST tick must
+        # park via the cap branch (not pre-seeded shortcut), persist
+        # `park_reason="review_cap"`, and seed a `user_content_hash`. The
+        # SECOND tick must then bypass the user-content-drift branch
+        # (the operator's command comment changes the hash by definition)
+        # and route through the cap-reset path so the round actually
+        # resets. Pre-seeded tests above cover the command parser in
+        # isolation; this one closes the loop on the production sequence.
+        gh = FakeGitHubClient()
+        issue = make_issue(83, label="validating")
+        gh.add_issue(issue)
+        gh.seed_state(
+            83,
+            review_round=config.MAX_REVIEW_ROUNDS,
+            pr_number=18,
+            branch="orchestrator/issue-83",
+            pickup_comment_id=900,
+            dev_session_id="dev-sess",
+            dev_agent="codex",
+        )
+
+        # Tick 1: cap park.
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+        tick1 = gh.pinned_data(83)
+        self.assertTrue(tick1.get("awaiting_human"))
+        self.assertEqual(tick1.get("park_reason"), "review_cap")
+        # The user-content baseline got seeded on the cap tick (either
+        # by the drift helper's first-call branch or via the orchestrator's
+        # own park comment routing). Either way the next tick has a hash
+        # to compare against.
+        self.assertIsInstance(tick1.get("user_content_hash"), str)
+        baseline_hash = tick1["user_content_hash"]
+
+        # Operator posts the command after the cap park. This is a
+        # non-orchestrator comment, so it shifts the content hash --
+        # without the drift-block bypass the next tick would resume the
+        # dev session on a body-edit prompt and never see the command.
+        issue.comments.append(
+            FakeComment(
+                id=2000,
+                body="/orchestrator add-review-rounds 1",
+                user=FakeUser("alice"),
+            )
+        )
+
+        # Tick 2: command processes through the cap-reset path.
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            head_shas=["aaa"],
+        )
+        tick2 = gh.pinned_data(83)
+        self.assertFalse(tick2.get("awaiting_human"))
+        self.assertIsNone(tick2.get("park_reason"))
+        self.assertEqual(
+            tick2.get("review_round"), config.MAX_REVIEW_ROUNDS - 1,
+        )
+        self.assertEqual(tick2.get("last_action_comment_id"), 2000)
+        # The drift block updates the baseline as it falls through, so
+        # the new hash should be persisted -- but the resumed-dev-session
+        # drift message must NOT have been posted.
+        self.assertNotEqual(tick2.get("user_content_hash"), baseline_hash)
+        self.assertFalse(any(
+            "issue body changed; resuming dev session" in body
+            for _, body in gh.posted_comments
+        ))
+        # The cap-reset confirmation landed AND the reviewer ran with
+        # the freshly-reset round.
+        self.assertTrue(any(
+            "review-cap reset" in body for _, body in gh.posted_comments
+        ))
+        reviewer_spawns = [
+            e for e in gh.recorded_events
+            if e["event"] == "agent_spawn"
+            and e.get("agent_role") == "reviewer"
+        ]
+        self.assertEqual(len(reviewer_spawns), 1)
+        self.assertEqual(
+            reviewer_spawns[0]["review_round"],
+            config.MAX_REVIEW_ROUNDS - 1,
+        )
+
+
 class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
     """Bound the implementing loop with MAX_RETRIES_PER_DAY in pinned state.
 
