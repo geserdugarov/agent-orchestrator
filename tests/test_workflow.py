@@ -2461,34 +2461,37 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_fourth_fresh_attempt_in_window_is_parked_before_codex(self) -> None:
         # Run three fresh attempts that each park as a question, then assert
-        # the fourth tick parks before run_agent is called. Cap is 3/day.
+        # the fourth tick parks before run_agent is called. Pin the cap at 3
+        # so the test is hermetic against a `MAX_RETRIES_PER_DAY` env
+        # override that would otherwise let the fourth tick spawn through.
         gh, issue = self._seeded()
 
-        # First three ticks: codex returns no commits + a question, parking on
-        # awaiting_human. Each tick consumes one retry from the budget.
-        for tick in range(3):
-            self._run(
+        with patch.object(config, "MAX_RETRIES_PER_DAY", 3):
+            # First three ticks: codex returns no commits + a question, parking on
+            # awaiting_human. Each tick consumes one retry from the budget.
+            for tick in range(3):
+                self._run(
+                    lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+                    run_agent=_agent(last_message=f"q{tick}"),
+                    has_new_commits=False,
+                )
+                # Clear the awaiting-human flag manually so the next tick takes
+                # the fresh-spawn branch again (simulating that the human answered
+                # but the agent still failed to commit). We do NOT update
+                # last_action_comment_id, but we also drop awaiting_human so the
+                # else branch runs.
+                data = gh._pinned[8].data
+                data["awaiting_human"] = False
+
+            self.assertEqual(gh.pinned_data(8).get("retry_count"), 3)
+            self.assertIsNotNone(gh.pinned_data(8).get("retry_window_start"))
+
+            # Fourth tick: must park before codex spawns.
+            mocks = self._run(
                 lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message=f"q{tick}"),
+                run_agent=_agent(last_message="should not run"),
                 has_new_commits=False,
             )
-            # Clear the awaiting-human flag manually so the next tick takes
-            # the fresh-spawn branch again (simulating that the human answered
-            # but the agent still failed to commit). We do NOT update
-            # last_action_comment_id, but we also drop awaiting_human so the
-            # else branch runs.
-            data = gh._pinned[8].data
-            data["awaiting_human"] = False
-
-        self.assertEqual(gh.pinned_data(8).get("retry_count"), 3)
-        self.assertIsNotNone(gh.pinned_data(8).get("retry_window_start"))
-
-        # Fourth tick: must park before codex spawns.
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="should not run"),
-            has_new_commits=False,
-        )
 
         mocks["run_agent"].assert_not_called()
         self.assertTrue(gh.pinned_data(8).get("awaiting_human"))
