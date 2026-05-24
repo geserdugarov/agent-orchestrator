@@ -124,9 +124,18 @@ Common knobs live in [`.env.example`](.env.example). The full reference — requ
 
 ## Managing multiple repositories
 
-Set `REPOS` to drive several target repositories from one orchestrator process. Each tick iterates every configured spec; a failure in one repo's tick is logged and skipped so the remaining repos still advance.
+Set `REPOS` to drive several target repositories from one orchestrator process. With more than one entry, per-repo ticks fan out across a thread pool so a slow repo cannot delay the others; a failure in one repo's tick is logged and skipped so the remaining repos still advance.
 
-Worktrees are namespaced under `WORKTREES_DIR/<owner>__<name>/issue-N` so two repos that share an issue number cannot collide. For the entry syntax and the available per-entry fields, see [`docs/configuration.md#multi-repo-repos-syntax`](docs/configuration.md#multi-repo-repos-syntax).
+Worktrees are namespaced under `WORKTREES_DIR/<owner>__<name>/issue-N` so two repos that share an issue number cannot collide. For the entry syntax (including the optional fifth `parallel_limit` field) and the available per-entry fields, see [`docs/configuration.md#multi-repo-repos-syntax`](docs/configuration.md#multi-repo-repos-syntax).
+
+## Parallel issue processing
+
+Each tick advances issues concurrently up to two caps:
+
+- `MAX_PARALLEL_ISSUES_PER_REPO` (default `1`) — per-repo cap on in-flight per-issue handlers within one repo on a single tick. Each `REPOS` entry can override this via its optional fifth pipe-separated field. The legacy default keeps the one-issue-at-a-time behavior; raise it to fan out independent issues within a single repo on the same tick.
+- `MAX_PARALLEL_ISSUES_GLOBAL` (default `3`) — global cap across all configured repos. Bounds total agent fan-out on the host regardless of any one repo's `parallel_limit`.
+
+See [`docs/configuration.md#parallel-processing`](docs/configuration.md#parallel-processing) for the full semantics (including family-aware label partitioning) and [`docs/architecture.md`](docs/architecture.md#per-tick-flow-workflowtick) for the per-tick fan-out details.
 
 ## License
 
