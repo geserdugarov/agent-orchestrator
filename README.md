@@ -114,6 +114,10 @@ Pinned in [`pyproject.toml`](pyproject.toml):
 
    With `AUTO_MERGE=on`, the orchestrator then merges the PR itself once GitHub reports it mergeable with green checks, flips the label to `done`, and closes the issue. With `AUTO_MERGE=off` (the default), review and merge the PR manually.
 
+## Asking the orchestrator a question
+
+Apply the workflow label `question` to any open issue to get a read-only answer instead of an implementation. The orchestrator spawns the configured `DECOMPOSE_AGENT` in the issue's `issue-N` worktree, posts the agent's answer (or its own clarifying follow-up) as an issue comment that pings `HITL_HANDLE`, and parks awaiting a human reply. No branch is pushed, no PR is opened, and a commit / dirty tree from the agent is treated as a read-only-violation park. Subsequent human comments resume the same locked agent session for a multi-turn conversation; **closing the issue** is the terminal signal — `_handle_question` then flips the label to `done` and tears the worktree down.
+
 ## Continuous integration
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff check` and `pytest` on Python 3.12 for every push to `main` and every pull request. Lint rules are configured in [`pyproject.toml`](pyproject.toml) under `[tool.ruff.lint]`.

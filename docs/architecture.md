@@ -122,7 +122,8 @@ A second control label `backlog` is created for postponed work. While present on
 | `validating` | The reviewer agent is checking the diff and may bounce fixes back to the dev agent. |
 | `in_review` | A PR is open and ready for human review or auto-merge gates. |
 | `resolving_conflict` | The orchestrator is trying to rebase an approved but unmergeable PR branch onto `origin/<base>`. |
-| `done` | Terminal success; the PR merged, or an umbrella parent resolved after all children reached `done`. |
+| `question` | Operator-applied read-only Q&A label: the orchestrator runs the decomposer agent in the per-issue worktree, posts the answer to the issue thread, and waits on a human reply or a manual close. No PR is opened on this label. |
+| `done` | Terminal success; the PR merged, an umbrella parent resolved after all children reached `done`, or a `question` issue was closed by the operator. |
 | `rejected` | Terminal rejection; the PR or issue was closed without merge. |
 
 ## Process model
@@ -160,7 +161,7 @@ Two paths depending on whether a PR already exists for the issue:
 - **Pre-PR worktrees** (no `pr_number` in pinned state) get a clean-tree `git rebase origin/<base>` directly — there is no remote to push to, so the local branch can be kept linear without publishing a rewrite.
 - **PR-having worktrees** in `validating` / `in_review` are detoured to `resolving_conflict` instead (via `_route_pr_worktree_to_resolving_conflict`: post a PR notice, seed `conflict_round` only when absent, flip the label) so the existing `_handle_resolving_conflict` handler does rebase + force-with-lease push + relabel-to-validating in one consistent flow.
 
-Applying `hold_base_sync` to an issue skips both paths for that issue; removing the label lets the next tick perform the accumulated base sync once.
+Applying `hold_base_sync` to an issue skips both paths for that issue; removing the label lets the next tick perform the accumulated base sync once. The `question` workflow label skips base sync unconditionally for the same read-only reason `_handle_question` already tears down its own worktree on every safe exit — merging `origin/<base>` into a question worktree would either accrete commits on a read-only branch or mask the inspection state of an unsafe park (`question_commits` / `question_dirty` / `question_timeout`).
 
 A local-only rebase on a pushed branch would otherwise diverge local HEAD from `pr.head.sha` and break the validating reviewer (it reads local HEAD, so it would snapshot `agent_approved_sha` to a SHA that isn't on the PR), `_squash_and_force_push`'s `--force-with-lease=<original_head>` (the lease compares against the un-rebased remote tip), and AUTO_MERGE's `agent_approved_sha == pr.head.sha` gate. The detour works under `AUTO_MERGE=off` too — `_handle_resolving_conflict` never reads AUTO_MERGE, it just does rebase + push + relabel.
 
@@ -178,14 +179,15 @@ Then `gh.list_pollable_issues()` yields all open non-PR issues plus closed non-P
 
 For every yielded issue:
 
-1. Read its workflow label (one of `decomposing/ready/blocked/umbrella/implementing/validating/in_review/resolving_conflict/done/rejected`).
-2. Dispatch by label. The full lifecycle (no label → `decomposing` → `ready`/`blocked`/`umbrella` → `implementing` → `validating` → `in_review` → `resolving_conflict` (optional detour) → `done`/`rejected`) is implemented; `done` and `rejected` are terminal no-ops, every other label routes to its handler. Every handler receives the active `RepoSpec`, so `git worktree add`, `git fetch origin <base>`, push-token resolution (`config._resolve_github_token(spec.slug)`), and PR-base selection all flow from the spec rather than module-level `config.REPO` / `config.TARGET_REPO_ROOT` / `config.BASE_BRANCH` reads.
+1. Read its workflow label (one of `decomposing/ready/blocked/umbrella/implementing/validating/in_review/resolving_conflict/question/done/rejected`).
+2. Dispatch by label. The full lifecycle (no label → `decomposing` → `ready`/`blocked`/`umbrella` → `implementing` → `validating` → `in_review` → `resolving_conflict` (optional detour) → `done`/`rejected`) is implemented; `done` and `rejected` are terminal no-ops, every other label routes to its handler. The operator-applied `question` label is an out-of-lifecycle branch (no automatic stage transitions in or out — see [`_handle_question`](#_handle_question-label-question)). Every handler receives the active `RepoSpec`, so `git worktree add`, `git fetch origin <base>`, push-token resolution (`config._resolve_github_token(spec.slug)`), and PR-base selection all flow from the spec rather than module-level `config.REPO` / `config.TARGET_REPO_ROOT` / `config.BASE_BRANCH` reads.
 
 Per-issue durable state lives in a single **"pinned" comment** on the issue (`<!--orchestrator-state {...json...}-->`). The keys it holds:
 
 - `dev_agent` + `dev_session_id` — the **raw full command spec** that handled this issue (first token plus any configured backend-CLI args, e.g. `"codex -m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'"`), re-parsed via `config._parse_agent_spec` on every resume so both the backend AND its args stay locked to whatever the first spawn used; plus the agent's session id.
 - `review_agent` — the spec the most recent reviewer spawn used. Reviewer is fresh per round so this is traceability only, not a lock.
 - `decomposer_agent` + `decomposer_session_id` — parents only; same raw-full-spec pinning + lock-on-first-spawn semantics as `dev_agent`.
+- `question_agent` + `question_session_id` — `question`-stage issues only; same raw-full-spec pinning + lock-on-first-spawn semantics as `dev_agent`. Seeded from `DECOMPOSE_AGENT` on the first spawn and re-parsed on every awaiting-human resume so a multi-turn Q&A keeps the same backend + args. `last_question_at` stamps the most recent spawn; `question_closed_at` stamps the terminal flip to `done` when the operator closes the issue.
 - `children` — parents only; child issue numbers, used by `_handle_blocked`.
 - `dep_graph` — parents only; `{child_idx_str: [child_idx, ...]}` because GitHub has no first-class blocks-issue relation.
 - `decomposed_at`, `pickup_comment_id`.
@@ -512,6 +514,26 @@ The "back to validating on a new PR comment" arc is intentional: validating is t
 
 The rebase path deliberately rewrites the PR branch to keep history linear after other issue PRs land. Every pushed rebase resets `review_round`, so the reviewer agent must re-approve the rewritten head before AUTO_MERGE can pass.
 
+### `_handle_question` (label `question`)
+- **Trigger**: each tick while the label is `question`. Also runs on closed-`question` issues yielded by the closed-issue sweep — that's the terminal signal the handler consumes to finalize the Q&A thread to `done`.
+- **Input**: issue title/body/comments + pinned state (`question_agent` / `question_session_id`, `awaiting_human`, `last_action_comment_id`, `park_reason`). The label is operator-applied — no other handler routes into `question` automatically, and `question` is deliberately NOT in `_FAMILY_AWARE_LABELS` so fan-out concurrency is preserved.
+- **Internal flow**:
+  1. **Terminal close.** If `issue.state == "closed"`, stamp `question_closed_at`, set label `done`, write pinned state, and tear down the per-issue worktree + local branch via `_cleanup_question_worktree`. Do NOT spawn the agent — the question is moot once the issue is closed. Even an unsafe park's preserved worktree is reaped here because the operator has signaled they're done with it.
+  2. **Awaiting-human resume.** If `awaiting_human`, scan for new issue-thread comments past `last_action_comment_id` via `_resume_question_on_human_reply`. No new comments → return without writing state (a no-reply tick is a no-op, but the `finally` block still tears down any worktree left from a prior safe tick). New comments → advance the watermark BEFORE spawning so a crashed/timed-out resume still records the comments as consumed, then resume the locked session via `_build_question_followup_prompt` (or fall back to `_build_question_prompt` when `question_session_id` is empty so a fresh-spawn recovery still gets the full issue context).
+  3. **Fresh spawn.** Otherwise ensure the per-issue worktree (same `issue-N` worktree the implementing stage uses) at `<WORKTREES_DIR>/<owner>__<name>/issue-<n>`, resolve the question spec via `_read_question_session(state)` — falling back to `(DECOMPOSE_AGENT_SPEC, DECOMPOSE_AGENT, DECOMPOSE_AGENT_ARGS, None)` only for the first-ever spawn so the question stage rides on the decomposer's backend choice. **Persist `question_agent` BEFORE invoking `run_agent`** so a backend hiccup that yields no session id cannot orphan the role identity (mirrors the `dev_agent` / `decomposer_agent` discipline). Build the read-only `_build_question_prompt`, spawn, and persist `question_session_id` from a fresh session id.
+  4. Branch on result:
+     - `timed_out` → `_park_question` with `question_timeout`. **Keep** the worktree on disk for operator inspection: the timeout killed the agent mid-run and it may have committed or dirtied the tree before being reaped.
+     - new commits → `_park_question` with `question_commits`. **Keep** the worktree: this stage is read-only and the orchestrator refuses to push agent-authored commits as a dev implementation.
+     - dirty tree → `_park_question` with `question_dirty`. **Keep** the worktree: same read-only contract.
+     - empty `last_message` → `_park_question` with `question_silent` (likely a poisoned resume of a session previously killed mid-stream). The worktree is provably clean here, so it is torn down.
+     - clean answer → post the agent's quoted message to the issue thread (pinging `HITL_MENTIONS` so the human is notified), park awaiting human with `question_answer`, and tear the worktree down.
+
+  The `finally` block runs `_cleanup_question_worktree` unless one of the three unsafe-park branches set `keep_worktree=True`. A no-reply tick on a prior unsafe park inherits `keep_worktree` from `park_reason in {question_timeout, question_commits, question_dirty}` so the inspection target survives subsequent no-reply ticks; the safe-branch overrides set it explicitly to `False` so a clean resume after an operator reset ends the inspection window.
+- **Cross-stage interaction (relabel to `implementing`).** `_handle_implementing` carries an explicit guard: when it inherits an `awaiting_human=True` + `park_reason` starting with `question_` from this stage, it inspects the worktree AND the local `orchestrator/issue-<n>` branch via `_branch_has_unpushed_commits`. A clean worktree + clean branch drops the question-stage park flags, ratchets `last_action_comment_id` past the question agent's answer comment, and falls through to the fresh dev-spawn path; a dirty worktree OR a branch with commits beyond `origin/<base>` re-parks with `question_unsafe_relabel` and tells the operator to reset before the dev agent can start from a clean base.
+- **Output**: an issue comment with the agent's answer or follow-up question (always pinging `HITL_MENTIONS`) + a HITL park, OR a terminal flip to `done` on a manual close, OR a no-op tick when awaiting a human reply that has not arrived.
+
+The Q&A flow deliberately keeps state minimal: no PR is ever opened, no branch is ever pushed, and the per-issue worktree only survives across ticks when an unsafe park requires operator inspection. Multi-turn conversations rebuild the worktree on each spawn from a fresh `origin/<base>` — the agent session state lives in pinned state, not in the worktree, so the locked session resumes correctly across the cleanup.
+
 ## Agent command specs
 
 `DEV_AGENT`, `REVIEW_AGENT`, and `DECOMPOSE_AGENT` are shell-like command specs, not bare backend names. `config._parse_agent_spec` runs `shlex.split` over each value and yields `(backend, extra_args)`:
@@ -584,7 +606,7 @@ Extras whose value is `None` are dropped, so callers can pass optional context (
 | `stage_enter` | `set_workflow_label` (via `_emit_stage_enter`) for every label flip | `stage` |
 | `agent_spawn` / `agent_exit` | `_run_agent_with_tracking` wraps every `run_agent` call (decomposer, implementer, reviewer, dev-resume, conflict-resolution dev) | both carry `agent` (backend), `agent_role`, `review_round`, `retry_count`. `session_id` and the `agent_exit`-only fields are described below the table. |
 | `review_verdict` | `_handle_validating` after `_parse_review_verdict` reads the reviewer's last message | `verdict` (`approved` / `changes_requested` / `unknown`), `review_round`, `pr_number`, `session_id` |
-| `park_awaiting_human` | every `_park_awaiting_human` call site, plus `_on_question`, `_on_dirty_worktree`, and `_park_verify_failure` | `stage` (read from the current workflow label, not passed in), `reason` (`agent_timeout`, `push_failed`, `failed_checks`, `agent_question`, `agent_silent`, `dirty_worktree`, `reviewer_timeout` / `reviewer_failed`, `missing_pr_number`, `verify_failed` / `verify_timeout` / `verify_dirty` / `verify_head_changed`, ...) |
+| `park_awaiting_human` | every `_park_awaiting_human` call site, plus `_on_question`, `_on_dirty_worktree`, `_park_verify_failure`, and the question-stage `_park_question` funnel | `stage` (read from the current workflow label, not passed in), `reason` (`agent_timeout`, `push_failed`, `failed_checks`, `agent_question`, `agent_silent`, `dirty_worktree`, `reviewer_timeout` / `reviewer_failed`, `missing_pr_number`, `verify_failed` / `verify_timeout` / `verify_dirty` / `verify_head_changed`, `question_answer` / `question_silent` / `question_timeout` / `question_commits` / `question_dirty` / `question_unsafe_relabel`, ...) |
 | `pr_opened` | `_on_commits` after `gh.open_pr` succeeds | `pr_number`, `branch`, `sha`, `retry_count` |
 | `pr_merged` | `_handle_in_review` and `_handle_resolving_conflict` terminal arcs (external merge OR successful `gh.merge_pr` under AUTO_MERGE) | `pr_number`, `sha`, `merge_method` (`external` / `squash`), `check_state`, `review_round`, `conflict_round`, `retry_count` |
 | `pr_closed_without_merge` | `_handle_in_review` and `_handle_resolving_conflict` when the PR is closed without merge | `pr_number`, `sha`, `review_round`, `conflict_round`, `retry_count` |
@@ -621,6 +643,8 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 | dev-fix agent | subprocess (resumed dev session, locked spec (backend + args)) | reviewer says CHANGES_REQUESTED | one shot per tick |
 | `_handle_resolving_conflict` | function call | issue label `resolving_conflict` (set by `_handle_in_review` when an approved PR is unmergeable under `AUTO_MERGE=on`); also fires on closed-`resolving_conflict` issues from the polling sweep | once per tick per such issue (drives PR-state terminals → `done`/`rejected`, ahead-of-remote recovery push, `git rebase origin/<base>` then clean-rebase no-op flip / clean-rebase push / dev-conflict resume / cap-park, plus all park branches) |
 | dev-conflict agent | subprocess (resumed dev session, locked spec (backend + args)) | `_handle_resolving_conflict` and `git rebase origin/<base>` left conflicts | one shot per tick |
+| `_handle_question` | function call | issue label `question` (operator-applied) OR closed-`question` issue from the polling sweep | once per tick per such issue; closed terminal finalizes to `done` + tears down the worktree, open issue spawns the question agent (or resumes it on a new human comment) and parks awaiting human |
+| question agent (`DECOMPOSE_AGENT` backend) | subprocess (read-only; fresh first spawn, locked spec on resume) | `_handle_question` (no prior session OR new human comment on a parked Q&A) | one shot per tick when needed |
 | `git push` | subprocess | after dev produces clean commits | per fix |
 | self-restart check | git fetch + diff | start of each tick | every tick |
 
@@ -820,6 +844,7 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 | **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
 | **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives |
 | **stages/conflicts.py** | `_handle_resolving_conflict` + rebase-loop primitives |
+| **stages/question.py** | `_handle_question` + question-session lifecycle (read-only Q&A on the `question` label, no PR) |
 | **agents.py** | dispatch + spawn codex/claude subprocess, capture session id + last message |
 | **github.py** | issues, comments, labels, pinned state, PR open/comment |
 | **config.py** | env + token loading (token kept outside REPO_ROOT), backend validation |
@@ -891,6 +916,24 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
      conflicts ─► dev resumes, continues rebase, push ─► label=validating
      conflict_round >= MAX_CONFLICT_ROUNDS ─► park awaiting human
      pr merged/closed mid-stage ─► done / rejected (terminal)
+
+   question (operator-applied; no automatic in/out transitions):
+     fresh spawn ─► DECOMPOSE_AGENT runs read-only in issue-N worktree,
+                    posts answer to issue thread, park awaiting human
+                    (question_answer)
+     human reply ─► resume locked session (question_agent /
+                    question_session_id), post follow-up, park again
+     agent commits / dirty / timeout ─► park (question_commits /
+                    question_dirty / question_timeout); worktree
+                    PRESERVED for operator inspection; base sync skipped
+                    while label is question
+     agent silent ─► park (question_silent); worktree torn down
+     issue closed (operator) ─► label=done, stamp question_closed_at,
+                    _cleanup_question_worktree (terminal)
+     relabel to implementing ─► implementing's guard: clean worktree
+                    AND branch ─► drop question park, resume dev;
+                    dirty / branch has commits ─► park
+                    (question_unsafe_relabel)
 
    any stage ──► [park: awaiting_human=true]  (timeout, dirty tree,
                        │                       question, push fail,

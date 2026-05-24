@@ -4,7 +4,11 @@
 
 The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 `umbrella` → `implementing` → `validating` → `in_review` → `resolving_conflict`
-optional detour → `done` / `rejected`) is wired end-to-end.
+optional detour → `done` / `rejected`) is wired end-to-end. The operator-
+applied `question` label adds a read-only Q&A side-branch (`_handle_question`)
+that runs the decomposer backend in the per-issue worktree to answer
+clarifying questions without opening a PR; closing the issue is the
+terminal signal.
 
 The orchestrator runs as a single long-lived Python process
 (`python -m orchestrator.main`, wrapped by `run.sh` for self-restart), polls
@@ -123,6 +127,31 @@ Real conflicts resume the dev session with a prompt naming up to 20
 conflicted paths. `MAX_CONFLICT_ROUNDS` (default 3) caps attempts. Merge
 over rebase preserves the stored `agent_approved_sha`.
 
+**Question stage.** The operator-applied `question` workflow label
+runs `_handle_question` (in `orchestrator/stages/question.py`) as a
+read-only side-branch: no implementation, no PR, no push. The handler
+spawns the configured `DECOMPOSE_AGENT` in the issue's `issue-N`
+worktree, posts the agent's answer (or its clarifying follow-up
+question) as an issue comment pinging `HITL_MENTIONS`, and parks
+awaiting human. Subsequent human comments resume the locked session
+(`question_agent` / `question_session_id` pinned per issue,
+independent from any decomposing-session pins) for multi-turn Q&A.
+
+Read-only violations are typed: `question_commits` /
+`question_dirty` / `question_timeout` parks PRESERVE the worktree for
+operator inspection and the per-tick base sync is skipped while the
+label is `question`; the safe parks (`question_answer`,
+`question_silent`) tear it down. Relabeling to `implementing` from a
+`question` park clears the question flags only when the worktree and
+local branch are both clean; otherwise the implementer parks with
+`question_unsafe_relabel` and refuses to publish question-agent
+state as a dev PR.
+
+The closed-issue sweep (`list_pollable_issues`) surfaces closed-
+`question` issues so `_handle_question` finalizes them to `done`,
+stamps `question_closed_at`, and tears down the per-issue worktree
+and local branch — closing the issue is the terminal signal.
+
 **Multi-repo support.** `RepoSpec(slug, target_root, base_branch,
 remote_name, parallel_limit)` is threaded through every handler. `REPOS`
 env (`owner/name|target_root|base_branch[|remote_name[|parallel_limit]]`,
@@ -169,7 +198,9 @@ Stage handler bodies live under `orchestrator/stages/` —
 `decomposition.py` (decomposing / ready / blocked / umbrella),
 `implementing.py` (developer-session lifecycle), `validating.py`
 (reviewer-session lifecycle), `in_review.py` (PR watermarks and the
-auto-merge gate), and `conflicts.py` (`_handle_resolving_conflict`).
+auto-merge gate), `conflicts.py` (`_handle_resolving_conflict`), and
+`question.py` (`_handle_question` — read-only Q&A on the `question`
+label, no PR).
 Shared support helpers live in `workflow_drift.py` (user-content drift),
 `workflow_messages.py` (prompts, parsers, comment posting), and
 `worktrees.py` (git/branch/worktree plumbing, hardened fetch/push).
