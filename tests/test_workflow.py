@@ -19,7 +19,7 @@ os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 from orchestrator import config, workflow, worktrees
 from orchestrator.agents import AgentResult
 from orchestrator.github import BACKLOG_LABEL, BASE_SYNC_HOLD_LABEL
-from orchestrator.workflow import _parse_review_verdict
+from orchestrator.workflow import _parse_documentation_verdict, _parse_review_verdict
 
 from tests.fakes import (
     FakeComment,
@@ -79,6 +79,139 @@ class ParseReviewVerdictTest(unittest.TestCase):
 
     def test_empty_message_returns_unknown(self) -> None:
         self.assertEqual(_parse_review_verdict(""), ("unknown", ""))
+
+
+class ParseDocumentationVerdictTest(unittest.TestCase):
+    """Documentation stage outputs one of three observable outcomes:
+
+      * Valid 'updated' -- the agent committed a `docs:` change. The
+        parser does NOT see this; the stage handler detects it from the
+        new commit. The case here is that a message describing the
+        update but lacking the no-change marker must still return
+        'unknown' so a forgotten commit can't be misread as no-change.
+      * Valid 'no_change' -- the explicit `DOCS: NO_CHANGE` marker.
+      * Invalid -- ambiguous text without the marker, including
+        plausible-but-unstructured 'no changes needed' phrasing that
+        must NOT be accepted as success.
+    """
+
+    def test_no_change_marker_alone_on_line(self) -> None:
+        self.assertEqual(
+            _parse_documentation_verdict(
+                "Diff is internal-only; nothing user-visible changed.\n\nDOCS: NO_CHANGE"
+            ),
+            ("no_change", "Diff is internal-only; nothing user-visible changed."),
+        )
+
+    def test_no_change_marker_case_insensitive(self) -> None:
+        verdict, _ = _parse_documentation_verdict("docs: no_change")
+        self.assertEqual(verdict, "no_change")
+
+    def test_last_marker_wins(self) -> None:
+        # Mirrors `_parse_review_verdict`'s "last marker wins" rule so a
+        # template/sample reference earlier in the body loses to the
+        # concluding line.
+        msg = (
+            "I almost wrote DOCS: NO_CHANGE but actually the README is "
+            "stale, so I'll commit a fix.\n\nDOCS: NO_CHANGE"
+        )
+        verdict, _ = _parse_documentation_verdict(msg)
+        self.assertEqual(verdict, "no_change")
+
+    def test_ambiguous_no_change_text_is_not_accepted(self) -> None:
+        # Plain prose that sounds like a no-change result must NOT pass
+        # without the explicit marker -- otherwise an agent that forgot
+        # to commit a real docs update would silently close the stage.
+        verdict, body = _parse_documentation_verdict(
+            "Looks like no docs changes needed."
+        )
+        self.assertEqual(verdict, "unknown")
+        self.assertIn("no docs changes needed", body)
+
+    def test_update_description_without_marker_is_unknown(self) -> None:
+        # The 'updated' outcome is signalled by the new commit on the
+        # branch, not by the parser. A message describing an update but
+        # lacking the no-change marker must therefore stay 'unknown' so
+        # the no-commit branch (parser-only) cannot silently accept it.
+        verdict, _ = _parse_documentation_verdict(
+            "Updated README.md with the new flag."
+        )
+        self.assertEqual(verdict, "unknown")
+
+    def test_inline_marker_in_prose_is_unknown(self) -> None:
+        # The marker must start its own line. An inline reference
+        # embedded in a sentence -- e.g. "I cannot conclude DOCS:
+        # NO_CHANGE because the README is stale" -- is exactly the kind
+        # of ambiguous no-commit text the issue forbids accepting.
+        verdict, _ = _parse_documentation_verdict(
+            "I cannot conclude DOCS: NO_CHANGE because README is stale."
+        )
+        self.assertEqual(verdict, "unknown")
+
+    def test_non_final_marker_followed_by_text_is_unknown(self) -> None:
+        # The marker must be the FINAL non-whitespace content. A marker
+        # line followed by an unresolved question must be rejected so an
+        # agent's follow-up clarification can't silently close the stage.
+        verdict, _ = _parse_documentation_verdict(
+            "DOCS: NO_CHANGE\nBut I have a question about the API."
+        )
+        self.assertEqual(verdict, "unknown")
+
+    def test_marker_with_trailing_punctuation_is_unknown(self) -> None:
+        # `DOCS: NO_CHANGE.` (trailing punctuation) is rejected; the
+        # contract is a machine-readable marker, not a sentence. Without
+        # this, a markdown-trained agent's habit of ending sentences
+        # with periods would silently mask the stricter rule.
+        verdict, _ = _parse_documentation_verdict("All clear.\n\nDOCS: NO_CHANGE.")
+        self.assertEqual(verdict, "unknown")
+
+    def test_empty_message_returns_unknown(self) -> None:
+        self.assertEqual(_parse_documentation_verdict(""), ("unknown", ""))
+
+
+class BuildDocumentationPromptTest(unittest.TestCase):
+    """The documentation prompt is what teaches the agent the contract
+    the parser relies on. Verify the contract is actually communicated:
+    diff vs README/docs/plans, `docs:` commit subject for the update
+    branch, explicit `DOCS: NO_CHANGE` marker for the no-update branch,
+    and a refusal to accept ambiguous phrasing.
+    """
+
+    def _build(self) -> str:
+        return workflow._build_documentation_prompt(
+            _TEST_SPEC,
+            make_issue(67100, title="add foo flag", body="users want a foo flag"),
+            comments_text="",
+        )
+
+    def test_instructs_diff_against_readme_docs_plans(self) -> None:
+        prompt = self._build()
+        self.assertIn("README.md", prompt)
+        self.assertIn("docs/", prompt)
+        self.assertIn("plans/", prompt)
+        base_ref = f"{_TEST_SPEC.remote_name}/{_TEST_SPEC.base_branch}"
+        self.assertIn(f"git diff {base_ref}...HEAD", prompt)
+
+    def test_instructs_docs_commit_subject_for_updated_case(self) -> None:
+        prompt = self._build()
+        self.assertIn("docs:", prompt)
+        self.assertIn('git commit -m "docs: <subject>"', prompt)
+
+    def test_specifies_machine_readable_no_change_marker(self) -> None:
+        prompt = self._build()
+        self.assertIn("DOCS: NO_CHANGE", prompt)
+
+    def test_warns_against_ambiguous_no_change_text(self) -> None:
+        # The prompt itself must tell the agent that prose like
+        # 'no changes needed' will be parked, mirroring the parser's
+        # refusal to accept it.
+        prompt = self._build()
+        self.assertIn("'no changes needed'", prompt)
+
+    def test_includes_issue_title_and_number(self) -> None:
+        prompt = self._build()
+        self.assertIn("#67100", prompt)
+        self.assertIn("add foo flag", prompt)
 
 
 class RedactSecretsTest(unittest.TestCase):

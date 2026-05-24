@@ -268,6 +268,61 @@ def _parse_review_verdict(last_message: str) -> Tuple[str, str]:
     return verdict, body
 
 
+# Marker the documentation session emits to explicitly assert that the
+# branch diff needs no documentation update. Stricter than `_VERDICT_RE`:
+# the marker MUST occupy its own line AND be the final non-whitespace
+# content of the message. Otherwise prose like
+#   "I cannot conclude DOCS: NO_CHANGE because README is stale."
+# or a marker line followed by an unresolved question
+#   "DOCS: NO_CHANGE\nBut I have a question about the API."
+# would be parsed as success, defeating the issue requirement that
+# ambiguous no-commit text must not be accepted. The leading
+# `(?:^|\n)` anchors the marker at the start of a line; the trailing
+# `\s*\Z` requires only whitespace through end of string (so trailing
+# punctuation like `DOCS: NO_CHANGE.` or any follow-up content fails to
+# match). `re.MULTILINE` is deliberately NOT set -- with it `$` would
+# match at every line break and a non-final marker would still slip
+# through.
+_DOC_VERDICT_RE = re.compile(
+    r"(?:^|\n)[ \t]*DOCS:[ \t]*NO_CHANGE[ \t]*\r?\n?\s*\Z",
+    re.IGNORECASE,
+)
+
+
+def _parse_documentation_verdict(last_message: str) -> Tuple[str, str]:
+    """Find a final 'DOCS: NO_CHANGE' marker in a documentation-stage message.
+
+    Returns (verdict, body_above_marker):
+      * `("no_change", body)` -- the agent emitted the explicit marker
+        AS THE FINAL LINE (alone on its line, with only optional
+        whitespace through end of string), confirming the branch diff
+        requires no documentation update. `body` is the slice above
+        the marker, suitable for surfacing the agent's one-line
+        justification on the issue.
+      * `("unknown", last_message)` -- no valid final marker present.
+        The caller MUST park rather than treat this as success;
+        deliberately rejected variants include:
+          - ambiguous prose like "no changes needed";
+          - inline references such as
+              "I cannot conclude DOCS: NO_CHANGE because ...";
+          - non-final markers followed by further content, e.g.
+              "DOCS: NO_CHANGE\nBut I have a question.";
+          - markers with trailing punctuation like "DOCS: NO_CHANGE.".
+
+    The `"updated"` outcome (docs were modified) is signalled by a fresh
+    `docs:`-prefixed commit on the branch and is detected at the stage
+    handler level rather than here -- this parser only resolves the
+    no-commit branch.
+    """
+    if not last_message:
+        return "unknown", ""
+    match = _DOC_VERDICT_RE.search(last_message)
+    if match is None:
+        return "unknown", last_message
+    body = last_message[: match.start()].rstrip()
+    return "no_change", body
+
+
 # Marker the dev session emits to explicitly acknowledge that the existing
 # work satisfies a user-content-drift edit. Matched on its own line,
 # anywhere in the message; the last occurrence wins (mirrors how
@@ -501,6 +556,57 @@ def _build_review_prompt(
         "If CHANGES_REQUESTED, list the specific items above the verdict line as a numbered "
         "list so the implementer can address them one by one. If the change is acceptable as "
         "is, write VERDICT: APPROVED with a one-line justification above it."
+    )
+
+
+def _build_documentation_prompt(
+    spec: RepoSpec,
+    issue: Issue,
+    comments_text: str,
+) -> str:
+    """Prompt for the documentation pass that runs after `implementing`.
+
+    Reuses the dev agent role -- the documentation pass commits to the same
+    branch as the implementer, so it is operating as a developer and not a
+    reviewer. No separate backend env var is introduced for this stage in
+    this child; the eventual stage handler should invoke the existing dev
+    backend.
+    """
+    body = issue.body or "(no body)"
+    convo = comments_text or "(no prior comments)"
+    base_ref = f"{spec.remote_name}/{spec.base_branch}"
+    return (
+        f"You are the documentation pass for GitHub issue #{issue.number}: "
+        f"{issue.title!r}. A separate session has implemented this issue and "
+        f"committed to the current branch. The base branch is `{base_ref}`.\n\n"
+        f"Issue body:\n{body}\n\n"
+        f"Conversation so far:\n{convo}\n\n"
+        "Inspect the change with:\n"
+        f"  git log --oneline {base_ref}..HEAD\n"
+        f"  git diff {base_ref}...HEAD\n\n"
+        "Compare the branch diff against `README.md`, the `docs/` tree, and "
+        "the `plans/` tree. If any user-facing description, architectural "
+        "note, or roadmap entry needs to be updated to match the code that "
+        "landed in this branch, UPDATE the relevant files and COMMIT the "
+        "change in the current worktree. Do NOT push -- the orchestrator "
+        "pushes once this stage finishes.\n\n"
+        "The commit subject MUST use the `docs:` Conventional-Commit type "
+        "and be a single short imperative line -- no extended description / "
+        "body and no `Co-Authored-By:` (or other) trailer. Use "
+        "`git commit -m \"docs: <subject>\"` with a single `-m`.\n\n"
+        "If the branch genuinely requires no documentation change, do NOT "
+        "commit and end your final message with EXACTLY this marker, alone "
+        "on its own line:\n\n"
+        "  DOCS: NO_CHANGE\n\n"
+        "Place a one-sentence justification on the line above the marker. "
+        "The orchestrator will NOT accept ambiguous phrasing like "
+        "'no changes needed' as success without the explicit marker; an "
+        "agent message that neither commits nor emits the marker is parked "
+        "for human review.\n\n"
+        "If you genuinely cannot decide because of missing information, "
+        "leave the worktree uncommitted, omit the marker, and end your "
+        "final message with a question for the human; the orchestrator "
+        "will park the issue for human review."
     )
 
 

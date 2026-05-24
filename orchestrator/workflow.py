@@ -67,6 +67,9 @@ from .workflow_messages import (
     _build_conflict_resolution_prompt as _build_conflict_resolution_prompt,
 )
 from .workflow_messages import _build_decompose_prompt as _build_decompose_prompt
+from .workflow_messages import (
+    _build_documentation_prompt as _build_documentation_prompt,
+)
 from .workflow_messages import _build_fix_prompt as _build_fix_prompt
 from .workflow_messages import _build_implement_prompt as _build_implement_prompt
 from .workflow_messages import (
@@ -80,6 +83,9 @@ from .workflow_messages import _build_review_prompt as _build_review_prompt
 from .workflow_messages import _drift_ack_reason as _drift_ack_reason
 from .workflow_messages import (
     _format_stderr_diagnostics as _format_stderr_diagnostics,
+)
+from .workflow_messages import (
+    _parse_documentation_verdict as _parse_documentation_verdict,
 )
 from .workflow_messages import _parse_manifest as _parse_manifest
 from .workflow_messages import _parse_review_verdict as _parse_review_verdict
