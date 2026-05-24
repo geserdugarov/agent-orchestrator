@@ -108,9 +108,14 @@ with a typed `park_reason` (`verify_failed` / `verify_timeout` /
 of the command output; GitHub CI remains the later auto-merge gate
 consulted by `_handle_in_review`.
 
-`CHANGES_REQUESTED` posts feedback, resumes the dev, and increments
-`review_round`; `MAX_REVIEW_ROUNDS` (default 3) caps iterations. Silent
-reviewer crashes are tagged transient for retry.
+`CHANGES_REQUESTED` posts feedback, resumes the dev, and on a clean
+pushed fix increments `review_round` and routes the issue through
+`documenting` so the docs pass runs against the new diff before the
+reviewer re-evaluates next tick (the awaiting-human resume,
+user-content drift, and the transient-park recovery push paths use
+the same handoff). A no-commit reply / explicit `ACK` keeps the
+issue on `validating`. `MAX_REVIEW_ROUNDS` (default 3) caps
+iterations. Silent reviewer crashes are tagged transient for retry.
 
 **In-review terminals and auto-merge.** `_handle_in_review` covers:
 PR merged → `done` + branch cleanup; PR closed unmerged → `rejected`;

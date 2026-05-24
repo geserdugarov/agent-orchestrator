@@ -104,10 +104,12 @@ def _handle_dev_fix_result(
 ) -> bool:
     """Post-agent handling for a dev fix during validating.
 
-    Returns True if a fix was committed, pushed, and the loop should re-review
-    on the next tick. Returns False if the run produced no fix (timeout,
-    no-new-commit, dirty tree, or push failure); caller should write state and
-    return.
+    Returns True if a fix was committed, pushed, and the caller should
+    advance the label (validating routes the issue through `documenting`
+    on True so the docs pass runs against the new head before the
+    reviewer re-evaluates). Returns False if the run produced no fix
+    (timeout, no-new-commit, dirty tree, or push failure); caller should
+    write state and return.
     """
     from .. import workflow as _wf
 
@@ -190,7 +192,9 @@ def _post_user_content_change_result(
       Caller stays on the current label.
     * ``"pushed"`` -- new commit landed and the push succeeded. Caller
       advances the label per its own rules (in_review bounces to
-      validating; validating stays with `review_round++`).
+      validating; validating bumps `review_round` and routes through
+      `documenting` so the docs pass runs against the new head before
+      the reviewer re-evaluates).
     * ``"parked"`` -- timeout, dirty tree, push fail, silent crash
       (empty `last_message`), OR a no-commit response WITHOUT the
       `ACK:` marker (treated as a clarification question via
@@ -262,13 +266,26 @@ def _post_user_content_change_result(
 
 def _try_recover_validating_transient_park(
     spec: RepoSpec, issue: Issue, state: PinnedState
-) -> bool:
+) -> str:
     """Quietly attempt to clear a transient validating park.
 
-    Returns True if the underlying condition has resolved (caller should
-    clear the park flags and progress); False to stay parked. Must not
-    spawn the agent or post issue/PR comments -- the caller owns the
-    visible side of the recovery so a still-stuck tick produces no churn.
+    Returns one of:
+      * ``"stuck"`` -- the underlying condition has not resolved; caller
+        leaves the park flags in place and returns silently.
+      * ``"cleared"`` -- the park can be cleared, but nothing new
+        landed on the PR (reviewer-only crash, or a dev-timeout that
+        had not actually produced a commit). Caller clears the flags
+        and stays on `validating` so the reviewer reruns.
+      * ``"pushed"`` -- a dev fix was finished off during recovery
+        (a deferred push of `push_failed`, or the trailing push of an
+        `agent_timeout` that had committed before being killed).
+        Caller clears the flags and routes the issue through
+        `documenting` so the docs pass runs against the new head before
+        the reviewer sees it.
+
+    Must not spawn the agent or post issue/PR comments -- the caller owns
+    the visible side of the recovery so a still-stuck tick produces no
+    churn.
 
     The helper IS allowed to update review-round bookkeeping when a fix
     landed during recovery (e.g. an agent_timeout where the dev had
@@ -285,14 +302,14 @@ def _try_recover_validating_transient_park(
             # Worktree was reaped; the dev's local commits are gone, so
             # there is nothing to push. A human has to intervene (relabel
             # back to implementing) -- that's the unblocking signal.
-            return False
+            return "stuck"
         if not _wf._push_branch(spec, wt, _wf._branch_name(issue.number)):
-            return False
+            return "stuck"
         # The dev's fix is now landed; bump the round so the cap reflects
         # the completed fix cycle.
         round_n = int(state.get("review_round") or 0)
         state.set("review_round", round_n + 1)
-        return True
+        return "pushed"
     if park_reason in ("reviewer_timeout", "reviewer_failed"):
         # Reviewer agent only reads the worktree; nothing to reconcile
         # locally. Clear flags so the next tick re-spawns the reviewer
@@ -300,7 +317,7 @@ def _try_recover_validating_transient_park(
         # empty stdout + non-zero exit) self-heals the same way as
         # `reviewer_timeout`: there is no dev-side state to reconcile,
         # and the next tick simply spawns a fresh reviewer.
-        return True
+        return "cleared"
     if park_reason == "agent_timeout":
         # The dev agent could have committed or left uncommitted edits
         # before the timeout killed it. Recovery cannot just clear flags
@@ -310,7 +327,7 @@ def _try_recover_validating_transient_park(
         # in_review. Reconcile the worktree explicitly here.
         wt = _wf._worktree_path(spec, issue.number)
         if not wt.exists():
-            return False
+            return "stuck"
         if _wf._worktree_dirty_files(wt):
             # The dev left edits that were never committed. We cannot
             # safely push, review, or auto-merge in this state; stay
@@ -318,7 +335,7 @@ def _try_recover_validating_transient_park(
             # sorts it out. A reviewer that ignored the dirty index
             # would vote on the committed head while the leftover edits
             # are silently dropped on the next push.
-            return False
+            return "stuck"
         # The pre-agent SHA was persisted when the timeout park ran.
         # Compare against the current worktree HEAD instead of
         # `_has_new_commits()`, which only checks against
@@ -330,23 +347,23 @@ def _try_recover_validating_transient_park(
             # so a missing watermark means foreign state we cannot
             # reason about. Stay parked rather than risk force-pushing
             # an out-of-date HEAD over the remote.
-            return False
+            return "stuck"
         now_sha = _wf._head_sha(wt)
         if not now_sha or now_sha == pre_sha:
             # The timeout produced no new commit. Clear flags but do
             # not bump the round or push -- nothing landed.
             state.set("pre_dev_fix_sha", None)
-            return True
+            return "cleared"
         # The dev committed before timing out. Finish what it started
         # by pushing the new SHA; on success the fix is now landed and
         # we bump the round just like the push_failed branch.
         if not _wf._push_branch(spec, wt, _wf._branch_name(issue.number)):
-            return False
+            return "stuck"
         state.set("pre_dev_fix_sha", None)
         round_n = int(state.get("review_round") or 0)
         state.set("review_round", round_n + 1)
-        return True
-    return False
+        return "pushed"
+    return "stuck"
 
 
 def _seed_watermark_past_self(
@@ -570,9 +587,11 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # reviewer was running. Re-decomposing now would discard the dev's
     # already-pushed work, so notify the human, resume the dev session on
     # its locked backend with the new body, and on a successful pushed fix
-    # stay in `validating` so the reviewer re-runs on the new diff next
-    # tick. On a failed resume (timeout, dirty, no commit), the standard
-    # park flags land via `_handle_dev_fix_result`.
+    # bump `review_round` and route through `documenting` so the docs
+    # pass runs against the updated body + new diff before the reviewer
+    # re-evaluates next tick. An ACK reply (no commit) keeps the issue
+    # on `validating`. On a failed resume (timeout, dirty, no commit),
+    # the standard park flags land via `_handle_dev_fix_result`.
     #
     # Exception: when the issue is parked with a reviewer-side park reason
     # (`reviewer_timeout` / `reviewer_failed`) OR on the review-round cap
@@ -632,6 +651,11 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             if outcome == "pushed":
                 round_n = int(state.get("review_round") or 0)
                 state.set("review_round", round_n + 1)
+                # New head landed: route through `documenting` so the
+                # docs pass runs against the updated body + new diff
+                # before the reviewer re-evaluates. The `ack` outcome
+                # (no commit) stays in `validating`.
+                gh.set_workflow_label(issue, "documenting")
             gh.write_pinned_state(issue, state)
             return
         # reviewer-side park OR review_cap: fall through to the
@@ -641,8 +665,9 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     # Awaiting-human path: human replied after a park; resume the developer
     # codex with their feedback. Identical mechanic to implementing's resume,
-    # but on success we stay in validating and bump the round so the reviewer
-    # runs again on the next tick.
+    # but on a clean pushed fix we bump the round AND route through
+    # `documenting` so the docs pass runs against the new head before the
+    # reviewer re-evaluates next tick.
     if state.get("awaiting_human"):
         # Transient-park recovery: when the original park reason is something
         # that can resolve without a human comment (a push race that the
@@ -700,9 +725,10 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             not new_comments
             and park_reason in _VALIDATING_TRANSIENT_PARK_REASONS
         ):
-            if not _try_recover_validating_transient_park(
+            recovery = _try_recover_validating_transient_park(
                 spec, issue, state
-            ):
+            )
+            if recovery == "stuck":
                 return  # still stuck, do not re-post the park comment
             # Conditions resolved: clear the park flags. The recovery
             # helper has already bumped review_round when a fix landed
@@ -713,6 +739,13 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             # handler will not re-feed any already-consumed comments.
             state.set("awaiting_human", False)
             state.set("park_reason", None)
+            if recovery == "pushed":
+                # A dev fix finished landing during recovery (push_failed
+                # retried successfully, or an agent_timeout whose dev
+                # had committed before the kill). Route through
+                # `documenting` so the docs pass runs against the new
+                # head before the reviewer agent re-evaluates.
+                gh.set_workflow_label(issue, "documenting")
             gh.write_pinned_state(issue, state)
             return
         elif (
@@ -748,6 +781,10 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 return
             round_n = int(state.get("review_round") or 0)
             state.set("review_round", round_n + 1)
+            # A clean dev fix landed: route through `documenting` so the
+            # docs pass runs against the new head before the reviewer
+            # re-evaluates.
+            gh.set_workflow_label(issue, "documenting")
             gh.write_pinned_state(issue, state)
             return
 
@@ -1077,4 +1114,8 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         return
 
     state.set("review_round", round_n + 1)
+    # A clean dev fix landed in response to CHANGES_REQUESTED: route
+    # through `documenting` so the docs pass runs against the new head
+    # before the reviewer re-evaluates.
+    gh.set_workflow_label(issue, "documenting")
     gh.write_pinned_state(issue, state)

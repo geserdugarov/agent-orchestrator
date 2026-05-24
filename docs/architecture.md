@@ -97,10 +97,18 @@ orchestrator/
     validating.py       — `_handle_validating` plus reviewer-session
                            lifecycle: `_handle_dev_fix_result`,
                            `_post_user_content_change_result`, validating-side
-                           transient-park recovery, the local-verify gate
-                           park helper (`_park_verify_failure`), and the
-                           watermark seeding for the validating→in_review
-                           handoff.
+                           transient-park recovery (returns
+                           `"stuck"`/`"cleared"`/`"pushed"` so the caller
+                           can route pushed recoveries through documenting),
+                           the local-verify gate park helper
+                           (`_park_verify_failure`), and the watermark
+                           seeding for the validating→in_review handoff.
+                           Pushed dev fixes (CHANGES_REQUESTED,
+                           awaiting-human resume, drift pushed,
+                           transient-park recovery push) relabel to
+                           `documenting`, NOT `validating`, so the docs
+                           pass runs against the new head before the
+                           reviewer re-evaluates.
     in_review.py        — `_handle_in_review` plus PR-side primitives:
                            transient park-reason set, the quiet auto-merge
                            gate re-check, legacy watermark migration, and the
@@ -276,7 +284,7 @@ Author-login matching is intentionally avoided because the orchestrator PAT is o
 
     Result routing in `_post_user_content_change_result`:
 
-    - a clean pushed fix flips back to `validating` from `in_review` / `resolving_conflict`, stays in `validating` with `review_round++` from `validating`, or runs the implementing `_on_commits` path to open/push the PR from `implementing`;
+    - a clean pushed fix flips back to `validating` from `in_review` / `resolving_conflict`, routes to `documenting` with `review_round++` from `validating` (so the docs pass runs against the updated body + new diff before the reviewer re-evaluates), or runs the implementing `_on_commits` path to open/push the PR from `implementing`;
     - a no-commit reply is treated as an ack ONLY when it carries the explicit `ACK: <reason>` marker the resume prompt instructs the dev to emit when the existing work already satisfies the edit.
 
       The dev's justification is posted on the issue as an FYI and the handler does NOT park awaiting_human, so a harmless clarification doesn't stall the issue;
@@ -411,7 +419,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 - **Trigger**: each tick while label is `validating` (set after PR opens).
 - **Input**: PR #, branch, `dev_agent`/`dev_session_id` (or legacy `codex_session_id`), pinned state, `review_round`.
 - **Internal flow**:
-  1. Awaiting-human path: same resume mechanic as implementing (resume on the dev's locked spec (backend + args)); on a successful pushed fix, bump `review_round` and stay in `validating` so the reviewer runs next tick.
+  1. Awaiting-human path: same resume mechanic as implementing (resume on the dev's locked spec (backend + args)); on a successful pushed fix, bump `review_round` and relabel to `documenting` so the docs pass runs against the new head before the reviewer re-evaluates next tick. A no-commit / ACK reply keeps the issue on `validating`.
 
      Exception: on a `review_cap` park (`park_reason="review_cap"`), the human reply does **not** wake the dev session — resuming would just bump past the cap on the next tick. Instead, the operator must post `/orchestrator add-review-rounds N` on its own line; that resets `review_round` to `MAX_REVIEW_ROUNDS - N`, clears the park flags, and falls through to spawn the reviewer this same tick. A plain reply (or one with an invalid `N`) leaves the issue parked.
   2. If `review_round >= MAX_REVIEW_ROUNDS` (default 3), park awaiting human. The park comment surfaces the `/orchestrator add-review-rounds N` escape hatch so the operator can grant more rounds without losing the PR/worktree.
@@ -431,8 +439,8 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
           With `SQUASH_ON_APPROVAL=off`, the snapshot is the pre-review local HEAD (`reviewed_sha` captured before `run_agent`).
        6. Seed the in_review comment watermarks, then set label `in_review`.
      - `unknown` (no marker) → park.
-     - `changes_requested` → post the feedback to the PR, then **resume the developer's session** on its locked spec (backend + args) with the fix prompt; if it produces a new commit on a clean tree, push and increment `review_round` for next tick.
-- **Output**: label moved to `in_review` (approval, squash succeeded or disabled) OR a new fix commit + bumped round OR a HITL park (squash/force-push failure stays on `validating` with the approval comment already on the PR; every other park branch keeps the existing label).
+     - `changes_requested` → post the feedback to the PR, then **resume the developer's session** on its locked spec (backend + args) with the fix prompt; if it produces a new commit on a clean tree, push, increment `review_round`, and relabel to `documenting` so the docs pass runs against the new diff before the reviewer re-evaluates next tick. A no-commit reply parks via `_on_question` and stays on `validating`.
+- **Output**: label moved to `in_review` (approval, squash succeeded or disabled) OR label moved to `documenting` (a new fix commit landed via CHANGES_REQUESTED, awaiting-human resume, user-content drift, or a transient-park-recovery push that finished a pending push) OR a HITL park (squash/force-push failure stays on `validating` with the approval comment already on the PR; every other park branch keeps the existing label).
 
 ### `_handle_in_review` (label `in_review`)
 - **Trigger**: each tick while label is `in_review` (set by `_handle_validating` after `VERDICT: APPROVED`). Also runs on closed-`in_review` issues yielded by the closed-issue sweep, so an external manual merge gets finalized to `done` even when `Resolves #N` already closed the issue.
@@ -795,7 +803,9 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
    │                       │       CHANGES_REQUESTED:             │  │    │
    │                       │         post feedback on PR          │  │    │
    │                       │         run_agent(dev, fix, resume) ─┘  │    │
-   │                       │         push, ++review_round            │    │
+   │                       │         push, ++review_round,           │    │
+   │                       │         label=documenting (docs pass    │    │
+   │                       │           on new head ─► validating)    │    │
    │                       │       UNKNOWN ─► park                   │    │
    │                       └─ round ≥ MAX_REVIEW_ROUNDS ─► park      │    │
    │                                                                 │    │
@@ -933,33 +943,28 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 ### State transition (label lifecycle)
 
 ```
-                         single
-                       ┌──────────────────────────────────────────────┐
-   (none) ──► decomposing ──► ready ──► implementing ──► documenting ──► validating ──► in_review ──► done | rejected
-                  │                          ▲                  │              ▲ │
-                  │ split                    │ all children     │              │ │  fresh PR feedback
-                  ▼                          │ done             │              │ │  ─► label=fixing
-                blocked ──► (children created) ──┐              │              │ │  (resume dev with the
-                  ▲                              │              │              │ │  unread feedback after
-                  └─ child rejected ─► park HITL │   CHANGES_   │              │ │  the quiet window, push
-                                                 │   REQUESTED  │              │ │  the fix, and bounce
-                                                 │              │              └─┤  back to validating)
-                                                 └──────────────┘                │
-                                  (APPROVED or MAX_REVIEW_ROUNDS)                │
-                                                                                 │
-                                            fixing ──(dev fix pushed) ──► validating ─┘
+   Forward (single-task happy path):
+     (none) ──► decomposing ──► ready ──► implementing ──► documenting ──► validating ──► in_review ──► done | rejected
 
-                                                 ┌──────────────────────────────┐
-                                                 │  in_review --(AUTO_MERGE on, │
-                                                 │   unmergeable past approval  │
-                                                 │   gates)─► resolving_conflict│
-                                                 │  resolving_conflict --(clean │
-                                                 │   rebase / pushed resolution)│
-                                                 │   ─► validating              │
-                                                 │  resolving_conflict --(round │
-                                                 │   >= MAX_CONFLICT_ROUNDS)    │
-                                                 │   ─► park awaiting human     │
-                                                 └──────────────────────────────┘
+   Decompose detours:
+     decomposing --(split)──► blocked ──(children created)──► ready
+                                  ▲
+                                  └ child rejected ─► park HITL
+
+   Validating fix loop (any pushed dev fix):
+     validating --(CHANGES_REQUESTED / awaiting-human resume / user-content drift / transient-park push)──►
+       ++review_round, label=documenting ──► docs pass ──► validating
+     (APPROVED ─► in_review; MAX_REVIEW_ROUNDS exhausted ─► park HITL)
+
+   In_review terminals and fix bounce:
+     in_review --(PR merged)─────────────► done
+     in_review --(PR closed unmerged)────► rejected
+     in_review --(fresh PR feedback)─────► fixing
+       fixing --(quiet window expires, dev fix pushed)──► validating
+     in_review --(AUTO_MERGE on, approved, gates pass)──► merge ─► done
+     in_review --(AUTO_MERGE on, approved, unmergeable past gates)──►
+       resolving_conflict --(clean rebase / pushed resolution)──► validating
+       resolving_conflict --(round ≥ MAX_CONFLICT_ROUNDS)──► park HITL
 
    decomposing flavors:
      decision='single'  ─► label=ready  (parent itself implements)
