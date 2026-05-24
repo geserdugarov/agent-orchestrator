@@ -81,22 +81,32 @@ def _branch_name(issue_number: int) -> str:
 # operator convenience). `_TARGET_ROOT_LOCKS_LOCK` only guards the dict
 # lookup/insert; the per-key lock is acquired outside that guard so a
 # slow git operation can't block lookup for other repos.
+#
+# Per-key locks are `RLock` so a caller that already holds the lock can
+# re-enter via a helper that also acquires it -- specifically,
+# `_authed_target_fetch` acquires the lock internally to keep its
+# critical section honest in isolation, and the worktree creators
+# (`_ensure_worktree` / `_ensure_pr_worktree` / `_ensure_decompose_worktree`)
+# also hold the lock for the whole add sequence. Cross-thread serialization
+# is unchanged.
 _TARGET_ROOT_LOCKS_LOCK = threading.Lock()
-_TARGET_ROOT_LOCKS: dict[str, threading.Lock] = {}
+_TARGET_ROOT_LOCKS: dict[str, threading.RLock] = {}
 
 
-def _target_root_lock(target_root: Path) -> threading.Lock:
+def _target_root_lock(target_root: Path) -> threading.RLock:
     """Return the lock that serializes git plumbing against `target_root`.
 
     Created lazily on first use so a single-repo deployment never pays
     for a lock it doesn't need. The dict is process-global; clearing it
-    is a test-only concern handled inline (no public API).
+    is a test-only concern handled inline (no public API). Re-entrant
+    so a caller already holding the lock can call into a helper that
+    also acquires it.
     """
     key = str(target_root)
     with _TARGET_ROOT_LOCKS_LOCK:
         lock = _TARGET_ROOT_LOCKS.get(key)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _TARGET_ROOT_LOCKS[key] = lock
         return lock
 
@@ -179,10 +189,7 @@ def _ensure_worktree(spec: RepoSpec, issue_number: int) -> Path:
                 cwd=spec.target_root,
             )
 
-        _git(
-            "fetch", "--quiet", spec.remote_name, spec.base_branch,
-            cwd=spec.target_root,
-        )
+        _authed_target_fetch(spec, spec.base_branch)
 
         have_branch = _git(
             "rev-parse", "--verify", branch, cwd=spec.target_root
@@ -244,31 +251,19 @@ def _ensure_pr_worktree(spec: RepoSpec, issue_number: int) -> Path:
             )
 
         # Fetch both base and the PR's remote branch so either path
-        # below has a fresh ref to anchor on.
-        _git(
-            "fetch", "--quiet", spec.remote_name, spec.base_branch,
-            cwd=spec.target_root,
-        )
-        # The PR branch fetch is best-effort: a freshly created PR may not
-        # have a remote ref yet (the orchestrator's own push opened it),
-        # but in that case the local branch must already exist (we just
-        # pushed it). Treat fetch failure as non-fatal and let the local
-        # ref check below decide.
-        #
-        # Use an explicit refspec so single-branch / narrowed clones still
-        # create the `refs/remotes/<remote>/<branch>` ref. A bare `git fetch
-        # <remote> <branch>` on a single-branch clone only updates
-        # FETCH_HEAD and leaves no `<remote>/<branch>` for the
-        # `worktree add ... <remote>/<branch>` fallback to anchor on. The
-        # `+` prefix forces non-fast-forward update, which we want because
-        # the orchestrator pushes with `--force-with-lease` and the local
-        # remote-tracking ref may be stale relative to the just-rewritten
-        # remote tip.
-        _git(
-            "fetch", "--quiet", spec.remote_name,
-            f"+refs/heads/{branch}:refs/remotes/{spec.remote_name}/{branch}",
-            cwd=spec.target_root,
-        )
+        # below has a fresh ref to anchor on. The PR branch fetch is
+        # best-effort: a freshly created PR may not have a remote ref
+        # yet (the orchestrator's own push opened it), but in that case
+        # the local branch must already exist (we just pushed it). Treat
+        # fetch failure as non-fatal and let the local ref check below
+        # decide. `_authed_target_fetch` already uses the explicit
+        # `+refs/heads/<branch>:refs/remotes/<remote>/<branch>` refspec
+        # so single-branch / narrowed clones still create the
+        # remote-tracking ref the `worktree add ... <remote>/<branch>`
+        # fallback anchors on; the `+` prefix forces non-fast-forward
+        # update against `--force-with-lease`-rewritten remote tips.
+        _authed_target_fetch(spec, spec.base_branch)
+        _authed_target_fetch(spec, branch)
 
         have_local = _git(
             "rev-parse", "--verify", branch, cwd=spec.target_root,
@@ -460,10 +455,7 @@ def _ensure_decompose_worktree(spec: RepoSpec, issue_number: int) -> Path:
                 "worktree", "remove", "--force", str(wt),
                 cwd=spec.target_root,
             )
-        _git(
-            "fetch", "--quiet", spec.remote_name, spec.base_branch,
-            cwd=spec.target_root,
-        )
+        _authed_target_fetch(spec, spec.base_branch)
         result = _git(
             "worktree", "add", "--detach", str(wt),
             f"{spec.remote_name}/{spec.base_branch}",
@@ -1063,6 +1055,108 @@ def _authed_fetch(
             )
 
 
+def _authed_target_fetch(
+    spec: RepoSpec, branch: str
+) -> subprocess.CompletedProcess:
+    """Authed `git fetch` into `spec.target_root` using the per-spec token.
+
+    Replaces the plain `git fetch <remote_name> <branch>` invocations the
+    worktree creators (`_ensure_worktree` / `_ensure_pr_worktree` /
+    `_ensure_decompose_worktree`) and the per-tick base refresh
+    (`_refresh_base_and_worktrees`) used to run. The plain form relied on
+    git's ambient credential helper or session state, which fails under
+    systemd (`GIT_TERMINAL_PROMPT=0` disables the fallback prompt) and
+    has no way to pick a per-repo token when the local clone has several
+    GitHub-pointing remotes whose `slug` differs from the
+    `~/.config/<owner>/<repo>/token` of the configured `REPO`.
+
+    The `spec.remote_name` field selects the local remote namespace --
+    refs land under `refs/remotes/<spec.remote_name>/<branch>` -- while
+    `spec.slug` selects which GitHub repo / token to authenticate with.
+    Without this split, a `REPOS` row like
+    `geserdugarov/lance-private|...|private-cache|private` would try to
+    use the cached single-repo `config.GITHUB_TOKEN` (looked up once for
+    `config.REPO`) and fail to fetch even with a correct per-spec token
+    file in place.
+
+    An explicit refspec `+refs/heads/<branch>:refs/remotes/<remote_name>/<branch>`
+    is used so single-branch / narrowed clones still update the
+    remote-tracking ref instead of leaving the fetched payload only in
+    FETCH_HEAD -- the worktree creators then anchor `git worktree add`
+    on `<remote>/<branch>` without surprise.
+
+    Same security envelope as `_push_branch` / `_authed_fetch`: token
+    delivered via GIT_ASKPASS (never argv), global/system git config
+    detached so url-rewrite rules planted in `~/.gitconfig` cannot
+    redirect the fetch to an attacker-controlled host, hooks /
+    fsmonitor / credential helpers blocked via `-c` overrides. The
+    target_root is normally operator-owned, but a linked worktree
+    (which the agent does write) can still mutate the parent clone's
+    local config via `git config --local`, and local config still
+    applies even with GIT_CONFIG_GLOBAL/SYSTEM detached. Mirror the
+    `_authed_fetch` / `_push_branch` pre-flight refusal: bail out if
+    `target_root`'s local config carries any
+    `url.<host>.(insteadOf|pushInsteadOf)` rule that could redirect
+    the token-bearing fetch to an attacker-controlled host.
+
+    Serialized via `_target_root_lock` (`RLock` so a caller already
+    holding it -- the worktree creators -- re-enters cleanly) for the
+    same `.git/config.lock` reason described on `_ensure_worktree`.
+    """
+    token = config._resolve_github_token(spec.slug)
+    if not token:
+        log.error("GITHUB_TOKEN missing for %s; cannot fetch", spec.slug)
+        return subprocess.CompletedProcess(
+            args=["git", "fetch"], returncode=1, stdout="",
+            stderr="GITHUB_TOKEN missing",
+        )
+    rewrite = subprocess.run(
+        ["git", "config", "--local", "--get-regexp",
+         r"^url\..*\.(insteadof|pushinsteadof)$"],
+        cwd=str(spec.target_root), capture_output=True, text=True,
+    )
+    if rewrite.returncode == 0 and rewrite.stdout.strip():
+        log.error(
+            "refusing to fetch into %s: target_root .git/config has url "
+            "rewrite rules: %s", spec.target_root, rewrite.stdout.strip(),
+        )
+        return subprocess.CompletedProcess(
+            args=["git", "fetch"], returncode=1, stdout="",
+            stderr="url rewrite rules in target_root .git/config",
+        )
+    auth_url = f"https://x-access-token@github.com/{spec.slug}.git"
+    refspec = (
+        f"+refs/heads/{branch}:refs/remotes/{spec.remote_name}/{branch}"
+    )
+    with tempfile.TemporaryDirectory(prefix="orch-askpass-") as td:
+        askpass = Path(td) / "askpass.sh"
+        askpass.write_text('#!/bin/sh\nprintf %s "$GIT_TOKEN"\n')
+        askpass.chmod(0o700)
+        env = {
+            **os.environ,
+            **_GIT_NO_PROMPT_ENV,
+            "GIT_ASKPASS": str(askpass),
+            "GIT_TOKEN": token,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        git_prefix = [
+            "git",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "credential.helper=",
+            "-c", "core.fsmonitor=",
+        ]
+        with _target_root_lock(spec.target_root):
+            return subprocess.run(
+                [*git_prefix, "fetch", "--quiet", auth_url, refspec],
+                cwd=str(spec.target_root),
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+
 def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
     """Fetch `origin/<base>` once for the spec and bring every existing
     per-issue worktree up to date.
@@ -1113,10 +1207,7 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
     info/warning and swallowed: keeping every issue moving matters more
     than perfect base sync.
     """
-    fetch_r = _git(
-        "fetch", "--quiet", spec.remote_name, spec.base_branch,
-        cwd=spec.target_root,
-    )
+    fetch_r = _authed_target_fetch(spec, spec.base_branch)
     if fetch_r.returncode != 0:
         log.warning(
             "repo=%s base fetch of %s/%s failed: %s",

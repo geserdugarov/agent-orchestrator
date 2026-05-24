@@ -104,6 +104,7 @@ from .workflow_messages import _with_orch_marker as _with_orch_marker
 # module's namespace -- both for the handler call sites and for the test
 # suite, which patches `workflow._foo` to intercept those calls.
 from .worktrees import _authed_fetch as _authed_fetch
+from .worktrees import _authed_target_fetch as _authed_target_fetch
 from .worktrees import _branch_ahead_behind as _branch_ahead_behind
 from .worktrees import _branch_name as _branch_name
 from .worktrees import _cleanup_decompose_worktree as _cleanup_decompose_worktree
