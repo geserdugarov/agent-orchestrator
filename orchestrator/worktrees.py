@@ -1587,15 +1587,17 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
       (the lease compares against the un-rebased remote tip), and
       AUTO_MERGE's `agent_approved_sha == pr.head.sha` gate. So instead
       we route the issue to `resolving_conflict`: the existing handler
-      does the rebase, pushes, and flips back to `validating` so the
-      reviewer re-runs on the rebased head. Applying the `hold_base_sync`
-      label to an issue pauses both the pre-PR local rebase and the PR
-      detour until the label is removed. This works under
-      `AUTO_MERGE=off` too -- `_handle_resolving_conflict` never reads
-      AUTO_MERGE, it just does the rebase+push+relabel cycle. Issues
-      already labeled `resolving_conflict` are left alone (the handler
-      runs this tick anyway); other labels are skipped (no PR worktree
-      to refresh in those states).
+      does the rebase, pushes, and flips to `documenting` so the docs
+      pass runs on the rewritten tree before the reviewer re-runs (a
+      base-up-to-date no-op with no diff bypasses `documenting` and
+      bounces straight back to `validating`). Applying the
+      `hold_base_sync` label to an issue pauses both the pre-PR local
+      rebase and the PR detour until the label is removed. This works
+      under `AUTO_MERGE=off` too -- `_handle_resolving_conflict` never
+      reads AUTO_MERGE, it just does the rebase+push+relabel cycle.
+      Issues already labeled `resolving_conflict` are left alone (the
+      handler runs this tick anyway); other labels are skipped (no PR
+      worktree to refresh in those states).
 
     Rebase keeps the PR history linear after sibling PRs land. The handler
     resets `review_round` on every pushed rebase, so the reviewer re-runs
@@ -1658,10 +1660,13 @@ def _sync_worktree_with_base(
     Pre-PR: rebase onto `origin/<base>` directly. PR-having + behind base +
     label in {validating, in_review, fixing}: detour the issue to
     `resolving_conflict` so the existing handler does rebase + push +
-    relabel-to-validating in one consistent flow. Skips a dirty worktree
-    or a worktree already up to date (no pre-PR rebase attempted, no PR
-    detour fired). On a pre-PR content conflict, aborts the rebase so the
-    worktree stays on its pre-rebase SHA -- conflict resolution lives in
+    relabel-to-`documenting` (the pushed diff goes through the docs pass
+    before the reviewer re-runs; a base-up-to-date no-op with no diff
+    bypasses `documenting` and bounces straight back to `validating`) in
+    one consistent flow. Skips a dirty worktree or a worktree already up
+    to date (no pre-PR rebase attempted, no PR detour fired). On a pre-PR
+    content conflict, aborts the rebase so the worktree stays on its
+    pre-rebase SHA -- conflict resolution lives in
     `_handle_resolving_conflict`, not here.
     """
     try:
@@ -1776,13 +1781,16 @@ def _route_pr_worktree_to_resolving_conflict(
     Mirrors `_handle_in_review`'s unmergeable detour, just driven by a
     base advance instead of a PyGithub `mergeable=False`. The handler
     then runs `git rebase origin/<base>` in the worktree, pushes, and
-    relabels to `validating` so the reviewer re-runs on the rebased head
-    -- the only safe pattern for PR-having worktrees, since a local-only
-    rebase would diverge local HEAD from `pr.head.sha` and break
-    every downstream gate that compares the two. Works under both
-    AUTO_MERGE on (replaces the unmergeable trigger) and AUTO_MERGE off
-    (the only auto-rebase path under that mode -- `_handle_in_review`'s
-    AUTO_MERGE-off path otherwise just sits in `in_review`).
+    relabels to `documenting` so the docs pass runs on the rewritten
+    tree before the reviewer re-runs (a base-up-to-date no-op with no
+    diff bypasses `documenting` and bounces straight back to
+    `validating`) -- the only safe pattern for PR-having worktrees,
+    since a local-only rebase would diverge local HEAD from
+    `pr.head.sha` and break every downstream gate that compares the
+    two. Works under both AUTO_MERGE on (replaces the unmergeable
+    trigger) and AUTO_MERGE off (the only auto-rebase path under that
+    mode -- `_handle_in_review`'s AUTO_MERGE-off path otherwise just
+    sits in `in_review`).
 
     Skips the detour when:
 
