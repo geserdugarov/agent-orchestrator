@@ -123,6 +123,58 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 
 On first start (any mode) the orchestrator creates the workflow labels and the `hold_base_sync` / `backlog` control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
 
+## Running under systemd (user service)
+
+`run.sh` is meant to be a continuously-running process: it already restarts the orchestrator after self-modifying merges and after non-signal crashes. It does **not** survive a reboot, a `tty` logout, or the user manager being torn down, so the recommended production deployment is a systemd **user** service that supervises `run.sh` directly.
+
+A detached `screen` / `tmux` session wrapped in a `Type=forking` unit (`ExecStart=screen -dmS agent run.sh`) looks similar but is the wrong shape: systemd ends up supervising `screen`, not the orchestrator; `ExecStop` races the screen session's own lifecycle; logs split across systemd, screen's scrollback, and `logs/orchestrator.log`; and the unit silently does nothing at boot unless linger is enabled. Keep `screen` / `tmux` for interactive debugging and let systemd supervise `run.sh` itself.
+
+### Unit file
+
+Drop this at `~/.config/systemd/user/agent.service`, replacing the working directory and the `PATH` entries with the values for your host:
+
+```ini
+[Unit]
+Description=Agent orchestrator
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/agent-orchestrator
+ExecStart=/path/to/agent-orchestrator/run.sh
+Restart=always
+RestartSec=5
+Environment=PATH=/home/<user>/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+```
+
+- `Type=simple` because `run.sh` stays in the foreground — systemd tracks the wrapper PID directly, and a `SIGTERM` from `systemctl stop` propagates to the wrapper, which then propagates to the orchestrator (exit `143`, no restart loop).
+- `Restart=always` covers machine-level events (reboot, OOM, host crash). Application-level self-restart after a self-modifying merge is still handled inside `run.sh`, so the two layers do not fight.
+- A non-interactive systemd service does not inherit your shell's `PATH`. If `codex` or `claude` lives under `~/.local/bin` (or any other shell-only path), add it to the `Environment=PATH=…` line, or set `CODEX_BIN` / `CLAUDE_BIN` to the absolute paths via additional `Environment=` lines. Without this the orchestrator will fail to spawn agents even though `run.sh` works fine in an interactive shell.
+
+### Enabling
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now agent.service
+loginctl enable-linger <user>
+```
+
+`enable-linger` is **required for boot-time start**: without it the per-user systemd manager only runs while the user has an active login session, so the "enabled" service still waits for the next login before it starts. Linger keeps the user manager running across logouts and reboots.
+
+### Operating
+
+```sh
+systemctl --user status agent.service        # current state and last log lines
+systemctl --user restart agent.service       # bounce the orchestrator
+systemctl --user stop agent.service          # SIGTERM the wrapper (exits 143, no restart)
+journalctl --user-unit agent.service -f      # tail the wrapper's stdout/stderr
+```
+
+systemd's journal captures `run.sh` and orchestrator stdout/stderr (process lifecycle, exit codes, restart messages). The orchestrator's own structured log lives at `logs/orchestrator.log` under `WorkingDirectory` (rotated, ~10 MiB × 5). Check the journal first for "did it start / did it die", then `logs/orchestrator.log` for per-issue handler detail.
+
 ## Control labels
 
 | Label | Purpose |
