@@ -3681,18 +3681,17 @@ class DriftMarksCommentsConsumedTest(
         self.assertIn((910, "fixing"), gh.label_history)
         self.assertNotIn((910, "validating"), gh.label_history)
         data = gh.pinned_data(910)
-        # The triggering comment is bookmarked for the future real
-        # fixing handler.
+        # The triggering comment is bookmarked for the fixing handler.
         self.assertEqual(data.get("pending_fix_issue_max_id"), 6000)
         # Hash is updated so the drift check does not re-fire on the
-        # same comment change after the operator (or the real fixing
-        # handler) relabels back to `in_review`.
+        # same comment change after the fixing handler (or an operator
+        # relabel) bounces the issue back to `in_review`.
         self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
         # Watermark is deliberately left at the route-time value so the
-        # future real fixing handler can read the triggering comment to
-        # build its dev-resume prompt (the bookmark above tells it where
-        # to start). The stub's park branch and a subsequent manual
-        # relabel-to-`in_review` advance it explicitly.
+        # fixing handler can read the triggering comment to build its
+        # dev-resume prompt (the bookmark above tells it where to start).
+        # The fixing handler advances this watermark itself once the
+        # consumed feedback has been fed to the dev.
         self.assertEqual(data.get("pr_last_comment_id"), 0)
 
     def test_implementing_drift_bumps_last_action_past_human_comment(
@@ -4666,10 +4665,12 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
 class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
     """`fixing` is registered as a workflow label that sits between
     `in_review` and `validating` in the PR-feedback fix loop. The dispatcher
-    must route the label to the stub stage handler instead of falling
-    through to pickup or implementation, and the bootstrap specs / family-
-    aware partitioning / closed-issue sweep / PR-worktree refresh detour
-    must all recognise it as a PR-having stage.
+    must route the label to `_handle_fixing` instead of falling through to
+    pickup or implementation, and the bootstrap specs / family-aware
+    partitioning / closed-issue sweep / PR-worktree refresh detour must
+    all recognise it as a PR-having stage. The PR-terminal arcs and the
+    no-`pr_number` park covered here pair with the quiet-window / dev-
+    resume tests in `tests/test_workflow_fixing.py`.
     """
 
     def test_fixing_label_is_recognized_as_workflow_label(self) -> None:
@@ -4732,11 +4733,12 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         impl.assert_not_called()
         in_review.assert_not_called()
 
-    def test_fixing_stub_parks_awaiting_human(self) -> None:
-        # End-to-end with the real (stub) handler: a `fixing` label must
-        # park awaiting human because the real fix-loop is not implemented
-        # yet (parent #137). The operator gets a clear signal instead of
-        # the issue silently sitting on the orchestrator.
+    def test_fixing_without_pr_number_parks_awaiting_human(self) -> None:
+        # A manual relabel directly to `fixing` without a recorded
+        # `pr_number` cannot drive the dev-resume path (no PR to push
+        # against). Park once, surfacing the misconfiguration to a
+        # human; the label is left in place so the operator can fix
+        # the relabel.
         gh = FakeGitHubClient()
         issue = make_issue(702, label="fixing")
         gh.add_issue(issue)
@@ -4747,16 +4749,29 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue_number, body = gh.posted_comments[0]
         self.assertEqual(issue_number, 702)
         self.assertIn("fixing", body)
+        self.assertIn("pr_number", body)
         self.assertTrue(gh.pinned_data(702).get("awaiting_human"))
+        # The `reason="missing_pr_number"` is recorded on the audit
+        # event by `_park_awaiting_human`; the durable `park_reason`
+        # field stays None (callers that need a transient/recoverable
+        # tag re-set it explicitly -- this park is HITL-only).
+        events_for_issue = [
+            e for e in gh.recorded_events
+            if e.get("issue") == 702
+            and e.get("event") == "park_awaiting_human"
+        ]
+        self.assertEqual(len(events_for_issue), 1)
+        self.assertEqual(events_for_issue[0].get("reason"), "missing_pr_number")
         # The label stays put: parking surfaces the situation but leaves
-        # the operator in control of the next move (relabel back to
-        # `in_review`, wait for the real handler, etc.).
+        # the operator in control of the next move.
         self.assertEqual(gh.label_history, [])
 
-    def test_fixing_stub_is_idempotent_when_already_parked(self) -> None:
-        # A second tick on an already-parked fixing issue must not re-post
-        # the parking comment or re-emit the audit event -- otherwise every
-        # polling tick would spam the issue.
+    def test_fixing_without_pr_number_is_idempotent_when_already_parked(
+        self,
+    ) -> None:
+        # A second tick on an already-parked no-PR fixing issue must
+        # not re-post the parking comment -- otherwise every polling
+        # tick would spam the issue.
         gh = FakeGitHubClient()
         issue = make_issue(703, label="fixing")
         gh.add_issue(issue)
@@ -4767,10 +4782,10 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.write_state_calls, 0)
 
-    def test_fixing_stub_skips_closed_issue_without_pr_number(self) -> None:
+    def test_fixing_skips_closed_issue_without_pr_number(self) -> None:
         # A closed-`fixing` issue with no recorded PR (manual relabel from
         # an early stage, no PR opened) cannot be finalized via the
-        # PR-state arcs. The stub must NOT park (parking a closed issue
+        # PR-state arcs. The handler must NOT park (parking a closed issue
         # would spam a parking comment on a terminated thread); it leaves
         # the label alone and lets the operator relabel manually.
         gh = FakeGitHubClient()
@@ -4784,10 +4799,10 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.write_state_calls, 0)
         self.assertEqual(gh.label_history, [])
 
-    def test_fixing_stub_finalizes_closed_issue_on_external_merge(self) -> None:
+    def test_fixing_finalizes_closed_issue_on_external_merge(self) -> None:
         # The headline closed-sweep contract: a human merges the PR with
         # `Resolves #N` while the issue is labeled `fixing`. The issue
-        # auto-closes; the closed-issue sweep yields it; the stub must
+        # auto-closes; the closed-issue sweep yields it; the handler must
         # finalize to `done`, stamp `merged_at`, close (already closed),
         # and run branch cleanup -- otherwise the issue sits closed +
         # `fixing` forever.
@@ -4814,11 +4829,11 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh, _TEST_SPEC, 705,
         )
 
-    def test_fixing_stub_finalizes_closed_issue_on_closed_without_merge(
+    def test_fixing_finalizes_closed_issue_on_closed_without_merge(
         self,
     ) -> None:
         # Mirror branch: PR was closed without merging while the issue
-        # was in `fixing`. Stub must flip to `rejected`, stamp
+        # was in `fixing`. Handler must flip to `rejected`, stamp
         # `closed_without_merge_at`, and run branch cleanup.
         gh = FakeGitHubClient()
         issue = make_issue(706, label="fixing")
@@ -4843,102 +4858,9 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh, _TEST_SPEC, 706,
         )
 
-    def test_fixing_stub_park_message_says_relabel_not_remove(self) -> None:
-        # Removing the workflow label entirely would have the dispatcher
-        # treat the issue as unlabeled pickup and could restart
-        # decomposition / implementation with fresh pinned state. The
-        # park message must point operators at a relabel, not a removal.
-        gh = FakeGitHubClient()
-        issue = make_issue(707, label="fixing")
-        gh.add_issue(issue)
-
-        workflow._process_issue(gh, _TEST_SPEC, issue)
-
-        self.assertEqual(len(gh.posted_comments), 1)
-        body = gh.posted_comments[0][1]
-        self.assertIn("relabel", body.lower())
-        self.assertIn("in_review", body)
-        # Explicit warning against the dangerous action.
-        self.assertIn("Do NOT remove", body)
-
-    def test_fixing_stub_park_bumps_watermarks_so_relabel_does_not_loop(
-        self,
-    ) -> None:
-        # The route in `_handle_in_review` deliberately leaves the
-        # in_review watermarks unadvanced so a future real fix-loop
-        # handler can read the triggering comments. With only the stub
-        # in place, the documented manual recovery path is "relabel back
-        # to `in_review`". For that to land cleanly, the stub MUST
-        # advance the watermarks past the recorded
-        # `pending_fix_*_max_id` bookmarks at park time -- otherwise the
-        # next `in_review` tick re-detects the same comments and routes
-        # the issue straight back to `fixing`, looping the recovery.
-        gh = FakeGitHubClient()
-        issue = make_issue(708, label="fixing")
-        # Add the triggering issue-thread comment so the in_review
-        # re-scan can see it. It sits past the existing watermark, so
-        # without the stub-park bump the next tick would route it back
-        # to `fixing`.
-        issue.comments.append(
-            FakeComment(
-                id=5000, body="please tighten the docstring",
-                user=FakeUser("alice"),
-            ),
-        )
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=901, head_branch="orchestrator/issue-708",
-            head=FakePRRef(sha="cafe1234"),
-            mergeable=True, check_state="success",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            708,
-            pr_number=pr.number,
-            branch="orchestrator/issue-708",
-            dev_agent="claude",
-            dev_session_id="dev-sess",
-            pr_last_comment_id=4999,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            # Bookmark the in_review route would have recorded.
-            pending_fix_issue_max_id=5000,
-            pending_fix_at="2026-05-24T00:00:00+00:00",
-        )
-
-        # Tick 1: the stub parks awaiting human. The bump must move the
-        # issue-side watermark past id=5000 AND past the park comment
-        # the stub just posted.
-        workflow._process_issue(gh, _TEST_SPEC, issue)
-        data = gh.pinned_data(708)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertGreaterEqual(data.get("pr_last_comment_id"), 5000)
-        # Bookmark is kept so a future real handler can locate the
-        # original triggering id.
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 5000)
-
-        # Tick 2: simulate the operator's recovery action -- relabel
-        # back to `in_review`. The handler must NOT re-detect the same
-        # comment as fresh feedback; the route to `fixing` must not
-        # fire.
-        issue.labels = [FakeLabel("in_review")]
-        # Clear the park flags as the operator's manual recovery would
-        # implicitly do once the underlying feedback has been addressed.
-        data = gh.pinned_data(708)
-        data["awaiting_human"] = False
-        data["park_reason"] = None
-        gh.seed_state(708, **data)
-        workflow._process_issue(gh, _TEST_SPEC, issue)
-        # Crucial: the in_review handler did not flip the label back to
-        # `fixing`. The loop is broken.
-        labels_after_recovery = [
-            l for (n, l) in gh.label_history if n == 708
-        ]
-        self.assertNotIn("fixing", labels_after_recovery)
-
     def test_closed_fixing_issue_surfaces_in_pollable_sweep(self) -> None:
-        # The closed-issue sweep has to include `fixing` so a future real
-        # handler can finalize an externally-merged PR to `done` even when
+        # The closed-issue sweep has to include `fixing` so the handler
+        # can finalize an externally-merged PR to `done` even when
         # `Resolves #N` already closed the issue.
         gh = FakeGitHubClient()
         open_impl = make_issue(710, label="implementing")
@@ -5145,8 +5067,8 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         self.assertEqual(data.get("pending_fix_issue_max_id"), 7000)
         self.assertIn("pending_fix_at", data)
         # And the hash was refreshed so the drift path does NOT
-        # double-fire on the same comment changes after the operator (or
-        # the future real fixing handler) relabels back to `in_review`.
+        # double-fire on the same comment changes after the fixing
+        # handler (or an operator) bounces the issue back to `in_review`.
         self.assertNotEqual(
             data.get("user_content_hash"),
             "stale-hash-from-before-the-human-comment",

@@ -143,7 +143,7 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 | Variable                     | Default | Purpose                                                                                              |
 | ---------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `AUTO_MERGE`                 | `off`   | merge approved PRs (green CI + mergeable) from `in_review`; flip to `on` once dogfooded             |
-| `IN_REVIEW_DEBOUNCE_SECONDS` | `600`   | quiet window the `fixing` stage will honour before resuming the dev on PR feedback (parent #137); `_handle_in_review` itself routes fresh feedback to `fixing` immediately and no longer applies the debounce |
+| `IN_REVIEW_DEBOUNCE_SECONDS` | `600`   | quiet window the `fixing` stage honours before resuming the dev on PR feedback. Newer comments arriving while already labeled `fixing` reset the window; `_handle_in_review` itself routes fresh feedback to `fixing` immediately and does NOT apply the debounce |
 
 `AUTO_MERGE=on` requires the `Checks: Read` permission on the PAT — without it the orchestrator sees `check_state='none'` for Actions-only PRs and parks awaiting a human even when CI is green.
 

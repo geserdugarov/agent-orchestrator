@@ -165,6 +165,7 @@ from .stages.implementing import _resume_dev_with_text as _resume_dev_with_text
 from .stages.implementing import (
     _resume_developer_on_human_reply as _resume_developer_on_human_reply,
 )
+from .stages.in_review import _comment_created_at as _comment_created_at
 from .stages.in_review import _handle_in_review as _handle_in_review
 from .stages.question import _handle_question as _handle_question
 from .stages.validating import _handle_dev_fix_result as _handle_dev_fix_result

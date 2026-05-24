@@ -5,14 +5,15 @@
 The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 `umbrella` → `implementing` → `validating` → `in_review` → `fixing`
 (on fresh PR feedback) or `resolving_conflict` (auto-merge detour) →
-`done` / `rejected`) is wired end-to-end; the `fixing` handler is a
-stub today (real fix-loop under parent #137), but the in_review route,
-the closed-issue sweep, the PR-worktree refresh detour, and the
-PR-state terminal arcs are all in place. The operator-applied
-`question` label adds a read-only Q&A side-branch (`_handle_question`)
-that runs the decomposer backend in the per-issue worktree to answer
-clarifying questions without opening a PR; closing the issue is the
-terminal signal.
+`done` / `rejected`) is wired end-to-end. `_handle_fixing` owns the
+PR-feedback quiet window and the dev-resume / push / bounce-back-to-
+`validating` cycle, with watermark advancement on success and on
+failure-park; the in_review route, the closed-issue sweep, the
+PR-worktree refresh detour, and the PR-state terminal arcs are all in
+place. The operator-applied `question` label adds a read-only Q&A
+side-branch (`_handle_question`) that runs the decomposer backend in
+the per-issue worktree to answer clarifying questions without opening
+a PR; closing the issue is the terminal signal.
 
 The orchestrator runs as a single long-lived Python process
 (`python -m orchestrator.main`, wrapped by `run.sh` for self-restart), polls
@@ -126,23 +127,37 @@ PullRequestReview namespaces; park comments bump watermarks past
 themselves to avoid replay. The route to `fixing` deliberately does NOT
 advance these watermarks so the fixing handler can read the triggering
 comments to build its dev-resume prompt; the `pending_fix_*_max_id`
-keys are bookmarks (a hint for the future handler), not watermarks.
+keys are bookmarks (a hint for the fixing handler / forensics), not
+watermarks.
 
-**Fixing stage (stub).** `fixing` is registered as a routable workflow
-label that sits between `in_review` and `validating` in the PR-feedback
-fix loop. The handler mirrors `_handle_in_review`'s PR-state terminal
-arcs so a closed-`fixing` issue with a merged PR finalizes to `done`
-and a closed-without-merge PR finalizes to `rejected` (the same
-`_cleanup_terminal_branch` + emit-event contract as in_review); open
-issues with no terminal arc fall through to a park-awaiting-human stub
-that ratchets the in_review watermarks past the recorded
-`pending_fix_*_max_id` bookmarks so the documented manual recovery
-(relabel back to `in_review`) does not loop. The real dev-resume +
-push + bounce-back-to-`validating` behaviour lands under parent #137.
-Closed `fixing` issues join the closed-issue sweep alongside
-`in_review`, `resolving_conflict`, and `question` so an external manual
-merge with `Resolves #N` finalizes cleanly, and the pre-tick base
-refresh treats `fixing` as a PR-having stage eligible for the
+**Fixing stage.** `fixing` is the routable workflow label that sits
+between `in_review` and `validating` in the PR-feedback fix loop.
+`_handle_fixing` rescans unread feedback from the three in_review
+watermarks each tick (filtering orchestrator-authored comments by id
+AND by the hidden `<!--orchestrator-comment-->` body marker), debounces
+the resume against the freshest comment timestamp
+(`IN_REVIEW_DEBOUNCE_SECONDS`) so newer comments arriving while
+already labeled `fixing` naturally extend the wait, then builds a
+`_build_pr_comment_followup` prompt across ALL unread surfaces and
+resumes the locked dev session via `_resume_dev_with_text`. Regardless
+of outcome the handler then advances the three in_review watermarks
+ONLY to the max id actually fed to the dev per surface (deliberately
+tighter than `_bump_in_review_watermarks` so a concurrent human
+comment that landed mid-handler survives to the next tick on BOTH the
+success and the failure path -- the orchestrator's own park comment is
+filtered by id + body marker on the next tick's rescan, so the broad
+bump is unnecessary). On a pushed fix the handler clears the
+`pending_fix_*` bookmarks, resets `review_round`, drops the now-stale
+`agent_approved_sha`, and flips the label to `validating`. On a failed
+resume (timeout / dirty / push fail / no-commit) the validating-side
+`_handle_dev_fix_result` parks awaiting human and the issue stays in
+`fixing` until the human reply unsticks it. PR-state terminal arcs
+(merged / closed / open-PR-closed-issue) mirror `_handle_in_review` so
+external manual actions still finalize cleanly. Closed `fixing` issues
+join the closed-issue sweep alongside `in_review`,
+`resolving_conflict`, and `question` so an external manual merge with
+`Resolves #N` finalizes to `done`, and the pre-tick base refresh
+treats `fixing` as a PR-having stage eligible for the
 `resolving_conflict` detour.
 
 **Conflict resolution stage.** Under `AUTO_MERGE=on`, approved-but-
@@ -244,8 +259,9 @@ stay private to their stage module and are deliberately not re-exported.
 **Tests.** Stage suites under `tests/test_workflow_*.py` cover every
 stage handler — `test_workflow_decomposition.py`,
 `test_workflow_implementing.py`, `test_workflow_validating.py`,
-`test_workflow_in_review.py`, and `test_workflow_conflicts.py` — plus
-`test_workflow.py` for facade-level dispatcher / tick / pickup behavior.
+`test_workflow_in_review.py`, `test_workflow_fixing.py`, and
+`test_workflow_conflicts.py` — plus `test_workflow.py` for
+facade-level dispatcher / tick / pickup behavior.
 Shared helpers live in `tests/workflow_helpers.py`. Coverage spans the
 manifest parser, watermark / debounce logic, the auto-merge gate,
 squash-on-approval, the resolving-conflict suite, the umbrella handler,
