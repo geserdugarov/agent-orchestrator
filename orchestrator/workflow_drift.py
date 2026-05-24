@@ -20,9 +20,11 @@ This module exposes:
 * `_route_drift_to_decomposing` -- destructive re-route used by the
   pre-implementation drift path.
 
-Stage handlers continue to live in `workflow.py` and call these helpers
-(re-exported there under their original names for backward compatibility
-with direct test references).
+Stage handlers live under `orchestrator/stages/` (decomposition.py,
+implementing.py, validating.py, in_review.py, conflicts.py); they reach
+these helpers through the compatibility facade in `workflow.py`, which
+re-exports each name above for backward compatibility with direct test
+references and `patch.object(workflow, ...)` patches.
 """
 from __future__ import annotations
 

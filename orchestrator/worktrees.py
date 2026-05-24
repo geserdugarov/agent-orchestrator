@@ -3,8 +3,12 @@
 """Git, branch, and worktree plumbing shared by stage handlers.
 
 Centralizes every direct shell-out to `git` plus the per-spec worktree
-layout helpers. Stage handlers in `workflow.py` continue to drive the
-state machine; this module owns:
+layout helpers. Stage handlers live under `orchestrator/stages/`
+(decomposition.py, implementing.py, validating.py, in_review.py,
+conflicts.py) and drive the state machine; the compatibility facade in
+`workflow.py` re-exports each helper below under its original name for
+backward compatibility with direct test references and
+`patch.object(workflow, ...)` patches. This module owns:
 
 * Branch naming and slug-safe per-repo worktree paths.
 * Worktree creation, restoration, and cleanup for both the implementer
@@ -16,8 +20,9 @@ state machine; this module owns:
 
 Each helper preserves the existing security hardening and crash-recovery
 semantics; downstream behavior is unchanged by this extraction. Helpers
-remain prefixed with `_` because they are module-internal contracts -- the
-public surface (the dispatcher entry points) still lives in `workflow.py`.
+remain prefixed with `_` because they are module-internal contracts --
+the public surface (the dispatcher entry points and the stage handlers
+they route to) still lives in `workflow.py` and `orchestrator/stages/`.
 """
 from __future__ import annotations
 

@@ -16,6 +16,8 @@ The workflow has three agent roles, each spawned by a different set of stage han
 
 All three first tokens need to be authenticated on the host before the orchestrator starts. The defaults (`claude` decomposes, `claude` implements, `codex` reviews) use both backends.
 
+The stage handlers themselves live under `orchestrator/stages/` after the workflow split — `decomposition.py` owns the decomposing / ready / blocked / umbrella handlers, `implementing.py` owns the dev-session lifecycle, `validating.py` owns the reviewer-session lifecycle, `in_review.py` owns the PR-watermark / auto-merge gate, and `conflicts.py` owns `_handle_resolving_conflict`. The `_handle_pickup` entry handler (no label → decomposing / implementing) and the `_process_issue` label dispatcher still live in the facade module `orchestrator/workflow.py`, which re-exports every handler under its original `_handle_*` name; tests and intra-handler calls keep using the `workflow._handle_*` surface unchanged. See [`architecture.md`](architecture.md#top-level-layout) for the full module map.
+
 ## Spec format
 
 `config._parse_agent_spec` runs `shlex.split` over each role's env value and yields `(backend, extra_args)`:

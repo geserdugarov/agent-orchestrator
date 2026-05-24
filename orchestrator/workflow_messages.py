@@ -2,17 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared workflow text/parsing/comment helpers.
 
-Extracted from `workflow.py` so the state-machine module focuses on stage
-handlers. Stage handlers continue to live in `workflow.py` and call these
-helpers (re-exported there under their original names for backward
-compatibility with direct test references).
+Stage handlers live under `orchestrator/stages/` (decomposition.py,
+implementing.py, validating.py, in_review.py, conflicts.py); they reach
+these helpers through the compatibility facade in `workflow.py`, which
+re-exports each public name below under its original identifier for
+backward compatibility with direct test references and
+`patch.object(workflow, ...)` patches.
 
 Covers:
 
 * Orchestrator comment markers and post helpers (`_post_issue_comment`,
   `_post_pr_comment`).
 * Agent stderr redaction/diagnostics surfaced in park comments.
-* Implementer / reviewer / decomposer / drift / conflict prompt builders.
+* Implementer / reviewer / decomposer / conflict / PR-comment followup
+  prompt builders. The drift / user-content-change prompt builder
+  (`_build_user_content_change_prompt`) lives in `workflow_drift.py`,
+  not here.
 * Manifest, review verdict, and drift-ACK parsers.
 * Recent-comment formatting for prompts.
 """

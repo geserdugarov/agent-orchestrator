@@ -154,7 +154,33 @@ state. Each worker thread mints a fresh `GitHubClient` via
 `gh._for_worker_thread()` so concurrent HTTP traffic does not share a
 PyGithub `Requester`.
 
-**Tests.** `tests/test_workflow.py` covers every stage handler, the
+**Workflow module split.** `workflow.py` is now a slim facade that owns
+the per-repo `tick` loop, family-aware / fan-out label partitioning, the
+`_process_issue` label dispatcher, the unlabeled-pickup handler
+(`_handle_pickup`), `_park_awaiting_human`, and `_run_agent_tracked`.
+Stage handler bodies live under `orchestrator/stages/` —
+`decomposition.py` (decomposing / ready / blocked / umbrella),
+`implementing.py` (developer-session lifecycle), `validating.py`
+(reviewer-session lifecycle), `in_review.py` (PR watermarks and the
+auto-merge gate), and `conflicts.py` (`_handle_resolving_conflict`).
+Shared support helpers live in `workflow_drift.py` (user-content drift),
+`workflow_messages.py` (prompts, parsers, comment posting), and
+`worktrees.py` (git/branch/worktree plumbing, hardened fetch/push).
+The facade re-exports the cross-module helpers and the stage entry
+handlers under their original names, and stage modules call back through
+`from .. import workflow as _wf` so existing
+`patch.object(workflow, "_foo", ...)` tests keep working unchanged.
+Stage-private helpers that no other module needs (such as
+`_bump_in_review_watermarks`, `_auto_merge_gates_pass`,
+`_seed_legacy_in_review_watermarks`, and `_emit_conflict_round_incremented`)
+stay private to their stage module and are deliberately not re-exported.
+
+**Tests.** Stage suites under `tests/test_workflow_*.py` cover every
+stage handler — `test_workflow_decomposition.py`,
+`test_workflow_implementing.py`, `test_workflow_validating.py`,
+`test_workflow_in_review.py`, and `test_workflow_conflicts.py` — plus
+`test_workflow.py` for facade-level dispatcher / tick / pickup behavior.
+Shared helpers live in `tests/workflow_helpers.py`. Coverage spans the
 manifest parser, watermark / debounce logic, the auto-merge gate,
 squash-on-approval, the resolving-conflict suite, the umbrella handler,
 the multi-repo dispatcher, and park-comment-replay prevention.

@@ -22,12 +22,81 @@ Agents run on the host as CLI subprocesses with broad local permissions (`codex 
 
 ```
 orchestrator/
-  main.py      — entry point, polling loop, self-restart guard
-  config.py    — env loading, secrets handling, backend validation
-  github.py    — PyGithub wrapper, label bootstrap, pinned-state comment
-  agents.py    — coding-agent subprocess runner (codex/claude dispatch)
-  workflow.py  — state machine over labels
+  main.py               — entry point, polling loop, self-restart guard
+  config.py             — env loading, secrets handling, backend validation
+  github.py             — PyGithub wrapper, label bootstrap, pinned-state comment
+  agents.py             — coding-agent subprocess runner (codex/claude dispatch)
+  workflow.py           — slim facade: per-repo tick loop, `_FAMILY_AWARE_LABELS`
+                           partitioning, `_process_issue` label dispatcher,
+                           `_handle_pickup`, `_park_awaiting_human`,
+                           `_run_agent_tracked`. Re-exports the cross-module
+                           helpers and the stage entry handlers from the
+                           modules below under their original names so existing
+                           test patches (`patch.object(workflow, "_foo", ...)`)
+                           keep working. Stage-private helpers that no other
+                           module needs (e.g. `_bump_in_review_watermarks`,
+                           `_auto_merge_gates_pass`,
+                           `_seed_legacy_in_review_watermarks`,
+                           `_emit_conflict_round_incremented`) stay private to
+                           their stage module and are NOT re-exported.
+  workflow_drift.py     — user-content drift helpers:
+                           `_compute_user_content_hash`,
+                           `_detect_user_content_change`,
+                           `_build_user_content_change_prompt` (the drift /
+                           user-content-change dev-resume prompt builder),
+                           `_mark_drift_comments_consumed`,
+                           `_route_drift_to_decomposing`.
+  workflow_messages.py  — shared text/parsing/comment helpers: orchestrator
+                           comment markers and post helpers, stderr redaction
+                           and diagnostics, the implementer / reviewer /
+                           decomposer / conflict-resolution / PR-comment
+                           followup prompt builders, and the manifest /
+                           review-verdict / drift-ACK parsers. The drift /
+                           user-content-change prompt builder lives in
+                           `workflow_drift.py`, not here.
+  worktrees.py          — git, branch, and worktree plumbing: `_branch_name`,
+                           slug-safe per-repo worktree paths,
+                           `_ensure_worktree` / `_ensure_pr_worktree` /
+                           `_ensure_decompose_worktree`, hardened git
+                           invocations (`_git`, `_git_hardened`), authenticated
+                           fetch/push (`_authed_fetch`, `_authed_target_fetch`,
+                           `_push_branch`), `_squash_and_force_push`,
+                           `_refresh_base_and_worktrees`, and
+                           `_cleanup_terminal_branch`.
+  stages/
+    __init__.py         — package marker; the dispatcher in `workflow.py`
+                           still owns label→handler routing.
+    decomposition.py    — `_handle_decomposing`, `_handle_ready`,
+                           `_handle_blocked`, `_handle_umbrella`, and the
+                           decomposer-session lookup / resume helpers.
+    implementing.py     — `_handle_implementing` plus the developer-session
+                           lifecycle: `_read_dev_session`,
+                           `_resume_developer_on_human_reply`,
+                           `_resume_dev_with_text` (with poisoned-session
+                           recovery), the 24h retry budget, and the post-agent
+                           disposition helpers (`_on_commits`, `_on_question`,
+                           `_on_dirty_worktree`).
+    validating.py       — `_handle_validating` plus reviewer-session
+                           lifecycle: `_handle_dev_fix_result`,
+                           `_post_user_content_change_result`, validating-side
+                           transient-park recovery, and the watermark seeding
+                           for the validating→in_review handoff.
+    in_review.py        — `_handle_in_review` plus PR-side primitives:
+                           transient park-reason set, the quiet auto-merge
+                           gate re-check, legacy watermark migration, and the
+                           cross-namespace watermark ratchet
+                           (`_bump_in_review_watermarks`).
+    conflicts.py        — `_handle_resolving_conflict` plus
+                           `_post_conflict_resolution_result` and the
+                           `conflict_round` audit-event emitter.
 ```
+
+Stage modules reach back into the facade via `from .. import workflow as _wf`
+at call time so test patches against `workflow.<helper>` still intercept calls
+made from inside a stage handler. Direct imports from `workflow_drift` /
+`workflow_messages` / `worktrees` would bind stable references that the
+`patch.object(workflow, ...)` pattern cannot override, so stage handlers
+deliberately avoid them.
 
 ## Workflow labels
 
@@ -722,7 +791,15 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 | Component | Role |
 |---|---|
 | **main.py** | polling loop + signal handling + self-restart |
-| **workflow.py** | label-driven state machine, agent orchestration, push/PR |
+| **workflow.py** | facade: per-repo tick loop, family-aware/fan-out partitioning, `_process_issue` dispatcher, `_handle_pickup`, `_park_awaiting_human`, `_run_agent_tracked`; re-exports the cross-module helpers and stage entry handlers (stage-private helpers like `_bump_in_review_watermarks` stay private to their module) |
+| **workflow_drift.py** | user-content drift detection and re-route helpers |
+| **workflow_messages.py** | prompt builders, parsers, comment posting + orchestrator-comment markers, stderr redaction |
+| **worktrees.py** | git/branch/worktree plumbing, hardened fetch/push, squash-on-approval, per-tick base refresh, terminal cleanup |
+| **stages/decomposition.py** | `_handle_decomposing` / `_handle_ready` / `_handle_blocked` / `_handle_umbrella` |
+| **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle |
+| **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
+| **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives |
+| **stages/conflicts.py** | `_handle_resolving_conflict` + merge-loop primitives |
 | **agents.py** | dispatch + spawn codex/claude subprocess, capture session id + last message |
 | **github.py** | issues, comments, labels, pinned state, PR open/comment |
 | **config.py** | env + token loading (token kept outside REPO_ROOT), backend validation |
