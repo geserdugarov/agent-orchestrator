@@ -9715,6 +9715,23 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
 
         return MagicMock(side_effect=fake_git), calls
 
+    def _authed_fetch_mock(self):
+        """Return a mock for `_authed_target_fetch` that records every
+        call as `(spec, branch)` and returns success. The target-root
+        fetches now go through this helper rather than plain `_git`
+        because the bare form relied on git's ambient credential helper
+        / session state (and could not pick a per-repo token when the
+        local clone has multiple GitHub-pointing remotes).
+        """
+        from unittest.mock import MagicMock
+        fetched: list[tuple] = []
+
+        def fake_fetch(spec, branch):
+            fetched.append((spec, branch))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        return MagicMock(side_effect=fake_fetch), fetched
+
     def test_missing_local_branch_restores_from_origin_branch(self) -> None:
         # The most common bad outcome: someone deletes the local branch.
         # Without our fix, `_ensure_worktree`'s fallback would create a
@@ -9723,11 +9740,13 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         from unittest.mock import MagicMock
 
         git_mock, calls = self._git_recorder(local_branch_present=False)
+        fetch_mock, _ = self._authed_fetch_mock()
 
         wt_path = MagicMock()
         wt_path.exists.return_value = False  # worktree dir absent too
 
         with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_authed_target_fetch", fetch_mock), \
              patch.object(worktrees, "_worktree_path", return_value=wt_path), \
              patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
@@ -9752,11 +9771,13 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         from unittest.mock import MagicMock
 
         git_mock, calls = self._git_recorder(local_branch_present=True)
+        fetch_mock, _ = self._authed_fetch_mock()
 
         wt_path = MagicMock()
         wt_path.exists.return_value = False
 
         with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_authed_target_fetch", fetch_mock), \
              patch.object(worktrees, "_worktree_path", return_value=wt_path), \
              patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
@@ -9770,18 +9791,20 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         self.assertNotIn("-b", add_args)
         self.assertEqual(add_args[3], self.BRANCH)
 
-    def test_fetches_run_in_target_root_not_worktree(self) -> None:
-        # All git invocations must run from `spec.target_root`. Running
-        # fetch in the agent-writable worktree under `_git_hardened`
-        # would block credential helpers and break HTTPS auth.
+    def test_non_fetch_git_calls_run_in_target_root(self) -> None:
+        # All non-fetch git invocations (rev-parse, worktree add/remove)
+        # must run from `spec.target_root`. Authed fetches are routed
+        # via `_authed_target_fetch` which already cd's into target_root.
         from unittest.mock import MagicMock
 
         git_mock, calls = self._git_recorder(local_branch_present=True)
+        fetch_mock, _ = self._authed_fetch_mock()
 
         wt_path = MagicMock()
         wt_path.exists.return_value = False
 
         with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_authed_target_fetch", fetch_mock), \
              patch.object(worktrees, "_worktree_path", return_value=wt_path), \
              patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
@@ -9793,40 +9816,37 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
                 f"expected {_TEST_SPEC.target_root}",
             )
 
-    def test_branch_fetch_uses_explicit_refspec(self) -> None:
-        # Single-branch / narrowed-refspec clones do NOT auto-update
-        # `refs/remotes/origin/<branch>` for a `git fetch origin <branch>`;
-        # they only touch FETCH_HEAD. The fallback `worktree add ...
-        # origin/<branch>` would then fail with "unknown revision". Force
-        # the refspec so the remote-tracking ref is created.
+    def test_branch_fetch_routed_through_authed_target_fetch(self) -> None:
+        # `git fetch <remote> <branch>` in target_root used to relyon git's
+        # ambient credential helper; `_authed_target_fetch` replaces it
+        # with an askpass-delivered per-spec token. The branch fetch and
+        # the base-branch fetch must both go through the helper, and
+        # neither must surface as a plain `_git("fetch", ...)` call.
         from unittest.mock import MagicMock
 
-        git_mock, calls = self._git_recorder(local_branch_present=True)
+        git_mock, git_calls = self._git_recorder(local_branch_present=True)
+        fetch_mock, fetched = self._authed_fetch_mock()
 
         wt_path = MagicMock()
         wt_path.exists.return_value = False
 
         with patch.object(worktrees, "_git", git_mock), \
+             patch.object(worktrees, "_authed_target_fetch", fetch_mock), \
              patch.object(worktrees, "_worktree_path", return_value=wt_path), \
              patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
 
-        # Find the per-branch fetch (not the base-branch fetch).
-        branch_fetches = [
-            args for args, _ in calls
-            if args and args[0] == "fetch"
-            and any(self.BRANCH in str(a) for a in args)
-        ]
-        self.assertTrue(branch_fetches, "expected branch fetch")
-        fetch_args = branch_fetches[0]
-        # Refspec form: `+refs/heads/<branch>:refs/remotes/origin/<branch>`
-        refspec = fetch_args[-1]
-        self.assertIn(f"refs/heads/{self.BRANCH}", refspec)
-        self.assertIn(f"refs/remotes/origin/{self.BRANCH}", refspec)
-        self.assertTrue(
-            refspec.startswith("+"),
-            f"refspec {refspec!r} should start with '+' for force-update",
-        )
+        # Both fetches landed on the authed helper -- base and PR branch.
+        self.assertEqual(len(fetched), 2)
+        branches = {branch for _spec, branch in fetched}
+        self.assertEqual(branches, {_TEST_SPEC.base_branch, self.BRANCH})
+        # And no plain-git fetch leaked through (which would prompt for
+        # credentials under systemd and fail).
+        for args, _cwd in git_calls:
+            self.assertNotEqual(
+                args[0] if args else "", "fetch",
+                f"plain `_git(\"fetch\", ...)` leaked: {args!r}",
+            )
 
 
 class HandleResolvingConflictUsesAuthedFetchTest(
@@ -10144,6 +10164,188 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         self.assertTrue(
             any("acme/widgets" in line for line in cm.output),
             f"expected slug 'acme/widgets' in log output, got {cm.output!r}",
+        )
+
+
+class AuthedTargetFetchTest(unittest.TestCase):
+    """`_authed_target_fetch` replaces the plain `git fetch <remote> <branch>`
+    invocations the worktree creators / per-tick base refresh used to run
+    in `spec.target_root`. The plain form relied on git's ambient credential
+    helper or session state, which fails under systemd (`GIT_TERMINAL_PROMPT=0`
+    disables the prompt) and has no way to pick a per-repo token when the
+    local clone has multiple GitHub-pointing remotes whose slug differs from
+    `config.REPO`. Mirrors `AuthedFetchHardeningTest`'s shape but covers
+    target-root semantics: token selection follows `spec.slug`,
+    local-namespace ref selection follows `spec.remote_name`.
+    """
+
+    def test_uses_per_spec_token_and_remote_namespace_ref(self) -> None:
+        # Acceptance criterion: a `REPOS` row like
+        # `geserdugarov/lance-private|...|cache-branch|private` should
+        # resolve its token from `~/.config/geserdugarov/lance-private/token`
+        # (i.e. `spec.slug`) and write the fetched ref under
+        # `refs/remotes/private/...` (i.e. `spec.remote_name`). Without
+        # this split the bug surfaces as `fatal: could not read Username
+        # for 'https://github.com'`.
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        captured: dict[str, object] = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured["env"] = kwargs.get("env")
+            captured["cwd"] = kwargs.get("cwd")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        resolved: list[str] = []
+
+        def fake_resolve(slug: str) -> str:
+            resolved.append(slug)
+            return f"ghp-token-for-{slug.replace('/', '-')}"
+
+        private_spec = config.RepoSpec(
+            slug="geserdugarov/lance-private",
+            target_root=Path("/tmp/orchestrator-test-shared-clone"),
+            base_branch="cache-branch",
+            remote_name="private",
+        )
+        with mock_patch("subprocess.run", side_effect=fake_run), \
+             mock_patch.object(
+                 workflow.config, "_resolve_github_token", fake_resolve,
+             ):
+            r = workflow._authed_target_fetch(private_spec, "cache-branch")
+
+        self.assertEqual(r.returncode, 0)
+        # Token resolved exactly once -- for the spec's slug, NOT the
+        # `remote_name` (which is just a local namespace label).
+        self.assertEqual(resolved, ["geserdugarov/lance-private"])
+        env = captured["env"]
+        self.assertEqual(
+            env.get("GIT_TOKEN"), "ghp-token-for-geserdugarov-lance-private",
+        )
+        # Auth URL targets the spec's slug, NOT `remote_name`.
+        self.assertIn(
+            "https://x-access-token@github.com/geserdugarov/lance-private.git",
+            captured["args"],
+        )
+        # The refspec writes under `refs/remotes/private/...`, NOT
+        # `refs/remotes/origin/...` -- the local clone's `private` remote
+        # is what the worktree creators anchor on.
+        self.assertIn(
+            "+refs/heads/cache-branch:refs/remotes/private/cache-branch",
+            captured["args"],
+        )
+        # And the fetch runs in `spec.target_root` (the shared local clone).
+        self.assertEqual(captured["cwd"], str(private_spec.target_root))
+
+    def test_token_is_delivered_via_askpass_not_argv(self) -> None:
+        # Same hardening as `_push_branch` / `_authed_fetch`: token in
+        # GIT_TOKEN env var (read by a tempfile askpass), never in argv,
+        # global/system config detached, hooks/fsmonitor/credential
+        # helpers blocked.
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        captured: dict[str, object] = {}
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured["env"] = kwargs.get("env")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with mock_patch("subprocess.run", side_effect=fake_run), \
+             mock_patch.object(
+                 workflow.config, "_resolve_github_token",
+                 return_value="super-secret-token",
+             ):
+            workflow._authed_target_fetch(_TEST_SPEC, "main")
+
+        env = captured["env"]
+        self.assertIn("GIT_ASKPASS", env)
+        self.assertEqual(env.get("GIT_TOKEN"), "super-secret-token")
+        # Token must NOT appear in argv (would surface in /proc/<pid>/cmdline).
+        for arg in captured["args"]:
+            self.assertNotIn("super-secret-token", str(arg))
+        # Global/system git config detached so url rewrites planted in
+        # `~/.gitconfig` cannot redirect the fetch.
+        self.assertEqual(env.get("GIT_CONFIG_GLOBAL"), os.devnull)
+        self.assertEqual(env.get("GIT_CONFIG_SYSTEM"), os.devnull)
+        # Hooks / fsmonitor / credential helpers blocked via -c overrides.
+        argv = captured["args"]
+        self.assertIn("core.hooksPath=/dev/null", argv)
+        self.assertIn("credential.helper=", argv)
+        self.assertIn("core.fsmonitor=", argv)
+
+    def test_refuses_when_target_root_has_url_rewrite_rule(self) -> None:
+        # The agent has write access to linked worktrees, and a linked
+        # worktree can rewrite the parent clone's local config via
+        # `git config --local`. Local config still applies even with
+        # GIT_CONFIG_GLOBAL/SYSTEM detached, so a planted
+        # `url.https://evil.example/.insteadOf https://github.com/`
+        # would redirect the token-bearing fetch to the attacker host
+        # and exfiltrate GIT_TOKEN. The pre-flight check must refuse.
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        rewrite_check = MagicMock(
+            returncode=0,
+            stdout="url.https://evil.example/.insteadof https://github.com/\n",
+            stderr="",
+        )
+        fetch_result = MagicMock(returncode=0, stdout="", stderr="")
+        runs: list = []
+
+        def fake_run(args, **kwargs):
+            runs.append(args)
+            if args and args[:3] == ["git", "config", "--local"]:
+                return rewrite_check
+            return fetch_result
+
+        with mock_patch("subprocess.run", side_effect=fake_run), \
+             mock_patch.object(
+                 workflow.config, "_resolve_github_token",
+                 return_value="super-secret-token",
+             ):
+            r = workflow._authed_target_fetch(_TEST_SPEC, "main")
+
+        # Only the rewrite probe ran; the token-bearing fetch did NOT.
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0][:3], ["git", "config", "--local"])
+        self.assertNotEqual(r.returncode, 0)
+        # And the token NEVER reached the (skipped) fetch subprocess env.
+        for arg in runs[0]:
+            self.assertNotIn("super-secret-token", str(arg))
+
+    def test_missing_token_returns_failure_without_subprocess(self) -> None:
+        # When the per-spec token file is missing, fail loudly with the
+        # slug in the log -- a multi-repo deployment that forgot to drop
+        # `~/.config/<slug>/token` gets a debuggable error rather than
+        # a generic "could not read Username".
+        from unittest.mock import patch as mock_patch, MagicMock
+
+        runs: list = []
+
+        def fake_run(args, **kwargs):
+            runs.append(args)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        private_spec = config.RepoSpec(
+            slug="geserdugarov/lance-private",
+            target_root=Path("/tmp/orchestrator-test-shared-clone"),
+            base_branch="cache-branch",
+            remote_name="private",
+        )
+        with mock_patch("subprocess.run", side_effect=fake_run), \
+             mock_patch.object(
+                 workflow.config, "_resolve_github_token", return_value="",
+             ), self.assertLogs(worktrees.log, level="ERROR") as cm:
+            r = workflow._authed_target_fetch(private_spec, "cache-branch")
+
+        # Failed without ever shelling out.
+        self.assertEqual(runs, [])
+        self.assertNotEqual(r.returncode, 0)
+        # Slug is in the log so the operator knows which token file to fix.
+        self.assertTrue(
+            any("geserdugarov/lance-private" in line for line in cm.output),
+            f"expected slug in log output, got {cm.output!r}",
         )
 
 
@@ -11298,7 +11500,7 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             )
         )
         sync = MagicMock()
-        with patch.object(worktrees, "_git", fetch_fail), \
+        with patch.object(worktrees, "_authed_target_fetch", fetch_fail), \
              patch.object(worktrees, "_sync_worktree_with_base", sync):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
         sync.assert_not_called()
@@ -11311,7 +11513,7 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             )
         )
         sync = MagicMock()
-        with patch.object(worktrees, "_git", fetch_ok), \
+        with patch.object(worktrees, "_authed_target_fetch", fetch_ok), \
              patch.object(
                 worktrees, "_repo_worktrees_root",
                 return_value=self.tmpdir / "missing",
@@ -11338,7 +11540,7 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             )
         )
         sync = MagicMock()
-        with patch.object(worktrees, "_git", fetch_ok), \
+        with patch.object(worktrees, "_authed_target_fetch", fetch_ok), \
              patch.object(
                 worktrees, "_repo_worktrees_root", return_value=wt_root,
              ), \
@@ -11360,7 +11562,7 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             )
         )
         sync = MagicMock(side_effect=[RuntimeError("kaboom"), None])
-        with patch.object(worktrees, "_git", fetch_ok), \
+        with patch.object(worktrees, "_authed_target_fetch", fetch_ok), \
              patch.object(
                 worktrees, "_repo_worktrees_root", return_value=wt_root,
              ), \
@@ -11368,6 +11570,60 @@ class RefreshBaseAndWorktreesUnitTest(unittest.TestCase):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
         # Both worktrees attempted despite the first raising.
         self.assertEqual(sync.call_count, 2)
+
+    def test_base_fetch_uses_per_spec_authed_helper(self) -> None:
+        # The base refresh must go through `_authed_target_fetch` (which
+        # resolves the per-spec token and uses the spec's `remote_name`
+        # for refs/remotes/<remote_name>/<branch>), NOT plain
+        # `_git("fetch", ...)`. Without this, a multi-remote spec where
+        # `remote_name != origin` falls back to the ambient git
+        # credential helper -- which fails under systemd with
+        # `terminal prompts disabled`.
+        from unittest.mock import MagicMock
+
+        private_spec = config.RepoSpec(
+            slug="acme/widget-private",
+            target_root=self.target_root,
+            base_branch="cache-main",
+            remote_name="private",
+        )
+        fetch_calls: list[tuple] = []
+
+        def fake_fetch(spec, branch):
+            fetch_calls.append((spec, branch))
+            return subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="", stderr="",
+            )
+
+        # Block any plain-git fetch to assert it never runs.
+        plain_git_calls: list[tuple] = []
+
+        def fake_git(*args, cwd):
+            plain_git_calls.append(args)
+            return subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout="", stderr="",
+            )
+
+        with patch.object(worktrees, "_authed_target_fetch", side_effect=fake_fetch), \
+             patch.object(worktrees, "_git", side_effect=fake_git), \
+             patch.object(
+                worktrees, "_repo_worktrees_root",
+                return_value=self.tmpdir / "missing",
+             ):
+            workflow._refresh_base_and_worktrees(self.gh, private_spec)
+
+        self.assertEqual(
+            fetch_calls, [(private_spec, "cache-main")],
+            "base refresh must route through `_authed_target_fetch` with "
+            "the spec's base branch",
+        )
+        # No plain-git fetch was issued -- otherwise the multi-remote
+        # token-selection regression resurfaces.
+        for args in plain_git_calls:
+            self.assertNotEqual(
+                args[0] if args else "", "fetch",
+                f"plain `_git(\"fetch\", ...)` leaked: {args!r}",
+            )
 
 
 class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
@@ -12681,6 +12937,27 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # the PR-skip path call `_seed_pr_state(7)`.
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label="implementing"))
+
+        # `_authed_target_fetch` would otherwise dial out to
+        # `https://x-access-token@github.com/acme/widget.git`, which
+        # does not exist for our local bare remote. Redirect it to a
+        # plain `git fetch <remote_name> <branch>` against the
+        # local-clone `origin` so the integration test still exercises
+        # the post-fetch merge / refresh logic end-to-end.
+        def _local_fetch(spec, branch):
+            r = subprocess.run(
+                ["git", "fetch", "--quiet", spec.remote_name, branch],
+                cwd=str(spec.target_root),
+                capture_output=True, text=True,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+            return r
+
+        self._fetch_patch = patch.object(
+            worktrees, "_authed_target_fetch", side_effect=_local_fetch,
+        )
+        self._fetch_patch.start()
+        self.addCleanup(self._fetch_patch.stop)
 
     def _seed_pr_state(
         self, issue_number: int, pr_number: int = 999, *,
@@ -15476,6 +15753,23 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
             r.stderr = ""
             return r
 
+        def fake_authed_fetch(spec, branch):
+            # The base-branch fetch also runs under the lock; count it
+            # the same way so the serialization assertion holds.
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+                order.append(f"fetch({threading.get_ident()})")
+            time.sleep(0.02)
+            with lock:
+                in_flight -= 1
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+
         def fake_has_new_commits(*_a, **_kw) -> bool:
             return False  # force the "(re)create" branch every time.
 
@@ -15483,6 +15777,10 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
             worktrees._ensure_worktree(spec, n)
 
         with patch.object(worktrees, "_git", side_effect=fake_git), \
+             patch.object(
+                 worktrees, "_authed_target_fetch",
+                 side_effect=fake_authed_fetch,
+             ), \
              patch.object(worktrees, "_has_new_commits", fake_has_new_commits), \
              patch.object(Path, "exists", lambda self: False), \
              patch.object(Path, "mkdir", lambda self, **_kw: None):
@@ -15624,10 +15922,31 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
             r.stderr = ""
             return r
 
+        def fake_authed_fetch(spec, branch) -> MagicMock:
+            # `_ensure_worktree` calls the authed fetch first; route it
+            # through the same barrier so the in-flight count is built
+            # from the fetch in each thread.
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            barrier.wait()
+            with lock:
+                in_flight -= 1
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+
         def fake_has_new_commits(*_a, **_kw) -> bool:
             return False
 
         with patch.object(worktrees, "_git", side_effect=fake_git), \
+             patch.object(
+                 worktrees, "_authed_target_fetch",
+                 side_effect=fake_authed_fetch,
+             ), \
              patch.object(worktrees, "_has_new_commits", fake_has_new_commits), \
              patch.object(Path, "exists", lambda self: False), \
              patch.object(Path, "mkdir", lambda self, **_kw: None):
@@ -15711,6 +16030,24 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
             slug="acme/widget", target_root=self.work, base_branch="main",
             remote_name="origin",
         )
+
+        # `_authed_target_fetch` dials `https://x-access-token@github.com/...`
+        # which has no answer for our local bare remote. Redirect to a
+        # plain local fetch so the test still exercises the
+        # `_ensure_worktree` worktree-add concurrency path.
+        def _local_fetch(spec, branch):
+            return subprocess.run(
+                ["git", "fetch", "--quiet", spec.remote_name, branch],
+                cwd=str(spec.target_root),
+                capture_output=True, text=True,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+
+        self._fetch_patch = patch.object(
+            worktrees, "_authed_target_fetch", side_effect=_local_fetch,
+        )
+        self._fetch_patch.start()
+        self.addCleanup(self._fetch_patch.stop)
 
     def test_concurrent_ensure_worktree_against_same_target_root(self) -> None:
         # Six concurrent workers, each requesting their own per-issue
