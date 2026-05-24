@@ -64,13 +64,22 @@ The coding agent runs as a **transient child subprocess**, not a daemon — spaw
 
 ## Per-tick flow (`workflow.tick`)
 
-Each tick the polling loop fans out across **every configured repo**. `config.default_repo_specs()` returns a list of `RepoSpec(slug, target_root, base_branch)` — one entry per `REPOS` line, or a single entry derived from the legacy `REPO` / `TARGET_REPO_ROOT` / `BASE_BRANCH` trio when `REPOS` is unset.
+Each tick the polling loop fans out across **every configured repo**. `config.default_repo_specs()` returns a list of `RepoSpec(slug, target_root, base_branch, remote_name, parallel_limit)` — one entry per `REPOS` line, or a single entry derived from the legacy `REPO` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME` quartet when `REPOS` is unset (with `parallel_limit` taken from `MAX_PARALLEL_ISSUES_PER_REPO`, default 1). Each `REPOS` entry may override `remote_name` via its optional fourth pipe-separated field (default `origin`) and `parallel_limit` via its optional fifth (default `MAX_PARALLEL_ISSUES_PER_REPO`).
 
 `main._run_tick` fans the per-repo `workflow.tick(gh, spec)` calls out across a `ThreadPoolExecutor` (one worker thread per configured repo) so a slow repo does not delay the others; a per-repo exception is logged and swallowed so one wedged repo cannot stop the others from advancing this tick. The single-repo legacy path stays in-thread (no executor) to keep deployments without `REPOS` unchanged. Each `GitHubClient` is constructed once at startup with `repo_spec=spec` and `ensure_workflow_labels` runs per repo so a fresh target repo bootstraps its labels on first connect.
 
-A single `threading.BoundedSemaphore(MAX_PARALLEL_ISSUES_GLOBAL)` is built once at startup and threaded through every `workflow.tick(gh, spec, global_semaphore=...)` call. Each tick acquires it around every `_process_issue` invocation so workers from different repos contend on the same semaphore — total in-flight per-issue handlers across all repos never exceeds `MAX_PARALLEL_ISSUES_GLOBAL` regardless of how many `parallel_limit` slots each repo declares.
+A single `threading.BoundedSemaphore(MAX_PARALLEL_ISSUES_GLOBAL)` is built once at startup and threaded through every `workflow.tick(gh, spec, global_semaphore=...)` call. Each tick acquires it around every `_process_issue` invocation so workers from different repos contend on the same semaphore — total in-flight per-issue handlers across all repos never exceeds `MAX_PARALLEL_ISSUES_GLOBAL` (default 3) regardless of how many `parallel_limit` slots each repo declares.
 
-Inside `workflow.tick(gh, spec)`, before any issue is dispatched the tick runs `_refresh_base_and_worktrees(gh, spec)`: a single `git fetch origin <base>` in `spec.target_root`, then per-issue dispatch on each existing worktree under `<WORKTREES_DIR>/<owner>__<name>/issue-*`. The per-stage `_ensure_*_worktree` helpers only fetch base on (re)creation, so a worktree that survives across ticks would otherwise stay anchored at whatever `origin/<base>` looked like when it was first added.
+Within one repo, `spec.parallel_limit` caps how many issues `workflow.tick` may advance concurrently on a single tick. Default is 1 (legacy one-at-a-time behavior); each `REPOS` entry can override it via its optional fifth pipe-separated field, and the global `MAX_PARALLEL_ISSUES_PER_REPO` (default 1) supplies the default for entries that omit the field. `parallel_limit == 1` keeps the legacy sequential, streaming loop directly over `gh.list_pollable_issues()` so a partial enumeration failure still processes everything yielded before the failure.
+
+`parallel_limit > 1` materializes the eligible-issue set up front (to bound `max_workers` correctly) and partitions it by workflow label:
+
+- **Family-aware labels** — `decomposing`, `blocked`, `umbrella`, and unlabeled (pickup) issues — read and write cross-issue state (parent ↔ child). Two of these running at once could race a parent's child-state write against the child's own handler on a sibling thread. They are folded into a SINGLE drain task that processes them sequentially on one worker thread; this caps the family bucket's executor footprint at exactly one slot regardless of how many family-aware issues are pending, so the other `limit - 1` slots stay free for fan-out work.
+- **Fan-out labels** — `ready`, `implementing`, `validating`, `in_review`, `resolving_conflict` — only touch their own per-issue pinned state and worktree. Each is submitted as its own future and runs concurrently up to `parallel_limit`. The two buckets share one executor capped at `min(parallel_limit, total_tasks)` and the family drain can overlap with non-family workers, so a slow decomposer no longer blocks unrelated implementing / validating issues on the same tick.
+
+Only issue numbers cross the thread boundary — each worker calls `gh._for_worker_thread()` to mint a fresh `GitHubClient` (and through it a fresh `Github` / `Requester` / `Repository`) and refetches its Issue against that client, so every in-flight HTTP call is the sole consumer of its requester's state (PyGithub's per-request state is not documented as thread-safe across a shared `Requester`). The label used for partitioning is read on the caller thread; a lazy-load failure on one issue's labels is logged and that issue is conservatively routed into the family bucket where the per-issue try/except picks up any sustained failure.
+
+Inside `workflow.tick(gh, spec)`, before any issue is dispatched the tick runs `_refresh_base_and_worktrees(gh, spec)`: a single `git fetch <spec.remote_name> <spec.base_branch>` in `spec.target_root` (the remote name defaults to `origin` but is overridable per `REPOS` entry via the fourth pipe-separated field, so a `REPOS=...|private|2` row fetches from `private/<base>`), then per-issue dispatch on each existing worktree under `<WORKTREES_DIR>/<owner>__<name>/issue-*`. The per-stage `_ensure_*_worktree` helpers only fetch base on (re)creation, so a worktree that survives across ticks would otherwise stay anchored at whatever `<remote>/<base>` looked like when it was first added.
 
 Two paths depending on whether a PR already exists for the issue:
 
@@ -521,9 +530,9 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 | Component | Type | Trigger | Cadence |
 |---|---|---|---|
 | `main` polling loop | long-lived Python process | manual start (or wrapper) | every `POLL_INTERVAL`s |
-| `workflow.tick(gh, spec)` | function call | each loop iteration | once per tick **per configured `RepoSpec`** (single-repo legacy mode collapses to N=1) |
-| `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo: one `git fetch origin <base>`, then per-worktree dispatch (pre-PR worktrees merge directly; PR-having worktrees behind base detour to `resolving_conflict`). See [Per-tick flow](#per-tick-flow-workflowtick) for the full open-PR / `awaiting_human` / watermark / conflict / dirty-tree rules. |
-| `_handle_*` per issue | function call | issue's workflow label | once per tick per open issue (within its repo's `tick`) |
+| `workflow.tick(gh, spec)` | function call | each loop iteration | once per tick **per configured `RepoSpec`**, fanned out across a `ThreadPoolExecutor` (one worker thread per repo) when N>1; single-repo legacy mode collapses to N=1 and stays in-thread |
+| `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo: one `git fetch <spec.remote_name> <spec.base_branch>` (remote defaults to `origin`, overridable per `REPOS` entry), then per-worktree dispatch (pre-PR worktrees merge directly; PR-having worktrees behind base detour to `resolving_conflict`). See [Per-tick flow](#per-tick-flow-workflowtick) for the full open-PR / `awaiting_human` / watermark / conflict / dirty-tree rules. |
+| `_handle_*` per issue | function call | issue's workflow label | once per tick per open issue (within its repo's `tick`); concurrent up to `spec.parallel_limit` per repo and `MAX_PARALLEL_ISSUES_GLOBAL` across all repos (single shared `BoundedSemaphore`) |
 | decomposer agent (`DECOMPOSE_AGENT`) | subprocess (fresh or resumed, locked spec (backend + args)) | `_handle_decomposing` (retry budget OK) or HITL resume | one shot per tick when needed |
 | implementer agent (`DEV_AGENT`) | subprocess | `_handle_implementing` (no commits yet, retry budget OK) or HITL resume | one shot per tick when needed |
 | reviewer agent (`REVIEW_AGENT`) | subprocess (fresh session) | `_handle_validating`, round < max | one shot per tick |
@@ -551,15 +560,34 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
    │   main.py                                                            │
    │     startup: build [(spec, GitHubClient(repo_spec=spec)), ...] from  │
    │              config.default_repo_specs() and ensure_workflow_labels  │
-   │              once per spec                                           │
+   │              once per spec; build one shared                         │
+   │              global_semaphore = BoundedSemaphore(                    │
+   │                  MAX_PARALLEL_ISSUES_GLOBAL)                         │
    │     loop every POLL_INTERVAL s:                                      │
    │       1. self-restart check                                          │
    │          (origin/<ORCHESTRATOR_BASE_BRANCH> moved & touches orch/?)   │
-   │       2. for (spec, gh) in clients: workflow.tick(gh, spec)          │
+   │       2. _run_tick(clients, global_semaphore):                       │
+   │            len(clients) == 1 → in-thread workflow.tick(              │
+   │                                  gh, spec,                           │
+   │                                  global_semaphore=global_semaphore)  │
+   │            len(clients)  > 1 → ThreadPoolExecutor                    │
+   │                                  (max_workers=len(clients)) fans     │
+   │                                  workflow.tick(gh, spec,             │
+   │                                  global_semaphore=global_semaphore)  │
+   │                                  across one worker thread per repo   │
    │          (per-repo exception logged + skipped, never aborts the tick)│
    │                    │                                                 │
    │                    ▼                                                 │
-   │   workflow.tick(gh, spec) → for each open issue → dispatch by label: │
+   │   workflow.tick(gh, spec, global_semaphore=...) →                    │
+   │     partition pollable issues by label:                              │
+   │       family-aware (decomposing/blocked/umbrella/unlabeled) → drain  │
+   │         sequentially on one worker (no parent↔child races)           │
+   │       fan-out (ready/implementing/validating/in_review/              │
+   │                resolving_conflict) → up to spec.parallel_limit       │
+   │         worker threads, each with its own gh._for_worker_thread()    │
+   │     every _process_issue call acquires global_semaphore, so total    │
+   │     in-flight handlers across all repos ≤ MAX_PARALLEL_ISSUES_GLOBAL │
+   │   → for each issue → dispatch by label:                              │
    │                                                                      │
    │     (no label) ──► _handle_pickup                            │       │
    │                       ├─ ALLOWED_ISSUE_AUTHORS skip?         │       │

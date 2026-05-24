@@ -26,13 +26,16 @@ Use `REPO` for a single repo (the default), or `REPOS` to drive several from one
 
 ### Multi-repo `REPOS` syntax
 
-Each entry is `owner/name|target_root|base_branch`, with an optional fourth `|remote_name` field (defaults to `origin` when omitted):
+Each entry is `owner/name|target_root|base_branch`, with two optional trailing fields:
+
+- fourth `|remote_name` — defaults to `origin` when omitted;
+- fifth `|parallel_limit` — defaults to `MAX_PARALLEL_ISSUES_PER_REPO` when omitted. Positional: to override `parallel_limit` you must also write the `remote_name` (use `origin` explicitly to keep the default).
 
 ```dotenv
-REPOS=acme/api|/srv/clones/acme-api|main;acme/web|/srv/clones/acme-web|master|private
+REPOS=acme/api|/srv/clones/acme-api|main;acme/web|/srv/clones/acme-web|master|private|2
 ```
 
-Validation happens at import — a malformed entry, empty owner/name, empty base branch, or a duplicate slug aborts startup with a clear error. A `target_root` that does not exist on disk warns to stderr but does not block startup.
+Validation happens at import — a malformed entry, empty owner/name, empty base branch, empty `remote_name`, a non-integer or non-positive `parallel_limit`, or a duplicate slug aborts startup with a clear error. A `target_root` that does not exist on disk warns to stderr but does not block startup.
 
 Each repo can have its own PAT at `~/.config/<owner>/<repo>/token`, or a single `GITHUB_TOKEN` covering every listed repo. Worktrees are namespaced `WORKTREES_DIR/<owner>__<name>/issue-N` so two repos with the same issue number cannot collide on disk.
 
@@ -61,6 +64,31 @@ The first token of each role spec selects the backend (`codex` / `claude`); any 
 | `MAX_CONFLICT_ROUNDS`      | `3`         | auto-conflict-resolution rounds before parking on `awaiting_human`                               |
 | `MAX_RETRIES_PER_DAY`      | `3`         | fresh implementer spawns per issue per 24h window (`0` = unbounded)                              |
 | `ORCHESTRATOR_BASE_BRANCH` | `main`      | base branch of the orchestrator's own repo, used by the self-update path                          |
+
+## Parallel processing
+
+Each polling tick advances issues concurrently along two axes:
+
+- **Across repos.** When `REPOS` lists more than one entry, `main._run_tick` fans the per-repo `workflow.tick(gh, spec)` calls out across a `ThreadPoolExecutor` (one worker thread per configured repo) so a slow repo cannot delay the others. The legacy single-repo mode (`REPOS` unset) stays in-thread, so deployments without `REPOS` see no behavior change.
+- **Within a repo.** When `parallel_limit > 1` for a given repo, `workflow.tick` materializes its eligible-issue set and dispatches the per-issue handlers across a bounded `ThreadPoolExecutor` capped at `parallel_limit`. `parallel_limit == 1` (the default) keeps the legacy sequential, streaming loop with no executor.
+
+The two caps below are the levers:
+
+| Variable                       | Default | Purpose                                                                                              |
+| ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------- |
+| `MAX_PARALLEL_ISSUES_PER_REPO` | `1`     | per-repo cap on concurrent in-flight per-issue handlers within one repo on a single tick. Default `1` keeps the legacy one-at-a-time behavior. Each `REPOS` entry can override this via its optional fifth pipe-separated field. Must be a positive integer. |
+| `MAX_PARALLEL_ISSUES_GLOBAL`   | `3`     | global cap across all configured repos. Bounds the total concurrent agent fan-out regardless of any one repo's `parallel_limit`. Must be a positive integer; raise only on hosts with the CPU / memory headroom to run that many agent CLIs at once. |
+
+`MAX_PARALLEL_ISSUES_GLOBAL` is enforced by a single `threading.BoundedSemaphore` built once at startup and threaded through every `workflow.tick(gh, spec, global_semaphore=...)` call. Each tick acquires it around every `_process_issue` invocation, so workers from different repos contend on the same semaphore — total in-flight per-issue handlers across all repos never exceeds the global cap regardless of how many `parallel_limit` slots each repo declares.
+
+Inside a single `workflow.tick`, the parallel path partitions pollable issues by workflow label before submitting work to the executor:
+
+- **Family-aware labels** (`decomposing`, `blocked`, `umbrella`, plus unlabeled issues) read and write cross-issue state (parent ↔ child) and must never run two at a time. They are folded into one drain task that processes them sequentially on a single worker thread.
+- **Fan-out labels** (`ready`, `implementing`, `validating`, `in_review`, `resolving_conflict`) only touch their own per-issue state and worktree, so each one is submitted as its own future and runs concurrently up to `parallel_limit`.
+
+The drain task occupies exactly one executor slot regardless of how many family-aware issues exist, leaving the other `parallel_limit - 1` slots free for fan-out work in the same tick.
+
+Non-positive or non-integer values for either cap (or for a per-entry `parallel_limit`) abort startup with a clear error so a typo cannot silently disable all work.
 
 ## Workspace and agent identity
 

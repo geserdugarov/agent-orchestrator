@@ -1,6 +1,6 @@
 # Agent Orchestrator — Roadmap
 
-## Status as of 2026-05-21
+## Status as of 2026-05-24
 
 The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 `umbrella` → `implementing` → `validating` → `in_review` → `resolving_conflict`
@@ -9,10 +9,11 @@ optional detour → `done` / `rejected`) is wired end-to-end.
 The orchestrator runs as a single long-lived Python process
 (`python -m orchestrator.main`, wrapped by `run.sh` for self-restart), polls
 one or more configured repos, and delegates the actual coding to `codex` /
-`claude` CLI subprocesses running in per-issue git worktrees. State lives
-in GitHub Issues themselves (one workflow label plus one pinned JSON
-comment), so the loop stays stateless and progress is observable on
-github.com.
+`claude` CLI subprocesses running in per-issue git worktrees. Per-repo
+ticks fan out concurrently and per-issue handlers within each repo can
+run in parallel up to configurable caps. State lives in GitHub Issues
+themselves (one workflow label plus one pinned JSON comment), so the
+loop stays stateless and progress is observable on github.com.
 
 See `docs/architecture.md` for the design, stage semantics, and
 implementation walk-through. This file tracks what shipped and what is
@@ -115,18 +116,43 @@ Real conflicts resume the dev session with a prompt naming up to 20
 conflicted paths. `MAX_CONFLICT_ROUNDS` (default 3) caps attempts. Merge
 over rebase preserves the stored `agent_approved_sha`.
 
-**Multi-repo support.** `RepoSpec(slug, target_root, base_branch)` is
-threaded through every handler. `REPOS` env
-(`owner/name|target_root|base_branch`, `;`- or newline-separated) drives
-fan-out; legacy single-repo mode applies when `REPOS` is unset.
+**Multi-repo support.** `RepoSpec(slug, target_root, base_branch,
+remote_name, parallel_limit)` is threaded through every handler. `REPOS`
+env (`owner/name|target_root|base_branch[|remote_name[|parallel_limit]]`,
+`;`- or newline-separated) drives fan-out; legacy single-repo mode
+applies when `REPOS` is unset.
 
-Validation at import aborts on malformed entries, bad slugs, or
-duplicates. Worktrees namespaced by slug. Each tick iterates every
-`(spec, GitHubClient)` with per-repo exception isolation.
+Validation at import aborts on malformed entries, bad slugs, duplicates,
+empty `remote_name`, and non-integer / non-positive `parallel_limit`.
+Worktrees namespaced by slug. With multiple `REPOS` entries each tick
+fans the per-repo `workflow.tick(gh, spec)` calls out across a
+`ThreadPoolExecutor` so a slow repo cannot delay the others; per-repo
+exception isolation keeps a wedged repo from stopping the rest.
 
 Per-slug token resolution; `ORCHESTRATOR_BASE_BRANCH` decoupled from
 `BASE_BRANCH`; `TARGET_REPO_ROOT` decouples orchestrator checkout from
 target clones.
+
+**Parallel issue processing.** Two caps bound concurrent agent fan-out:
+`MAX_PARALLEL_ISSUES_PER_REPO` (default 1, overridable per `REPOS`
+entry via the optional fifth pipe-separated field) caps the number of
+per-issue handlers from one repo that may be in flight at once on a
+single tick (every pollable issue is still considered each tick — the
+cap throttles concurrent execution, not the per-tick workload);
+`MAX_PARALLEL_ISSUES_GLOBAL` (default 3) caps the total in-flight
+per-issue handlers across all repos via a single
+`threading.BoundedSemaphore` shared between every repo's tick.
+
+Within a tick, the parallel path partitions pollable issues by label:
+family-aware stages (`decomposing`, `blocked`, `umbrella`, unlabeled
+pickup) that read/write across parent/child boundaries are drained
+sequentially on one worker thread so parent and child handlers cannot
+race on the same pinned-state comment; the remaining stages (`ready`,
+`implementing`, `validating`, `in_review`, `resolving_conflict`) fan
+out across the bounded executor because they only touch per-issue
+state. Each worker thread mints a fresh `GitHubClient` via
+`gh._for_worker_thread()` so concurrent HTTP traffic does not share a
+PyGithub `Requester`.
 
 **Tests.** `tests/test_workflow.py` covers every stage handler, the
 manifest parser, watermark / debounce logic, the auto-merge gate,
