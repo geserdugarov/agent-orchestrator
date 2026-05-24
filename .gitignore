@@ -1,7 +1,8 @@
 # agents related
 .codex
 .codex-*
-.claude/
+.claude/*
+!.claude/skills/
 .develop-review-loop/
 
 # sensitive data
