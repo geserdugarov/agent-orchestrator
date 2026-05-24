@@ -6,7 +6,7 @@ The dev/review/decompose roles are picked independently via `DEV_AGENT` / `REVIE
 
 New unlabeled issues route through a `decomposing` stage that asks the decomposer agent for a structured manifest: `decision=single` flips the issue to `ready` and the implementer takes over; `decision=split` creates child issues, persists the dep graph, and parks the parent on `blocked` (or `umbrella` when the manifest's `umbrella` flag is true — a parent with no implementation of its own that `_handle_umbrella` closes to `done` once every child resolves) until the matching handler walks the children. Decomposition can be disabled with `DECOMPOSE=off`, which reverts to the legacy direct-to-`implementing` pickup.
 
-Once the reviewer approves and the PR is mergeable with green CI, the orchestrator can merge it itself (gated by `AUTO_MERGE`, default off) and close the issue with `done`; an approved-but-unmergeable PR detours through a `resolving_conflict` stage that auto-merges `origin/<base>` (capped by `MAX_CONFLICT_ROUNDS`) before bouncing back to `validating`; PRs closed without merge land on `rejected`.
+Once the reviewer approves and the PR is mergeable with green CI, the orchestrator can merge it itself (gated by `AUTO_MERGE`, default off) and close the issue with `done`; an approved-but-unmergeable PR detours through a `resolving_conflict` stage that rebases onto `origin/<base>` (capped by `MAX_CONFLICT_ROUNDS`) before bouncing back to `validating`; PRs closed without merge land on `rejected`.
 
 ## Design constraints
 
@@ -102,7 +102,7 @@ deliberately avoid them.
 
 An issue should have at most one workflow label at a time. Non-workflow labels such as `bug` or `enhancement` are preserved; orchestrator label writes only swap labels from its own workflow set. Label names are part of the public contract because live GitHub issues carry them, so renaming or repurposing one is a migration.
 
-The orchestrator also creates the non-workflow control label `hold_base_sync`; while present on an issue, it pauses per-tick base sync, `in_review` auto-merge/unmergeable handling, and `resolving_conflict` base merges until the label is removed.
+The orchestrator also creates the non-workflow control label `hold_base_sync`; while present on an issue, it pauses per-tick base sync, `in_review` auto-merge/unmergeable handling, and `resolving_conflict` base rebases until the label is removed.
 
 A second control label `backlog` is created for postponed work. While present on an issue, every per-tick handler skips it before the workflow label is even read, so the orchestrator does not pick up, decompose, or otherwise advance the issue. Removing the label hands control back to the state machine on the next tick — typically applied at issue creation to queue work that should sit until a human is ready.
 
@@ -116,7 +116,7 @@ A second control label `backlog` is created for postponed work. While present on
 | `implementing` | The dev agent is producing commits in a per-issue worktree. |
 | `validating` | The reviewer agent is checking the diff and may bounce fixes back to the dev agent. |
 | `in_review` | A PR is open and ready for human review or auto-merge gates. |
-| `resolving_conflict` | The orchestrator is trying to merge `origin/<base>` into an approved but unmergeable PR branch. |
+| `resolving_conflict` | The orchestrator is trying to rebase an approved but unmergeable PR branch onto `origin/<base>`. |
 | `done` | Terminal success; the PR merged, or an umbrella parent resolved after all children reached `done`. |
 | `rejected` | Terminal rejection; the PR or issue was closed without merge. |
 
@@ -152,22 +152,22 @@ Inside `workflow.tick(gh, spec)`, before any issue is dispatched the tick runs `
 
 Two paths depending on whether a PR already exists for the issue:
 
-- **Pre-PR worktrees** (no `pr_number` in pinned state) get a clean-tree `git merge --no-edit origin/<base>` directly — there is no remote to push to, so a local-only merge commit is the right outcome.
-- **PR-having worktrees** in `validating` / `in_review` are detoured to `resolving_conflict` instead (via `_route_pr_worktree_to_resolving_conflict`: post a PR notice, seed `conflict_round` only when absent, flip the label) so the existing `_handle_resolving_conflict` handler does merge + push + relabel-to-validating in one consistent flow.
+- **Pre-PR worktrees** (no `pr_number` in pinned state) get a clean-tree `git rebase origin/<base>` directly — there is no remote to push to, so the local branch can be kept linear without publishing a rewrite.
+- **PR-having worktrees** in `validating` / `in_review` are detoured to `resolving_conflict` instead (via `_route_pr_worktree_to_resolving_conflict`: post a PR notice, seed `conflict_round` only when absent, flip the label) so the existing `_handle_resolving_conflict` handler does rebase + force-with-lease push + relabel-to-validating in one consistent flow.
 
 Applying `hold_base_sync` to an issue skips both paths for that issue; removing the label lets the next tick perform the accumulated base sync once.
 
-A local-only merge commit on a pushed branch would otherwise diverge local HEAD from `pr.head.sha` and break the validating reviewer (it reads local HEAD, so it would snapshot `agent_approved_sha` to a SHA that isn't on the PR), `_squash_and_force_push`'s `--force-with-lease=<original_head>` (the lease compares against the un-merged remote tip), and AUTO_MERGE's `agent_approved_sha == pr.head.sha` gate. The detour works under `AUTO_MERGE=off` too — `_handle_resolving_conflict` never reads AUTO_MERGE, it just does merge + push + relabel.
+A local-only rebase on a pushed branch would otherwise diverge local HEAD from `pr.head.sha` and break the validating reviewer (it reads local HEAD, so it would snapshot `agent_approved_sha` to a SHA that isn't on the PR), `_squash_and_force_push`'s `--force-with-lease=<original_head>` (the lease compares against the un-rebased remote tip), and AUTO_MERGE's `agent_approved_sha == pr.head.sha` gate. The detour works under `AUTO_MERGE=off` too — `_handle_resolving_conflict` never reads AUTO_MERGE, it just does rebase + push + relabel.
 
 The detour deliberately does NOT call `_bump_in_review_watermarks` (the `_handle_in_review` analog runs that AFTER scanning new comments — running it here, before any handler scans, would silently mark unread human "do not merge" / fix-request comments as consumed and AUTO_MERGE could land the PR over them). The orchestrator's own PR notice is filtered out via `orchestrator_comment_ids` on the next in_review scan, so leaving the watermark alone is safe.
 
-The detour also skips when `awaiting_human=True` because `_handle_resolving_conflict`'s awaiting-human branch returns early without merging unless a new human comment arrived; relabeling here would just hide the existing park behind a `resolving_conflict` label without progress, including the documented `AUTO_MERGE=off` unmergeable-park case.
+The detour also skips when `awaiting_human=True` because `_handle_resolving_conflict`'s awaiting-human branch returns early without rebasing unless a new human comment arrived; relabeling here would just hide the existing park behind a `resolving_conflict` label without progress, including the documented `AUTO_MERGE=off` unmergeable-park case.
 
 Before relabeling, the detour fetches `gh.get_pr(pr_number)` and skips when `pr_state != "open"`: a just-merged PR advances `origin/<base>`, so the still-validating / still-in_review worktree pointed at the now-stale branch is naturally behind base; without this gate the refresh would post an "auto-resolution" notice and relabel to `resolving_conflict` on a PR the next handler call would finalize to `done` (or `rejected` for a closed-without-merge PR).
 
 A `gh.get_pr` failure is treated as "leave alone" so the handler retries from a stable label rather than racing a half-known PR state. Issues already labeled `resolving_conflict` are also skipped (the handler runs this tick anyway).
 
-Merge over rebase across both paths matches `_handle_resolving_conflict`'s standing contract: rebase rewrites every commit's SHA, which would invalidate `agent_approved_sha` and force the reviewer to re-approve even when only the base content changed. Dirty worktrees (in-flight agent edits, crash-recovered trees) are skipped, and on a pre-PR content conflict the merge is aborted so the worktree stays on its pre-merge SHA. Failures are logged and swallowed; keeping every issue moving matters more than perfect base sync.
+Rebase is used across both paths to keep issue branches linear after sibling PRs land. Dirty worktrees (in-flight agent edits, crash-recovered trees) are skipped, and on a pre-PR content conflict the rebase is aborted so the worktree stays on its pre-rebase SHA. For PR branches, every pushed rebase resets `review_round`, so the reviewer must approve the rewritten head before auto-merge can proceed. Failures are logged and swallowed; keeping every issue moving matters more than perfect base sync.
 
 Then `gh.list_pollable_issues()` yields all open non-PR issues plus closed non-PR issues still labeled `in_review` or `resolving_conflict`. The closed-`in_review`/`resolving_conflict` sweep is what makes the manual-merge path land cleanly: a human-merged PR with a `Resolves #N` footer auto-closes issue N before the orchestrator can flip the label, and without the sweep `_handle_in_review` / `_handle_resolving_conflict` would never run on it.
 
@@ -437,7 +437,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      - **Approval check** — either `agent_approved_sha == pr.head.sha` (snapshotted by validating when the reviewer agent emitted `VERDICT: APPROVED`), OR `gh.pr_is_approved(pr, head_sha=pr.head.sha)` — only counts human/bot reviews submitted on the *current* head SHA, so a stale APPROVED from before a later push does not unlock auto-merge.
      - **`pr_is_mergeable`** — `None` means GitHub still computing, try next tick.
 
-       `False` with `AUTO_MERGE=on` does NOT park anymore — it routes the issue to the new `resolving_conflict` stage (post a notice on the PR, seed `conflict_round=0` only when absent so a re-entry preserves the cap counter, flip the label, return), where `_handle_resolving_conflict` attempts the auto-merge of `origin/<base>` on the next tick. Under `AUTO_MERGE=off` the legacy unmergeable park still fires here.
+       `False` with `AUTO_MERGE=on` does NOT park anymore — it routes the issue to the new `resolving_conflict` stage (post a notice on the PR, seed `conflict_round=0` only when absent so a re-entry preserves the cap counter, flip the label, return), where `_handle_resolving_conflict` attempts the base rebase on the next tick. Under `AUTO_MERGE=off` the legacy unmergeable park still fires here.
      - **`pr_combined_check_state`** — `success` proceeds; `pending` waits; `failure`/`none` parks awaiting human — `none` means no checks at all, ambiguous.
 
      Under `AUTO_MERGE=off` the gate sequence above is skipped entirely. Instead, once the PR is mergeable the handler posts a one-shot `:bell:` ping mentioning every `HITL_HANDLE` so the human knows the PR is ready for review/merge. The ping is de-duplicated by `ready_ping_sha` (the head SHA we pinged for) — a long-lived ready PR doesn't spam handles on every poll, but a new commit shifts `pr.head.sha` and triggers a fresh ping. The ping is NOT a park: `awaiting_human` stays false so subsequent ticks still react to new PR comments, an external merge, or a later unmergeable transition.
@@ -472,7 +472,7 @@ The "back to validating on a new PR comment" arc is intentional: validating is t
   3. If the issue itself was closed manually while the PR is still open, treat as a hard human stop: flip to `rejected` rather than continuing to spawn the dev agent. Deliberately do NOT clean up the branch here — the PR is still open and may be useful for inspection or salvage.
 
      Same caveat as the in_review counterpart: once the label flips to `rejected` the closed-issue sweep no longer surfaces this issue, so a subsequent PR close is not observed and the operator must clean up the worktree, local branch, and remote branch by hand. Cleanup fires automatically only when the PR is closed *before* the orchestrator flips the label to `rejected`.
-  4. **Awaiting-human resume path**: when parked from a previous round and a new human comment has arrived since `last_action_comment_id`, resume the dev session on the in-progress merge worktree with the human's text (mirrors `_handle_implementing`'s awaiting-human branch — the park messages explicitly invite that flow). The post-agent step uses the same `_post_conflict_resolution_result` helper as the fresh-merge path.
+  4. **Awaiting-human resume path**: when parked from a previous round and a new human comment has arrived since `last_action_comment_id`, resume the dev session on the in-progress rebase worktree with the human's text (mirrors `_handle_implementing`'s awaiting-human branch — the park messages explicitly invite that flow). The post-agent step uses the same `_post_conflict_resolution_result` helper as the fresh-rebase path.
   5. **Cap check**: if `conflict_round >= MAX_CONFLICT_ROUNDS`, park awaiting human with the round count and the cap quoted. To escape the park the human must either:
      - (a) relabel the issue back to `validating` (or any other workflow label) so the dispatcher leaves `_handle_resolving_conflict` entirely; or
      - (b) post a new issue comment, which the awaiting-human resume branch (item 4) picks up to drive another dev-agent round.
@@ -484,24 +484,27 @@ The "back to validating on a new PR comment" arc is intentional: validating is t
      - `behind > 0` (worktree diverged) → park: force-pushing local state would clobber the real PR head.
      - `ahead > 0` (recovered unpushed commits from a previous tick that crashed before `_push_branch` returned) → run the same dirty-tree check `_on_dirty_worktree` uses, then push the recovered work and flip to `validating` with `review_round=0`, `conflict_round += 1`.
      - `(0, 0)` (in sync) → fall through.
-  9. Refresh `origin/<base>` over the same hardened path, then run `git merge --no-edit origin/<base>` in the worktree under `_git_hardened` (drops global/system git config and disables hooks/fsmonitor/credential helpers — the agent owns the worktree and could otherwise plant a hook to execute attacker code mid-merge).
-  10. **Clean merge succeeded**: dirty-tree check first (a leftover edit from a crashed prior tick must not silently survive into validating).
+  9. Refresh `origin/<base>` over the same hardened path, then run `git rebase origin/<base>` in the worktree under `_git_hardened` (drops global/system git config, disables hooks/fsmonitor/credential helpers/commit signing, and disables rebase autostash — the agent owns the worktree and could otherwise plant a hook to execute attacker code mid-rebase).
+  10. **Clean rebase succeeded**: dirty-tree check first (a leftover edit from a crashed prior tick must not silently survive into validating).
 
-      If the HEAD SHA did not move (already up-to-date — `git merge` returned success without applying anything), skip the push and flip to `validating` with `review_round=0`, `conflict_round += 1`; counting the no-op against the cap surfaces a perpetually-unmergeable-due-to-branch-protection PR within `MAX_CONFLICT_ROUNDS` ticks instead of letting it ping-pong between handlers forever.
+      If the HEAD SHA did not move (already up-to-date — `git rebase` returned success without applying anything), skip the push and flip to `validating` with `review_round=0`, `conflict_round += 1`; counting the no-op against the cap surfaces a perpetually-unmergeable-due-to-branch-protection PR within `MAX_CONFLICT_ROUNDS` ticks instead of letting it ping-pong between handlers forever.
 
-      If HEAD moved (whether by fast-forward or by a real merge commit), push and flip to `validating` (same state writes).
-  11. **Conflicted merge**: build a conflict-resolution prompt via `_build_conflict_resolution_prompt` (lists up to 20 conflicted paths, instructs the agent to commit the merge and not push), resume the dev session on the locked spec (backend + args) with that prompt, then run `_post_conflict_resolution_result`.
+      If HEAD moved, force-with-lease push the rebased branch, clear any stale `agent_approved_sha`, and flip to `validating` (same state writes).
+  11. **Conflicted rebase**: build a conflict-resolution prompt via `_build_conflict_resolution_prompt` (lists up to 20 conflicted paths, instructs the agent to resolve and continue the rebase, and not push), resume the dev session on the locked spec (backend + args) with that prompt, then run `_post_conflict_resolution_result`.
   12. `_post_conflict_resolution_result` is the shared post-agent funnel:
       - timeout → park (HITL);
+      - unfinished rebase → park;
       - no new commit → `_on_question` park;
       - dirty tree → `_on_dirty_worktree` park;
       - push fail → park;
-      - success → push, set `last_conflict_resolved_at`, increment `conflict_round`, reset `review_round=0`, flip back to `validating`.
+      - success → force-with-lease push, clear any stale `agent_approved_sha`, set `last_conflict_resolved_at`, increment `conflict_round`, reset `review_round=0`, flip back to `validating`.
+
+      Fresh conflicted-rebase pushes pin the lease to the pre-rebase PR head captured after the branch/head equality gate. Awaiting-human resume pushes deliberately use `_push_branch`'s live `ls-remote` lease fallback, because the local `before_sha` may be an intermediate rebase or recovered commit SHA rather than the remote PR head.
 
       The counter increments only on the success path so a timeout/dirty/push-fail does not eat a slot from the cap.
 - **Output**: label moved to `validating` (clean push or up-to-date base) OR `done`/`rejected` (terminal arcs) OR a HITL park (cap exhausted, dirty worktree, push fail, agent timeout, agent silence, fetch fail, diverged worktree, missing pr_number).
 
-Merge over rebase by design: rebase rewrites every commit's SHA, which would invalidate the stored `agent_approved_sha` snapshot and force the reviewer agent to re-approve the entire branch even when only the base content changed. A merge commit costs one extra entry in `git log` and keeps approvals stable.
+The rebase path deliberately rewrites the PR branch to keep history linear after other issue PRs land. Every pushed rebase resets `review_round`, so the reviewer agent must re-approve the rewritten head before AUTO_MERGE can pass.
 
 ## Agent command specs
 
@@ -579,7 +582,7 @@ Extras whose value is `None` are dropped, so callers can pass optional context (
 | `pr_opened` | `_on_commits` after `gh.open_pr` succeeds | `pr_number`, `branch`, `sha`, `retry_count` |
 | `pr_merged` | `_handle_in_review` and `_handle_resolving_conflict` terminal arcs (external merge OR successful `gh.merge_pr` under AUTO_MERGE) | `pr_number`, `sha`, `merge_method` (`external` / `squash`), `check_state`, `review_round`, `conflict_round`, `retry_count` |
 | `pr_closed_without_merge` | `_handle_in_review` and `_handle_resolving_conflict` when the PR is closed without merge | `pr_number`, `sha`, `review_round`, `conflict_round`, `retry_count` |
-| `merge_attempt` | AUTO_MERGE `gh.merge_pr` call AND every `git merge origin/<base>` inside `_handle_resolving_conflict` | `method` (`squash` / `base_merge`), `result` (`success` / `failed` / `conflict`), `pr_number`, `sha`, `conflict_round`, `review_round`, `retry_count` |
+| `merge_attempt` | AUTO_MERGE `gh.merge_pr` call AND every `git rebase origin/<base>` inside `_handle_resolving_conflict` | `method` (`squash` / `base_rebase`), `result` (`success` / `failed` / `conflict`), `pr_number`, `sha`, `conflict_round`, `review_round`, `retry_count` |
 | `conflict_round` | `_route_pr_worktree_to_resolving_conflict` and the in_review unmergeable arc emit `action="entered"`; every increment site (`_emit_conflict_round_incremented`) emits `action="incremented"` with `outcome` | `pr_number`, `conflict_round`, `review_round`, `retry_count`, `outcome` (for increments), `sha` |
 
 **`agent_spawn` / `agent_exit` extras.** On top of the shared fields above:
@@ -604,14 +607,14 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 |---|---|---|---|
 | `main` polling loop | long-lived Python process | manual start (or wrapper) | every `POLL_INTERVAL`s |
 | `workflow.tick(gh, spec)` | function call | each loop iteration | once per tick **per configured `RepoSpec`**, fanned out across a `ThreadPoolExecutor` (one worker thread per repo) when N>1; single-repo legacy mode collapses to N=1 and stays in-thread |
-| `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo: one `git fetch <spec.remote_name> <spec.base_branch>` (remote defaults to `origin`, overridable per `REPOS` entry), then per-worktree dispatch (pre-PR worktrees merge directly; PR-having worktrees behind base detour to `resolving_conflict`). See [Per-tick flow](#per-tick-flow-workflowtick) for the full open-PR / `awaiting_human` / watermark / conflict / dirty-tree rules. |
+| `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo: one `git fetch <spec.remote_name> <spec.base_branch>` (remote defaults to `origin`, overridable per `REPOS` entry), then per-worktree dispatch (pre-PR worktrees rebase directly; PR-having worktrees behind base detour to `resolving_conflict`). See [Per-tick flow](#per-tick-flow-workflowtick) for the full open-PR / `awaiting_human` / watermark / conflict / dirty-tree rules. |
 | `_handle_*` per issue | function call | issue's workflow label | once per tick per open issue (within its repo's `tick`); concurrent up to `spec.parallel_limit` per repo and `MAX_PARALLEL_ISSUES_GLOBAL` across all repos (single shared `BoundedSemaphore`) |
 | decomposer agent (`DECOMPOSE_AGENT`) | subprocess (fresh or resumed, locked spec (backend + args)) | `_handle_decomposing` (retry budget OK) or HITL resume | one shot per tick when needed |
 | implementer agent (`DEV_AGENT`) | subprocess | `_handle_implementing` (no commits yet, retry budget OK) or HITL resume | one shot per tick when needed |
 | reviewer agent (`REVIEW_AGENT`) | subprocess (fresh session) | `_handle_validating`, round < max | one shot per tick |
 | dev-fix agent | subprocess (resumed dev session, locked spec (backend + args)) | reviewer says CHANGES_REQUESTED | one shot per tick |
-| `_handle_resolving_conflict` | function call | issue label `resolving_conflict` (set by `_handle_in_review` when an approved PR is unmergeable under `AUTO_MERGE=on`); also fires on closed-`resolving_conflict` issues from the polling sweep | once per tick per such issue (drives PR-state terminals → `done`/`rejected`, ahead-of-remote recovery push, `git merge origin/<base>` then clean-merge no-op flip / clean-merge push / dev-conflict resume / cap-park, plus all park branches) |
-| dev-conflict agent | subprocess (resumed dev session, locked spec (backend + args)) | `_handle_resolving_conflict` and `git merge origin/<base>` left conflicts | one shot per tick |
+| `_handle_resolving_conflict` | function call | issue label `resolving_conflict` (set by `_handle_in_review` when an approved PR is unmergeable under `AUTO_MERGE=on`); also fires on closed-`resolving_conflict` issues from the polling sweep | once per tick per such issue (drives PR-state terminals → `done`/`rejected`, ahead-of-remote recovery push, `git rebase origin/<base>` then clean-rebase no-op flip / clean-rebase push / dev-conflict resume / cap-park, plus all park branches) |
+| dev-conflict agent | subprocess (resumed dev session, locked spec (backend + args)) | `_handle_resolving_conflict` and `git rebase origin/<base>` left conflicts | one shot per tick |
 | `git push` | subprocess | after dev produces clean commits | per fix |
 | self-restart check | git fetch + diff | start of each tick | every tick |
 
@@ -747,12 +750,12 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
    │                       ├─ recovered ahead-of-remote commits      │    │
    │                       │   ─► push, ++conflict_round,            │    │
    │                       │      label=validating                   │    │
-   │                       ├─ git merge origin/<base>:               │    │
+   │                       ├─ git rebase origin/<base>:              │    │
    │                       │     already up-to-date (HEAD unchanged) │    │
    │                       │       ─► flip to validating,            │    │
    │                       │         ++conflict_round (no push)      │    │
-   │                       │     HEAD moved (fast-forward or merge   │    │
-   │                       │       commit) ─► push,                  │    │
+   │                       │     HEAD moved (rebased commits)        │    │
+   │                       │       ─► push,                          │    │
    │                       │       label=validating, ++conflict_round│    │
    │                       │     conflicts ─► resume dev (locked) ───┘    │
    │                       │       push resolved commit,                  │
@@ -803,7 +806,7 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 | **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle |
 | **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
 | **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives |
-| **stages/conflicts.py** | `_handle_resolving_conflict` + merge-loop primitives |
+| **stages/conflicts.py** | `_handle_resolving_conflict` + rebase-loop primitives |
 | **agents.py** | dispatch + spawn codex/claude subprocess, capture session id + last message |
 | **github.py** | issues, comments, labels, pinned state, PR open/comment |
 | **config.py** | env + token loading (token kept outside REPO_ROOT), backend validation |
@@ -831,7 +834,7 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
                                                  │   unmergeable past approval  │
                                                  │   gates)─► resolving_conflict│
                                                  │  resolving_conflict --(clean │
-                                                 │   merge / pushed resolution) │
+                                                 │   rebase / pushed resolution)│
                                                  │   ─► validating              │
                                                  │  resolving_conflict --(round │
                                                  │   >= MAX_CONFLICT_ROUNDS)    │
@@ -871,8 +874,8 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
                                                 done by hand)
 
    resolving_conflict (AUTO_MERGE only, capped by MAX_CONFLICT_ROUNDS):
-     git merge origin/<base> clean ─► label=validating (++conflict_round)
-     conflicts ─► dev resumes, commits merge, push ─► label=validating
+     git rebase origin/<base> clean ─► label=validating (++conflict_round)
+     conflicts ─► dev resumes, continues rebase, push ─► label=validating
      conflict_round >= MAX_CONFLICT_ROUNDS ─► park awaiting human
      pr merged/closed mid-stage ─► done / rejected (terminal)
 

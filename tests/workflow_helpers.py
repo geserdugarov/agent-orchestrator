@@ -85,6 +85,7 @@ class _PatchedWorkflowMixin:
         first_commit_subject="",
         squash_result=(True, None, 0, None),
         branch_ahead_behind=(0, 0),
+        rebase_in_progress=False,
     ):
         rc_mock = _as_mock(run_agent)
         hnc_seq = has_new_commits if isinstance(has_new_commits, (list, tuple)) else None
@@ -128,6 +129,7 @@ class _PatchedWorkflowMixin:
         # against `_FAKE_WT`. Default: success-no-op, so tests not exercising
         # the squash path see no agent_approved_sha override.
         squash_mock = MagicMock(return_value=tuple(squash_result))
+        rebase_in_progress_mock = MagicMock(return_value=bool(rebase_in_progress))
 
         with patch.object(workflow, "run_agent", rc_mock), \
              patch.object(workflow, "_ensure_worktree", wt_mock), \
@@ -143,7 +145,8 @@ class _PatchedWorkflowMixin:
              patch.object(workflow, "_first_commit_subject", first_subject_mock), \
              patch.object(workflow, "_squash_and_force_push", squash_mock), \
              patch.object(workflow, "_authed_fetch", authed_fetch_ok), \
-             patch.object(workflow, "_branch_ahead_behind", ahead_behind_mock):
+             patch.object(workflow, "_branch_ahead_behind", ahead_behind_mock), \
+             patch.object(workflow, "_rebase_in_progress", rebase_in_progress_mock):
             callable_()
 
         return {
@@ -162,4 +165,5 @@ class _PatchedWorkflowMixin:
             "_squash_and_force_push": squash_mock,
             "_authed_fetch": authed_fetch_ok,
             "_branch_ahead_behind": ahead_behind_mock,
+            "_rebase_in_progress": rebase_in_progress_mock,
         }

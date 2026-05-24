@@ -588,18 +588,21 @@ def _build_conflict_resolution_prompt(
     if len(files) > len(shown):
         files_md += f"\n- ... ({len(files) - len(shown)} more)"
     return (
-        f"`git merge {base_ref}` left {len(files)} conflicted "
-        "file(s) in your worktree. Resolve each conflict and COMMIT the "
-        "merge in your current worktree. Do NOT push -- the orchestrator "
+        f"`git rebase {base_ref}` left {len(files)} conflicted "
+        "file(s) in your worktree. Resolve each conflict and complete the "
+        "rebase in your current worktree. Do NOT push -- the orchestrator "
         "pushes and re-runs the reviewer.\n\n"
         f"Conflicted paths:\n\n{files_md}\n\n"
         "Workflow: edit each file to a coherent resolution, `git add` it, "
-        "then commit (`git commit --no-edit` accepts the default merge "
-        "commit message). Use `git status` to inspect the in-progress "
-        "merge.\n\n"
+        "then run `git rebase --continue`. Repeat until the rebase completes. "
+        "If Git reports an empty commit because the change is already present, "
+        "use `git rebase --skip`; use `git commit --allow-empty` only when "
+        "an empty commit is intentional. Use `git rebase --abort` only as "
+        "the escape hatch when you cannot make progress. "
+        "Use `git status` to inspect the in-progress rebase.\n\n"
         "If you genuinely cannot resolve a conflict, end your final "
         "message with a question for the human and leave the worktree "
-        "mid-merge; the orchestrator will park the issue for human review."
+        "mid-rebase; the orchestrator will park the issue for human review."
     )
 
 
