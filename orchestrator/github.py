@@ -36,6 +36,7 @@ WORKFLOW_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("blocked", "b60205", "Blocked on another issue"),
     ("umbrella", "ededed", "Parent of child issues with no implementation of its own"),
     ("implementing", "1d76db", "A coding agent is working on this"),
+    ("documenting", "c2e0c6", "Documentation pass after implementation, before validation"),
     ("validating", "8a2be2", "Automated review/tests are running"),
     ("in_review", "d93f0b", "PR is open, awaiting human review"),
     ("resolving_conflict", "e99695", "Auto-resolving merge conflicts after a sibling PR landed first"),
