@@ -33,7 +33,7 @@ class ResolvingConflictEventEmissionTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
     """`_handle_resolving_conflict` emits `merge_attempt` for each base-
-    merge attempt, `conflict_round` whenever the counter ticks, and the
+    rebase attempt, `conflict_round` whenever the counter ticks, and the
     same `pr_merged` / `pr_closed_without_merge` terminals as in_review.
     """
 
@@ -80,7 +80,7 @@ class ResolvingConflictEventEmissionTest(
             return_value=(merge_succeeded, list(conflicted_files))
         )
         ok = MagicMock(returncode=0, stdout="", stderr="")
-        with patch.object(workflow, "_merge_base_into_worktree", merge_mock), \
+        with patch.object(workflow, "_rebase_base_into_worktree", merge_mock), \
              patch.object(workflow, "_git", MagicMock(return_value=ok)), \
              patch.object(workflow, "_git_hardened", MagicMock(return_value=ok)):
             return self._run(
@@ -92,7 +92,7 @@ class ResolvingConflictEventEmissionTest(
                 head_shas=head_shas,
             )
 
-    def test_merge_attempt_success_on_clean_base_merge(self) -> None:
+    def test_merge_attempt_success_on_clean_base_rebase(self) -> None:
         gh, issue, pr = self._seed()
         self._run_with_merge(
             gh, issue, merge_succeeded=True,
@@ -103,11 +103,11 @@ class ResolvingConflictEventEmissionTest(
         ev = attempts[0]
         self.assertEqual(ev["stage"], "resolving_conflict")
         self.assertEqual(ev["pr_number"], self.PR_NUMBER)
-        self.assertEqual(ev["method"], "base_merge")
+        self.assertEqual(ev["method"], "base_rebase")
         self.assertEqual(ev["result"], "success")
         self.assertEqual(ev["conflict_round"], 0)
 
-    def test_merge_attempt_conflict_when_base_merge_leaves_unmerged_paths(self) -> None:
+    def test_merge_attempt_conflict_when_base_rebase_leaves_unmerged_paths(self) -> None:
         gh, issue, pr = self._seed()
         self._run_with_merge(
             gh, issue, merge_succeeded=False,
@@ -118,7 +118,7 @@ class ResolvingConflictEventEmissionTest(
         self.assertEqual(len(attempts), 1)
         self.assertEqual(attempts[0]["result"], "conflict")
 
-    def test_conflict_round_incremented_on_clean_base_merge_push(self) -> None:
+    def test_conflict_round_incremented_on_clean_base_rebase_push(self) -> None:
         gh, issue, pr = self._seed()
         self._run_with_merge(
             gh, issue, merge_succeeded=True,
@@ -130,8 +130,8 @@ class ResolvingConflictEventEmissionTest(
         ]
         self.assertEqual(len(rounds), 1)
         self.assertEqual(rounds[0]["conflict_round"], 1)
-        self.assertEqual(rounds[0]["outcome"], "base_merged_clean")
-        # SHA is the after-merge HEAD captured before the push.
+        self.assertEqual(rounds[0]["outcome"], "base_rebased_clean")
+        # SHA is the after-rebase HEAD captured before the push.
         self.assertEqual(rounds[0]["sha"], "merged")
 
     def test_conflict_round_incremented_on_base_up_to_date_no_op(self) -> None:
@@ -169,7 +169,7 @@ class ResolvingConflictEventEmissionTest(
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["stage"], "resolving_conflict")
         self.assertEqual(merged[0]["pr_number"], self.PR_NUMBER)
-        # No base-merge attempted on the terminal path.
+        # No base rebase attempted on the terminal path.
         self.assertEqual(self._events_of(gh, "merge_attempt"), [])
 
     def test_pr_closed_without_merge_event_on_resolving_conflict_closed(self) -> None:
@@ -379,7 +379,7 @@ class HandleResolvingConflictUsesAuthedFetchTest(
         # mocks dict rather than installing our own outer patch (which
         # `_run`'s inner `with` would override).
         with patch.object(
-            workflow, "_merge_base_into_worktree", merge_mock,
+            workflow, "_rebase_base_into_worktree", merge_mock,
         ):
             mocks = self._run(
                 lambda: workflow._handle_resolving_conflict(
@@ -394,7 +394,7 @@ class HandleResolvingConflictUsesAuthedFetchTest(
         # Two fetches per fresh resolving_conflict round: first for the
         # PR branch (so the SHA-alignment / unpushed-recovery check sees
         # current `origin/<branch>`), then for the base branch (so the
-        # upcoming `git merge` sees current `origin/<base>`).
+        # upcoming `git rebase` sees current `origin/<base>`).
         self.assertEqual(authed_fetch_mock.call_count, 2)
         refspecs = [call.args[1] for call in authed_fetch_mock.call_args_list]
         cwds = [call.kwargs["cwd"] for call in authed_fetch_mock.call_args_list]
@@ -424,9 +424,9 @@ class HandleResolvingConflictUsesAuthedFetchTest(
 class GitHardenedInjectsIdentityTest(unittest.TestCase):
     """`_git_hardened` strips global/system git config (where `user.name`
     / `user.email` typically live), so without explicit `GIT_AUTHOR_*` /
-    `GIT_COMMITTER_*` env vars a `git merge --no-edit` that needs to
-    create a merge commit fails with "Committer identity unknown" and
-    parks the issue as a non-conflict failure rather than resolving.
+    `GIT_COMMITTER_*` env vars a `git rebase` that needs to replay commits
+    can fail with "Committer identity unknown" and park the issue as a
+    non-conflict failure rather than resolving.
     """
 
     def test_env_includes_committer_and_author_identity(self) -> None:
@@ -440,7 +440,7 @@ class GitHardenedInjectsIdentityTest(unittest.TestCase):
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with mock_patch("subprocess.run", side_effect=fake_run):
-            workflow._git_hardened("merge", "--no-edit", "x", cwd=Path("/tmp"))
+            workflow._git_hardened("rebase", "x", cwd=Path("/tmp"))
 
         env = captured["env"]
         self.assertEqual(env.get("GIT_AUTHOR_NAME"), config.AGENT_GIT_NAME)
@@ -906,8 +906,8 @@ class HandleResolvingConflictDispatchTest(unittest.TestCase):
 class HandleResolvingConflictTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
-    """Drive `_handle_resolving_conflict` through the merge / push / cap /
-    PR-state branches with `_git`, `_merge_base_into_worktree`, and the
+    """Drive `_handle_resolving_conflict` through the rebase / push / cap /
+    PR-state branches with `_git`, `_rebase_base_into_worktree`, and the
     push helper mocked so no shell-out happens.
     """
 
@@ -959,6 +959,7 @@ class HandleResolvingConflictTest(
         run_agent_result=None,
         fetch_returncode: int = 0,
         dirty_files=(),
+        rebase_in_progress: bool = False,
     ):
         from unittest.mock import MagicMock
 
@@ -976,7 +977,7 @@ class HandleResolvingConflictTest(
         git_mock = MagicMock(return_value=fetch_result)
         git_hardened_mock = MagicMock(return_value=fetch_result)
         with patch.object(
-            workflow, "_merge_base_into_worktree", merge_mock
+            workflow, "_rebase_base_into_worktree", merge_mock
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_hardened_mock,
         ):
@@ -988,25 +989,34 @@ class HandleResolvingConflictTest(
                 push_branch=push_branch,
                 head_shas=head_shas,
                 dirty_files=dirty_files,
+                rebase_in_progress=rebase_in_progress,
             )
         return mocks, merge_mock, git_mock
 
-    def test_clean_merge_pushes_and_flips_to_validating(self) -> None:
-        gh, issue, pr = self._seed()
+    def test_clean_rebase_pushes_and_flips_to_validating(self) -> None:
+        gh, issue, pr = self._seed(
+            extra_state={"agent_approved_sha": "stale-approval"},
+        )
         mocks, merge_mock, git_mock = self._run_with_merge(
             gh, issue,
             merge_succeeded=True,
             head_shas=["beforehead", "merged"],
             push_branch=True,
         )
-        # Agent must NOT be spawned -- a clean base-merge does not need
+        # Agent must NOT be spawned -- a clean base rebase does not need
         # the dev to do anything.
         mocks["run_agent"].assert_not_called()
         merge_mock.assert_called_once()
-        mocks["_push_branch"].assert_called_once()
+        mocks["_push_branch"].assert_called_once_with(
+            _TEST_SPEC,
+            _FAKE_WT,
+            self.BRANCH,
+            force_with_lease="beforehead",
+        )
         self.assertIn((200, "validating"), gh.label_history)
         data = gh.pinned_data(200)
         self.assertEqual(data.get("review_round"), 0)
+        self.assertIsNone(data.get("agent_approved_sha"))
         self.assertEqual(data.get("conflict_round"), 1)
         self.assertIn("last_conflict_resolved_at", data)
 
@@ -1028,11 +1038,11 @@ class HandleResolvingConflictTest(
         self.assertEqual(data.get("conflict_round"), 0)
         self.assertFalse(data.get("awaiting_human"))
 
-    def test_clean_merge_already_up_to_date_skips_push_and_ticks_round(
+    def test_clean_rebase_already_up_to_date_skips_push_and_ticks_round(
         self,
     ) -> None:
         # When the base hasn't moved (e.g. unmergeability is purely due to
-        # branch protection), the merge is a no-op and there is nothing to
+        # branch protection), the rebase is a no-op and there is nothing to
         # push. The handler must still increment `conflict_round` so the
         # cap eventually fires -- otherwise the in_review <-> resolving
         # cycle would loop forever.
@@ -1051,9 +1061,9 @@ class HandleResolvingConflictTest(
         self.assertEqual(data.get("review_round"), 0)
         self.assertEqual(data.get("conflict_round"), 1)
 
-    def test_no_op_merge_loops_until_cap_fires(self) -> None:
+    def test_no_op_rebase_loops_until_cap_fires(self) -> None:
         # A PR stuck unmergeable purely due to branch protection would
-        # bounce between in_review and resolving_conflict with the merge
+        # bounce between in_review and resolving_conflict with the rebase
         # always a no-op. The cap must fire after MAX_CONFLICT_ROUNDS
         # such no-op rounds.
         gh, issue, pr = self._seed(extra_state={"conflict_round": 2})
@@ -1080,7 +1090,9 @@ class HandleResolvingConflictTest(
     def test_conflict_resolved_by_agent_pushes_and_flips_to_validating(
         self,
     ) -> None:
-        gh, issue, pr = self._seed()
+        gh, issue, pr = self._seed(
+            extra_state={"agent_approved_sha": "stale-approval"},
+        )
         mocks, merge_mock, git_mock = self._run_with_merge(
             gh, issue,
             merge_succeeded=False,
@@ -1093,11 +1105,20 @@ class HandleResolvingConflictTest(
         prompt = mocks["run_agent"].call_args.args[1]
         self.assertIn("a.py", prompt)
         self.assertIn("b.py", prompt)
-        self.assertIn("merge", prompt.lower())
-        mocks["_push_branch"].assert_called_once()
+        self.assertIn("rebase", prompt.lower())
+        self.assertIn("git rebase --skip", prompt)
+        self.assertIn("git commit --allow-empty", prompt)
+        self.assertIn("git rebase --abort", prompt)
+        mocks["_push_branch"].assert_called_once_with(
+            _TEST_SPEC,
+            _FAKE_WT,
+            self.BRANCH,
+            force_with_lease="beforehead",
+        )
         self.assertIn((200, "validating"), gh.label_history)
         data = gh.pinned_data(200)
         self.assertEqual(data.get("review_round"), 0)
+        self.assertIsNone(data.get("agent_approved_sha"))
         self.assertEqual(data.get("conflict_round"), 1)
         self.assertIn("last_conflict_resolved_at", data)
 
@@ -1214,7 +1235,7 @@ class HandleResolvingConflictTest(
         # so wire dirty_files through the kwarg rather than a separate
         # outer patch (which `_run`'s patch would override).
         with patch.object(
-            workflow, "_merge_base_into_worktree", merge_mock
+            workflow, "_rebase_base_into_worktree", merge_mock
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_mock,
         ):
@@ -1235,6 +1256,29 @@ class HandleResolvingConflictTest(
         self.assertTrue(data.get("awaiting_human"))
         self.assertNotIn((200, "validating"), gh.label_history)
 
+    def test_agent_left_rebase_in_progress_parks_without_push(self) -> None:
+        gh, issue, pr = self._seed()
+        mocks, merge_mock, git_mock = self._run_with_merge(
+            gh, issue,
+            merge_succeeded=False,
+            conflicted_files=["a.py"],
+            head_shas=["beforehead", "after"],
+            push_branch=True,
+            run_agent_result=_agent(
+                session_id="dev-sess",
+                last_message="I resolved one stop but another remains",
+            ),
+            rebase_in_progress=True,
+        )
+
+        mocks["_push_branch"].assert_not_called()
+        data = gh.pinned_data(200)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertNotIn((200, "validating"), gh.label_history)
+        last_comment = gh.posted_comments[-1][1]
+        self.assertIn("rebase is still in progress", last_comment)
+        self.assertIn("I resolved one stop", last_comment)
+
     def test_push_failure_parks_awaiting_human(self) -> None:
         gh, issue, pr = self._seed()
         mocks, merge_mock, git_mock = self._run_with_merge(
@@ -1254,7 +1298,7 @@ class HandleResolvingConflictTest(
 
     def test_awaiting_human_no_new_comments_is_quiet(self) -> None:
         # Once parked, ticks without a new human reply must not retry --
-        # otherwise the cap is meaningless and a poisoned merge would
+        # otherwise the cap is meaningless and a poisoned rebase would
         # burn tokens. The parked state stays put.
         gh, issue, pr = self._seed(
             extra_state={
@@ -1270,7 +1314,7 @@ class HandleResolvingConflictTest(
             return_value=MagicMock(returncode=0, stdout="", stderr="")
         )
         with patch.object(
-            workflow, "_merge_base_into_worktree", merge_mock
+            workflow, "_rebase_base_into_worktree", merge_mock
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_mock,
         ):
@@ -1289,13 +1333,14 @@ class HandleResolvingConflictTest(
         # `_on_question` / `_on_dirty_worktree` parks tell the human
         # "reply with guidance and the orchestrator will resume the
         # session". Honor that contract: a fresh comment past the
-        # watermark must resume the dev on the in-progress merge
+        # watermark must resume the dev on the in-progress rebase
         # worktree, NOT keep the issue stuck until a manual relabel.
         gh, issue, pr = self._seed(
             extra_state={
                 "awaiting_human": True,
                 "conflict_round": 1,
                 "last_action_comment_id": 1000,
+                "agent_approved_sha": "stale-approval",
             },
         )
         # Fresh comment above the watermark.
@@ -1313,16 +1358,22 @@ class HandleResolvingConflictTest(
             push_branch=True,
         )
 
-        # Resume runs the agent with the human's text; merge is NOT
-        # re-attempted (the worktree is mid-merge already).
+        # Resume runs the agent with the human's text; rebase is NOT
+        # re-attempted (the worktree is mid-rebase already).
         mocks["run_agent"].assert_called_once()
         prompt = mocks["run_agent"].call_args.args[1]
         self.assertIn("try harder", prompt)
         merge_mock.assert_not_called()
         # Successful resume pushes the branch and flips to validating.
-        mocks["_push_branch"].assert_called_once()
+        mocks["_push_branch"].assert_called_once_with(
+            _TEST_SPEC,
+            _FAKE_WT,
+            self.BRANCH,
+            force_with_lease=None,
+        )
         data = gh.pinned_data(200)
         self.assertEqual(data.get("review_round"), 0)
+        self.assertIsNone(data.get("agent_approved_sha"))
         self.assertEqual(data.get("conflict_round"), 2)
         self.assertIn((200, "validating"), gh.label_history)
         # Watermark advanced past the consumed comment.
@@ -1338,7 +1389,7 @@ class HandleResolvingConflictTest(
         # (still below the threshold), and the human would have to comment
         # twice more before recovery. With the fix, `_resume_dev_with_text`
         # transparently retries with a fresh spawn in the same worktree;
-        # the merge commit produced by the retry pushes and the issue
+        # the rebase commit produced by the retry pushes and the issue
         # flips back to validating in a single tick.
         gh, issue, pr = self._seed(
             extra_state={
@@ -1373,7 +1424,7 @@ class HandleResolvingConflictTest(
             return_value=MagicMock(returncode=0, stdout="", stderr="")
         )
         with patch.object(
-            workflow, "_merge_base_into_worktree", merge_mock,
+            workflow, "_rebase_base_into_worktree", merge_mock,
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_mock,
         ):
@@ -1454,7 +1505,7 @@ class HandleResolvingConflictTest(
             return_value=MagicMock(returncode=0, stdout="", stderr="")
         )
         with patch.object(
-            workflow, "_merge_base_into_worktree", merge_mock,
+            workflow, "_rebase_base_into_worktree", merge_mock,
         ), patch.object(workflow, "_git", git_mock), patch.object(
             workflow, "_git_hardened", git_mock,
         ):
@@ -1480,7 +1531,7 @@ class HandleResolvingConflictTest(
         from unittest.mock import MagicMock
         merge_mock = MagicMock(return_value=(True, []))
 
-        with patch.object(workflow, "_merge_base_into_worktree", merge_mock):
+        with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
             mocks = self._run(
                 lambda: workflow._handle_resolving_conflict(
                     gh, _TEST_SPEC, issue,
@@ -1491,7 +1542,7 @@ class HandleResolvingConflictTest(
                 # unpushed resolution); not behind.
                 branch_ahead_behind=(1, 0),
             )
-        # Recovered work pushed; merge NOT attempted (we already have a
+        # Recovered work pushed; rebase NOT attempted (we already have a
         # resolution waiting to ship).
         mocks["_push_branch"].assert_called_once()
         merge_mock.assert_not_called()
@@ -1515,7 +1566,7 @@ class HandleResolvingConflictTest(
         from unittest.mock import MagicMock
         merge_mock = MagicMock(return_value=(True, []))
 
-        with patch.object(workflow, "_merge_base_into_worktree", merge_mock):
+        with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
             mocks = self._run(
                 lambda: workflow._handle_resolving_conflict(
                     gh, _TEST_SPEC, issue,
@@ -1541,7 +1592,7 @@ class HandleResolvingConflictTest(
         from unittest.mock import MagicMock
         merge_mock = MagicMock(return_value=(True, []))
 
-        with patch.object(workflow, "_merge_base_into_worktree", merge_mock):
+        with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
             mocks = self._run(
                 lambda: workflow._handle_resolving_conflict(
                     gh, _TEST_SPEC, issue,
@@ -1565,7 +1616,7 @@ class HandleResolvingConflictTest(
         from unittest.mock import MagicMock
         merge_mock = MagicMock(return_value=(True, []))
 
-        with patch.object(workflow, "_merge_base_into_worktree", merge_mock):
+        with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
             mocks = self._run(
                 lambda: workflow._handle_resolving_conflict(
                     gh, _TEST_SPEC, issue,
@@ -1592,7 +1643,7 @@ class HandleResolvingConflictTest(
         from unittest.mock import MagicMock
         merge_mock = MagicMock(return_value=(True, []))
 
-        with patch.object(workflow, "_merge_base_into_worktree", merge_mock):
+        with patch.object(workflow, "_rebase_base_into_worktree", merge_mock):
             mocks = self._run(
                 lambda: workflow._handle_resolving_conflict(
                     gh, _TEST_SPEC, issue,
@@ -1611,10 +1662,10 @@ class HandleResolvingConflictTest(
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted", last_comment)
 
-    def test_dirty_clean_merge_with_new_commit_parks_without_push(self) -> None:
-        # Clean merge produced a merge commit (HEAD changed) but the
+    def test_dirty_clean_rebase_with_new_commit_parks_without_push(self) -> None:
+        # Clean rebase produced a new HEAD but the
         # worktree carries pre-existing dirty files. Pushing the merge
-        # commit without those edits would publish an incomplete branch.
+        # rebased branch without those edits would publish an incomplete branch.
         gh, issue, pr = self._seed()
         mocks, merge_mock, _ = self._run_with_merge(
             gh, issue,
@@ -1628,8 +1679,8 @@ class HandleResolvingConflictTest(
         data = gh.pinned_data(200)
         self.assertTrue(data.get("awaiting_human"))
 
-    def test_dirty_clean_merge_no_op_parks_without_flip(self) -> None:
-        # Clean no-op merge (HEAD didn't change because base hadn't
+    def test_dirty_clean_rebase_no_op_parks_without_flip(self) -> None:
+        # Clean no-op rebase (HEAD didn't change because base hadn't
         # moved) but the worktree carries dirty files. The reviewer
         # at validating reads the worktree directly, so flipping with a
         # dirty tree would let the agent vote on something that does NOT

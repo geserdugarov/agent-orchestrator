@@ -318,7 +318,7 @@ def _branch_ahead_behind(
     calling so the comparison is against the current remote tip.
     Returns `(0, 0)` on git error so a transient failure does not
     silently re-route the workflow; the caller's subsequent steps
-    (the merge attempt, the push) surface the underlying problem.
+    (the rebase attempt, the push) surface the underlying problem.
     """
     r = _git_hardened(
         "rev-list", "--left-right", "--count",
@@ -880,28 +880,30 @@ def _squash_and_force_push(
 def _git_hardened(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     """`_git` plus the agent-hostile-environment hardening from `_push_branch`.
 
-    Used for `git merge` inside a worktree the agent can write to: a
+    Used for local git operations inside a worktree the agent can write to: a
     planted `core.hooksPath`, `core.fsmonitor`, or url rewrite rule in
     the worktree's `.git/config` (or in `~/.gitconfig`) would otherwise
-    execute attacker code mid-merge or redirect a transient fetch to an
+    execute attacker code mid-operation or redirect a transient fetch to an
     attacker-controlled host. Drops global/system git config so url
     `insteadOf` rewrites and host-wide hooks cannot apply, and disables
-    repo-local hooks / fsmonitor / credential helpers via `-c` overrides.
-    No askpass is wired in -- this helper is for local-only operations
-    (merge); push remains the only call site that handles GIT_TOKEN.
+    repo-local hooks / fsmonitor / credential helpers / commit signing via
+    `-c` overrides. No askpass is wired in -- this helper is for local-only
+    operations (rebase, diff, rev-parse); push remains the only call site
+    that handles GIT_TOKEN.
 
     Injects `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env vars (matching the
-    agent spawn's `_agent_env`) so a `git merge --no-edit` that needs
-    to create a merge commit doesn't fail with "Committer identity
-    unknown" -- stripping global config also strips any `user.name` /
-    `user.email` set there, and env vars take precedence over config
-    so the orchestrator's identity stamps the merge commit cleanly.
+    agent spawn's `_agent_env`) so a `git rebase` that needs to replay
+    commits doesn't fail with "Committer identity unknown" -- stripping
+    global config also strips any `user.name` / `user.email` set there,
+    and env vars take precedence over config.
     """
     git_prefix = [
         "git",
         "-c", "core.hooksPath=/dev/null",
         "-c", "credential.helper=",
         "-c", "core.fsmonitor=",
+        "-c", "commit.gpgsign=false",
+        "-c", "rebase.autoStash=false",
     ]
     env = {
         **os.environ,
@@ -923,16 +925,16 @@ def _git_hardened(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-def _merge_base_into_worktree(
+def _rebase_base_into_worktree(
     spec: RepoSpec, worktree: Path
 ) -> Tuple[bool, list[str]]:
-    """Run `git merge --no-edit origin/<base>` in the worktree.
+    """Run `git rebase origin/<base>` in the worktree.
 
     Returns `(succeeded, conflicted_files)`. On success, `conflicted_files`
-    is empty -- whether the merge fast-forwarded (no commit) or produced a
-    merge commit is the caller's job to detect via the HEAD-SHA delta.
-    On failure, the conflicted-file list is the unmerged paths from
-    `git diff --name-only --diff-filter=U`; an empty list means the merge
+    is empty -- whether the rebase was a no-op or replayed commits is the
+    caller's job to detect via the HEAD-SHA delta. On failure, the
+    conflicted-file list is the unmerged paths from
+    `git diff --name-only --diff-filter=U`; an empty list means the rebase
     failed for a non-conflict reason (hooks, permissions, etc.) and the
     caller should park rather than ask the agent to resolve nothing.
 
@@ -942,7 +944,7 @@ def _merge_base_into_worktree(
     code under the orchestrator's UID at diff time.
     """
     r = _git_hardened(
-        "merge", "--no-edit",
+        "rebase",
         f"{spec.remote_name}/{spec.base_branch}", cwd=worktree,
     )
     if r.returncode == 0:
@@ -955,6 +957,34 @@ def _merge_base_into_worktree(
         if line.strip()
     ]
     return False, files
+
+
+def _merge_base_into_worktree(
+    spec: RepoSpec, worktree: Path
+) -> Tuple[bool, list[str]]:
+    """Compatibility alias for older patches/imports.
+
+    TODO(remove after 2026-08-24): drop once out-of-repo patches have moved
+    to `_rebase_base_into_worktree`.
+    """
+    return _rebase_base_into_worktree(spec, worktree)
+
+
+def _rebase_in_progress(worktree: Path) -> bool:
+    """Return True when the worktree still has an unfinished rebase."""
+    for state_dir in ("rebase-merge", "rebase-apply"):
+        r = _git_hardened("rev-parse", "--git-path", state_dir, cwd=worktree)
+        if r.returncode != 0:
+            continue
+        path = (r.stdout or "").strip()
+        if not path:
+            continue
+        state_path = Path(path)
+        if not state_path.is_absolute():
+            state_path = worktree / state_path
+        if state_path.exists():
+            return True
+    return False
 
 
 def _authed_fetch(
@@ -1175,36 +1205,33 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
 
     Two paths depending on whether a PR already exists for the issue:
 
-    * **Pre-PR worktrees** (no `pr_number` in pinned state): merge
-      `origin/<base>` directly into the local worktree -- no remote yet,
-      so a local-only merge commit is the right outcome and there is
-      nothing to push.
+    * **Pre-PR worktrees** (no `pr_number` in pinned state): rebase
+      the local worktree onto `origin/<base>` -- no remote yet, so there
+      is nothing to push.
 
-    * **PR-having worktrees** (validating / in_review): merging locally
+    * **PR-having worktrees** (validating / in_review): rebasing locally
       WITHOUT pushing would diverge local HEAD from `pr.head.sha` and
       break the validating reviewer (it reads local HEAD, so it would
       snapshot `agent_approved_sha` to a SHA that isn't on the PR),
       `_squash_and_force_push`'s `--force-with-lease=<original_head>`
-      (the lease compares against the un-merged remote tip), and
+      (the lease compares against the un-rebased remote tip), and
       AUTO_MERGE's `agent_approved_sha == pr.head.sha` gate. So instead
       we route the issue to `resolving_conflict`: the existing handler
-      does the merge, pushes, and flips back to `validating` so the
-      reviewer re-runs on the merged head. Applying the `hold_base_sync`
-      label to an issue pauses both the pre-PR local merge and the PR
+      does the rebase, pushes, and flips back to `validating` so the
+      reviewer re-runs on the rebased head. Applying the `hold_base_sync`
+      label to an issue pauses both the pre-PR local rebase and the PR
       detour until the label is removed. This works under
       `AUTO_MERGE=off` too -- `_handle_resolving_conflict` never reads
-      AUTO_MERGE, it just does the merge+push+relabel cycle. Issues
+      AUTO_MERGE, it just does the rebase+push+relabel cycle. Issues
       already labeled `resolving_conflict` are left alone (the handler
       runs this tick anyway); other labels are skipped (no PR worktree
       to refresh in those states).
 
-    Merge over rebase is the codebase's standing contract (see
-    `_handle_resolving_conflict`'s docstring): rebase rewrites every
-    commit's SHA, which would invalidate any stored `agent_approved_sha`
-    in surprising ways and force the reviewer to re-approve the entire
-    branch even when only the base content changed.
+    Rebase keeps the PR history linear after sibling PRs land. The handler
+    resets `review_round` on every pushed rebase, so the reviewer re-runs
+    against the rewritten SHA before any merge gate can pass.
 
-    Conflicts on the pre-PR path abort the merge so the worktree stays
+    Conflicts on the pre-PR path abort the rebase so the worktree stays
     on its original SHA -- conflict resolution still belongs to
     `_handle_resolving_conflict`. Dirty worktrees are skipped so a
     crash-recovered tree with uncommitted edits is never disturbed
@@ -1246,7 +1273,7 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
 # in_review are the long-lived PR-stage labels: validating may run the
 # reviewer again, in_review is parked waiting for AUTO_MERGE / human merge.
 # `resolving_conflict` itself is excluded -- the handler runs this tick
-# regardless and will do the merge anyway. Other labels mean either no PR
+# regardless and will do the rebase anyway. Other labels mean either no PR
 # yet (pre-PR path applies instead) or terminal (done/rejected, nothing to
 # refresh).
 _PR_REFRESH_DETOUR_LABELS = frozenset({"validating", "in_review"})
@@ -1257,13 +1284,13 @@ def _sync_worktree_with_base(
 ) -> None:
     """Bring a single per-issue worktree up to date with `origin/<base>`.
 
-    Pre-PR: merge `origin/<base>` directly. PR-having + behind base +
+    Pre-PR: rebase onto `origin/<base>` directly. PR-having + behind base +
     label in {validating, in_review}: detour the issue to
-    `resolving_conflict` so the existing handler does merge + push +
+    `resolving_conflict` so the existing handler does rebase + push +
     relabel-to-validating in one consistent flow. Skips a dirty worktree
-    or a worktree already up to date (no pre-PR merge attempted, no PR
-    detour fired). On a pre-PR content conflict, aborts the merge so the
-    worktree stays on its pre-merge SHA -- conflict resolution lives in
+    or a worktree already up to date (no pre-PR rebase attempted, no PR
+    detour fired). On a pre-PR content conflict, aborts the rebase so the
+    worktree stays on its pre-rebase SHA -- conflict resolution lives in
     `_handle_resolving_conflict`, not here.
     """
     try:
@@ -1275,7 +1302,7 @@ def _sync_worktree_with_base(
         return
     if issue_has_label(issue, BACKLOG_LABEL):
         # Match the dispatcher's hard-skip: `backlog` means "the orchestrator
-        # should not touch this issue at all", so refresh must not merge
+        # should not touch this issue at all", so refresh must not rebase
         # base, post a PR comment, or detour the issue to
         # `resolving_conflict` before `_process_issue` would have skipped it.
         log.debug(
@@ -1322,29 +1349,29 @@ def _sync_worktree_with_base(
         )
         return
 
-    succeeded, conflicted = _merge_base_into_worktree(spec, worktree)
+    succeeded, conflicted = _rebase_base_into_worktree(spec, worktree)
     if succeeded:
         log.info(
-            "issue=#%d merged %s into worktree (was %d commit(s) behind)",
+            "issue=#%d rebased worktree onto %s (was %d commit(s) behind)",
             issue_number, base_ref, behind,
         )
         return
 
-    abort = _git_hardened("merge", "--abort", cwd=worktree)
+    abort = _git_hardened("rebase", "--abort", cwd=worktree)
     if abort.returncode != 0:
         log.warning(
-            "issue=#%d base merge failed and abort failed: %s",
+            "issue=#%d base rebase failed and abort failed: %s",
             issue_number, (abort.stderr or "").strip(),
         )
     if conflicted:
         log.info(
-            "issue=#%d base merge has %d conflict(s); aborted -- "
+            "issue=#%d base rebase has %d conflict(s); aborted -- "
             "resolving_conflict will handle it once a PR exists",
             issue_number, len(conflicted),
         )
     else:
         log.warning(
-            "issue=#%d base merge failed without conflicted files; aborted",
+            "issue=#%d base rebase failed without conflicted files; aborted",
             issue_number,
         )
 
@@ -1361,10 +1388,10 @@ def _route_pr_worktree_to_resolving_conflict(
 
     Mirrors `_handle_in_review`'s unmergeable detour, just driven by a
     base advance instead of a PyGithub `mergeable=False`. The handler
-    then runs `git merge origin/<base>` in the worktree, pushes, and
-    relabels to `validating` so the reviewer re-runs on the merged head
+    then runs `git rebase origin/<base>` in the worktree, pushes, and
+    relabels to `validating` so the reviewer re-runs on the rebased head
     -- the only safe pattern for PR-having worktrees, since a local-only
-    merge commit would diverge local HEAD from `pr.head.sha` and break
+    rebase would diverge local HEAD from `pr.head.sha` and break
     every downstream gate that compares the two. Works under both
     AUTO_MERGE on (replaces the unmergeable trigger) and AUTO_MERGE off
     (the only auto-rebase path under that mode -- `_handle_in_review`'s
@@ -1375,10 +1402,10 @@ def _route_pr_worktree_to_resolving_conflict(
     * The label is not one this refresh knows how to drive into
       `resolving_conflict` (only `validating` / `in_review`); the
       `resolving_conflict` label itself is also skipped because the
-      handler runs this tick anyway and will do the merge regardless.
+      handler runs this tick anyway and will do the rebase regardless.
 
     * `awaiting_human=True`. `_handle_resolving_conflict`'s awaiting-human
-      branch returns early without merging unless a new human comment
+      branch returns early without rebasing unless a new human comment
       arrived; relabeling here would just hide the existing park behind a
       `resolving_conflict` label without making any progress, including
       the documented `AUTO_MERGE=off` unmergeable park path. The park
@@ -1390,7 +1417,7 @@ def _route_pr_worktree_to_resolving_conflict(
       intervention after repeated failures.
 
     * The issue has `hold_base_sync`, which is an explicit operator hold for
-      series work where base should be merged once after prerequisite PRs
+      series work where base should be integrated once after prerequisite PRs
       land, not after every intermediate base advance.
 
     * The PR is no longer open. A merged PR advances `origin/<base>`, so
@@ -1464,7 +1491,7 @@ def _route_pr_worktree_to_resolving_conflict(
 
     log.info(
         "issue=#%d behind %s/%s by %d commit(s); routing %r -> "
-        "resolving_conflict so the handler can merge, push, and re-review",
+        "resolving_conflict so the handler can rebase, push, and re-review",
         issue.number, spec.remote_name, spec.base_branch, behind, label,
     )
 
@@ -1479,7 +1506,7 @@ def _route_pr_worktree_to_resolving_conflict(
             gh, pr_number, state,
             f":mag: PR is {behind} commit(s) behind "
             f"`{spec.remote_name}/{spec.base_branch}`; "
-            "orchestrator is attempting auto-resolution by merging it into "
+            "orchestrator is attempting auto-resolution by rebasing "
             "the branch (label: `resolving_conflict`).",
         )
     except Exception:

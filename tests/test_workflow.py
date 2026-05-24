@@ -1670,15 +1670,15 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self,
     ) -> None:
         # Regression for the validating/squash/AUTO_MERGE break: a local-only
-        # merge commit on a worktree whose branch has already been pushed
+        # base update on a worktree whose branch has already been pushed
         # diverges local HEAD from `pr.head.sha`. The reviewer would then
         # snapshot `agent_approved_sha` to a SHA that isn't on the PR (the
-        # local merge commit), `_squash_and_force_push`'s
+        # local updated HEAD), `_squash_and_force_push`'s
         # `--force-with-lease=<original_head>` would reject (the remote is
         # still at the un-merged tip), and AUTO_MERGE's
         # `agent_approved_sha == pr.head.sha` check would never pass.
         # The fix is to detour the issue to `resolving_conflict` so the
-        # existing handler does merge + push + relabel-to-validating in one
+        # existing handler does rebase + push + relabel-to-validating in one
         # consistent flow.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
@@ -1688,10 +1688,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Behind base by 3 commits.
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
-             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_rebase_base_into_worktree", merge), \
              patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
-        # Local merge MUST NOT have happened on the PR worktree.
+        # Local base update MUST NOT have happened on the PR worktree.
         merge.assert_not_called()
         # Label flipped to resolving_conflict.
         self.assertIn((7, "resolving_conflict"), self.gh.label_history)
@@ -1727,7 +1727,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge = MagicMock()
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
-             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_rebase_base_into_worktree", merge), \
              patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
 
@@ -1735,7 +1735,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(self.gh.label_history, [])
         self.assertEqual(self.gh.posted_pr_comments, [])
 
-    def test_hold_base_sync_label_skips_pre_pr_base_merge(self) -> None:
+    def test_hold_base_sync_label_skips_pre_pr_base_rebase(self) -> None:
         from unittest.mock import MagicMock
         issue = make_issue(7, label="implementing")
         issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
@@ -1743,7 +1743,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge = MagicMock()
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
-             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_rebase_base_into_worktree", merge), \
              patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
 
@@ -1763,7 +1763,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge = MagicMock()
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
-             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_rebase_base_into_worktree", merge), \
              patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
 
@@ -1771,7 +1771,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(self.gh.label_history, [])
         self.assertEqual(self.gh.posted_pr_comments, [])
 
-    def test_backlog_label_skips_pre_pr_base_merge(self) -> None:
+    def test_backlog_label_skips_pre_pr_base_rebase(self) -> None:
         from unittest.mock import MagicMock
         issue = make_issue(7, label="implementing")
         issue.labels.append(FakeLabel(BACKLOG_LABEL))
@@ -1779,7 +1779,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge = MagicMock()
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
-             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_rebase_base_into_worktree", merge), \
              patch.object(worktrees, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
 
@@ -1787,7 +1787,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(self.gh.label_history, [])
 
     def test_pr_having_resolving_conflict_label_does_not_re_route(self) -> None:
-        # The handler runs this tick anyway and will do the merge -- a
+        # The handler runs this tick anyway and will do the rebase -- a
         # second label flip is pointless and would re-post the PR notice.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="resolving_conflict"))
@@ -1946,7 +1946,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge = MagicMock()
         with patch.object(
             worktrees, "_worktree_dirty_files", return_value=["a.py"],
-        ), patch.object(worktrees, "_merge_base_into_worktree", merge):
+        ), patch.object(worktrees, "_rebase_base_into_worktree", merge):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         merge.assert_not_called()
 
@@ -1957,7 +1957,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         with patch.object(
             worktrees, "_worktree_dirty_files", return_value=[],
         ), patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_merge_base_into_worktree", merge):
+             patch.object(worktrees, "_rebase_base_into_worktree", merge):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         merge.assert_not_called()
 
@@ -1968,11 +1968,11 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         with patch.object(
             worktrees, "_worktree_dirty_files", return_value=[],
         ), patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_merge_base_into_worktree", merge):
+             patch.object(worktrees, "_rebase_base_into_worktree", merge):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         merge.assert_not_called()
 
-    def test_clean_merge_when_behind(self) -> None:
+    def test_clean_rebase_when_behind(self) -> None:
         from unittest.mock import MagicMock
         merge = MagicMock(return_value=(True, []))
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
@@ -1980,13 +1980,13 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         with patch.object(
             worktrees, "_worktree_dirty_files", return_value=[],
         ), patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_rebase_base_into_worktree", merge), \
              patch.object(worktrees, "_git_hardened", hardened):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         merge.assert_called_once()
         # No abort issued on success.
         self.assertFalse(
-            any(c.args[:1] == ("merge",) for c in hardened.call_args_list)
+            any(c.args[:1] == ("rebase",) for c in hardened.call_args_list)
         )
 
     def test_conflict_aborts_and_swallows(self) -> None:
@@ -1997,13 +1997,13 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         with patch.object(
             worktrees, "_worktree_dirty_files", return_value=[],
         ), patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_merge_base_into_worktree", merge), \
+             patch.object(worktrees, "_rebase_base_into_worktree", merge), \
              patch.object(worktrees, "_git_hardened", hardened):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         # Abort issued exactly once.
         abort_calls = [
             c for c in hardened.call_args_list
-            if c.args[:2] == ("merge", "--abort")
+            if c.args[:2] == ("rebase", "--abort")
         ]
         self.assertEqual(len(abort_calls), 1)
 
@@ -2012,7 +2012,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # must not crash the refresh -- skip silently.
         from unittest.mock import MagicMock
         merge = MagicMock()
-        with patch.object(worktrees, "_merge_base_into_worktree", merge):
+        with patch.object(worktrees, "_rebase_base_into_worktree", merge):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 9999)
         merge.assert_not_called()
 
@@ -2883,8 +2883,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
 class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
     """Integration coverage for `_refresh_base_and_worktrees` against a real
     bare remote + per-issue worktree. Mirrors `SquashHelperRealGitTest`'s
-    setup so the helper's interaction with `git fetch` / `git merge` /
-    `git merge --abort` is exercised end-to-end.
+    setup so the helper's interaction with `git fetch` / `git rebase` /
+    `git rebase --abort` is exercised end-to-end.
     """
 
     def _git(self, *args: str, cwd: Path, env_extra: dict | None = None) -> str:
@@ -2942,7 +2942,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
             base_branch="main",
         )
         # Default: per-issue worktree #7 is in `implementing` (no PR yet),
-        # so the refresh is allowed to merge base into it. Tests that want
+        # so the refresh is allowed to rebase it onto base. Tests that want
         # the PR-skip path call `_seed_pr_state(7)`.
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label="implementing"))
@@ -2984,7 +2984,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
 
     def _advance_base(self, *, conflicting: bool) -> None:
         """Push a new commit to origin/main. When `conflicting=True`, the
-        commit edits `feature.py` so a base-merge into the per-issue branch
+        commit edits `feature.py` so a base rebase of the per-issue branch
         will conflict with the local feature commit.
         """
         self._git("checkout", "main", cwd=self.work)
@@ -3003,7 +3003,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
     def _is_clean(self) -> bool:
         return self._git("status", "--porcelain", cwd=self.wt).strip() == ""
 
-    def test_clean_advance_merges_into_worktree(self) -> None:
+    def test_clean_advance_rebases_worktree(self) -> None:
         self._advance_base(conflicting=False)
         head_before = self._wt_head()
         with patch.object(
@@ -3014,6 +3014,10 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertNotEqual(head_before, head_after)
         # The base file landed in the worktree's tree.
         self.assertTrue((self.wt / "extra.txt").exists())
+        self.assertEqual(
+            self._git("log", "-1", "--format=%s", cwd=self.wt).strip(),
+            "feat: add feature",
+        )
         self.assertTrue(self._is_clean())
 
     def test_no_op_when_already_up_to_date(self) -> None:
@@ -3032,7 +3036,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
             workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
         ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
-        # HEAD did NOT move (merge aborted) and worktree is clean again --
+        # HEAD did NOT move (rebase aborted) and worktree is clean again --
         # the conflict surfaces later via the resolving_conflict stage.
         self.assertEqual(head_before, self._wt_head())
         self.assertTrue(self._is_clean())
@@ -3040,7 +3044,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
     def test_dirty_worktree_skipped_without_disturbing_changes(self) -> None:
         self._advance_base(conflicting=False)
         # Plant an uncommitted edit in the worktree -- mirrors a mid-flight
-        # agent edit. The base merge must NOT run.
+        # agent edit. The base rebase must NOT run.
         (self.wt / "scratch.py").write_text("scratch\n")
         head_before = self._wt_head()
         with patch.object(
@@ -3054,13 +3058,13 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
 
     def test_pr_open_worktree_is_not_merged_locally(self) -> None:
         # Regression: once a PR exists, the per-issue branch has been pushed
-        # and `pr.head.sha` equals local HEAD. A local-only base-merge would
+        # and `pr.head.sha` equals local HEAD. A local-only base rebase would
         # diverge them and break the validating reviewer (it reads local
         # HEAD), `_squash_and_force_push`'s lease check (it expects the
         # remote to equal `original_head` = local HEAD), and AUTO_MERGE's
         # `agent_approved_sha == pr.head.sha` gate. The refresh must NOT
-        # do a local merge here; instead it routes the issue to
-        # `resolving_conflict` so the existing handler does merge + push +
+        # do a local rebase here; instead it routes the issue to
+        # `resolving_conflict` so the existing handler does rebase + push +
         # relabel-to-validating in one consistent flow.
         # Replace the default `implementing` issue with one in `in_review`
         # plus the PR-having pinned state.
@@ -3073,7 +3077,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
             workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
         ):
             workflow._refresh_base_and_worktrees(self.gh, self.spec)
-        # HEAD did NOT move: no local-only merge commit was created.
+        # HEAD did NOT move: no local-only rebase was performed.
         self.assertEqual(head_before, self._wt_head())
         # The base file did NOT land in the worktree (not yet -- it will
         # after `_handle_resolving_conflict` runs and pushes).

@@ -100,12 +100,16 @@ from .worktrees import _git_hardened as _git_hardened
 from .worktrees import _has_new_commits as _has_new_commits
 from .worktrees import _head_sha as _head_sha
 from .worktrees import _is_conventional_subject as _is_conventional_subject
+# TODO(remove after 2026-08-24): remove this compatibility re-export with
+# worktrees._merge_base_into_worktree.
 from .worktrees import _merge_base_into_worktree as _merge_base_into_worktree
+from .worktrees import _rebase_base_into_worktree as _rebase_base_into_worktree
 from .worktrees import (
     _pr_title_from_commit_or_issue as _pr_title_from_commit_or_issue,
 )
 from .worktrees import _push_branch as _push_branch
 from .worktrees import _refresh_base_and_worktrees as _refresh_base_and_worktrees
+from .worktrees import _rebase_in_progress as _rebase_in_progress
 from .worktrees import _sanitize_slug as _sanitize_slug
 from .worktrees import _squash_and_force_push as _squash_and_force_push
 from .worktrees import _sync_worktree_with_base as _sync_worktree_with_base
