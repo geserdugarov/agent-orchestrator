@@ -172,12 +172,17 @@ treats `fixing` as a PR-having stage eligible for the
 **Conflict resolution stage.** Under `AUTO_MERGE=on`, approved-but-
 unmergeable PRs route to `resolving_conflict` instead of parking.
 `_handle_resolving_conflict` fetches base via `_authed_fetch`, runs
-`git merge --no-edit` under `_git_hardened`, and flips back to
-`validating` on clean merge (or no-op already-up-to-date).
+`git rebase <remote>/<base>` under `_git_hardened`. Pushed resolutions
+(clean rebase that moved HEAD, recovered push, agent-resolved
+conflicts, awaiting-human resume push, and user-content drift pushed
+fixes) flip to `documenting` so the docs pass runs on the rewritten
+tree before the reviewer re-runs; a base-up-to-date no-op (no diff
+changed) skips `documenting` and bounces straight back to `validating`.
 
 Real conflicts resume the dev session with a prompt naming up to 20
-conflicted paths. `MAX_CONFLICT_ROUNDS` (default 3) caps attempts. Merge
-over rebase preserves the stored `agent_approved_sha`.
+conflicted paths. `MAX_CONFLICT_ROUNDS` (default 3) caps attempts.
+Every pushed rebase drops the stored `agent_approved_sha` so the
+reviewer must re-approve the rewritten head before AUTO_MERGE can pass.
 
 **Question stage.** The operator-applied `question` workflow label
 runs `_handle_question` (in `orchestrator/stages/question.py`) as a
