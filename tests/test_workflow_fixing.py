@@ -787,3 +787,226 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No new feedback -> bounce back to validating (rather than
         # treating the orchestrator's own comment as fresh feedback).
         self.assertIn((880, "validating"), gh.label_history)
+
+    # --- crash/restart and failure-path coverage ------------------------
+
+    def test_missing_dev_session_resumes_via_fresh_spawn(self) -> None:
+        # `dev_session_id` may be absent on a `fixing` issue whose prior
+        # dev session was dropped by the silent-park fallback, or on
+        # legacy state that pre-dates session tracking. The fixing
+        # handler MUST NOT park on missing-session: `_resume_dev_with_text`
+        # treats `dev_sid=None` as the fresh-spawn case, so the dev
+        # resumes correctly with the locked backend. Asserting fresh
+        # spawn here pins the "resume correctly" half of the
+        # crash/restart contract (the other half -- park on missing
+        # `pr_number` -- is in `FixingLabelRoutingTest`).
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please tighten the test",
+            user=FakeUser("alice"), created_at=long_ago,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr, issue_comments=[comment],
+            extra_state={"dev_session_id": None},
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="fresh-sess",
+                    last_message="pushed fix",
+                ),
+                head_shas=("sha-before", "sha-after"),
+            )
+
+        # The handler resumed with `resume_session_id=None` -- the locked
+        # backend (`dev_agent=claude`) drives a fresh spawn rather than
+        # parking on the missing session.
+        mocks["run_agent"].assert_called_once()
+        call_args = mocks["run_agent"].call_args
+        self.assertIsNone(call_args.kwargs.get("resume_session_id"))
+        # Did NOT park -- the issue made progress instead.
+        data = gh.pinned_data(880)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertIn((880, "validating"), gh.label_history)
+
+    def test_push_failure_parks_in_fixing_with_transient_reason(self) -> None:
+        # Push failure on the dev fix -> park awaiting_human in `fixing`
+        # with the transient `push_failed` reason. The workflow label
+        # MUST stay at `fixing` so the operator can see where the issue
+        # is in the lifecycle; flipping to `validating` would imply the
+        # fix landed when it did not.
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please address the typo",
+            user=FakeUser("alice"), created_at=long_ago,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess", last_message="fixed",
+                ),
+                head_shas=("sha-before", "sha-after"),
+                push_branch=False,
+            )
+
+        data = gh.pinned_data(880)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "push_failed")
+        # Label stayed at `fixing` -- no relabel to `validating`.
+        self.assertNotIn((880, "validating"), gh.label_history)
+        # Watermark advanced past the consumed feedback so the next
+        # fixing tick does not replay it on top of the park.
+        self.assertGreaterEqual(data.get("pr_last_comment_id"), 2000)
+
+    def test_dirty_tree_parks_in_fixing(self) -> None:
+        # Dev committed but left the tree dirty -> park (refuses to
+        # push an incomplete branch). Label stays at `fixing`.
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please rename helper",
+            user=FakeUser("alice"), created_at=long_ago,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess", last_message="WIP",
+                ),
+                head_shas=("sha-before", "sha-after"),
+                dirty_files=["orchestrator/foo.py"],
+            )
+
+        data = gh.pinned_data(880)
+        self.assertTrue(data.get("awaiting_human"))
+        # `_on_dirty_worktree` clears `park_reason` (terminal, needs
+        # human reply); the audit event still records the reason.
+        self.assertIsNone(data.get("park_reason"))
+        self.assertNotIn((880, "validating"), gh.label_history)
+        # Watermark advanced past the consumed feedback.
+        self.assertGreaterEqual(data.get("pr_last_comment_id"), 2000)
+
+    def test_no_commit_question_parks_in_fixing(self) -> None:
+        # Dev returned a clarifying question with no new commit. The
+        # handler routes through `_on_question`, which parks
+        # awaiting_human and posts the agent's text on the issue
+        # thread. Label MUST stay at `fixing`.
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please address the lint",
+            user=FakeUser("alice"), created_at=long_ago,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    last_message="Should I prefer ruff or black for this?",
+                ),
+                # No new commit: head_sha unchanged between before/after.
+                head_shas=("sha-before", "sha-before"),
+            )
+
+        data = gh.pinned_data(880)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertNotIn((880, "validating"), gh.label_history)
+        # Agent's question was surfaced to the human.
+        joined = "\n".join(b for _, b in gh.posted_comments)
+        self.assertIn("Should I prefer ruff or black for this?", joined)
+
+    def test_agent_silent_failure_parks_in_fixing(self) -> None:
+        # Dev returned empty `last_message` and no commit. The handler
+        # routes through `_on_question`'s silent-failure branch, parks
+        # with `park_reason="agent_silent"`, and the silent-park
+        # counter ticks so a future resume can drop a poisoned session.
+        # Label MUST stay at `fixing`.
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please fix the import order",
+            user=FakeUser("alice"), created_at=long_ago,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    last_message="",
+                    exit_code=1,
+                ),
+                head_shas=("sha-before", "sha-before"),
+            )
+
+        data = gh.pinned_data(880)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "agent_silent")
+        self.assertNotIn((880, "validating"), gh.label_history)
+        # Silent-park streak counter ticked so the next resume can
+        # drop the poisoned session after the configured threshold.
+        self.assertGreaterEqual(
+            int(data.get("silent_park_count") or 0), 1,
+        )
+
+    def test_restart_with_pending_feedback_resumes_from_watermarks(
+        self,
+    ) -> None:
+        # Crash/restart contract: the orchestrator has no in-memory
+        # state across ticks, so a `fixing` issue with pending feedback
+        # in pinned state must drive the rescan entirely off the
+        # persisted watermarks + bookmarks. Simulate it by leaving the
+        # `pending_fix_*` bookmarks recorded by a prior in_review tick
+        # but starting with no transient state (no `awaiting_human`,
+        # no in-flight session); the rescan finds the triggering
+        # comment past `pr_last_comment_id`, debounce expires, and the
+        # dev resumes -- exactly as if the handler had never run before.
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please fix the off-by-one",
+            user=FakeUser("alice"), created_at=long_ago,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr, issue_comments=[comment],
+            # Bookmarks left by in_review when it routed; transient
+            # state cleared as if the process just started up.
+            extra_state={
+                "awaiting_human": False,
+                "pending_fix_at": "2026-05-23T00:00:00+00:00",
+                "pending_fix_issue_max_id": 2000,
+            },
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess", last_message="pushed",
+                ),
+                head_shas=("sha-before", "sha-after"),
+            )
+
+        mocks["run_agent"].assert_called_once()
+        # The followup quotes the triggering comment, proving the
+        # rescan re-derived the unread feedback from the persisted
+        # watermarks rather than relying on in-memory state.
+        prompt = mocks["run_agent"].call_args.args[1]
+        self.assertIn("please fix the off-by-one", prompt)
+        # Push succeeded -> back to validating; bookmarks cleared.
+        self.assertIn((880, "validating"), gh.label_history)
+        data = gh.pinned_data(880)
+        self.assertIsNone(data.get("pending_fix_at"))
+        self.assertIsNone(data.get("pending_fix_issue_max_id"))

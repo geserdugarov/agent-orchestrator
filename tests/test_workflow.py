@@ -4872,6 +4872,133 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         numbers = {i.number for i in gh.list_pollable_issues()}
         self.assertEqual(numbers, {710, 711})
 
+    def test_auto_merge_does_not_fire_while_label_is_fixing(self) -> None:
+        # Headline merge-safeguard contract: an approved + mergeable +
+        # green PR whose linked issue is labeled `fixing` MUST NOT
+        # auto-merge. The dispatcher routes `fixing` to `_handle_fixing`
+        # (which has no merge path), so `_handle_in_review` -- the only
+        # handler that calls `merge_pr` -- never runs. AUTO_MERGE is
+        # forced on here precisely so a regression that routes a
+        # `fixing` issue back into the in_review branch would
+        # immediately try to merge and break the assertion.
+        gh = FakeGitHubClient()
+        issue = make_issue(720, label="fixing")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=901, head_branch="orchestrator/issue-720",
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=True, check_state="success",
+            approved=True,
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            720, pr_number=pr.number,
+            branch="orchestrator/issue-720",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            agent_approved_sha="cafe1234",
+            pr_last_comment_id=1999,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            # Pending feedback recorded by the prior in_review tick.
+            pending_fix_at="2026-05-23T00:00:00+00:00",
+            pending_fix_issue_max_id=2000,
+        )
+
+        with patch.object(config, "AUTO_MERGE", True):
+            self._run(
+                lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        # No merge call, no flip to done -- AUTO_MERGE never had the
+        # chance to fire because the dispatcher routed to fixing.
+        self.assertEqual(gh.merge_calls, [])
+        self.assertNotIn((720, "done"), gh.label_history)
+
+
+class FixingConflictDetourTest(unittest.TestCase):
+    """A behind-base `fixing` worktree is detoured into
+    `resolving_conflict` by the pre-tick refresh. The detour must NOT
+    swallow pending PR feedback: the `pending_fix_*` bookmarks recorded
+    by the in_review handoff and the in_review watermarks MUST survive
+    the relabel, so the eventual return from `resolving_conflict` ->
+    `validating` -> `in_review` re-discovers the unread feedback and
+    routes it back to `fixing`.
+    """
+
+    def setUp(self) -> None:
+        self.spec = config.RepoSpec(
+            slug="acme/widget",
+            target_root=Path("/tmp/refresh-target-fixing"),
+            base_branch="main",
+        )
+        self.wt = Path("/tmp/refresh-wt-fixing")
+        self.gh = FakeGitHubClient()
+
+    def _git_result(
+        self, *, returncode: int = 0, stdout: str = ""
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            args=["git"], returncode=returncode, stdout=stdout, stderr="",
+        )
+
+    def test_fixing_detour_preserves_pending_feedback(self) -> None:
+        # A `fixing` worktree that is N commits behind `origin/<base>`
+        # must flip to `resolving_conflict` and PRESERVE the
+        # `pending_fix_*` bookmarks and `pr_last_comment_id` watermark.
+        # Any bump of those values here would silently consume the
+        # unread feedback that triggered the original in_review ->
+        # fixing route: when the resolving_conflict handler eventually
+        # pushes the rebase and the validating -> in_review handoff
+        # runs, the rescan would skip the (now-watermarked-past) human
+        # comment and AUTO_MERGE could land the PR over it.
+        self.gh.add_issue(make_issue(7, label="fixing"))
+        pr = FakePR(
+            number=42, head_branch="orchestrator/issue-7",
+            head=FakePRRef(sha="cafe1234"),
+            state="open",
+        )
+        self.gh.add_pr(pr)
+        self.gh.seed_state(
+            7,
+            pr_number=42,
+            branch="orchestrator/issue-7",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_last_comment_id=1999,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            pending_fix_at="2026-05-23T00:00:00+00:00",
+            pending_fix_issue_max_id=2000,
+            pending_fix_review_max_id=3000,
+            pending_fix_review_summary_max_id=4000,
+        )
+        # Behind base by 3 commits drives the detour.
+        git_mock = patch.object(
+            worktrees, "_git",
+            return_value=self._git_result(stdout="3\n"),
+        )
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             git_mock:
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+
+        # Detour fired: label flipped to resolving_conflict.
+        self.assertIn((7, "resolving_conflict"), self.gh.label_history)
+        # Pending-fix bookmarks survived the relabel so the eventual
+        # in_review re-entry can correlate the triggering ids.
+        data = self.gh.pinned_data(7)
+        self.assertEqual(data.get("pending_fix_at"), "2026-05-23T00:00:00+00:00")
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
+        self.assertEqual(data.get("pending_fix_review_max_id"), 3000)
+        self.assertEqual(data.get("pending_fix_review_summary_max_id"), 4000)
+        # And the in_review watermark is unchanged -- the rescan after
+        # resolving_conflict -> validating -> in_review will surface
+        # the original triggering comment as fresh feedback again.
+        self.assertEqual(data.get("pr_last_comment_id"), 1999)
+        self.assertEqual(data.get("pr_last_review_comment_id"), 0)
+        self.assertEqual(data.get("pr_last_review_summary_id"), 0)
+
 
 class InReviewRoutesFreshFeedbackToFixingTest(
     unittest.TestCase, _PatchedWorkflowMixin
