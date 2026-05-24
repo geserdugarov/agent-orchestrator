@@ -61,8 +61,11 @@ orchestrator/
                            invocations (`_git`, `_git_hardened`), authenticated
                            fetch/push (`_authed_fetch`, `_authed_target_fetch`,
                            `_push_branch`), `_squash_and_force_push`,
-                           `_refresh_base_and_worktrees`, and
-                           `_cleanup_terminal_branch`.
+                           `_refresh_base_and_worktrees`,
+                           `_cleanup_terminal_branch`, and the local-verify
+                           runner (`_run_verify_commands` + `VerifyResult`)
+                           used by `_handle_validating`'s pre-`in_review`
+                           gate.
   stages/
     __init__.py         — package marker; the dispatcher in `workflow.py`
                            still owns label→handler routing.
@@ -79,8 +82,10 @@ orchestrator/
     validating.py       — `_handle_validating` plus reviewer-session
                            lifecycle: `_handle_dev_fix_result`,
                            `_post_user_content_change_result`, validating-side
-                           transient-park recovery, and the watermark seeding
-                           for the validating→in_review handoff.
+                           transient-park recovery, the local-verify gate
+                           park helper (`_park_verify_failure`), and the
+                           watermark seeding for the validating→in_review
+                           handoff.
     in_review.py        — `_handle_in_review` plus PR-side primitives:
                            transient park-reason set, the quiet auto-merge
                            gate re-check, legacy watermark migration, and the
@@ -384,15 +389,16 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      Then spawn a **fresh reviewer session** via `run_agent(config.REVIEW_AGENT, review_prompt, wt, timeout=config.REVIEW_TIMEOUT, extra_args=config.REVIEW_AGENT_ARGS)` with the **reviewer prompt** (read-only: `git log` / `git diff origin/<spec.base_branch>...HEAD`, must end with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`).
   4. Parse last `VERDICT:` marker (`_parse_review_verdict`):
      - `approved` → in this order:
-       1. Post `:white_check_mark: codex review approved.` on the PR (so the comment exists even when squash later fails).
-       2. When `SQUASH_ON_APPROVAL` is on (default), call `_squash_and_force_push` to collapse the dev's commits into one. Subject reuses the first commit when already conventional-commit-shaped, otherwise `feat: <issue title>`; body lists the original subjects; pushed with `--force-with-lease` against the pre-squash SHA.
+       1. **Local-verify gate.** Run `_run_verify_commands(wt, config.VERIFY_COMMANDS, config.VERIFY_TIMEOUT)` in the per-issue worktree. A default-empty `VERIFY_COMMANDS` short-circuits to `status="ok"` so the legacy "no verification" behavior is unchanged. Any non-ok result parks the issue on `validating` via `_park_verify_failure` with a typed `park_reason` (`verify_failed`, `verify_timeout`, `verify_dirty`, or `verify_head_changed`) and a park comment that names the failing command, its exit code (or timeout), and a redacted / truncated tail of the captured output; the approval comment, squash, watermark seeding, and `in_review` handoff do **not** fire. GitHub CI remains the later auto-merge gate consulted by `_handle_in_review` — the verify gate is the first gate after the reviewer agent, not the only one. See [`configuration.md#local-verification-gate`](configuration.md#local-verification-gate) for the env-var reference and per-`park_reason` semantics.
+       2. Post `:white_check_mark: codex review approved.` on the PR (so the comment exists even when squash later fails).
+       3. When `SQUASH_ON_APPROVAL` is on (default), call `_squash_and_force_push` to collapse the dev's commits into one. Subject reuses the first commit when already conventional-commit-shaped, otherwise `feat: <issue title>`; body lists the original subjects; pushed with `--force-with-lease` against the pre-squash SHA.
 
           On squash or force-push failure, **park awaiting human and stay on `validating`** (no relabel) so the original commits remain on the branch for manual triage — the approval comment has already landed on the PR.
-       3. On success, if `squashed_count > 1` post `:package: squashed N commits to 1 after approval` to the PR before seeding the in_review watermarks, so the seed walks past it.
-       4. Snapshot `agent_approved_sha` from the **local SHA the reviewer (or the squash) produced** — explicitly *not* the current remote PR head. If the remote moves out from under us, `agent_approved_sha != pr.head.sha` in the auto-merge gate and AUTO_MERGE waits for a fresh review round.
+       4. On success, if `squashed_count > 1` post `:package: squashed N commits to 1 after approval` to the PR before seeding the in_review watermarks, so the seed walks past it.
+       5. Snapshot `agent_approved_sha` from the **local SHA the reviewer (or the squash) produced** — explicitly *not* the current remote PR head. If the remote moves out from under us, `agent_approved_sha != pr.head.sha` in the auto-merge gate and AUTO_MERGE waits for a fresh review round.
 
           With `SQUASH_ON_APPROVAL=off`, the snapshot is the pre-review local HEAD (`reviewed_sha` captured before `run_agent`).
-       5. Seed the in_review comment watermarks, then set label `in_review`.
+       6. Seed the in_review comment watermarks, then set label `in_review`.
      - `unknown` (no marker) → park.
      - `changes_requested` → post the feedback to the PR, then **resume the developer's session** on its locked spec (backend + args) with the fix prompt; if it produces a new commit on a clean tree, push and increment `review_round` for next tick.
 - **Output**: label moved to `in_review` (approval, squash succeeded or disabled) OR a new fix commit + bumped round OR a HITL park (squash/force-push failure stays on `validating` with the approval comment already on the PR; every other park branch keeps the existing label).
@@ -578,7 +584,7 @@ Extras whose value is `None` are dropped, so callers can pass optional context (
 | `stage_enter` | `set_workflow_label` (via `_emit_stage_enter`) for every label flip | `stage` |
 | `agent_spawn` / `agent_exit` | `_run_agent_with_tracking` wraps every `run_agent` call (decomposer, implementer, reviewer, dev-resume, conflict-resolution dev) | both carry `agent` (backend), `agent_role`, `review_round`, `retry_count`. `session_id` and the `agent_exit`-only fields are described below the table. |
 | `review_verdict` | `_handle_validating` after `_parse_review_verdict` reads the reviewer's last message | `verdict` (`approved` / `changes_requested` / `unknown`), `review_round`, `pr_number`, `session_id` |
-| `park_awaiting_human` | every `_park_awaiting_human` call site, plus `_on_question` and `_on_dirty_worktree` | `stage` (read from the current workflow label, not passed in), `reason` (`agent_timeout`, `push_failed`, `failed_checks`, `agent_question`, `agent_silent`, `dirty_worktree`, `reviewer_timeout` / `reviewer_failed`, `missing_pr_number`, ...) |
+| `park_awaiting_human` | every `_park_awaiting_human` call site, plus `_on_question`, `_on_dirty_worktree`, and `_park_verify_failure` | `stage` (read from the current workflow label, not passed in), `reason` (`agent_timeout`, `push_failed`, `failed_checks`, `agent_question`, `agent_silent`, `dirty_worktree`, `reviewer_timeout` / `reviewer_failed`, `missing_pr_number`, `verify_failed` / `verify_timeout` / `verify_dirty` / `verify_head_changed`, ...) |
 | `pr_opened` | `_on_commits` after `gh.open_pr` succeeds | `pr_number`, `branch`, `sha`, `retry_count` |
 | `pr_merged` | `_handle_in_review` and `_handle_resolving_conflict` terminal arcs (external merge OR successful `gh.merge_pr` under AUTO_MERGE) | `pr_number`, `sha`, `merge_method` (`external` / `squash`), `check_state`, `review_round`, `conflict_round`, `retry_count` |
 | `pr_closed_without_merge` | `_handle_in_review` and `_handle_resolving_conflict` when the PR is closed without merge | `pr_number`, `sha`, `review_round`, `conflict_round`, `retry_count` |
@@ -710,7 +716,14 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
    │                       │                                      │  │    │
    │                       ├─ run_agent(REVIEW_AGENT, fresh)      │  │    │
    │                       │     parse VERDICT marker             │  │    │
-   │                       │       APPROVED ─► label=in_review    │  │    │
+   │                       │       APPROVED:                      │  │    │
+   │                       │         run VERIFY_COMMANDS locally  │  │    │
+   │                       │           ok      ─► label=in_review │  │    │
+   │                       │           failed  ─► park (typed     │  │    │
+   │                       │             reason: verify_failed /  │  │    │
+   │                       │             verify_timeout /         │  │    │
+   │                       │             verify_dirty /           │  │    │
+   │                       │             verify_head_changed)     │  │    │
    │                       │       CHANGES_REQUESTED:             │  │    │
    │                       │         post feedback on PR          │  │    │
    │                       │         run_agent(dev, fix, resume) ─┘  │    │

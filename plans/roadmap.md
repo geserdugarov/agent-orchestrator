@@ -88,9 +88,16 @@ when conformant.
 
 **Validating stage.** `_handle_validating` spawns a fresh reviewer on
 `git diff origin/<base>...HEAD` and parses the last `VERDICT:` marker.
-`APPROVED` snapshots `agent_approved_sha`, optionally squashes
-(`SQUASH_ON_APPROVAL`, default on, `--force-with-lease`), and flips to
-`in_review`.
+On `APPROVED` the handler runs the configured `VERIFY_COMMANDS`
+(default empty — legacy behavior preserved) in the per-issue worktree
+before snapshotting `agent_approved_sha`, optionally squashing
+(`SQUASH_ON_APPROVAL`, default on, `--force-with-lease`), and flipping
+to `in_review`. A verify failure (non-zero exit, `VERIFY_TIMEOUT`,
+dirty worktree, or HEAD moved by the command) parks on `validating`
+with a typed `park_reason` (`verify_failed` / `verify_timeout` /
+`verify_dirty` / `verify_head_changed`) and a redacted / truncated tail
+of the command output; GitHub CI remains the later auto-merge gate
+consulted by `_handle_in_review`.
 
 `CHANGES_REQUESTED` posts feedback, resumes the dev, and increments
 `review_round`; `MAX_REVIEW_ROUNDS` (default 3) caps iterations. Silent
@@ -245,13 +252,6 @@ for long-lived deployments).
   base. Keep the first version fixed-schema and file-backed; richer
   search, exemplars, or lesson mining can wait until the simple signal
   proves useful.
-- **Project tests/linters during `validating`.** Run project-specific
-  verification locally before the reviewer-approved branch can flip to
-  `in_review`. Today `_handle_validating` only runs the reviewer agent;
-  `ruff`, `pytest`, `mypy`, or target-repo scripts run externally in PR
-  CI and are consulted later by the auto-merge gate. Add a configurable
-  verify-command list and park with actionable output on failure, while
-  keeping CI as the final merge gate.
 - **Dockerfile / systemd / GitHub App migration.** The current deployment
   is a `run.sh` wrapper around `python -m orchestrator.main` on a single
   host. Container / VM isolation remains an open deployment question.

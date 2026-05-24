@@ -65,6 +65,46 @@ The first token of each role spec selects the backend (`codex` / `claude`); any 
 | `MAX_RETRIES_PER_DAY`      | `3`         | fresh implementer spawns per issue per 24h window (`0` = unbounded)                              |
 | `ORCHESTRATOR_BASE_BRANCH` | `main`      | base branch of the orchestrator's own repo, used by the self-update path                          |
 
+## Local verification gate
+
+When the reviewer agent emits `VERDICT: APPROVED`, `_handle_validating` runs the configured `VERIFY_COMMANDS` in the per-issue worktree **before** posting the approval comment, squashing, seeding watermarks, or relabeling to `in_review`. A clean run advances the issue as usual; any failure parks the issue on `validating` with `awaiting_human=True` and a typed `park_reason`, so an operator can fix the breakage and resume.
+
+The verify gate is the **first** gate after the reviewer agent. GitHub CI remains the later auto-merge gate consulted by `_handle_in_review` — the verify gate does not replace it, it catches regressions locally so an obviously-broken branch never reaches the PR-side merge path.
+
+| Variable          | Default | Purpose                                                                                                                |
+| ----------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `VERIFY_COMMANDS` | _(empty — no verification)_ | Ordered shell commands run sequentially in the per-issue worktree on `VERDICT: APPROVED`. Entries are separated by `;` or newlines; blank lines and `#`-comment lines are skipped. Each entry runs via the shell so quoting, pipes, and `&&` work; stdout and stderr are merged into one captured block. Default empty preserves the legacy behavior (no local verification — go straight to `in_review`). |
+| `VERIFY_TIMEOUT`  | `600`   | Per-command wall-clock cap in seconds. A single slow command parks with `verify_timeout` instead of burning the orchestrator's tick budget. Ignored when `VERIFY_COMMANDS` is empty.                                                                                                                                                                  |
+
+### Failure modes and `park_reason` tokens
+
+The park comment names the failing command, its exit code (or timeout), and a redacted / truncated tail (last 4096 bytes) of the captured output. `park_reason` is set to one of these stable tokens so dashboards and recovery logic can branch on the failure mode:
+
+| `park_reason`           | Trigger                                                                                                                                            |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `verify_failed`         | Command exited non-zero.                                                                                                                            |
+| `verify_timeout`        | Command exceeded `VERIFY_TIMEOUT`.                                                                                                                  |
+| `verify_dirty`          | Command exited 0 but left uncommitted changes in the worktree; handing off a dirty tree would let AUTO_MERGE land state the dev never committed.    |
+| `verify_head_changed`   | Command exited 0 and the tree is clean but the command moved `HEAD` (e.g. ran `git commit` on its own). The subsequent squash + force-push would otherwise publish an unreviewed commit; the park comment surfaces the before / after SHAs so the operator can inspect, keep, or revert. |
+
+Output is redacted via `_redact_secrets` **before** truncation so a secret straddling the cut cannot leak a partial value.
+
+### Examples
+
+```dotenv
+# single command
+VERIFY_COMMANDS=python3 -m pytest -q
+
+# multiple commands (semicolon-separated because the .env loader cannot
+# represent newlines inside a value)
+VERIFY_COMMANDS=python3 -m pytest -q;ruff check .
+
+# raise the per-command cap to 20 min for a slow test suite
+VERIFY_TIMEOUT=1200
+```
+
+When exporting in a shell instead of `.env`, prefer one command per line — the parser accepts both `;` and newlines as separators.
+
 ## Parallel processing
 
 Each polling tick advances issues concurrently along two axes:
@@ -245,7 +285,7 @@ Each `--once` invocation is a fresh Python process and reads the current `.env` 
 
 | Setting | When the change takes effect |
 | ------- | ---------------------------- |
-| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `AUTO_MERGE`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `EVENT_LOG_PATH`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
+| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `AUTO_MERGE`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `EVENT_LOG_PATH`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
 | `MAX_PARALLEL_ISSUES_PER_REPO`, `MAX_PARALLEL_ISSUES_GLOBAL` | next Python start. Per-`REPOS` `parallel_limit` overrides take precedence over `MAX_PARALLEL_ISSUES_PER_REPO`, so editing the default only affects entries that omit the fifth field |
 | `DEV_AGENT`, `DECOMPOSE_AGENT` | next Python start, **except** for issues whose pinned state already names a `dev_agent` / `decomposer_agent` — those keep the pinned spec until the issue reaches `done` or `rejected` |
 | `REVIEW_AGENT` | next reviewer spawn after the next Python start (not pinned per issue) |

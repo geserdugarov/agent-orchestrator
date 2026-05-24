@@ -18,6 +18,10 @@ All three first tokens need to be authenticated on the host before the orchestra
 
 The stage handlers themselves live under `orchestrator/stages/` after the workflow split — `decomposition.py` owns the decomposing / ready / blocked / umbrella handlers, `implementing.py` owns the dev-session lifecycle, `validating.py` owns the reviewer-session lifecycle, `in_review.py` owns the PR-watermark / auto-merge gate, and `conflicts.py` owns `_handle_resolving_conflict`. The `_handle_pickup` entry handler (no label → decomposing / implementing) and the `_process_issue` label dispatcher still live in the facade module `orchestrator/workflow.py`, which re-exports every handler under its original `_handle_*` name; tests and intra-handler calls keep using the `workflow._handle_*` surface unchanged. See [`architecture.md`](architecture.md#top-level-layout) for the full module map.
 
+### Local verify gate (not an agent)
+
+After the reviewer emits `VERDICT: APPROVED`, `_handle_validating` runs the configured `VERIFY_COMMANDS` directly in the per-issue worktree — these are plain shell commands, not an agent role, so no `*_AGENT` env var applies. The gate runs before the approval comment, the squash, the watermark seeding, and the `in_review` label flip. A clean run advances the issue; any failure parks on `validating` with a typed `park_reason` (`verify_failed` / `verify_timeout` / `verify_dirty` / `verify_head_changed`) so the operator can fix the breakage. GitHub CI remains the later auto-merge gate consulted by `_handle_in_review`. See [`configuration.md#local-verification-gate`](configuration.md#local-verification-gate) for the env-var reference.
+
 ## Spec format
 
 `config._parse_agent_spec` runs `shlex.split` over each role's env value and yields `(backend, extra_args)`:
