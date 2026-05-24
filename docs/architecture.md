@@ -147,7 +147,7 @@ A second control label `backlog` is created for postponed work. While present on
 | `implementing` | The dev agent is producing commits in a per-issue worktree. |
 | `validating` | The reviewer agent is checking the diff and may bounce fixes back to the dev agent. |
 | `in_review` | A PR is open and ready for human review or auto-merge gates. |
-| `fixing` | Fresh PR feedback arrived during `in_review`; the dev fix-loop owns the issue until a new diff bounces back to `validating`. |
+| `fixing` | Unread in-review feedback (issue thread / PR conversation / inline review / PR review summary) or a human CI-fix request is queued during the quiet window or actively being addressed by the dev fix-loop. A successful fix bounces back to `validating` so the reviewer re-approves the new head before auto-merge can proceed. |
 | `resolving_conflict` | The orchestrator is trying to rebase an approved but unmergeable PR branch onto `origin/<base>`. |
 | `question` | Operator-applied read-only Q&A label: the orchestrator runs the decomposer agent in the per-issue worktree, posts the answer to the issue thread, and waits on a human reply or a manual close. No PR is opened on this label. |
 | `done` | Terminal success; the PR merged, an umbrella parent resolved after all children reached `done`, or a `question` issue was closed by the operator. |
@@ -229,7 +229,9 @@ Per-issue durable state lives in a single **"pinned" comment** on the issue (`<!
   The watermark *only* advances from review IDs that survived `gh.pr_reviews_after`'s state/body filter — non-empty `CHANGES_REQUESTED` or `COMMENTED` — so `APPROVED`, `DISMISSED`, `PENDING`, and empty-body reviews **never** bump it. `_bump_in_review_watermarks` mirrors the same filter and advances strictly from the filtered list.
 
   This is safe because the same filter runs on every scan, so an `APPROVED` review id sitting above the watermark is harmlessly re-skipped each tick rather than re-forwarded.
-- `agent_approved_sha` — the head SHA the reviewer agent OK'd; `_handle_in_review` keys AUTO_MERGE on this since the agent posts an issue comment, not a real PR review.
+- `agent_approved_sha` — the head SHA the reviewer agent OK'd; `_handle_in_review` keys AUTO_MERGE on this since the agent posts an issue comment, not a real PR review. Cleared by `_handle_fixing` whenever it pushes a fix so AUTO_MERGE cannot land the PR until the reviewer re-approves the new head.
+- `pending_fix_at` — ISO timestamp recorded by `_handle_in_review` when it routes fresh PR feedback to `fixing`. Surfaces to operators that the issue is in the `fixing` quiet window or actively being fixed; cleared on a pushed fix or when the rescan finds no unread feedback and bounces back to `validating`.
+- `pending_fix_issue_max_id` / `pending_fix_review_max_id` / `pending_fix_review_summary_max_id` — per-namespace bookmarks for the PR-feedback ids that triggered the `fixing` route. They are hints for `_handle_fixing` and forensics, NOT watermarks — the in_review watermarks are deliberately left behind so the fixing rescan can re-discover the triggering comments and build the dev-resume prompt. Cleared alongside `pending_fix_at` on the same exits.
 - `merged_at` / `closed_without_merge_at` — terminal stamps.
 - etc. (see `github.PINNED_STATE_MARKER` / `PINNED_STATE_RE` and `read_pinned_state` / `write_pinned_state`).
 
@@ -452,7 +454,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      - `merged` → set label `done`, stamp `merged_at`, write pinned state, then `issue.edit(state="closed")`. (Pinned-state write before close so PyGithub caching cannot serve a stale issue body to the writer.) Cleanup follows via `_cleanup_terminal_branch`.
      - `closed` (without merge) → set label `rejected`, stamp `closed_without_merge_at`, write state, close, then call `_cleanup_terminal_branch`. The branch name is derived from the issue number (`orchestrator/issue-<n>`) so cleanup cannot touch an arbitrary branch.
      - `open` → fall through.
-  3. **Fresh PR feedback → route to `fixing`.** Read four sources independently, one per id namespace:
+  3. **Fresh PR feedback (including any human CI-fix request) → route to `fixing`.** A human CI-fix request — a "please fix CI" / "tests are red, fix" comment on any of the four surfaces below — is just one shape of fresh PR feedback as far as this handler is concerned: the route triggers on the *presence* of an unread human comment past the watermark, not on its content. Read four sources independently, one per id namespace:
      - `gh.comments_after(issue, pr_last_comment_id)` (issue thread).
      - `gh.pr_conversation_comments_after(pr, pr_last_comment_id)` (PR conversation; shares id space with the issue thread, so one watermark suffices).
      - `gh.pr_inline_comments_after(pr, pr_last_review_comment_id)` (inline review comments).
@@ -490,7 +492,7 @@ The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage
 `_park_awaiting_human` posts on the issue (not the PR) so the HITL ping appears alongside the rest of orchestrator state. The PR comment that triggers a route to `fixing` is the human signal; awaiting-human is reserved for *unrecoverable* states (failed checks / push fail / missing pr_number — note: under `AUTO_MERGE=on` "not mergeable" detours to `resolving_conflict` instead of parking).
 
 ### `_handle_fixing` (label `fixing`)
-- **Trigger**: each tick while label is `fixing` (set by `_handle_in_review` when fresh PR feedback arrives on any of the four comment surfaces). Also runs on closed-`fixing` issues yielded by the closed-issue sweep so an externally-merged PR can be finalized to `done`.
+- **Trigger**: each tick while label is `fixing` (set by `_handle_in_review` when fresh PR feedback arrives on any of the four comment surfaces — including a human CI-fix request, i.e. a "please fix CI" / "tests are red, fix" comment, which is handled identically to any other unread human comment). The label therefore means an unread human comment OR a human CI-fix request is queued during the quiet window or actively being addressed by the dev fix-loop. Also runs on closed-`fixing` issues yielded by the closed-issue sweep so an externally-merged PR can be finalized to `done`.
 - **Input**: pinned `pr_number`, `branch`, `dev_agent`/`dev_session_id`, plus the `pending_fix_at` ISO timestamp and per-namespace `pending_fix_*_max_id` bookmarks recorded by the in_review route. Reads the three in_review watermarks (`pr_last_comment_id`, `pr_last_review_comment_id`, `pr_last_review_summary_id`) which the route deliberately left behind so the rescan can re-discover the triggering feedback. `IN_REVIEW_DEBOUNCE_SECONDS` controls the quiet window.
 - **Internal flow**:
   1. PR-state terminals mirror `_handle_in_review` so the handler does not strand closed-`fixing` issues:

@@ -132,6 +132,10 @@ watermarks.
 
 **Fixing stage.** `fixing` is the routable workflow label that sits
 between `in_review` and `validating` in the PR-feedback fix loop.
+The label means unread in-review feedback or a human CI-fix request is
+queued during the quiet window or actively being addressed; a
+successful fix returns to `validating` so the reviewer re-approves
+the new head before auto-merge can proceed.
 `_handle_fixing` rescans unread feedback from the three in_review
 watermarks each tick (filtering orchestrator-authored comments by id
 AND by the hidden `<!--orchestrator-comment-->` body marker), debounces
@@ -227,9 +231,9 @@ family-aware stages (`decomposing`, `blocked`, `umbrella`, unlabeled
 pickup) that read/write across parent/child boundaries are drained
 sequentially on one worker thread so parent and child handlers cannot
 race on the same pinned-state comment; the remaining stages (`ready`,
-`implementing`, `validating`, `in_review`, `resolving_conflict`) fan
-out across the bounded executor because they only touch per-issue
-state. Each worker thread mints a fresh `GitHubClient` via
+`implementing`, `documenting`, `validating`, `in_review`, `fixing`,
+`resolving_conflict`) fan out across the bounded executor because they
+only touch per-issue state. Each worker thread mints a fresh `GitHubClient` via
 `gh._for_worker_thread()` so concurrent HTTP traffic does not share a
 PyGithub `Requester`.
 

@@ -114,6 +114,8 @@ Pinned in [`pyproject.toml`](pyproject.toml):
 
    With `AUTO_MERGE=on`, the orchestrator then merges the PR itself once GitHub reports it mergeable with green checks, flips the label to `done`, and closes the issue. With `AUTO_MERGE=off` (the default), review and merge the PR manually.
 
+   If a human posts PR feedback (issue thread, PR conversation, inline review, or PR review summary) while the issue is `in_review`, the orchestrator flips the label to `fixing` and queues the comments. After the `IN_REVIEW_DEBOUNCE_SECONDS` quiet window expires (newer comments arriving in the meantime reset the timer), the dev agent resumes against the unread feedback, pushes the fix, and the label bounces back to `validating` so the reviewer re-approves the new head before auto-merge can proceed.
+
 ## Asking the orchestrator a question
 
 Apply the workflow label `question` to any open issue to get a read-only answer instead of an implementation. The orchestrator spawns the configured `DECOMPOSE_AGENT` in the issue's `issue-N` worktree, posts the agent's answer (or its own clarifying follow-up) as an issue comment that pings `HITL_HANDLE`, and parks awaiting a human reply. No branch is pushed, no PR is opened, and a commit / dirty tree from the agent is treated as a read-only-violation park. Subsequent human comments resume the same locked agent session for a multi-turn conversation; **closing the issue** is the terminal signal — `_handle_question` then flips the label to `done` and tears the worktree down.
