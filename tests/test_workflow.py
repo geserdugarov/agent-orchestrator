@@ -4356,5 +4356,65 @@ class BacklogLabelSkipsProcessingTest(unittest.TestCase):
         pickup.assert_called_once_with(gh, _TEST_SPEC, issue)
 
 
+class QuestionLabelRoutingTest(unittest.TestCase):
+    """`question` is registered as a workflow label so the dispatcher routes
+    it to the stub stage handler instead of falling through to pickup or
+    implementation. The stub is intentionally a no-op until follow-up work
+    fills in real behavior, so the dispatcher must not flip the label,
+    write pinned state, spawn an agent, or post a comment on a `question`
+    issue.
+    """
+
+    def test_question_label_is_recognized_as_workflow_label(self) -> None:
+        from orchestrator.github import WORKFLOW_LABELS
+
+        self.assertIn("question", WORKFLOW_LABELS)
+
+    def test_question_label_is_in_bootstrap_specs(self) -> None:
+        # Label bootstrap iterates WORKFLOW_LABEL_SPECS; if the spec entry
+        # is missing, `ensure_workflow_labels` would never create the
+        # label on a fresh repo and operators would be unable to apply it.
+        from orchestrator.github import WORKFLOW_LABEL_SPECS
+
+        names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
+        self.assertIn("question", names)
+
+    def test_question_label_is_not_family_aware(self) -> None:
+        # Open `question` issues touch only their own pinned state, so the
+        # label must stay out of `_FAMILY_AWARE_LABELS` -- otherwise the
+        # parallel tick path would route it through the single-threaded
+        # family bucket and defeat fan-out concurrency.
+        self.assertNotIn("question", workflow._FAMILY_AWARE_LABELS)
+
+    def test_dispatcher_routes_question_to_handler(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(801, label="question")
+        gh.add_issue(issue)
+
+        with patch.object(workflow, "_handle_question") as handler, \
+             patch.object(workflow, "_handle_pickup") as pickup, \
+             patch.object(workflow, "_handle_implementing") as impl:
+            workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        handler.assert_called_once_with(gh, _TEST_SPEC, issue)
+        pickup.assert_not_called()
+        impl.assert_not_called()
+
+    def test_question_label_does_not_fall_through_to_pickup(self) -> None:
+        # End-to-end with the real (stub) handler: the question-labeled
+        # issue must not be treated as unlabeled, so no pickup comment,
+        # no label flip, and no pinned state write happens.
+        gh = FakeGitHubClient()
+        issue = make_issue(802, label="question")
+        gh.add_issue(issue)
+
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.label_history, [])
+        self.assertEqual(gh.pinned_data(802), {})
+        self.assertEqual(gh.write_state_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

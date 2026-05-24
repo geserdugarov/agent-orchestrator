@@ -137,6 +137,7 @@ from .stages.implementing import (
     _resume_developer_on_human_reply as _resume_developer_on_human_reply,
 )
 from .stages.in_review import _handle_in_review as _handle_in_review
+from .stages.question import _handle_question as _handle_question
 from .stages.validating import _handle_dev_fix_result as _handle_dev_fix_result
 from .stages.validating import _handle_validating as _handle_validating
 from .stages.validating import _latest_pr_comment_ids as _latest_pr_comment_ids
@@ -503,6 +504,8 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         _handle_in_review(gh, spec, issue)
     elif label == "resolving_conflict":
         _handle_resolving_conflict(gh, spec, issue)
+    elif label == "question":
+        _handle_question(gh, spec, issue)
     elif label in ("done", "rejected"):
         return
     else:
