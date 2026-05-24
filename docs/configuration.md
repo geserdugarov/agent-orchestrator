@@ -124,7 +124,7 @@ The two caps below are the levers:
 Inside a single `workflow.tick`, the parallel path partitions pollable issues by workflow label before submitting work to the executor:
 
 - **Family-aware labels** (`decomposing`, `blocked`, `umbrella`, plus unlabeled issues) read and write cross-issue state (parent ↔ child) and must never run two at a time. They are folded into one drain task that processes them sequentially on a single worker thread.
-- **Fan-out labels** (`ready`, `implementing`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`) only touch their own per-issue state and worktree, so each one is submitted as its own future and runs concurrently up to `parallel_limit`.
+- **Fan-out labels** (`ready`, `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`) only touch their own per-issue state and worktree, so each one is submitted as its own future and runs concurrently up to `parallel_limit`.
 
 The drain task occupies exactly one executor slot regardless of how many family-aware issues exist, leaving the other `parallel_limit - 1` slots free for fan-out work in the same tick.
 

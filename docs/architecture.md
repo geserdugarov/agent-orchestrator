@@ -78,7 +78,19 @@ orchestrator/
                            `_resume_dev_with_text` (with poisoned-session
                            recovery), the 24h retry budget, and the post-agent
                            disposition helpers (`_on_commits`, `_on_question`,
-                           `_on_dirty_worktree`).
+                           `_on_dirty_worktree`). `_on_commits` relabels to
+                           `documenting`, NOT `validating`, so the docs pass
+                           runs before the reviewer.
+    documenting.py      — `_handle_documenting`: a docs pass that resumes the
+                           dev session on the existing PR worktree, commits
+                           any README / docs / plans updates, pushes them,
+                           and advances to `validating`. Refuses to act on
+                           a stale or diverged PR branch (fetch + behind
+                           check) and routes unrecognized outcomes through
+                           the existing dirty / question / push park helpers.
+                           Advances without pushing only on an explicit
+                           `DOCS: NO_CHANGE` verdict against a remote-clean
+                           branch.
     validating.py       — `_handle_validating` plus reviewer-session
                            lifecycle: `_handle_dev_fix_result`,
                            `_post_user_content_change_result`, validating-side
@@ -155,7 +167,7 @@ Within one repo, `spec.parallel_limit` caps how many issues `workflow.tick` may 
 `parallel_limit > 1` materializes the eligible-issue set up front (to bound `max_workers` correctly) and partitions it by workflow label:
 
 - **Family-aware labels** — `decomposing`, `blocked`, `umbrella`, and unlabeled (pickup) issues — read and write cross-issue state (parent ↔ child). Two of these running at once could race a parent's child-state write against the child's own handler on a sibling thread. They are folded into a SINGLE drain task that processes them sequentially on one worker thread; this caps the family bucket's executor footprint at exactly one slot regardless of how many family-aware issues are pending, so the other `limit - 1` slots stay free for fan-out work.
-- **Fan-out labels** — `ready`, `implementing`, `validating`, `in_review`, `fixing`, `resolving_conflict` — only touch their own per-issue pinned state and worktree. Each is submitted as its own future and runs concurrently up to `parallel_limit`. The two buckets share one executor capped at `min(parallel_limit, total_tasks)` and the family drain can overlap with non-family workers, so a slow decomposer no longer blocks unrelated implementing / validating issues on the same tick.
+- **Fan-out labels** — `ready`, `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict` — only touch their own per-issue pinned state and worktree. Each is submitted as its own future and runs concurrently up to `parallel_limit`. The two buckets share one executor capped at `min(parallel_limit, total_tasks)` and the family drain can overlap with non-family workers, so a slow decomposer no longer blocks unrelated implementing / documenting / validating issues on the same tick.
 
 Only issue numbers cross the thread boundary — each worker calls `gh._for_worker_thread()` to mint a fresh `GitHubClient` (and through it a fresh `Github` / `Requester` / `Repository`) and refetches its Issue against that client, so every in-flight HTTP call is the sole consumer of its requester's state (PyGithub's per-request state is not documented as thread-safe across a shared `Requester`). The label used for partitioning is read on the caller thread; a lazy-load failure on one issue's labels is logged and that issue is conservatively routed into the family bucket where the per-issue try/except picks up any sustained failure.
 
@@ -184,8 +196,8 @@ Then `gh.list_pollable_issues()` yields all open non-PR issues plus closed non-P
 
 For every yielded issue:
 
-1. Read its workflow label (one of `decomposing/ready/blocked/umbrella/implementing/validating/in_review/fixing/resolving_conflict/question/done/rejected`).
-2. Dispatch by label. The full lifecycle (no label → `decomposing` → `ready`/`blocked`/`umbrella` → `implementing` → `validating` → `in_review` → `fixing` (on fresh PR feedback) or `resolving_conflict` (optional auto-merge detour) → `done`/`rejected`) is implemented; `done` and `rejected` are terminal no-ops, every other label routes to its handler. The operator-applied `question` label is an out-of-lifecycle branch (no automatic stage transitions in or out — see [`_handle_question`](#_handle_question-label-question)). Every handler receives the active `RepoSpec`, so `git worktree add`, `git fetch origin <base>`, push-token resolution (`config._resolve_github_token(spec.slug)`), and PR-base selection all flow from the spec rather than module-level `config.REPO` / `config.TARGET_REPO_ROOT` / `config.BASE_BRANCH` reads.
+1. Read its workflow label (one of `decomposing/ready/blocked/umbrella/implementing/documenting/validating/in_review/fixing/resolving_conflict/question/done/rejected`).
+2. Dispatch by label. The full lifecycle (no label → `decomposing` → `ready`/`blocked`/`umbrella` → `implementing` → `documenting` → `validating` → `in_review` → `fixing` (on fresh PR feedback) or `resolving_conflict` (optional auto-merge detour) → `done`/`rejected`) is implemented; `done` and `rejected` are terminal no-ops, every other label routes to its handler. The operator-applied `question` label is an out-of-lifecycle branch (no automatic stage transitions in or out — see [`_handle_question`](#_handle_question-label-question)). Every handler receives the active `RepoSpec`, so `git worktree add`, `git fetch origin <base>`, push-token resolution (`config._resolve_github_token(spec.slug)`), and PR-base selection all flow from the spec rather than module-level `config.REPO` / `config.TARGET_REPO_ROOT` / `config.BASE_BRANCH` reads.
 
 Per-issue durable state lives in a single **"pinned" comment** on the issue (`<!--orchestrator-state {...json...}-->`). The keys it holds:
 
@@ -703,8 +715,8 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
    │     partition pollable issues by label:                              │
    │       family-aware (decomposing/blocked/umbrella/unlabeled) → drain  │
    │         sequentially on one worker (no parent↔child races)           │
-   │       fan-out (ready/implementing/validating/in_review/fixing/      │
-   │                resolving_conflict) → up to spec.parallel_limit       │
+   │       fan-out (ready/implementing/documenting/validating/in_review/ │
+   │                fixing/resolving_conflict) → up to spec.parallel_limit│
    │         worker threads, each with its own gh._for_worker_thread()    │
    │     every _process_issue call acquires global_semaphore, so total    │
    │     in-flight handlers across all repos ≤ MAX_PARALLEL_ISSUES_GLOBAL │
@@ -875,7 +887,8 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 | **workflow_messages.py** | prompt builders, parsers, comment posting + orchestrator-comment markers, stderr redaction |
 | **worktrees.py** | git/branch/worktree plumbing, hardened fetch/push, squash-on-approval, per-tick base refresh, terminal cleanup |
 | **stages/decomposition.py** | `_handle_decomposing` / `_handle_ready` / `_handle_blocked` / `_handle_umbrella` |
-| **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle |
+| **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle (relabels to `documenting` after PR opens) |
+| **stages/documenting.py** | `_handle_documenting` — docs pass on the existing PR worktree (fetch + ahead/behind guard, dirty-check before any outcome, advance to `validating` after push or explicit no-change verdict) |
 | **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
 | **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives; routes fresh PR feedback to `fixing` |
 | **stages/fixing.py** | `_handle_fixing` (stub today; real fix-loop lands under parent #137) |
@@ -890,8 +903,8 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 
 ```
                          single
-                       ┌─────────────────────────────┐
-   (none) ──► decomposing ──► ready ──► implementing ──► validating ──► in_review ──► done | rejected
+                       ┌──────────────────────────────────────────────┐
+   (none) ──► decomposing ──► ready ──► implementing ──► documenting ──► validating ──► in_review ──► done | rejected
                   │                          ▲                  │              ▲ │
                   │ split                    │ all children     │              │ │  fresh PR feedback
                   ▼                          │ done             │              │ │  ─► label=fixing

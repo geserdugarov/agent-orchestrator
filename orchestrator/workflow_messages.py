@@ -3,11 +3,11 @@
 """Shared workflow text/parsing/comment helpers.
 
 Stage handlers live under `orchestrator/stages/` (decomposition.py,
-implementing.py, validating.py, in_review.py, conflicts.py); they reach
-these helpers through the compatibility facade in `workflow.py`, which
-re-exports each public name below under its original identifier for
-backward compatibility with direct test references and
-`patch.object(workflow, ...)` patches.
+implementing.py, documenting.py, validating.py, in_review.py, fixing.py,
+conflicts.py, question.py); they reach these helpers through the
+compatibility facade in `workflow.py`, which re-exports each public
+name below under its original identifier for backward compatibility
+with direct test references and `patch.object(workflow, ...)` patches.
 
 Covers:
 

@@ -2,9 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """State machine: drive issues through the orchestrator workflow.
 
-(no label) -> implementing -> validating -> in_review -> done|rejected.
-Validating runs a fresh reviewer session; on changes-requested the dev session
-is resumed, the fix pushed, and the review rerun until APPROVED or
+(no label) -> implementing -> documenting -> validating -> in_review ->
+done|rejected.
+After the implementer commits and the PR opens, `_on_commits` relabels to
+`documenting`: a docs pass runs on the same PR branch, commits any
+README / docs / plans updates, pushes them, and advances to `validating`
+(or advances without pushing on an explicit `DOCS: NO_CHANGE` verdict).
+Validating then runs a fresh reviewer session; on changes-requested the dev
+session is resumed, the fix pushed, and the review rerun until APPROVED or
 MAX_REVIEW_ROUNDS is hit. In_review reacts to PR state (merged/closed) and
 hands fresh PR feedback (any of the four comment surfaces) off to the
 `fixing` stage by recording pending-fix metadata in pinned state and flipping
@@ -209,11 +214,12 @@ log = logging.getLogger(__name__)
 # additional worker slots and starve fanout under a small `limit`.)
 # This preserves the "no two cross-issue writers at once" invariant
 # while keeping a slow decomposing / unlabeled-pickup handler from
-# blocking unrelated implementing / validating issues on the same
-# tick. Stages outside this set (`ready`, `implementing`,
-# `validating`, `in_review`, `fixing`, `resolving_conflict`,
-# `question`) only read and write their own per-issue state + worktree,
-# so they stay eligible for unconditional parallel fan-out.
+# blocking unrelated implementing / documenting / validating issues
+# on the same tick. Stages outside this set (`ready`, `implementing`,
+# `documenting`, `validating`, `in_review`, `fixing`,
+# `resolving_conflict`, `question`) only read and write their own
+# per-issue state + worktree, so they stay eligible for
+# unconditional parallel fan-out.
 _FAMILY_AWARE_LABELS = frozenset({
     "decomposing", "blocked", "umbrella",
 })

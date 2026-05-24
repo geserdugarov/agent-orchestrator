@@ -21,10 +21,11 @@ This module exposes:
   pre-implementation drift path.
 
 Stage handlers live under `orchestrator/stages/` (decomposition.py,
-implementing.py, validating.py, in_review.py, conflicts.py); they reach
-these helpers through the compatibility facade in `workflow.py`, which
-re-exports each name above for backward compatibility with direct test
-references and `patch.object(workflow, ...)` patches.
+implementing.py, documenting.py, validating.py, in_review.py, fixing.py,
+conflicts.py, question.py); they reach these helpers through the
+compatibility facade in `workflow.py`, which re-exports each name
+above for backward compatibility with direct test references and
+`patch.object(workflow, ...)` patches.
 """
 from __future__ import annotations
 

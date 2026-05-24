@@ -4,11 +4,12 @@
 
 Centralizes every direct shell-out to `git` plus the per-spec worktree
 layout helpers. Stage handlers live under `orchestrator/stages/`
-(decomposition.py, implementing.py, validating.py, in_review.py,
-conflicts.py) and drive the state machine; the compatibility facade in
-`workflow.py` re-exports each helper below under its original name for
-backward compatibility with direct test references and
-`patch.object(workflow, ...)` patches. This module owns:
+(decomposition.py, implementing.py, documenting.py, validating.py,
+in_review.py, fixing.py, conflicts.py, question.py) and drive the
+state machine; the compatibility facade in `workflow.py` re-exports
+each helper below under its original name for backward compatibility
+with direct test references and `patch.object(workflow, ...)` patches.
+This module owns:
 
 * Branch naming and slug-safe per-repo worktree paths.
 * Worktree creation, restoration, and cleanup for both the implementer

@@ -54,7 +54,11 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             f":sparkles: PR opened: #{opened.number}" in body
             for _, body in gh.posted_comments
         ))
-        self.assertIn((1, "validating"), gh.label_history)
+        # After PR open, hand off to the documenting stage; the docs
+        # pass runs against the same PR worktree and advances to
+        # validating only once docs are pushed / explicit no-change.
+        self.assertIn((1, "documenting"), gh.label_history)
+        self.assertNotIn((1, "validating"), gh.label_history)
         data = gh.pinned_data(1)
         self.assertEqual(data["pr_number"], opened.number)
         self.assertEqual(data["branch"], "orchestrator/issue-1")
@@ -300,7 +304,7 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.opened_prs, [])
         self.assertFalse(any(":sparkles: PR opened" in body
                              for _, body in gh.posted_comments))
-        self.assertIn((4, "validating"), gh.label_history)
+        self.assertIn((4, "documenting"), gh.label_history)
         self.assertEqual(gh.pinned_data(4).get("pr_number"), 42)
 
 
@@ -1232,11 +1236,11 @@ class HandleImplementingResumeOnHashChangeTest(
         prompt = mocks["run_agent"].call_args[0][1]
         self.assertIn("new requirements", prompt)
         self.assertIn("Updated issue", prompt)
-        # The label still flipped via _on_commits -> validating because
-        # the resume produced a commit; the issue is NOT routed to
-        # decomposing.
+        # The label flipped via _on_commits -> documenting because the
+        # resume produced a commit; the issue is NOT routed to
+        # decomposing, and validating only comes after the docs pass.
         self.assertNotIn((60, "decomposing"), gh.label_history)
-        self.assertIn((60, "validating"), gh.label_history)
+        self.assertIn((60, "documenting"), gh.label_history)
         data = gh.pinned_data(60)
         self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
         self.assertTrue(any(

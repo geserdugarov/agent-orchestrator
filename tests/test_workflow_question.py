@@ -810,7 +810,7 @@ class QuestionRelabelToImplementingTest(
 
         # The dev agent ran fresh with the implement prompt (not the
         # question-stage followup), opened a PR, and flipped to
-        # validating -- the relabel was honored as an unblock signal.
+        # documenting -- the relabel was honored as an unblock signal.
         mocks["run_agent"].assert_called_once()
         spawn_kwargs = mocks["run_agent"].call_args.kwargs
         # Fresh spawn -- no resume_session_id forwarded.
@@ -819,7 +819,7 @@ class QuestionRelabelToImplementingTest(
         self.assertIn("You are the implementer", prompt)
 
         self.assertEqual(len(gh.opened_prs), 1)
-        self.assertIn((80, "validating"), gh.label_history)
+        self.assertIn((80, "documenting"), gh.label_history)
 
         data = gh.pinned_data(80)
         self.assertFalse(data.get("awaiting_human"))
@@ -1061,7 +1061,10 @@ class QuestionRelabelToImplementingTest(
         mocks["run_agent"].assert_called_once()
         spawn_kwargs = mocks["run_agent"].call_args.kwargs
         self.assertNotIn("resume_session_id", spawn_kwargs)
-        self.assertIn((85, "validating"), gh.label_history)
+        # Implementing -> documenting -> validating; the relabel
+        # exercises the implementing fresh-spawn path so the immediate
+        # post-PR label is documenting.
+        self.assertIn((85, "documenting"), gh.label_history)
         data = gh.pinned_data(85)
         self.assertFalse(data.get("awaiting_human"))
         self.assertIsNone(data.get("park_reason"))

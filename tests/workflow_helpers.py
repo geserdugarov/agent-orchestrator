@@ -87,6 +87,7 @@ class _PatchedWorkflowMixin:
         branch_ahead_behind=(0, 0),
         rebase_in_progress=False,
         verify_result=None,
+        authed_fetch_result=None,
     ):
         rc_mock = _as_mock(run_agent)
         hnc_seq = has_new_commits if isinstance(has_new_commits, (list, tuple)) else None
@@ -106,9 +107,16 @@ class _PatchedWorkflowMixin:
         pr_wt_mock = MagicMock(return_value=_FAKE_WT)
         # `_authed_fetch` runs an actual subprocess in production; mock
         # it to a successful CompletedProcess so resolving_conflict tests
-        # don't need a real askpass / token / network.
+        # don't need a real askpass / token / network. Tests that want
+        # to exercise the fetch-failure park branch pass an explicit
+        # `authed_fetch_result` (e.g. `MagicMock(returncode=1,
+        # stderr="...")`) to drive that path.
         authed_fetch_ok = MagicMock(
-            return_value=MagicMock(returncode=0, stdout="", stderr="")
+            return_value=(
+                authed_fetch_result
+                if authed_fetch_result is not None
+                else MagicMock(returncode=0, stdout="", stderr="")
+            )
         )
         # `_branch_ahead_behind` runs `git rev-list` in the worktree;
         # default to (0, 0) ("in sync") so existing tests don't have to

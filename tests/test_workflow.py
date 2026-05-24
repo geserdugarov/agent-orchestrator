@@ -4625,11 +4625,11 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         impl.assert_not_called()
         val.assert_not_called()
 
-    def test_documenting_stub_parks_awaiting_human(self) -> None:
-        # End-to-end with the real (stub) handler: a manually-applied
-        # `documenting` label must park awaiting human rather than
-        # silently skipping documentation, so the operator gets a clear
-        # signal that the stage is not implemented yet.
+    def test_documenting_without_pr_number_parks_awaiting_human(self) -> None:
+        # End-to-end with the real handler: a manually-applied
+        # `documenting` label on an issue with no pinned `pr_number`
+        # cannot anchor on a dev PR worktree, so the handler parks
+        # awaiting human rather than guessing.
         gh = FakeGitHubClient()
         issue = make_issue(902, label="documenting")
         gh.add_issue(issue)
@@ -4642,14 +4642,16 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         self.assertIn("documenting", body)
         self.assertTrue(gh.pinned_data(902).get("awaiting_human"))
         # The label is NOT flipped: parking surfaces the situation but
-        # leaves the operator in control of the next move (remove the
-        # label to resume, or wait for the real handler to land).
+        # leaves the operator in control of the next move.
         self.assertEqual(gh.label_history, [])
 
-    def test_documenting_stub_is_idempotent_when_already_parked(self) -> None:
-        # A second tick on an already-parked documenting issue must not
-        # re-post the parking comment or re-emit the audit event --
-        # otherwise every polling tick would spam the issue.
+    def test_documenting_missing_pr_number_is_idempotent_when_parked(
+        self,
+    ) -> None:
+        # A second tick on an already-parked documenting issue (still
+        # missing `pr_number`) must not re-post the parking comment or
+        # re-emit the audit event -- otherwise every polling tick
+        # would spam the issue.
         gh = FakeGitHubClient()
         issue = make_issue(903, label="documenting")
         gh.add_issue(issue)
