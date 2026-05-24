@@ -597,7 +597,35 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             _bump_in_review_watermarks(gh, issue, state)
             gh.write_pinned_state(issue, state)
             return
-        return  # mergeable: humans drive the merge from here
+        # mergeable: humans drive the merge. Ping HITL handles once per
+        # head SHA so the human knows the PR is ready. De-duplication is
+        # keyed on `ready_ping_sha` (the head we pinged for); a new commit
+        # pushed onto the branch shifts pr.head.sha and re-pings, while
+        # repeated ticks on the same head stay silent. Deliberately do NOT
+        # set `awaiting_human` -- the handler must still react to PR
+        # comments / external merge / a later unmergeable transition.
+        #
+        # Deliberately NOT calling `_bump_in_review_watermarks` here: that
+        # helper reads `gh.latest_comment_id(issue)`, which could include
+        # a human issue/PR-conversation comment that landed between the
+        # earlier comment scan and this point. Bumping the watermark past
+        # an unobserved human comment would silently swallow it -- the
+        # next tick's `comments_after` would skip it and the dev would
+        # never see the feedback. The ping is recorded in
+        # `orchestrator_comment_ids` by `_post_issue_comment`, so the
+        # next tick's id-set filter excludes it from `new_issue_side`
+        # without needing the watermark to move; a concurrent human
+        # comment naturally surfaces below the unchanged watermark.
+        head_sha = pr.head.sha
+        if state.get("ready_ping_sha") != head_sha:
+            _wf._post_issue_comment(
+                gh, issue, state,
+                f":bell: {config.HITL_MENTIONS} PR #{pr_number} is ready "
+                "for review/merge.",
+            )
+            state.set("ready_ping_sha", head_sha)
+            gh.write_pinned_state(issue, state)
+        return
 
     # AUTO_MERGE on. Run the original gating order: changes-requested
     # and approval first, then mergeable. This matches the pre-rollout

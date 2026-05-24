@@ -113,22 +113,151 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh, _TEST_SPEC, 30,
         )
 
-    def test_in_review_pr_open_no_comments_no_auto_merge(self) -> None:
+    def test_in_review_auto_merge_off_mergeable_pings_human(self) -> None:
+        # AUTO_MERGE off + PR mergeable: post a one-shot HITL ping so the
+        # human knows the PR is ready, but stay open (no merge, no label
+        # flip, no awaiting_human). The ping must mention every HITL handle
+        # so notifications fire even on a multi-handle deployment.
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        with patch.object(config, "AUTO_MERGE", False):
+        with patch.object(config, "AUTO_MERGE", False), \
+             patch.object(config, "HITL_MENTIONS", "@alice @bob"):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
-        # Pure no-op: no agent run, no merge, no label flip, no comment.
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
         self.assertEqual(gh.label_history, [])
-        self.assertEqual(gh.posted_comments, [])
         self.assertFalse(issue.closed)
+        # Exactly one ping was posted on the issue thread.
+        ping_comments = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(ping_comments), 1)
+        self.assertIn("@alice", ping_comments[0])
+        self.assertIn("@bob", ping_comments[0])
+        self.assertIn(f"PR #{self.PR_NUMBER}", ping_comments[0])
+        data = gh.pinned_data(30)
+        # De-dup key is the head SHA we pinged for.
+        self.assertEqual(data.get("ready_ping_sha"), "cafe1234")
+        # Not parked: subsequent ticks must still react to comments / state.
+        self.assertFalse(data.get("awaiting_human"))
+        # Ping is recorded in orchestrator_comment_ids so the next tick's
+        # `comments_after` filter excludes it as bot noise without needing
+        # the watermark to move (which would risk swallowing a human
+        # comment that landed between the earlier scan and the ping).
+        ping_id = gh.latest_comment_id(issue)
+        self.assertIsNotNone(ping_id)
+        self.assertIn(ping_id, data.get("orchestrator_comment_ids", []))
+
+    def test_in_review_auto_merge_off_mergeable_dedups_same_head(self) -> None:
+        # Second tick on the same head SHA must NOT re-ping; the ping is
+        # one-shot per head so a long-lived ready-for-merge PR doesn't spam
+        # the HITL handles on every poll.
+        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
+        gh, issue = self._seed(pr=pr)
+
+        with patch.object(config, "AUTO_MERGE", False):
+            self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+            comments_after_first = list(gh.posted_comments)
+            self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        self.assertEqual(gh.posted_comments, comments_after_first)
+
+    def test_in_review_auto_merge_off_mergeable_repings_new_head(self) -> None:
+        # A new commit on the PR branch shifts pr.head.sha; the ping is
+        # keyed on the SHA we last pinged for, so the next tick must
+        # re-ping on the new head.
+        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
+        gh, issue = self._seed(pr=pr)
+
+        with patch.object(config, "AUTO_MERGE", False):
+            self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+            pings_first = [
+                body for _, body in gh.posted_comments
+                if "ready for review/merge" in body
+            ]
+            pr.head = FakePRRef(sha="beefcafe")
+            self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        pings_total = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(pings_first), 1)
+        self.assertEqual(len(pings_total), 2)
+        self.assertEqual(gh.pinned_data(30).get("ready_ping_sha"), "beefcafe")
+
+    def test_in_review_ready_ping_does_not_swallow_concurrent_human(self) -> None:
+        # Race window: a human posts an issue comment AFTER the handler's
+        # comment scan but BEFORE the ready-for-merge ping. The ping must
+        # NOT bump `pr_last_comment_id` past the unseen human comment;
+        # otherwise the next tick's `comments_after` would skip the human
+        # feedback and the dev would never resume on it.
+        from unittest.mock import patch as _patch_mock
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
+        gh, issue = self._seed(
+            pr=pr, extra_state={"pr_last_comment_id": 1500}
+        )
+        # Pre-seed the human comment with an id ABOVE the watermark but
+        # BELOW the ping id (the fake comment-id counter starts at 1000,
+        # so the next id allocated by `_post_issue_comment` will be the
+        # one after this). We splice the comment in mid-handler via a
+        # patch on `_post_issue_comment` so it lands AFTER the scan.
+        human = FakeComment(
+            id=1600, body="please hold off, doing one more pass",
+            user=FakeUser("alice"), created_at=long_ago,
+        )
+        from orchestrator import workflow_messages
+        real_post = workflow_messages._post_issue_comment
+
+        def post_with_race(gh_arg, issue_arg, state_arg, body_arg):
+            # Simulate a human comment landing right before our ping.
+            if "ready for review/merge" in body_arg:
+                issue_arg.comments.append(human)
+            return real_post(gh_arg, issue_arg, state_arg, body_arg)
+
+        with patch.object(config, "AUTO_MERGE", False), \
+             _patch_mock.object(workflow, "_post_issue_comment", post_with_race):
+            self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        # Watermark must NOT have advanced past the human comment.
+        data = gh.pinned_data(30)
+        self.assertLess(data.get("pr_last_comment_id"), human.id)
+
+        # Second tick: the human comment surfaces and triggers a dev
+        # resume (the ping is filtered as orchestrator-authored).
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dev-sess", last_message="held"),
+            push_branch=True,
+            head_shas=["cafe1234", "deadbeef"],
+        )
+        self.assertEqual(mocks["run_agent"].call_count, 1)
+        self.assertIn(
+            "please hold off",
+            mocks["run_agent"].call_args.args[1],
+        )
 
     def test_in_review_auto_merge_happy_path(self) -> None:
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
