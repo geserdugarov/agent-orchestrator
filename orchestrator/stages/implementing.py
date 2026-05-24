@@ -358,6 +358,103 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
 
     state = gh.read_pinned_state(issue)
 
+    # Stale question-stage park: the operator relabeled from `question`
+    # to `implementing`. `_handle_question` parks with
+    # `awaiting_human=True` and `park_reason="question_*"` so its own
+    # next tick can resume the locked question-agent session; those
+    # flags are opaque to implementing's resume path and would
+    # mis-fire below.
+    #
+    # The clear must check the actual worktree, NOT just the park
+    # reason. The question agent is supposed to be read-only, but a
+    # misbehaving run can park as `question_commits` / `question_dirty`
+    # (or `question_timeout` that committed before being killed) with
+    # unreviewed code state on the per-issue branch. Silently dropping
+    # the park would let the fresh-spawn branch's recovered-worktree
+    # shortcut (`_has_new_commits` -> push) publish the question
+    # agent's commits as if a dev session had authored them, violating
+    # the read-only contract.
+    #
+    # Two outcomes:
+    #   * Worktree and local branch both clean -> the relabel IS the
+    #     unblock signal: drop the question-stage park flags, ratchet
+    #     `last_action_comment_id` past the question agent's answer
+    #     comment so the eventual validating->in_review watermark seed
+    #     cannot replay it as fresh PR feedback, and fall through to
+    #     the fresh-spawn path.
+    #   * Worktree carries dirty edits OR the local
+    #     `orchestrator/issue-N` branch carries commits beyond
+    #     `origin/<base>` -> refuse to proceed. The branch check
+    #     covers the case where the worktree was removed
+    #     (`_cleanup_question_worktree` ran on a safe park, or the
+    #     operator manually deleted the worktree dir) but the local
+    #     branch survived with question-agent commits: without it,
+    #     `_ensure_worktree` would silently restore the branch in a
+    #     fresh worktree, `_has_new_commits` would return True in the
+    #     recovered-worktree shortcut below, and those commits would
+    #     ship as a dev PR. Re-park with `question_unsafe_relabel`
+    #     and tell the operator to reset the branch (or delete it) so
+    #     the dev agent can start from a clean base. The re-park is
+    #     idempotent: once `park_reason` is already
+    #     `question_unsafe_relabel`, subsequent ticks stay silent
+    #     until the state is cleaned (which makes the clean branch
+    #     fire) or the operator relabels elsewhere.
+    park_reason = state.get("park_reason")
+    if (
+        state.get("awaiting_human")
+        and isinstance(park_reason, str)
+        and park_reason.startswith("question_")
+    ):
+        wt = _wf._worktree_path(spec, issue.number)
+        worktree_dirty = wt.exists() and bool(
+            _wf._worktree_dirty_files(wt)
+        )
+        branch_has_commits = _wf._branch_has_unpushed_commits(
+            spec, issue.number,
+        )
+        if worktree_dirty or branch_has_commits:
+            if park_reason != "question_unsafe_relabel":
+                trigger = (
+                    "dirty edits in the per-issue worktree"
+                    if worktree_dirty and not branch_has_commits
+                    else (
+                        "unreviewed commits on the per-issue "
+                        f"branch `{_wf._branch_name(issue.number)}`"
+                        if branch_has_commits and not worktree_dirty
+                        else (
+                            "unreviewed commits on the per-issue "
+                            f"branch `{_wf._branch_name(issue.number)}` "
+                            "AND dirty edits in its worktree"
+                        )
+                    )
+                )
+                _wf._park_awaiting_human(
+                    gh, issue, state,
+                    f"{config.HITL_MENTIONS} relabeled to `implementing`, "
+                    f"but the prior question-stage park "
+                    f"(`{park_reason}`) left {trigger}. The question "
+                    "agent must be read-only, so the orchestrator "
+                    "refuses to push that work as a dev "
+                    "implementation. Reset the worktree (e.g. "
+                    "`git -C <worktree> reset --hard origin/<base> && "
+                    "git -C <worktree> clean -fd`), or delete the "
+                    f"local branch (`git branch -D "
+                    f"{_wf._branch_name(issue.number)}` in "
+                    "`target_root`), before re-relabeling so the dev "
+                    "agent starts from a clean base.",
+                    reason="question_unsafe_relabel",
+                )
+                state.set("park_reason", "question_unsafe_relabel")
+            gh.write_pinned_state(issue, state)
+            return
+        state.set("awaiting_human", False)
+        state.set("park_reason", None)
+        latest = gh.latest_comment_id(issue)
+        if isinstance(latest, int):
+            prior = state.get("last_action_comment_id")
+            if not isinstance(prior, int) or latest > prior:
+                state.set("last_action_comment_id", latest)
+
     # User-content drift: a human edited the issue title/body after the dev
     # session was spawned. The issue spec ("don't re-decompose mid-
     # implementation -- too disruptive") rules out routing back to

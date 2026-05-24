@@ -116,12 +116,24 @@ class _PatchedWorkflowMixin:
         # to exercise the recovery / stale / diverged branches pass a
         # different tuple via the `branch_ahead_behind` kwarg.
         ahead_behind_mock = MagicMock(return_value=tuple(branch_ahead_behind))
+        # `_branch_has_unpushed_commits` shells out to `git rev-list`
+        # against the parent clone; default to False ("local branch is
+        # clean or absent") so existing tests don't trip the
+        # question-stage-park branch check in `_handle_implementing`.
+        # The question-stage relabel tests override this mock to True
+        # to assert the unsafe-branch refusal.
+        branch_unpushed_mock = MagicMock(return_value=False)
         # Decomposer worktree helpers run real `git` calls in production.
         # Mock them with the same _FAKE_WT so `_handle_decomposing` tests
         # don't shell out (and the cleanup helper is a no-op).
         decompose_wt_mock = MagicMock(return_value=_FAKE_WT)
         decompose_path_mock = MagicMock(return_value=_FAKE_WT)
         cleanup_decompose_mock = MagicMock()
+        # `_cleanup_question_worktree` runs at every safe exit of
+        # `_handle_question` to tear down the read-only worktree.
+        # Production calls `git worktree remove` + `git branch -D`;
+        # mocked here so tests don't shell out.
+        cleanup_question_mock = MagicMock()
         # `_on_commits` reads the worktree's first commit subject to derive
         # the PR title; mock it so tests don't shell out to git.
         first_subject_mock = MagicMock(return_value=first_commit_subject)
@@ -149,6 +161,7 @@ class _PatchedWorkflowMixin:
              patch.object(workflow, "_ensure_decompose_worktree", decompose_wt_mock), \
              patch.object(workflow, "_decompose_worktree_path", decompose_path_mock), \
              patch.object(workflow, "_cleanup_decompose_worktree", cleanup_decompose_mock), \
+             patch.object(workflow, "_cleanup_question_worktree", cleanup_question_mock), \
              patch.object(workflow, "_cleanup_terminal_branch", cleanup_terminal_mock), \
              patch.object(workflow, "_has_new_commits", hnc_mock), \
              patch.object(workflow, "_worktree_dirty_files", df_mock), \
@@ -159,6 +172,7 @@ class _PatchedWorkflowMixin:
              patch.object(workflow, "_run_verify_commands", verify_mock), \
              patch.object(workflow, "_authed_fetch", authed_fetch_ok), \
              patch.object(workflow, "_branch_ahead_behind", ahead_behind_mock), \
+             patch.object(workflow, "_branch_has_unpushed_commits", branch_unpushed_mock), \
              patch.object(workflow, "_rebase_in_progress", rebase_in_progress_mock):
             callable_()
 
@@ -169,6 +183,7 @@ class _PatchedWorkflowMixin:
             "_ensure_decompose_worktree": decompose_wt_mock,
             "_decompose_worktree_path": decompose_path_mock,
             "_cleanup_decompose_worktree": cleanup_decompose_mock,
+            "_cleanup_question_worktree": cleanup_question_mock,
             "_cleanup_terminal_branch": cleanup_terminal_mock,
             "_has_new_commits": hnc_mock,
             "_worktree_dirty_files": df_mock,
@@ -179,5 +194,6 @@ class _PatchedWorkflowMixin:
             "_run_verify_commands": verify_mock,
             "_authed_fetch": authed_fetch_ok,
             "_branch_ahead_behind": ahead_behind_mock,
+            "_branch_has_unpushed_commits": branch_unpushed_mock,
             "_rebase_in_progress": rebase_in_progress_mock,
         }

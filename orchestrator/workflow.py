@@ -72,6 +72,10 @@ from .workflow_messages import _build_implement_prompt as _build_implement_promp
 from .workflow_messages import (
     _build_pr_comment_followup as _build_pr_comment_followup,
 )
+from .workflow_messages import (
+    _build_question_followup_prompt as _build_question_followup_prompt,
+)
+from .workflow_messages import _build_question_prompt as _build_question_prompt
 from .workflow_messages import _build_review_prompt as _build_review_prompt
 from .workflow_messages import _drift_ack_reason as _drift_ack_reason
 from .workflow_messages import (
@@ -87,8 +91,12 @@ from .workflow_messages import _with_orch_marker as _with_orch_marker
 from .worktrees import _authed_fetch as _authed_fetch
 from .worktrees import _authed_target_fetch as _authed_target_fetch
 from .worktrees import _branch_ahead_behind as _branch_ahead_behind
+from .worktrees import (
+    _branch_has_unpushed_commits as _branch_has_unpushed_commits,
+)
 from .worktrees import _branch_name as _branch_name
 from .worktrees import _cleanup_decompose_worktree as _cleanup_decompose_worktree
+from .worktrees import _cleanup_question_worktree as _cleanup_question_worktree
 from .worktrees import _cleanup_terminal_branch as _cleanup_terminal_branch
 from .worktrees import _decompose_worktree_path as _decompose_worktree_path
 from .worktrees import _ensure_decompose_worktree as _ensure_decompose_worktree

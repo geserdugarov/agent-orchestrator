@@ -732,6 +732,141 @@ def _cleanup_decompose_worktree(spec: RepoSpec, issue_number: int) -> None:
         )
 
 
+def _branch_has_unpushed_commits(
+    spec: RepoSpec, issue_number: int,
+) -> bool:
+    """True if the local `orchestrator/issue-N` branch exists in
+    `spec.target_root` and carries commits beyond
+    `<remote>/<base>`.
+
+    Inspects the parent clone directly so the answer does not
+    depend on a per-issue worktree existing on disk. The question-
+    stage relabel guard in `_handle_implementing` needs this: if
+    the operator manually removes the worktree (or
+    `_cleanup_question_worktree` partially failed) but the local
+    branch survives with question-agent commits, the
+    worktree-only `_has_new_commits` / `_worktree_dirty_files`
+    checks would report "clean" and the relabel-clear would let
+    `_ensure_worktree` restore the branch in a fresh worktree;
+    the recovered-worktree shortcut would then push those commits
+    as if a dev session authored them.
+
+    Returns False when:
+
+    * the local branch does not exist (no state to inspect);
+    * the local branch exists at exactly `<remote>/<base>` (a
+      fresh-from-base reset);
+    * the `rev-list` itself errors (transient git failure -- the
+      caller's later steps will surface the underlying problem if
+      it persists).
+
+    Returns True only when the branch has at least one commit
+    that is not in `<remote>/<base>`, which is the exact
+    condition the recovered-worktree shortcut would treat as
+    "unpushed dev work" -- the read-only-violation we are trying
+    to prevent.
+
+    Serialized via `_target_root_lock` for the same
+    `.git/config.lock` reason described on `_ensure_worktree`;
+    `RLock` re-entry keeps callers that already hold the lock
+    safe.
+    """
+    branch = _branch_name(issue_number)
+    with _target_root_lock(spec.target_root):
+        have_local = _git(
+            "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
+            cwd=spec.target_root,
+        ).returncode == 0
+        if not have_local:
+            return False
+        r = _git(
+            "rev-list", "--count",
+            f"refs/remotes/{spec.remote_name}/{spec.base_branch}"
+            f"..refs/heads/{branch}",
+            cwd=spec.target_root,
+        )
+    if r.returncode != 0:
+        return False
+    try:
+        return int((r.stdout or "0").strip() or "0") > 0
+    except ValueError:
+        return False
+
+
+def _cleanup_question_worktree(spec: RepoSpec, issue_number: int) -> None:
+    """Tear down the per-issue worktree and local branch after a
+    `_handle_question` tick.
+
+    The question stage spawns the agent in the same `issue-N`
+    worktree the implementing stage uses, but the agent is read-only
+    -- it never commits or pushes. Leaving the worktree on disk
+    between ticks lets the per-tick `_refresh_base_and_worktrees`
+    treat it as a pre-PR worktree behind base and merge
+    `origin/<base>` into it, accreting local commits on a read-only
+    question branch. A later relabel to `implementing` then either
+    trips the `question_unsafe_relabel` guard (worktree still on
+    disk) or, if a stale local branch survives a worktree GC, falls
+    through to the recovered-worktree push path. Either way the
+    "question responses without PRs / read-only" contract breaks.
+
+    Called from every safe-exit of `_handle_question` (answer,
+    silent, no-resume return). Skipped for the parks that
+    explicitly KEEP the worktree so the operator can inspect what
+    the misbehaving agent did (`question_commits`, `question_dirty`,
+    `question_timeout`); the workflow-label skip in
+    `_sync_worktree_with_base` then prevents base sync from
+    mutating those kept worktrees behind the operator's back.
+
+    Removes the worktree AND the local branch. The next answer /
+    resume / relabel rebuilds the worktree from a fresh
+    `origin/<base>`; agent session state lives in pinned state, not
+    in the worktree, so resume across the cleanup works.
+
+    No remote-side step -- the question stage never pushed, so
+    there is no remote branch to delete. Best-effort: each step
+    swallows its own error so cleanup never raises out of the
+    handler. Serialized via `_target_root_lock` for the same
+    `.git/config.lock` reason described on `_ensure_worktree`.
+    """
+    branch = _branch_name(issue_number)
+    try:
+        wt = _worktree_path(spec, issue_number)
+        if wt.exists():
+            with _target_root_lock(spec.target_root):
+                r = _git(
+                    "worktree", "remove", "--force", str(wt),
+                    cwd=spec.target_root,
+                )
+            if r.returncode != 0:
+                log.warning(
+                    "issue=#%d question worktree remove failed: %s",
+                    issue_number, (r.stderr or "").strip(),
+                )
+    except Exception:
+        log.exception(
+            "issue=#%d question worktree remove raised", issue_number,
+        )
+
+    try:
+        with _target_root_lock(spec.target_root):
+            have_local = _git(
+                "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
+                cwd=spec.target_root,
+            ).returncode == 0
+            if have_local:
+                r = _git("branch", "-D", branch, cwd=spec.target_root)
+                if r.returncode != 0:
+                    log.warning(
+                        "issue=#%d question local branch %r delete failed: %s",
+                        issue_number, branch, (r.stderr or "").strip(),
+                    )
+    except Exception:
+        log.exception(
+            "issue=#%d question local branch %r delete raised",
+            issue_number, branch,
+        )
+
+
 def _cleanup_terminal_branch(
     gh: GitHubClient, spec: RepoSpec, issue_number: int
 ) -> None:
@@ -1548,6 +1683,22 @@ def _sync_worktree_with_base(
         log.debug(
             "issue=#%d has %r; skipping base sync",
             issue_number, BASE_SYNC_HOLD_LABEL,
+        )
+        return
+    # `question`-labeled issues are read-only: the question agent
+    # must not commit, and `_handle_question` already tears down the
+    # per-issue worktree on every safe exit. The only worktrees that
+    # survive across ticks under this label are the unsafe-park
+    # cases (`question_commits`, `question_dirty`, `question_timeout`)
+    # where the operator is supposed to inspect what the agent did
+    # before resetting; merging `origin/<base>` over that inspection
+    # state would mask it. Skip base sync entirely while the label
+    # is `question` so the read-only contract holds even if the
+    # handler ever leaves the worktree on disk unexpectedly.
+    if issue_has_label(issue, "question"):
+        log.debug(
+            "issue=#%d has 'question' label; skipping base sync "
+            "(read-only stage)", issue_number,
         )
         return
     state = gh.read_pinned_state(issue)

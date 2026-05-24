@@ -606,6 +606,59 @@ def _build_conflict_resolution_prompt(
     )
 
 
+def _build_question_prompt(issue: Issue, comments_text: str) -> str:
+    """Compose the read-only prompt used by the `question` stage.
+
+    The agent runs in the per-issue `issue-N` worktree with read-only
+    expectations: it must answer the standing question (or ask a focused
+    follow-up of its own) without touching code, committing, or pushing.
+    The orchestrator parks on any commit / dirty-tree output, so the
+    prompt is explicit about that contract.
+    """
+    body = issue.body or "(no body)"
+    convo = comments_text or "(no prior comments)"
+    return (
+        f"You are answering a standing question on GitHub issue "
+        f"#{issue.number}: {issue.title!r}.\n\n"
+        f"Issue body:\n{body}\n\n"
+        f"Conversation so far:\n{convo}\n\n"
+        "Read the issue and the conversation above, inspect the codebase "
+        "with read-only commands (`git ls-files`, `git log`, `cat`, "
+        "`grep`, etc.), and write a focused answer to the open question. "
+        "Cite file paths or commits when useful. You MUST NOT modify, "
+        "create, delete, commit, or push any file -- this stage is "
+        "purely informational.\n\n"
+        "If you need more information from the human before you can "
+        "answer, end your message with a single, focused follow-up "
+        "question. Otherwise end with a clear answer that the human can "
+        "act on (close the issue, relabel it to `implementing`, etc.)."
+    )
+
+
+def _build_question_followup_prompt(comments: list) -> str:
+    """Compose the resume prompt the question stage sends back to its
+    locked agent session after a human reply.
+
+    Mirrors `_resume_developer_on_human_reply`'s shape -- a quote of the
+    incoming comments -- but reiterates the read-only / no-commit
+    contract so a multi-tick conversation cannot drift into the agent
+    deciding to "just implement the fix".
+    """
+    body = "\n\n".join(
+        f"@{c.user.login if c.user else 'user'}: {c.body or ''}"
+        for c in comments
+    )
+    quoted = "> " + body.replace("\n", "\n> ")
+    return (
+        "The human replied on the issue thread. Continue the discussion "
+        "and answer their reply.\n\n"
+        f"Human reply:\n\n{quoted}\n\n"
+        "Reminder: this is still the read-only question stage. Do NOT "
+        "modify, create, delete, commit, or push any file. End with a "
+        "clear answer or a single, focused follow-up question."
+    )
+
+
 def _build_pr_comment_followup(comments: list) -> str:
     """Compose a dev-fix prompt from new PR-side comments.
 
