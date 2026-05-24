@@ -39,6 +39,7 @@ WORKFLOW_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("documenting", "c2e0c6", "Documentation pass after implementation, before validation"),
     ("validating", "8a2be2", "Automated review/tests are running"),
     ("in_review", "d93f0b", "PR is open, awaiting human review"),
+    ("fixing", "fef2c0", "Addressing PR feedback before the next reviewer round"),
     ("resolving_conflict", "e99695", "Auto-resolving merge conflicts after a sibling PR landed first"),
     ("question", "d876e3", "Awaiting a clarifying answer from a human before the orchestrator can advance"),
     ("done", "cccccc", "Merged to main"),
@@ -200,7 +201,7 @@ class GitHubClient:
 
     def list_pollable_issues(self, since: Optional[datetime] = None) -> Iterable[Issue]:
         """Open issues plus closed issues still labeled `in_review`,
-        `resolving_conflict`, or `question`.
+        `fixing`, `resolving_conflict`, or `question`.
 
         The closed-issue sweep is what makes the manual-merge path work:
         when a human merges a PR with a `Resolves #N` footer, GitHub
@@ -210,11 +211,12 @@ class GitHubClient:
         issue no longer carries either sweep label, so the cost stays
         bounded in steady state.
 
-        `resolving_conflict` is included alongside `in_review` because
-        an external merge can land while the orchestrator is mid-resolution
-        too: `Resolves #N` closes the issue, the PR moves to merged, and
-        `_handle_resolving_conflict`'s terminal branch handles it -- but
-        only if the closed issue actually surfaces here.
+        `fixing` and `resolving_conflict` are included alongside
+        `in_review` because an external merge can land while the
+        orchestrator is mid-fix or mid-resolution too: `Resolves #N`
+        closes the issue, the PR moves to merged, and the matching
+        handler's terminal branch finalizes the label -- but only if
+        the closed issue actually surfaces here.
 
         `question` joins the sweep so a human closing an open Q&A thread
         is recognized as a terminal signal: `_handle_question` finalizes
@@ -247,7 +249,9 @@ class GitHubClient:
         # sweep" and skip rather than raising. Multi-label-OR is achieved
         # by issuing one query per label (the GitHub Issues API treats
         # `labels` as AND, not OR).
-        for label_name in ("in_review", "resolving_conflict", "question"):
+        for label_name in (
+            "in_review", "fixing", "resolving_conflict", "question",
+        ):
             try:
                 label_obj = self.repo.get_label(label_name)
             except GithubException as e:

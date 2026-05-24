@@ -3,9 +3,13 @@
 ## Status as of 2026-05-24
 
 The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
-`umbrella` → `implementing` → `validating` → `in_review` → `resolving_conflict`
-optional detour → `done` / `rejected`) is wired end-to-end. The operator-
-applied `question` label adds a read-only Q&A side-branch (`_handle_question`)
+`umbrella` → `implementing` → `validating` → `in_review` → `fixing`
+(on fresh PR feedback) or `resolving_conflict` (auto-merge detour) →
+`done` / `rejected`) is wired end-to-end; the `fixing` handler is a
+stub today (real fix-loop under parent #137), but the in_review route,
+the closed-issue sweep, the PR-worktree refresh detour, and the
+PR-state terminal arcs are all in place. The operator-applied
+`question` label adds a read-only Q&A side-branch (`_handle_question`)
 that runs the decomposer backend in the per-issue worktree to answer
 clarifying questions without opening a PR; closing the issue is the
 terminal signal.
@@ -109,13 +113,37 @@ reviewer crashes are tagged transient for retry.
 
 **In-review terminals and auto-merge.** `_handle_in_review` covers:
 PR merged → `done` + branch cleanup; PR closed unmerged → `rejected`;
-new comments past `IN_REVIEW_DEBOUNCE_SECONDS` (default 600s) → resume
-dev, bounce to `validating`; `AUTO_MERGE=on` + agent-or-human approval +
-no veto + mergeable + green CI → SHA-pinned `gh.merge_pr` → `done`.
+fresh actionable PR feedback on any of the four comment surfaces →
+record pending-fix metadata in pinned state and flip the label to
+`fixing` immediately (no debounce wait, no dev spawn from this
+handler — the `fixing` stage owns the resume + push + bounce-back-to-
+`validating` cycle, with debouncing applied there);
+`AUTO_MERGE=on` + agent-or-human approval + no veto + mergeable +
+green CI → SHA-pinned `gh.merge_pr` → `done`.
 
 Three independent watermarks separate IssueComment / PullRequestComment /
 PullRequestReview namespaces; park comments bump watermarks past
-themselves to avoid replay.
+themselves to avoid replay. The route to `fixing` deliberately does NOT
+advance these watermarks so the fixing handler can read the triggering
+comments to build its dev-resume prompt; the `pending_fix_*_max_id`
+keys are bookmarks (a hint for the future handler), not watermarks.
+
+**Fixing stage (stub).** `fixing` is registered as a routable workflow
+label that sits between `in_review` and `validating` in the PR-feedback
+fix loop. The handler mirrors `_handle_in_review`'s PR-state terminal
+arcs so a closed-`fixing` issue with a merged PR finalizes to `done`
+and a closed-without-merge PR finalizes to `rejected` (the same
+`_cleanup_terminal_branch` + emit-event contract as in_review); open
+issues with no terminal arc fall through to a park-awaiting-human stub
+that ratchets the in_review watermarks past the recorded
+`pending_fix_*_max_id` bookmarks so the documented manual recovery
+(relabel back to `in_review`) does not loop. The real dev-resume +
+push + bounce-back-to-`validating` behaviour lands under parent #137.
+Closed `fixing` issues join the closed-issue sweep alongside
+`in_review`, `resolving_conflict`, and `question` so an external manual
+merge with `Resolves #N` finalizes cleanly, and the pre-tick base
+refresh treats `fixing` as a PR-having stage eligible for the
+`resolving_conflict` detour.
 
 **Conflict resolution stage.** Under `AUTO_MERGE=on`, approved-but-
 unmergeable PRs route to `resolving_conflict` instead of parking.

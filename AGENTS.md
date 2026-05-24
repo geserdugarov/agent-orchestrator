@@ -24,7 +24,8 @@ Read these before making non-trivial changes to the state machine.
     - `decomposition.py` — `_handle_decomposing`, `_handle_ready`, `_handle_blocked`, `_handle_umbrella`, decomposer-session helpers.
     - `implementing.py` — `_handle_implementing`, dev-session lifecycle, retry budget, `_on_commits` / `_on_question` / `_on_dirty_worktree`.
     - `validating.py` — `_handle_validating`, reviewer-session lifecycle, dev-fix disposition, watermark seeding.
-    - `in_review.py` — `_handle_in_review`, PR-watermark ratchet, auto-merge gate.
+    - `in_review.py` — `_handle_in_review`, PR-watermark ratchet, auto-merge gate, route-to-`fixing` on fresh PR feedback.
+    - `fixing.py` — `_handle_fixing` (stub; real fix-loop lands under parent #137). Entered when `_handle_in_review` detects fresh PR feedback and hands the issue off instead of spawning the dev itself.
     - `conflicts.py` — `_handle_resolving_conflict`, conflict-loop helpers.
   - `agents.py` — `codex` / `claude` subprocess invocation
   - `github.py` — `GitHubClient` wrapper around PyGithub
@@ -47,7 +48,7 @@ uv pip install PyGithub
 .venv/bin/python -m orchestrator.main --log-level DEBUG
 ```
 
-Tests are the primary correctness gate. Add or update tests for any behavioral change to `workflow.py`, the stage modules under `orchestrator/stages/`, the workflow helper modules (`workflow_drift.py`, `workflow_messages.py`, `worktrees.py`), `agents.py`, `github.py`, or `config.py`. Stage-handler tests live in per-stage files (`tests/test_workflow_decomposition.py`, `_implementing.py`, `_validating.py`, `_in_review.py`, `_conflicts.py`) with shared helpers in `tests/workflow_helpers.py`; `tests/test_workflow.py` covers the facade-level dispatcher / tick / pickup behavior.
+Tests are the primary correctness gate. Add or update tests for any behavioral change to `workflow.py`, the stage modules under `orchestrator/stages/`, the workflow helper modules (`workflow_drift.py`, `workflow_messages.py`, `worktrees.py`), `agents.py`, `github.py`, or `config.py`. Stage-handler tests live in per-stage files (`tests/test_workflow_decomposition.py`, `_implementing.py`, `_validating.py`, `_in_review.py`, `_conflicts.py`) with shared helpers in `tests/workflow_helpers.py`; `tests/test_workflow.py` covers the facade-level dispatcher / tick / pickup behavior (plus the `fixing` stub's dispatcher / sweep / route wiring, which has no dedicated stage test file yet because the real handler is still pending).
 
 ## Code conventions
 
@@ -66,14 +67,14 @@ Tests are the primary correctness gate. Add or update tests for any behavioral c
 
 - Labels and stage names are part of the public contract — issues in flight carry them. Renaming or repurposing a label is a migration, not a refactor.
 - The pinned JSON state comment is the only durable per-issue state. Schema changes need to stay backward-compatible with comments already on live issues.
-- `workflow.py` is now a slim facade that owns the dispatcher (`_process_issue`), the tick loop, the unlabeled-pickup handler, `_park_awaiting_human`, and `_run_agent_tracked`. Stage handler bodies live under `orchestrator/stages/` — `decomposition.py` for `_handle_decomposing` / `_handle_ready` / `_handle_blocked` / `_handle_umbrella`, `implementing.py` for `_handle_implementing`, `validating.py` for `_handle_validating`, `in_review.py` for `_handle_in_review`, `conflicts.py` for `_handle_resolving_conflict`. Find the right stage module before changing dispatcher routing.
+- `workflow.py` is now a slim facade that owns the dispatcher (`_process_issue`), the tick loop, the unlabeled-pickup handler, `_park_awaiting_human`, and `_run_agent_tracked`. Stage handler bodies live under `orchestrator/stages/` — `decomposition.py` for `_handle_decomposing` / `_handle_ready` / `_handle_blocked` / `_handle_umbrella`, `implementing.py` for `_handle_implementing`, `validating.py` for `_handle_validating`, `in_review.py` for `_handle_in_review`, `fixing.py` for `_handle_fixing` (stub today; real fix-loop lands under parent #137 — `_handle_in_review` routes fresh PR feedback there), `conflicts.py` for `_handle_resolving_conflict`. Find the right stage module before changing dispatcher routing.
 - Stage modules call back into the facade via `from .. import workflow as _wf` at call time so test patches against `workflow.<helper>` keep intercepting calls made from inside a stage handler. Adding a new stage helper that other stages also reach for? Re-export it from `workflow.py` (the existing pattern in `workflow.py` aliases each name with `as <name>`) and import it through `_wf` from the consumer, not directly from `workflow_drift` / `workflow_messages` / `worktrees`.
 - Tests for stage handlers live in `tests/test_workflow_<stage>.py` (`_decomposition`, `_implementing`, `_validating`, `_in_review`, `_conflicts`) with shared helpers in `tests/workflow_helpers.py`. Facade-level dispatcher / tick / pickup tests stay in `tests/test_workflow.py`. All of them exercise stages against in-memory fakes (`tests/fakes.py`). Prefer extending these fakes over mocking PyGithub directly.
 
 ## When working on agent invocation
 
 - `codex` is invoked with `--dangerously-bypass-approvals-and-sandbox`; `claude` with `--dangerously-skip-permissions`. The host is the sandbox boundary, which is why secrets are kept off the worktree.
-- Agent stdout/stderr handling matters: empty-output and timeout cases are deliberately distinguished (`park_reason`s are tagged transient vs. terminal). Look at `agents.py` and the per-stage `_on_question` / `_on_dirty_worktree` recovery paths (in `orchestrator/stages/implementing.py`, with stage-specific siblings in `validating.py` / `in_review.py` / `conflicts.py`) before adjusting subprocess plumbing.
+- Agent stdout/stderr handling matters: empty-output and timeout cases are deliberately distinguished (`park_reason`s are tagged transient vs. terminal). Look at `agents.py` and the per-stage `_on_question` / `_on_dirty_worktree` recovery paths (in `orchestrator/stages/implementing.py`, with stage-specific siblings in `validating.py` / `in_review.py` / `conflicts.py`) before adjusting subprocess plumbing. The `fixing` stage is a stub today (parks awaiting human via `_park_awaiting_human`) and does not spawn agents itself yet.
 
 ## Out of scope without explicit ask
 

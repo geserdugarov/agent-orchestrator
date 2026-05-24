@@ -124,7 +124,7 @@ The two caps below are the levers:
 Inside a single `workflow.tick`, the parallel path partitions pollable issues by workflow label before submitting work to the executor:
 
 - **Family-aware labels** (`decomposing`, `blocked`, `umbrella`, plus unlabeled issues) read and write cross-issue state (parent ↔ child) and must never run two at a time. They are folded into one drain task that processes them sequentially on a single worker thread.
-- **Fan-out labels** (`ready`, `implementing`, `validating`, `in_review`, `resolving_conflict`) only touch their own per-issue state and worktree, so each one is submitted as its own future and runs concurrently up to `parallel_limit`.
+- **Fan-out labels** (`ready`, `implementing`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`) only touch their own per-issue state and worktree, so each one is submitted as its own future and runs concurrently up to `parallel_limit`.
 
 The drain task occupies exactly one executor slot regardless of how many family-aware issues exist, leaving the other `parallel_limit - 1` slots free for fan-out work in the same tick.
 
@@ -143,7 +143,7 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 | Variable                     | Default | Purpose                                                                                              |
 | ---------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `AUTO_MERGE`                 | `off`   | merge approved PRs (green CI + mergeable) from `in_review`; flip to `on` once dogfooded             |
-| `IN_REVIEW_DEBOUNCE_SECONDS` | `600`   | quiet window after the latest PR/issue comment before resuming the dev session                       |
+| `IN_REVIEW_DEBOUNCE_SECONDS` | `600`   | quiet window the `fixing` stage will honour before resuming the dev on PR feedback (parent #137); `_handle_in_review` itself routes fresh feedback to `fixing` immediately and no longer applies the debounce |
 
 `AUTO_MERGE=on` requires the `Checks: Read` permission on the PAT — without it the orchestrator sees `check_state='none'` for Actions-only PRs and parks awaiting a human even when CI is green.
 

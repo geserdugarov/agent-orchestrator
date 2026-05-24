@@ -1589,10 +1589,11 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
             f"watermark must stop before human comment id=950 (got {wm})",
         )
 
-        # Step 2: in_review tick. With the fix, the human comment is visible
-        # past the watermark, gets surfaced to the dev agent, and the issue
-        # bounces back to validating. Without it, the auto-merge gate would
-        # fire on the agent's approval and merge over the human's feedback.
+        # Step 2: in_review tick. The human comment is visible past the
+        # watermark and the handler routes the issue to `fixing` (no dev
+        # spawn here; the fixing handler drives the resume). Without the
+        # surfacing, the auto-merge gate would fire on the agent's
+        # approval and merge over the human's feedback.
         from tests.fakes import FakeLabel
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
@@ -1601,22 +1602,17 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="docstring added"
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
-        # Dev agent was resumed on the human's comment text.
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "please add a docstring",
-            mocks["run_agent"].call_args.args[1],
-        )
-        # No merge happened; issue bounced back to validating.
+        mocks["run_agent"].assert_not_called()
+        # No merge happened; issue routed to `fixing` so the human's
+        # feedback is owned by the fix loop.
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((15, "validating"), gh.label_history)
+        self.assertIn((15, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(15).get("pending_fix_issue_max_id"), 950,
+        )
 
 
 class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -2270,27 +2266,25 @@ class ValidatingHandoffSeedsAllWatermarksTest(
         # past the review.
         self.assertLess(data["pr_last_review_summary_id"], 4242)
 
-        # Step 2: in_review tick. The summary surfaces and resumes the dev.
+        # Step 2: in_review tick. The summary surfaces and the handler
+        # routes the issue to `fixing` (the fixing handler owns the dev
+        # resume cycle, not the in_review handler).
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "AUTO_MERGE", True), \
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="tightened",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "tighten the docstring",
-            mocks["run_agent"].call_args.args[1],
-        )
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((200, "validating"), gh.label_history)
+        self.assertIn((200, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(200).get("pending_fix_review_summary_max_id"),
+            4242,
+        )
 
     def test_pre_handoff_inline_review_comment_surfaces(self) -> None:
         # Same shape, inline-review surface. The orchestrator never posts
@@ -2320,19 +2314,15 @@ class ValidatingHandoffSeedsAllWatermarksTest(
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="renamed",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "rename foo to bar",
-            mocks["run_agent"].call_args.args[1],
-        )
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
+        self.assertIn((200, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(200).get("pending_fix_review_max_id"), 77,
+        )
 
 
 class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -2394,27 +2384,23 @@ class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         # Step 2: in_review tick. The human's inline comment surfaces and
-        # the dev gets resumed -- not auto-merged.
+        # routes the issue to `fixing` -- not auto-merged. The fixing
+        # handler owns the dev resume on the next tick.
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "AUTO_MERGE", True), \
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="renamed",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "rename foo to bar",
-            mocks["run_agent"].call_args.args[1],
-        )
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((300, "validating"), gh.label_history)
+        self.assertIn((300, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(300).get("pending_fix_review_max_id"), 4242,
+        )
 
 
 class HandoffWithoutPickupIdLegacyStateTest(
@@ -2496,32 +2482,30 @@ class HandoffWithoutPickupIdLegacyStateTest(
 
         # Step 2: in_review tick. AUTO_MERGE on, every gate passes -- the
         # only thing standing between the PR and a merge is the human's
-        # "do not merge yet" comment, which the handler must surface.
+        # "do not merge yet" comment. The handler must surface it as
+        # fresh feedback and route to `fixing`.
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "AUTO_MERGE", True), \
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="ack",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
         # Auto-merge must NOT fire.
         self.assertEqual(gh.merge_calls, [])
         self.assertNotIn((500, "done"), gh.label_history)
-        # The "do not merge yet" comment surfaces as fresh PR feedback;
-        # the dev session is resumed on it (alongside other legacy
+        # The "do not merge yet" comment surfaces as fresh PR feedback
+        # and routes the issue to `fixing` (alongside other legacy
         # comments the migration cannot reliably classify).
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "do not merge yet",
-            mocks["run_agent"].call_args.args[1],
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((500, "fixing"), gh.label_history)
+        # The legacy default falls through to scan from the beginning,
+        # so the route bookmarks the latest visible human/issue-side id.
+        self.assertGreaterEqual(
+            gh.pinned_data(500).get("pending_fix_issue_max_id"), 950,
         )
-        self.assertIn((500, "validating"), gh.label_history)
 
 
 class ReviewedShaBranchUpdateRaceTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -2868,31 +2852,36 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
             f"(consumed_through=920 must NOT apply across surfaces); got {wm}",
         )
 
-        # Step 2: in_review tick. The PR-conv comment surfaces, the dev is
-        # resumed on it, and the issue bounces to validating instead of
-        # merging.
+        # Step 2: in_review tick. The PR-conv comment surfaces and the
+        # handler routes the issue to `fixing` (the fixing handler owns
+        # the dev resume on the next tick) instead of merging.
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "AUTO_MERGE", True), \
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="docstring added",
-                ),
-                push_branch=True,
-                head_shas=["cafe1234", "cafe5678"],
+                run_agent=_agent(),
             )
 
-        # Dev was resumed on the unread PR-conv text -- the safety guarantee.
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "please add a docstring",
-            mocks["run_agent"].call_args.args[1],
-        )
-        # No auto-merge over unread feedback.
+        # Routed to fixing -- the unread PR-conv text is bookmarked for
+        # the fixing handler. No auto-merge over unread feedback.
+        # `pending_fix_issue_max_id` covers BOTH the issue-thread and
+        # PR-conversation surfaces (they share the IssueComment id space);
+        # 915 was the unread PR-conv comment, 920 was the issue-thread
+        # human reply that consumed_through skipped at handoff but
+        # in_review re-scans regardless, so the max across the bucket is
+        # 920. The point of the test is that 915 has to be visible to
+        # the fixing handler -- it must sit at or below the bookmark and
+        # past the watermark.
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((800, "validating"), gh.label_history)
+        self.assertIn((800, "fixing"), gh.label_history)
+        data = gh.pinned_data(800)
+        self.assertGreaterEqual(data.get("pending_fix_issue_max_id"), 915)
+        # The watermark stays put so the fixing handler can re-scan and
+        # see id 915.
+        self.assertLess(data.get("pr_last_comment_id"), 915)
 
 
 class HandleValidatingResumeOnHashChangeTest(

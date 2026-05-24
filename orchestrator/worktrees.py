@@ -1578,8 +1578,8 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
       the local worktree onto `origin/<base>` -- no remote yet, so there
       is nothing to push.
 
-    * **PR-having worktrees** (validating / in_review): rebasing locally
-      WITHOUT pushing would diverge local HEAD from `pr.head.sha` and
+    * **PR-having worktrees** (validating / in_review / fixing): rebasing
+      locally WITHOUT pushing would diverge local HEAD from `pr.head.sha` and
       break the validating reviewer (it reads local HEAD, so it would
       snapshot `agent_approved_sha` to a SHA that isn't on the PR),
       `_squash_and_force_push`'s `--force-with-lease=<original_head>`
@@ -1638,14 +1638,15 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
 
 
 # Workflow labels the pre-tick refresh is willing to detour into
-# `resolving_conflict` when the PR worktree is behind base. Validating and
-# in_review are the long-lived PR-stage labels: validating may run the
-# reviewer again, in_review is parked waiting for AUTO_MERGE / human merge.
-# `resolving_conflict` itself is excluded -- the handler runs this tick
-# regardless and will do the rebase anyway. Other labels mean either no PR
-# yet (pre-PR path applies instead) or terminal (done/rejected, nothing to
-# refresh).
-_PR_REFRESH_DETOUR_LABELS = frozenset({"validating", "in_review"})
+# `resolving_conflict` when the PR worktree is behind base. Validating,
+# in_review, and fixing are the long-lived PR-stage labels: validating may
+# run the reviewer again, in_review is parked waiting for AUTO_MERGE /
+# human merge, and fixing is between in_review and validating while a PR
+# feedback round is being addressed. `resolving_conflict` itself is
+# excluded -- the handler runs this tick regardless and will do the rebase
+# anyway. Other labels mean either no PR yet (pre-PR path applies instead)
+# or terminal (done/rejected, nothing to refresh).
+_PR_REFRESH_DETOUR_LABELS = frozenset({"validating", "in_review", "fixing"})
 
 
 def _sync_worktree_with_base(
@@ -1654,7 +1655,7 @@ def _sync_worktree_with_base(
     """Bring a single per-issue worktree up to date with `origin/<base>`.
 
     Pre-PR: rebase onto `origin/<base>` directly. PR-having + behind base +
-    label in {validating, in_review}: detour the issue to
+    label in {validating, in_review, fixing}: detour the issue to
     `resolving_conflict` so the existing handler does rebase + push +
     relabel-to-validating in one consistent flow. Skips a dirty worktree
     or a worktree already up to date (no pre-PR rebase attempted, no PR
@@ -1785,8 +1786,8 @@ def _route_pr_worktree_to_resolving_conflict(
     Skips the detour when:
 
     * The label is not one this refresh knows how to drive into
-      `resolving_conflict` (only `validating` / `in_review`); the
-      `resolving_conflict` label itself is also skipped because the
+      `resolving_conflict` (only `validating` / `in_review` / `fixing`);
+      the `resolving_conflict` label itself is also skipped because the
       handler runs this tick anyway and will do the rebase regardless.
 
     * `awaiting_human=True`. `_handle_resolving_conflict`'s awaiting-human
@@ -1806,8 +1807,9 @@ def _route_pr_worktree_to_resolving_conflict(
       land, not after every intermediate base advance.
 
     * The PR is no longer open. A merged PR advances `origin/<base>`, so
-      the still-validating / still-in_review worktree pointed at the now-
-      stale branch is naturally behind base; without this gate the detour
+      the still-validating / still-in_review / still-fixing worktree pointed
+      at the now-stale branch is naturally behind base; without this gate
+      the detour
       would post an "auto-resolution" notice and relabel to
       `resolving_conflict` on a PR the next handler call would finalize to
       `done`. Same for closed-without-merge if base advanced concurrently

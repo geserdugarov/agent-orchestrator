@@ -211,16 +211,18 @@ def _seed_legacy_in_review_watermarks(
 
 
 def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
-    """Drive an in_review issue toward done / rejected, or back to validating
-    on a new PR comment.
+    """Drive an in_review issue toward done / rejected, or hand fresh PR
+    feedback off to the `fixing` stage.
 
     The handler always re-checks PR state (merged/closed) first so an external
-    human merge wins over any orchestrator-side logic. A PR comment newer than
-    the debounce window resumes the dev's locked-backend session and bounces
-    the issue back to `validating` so the reviewer agent re-runs on the fix.
-    Auto-merge is gated by `AUTO_MERGE` (default off); without it, the loop
-    only handles state transitions and comment-driven re-fixes -- humans still
-    click Merge.
+    human merge wins over any orchestrator-side logic. Fresh actionable PR
+    feedback on any of the four surfaces (issue thread, PR conversation,
+    inline review, review summary) records pending-fix metadata in pinned
+    state and flips the label to `fixing` immediately -- the dev resume and
+    bounce-back-to-`validating` cycle moves to the `fixing` handler. Auto-
+    merge is gated by `AUTO_MERGE` (default off); without it, the loop only
+    handles state transitions and feedback hand-off -- humans still click
+    Merge.
     """
     from .. import workflow as _wf
 
@@ -325,11 +327,143 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # for the actual closed-PR rejection arc above.
         return
 
+    # Fresh PR feedback scan runs FIRST -- BEFORE the user-content drift
+    # check below. `user_content_hash` covers title + body + every human
+    # issue-thread comment, so without this ordering a normal fresh
+    # issue-thread review comment would also flip the hash and the drift
+    # path would resume the dev + bounce to `validating` instead of
+    # recording `pending_fix_*` and flipping to `fixing`. That violates the
+    # documented in_review -> fixing contract for issue-thread feedback.
+    # Reorder so issue-thread / PR-conversation / inline-review /
+    # review-summary feedback always routes to `fixing`, and the drift
+    # check only fires for true title/body edits that the feedback scan
+    # cannot represent.
+    _seed_legacy_in_review_watermarks(gh, issue, pr, state)
+    # `or` would discard a legacy default of `pr_last_comment_id == 0` and
+    # fall back to `last_action_comment_id` (the id of a prior park
+    # comment), which sits ABOVE any human "do not merge yet" comment
+    # posted earlier during implementing/validating; that human comment
+    # would then never surface and AUTO_MERGE could land the PR over it.
+    # Treat 0 as a valid "scan from the beginning" watermark.
+    issue_wm = state.get("pr_last_comment_id")
+    if issue_wm is None:
+        issue_wm = state.get("last_action_comment_id")
+    review_wm = state.get("pr_last_review_comment_id")
+    review_summary_wm = state.get("pr_last_review_summary_id")
+    orchestrator_ids = _wf._orchestrator_ids(state)
+    new_issue_side = [
+        c for c in gh.comments_after(issue, issue_wm)
+        if c.id not in orchestrator_ids
+    ]
+    new_pr_conv = [
+        c for c in gh.pr_conversation_comments_after(pr, issue_wm)
+        if c.id not in orchestrator_ids
+    ]
+    new_pr_inline = list(gh.pr_inline_comments_after(pr, review_wm))
+    new_pr_reviews = list(gh.pr_reviews_after(pr, review_summary_wm))
+    issue_space_new = sorted(
+        list(new_issue_side) + list(new_pr_conv), key=lambda c: c.id
+    )
+    review_space_new = sorted(new_pr_inline, key=lambda c: c.id)
+    review_summary_new = sorted(new_pr_reviews, key=lambda r: r.id)
+    new_comments = issue_space_new + review_space_new + review_summary_new
+
+    # If a previous tick already parked on an unrecoverable state and
+    # nothing changed since, do nothing -- the human action that unsticks
+    # us is a comment, a relabel, or closing/merging the PR. The first two
+    # land in `new_comments`; the last two are caught by the `pr_status`
+    # branches above.
+    #
+    # Exception: when the park reason is transient (failed checks or PR not
+    # yet mergeable) and `AUTO_MERGE` is on, re-evaluate the gates here. A
+    # human who reruns CI green or rebases the branch without leaving a
+    # comment would otherwise leave the issue stuck in_review forever.
+    if state.get("awaiting_human") and not new_comments:
+        if not (
+            config.AUTO_MERGE
+            and state.get("park_reason") in _TRANSIENT_PARK_REASONS
+        ):
+            return
+        if not _auto_merge_gates_pass(gh, pr, state):
+            return  # still stuck, do not re-post the park comment
+        # Conditions resolved: clear the park flags and fall through to the
+        # auto-merge block, which re-checks the same gates and merges.
+        state.set("awaiting_human", False)
+        state.set("park_reason", None)
+
+    if new_comments:
+        # Hand the fresh PR feedback off to the `fixing` stage instead of
+        # silently waiting through the debounce window or spawning the dev
+        # agent here. Recording the per-namespace high ids in pinned state
+        # gives the fixing handler a bookmark of what triggered the route
+        # so it can resume the dev session, push a fix, and bounce back to
+        # `validating` -- all without `_handle_in_review` having to keep
+        # the comment-debounce / dev-resume machinery in its own body.
+        #
+        # Deliberately NOT honoring the debounce window before the flip: the
+        # in_review handler used to wait IN_REVIEW_DEBOUNCE_SECONDS so a
+        # human typing follow-up comments would not get a half-quoted prompt
+        # forwarded to the dev. With the route to `fixing`, the dev is no
+        # longer spawned from this handler at all -- the fixing stage owns
+        # debouncing before its own spawn, so flipping immediately here is
+        # the right contract (the issue's `fixing` label surfaces the
+        # transition to the operator straight away, and any concurrent
+        # additional comments are seen by the fixing handler on its next
+        # tick).
+        #
+        # Watermarks are deliberately NOT bumped here: the fixing handler
+        # needs to read these same comments to build its dev-resume prompt,
+        # so consuming them now would lose the triggering feedback. The
+        # `pending_fix_*_max_id` keys are bookmarks (a hint for the future
+        # handler / for observability), not watermarks.
+        state.set("pending_fix_at", _wf._now_iso())
+        if issue_space_new:
+            state.set(
+                "pending_fix_issue_max_id",
+                max(c.id for c in issue_space_new),
+            )
+        if review_space_new:
+            state.set(
+                "pending_fix_review_max_id",
+                max(c.id for c in review_space_new),
+            )
+        if review_summary_new:
+            state.set(
+                "pending_fix_review_summary_max_id",
+                max(r.id for r in review_summary_new),
+            )
+        # Update `user_content_hash` so the user-content drift detection
+        # below does NOT fire on the next tick for the same comment changes
+        # we just consumed via the fixing route. The hash covers title +
+        # body + human issue-thread comments, so any issue-thread comment
+        # in `new_issue_side` shifts the hash; leaving the old hash in
+        # pinned state would have the drift path resume the dev (and flip
+        # to `validating`) the moment a human relabels the issue back to
+        # `in_review`, undoing the fixing route. `_compute_user_content_hash`
+        # is a pure read of the current issue state, so reading it here is
+        # cheap and self-contained -- the bookmark and the hash both
+        # advance atomically with the label flip.
+        state.set(
+            "user_content_hash",
+            _wf._compute_user_content_hash(
+                issue, _wf._orchestrator_ids(state),
+            ),
+        )
+        # If we were parked awaiting human, the comment that triggered this
+        # route is the human signal -- clear the park flags so the fixing
+        # handler is not greeted with stale awaiting_human state.
+        state.set("awaiting_human", False)
+        state.set("park_reason", None)
+        gh.set_workflow_label(issue, "fixing")
+        gh.write_pinned_state(issue, state)
+        return
+
     # User-content drift: a human edited the issue title/body after the PR
-    # opened. Notify on both surfaces, resume the dev session on its locked
+    # opened (no fresh comment surface triggered the fixing route above).
+    # Notify on both surfaces, resume the dev session on its locked
     # backend with the new body, and on a successful pushed fix bounce back
     # to `validating` so the reviewer agent re-runs on the new diff next
-    # tick (mirrors the comment-driven dev-resume path below).
+    # tick.
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is not None:
         state.set("user_content_hash", new_hash)
@@ -431,130 +565,6 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             state.set("review_round", 0)
             state.set("agent_approved_sha", None)
             gh.set_workflow_label(issue, "validating")
-        gh.write_pinned_state(issue, state)
-        return
-
-    # PR is open. Look for new human activity. Three watermarks because the
-    # three comment surfaces live in distinct id namespaces in GitHub's REST
-    # API: issue/PR-conversation comments share the IssueComment id space,
-    # inline review comments live in the PullRequestComment id space, and
-    # PR review summaries (the body posted alongside an APPROVE / REQUEST
-    # CHANGES / COMMENT submission) live in the PullRequestReview id space.
-    # Mixing any two under one int would silently drop or replay one side.
-    # Orchestrator-authored items are filtered by exact id (recorded when
-    # we posted them); we cannot key this on author login because a PAT
-    # shared with a human reviewer's GitHub account is a normal deployment
-    # shape, and login-matching would silently drop that human's feedback.
-    # The id-set filter is restricted to the IssueComment namespace -- the
-    # only surface the orchestrator posts on -- so a human inline review
-    # comment or PR review summary that happens to share a numeric id with
-    # a recorded bot comment is not falsely dropped.
-    _seed_legacy_in_review_watermarks(gh, issue, pr, state)
-    # `or` would discard a legacy default of `pr_last_comment_id == 0` and
-    # fall back to `last_action_comment_id` (the id of a prior park
-    # comment), which sits ABOVE any human "do not merge yet" comment
-    # posted earlier during implementing/validating; that human comment
-    # would then never surface and AUTO_MERGE could land the PR over it.
-    # Treat 0 as a valid "scan from the beginning" watermark.
-    issue_wm = state.get("pr_last_comment_id")
-    if issue_wm is None:
-        issue_wm = state.get("last_action_comment_id")
-    review_wm = state.get("pr_last_review_comment_id")
-    review_summary_wm = state.get("pr_last_review_summary_id")
-    orchestrator_ids = _wf._orchestrator_ids(state)
-    new_issue_side = [
-        c for c in gh.comments_after(issue, issue_wm)
-        if c.id not in orchestrator_ids
-    ]
-    new_pr_conv = [
-        c for c in gh.pr_conversation_comments_after(pr, issue_wm)
-        if c.id not in orchestrator_ids
-    ]
-    new_pr_inline = list(gh.pr_inline_comments_after(pr, review_wm))
-    new_pr_reviews = list(gh.pr_reviews_after(pr, review_summary_wm))
-    issue_space_new = sorted(
-        list(new_issue_side) + list(new_pr_conv), key=lambda c: c.id
-    )
-    review_space_new = sorted(new_pr_inline, key=lambda c: c.id)
-    review_summary_new = sorted(new_pr_reviews, key=lambda r: r.id)
-    new_comments = issue_space_new + review_space_new + review_summary_new
-
-    # If a previous tick already parked on an unrecoverable state and
-    # nothing changed since, do nothing -- the human action that unsticks
-    # us is a comment, a relabel, or closing/merging the PR. The first two
-    # land in `new_comments`; the last two are caught by the `pr_status`
-    # branches above.
-    #
-    # Exception: when the park reason is transient (failed checks or PR not
-    # yet mergeable) and `AUTO_MERGE` is on, re-evaluate the gates here. A
-    # human who reruns CI green or rebases the branch without leaving a
-    # comment would otherwise leave the issue stuck in_review forever.
-    if state.get("awaiting_human") and not new_comments:
-        if not (
-            config.AUTO_MERGE
-            and state.get("park_reason") in _TRANSIENT_PARK_REASONS
-        ):
-            return
-        if not _auto_merge_gates_pass(gh, pr, state):
-            return  # still stuck, do not re-post the park comment
-        # Conditions resolved: clear the park flags and fall through to the
-        # auto-merge block, which re-checks the same gates and merges.
-        state.set("awaiting_human", False)
-        state.set("park_reason", None)
-
-    if new_comments:
-        timestamps = [
-            ts for ts in (_comment_created_at(c) for c in new_comments)
-            if ts is not None
-        ]
-        if timestamps:
-            newest_ts = max(timestamps)
-            elapsed = (datetime.now(timezone.utc) - newest_ts).total_seconds()
-            if elapsed < config.IN_REVIEW_DEBOUNCE_SECONDS:
-                return  # human may still be typing; wait a tick
-
-        followup = _wf._build_pr_comment_followup(new_comments)
-        wt = _wf._worktree_path(spec, issue.number)
-        if not wt.exists():
-            wt = _wf._ensure_worktree(spec, issue.number)
-        before_sha = _wf._head_sha(wt)
-        wt, dev_result = _wf._resume_dev_with_text(
-            gh, spec, issue, state, followup,
-        )
-        state.set("last_agent_action_at", _wf._now_iso())
-        if not _wf._handle_dev_fix_result(
-            gh, spec, issue, state, wt, dev_result, before_sha
-        ):
-            # Park has updated last_action_comment_id; bump the in_review
-            # watermarks past anything we just consumed so the next tick does
-            # not replay these comments OR the orchestrator's own park
-            # message as fresh PR feedback.
-            _bump_in_review_watermarks(
-                gh, issue, state,
-                issue_space_new=issue_space_new,
-                review_space_new=review_space_new,
-                review_summary_new=review_summary_new,
-            )
-            gh.write_pinned_state(issue, state)
-            return
-        # Successful fix pushed -- bounce back to validating so the reviewer
-        # re-runs on the next tick. Reset round counter; this is a new diff.
-        if issue_space_new:
-            state.set(
-                "pr_last_comment_id", max(c.id for c in issue_space_new)
-            )
-        if review_space_new:
-            state.set(
-                "pr_last_review_comment_id",
-                max(c.id for c in review_space_new),
-            )
-        if review_summary_new:
-            state.set(
-                "pr_last_review_summary_id",
-                max(r.id for r in review_summary_new),
-            )
-        state.set("review_round", 0)
-        gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
 

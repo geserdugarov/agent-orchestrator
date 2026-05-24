@@ -91,6 +91,10 @@ orchestrator/
                            gate re-check, legacy watermark migration, and the
                            cross-namespace watermark ratchet
                            (`_bump_in_review_watermarks`).
+    fixing.py           — `_handle_fixing` (stub; real fix-loop lands under
+                           parent #137). Stage entered when `_handle_in_review`
+                           detects fresh PR feedback and routes the issue
+                           there instead of spawning the dev itself.
     conflicts.py        — `_handle_resolving_conflict` plus
                            `_post_conflict_resolution_result` and the
                            `conflict_round` audit-event emitter.
@@ -121,6 +125,7 @@ A second control label `backlog` is created for postponed work. While present on
 | `implementing` | The dev agent is producing commits in a per-issue worktree. |
 | `validating` | The reviewer agent is checking the diff and may bounce fixes back to the dev agent. |
 | `in_review` | A PR is open and ready for human review or auto-merge gates. |
+| `fixing` | Fresh PR feedback arrived during `in_review`; the dev fix-loop owns the issue until a new diff bounces back to `validating`. |
 | `resolving_conflict` | The orchestrator is trying to rebase an approved but unmergeable PR branch onto `origin/<base>`. |
 | `question` | Operator-applied read-only Q&A label: the orchestrator runs the decomposer agent in the per-issue worktree, posts the answer to the issue thread, and waits on a human reply or a manual close. No PR is opened on this label. |
 | `done` | Terminal success; the PR merged, an umbrella parent resolved after all children reached `done`, or a `question` issue was closed by the operator. |
@@ -150,7 +155,7 @@ Within one repo, `spec.parallel_limit` caps how many issues `workflow.tick` may 
 `parallel_limit > 1` materializes the eligible-issue set up front (to bound `max_workers` correctly) and partitions it by workflow label:
 
 - **Family-aware labels** — `decomposing`, `blocked`, `umbrella`, and unlabeled (pickup) issues — read and write cross-issue state (parent ↔ child). Two of these running at once could race a parent's child-state write against the child's own handler on a sibling thread. They are folded into a SINGLE drain task that processes them sequentially on one worker thread; this caps the family bucket's executor footprint at exactly one slot regardless of how many family-aware issues are pending, so the other `limit - 1` slots stay free for fan-out work.
-- **Fan-out labels** — `ready`, `implementing`, `validating`, `in_review`, `resolving_conflict` — only touch their own per-issue pinned state and worktree. Each is submitted as its own future and runs concurrently up to `parallel_limit`. The two buckets share one executor capped at `min(parallel_limit, total_tasks)` and the family drain can overlap with non-family workers, so a slow decomposer no longer blocks unrelated implementing / validating issues on the same tick.
+- **Fan-out labels** — `ready`, `implementing`, `validating`, `in_review`, `fixing`, `resolving_conflict` — only touch their own per-issue pinned state and worktree. Each is submitted as its own future and runs concurrently up to `parallel_limit`. The two buckets share one executor capped at `min(parallel_limit, total_tasks)` and the family drain can overlap with non-family workers, so a slow decomposer no longer blocks unrelated implementing / validating issues on the same tick.
 
 Only issue numbers cross the thread boundary — each worker calls `gh._for_worker_thread()` to mint a fresh `GitHubClient` (and through it a fresh `Github` / `Requester` / `Repository`) and refetches its Issue against that client, so every in-flight HTTP call is the sole consumer of its requester's state (PyGithub's per-request state is not documented as thread-safe across a shared `Requester`). The label used for partitioning is read on the caller thread; a lazy-load failure on one issue's labels is logged and that issue is conservatively routed into the family bucket where the per-issue try/except picks up any sustained failure.
 
@@ -159,7 +164,7 @@ Inside `workflow.tick(gh, spec)`, before any issue is dispatched the tick runs `
 Two paths depending on whether a PR already exists for the issue:
 
 - **Pre-PR worktrees** (no `pr_number` in pinned state) get a clean-tree `git rebase origin/<base>` directly — there is no remote to push to, so the local branch can be kept linear without publishing a rewrite.
-- **PR-having worktrees** in `validating` / `in_review` are detoured to `resolving_conflict` instead (via `_route_pr_worktree_to_resolving_conflict`: post a PR notice, seed `conflict_round` only when absent, flip the label) so the existing `_handle_resolving_conflict` handler does rebase + force-with-lease push + relabel-to-validating in one consistent flow.
+- **PR-having worktrees** in `validating` / `in_review` / `fixing` are detoured to `resolving_conflict` instead (via `_route_pr_worktree_to_resolving_conflict`: post a PR notice, seed `conflict_round` only when absent, flip the label) so the existing `_handle_resolving_conflict` handler does rebase + force-with-lease push + relabel-to-validating in one consistent flow.
 
 Applying `hold_base_sync` to an issue skips both paths for that issue; removing the label lets the next tick perform the accumulated base sync once. The `question` workflow label skips base sync unconditionally for the same read-only reason `_handle_question` already tears down its own worktree on every safe exit — merging `origin/<base>` into a question worktree would either accrete commits on a read-only branch or mask the inspection state of an unsafe park (`question_commits` / `question_dirty` / `question_timeout`).
 
@@ -169,18 +174,18 @@ The detour deliberately does NOT call `_bump_in_review_watermarks` (the `_handle
 
 The detour also skips when `awaiting_human=True` because `_handle_resolving_conflict`'s awaiting-human branch returns early without rebasing unless a new human comment arrived; relabeling here would just hide the existing park behind a `resolving_conflict` label without progress, including the documented `AUTO_MERGE=off` unmergeable-park case.
 
-Before relabeling, the detour fetches `gh.get_pr(pr_number)` and skips when `pr_state != "open"`: a just-merged PR advances `origin/<base>`, so the still-validating / still-in_review worktree pointed at the now-stale branch is naturally behind base; without this gate the refresh would post an "auto-resolution" notice and relabel to `resolving_conflict` on a PR the next handler call would finalize to `done` (or `rejected` for a closed-without-merge PR).
+Before relabeling, the detour fetches `gh.get_pr(pr_number)` and skips when `pr_state != "open"`: a just-merged PR advances `origin/<base>`, so the still-validating / still-in_review / still-fixing worktree pointed at the now-stale branch is naturally behind base; without this gate the refresh would post an "auto-resolution" notice and relabel to `resolving_conflict` on a PR the next handler call would finalize to `done` (or `rejected` for a closed-without-merge PR).
 
 A `gh.get_pr` failure is treated as "leave alone" so the handler retries from a stable label rather than racing a half-known PR state. Issues already labeled `resolving_conflict` are also skipped (the handler runs this tick anyway).
 
 Rebase is used across both paths to keep issue branches linear after sibling PRs land. Dirty worktrees (in-flight agent edits, crash-recovered trees) are skipped, and on a pre-PR content conflict the rebase is aborted so the worktree stays on its pre-rebase SHA. For PR branches, every pushed rebase resets `review_round`, so the reviewer must approve the rewritten head before auto-merge can proceed. Failures are logged and swallowed; keeping every issue moving matters more than perfect base sync.
 
-Then `gh.list_pollable_issues()` yields all open non-PR issues plus closed non-PR issues still labeled `in_review`, `resolving_conflict`, or `question`. The closed-`in_review`/`resolving_conflict` sweep is what makes the manual-merge path land cleanly: a human-merged PR with a `Resolves #N` footer auto-closes issue N before the orchestrator can flip the label, and without the sweep `_handle_in_review` / `_handle_resolving_conflict` would never run on it. The closed-`question` sweep does the same for the Q&A path: a human closing the issue is the terminal signal `_handle_question` consumes to finalize the issue to `done` and clean up the per-issue worktree/branch.
+Then `gh.list_pollable_issues()` yields all open non-PR issues plus closed non-PR issues still labeled `in_review`, `fixing`, `resolving_conflict`, or `question`. The closed-`in_review` / `fixing` / `resolving_conflict` sweep is what makes the manual-merge path land cleanly: a human-merged PR with a `Resolves #N` footer auto-closes issue N before the orchestrator can flip the label, and without the sweep `_handle_in_review` / `_handle_fixing` / `_handle_resolving_conflict` would never run on it. The closed-`question` sweep does the same for the Q&A path: a human closing the issue is the terminal signal `_handle_question` consumes to finalize the issue to `done` and clean up the per-issue worktree/branch.
 
 For every yielded issue:
 
-1. Read its workflow label (one of `decomposing/ready/blocked/umbrella/implementing/validating/in_review/resolving_conflict/question/done/rejected`).
-2. Dispatch by label. The full lifecycle (no label → `decomposing` → `ready`/`blocked`/`umbrella` → `implementing` → `validating` → `in_review` → `resolving_conflict` (optional detour) → `done`/`rejected`) is implemented; `done` and `rejected` are terminal no-ops, every other label routes to its handler. The operator-applied `question` label is an out-of-lifecycle branch (no automatic stage transitions in or out — see [`_handle_question`](#_handle_question-label-question)). Every handler receives the active `RepoSpec`, so `git worktree add`, `git fetch origin <base>`, push-token resolution (`config._resolve_github_token(spec.slug)`), and PR-base selection all flow from the spec rather than module-level `config.REPO` / `config.TARGET_REPO_ROOT` / `config.BASE_BRANCH` reads.
+1. Read its workflow label (one of `decomposing/ready/blocked/umbrella/implementing/validating/in_review/fixing/resolving_conflict/question/done/rejected`).
+2. Dispatch by label. The full lifecycle (no label → `decomposing` → `ready`/`blocked`/`umbrella` → `implementing` → `validating` → `in_review` → `fixing` (on fresh PR feedback) or `resolving_conflict` (optional auto-merge detour) → `done`/`rejected`) is implemented; `done` and `rejected` are terminal no-ops, every other label routes to its handler. The operator-applied `question` label is an out-of-lifecycle branch (no automatic stage transitions in or out — see [`_handle_question`](#_handle_question-label-question)). Every handler receives the active `RepoSpec`, so `git worktree add`, `git fetch origin <base>`, push-token resolution (`config._resolve_github_token(spec.slug)`), and PR-base selection all flow from the spec rather than module-level `config.REPO` / `config.TARGET_REPO_ROOT` / `config.BASE_BRANCH` reads.
 
 Per-issue durable state lives in a single **"pinned" comment** on the issue (`<!--orchestrator-state {...json...}-->`). The keys it holds:
 
@@ -425,7 +430,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      - `merged` → set label `done`, stamp `merged_at`, write pinned state, then `issue.edit(state="closed")`. (Pinned-state write before close so PyGithub caching cannot serve a stale issue body to the writer.) Cleanup follows via `_cleanup_terminal_branch`.
      - `closed` (without merge) → set label `rejected`, stamp `closed_without_merge_at`, write state, close, then call `_cleanup_terminal_branch`. The branch name is derived from the issue number (`orchestrator/issue-<n>`) so cleanup cannot touch an arbitrary branch.
      - `open` → fall through.
-  3. **PR-comment debounce → dev resume → bounce back to validating.** Read four sources independently, one per id namespace:
+  3. **Fresh PR feedback → route to `fixing`.** Read four sources independently, one per id namespace:
      - `gh.comments_after(issue, pr_last_comment_id)` (issue thread).
      - `gh.pr_conversation_comments_after(pr, pr_last_comment_id)` (PR conversation; shares id space with the issue thread, so one watermark suffices).
      - `gh.pr_inline_comments_after(pr, pr_last_review_comment_id)` (inline review comments).
@@ -433,11 +438,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 
      Without the `pr_reviews_after` surface, a "Comment" review with a request in the body would be silently ignored (and may be auto-merged over), and a `CHANGES_REQUESTED` review with body but no inline comments would block merge via `pr_has_changes_requested` without ever reaching the dev agent.
 
-     If any source is newer than its watermark and the most recent one is older than `IN_REVIEW_DEBOUNCE_SECONDS` (default 600s), build a follow-up prompt that quotes them and call `_resume_dev_with_text` on the dev's locked spec (backend + args).
-
-     On a successful pushed commit (clean tree + push ok), bump each watermark to the newest seen in its own id space, reset `review_round=0`, and flip the label back to `validating` so the reviewer agent re-runs on the new diff next tick.
-
-     If still inside the debounce window, return — the human may still be typing.
+     If any source is newer than its watermark, record pending-fix metadata in pinned state (`pending_fix_at` ISO timestamp plus per-namespace `pending_fix_issue_max_id` / `pending_fix_review_max_id` / `pending_fix_review_summary_max_id` bookmarks) and flip the label to `fixing` immediately. The `_handle_in_review` handler deliberately does NOT honor `IN_REVIEW_DEBOUNCE_SECONDS` here or spawn the dev itself — the new `fixing` stage owns debouncing, the dev resume, the push, and the bounce back to `validating` so the in_review handler stays focused on PR-state terminals and the auto-merge gate. Watermarks are deliberately NOT advanced on this route so the fixing handler can read the triggering comments to build its dev-resume prompt; the `pending_fix_*_max_id` keys are bookmarks (a hint for the future handler / for observability), not watermarks. If `awaiting_human` / `park_reason` were carried over from a prior transient park, they are cleared as part of the route (the human comment that triggered the route is the resume signal).
   4. **Auto-merge gate** (only reached when there are no new comments to act on). Off unless `AUTO_MERGE=on`. Sequence:
      - **Standing CHANGES_REQUESTED veto** — `gh.pr_has_changes_requested(pr, head_sha=head_sha)` runs *before* the approval check and silently returns on True.
 
@@ -458,13 +459,27 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 
      A manually closed issue with an *open* PR is conservative on purpose: the label flips to `rejected` but the branch is left alone, since the operator may still want to inspect or salvage the PR.
 
-     **Caveat:** once that flip lands, the issue is closed AND labeled `rejected`, so it falls outside `list_pollable_issues` (which only sweeps closed issues still labeled `in_review` or `resolving_conflict`) and the terminal-label dispatcher is a no-op. If the operator subsequently closes the PR, the orchestrator will never observe it and `_cleanup_terminal_branch` will not run — the worktree, local branch, and remote branch must be removed by hand for that ordering. The reverse ordering (close the PR first, then the issue) is fully automated by the `pr_status == "closed"` arc above.
+     **Caveat:** once that flip lands, the issue is closed AND labeled `rejected`, so it falls outside `list_pollable_issues` (which only sweeps closed issues still labeled `in_review`, `fixing`, or `resolving_conflict`) and the terminal-label dispatcher is a no-op. If the operator subsequently closes the PR, the orchestrator will never observe it and `_cleanup_terminal_branch` will not run — the worktree, local branch, and remote branch must be removed by hand for that ordering. The reverse ordering (close the PR first, then the issue) is fully automated by the `pr_status == "closed"` arc above.
   6. Every park inside this handler bumps the in_review watermarks past the orchestrator's own park comment via `_bump_in_review_watermarks`, so the next tick does not see the HITL ping as fresh PR feedback and resume the dev agent against it.
-- **Output**: label moved to `done` / `rejected` (terminal) OR a fix push and label bounce to `validating` OR a relabel to `resolving_conflict` (under `AUTO_MERGE=on` when the PR is unmergeable past the approval gates) OR a HITL park OR a no-op tick.
+- **Output**: label moved to `done` / `rejected` (terminal) OR a relabel to `fixing` (fresh PR feedback) OR a relabel to `resolving_conflict` (under `AUTO_MERGE=on` when the PR is unmergeable past the approval gates) OR a HITL park OR a no-op tick.
 
-The "back to validating on a new PR comment" arc is intentional: validating is the stage that re-runs the reviewer after a fix is pushed. Staying in `in_review` would skip the automated re-review and rely on humans alone, contradicting the validating loop.
+The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage owns the dev-resume + push + bounce-back-to-`validating` cycle so the in_review handler stays focused on PR-state terminals and the auto-merge gate. The follow-up dev resume and reviewer re-run still happen — they just live in a different stage — so the "validating re-runs after a fix" guarantee holds.
 
-`_park_awaiting_human` posts on the issue (not the PR) so the HITL ping appears alongside the rest of orchestrator state. The PR comment that triggers a resume is the human signal; awaiting-human is reserved for *unrecoverable* states (failed checks / push fail / missing pr_number — note: under `AUTO_MERGE=on` "not mergeable" detours to `resolving_conflict` instead of parking).
+`_park_awaiting_human` posts on the issue (not the PR) so the HITL ping appears alongside the rest of orchestrator state. The PR comment that triggers a route to `fixing` is the human signal; awaiting-human is reserved for *unrecoverable* states (failed checks / push fail / missing pr_number — note: under `AUTO_MERGE=on` "not mergeable" detours to `resolving_conflict` instead of parking).
+
+### `_handle_fixing` (label `fixing`)
+- **Trigger**: each tick while label is `fixing` (set by `_handle_in_review` when fresh PR feedback arrives on any of the four comment surfaces). Also runs on closed-`fixing` issues yielded by the closed-issue sweep so an externally-merged PR can be finalized to `done`.
+- **Input**: pinned `pr_number`, `branch`, `dev_agent`/`dev_session_id`, plus the `pending_fix_at` ISO timestamp and per-namespace `pending_fix_*_max_id` bookmarks recorded by the in_review route.
+- **Internal flow** (stub, parent #137):
+  1. PR-state terminals mirror `_handle_in_review` so the stub does not strand closed-`fixing` issues:
+     - `pr_state == "merged"` → label `done`, stamp `merged_at`, write pinned state, close the issue, emit `pr_merged` (`stage="fixing"`, `merge_method="external"`), and call `_cleanup_terminal_branch`.
+     - `pr_state == "closed"` (without merge) → label `rejected`, stamp `closed_without_merge_at`, write pinned state, close the issue, emit `pr_closed_without_merge`, and call `_cleanup_terminal_branch`.
+     - PR is open BUT the issue was closed manually (sweep yielded it) → flip to `rejected` without branch cleanup so the operator can salvage the still-open PR.
+  2. Closed issue with no resolvable PR (manual relabel, no `pr_number`) → no-op; the operator must relabel manually to finalize.
+  3. Open issue, no terminal arc fired → park awaiting human (`park_reason="fixing_stub"`) with a message that instructs operators to RELABEL to `in_review` (or another workflow stage) rather than remove the label entirely. Removing the workflow label would have the dispatcher treat the issue as a fresh unlabeled pickup and could restart decomposition / implementation with brand-new pinned state.
+
+  The real fix-loop (resume dev on the locked spec, debounce, push, bounce back to `validating`) lands under a follow-up to parent #137. It will keep the PR-state terminal contract above so the closed-sweep arcs continue to work after the rollout.
+- **Output**: terminal `done` / `rejected` (PR-state arcs) OR a HITL park (stub for open issues with no fresh terminal).
 
 ### `_handle_resolving_conflict` (label `resolving_conflict`)
 - **Trigger**: each tick while label is `resolving_conflict` (set by `_handle_in_review`'s auto-merge gate when an approved PR is unmergeable under `AUTO_MERGE=on`). Also runs on closed-`resolving_conflict` issues yielded by the closed-issue sweep, mirroring the in_review terminal handling so a manually-merged PR finalizes to `done` even when `Resolves #N` already closed the issue.
@@ -608,8 +623,8 @@ Extras whose value is `None` are dropped, so callers can pass optional context (
 | `review_verdict` | `_handle_validating` after `_parse_review_verdict` reads the reviewer's last message | `verdict` (`approved` / `changes_requested` / `unknown`), `review_round`, `pr_number`, `session_id` |
 | `park_awaiting_human` | every `_park_awaiting_human` call site, plus `_on_question`, `_on_dirty_worktree`, `_park_verify_failure`, and the question-stage `_park_question` funnel | `stage` (read from the current workflow label, not passed in), `reason` (`agent_timeout`, `push_failed`, `failed_checks`, `agent_question`, `agent_silent`, `dirty_worktree`, `reviewer_timeout` / `reviewer_failed`, `missing_pr_number`, `verify_failed` / `verify_timeout` / `verify_dirty` / `verify_head_changed`, `question_answer` / `question_silent` / `question_timeout` / `question_commits` / `question_dirty` / `question_unsafe_relabel`, ...) |
 | `pr_opened` | `_on_commits` after `gh.open_pr` succeeds | `pr_number`, `branch`, `sha`, `retry_count` |
-| `pr_merged` | `_handle_in_review` and `_handle_resolving_conflict` terminal arcs (external merge OR successful `gh.merge_pr` under AUTO_MERGE) | `pr_number`, `sha`, `merge_method` (`external` / `squash`), `check_state`, `review_round`, `conflict_round`, `retry_count` |
-| `pr_closed_without_merge` | `_handle_in_review` and `_handle_resolving_conflict` when the PR is closed without merge | `pr_number`, `sha`, `review_round`, `conflict_round`, `retry_count` |
+| `pr_merged` | `_handle_in_review`, `_handle_fixing`, and `_handle_resolving_conflict` terminal arcs (external merge OR successful `gh.merge_pr` under AUTO_MERGE) | `pr_number`, `sha`, `merge_method` (`external` / `squash`), `check_state`, `review_round`, `conflict_round`, `retry_count` |
+| `pr_closed_without_merge` | `_handle_in_review`, `_handle_fixing`, and `_handle_resolving_conflict` when the PR is closed without merge | `pr_number`, `sha`, `review_round`, `conflict_round`, `retry_count` |
 | `merge_attempt` | AUTO_MERGE `gh.merge_pr` call AND every `git rebase origin/<base>` inside `_handle_resolving_conflict` | `method` (`squash` / `base_rebase`), `result` (`success` / `failed` / `conflict`), `pr_number`, `sha`, `conflict_round`, `review_round`, `retry_count` |
 | `conflict_round` | `_route_pr_worktree_to_resolving_conflict` and the in_review unmergeable arc emit `action="entered"`; every increment site (`_emit_conflict_round_incremented`) emits `action="incremented"` with `outcome` | `pr_number`, `conflict_round`, `review_round`, `retry_count`, `outcome` (for increments), `sha` |
 
@@ -688,7 +703,7 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
    │     partition pollable issues by label:                              │
    │       family-aware (decomposing/blocked/umbrella/unlabeled) → drain  │
    │         sequentially on one worker (no parent↔child races)           │
-   │       fan-out (ready/implementing/validating/in_review/              │
+   │       fan-out (ready/implementing/validating/in_review/fixing/      │
    │                resolving_conflict) → up to spec.parallel_limit       │
    │         worker threads, each with its own gh._for_worker_thread()    │
    │     every _process_issue call acquires global_semaphore, so total    │
@@ -764,19 +779,39 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
    │                       │     stamp closed_without_merge_at,      │    │
    │                       │     close issue,                        │    │
    │                       │     _cleanup_terminal_branch            │    │
-   │                       ├─ new PR/issue comment past debounce:    │    │
-   │                       │     resume dev (locked spec (backend + args)) ────────┘    │
-   │                       │     push, ++pr_last_*_id watermarks,         │
-   │                       │     label=validating, review_round=0         │
-   │                       ├─ AUTO_MERGE on, approved, mergeable,         │
-   │                       │   green checks ─► merge_pr (sha pin),        │
-   │                       │   label=done, close,                         │
-   │                       │   _cleanup_terminal_branch                   │
-   │                       ├─ AUTO_MERGE on, approved, unmergeable        │
-   │                       │   ─► label=resolving_conflict (seed          │
-   │                       │      conflict_round=0 if absent)             │
-   │                       └─ failed checks / AUTO_MERGE off              │
-   │                          unmergeable ─► park                         │
+   │                       ├─ fresh PR/issue/inline/summary comment │    │
+   │                       │     ─► record pending_fix_at + per-     │    │
+   │                       │        namespace pending_fix_*_max_id   │    │
+   │                       │        bookmarks, clear awaiting_human/ │    │
+   │                       │        park_reason, label=fixing        │    │
+   │                       │        (no debounce wait, no dev spawn) │    │
+   │                       ├─ AUTO_MERGE on, approved, mergeable,    │    │
+   │                       │   green checks ─► merge_pr (sha pin),   │    │
+   │                       │   label=done, close,                    │    │
+   │                       │   _cleanup_terminal_branch              │    │
+   │                       ├─ AUTO_MERGE on, approved, unmergeable   │    │
+   │                       │   ─► label=resolving_conflict (seed     │    │
+   │                       │      conflict_round=0 if absent)        │    │
+   │                       └─ failed checks / AUTO_MERGE off         │    │
+   │                          unmergeable ─► park                    │    │
+   │                                                                 │    │
+   │     fixing ──► _handle_fixing (stub, parent #137)               │    │
+   │                       │                                         │    │
+   │                       ├─ pr merged externally ─► label=done,    │    │
+   │                       │     stamp merged_at, close issue,       │    │
+   │                       │     _cleanup_terminal_branch (mirrors   │    │
+   │                       │     in_review terminals so closed-      │    │
+   │                       │     `fixing` issues finalize cleanly)   │    │
+   │                       ├─ pr closed unmerged ─► label=rejected,  │    │
+   │                       │     stamp closed_without_merge_at,      │    │
+   │                       │     close issue, _cleanup_terminal_     │    │
+   │                       │     branch                              │    │
+   │                       ├─ closed issue, no resolvable PR ─►      │    │
+   │                       │     no-op (relabel manually to finalize)│    │
+   │                       └─ open issue ─► park awaiting human      │    │
+   │                          (real fix-loop pending; park message   │    │
+   │                          instructs operators to RELABEL to      │    │
+   │                          `in_review`, not remove the label)     │    │
    │                                                                 │    │
    │     resolving_conflict ──► _handle_resolving_conflict           │    │
    │                       │                                         │    │
@@ -842,7 +877,8 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 | **stages/decomposition.py** | `_handle_decomposing` / `_handle_ready` / `_handle_blocked` / `_handle_umbrella` |
 | **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle |
 | **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
-| **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives |
+| **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives; routes fresh PR feedback to `fixing` |
+| **stages/fixing.py** | `_handle_fixing` (stub today; real fix-loop lands under parent #137) |
 | **stages/conflicts.py** | `_handle_resolving_conflict` + rebase-loop primitives |
 | **stages/question.py** | `_handle_question` + question-session lifecycle (read-only Q&A on the `question` label, no PR) |
 | **agents.py** | dispatch + spawn codex/claude subprocess, capture session id + last message |
@@ -857,15 +893,17 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
                        ┌─────────────────────────────┐
    (none) ──► decomposing ──► ready ──► implementing ──► validating ──► in_review ──► done | rejected
                   │                          ▲                  │              ▲ │
-                  │ split                    │ all children     │              │ │  PR comment past
-                  ▼                          │ done             │              │ │  debounce ─► resume
-                blocked ──► (children created) ──┐              │              │ │  dev, push, label
-                  ▲                              │              │              │ │  back to validating
-                  └─ child rejected ─► park HITL │   CHANGES_   │              │ │
-                                                 │   REQUESTED  │              │ │
-                                                 │              │              └─┘
-                                                 └──────────────┘
-                                  (APPROVED or MAX_REVIEW_ROUNDS)
+                  │ split                    │ all children     │              │ │  fresh PR feedback
+                  ▼                          │ done             │              │ │  ─► label=fixing
+                blocked ──► (children created) ──┐              │              │ │  (stub today; real
+                  ▲                              │              │              │ │  handler under #137
+                  └─ child rejected ─► park HITL │   CHANGES_   │              │ │  will resume dev,
+                                                 │   REQUESTED  │              │ │  push, and bounce
+                                                 │              │              └─┤  back to validating)
+                                                 └──────────────┘                │
+                                  (APPROVED or MAX_REVIEW_ROUNDS)                │
+                                                                                 │
+                                            fixing ──(future dev fix push) ──► validating ─┘
 
                                                  ┌──────────────────────────────┐
                                                  │  in_review --(AUTO_MERGE on, │
@@ -896,7 +934,7 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
      any child = rejected ─► park HITL on parent
      dep_graph walk: any blocked child with all deps=done ─► child=ready
 
-   in_review terminals:
+   in_review terminals and routes:
      pr merged (externally or by AUTO_MERGE) ─► done (issue closed,
                                                 _cleanup_terminal_branch)
      pr closed without merge                  ─► rejected (issue closed,
@@ -910,6 +948,25 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
                                                 issue sweep does not pick
                                                 it up so cleanup must be
                                                 done by hand)
+     fresh PR feedback on any of the four     ─► label=fixing (record
+       comment surfaces (issue thread,           pending_fix_at + per-
+       PR conversation, inline review,           namespace pending_fix_*_
+       review summary)                           max_id bookmarks, clear
+                                                 stale awaiting_human/
+                                                 park_reason; no debounce
+                                                 wait, no dev spawn here)
+
+   fixing (stub under parent #137):
+     real fix-loop pending; the stub mirrors the in_review terminal
+     branches so a closed-`fixing` issue with a merged PR finalizes to
+     `done` and a closed PR finalizes to `rejected` (otherwise the
+     issue would sit closed + `fixing` forever):
+       pr merged    ─► done + merged_at + close + cleanup
+       pr closed    ─► rejected + closed_without_merge_at + cleanup
+       open + no fresh feedback ─► park awaiting human (park message
+         tells operators to RELABEL to `in_review`; removing the label
+         entirely would have the dispatcher treat the issue as a fresh
+         unlabeled pickup and could restart decomposition / implementation)
 
    resolving_conflict (AUTO_MERGE only, capped by MAX_CONFLICT_ROUNDS):
      git rebase origin/<base> clean ─► label=validating (++conflict_round)

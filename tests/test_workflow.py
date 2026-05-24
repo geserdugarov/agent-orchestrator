@@ -3636,9 +3636,17 @@ class DriftMarksCommentsConsumedTest(
             int(data.get("last_action_comment_id")), 5000,
         )
 
-    def test_in_review_drift_bumps_watermarks_past_human_comment(
+    def test_in_review_fresh_human_comment_routes_to_fixing_not_drift(
         self,
     ) -> None:
+        # Regression for the reviewer's bug: a fresh issue-thread human
+        # comment used to trip `user_content_hash` (which covers comments
+        # too) and the drift path would resume the dev + bounce to
+        # `validating` instead of the contracted route to `fixing`. With
+        # the in_review handler scanning fresh feedback BEFORE the drift
+        # check, the issue-thread comment now routes to `fixing` and the
+        # hash is recomputed so the drift path does not double-fire on the
+        # same comment changes next tick.
         gh = FakeGitHubClient()
         issue = make_issue(910, label="in_review", body="new body")
         human = FakeComment(
@@ -3662,27 +3670,30 @@ class DriftMarksCommentsConsumedTest(
             last_action_comment_id=100,
         )
 
-        self._run(
+        mocks = self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id="dev-sess", last_message="addressed"
-            ),
-            has_new_commits=True,
-            dirty_files=(),
-            push_branch=True,
-            head_shas=["before", "after"],
+            run_agent=_agent(),
         )
 
+        # No dev spawn, no bounce to `validating`: the fixing route owns
+        # this signal.
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((910, "fixing"), gh.label_history)
+        self.assertNotIn((910, "validating"), gh.label_history)
         data = gh.pinned_data(910)
-        # Both watermarks bumped past the human comment so the eventual
-        # bounce back to in_review (after the validating reviewer
-        # approves) does not replay it.
-        self.assertGreaterEqual(
-            int(data.get("last_action_comment_id")), 6000,
-        )
-        self.assertGreaterEqual(
-            int(data.get("pr_last_comment_id")), 6000,
-        )
+        # The triggering comment is bookmarked for the future real
+        # fixing handler.
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 6000)
+        # Hash is updated so the drift check does not re-fire on the
+        # same comment change after the operator (or the real fixing
+        # handler) relabels back to `in_review`.
+        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        # Watermark is deliberately left at the route-time value so the
+        # future real fixing handler can read the triggering comment to
+        # build its dev-resume prompt (the bookmark above tells it where
+        # to start). The stub's park branch and a subsequent manual
+        # relabel-to-`in_review` advance it explicitly.
+        self.assertEqual(data.get("pr_last_comment_id"), 0)
 
     def test_implementing_drift_bumps_last_action_past_human_comment(
         self,
@@ -4648,6 +4659,496 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
 
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.write_state_calls, 0)
+
+
+class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """`fixing` is registered as a workflow label that sits between
+    `in_review` and `validating` in the PR-feedback fix loop. The dispatcher
+    must route the label to the stub stage handler instead of falling
+    through to pickup or implementation, and the bootstrap specs / family-
+    aware partitioning / closed-issue sweep / PR-worktree refresh detour
+    must all recognise it as a PR-having stage.
+    """
+
+    def test_fixing_label_is_recognized_as_workflow_label(self) -> None:
+        from orchestrator.github import WORKFLOW_LABELS
+
+        self.assertIn("fixing", WORKFLOW_LABELS)
+
+    def test_fixing_label_is_in_bootstrap_specs(self) -> None:
+        # Label bootstrap iterates WORKFLOW_LABEL_SPECS; if the spec entry
+        # is missing, `ensure_workflow_labels` would never create the
+        # label on a fresh repo and operators would be unable to apply it.
+        from orchestrator.github import WORKFLOW_LABEL_SPECS
+
+        names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
+        self.assertIn("fixing", names)
+
+    def test_fixing_label_sits_between_in_review_and_resolving_conflict(
+        self,
+    ) -> None:
+        # Lifecycle order matters: `fixing` is the next stage after
+        # `in_review` when the PR has fresh feedback. The spec tuple
+        # encodes the lifecycle ordering, so it must place `fixing` right
+        # after `in_review`.
+        from orchestrator.github import WORKFLOW_LABEL_SPECS
+
+        names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
+        in_review_idx = names.index("in_review")
+        fixing_idx = names.index("fixing")
+        self.assertEqual(fixing_idx, in_review_idx + 1)
+
+    def test_fixing_label_is_not_family_aware(self) -> None:
+        # Open `fixing` issues touch only their own pinned state and PR
+        # worktree, so the label must stay out of `_FAMILY_AWARE_LABELS` --
+        # otherwise the parallel tick path would route it through the
+        # single-threaded family bucket and defeat fan-out concurrency.
+        self.assertNotIn("fixing", workflow._FAMILY_AWARE_LABELS)
+
+    def test_fixing_label_is_in_pr_refresh_detour_set(self) -> None:
+        # Behind-base PR-having worktrees need to be routed through
+        # `resolving_conflict` by the pre-tick refresh; a `fixing` worktree
+        # is PR-having (its sibling labels validating/in_review already
+        # qualify) so it must be eligible for the same detour.
+        from orchestrator.worktrees import _PR_REFRESH_DETOUR_LABELS
+
+        self.assertIn("fixing", _PR_REFRESH_DETOUR_LABELS)
+
+    def test_dispatcher_routes_fixing_to_handler(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(701, label="fixing")
+        gh.add_issue(issue)
+
+        with patch.object(workflow, "_handle_fixing") as handler, \
+             patch.object(workflow, "_handle_pickup") as pickup, \
+             patch.object(workflow, "_handle_implementing") as impl, \
+             patch.object(workflow, "_handle_in_review") as in_review:
+            workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        handler.assert_called_once_with(gh, _TEST_SPEC, issue)
+        pickup.assert_not_called()
+        impl.assert_not_called()
+        in_review.assert_not_called()
+
+    def test_fixing_stub_parks_awaiting_human(self) -> None:
+        # End-to-end with the real (stub) handler: a `fixing` label must
+        # park awaiting human because the real fix-loop is not implemented
+        # yet (parent #137). The operator gets a clear signal instead of
+        # the issue silently sitting on the orchestrator.
+        gh = FakeGitHubClient()
+        issue = make_issue(702, label="fixing")
+        gh.add_issue(issue)
+
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        self.assertEqual(len(gh.posted_comments), 1)
+        issue_number, body = gh.posted_comments[0]
+        self.assertEqual(issue_number, 702)
+        self.assertIn("fixing", body)
+        self.assertTrue(gh.pinned_data(702).get("awaiting_human"))
+        # The label stays put: parking surfaces the situation but leaves
+        # the operator in control of the next move (relabel back to
+        # `in_review`, wait for the real handler, etc.).
+        self.assertEqual(gh.label_history, [])
+
+    def test_fixing_stub_is_idempotent_when_already_parked(self) -> None:
+        # A second tick on an already-parked fixing issue must not re-post
+        # the parking comment or re-emit the audit event -- otherwise every
+        # polling tick would spam the issue.
+        gh = FakeGitHubClient()
+        issue = make_issue(703, label="fixing")
+        gh.add_issue(issue)
+        gh.seed_state(703, awaiting_human=True)
+
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.write_state_calls, 0)
+
+    def test_fixing_stub_skips_closed_issue_without_pr_number(self) -> None:
+        # A closed-`fixing` issue with no recorded PR (manual relabel from
+        # an early stage, no PR opened) cannot be finalized via the
+        # PR-state arcs. The stub must NOT park (parking a closed issue
+        # would spam a parking comment on a terminated thread); it leaves
+        # the label alone and lets the operator relabel manually.
+        gh = FakeGitHubClient()
+        issue = make_issue(704, label="fixing")
+        issue.closed = True
+        gh.add_issue(issue)
+
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.write_state_calls, 0)
+        self.assertEqual(gh.label_history, [])
+
+    def test_fixing_stub_finalizes_closed_issue_on_external_merge(self) -> None:
+        # The headline closed-sweep contract: a human merges the PR with
+        # `Resolves #N` while the issue is labeled `fixing`. The issue
+        # auto-closes; the closed-issue sweep yields it; the stub must
+        # finalize to `done`, stamp `merged_at`, close (already closed),
+        # and run branch cleanup -- otherwise the issue sits closed +
+        # `fixing` forever.
+        gh = FakeGitHubClient()
+        issue = make_issue(705, label="fixing")
+        issue.closed = True
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=801, head_branch="orchestrator/issue-705",
+            head=FakePRRef(sha="cafe1234"),
+            merged=True, state="closed",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(705, pr_number=pr.number, branch="orchestrator/issue-705")
+
+        mocks = self._run(
+            lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((705, "done"), gh.label_history)
+        self.assertIn("merged_at", gh.pinned_data(705))
+        mocks["_cleanup_terminal_branch"].assert_called_once_with(
+            gh, _TEST_SPEC, 705,
+        )
+
+    def test_fixing_stub_finalizes_closed_issue_on_closed_without_merge(
+        self,
+    ) -> None:
+        # Mirror branch: PR was closed without merging while the issue
+        # was in `fixing`. Stub must flip to `rejected`, stamp
+        # `closed_without_merge_at`, and run branch cleanup.
+        gh = FakeGitHubClient()
+        issue = make_issue(706, label="fixing")
+        issue.closed = True
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=802, head_branch="orchestrator/issue-706",
+            head=FakePRRef(sha="cafe1234"),
+            merged=False, state="closed",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(706, pr_number=pr.number, branch="orchestrator/issue-706")
+
+        mocks = self._run(
+            lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((706, "rejected"), gh.label_history)
+        self.assertIn("closed_without_merge_at", gh.pinned_data(706))
+        mocks["_cleanup_terminal_branch"].assert_called_once_with(
+            gh, _TEST_SPEC, 706,
+        )
+
+    def test_fixing_stub_park_message_says_relabel_not_remove(self) -> None:
+        # Removing the workflow label entirely would have the dispatcher
+        # treat the issue as unlabeled pickup and could restart
+        # decomposition / implementation with fresh pinned state. The
+        # park message must point operators at a relabel, not a removal.
+        gh = FakeGitHubClient()
+        issue = make_issue(707, label="fixing")
+        gh.add_issue(issue)
+
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        self.assertEqual(len(gh.posted_comments), 1)
+        body = gh.posted_comments[0][1]
+        self.assertIn("relabel", body.lower())
+        self.assertIn("in_review", body)
+        # Explicit warning against the dangerous action.
+        self.assertIn("Do NOT remove", body)
+
+    def test_fixing_stub_park_bumps_watermarks_so_relabel_does_not_loop(
+        self,
+    ) -> None:
+        # The route in `_handle_in_review` deliberately leaves the
+        # in_review watermarks unadvanced so a future real fix-loop
+        # handler can read the triggering comments. With only the stub
+        # in place, the documented manual recovery path is "relabel back
+        # to `in_review`". For that to land cleanly, the stub MUST
+        # advance the watermarks past the recorded
+        # `pending_fix_*_max_id` bookmarks at park time -- otherwise the
+        # next `in_review` tick re-detects the same comments and routes
+        # the issue straight back to `fixing`, looping the recovery.
+        gh = FakeGitHubClient()
+        issue = make_issue(708, label="fixing")
+        # Add the triggering issue-thread comment so the in_review
+        # re-scan can see it. It sits past the existing watermark, so
+        # without the stub-park bump the next tick would route it back
+        # to `fixing`.
+        issue.comments.append(
+            FakeComment(
+                id=5000, body="please tighten the docstring",
+                user=FakeUser("alice"),
+            ),
+        )
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=901, head_branch="orchestrator/issue-708",
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=True, check_state="success",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            708,
+            pr_number=pr.number,
+            branch="orchestrator/issue-708",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_last_comment_id=4999,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            # Bookmark the in_review route would have recorded.
+            pending_fix_issue_max_id=5000,
+            pending_fix_at="2026-05-24T00:00:00+00:00",
+        )
+
+        # Tick 1: the stub parks awaiting human. The bump must move the
+        # issue-side watermark past id=5000 AND past the park comment
+        # the stub just posted.
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+        data = gh.pinned_data(708)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertGreaterEqual(data.get("pr_last_comment_id"), 5000)
+        # Bookmark is kept so a future real handler can locate the
+        # original triggering id.
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 5000)
+
+        # Tick 2: simulate the operator's recovery action -- relabel
+        # back to `in_review`. The handler must NOT re-detect the same
+        # comment as fresh feedback; the route to `fixing` must not
+        # fire.
+        issue.labels = [FakeLabel("in_review")]
+        # Clear the park flags as the operator's manual recovery would
+        # implicitly do once the underlying feedback has been addressed.
+        data = gh.pinned_data(708)
+        data["awaiting_human"] = False
+        data["park_reason"] = None
+        gh.seed_state(708, **data)
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+        # Crucial: the in_review handler did not flip the label back to
+        # `fixing`. The loop is broken.
+        labels_after_recovery = [
+            l for (n, l) in gh.label_history if n == 708
+        ]
+        self.assertNotIn("fixing", labels_after_recovery)
+
+    def test_closed_fixing_issue_surfaces_in_pollable_sweep(self) -> None:
+        # The closed-issue sweep has to include `fixing` so a future real
+        # handler can finalize an externally-merged PR to `done` even when
+        # `Resolves #N` already closed the issue.
+        gh = FakeGitHubClient()
+        open_impl = make_issue(710, label="implementing")
+        closed_fixing = make_issue(711, label="fixing")
+        closed_fixing.closed = True
+        for i in (open_impl, closed_fixing):
+            gh.add_issue(i)
+
+        numbers = {i.number for i in gh.list_pollable_issues()}
+        self.assertEqual(numbers, {710, 711})
+
+
+class InReviewRoutesFreshFeedbackToFixingTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """Fresh actionable PR feedback during `in_review` must hand the issue
+    off to `fixing` immediately -- no debounce wait, no dev spawn from the
+    in_review handler itself. The pending-fix bookmark recorded in pinned
+    state gives the (future) fixing handler a starting point for the
+    triggering comment.
+    """
+
+    PR_NUMBER = 880
+    BRANCH = "orchestrator/issue-880"
+
+    def _seed_in_review_with_pr(self, *, pr=None, extra_state=None):
+        gh = FakeGitHubClient()
+        issue = make_issue(880, label="in_review")
+        gh.add_issue(issue)
+        if pr is None:
+            pr = FakePR(
+                number=self.PR_NUMBER, head_branch=self.BRANCH,
+                head=FakePRRef(sha="cafe1234"),
+                mergeable=True, check_state="success",
+            )
+        gh.add_pr(pr)
+        state = dict(
+            pr_number=pr.number,
+            branch=self.BRANCH,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            agent_approved_sha="cafe1234",
+            pr_last_comment_id=1999,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+        )
+        if extra_state:
+            state.update(extra_state)
+        gh.seed_state(880, **state)
+        return gh, issue, pr
+
+    def test_fresh_pr_conversation_comment_flips_to_fixing_no_dev_spawn(
+        self,
+    ) -> None:
+        # The headline contract: a single fresh PR conversation comment
+        # within the debounce window must route the issue from `in_review`
+        # to `fixing` on this tick. The dev is NOT spawned by
+        # `_handle_in_review` any more -- the fixing stage owns that step.
+        # Run through the full dispatcher (`_process_issue`) so the test
+        # also covers the routing wiring end-to-end.
+        now = datetime.now(timezone.utc)
+        pr = FakePR(
+            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=True, check_state="success",
+            issue_comments=[
+                FakeComment(
+                    id=3000,
+                    body="please tighten the integration test",
+                    user=FakeUser("alice"),
+                    created_at=now,  # well inside the debounce window
+                ),
+            ],
+        )
+        gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
+
+        with patch.object(config, "AUTO_MERGE", True), \
+             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        # No dev spawn during the debounce window (or after it -- the
+        # in_review handler no longer spawns the dev at all).
+        mocks["run_agent"].assert_not_called()
+        # No merge attempt either: the fresh feedback short-circuits the
+        # auto-merge path.
+        self.assertEqual(gh.merge_calls, [])
+        # The label flipped to `fixing` this tick.
+        self.assertIn((880, "fixing"), gh.label_history)
+        # Pending-fix metadata records the triggering comment id and an
+        # ISO timestamp so the fixing handler has a bookmark.
+        data = gh.pinned_data(880)
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 3000)
+        self.assertIn("pending_fix_at", data)
+        # Watermark stays put so the fixing handler can rescan and reach
+        # the triggering comment on its next tick.
+        self.assertEqual(data.get("pr_last_comment_id"), 1999)
+
+    def test_no_fresh_feedback_preserves_auto_merge_behavior(self) -> None:
+        # The new in_review -> fixing route must NOT regress the
+        # no-feedback auto-merge path: an approved, mergeable, green PR
+        # with no fresh PR comments still flips to `done` via AUTO_MERGE.
+        pr = FakePR(
+            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=True, check_state="success",
+            approved=True,
+        )
+        gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
+
+        with patch.object(config, "AUTO_MERGE", True):
+            self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        # Auto-merge proceeded; no fixing route fired.
+        self.assertEqual(gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")])
+        self.assertIn((880, "done"), gh.label_history)
+        self.assertNotIn((880, "fixing"), gh.label_history)
+        self.assertNotIn("pending_fix_at", gh.pinned_data(880))
+
+    def test_no_fresh_feedback_preserves_pr_merged_terminal(self) -> None:
+        # Existing terminal PR handling must still finalize the issue to
+        # `done` on an external merge -- the fixing route is gated on
+        # fresh PR feedback and must not preempt the merged-PR branch.
+        pr = FakePR(
+            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            head=FakePRRef(sha="cafe1234"),
+            merged=True, state="closed",
+        )
+        gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((880, "done"), gh.label_history)
+        self.assertNotIn((880, "fixing"), gh.label_history)
+        self.assertIn("merged_at", gh.pinned_data(880))
+
+    def test_fresh_issue_thread_comment_routes_to_fixing_despite_drift_hash(
+        self,
+    ) -> None:
+        # Regression test for the reviewer's reproducer: a normal fresh
+        # issue-thread review comment used to trigger user-content drift
+        # (because `user_content_hash` covers human issue comments) and
+        # the drift path would `_resume_dev_with_text` + flip to
+        # `validating` -- violating the contract that any fresh issue-
+        # thread feedback during `in_review` records `pending_fix_*` and
+        # routes to `fixing`. Seed a stale prior `user_content_hash` so
+        # the drift path WOULD fire if the ordering were wrong, then
+        # confirm the fresh-feedback scan wins.
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        gh = FakeGitHubClient()
+        issue = make_issue(1660, label="in_review")
+        # Issue-thread comment posted after the watermark; the hash that
+        # was recorded earlier did not include it, so the drift detector
+        # WOULD fire on the next tick if the scan order were wrong.
+        issue.comments.append(FakeComment(
+            id=7000, body="please tighten the docstring",
+            user=FakeUser("alice"), created_at=long_ago,
+        ))
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=1661, head_branch="orchestrator/issue-1660",
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=True, check_state="success",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            1660,
+            pr_number=pr.number,
+            branch="orchestrator/issue-1660",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            agent_approved_sha="cafe1234",
+            pr_last_comment_id=6999,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            # Stale hash that doesn't cover the human comment above --
+            # the drift path WOULD fire on this tick if the scan order
+            # were wrong (this is the reviewer's reproducer).
+            user_content_hash="stale-hash-from-before-the-human-comment",
+        )
+
+        with patch.object(config, "AUTO_MERGE", True), \
+             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        # Contract: no dev spawn, no flip to `validating`.
+        mocks["run_agent"].assert_not_called()
+        self.assertNotIn((1660, "validating"), gh.label_history)
+        # The issue routed to `fixing` and recorded the triggering
+        # bookmark.
+        self.assertIn((1660, "fixing"), gh.label_history)
+        data = gh.pinned_data(1660)
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 7000)
+        self.assertIn("pending_fix_at", data)
+        # And the hash was refreshed so the drift path does NOT
+        # double-fire on the same comment changes after the operator (or
+        # the future real fixing handler) relabels back to `in_review`.
+        self.assertNotEqual(
+            data.get("user_content_hash"),
+            "stale-hash-from-before-the-human-comment",
+        )
 
 
 if __name__ == "__main__":

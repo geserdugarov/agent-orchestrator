@@ -5,10 +5,13 @@
 (no label) -> implementing -> validating -> in_review -> done|rejected.
 Validating runs a fresh reviewer session; on changes-requested the dev session
 is resumed, the fix pushed, and the review rerun until APPROVED or
-MAX_REVIEW_ROUNDS is hit. In_review reacts to PR state (merged/closed) and PR
-comments (debounced) and, when AUTO_MERGE is on, merges PRs that the reviewer
-approved and that GitHub considers mergeable with green checks. Other labels
-are observed and logged as not-yet-implemented.
+MAX_REVIEW_ROUNDS is hit. In_review reacts to PR state (merged/closed) and
+hands fresh PR feedback (any of the four comment surfaces) off to the
+`fixing` stage by recording pending-fix metadata in pinned state and flipping
+the label -- no debounce wait, no dev spawn from in_review itself. When
+AUTO_MERGE is on, in_review merges PRs that the reviewer approved and that
+GitHub considers mergeable with green checks. Other labels are observed and
+logged as not-yet-implemented.
 """
 from __future__ import annotations
 
@@ -139,6 +142,7 @@ from .stages.decomposition import _handle_ready as _handle_ready
 from .stages.decomposition import _handle_umbrella as _handle_umbrella
 from .stages.decomposition import _read_decomposer_session as _read_decomposer_session
 from .stages.documenting import _handle_documenting as _handle_documenting
+from .stages.fixing import _handle_fixing as _handle_fixing
 from .stages.implementing import (
     _SILENT_PARKS_BEFORE_FRESH_SESSION as _SILENT_PARKS_BEFORE_FRESH_SESSION,
 )
@@ -207,9 +211,9 @@ log = logging.getLogger(__name__)
 # while keeping a slow decomposing / unlabeled-pickup handler from
 # blocking unrelated implementing / validating issues on the same
 # tick. Stages outside this set (`ready`, `implementing`,
-# `validating`, `in_review`, `resolving_conflict`) only read and write
-# their own per-issue state + worktree, so they stay eligible for
-# unconditional parallel fan-out.
+# `validating`, `in_review`, `fixing`, `resolving_conflict`,
+# `question`) only read and write their own per-issue state + worktree,
+# so they stay eligible for unconditional parallel fan-out.
 _FAMILY_AWARE_LABELS = frozenset({
     "decomposing", "blocked", "umbrella",
 })
@@ -524,6 +528,8 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         _handle_validating(gh, spec, issue)
     elif label == "in_review":
         _handle_in_review(gh, spec, issue)
+    elif label == "fixing":
+        _handle_fixing(gh, spec, issue)
     elif label == "resolving_conflict":
         _handle_resolving_conflict(gh, spec, issue)
     elif label == "question":

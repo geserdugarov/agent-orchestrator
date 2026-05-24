@@ -245,18 +245,20 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         data = gh.pinned_data(30)
         self.assertLess(data.get("pr_last_comment_id"), human.id)
 
-        # Second tick: the human comment surfaces and triggers a dev
-        # resume (the ping is filtered as orchestrator-authored).
+        # Second tick: the human comment surfaces. The fresh-feedback
+        # scan now runs BEFORE the drift check, so the human comment
+        # routes the issue to `fixing` (the dev is not spawned by
+        # `_handle_in_review` here). The ping itself is filtered as
+        # orchestrator-authored, so the route is driven by the (real,
+        # human-authored) `human` comment.
         mocks = self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dev-sess", last_message="held"),
-            push_branch=True,
-            head_shas=["cafe1234", "deadbeef"],
+            run_agent=_agent(),
         )
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "please hold off",
-            mocks["run_agent"].call_args.args[1],
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((30, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(30).get("pending_fix_issue_max_id"), human.id,
         )
 
     def test_in_review_auto_merge_happy_path(self) -> None:
@@ -516,9 +518,11 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.posted_comments, [])
         self.assertFalse(gh.pinned_data(30).get("awaiting_human"))
 
-    def test_in_review_pr_comment_within_debounce(self) -> None:
-        # A PR comment posted just now must NOT trigger a dev resume; the
-        # human may still be typing more comments.
+    def test_in_review_pr_comment_within_debounce_flips_to_fixing(self) -> None:
+        # Fresh PR feedback inside the debounce window must NOT silently
+        # wait or spawn the dev: the handler records pending-fix metadata
+        # and flips the label to `fixing` immediately so the fixing handler
+        # can own its own debounce / resume cycle.
         now = datetime.now(timezone.utc)
         pr = self._open_pr(
             approved=True, mergeable=True, check_state="success",
@@ -543,12 +547,19 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
                 run_agent=_agent(),
             )
 
-        # Within debounce: no agent spawn, no merge, no label flip.
+        # No dev spawn, no merge attempt (the in_review handler is not the
+        # one that drives the fix any more); label flipped to `fixing`.
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
+        self.assertIn((30, "fixing"), gh.label_history)
+        data = gh.pinned_data(30)
+        self.assertIn("pending_fix_at", data)
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
+        # Watermarks deliberately NOT bumped: the fixing handler needs the
+        # triggering comments to build its dev-resume prompt.
+        self.assertEqual(data.get("pr_last_comment_id"), 1999)
 
-    def test_in_review_pr_comment_past_debounce(self) -> None:
+    def test_in_review_pr_comment_past_debounce_flips_to_fixing(self) -> None:
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr = self._open_pr(
             issue_comments=[
@@ -564,24 +575,19 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks = self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dev-sess", last_message="renamed"),
-            push_branch=True,
-            head_shas=["aaa", "bbb"],
+            run_agent=_agent(),
         )
 
-        # Dev resumed on the locked backend with the PR-comment text quoted
-        # into the prompt; pushed; bounced back to validating with round=0.
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        call = mocks["run_agent"].call_args
-        self.assertEqual(call.args[0], "claude")
-        self.assertEqual(call.kwargs.get("resume_session_id"), "dev-sess")
-        self.assertIn("rename foo to bar", call.args[1])
-
-        mocks["_push_branch"].assert_called_once()
-        self.assertIn((30, "validating"), gh.label_history)
+        # Past-debounce feedback also hands off to the fixing stage rather
+        # than spawning the dev inline. The fixing handler owns the
+        # resume / push / bounce-back-to-validating cycle.
+        mocks["run_agent"].assert_not_called()
+        mocks["_push_branch"].assert_not_called()
+        self.assertIn((30, "fixing"), gh.label_history)
+        self.assertNotIn((30, "validating"), gh.label_history)
         data = gh.pinned_data(30)
-        self.assertEqual(data.get("review_round"), 0)
-        self.assertEqual(data.get("pr_last_comment_id"), 2000)
+        self.assertIn("pending_fix_at", data)
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
 
     def test_in_review_sha_mismatch_on_merge(self) -> None:
         # merge_pr returning False (409 SHA mismatch / 405 / 422) leaves the
@@ -877,7 +883,7 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(65, **state)
         return gh, issue, pr
 
-    def test_inline_review_comment_triggers_resume(self) -> None:
+    def test_inline_review_comment_routes_to_fixing(self) -> None:
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         gh, issue, pr = self._setup(
             review_comments=[
@@ -894,27 +900,23 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks = self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dev-sess", last_message="renamed"),
-            push_branch=True,
-            head_shas=["aaa", "bbb"],
+            run_agent=_agent(),
         )
 
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn("rename foo to bar", mocks["run_agent"].call_args.args[1])
-        self.assertIn((65, "validating"), gh.label_history)
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((65, "fixing"), gh.label_history)
+        self.assertNotIn((65, "validating"), gh.label_history)
         data = gh.pinned_data(65)
-        self.assertEqual(data.get("pr_last_review_comment_id"), 42)
-        # Issue-comment watermark stays at the legacy-migration default (0)
-        # because no issue-side comment was consumed -- the two id spaces
-        # ratchet independently. The migration always persists 0 instead of
-        # leaving the watermark unset, so the next tick does not re-run the
-        # migration past any newly-arrived first comment.
-        self.assertEqual(data.get("pr_last_comment_id"), 0)
+        # Bookmark recorded but the inline-review watermark stays where it
+        # was -- the fixing handler needs the triggering comment.
+        self.assertEqual(data.get("pending_fix_review_max_id"), 42)
+        self.assertEqual(data.get("pr_last_review_comment_id"), 41)
 
     def test_id_overlap_across_spaces_does_not_drop_comments(self) -> None:
         # Inline review comment id (5) is LOWER than the issue-comment
         # watermark (1000). With one merged-id watermark this comment would
-        # be silently filtered out; with split watermarks it gets through.
+        # be silently filtered out; with split watermarks it gets through
+        # and triggers the route to `fixing`.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         gh, issue, pr = self._setup(
             review_comments=[
@@ -933,15 +935,14 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks = self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dev-sess", last_message="added"),
-            push_branch=True,
-            head_shas=["aaa", "bbb"],
+            run_agent=_agent(),
         )
 
-        # The inline comment is consumed even though id=5 < pr_last_comment_id=1000.
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn("please add a docstring", mocks["run_agent"].call_args.args[1])
-        self.assertEqual(gh.pinned_data(65).get("pr_last_review_comment_id"), 5)
+        # The inline comment surfaces and routes to fixing even though
+        # id=5 < pr_last_comment_id=1000.
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((65, "fixing"), gh.label_history)
+        self.assertEqual(gh.pinned_data(65).get("pending_fix_review_max_id"), 5)
 
 
 class HumanChangesRequestedVetoTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -1073,7 +1074,7 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_changes_requested_with_body_resumes_dev(self) -> None:
+    def test_changes_requested_with_body_routes_to_fixing(self) -> None:
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         review = FakePRReview(
             id=4242,
@@ -1089,30 +1090,27 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="renamed",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
-        # Dev resumed with the review body quoted into the prompt; pushed;
-        # bounced to validating; summary watermark advanced past the review.
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "rename foo to bar",
-            mocks["run_agent"].call_args.args[1],
-        )
-        self.assertIn((90, "validating"), gh.label_history)
+        # The CHANGES_REQUESTED review surfaces as fresh feedback and the
+        # handler flips to `fixing` without spawning the dev or merging.
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((90, "fixing"), gh.label_history)
+        self.assertNotIn((90, "validating"), gh.label_history)
         self.assertEqual(gh.merge_calls, [])
         data = gh.pinned_data(90)
-        self.assertEqual(data.get("pr_last_review_summary_id"), 4242)
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertEqual(data.get("pending_fix_review_summary_max_id"), 4242)
+        # Watermark stays put so the fixing handler can read the review
+        # body when it builds its dev-resume prompt.
+        self.assertEqual(data.get("pr_last_review_summary_id"), 0)
 
-    def test_commented_review_with_body_resumes_dev(self) -> None:
+    def test_commented_review_with_body_routes_to_fixing(self) -> None:
         # A "Comment" review (state=COMMENTED) doesn't block via
         # pr_has_changes_requested, so without surfacing the body the
         # auto-merge gate would proceed and merge over the human's note.
+        # With the in_review -> fixing route, the body still has to be
+        # detected as fresh feedback and the label flipped immediately.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         review = FakePRReview(
             id=4243,
@@ -1127,21 +1125,17 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="added test",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "smoke test for the empty-input case",
-            mocks["run_agent"].call_args.args[1],
-        )
+        mocks["run_agent"].assert_not_called()
         # Auto-merge did NOT fire over the human's comment.
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((90, "validating"), gh.label_history)
+        self.assertIn((90, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(90).get("pending_fix_review_summary_max_id"),
+            4243,
+        )
 
     def test_approved_review_body_does_not_trigger_resume(self) -> None:
         # APPROVED reviews are excluded from the summary surface even when
@@ -1258,24 +1252,20 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="standing by"
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
         # Auto-merge must not fire over the human's standing objection.
         self.assertEqual(gh.merge_calls, [])
         self.assertNotIn((100, "done"), gh.label_history)
-        # The human comment is treated as fresh feedback: the dev session
-        # is resumed on it and the issue bounces back to validating.
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "please do not merge yet",
-            mocks["run_agent"].call_args.args[1],
+        # The human comment is treated as fresh feedback and routes the
+        # issue to `fixing` -- the dev session is not spawned here; the
+        # fixing handler owns that step.
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((100, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(100).get("pending_fix_issue_max_id"), 3000,
         )
-        self.assertIn((100, "validating"), gh.label_history)
 
     def test_same_account_human_issue_comment_at_handoff_is_preserved(self) -> None:
         # Validating-handoff variant: a human posts a review comment on the
@@ -1334,27 +1324,23 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         # Step 2: in_review tick. Human comment is still past the watermark
-        # and the dev gets resumed -- not auto-merged.
+        # and the in_review handler hands it off to `fixing` (no
+        # auto-merge, no inline dev resume).
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "AUTO_MERGE", True), \
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="docstring added"
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "please add a docstring",
-            mocks["run_agent"].call_args.args[1],
-        )
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((101, "validating"), gh.label_history)
+        self.assertIn((101, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(101).get("pending_fix_issue_max_id"), 950,
+        )
 
 
 class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -1514,22 +1500,18 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="renamed",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
         # Inline review comment id=4242 surfaces despite colliding with the
-        # recorded IssueComment id 4242; auto-merge does not fire.
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "rename foo to bar",
-            mocks["run_agent"].call_args.args[1],
-        )
+        # recorded IssueComment id 4242; auto-merge does not fire and the
+        # handler routes to `fixing` instead.
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((160, "validating"), gh.label_history)
+        self.assertIn((160, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(160).get("pending_fix_review_max_id"), 4242,
+        )
 
     def test_review_summary_with_colliding_id_still_surfaces(self) -> None:
         gh = FakeGitHubClient()
@@ -1565,20 +1547,16 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="tightened",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "tighten the spec",
-            mocks["run_agent"].call_args.args[1],
-        )
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((161, "validating"), gh.label_history)
+        self.assertIn((161, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(161).get("pending_fix_review_summary_max_id"),
+            5000,
+        )
 
 
 class TransientParkRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -1899,22 +1877,18 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="renamed",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
         # The first inline review comment after migration is treated as
-        # fresh feedback and resumes the dev.
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "rename foo to bar",
-            mocks["run_agent"].call_args.args[1],
-        )
+        # fresh feedback and routes the issue to `fixing` (no dev spawn
+        # here; the fixing handler owns that step).
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((400, "validating"), gh.label_history)
+        self.assertIn((400, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(400).get("pending_fix_review_max_id"), 42,
+        )
 
     def test_first_review_summary_after_migration_surfaces(self) -> None:
         # Same shape on the review-summary surface. A COMMENTED summary
@@ -1952,20 +1926,16 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="tightened",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "tighten the spec",
-            mocks["run_agent"].call_args.args[1],
-        )
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        self.assertIn((400, "validating"), gh.label_history)
+        self.assertIn((400, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(400).get("pending_fix_review_summary_max_id"),
+            5050,
+        )
 
 
 class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
@@ -1991,12 +1961,14 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         # return nothing -- we only care about the call arguments.
         client.repo.get_issues.return_value = iter([])
         in_review_label = MagicMock(name="in_review_label")
+        fixing_label = MagicMock(name="fixing_label")
         resolving_label = MagicMock(name="resolving_conflict_label")
         question_label = MagicMock(name="question_label")
 
         def fake_get_label(name: str):
             return {
                 "in_review": in_review_label,
+                "fixing": fixing_label,
                 "resolving_conflict": resolving_label,
                 "question": question_label,
             }[name]
@@ -2005,14 +1977,14 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
 
         list(client.list_pollable_issues())
 
-        # All three sweep labels are looked up by name (one query per
-        # label because the GitHub Issues API treats `labels` as AND,
-        # not OR -- a single query for "any of these labels" is
-        # impossible).
+        # Each sweep label is looked up by name (one query per label
+        # because the GitHub Issues API treats `labels` as AND, not OR --
+        # a single query for "any of these labels" is impossible).
         looked_up = [
             ca.args[0] for ca in client.repo.get_label.call_args_list
         ]
         self.assertIn("in_review", looked_up)
+        self.assertIn("fixing", looked_up)
         self.assertIn("resolving_conflict", looked_up)
         self.assertIn("question", looked_up)
         # The closed sweeps were invoked with Label OBJECTS, not strings.
@@ -2020,9 +1992,10 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
             ca for ca in client.repo.get_issues.call_args_list
             if ca.kwargs.get("state") == "closed"
         ]
-        self.assertEqual(len(closed_calls), 3)
+        self.assertEqual(len(closed_calls), 4)
         labels_passed = [ca.kwargs["labels"] for ca in closed_calls]
         self.assertIn([in_review_label], labels_passed)
+        self.assertIn([fixing_label], labels_passed)
         self.assertIn([resolving_label], labels_passed)
         self.assertIn([question_label], labels_passed)
 
@@ -2110,40 +2083,36 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess", last_message="ack",
-                ),
-                push_branch=True,
-                head_shas=["aaa", "bbb"],
+                run_agent=_agent(),
             )
 
         # AUTO_MERGE must NOT fire over the human's id=910 comment.
         self.assertEqual(gh.merge_calls, [])
         self.assertNotIn((600, "done"), gh.label_history)
-        # Dev resumed on the human comment.
-        self.assertEqual(mocks["run_agent"].call_count, 1)
-        self.assertIn(
-            "do not merge yet",
-            mocks["run_agent"].call_args.args[1],
+        # The human comment is treated as fresh feedback and routes the
+        # issue to `fixing` (the in_review handler no longer drives the
+        # dev resume itself).
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((600, "fixing"), gh.label_history)
+        self.assertEqual(
+            gh.pinned_data(600).get("pending_fix_issue_max_id"), 910,
         )
-        self.assertIn((600, "validating"), gh.label_history)
 
 
-class StaleParkReasonClearedOnNewParkTest(
+class StaleParkReasonClearedOnFixingRouteTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
     """A transient AUTO_MERGE park (failed_checks/unmergeable) followed by
-    a comment-driven dev resume that itself parks (e.g. the dev asked a
-    question, made no commit, or left a dirty worktree) must replace the
-    stale `park_reason`. Otherwise the next tick's recovery branch sees a
-    transient reason, re-checks gates, and merges over the dev's standing
-    question or follow-up.
+    a fresh PR comment must clear the stale `park_reason` and
+    `awaiting_human` flags as part of the in_review -> fixing route.
+    Otherwise the next tick's recovery branch sees a transient reason,
+    re-checks gates, and merges over the human's standing follow-up.
     """
 
     PR_NUMBER = 1200
     BRANCH = "orchestrator/issue-700"
 
-    def test_stale_park_reason_cleared_after_question_park(self) -> None:
+    def test_stale_park_reason_cleared_on_route_to_fixing(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Tick 0 already parked for failed_checks; the human posted a
@@ -2174,47 +2143,33 @@ class StaleParkReasonClearedOnNewParkTest(
             park_reason="failed_checks",
         )
 
-        # Tick A: the new comment arrives; dev gets resumed; the run
-        # produces no commit (head SHA unchanged), which routes through
-        # `_on_question`. That path must clear `park_reason`.
+        # Tick A: the new comment arrives; the handler routes to `fixing`
+        # and clears both the stale `park_reason` and `awaiting_human`
+        # flag so the transient-park recovery branch can't re-fire on the
+        # next tick and merge over the human's follow-up.
         with patch.object(config, "AUTO_MERGE", True), \
              patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(
-                    session_id="dev-sess",
-                    last_message="I cannot proceed without a clarification",
-                ),
-                push_branch=True,
-                head_shas=["sha-before", "sha-before"],  # no new commit
-            )
-        data = gh.pinned_data(700)
-        self.assertTrue(
-            data.get("awaiting_human"),
-            "should still be awaiting human after the question",
-        )
-        self.assertIsNone(
-            data.get("park_reason"),
-            "stale 'failed_checks' park reason must be cleared by the "
-            "question park",
-        )
-
-        # Tick B: no new comments; gates still pass. Recovery must NOT
-        # fire because park_reason is no longer transient.
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            self._run(
+            mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
-        self.assertEqual(
-            gh.merge_calls, [],
-            "auto-merge must not fire over the standing dev question",
-        )
-        self.assertNotIn((700, "done"), gh.label_history)
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((700, "fixing"), gh.label_history)
         data = gh.pinned_data(700)
-        self.assertTrue(data.get("awaiting_human"))
+        self.assertFalse(
+            data.get("awaiting_human"),
+            "the route to fixing consumes the human signal and clears the "
+            "stale awaiting_human flag",
+        )
+        self.assertIsNone(
+            data.get("park_reason"),
+            "stale 'failed_checks' park reason must be cleared by the "
+            "route to fixing",
+        )
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 3000)
+        # Auto-merge must not fire on this tick either.
+        self.assertEqual(gh.merge_calls, [])
 
 
 class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
@@ -2518,26 +2473,27 @@ class HandleInReviewResumeOnHashChangeTest(
         self.assertEqual(data.get("review_round"), 0)
 
 
-class InReviewDriftForwardsUnreadPrConversationTest(
+class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
-    """Reviewer concern: the in_review drift path resumes the dev with
-    `_recent_comments_text(issue)` (issue thread only), then
-    `_bump_in_review_watermarks` advances the shared `pr_last_comment_id`
-    based on the issue-thread max. A PR-conversation comment whose id
-    falls between the prior watermark and the issue-thread max would be
-    silently consumed by the bump and never forwarded to the dev. The
-    drift path must capture unread PR comments BEFORE the bump and
-    include them in the followup prompt."""
+    """Issue-thread and PR-conversation comments share the IssueComment id
+    space. The fresh-feedback scan must surface both before the drift
+    check runs, otherwise the drift path's `user_content_hash` (which
+    only sees the issue thread) would catch the issue-thread comment and
+    forward it through the dev-resume path, leaving the PR-conversation
+    comment for a later bump to silently consume. By scanning both
+    surfaces together and bookmarking the max id across them, the
+    fixing route preserves both comments for the (future real) fix
+    handler."""
 
-    def test_unread_pr_comment_below_issue_max_is_forwarded(
+    def test_concurrent_issue_thread_and_pr_conv_both_bookmarked(
         self,
     ) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
             1300, label="in_review", body="updated body",
         )
-        # Issue-thread comment with id 200 (the body-edit signal).
+        # Issue-thread comment with id 200.
         issue.comments.append(FakeComment(
             id=200, body="adds an acceptance criterion",
             user=FakeUser("alice"),
@@ -2545,8 +2501,7 @@ class InReviewDriftForwardsUnreadPrConversationTest(
         gh.add_issue(issue)
         pr = FakePR(number=13000, head_branch="orchestrator/issue-1300")
         # Concurrent PR-conversation comment at id 150 (between the
-        # prior watermark and the issue-thread max). Without the fix,
-        # the watermark bump leaps to 200 and this comment is lost.
+        # prior watermark and the issue-thread max).
         pr.issue_comments.append(FakeComment(
             id=150, body="please also handle empty input",
             user=FakeUser("alice"),
@@ -2567,33 +2522,29 @@ class InReviewDriftForwardsUnreadPrConversationTest(
 
         mocks = self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id="dev-sess", last_message="addressed both",
-            ),
-            has_new_commits=True,
-            dirty_files=(),
-            push_branch=True,
-            head_shas=["before", "after"],
+            run_agent=_agent(),
         )
 
-        # The dev's prompt must include the unread PR-conversation
-        # comment so it is not lost to the watermark bump.
-        prompt = mocks["run_agent"].call_args[0][1]
-        self.assertIn("please also handle empty input", prompt)
-        # The bump advanced past BOTH the issue-thread max AND the PR
-        # comment, so the next tick won't replay either.
+        # Fresh feedback wins over the drift check: the dev is NOT
+        # spawned by `_handle_in_review`; the issue routes to `fixing`
+        # with a bookmark covering BOTH surfaces (max across the
+        # IssueComment id space).
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((1300, "fixing"), gh.label_history)
         data = gh.pinned_data(1300)
-        self.assertGreaterEqual(
-            int(data.get("pr_last_comment_id")), 200,
-        )
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 200)
+        # Watermark stays at the seeded value so the future real fix
+        # handler can re-scan both surfaces from there and find both
+        # comments.
+        self.assertEqual(data.get("pr_last_comment_id"), 100)
 
-    def test_unread_pr_comment_above_issue_max_also_consumed(
+    def test_pr_conv_comment_above_issue_max_also_bookmarked(
         self,
     ) -> None:
         # Symmetric guard: a PR-conversation comment whose id is HIGHER
-        # than every issue-thread id must also be consumed by the bump
-        # (we forward it to the dev AND include it in `issue_space_new`
-        # so the bump's candidate set extends past it).
+        # than every issue-thread id is still picked up by the
+        # fresh-feedback scan (it surfaces in `pr_conversation_comments_after`
+        # past the IssueComment-space watermark).
         gh = FakeGitHubClient()
         issue = make_issue(1310, label="in_review", body="updated body")
         gh.add_issue(issue)
@@ -2618,18 +2569,10 @@ class InReviewDriftForwardsUnreadPrConversationTest(
 
         mocks = self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id="dev-sess", last_message="done"
-            ),
-            has_new_commits=True,
-            dirty_files=(),
-            push_branch=True,
-            head_shas=["before", "after"],
+            run_agent=_agent(),
         )
 
-        prompt = mocks["run_agent"].call_args[0][1]
-        self.assertIn("additional ask", prompt)
+        mocks["run_agent"].assert_not_called()
+        self.assertIn((1310, "fixing"), gh.label_history)
         data = gh.pinned_data(1310)
-        self.assertGreaterEqual(
-            int(data.get("pr_last_comment_id")), 600,
-        )
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 600)
