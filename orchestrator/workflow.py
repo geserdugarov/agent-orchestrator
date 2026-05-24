@@ -33,6 +33,21 @@ from .github import (
     PinnedState,
     issue_has_label,
 )
+
+# Compatibility facade: `workflow.py` keeps the dispatcher, the tick loop,
+# the unlabeled-pickup handler, and `_park_awaiting_human` / `_run_agent_tracked`.
+# Everything else lives in helper modules (`workflow_drift`, `workflow_messages`,
+# `worktrees`) or in the per-stage modules under `orchestrator.stages`.
+#
+# The re-export blocks below republish those names on `workflow.<name>` so two
+# call patterns keep working without touching the helper modules:
+#   1. Tests patch primitives as `patch.object(workflow, "_foo", ...)`.
+#   2. Stage modules reach back through `from .. import workflow as _wf` and
+#      call `_wf._foo(...)` so a patch on `workflow._foo` intercepts even when
+#      the call site lives in `orchestrator.stages.<stage>`.
+# The redundant `as <name>` aliasing is the pyflakes/ruff convention marking
+# an intentional re-export so F401 does not flag the name as unused.
+
 from .workflow_drift import (
     _build_user_content_change_prompt as _build_user_content_change_prompt,
 )
@@ -44,142 +59,76 @@ from .workflow_drift import (
     _mark_drift_comments_consumed as _mark_drift_comments_consumed,
 )
 from .workflow_drift import _route_drift_to_decomposing as _route_drift_to_decomposing
-from .workflow_messages import (
-    _orchestrator_ids,
-    _post_issue_comment,
-)
-# Consumed by the stage modules under `orchestrator.stages` (via
-# `_wf.<name>`) and by tests that read them as `workflow.<name>`. The
-# redundant `as <name>` aliasing is the pyflakes/ruff convention for
-# marking an import as an intentional re-export so F401 does not flag
-# the name as unused.
+from .workflow_messages import _orchestrator_ids, _post_issue_comment
+from .workflow_messages import _MANIFEST_RE as _MANIFEST_RE
 from .workflow_messages import _ORCH_COMMENT_MARKER as _ORCH_COMMENT_MARKER
+from .workflow_messages import _STDERR_TAIL_BUDGET as _STDERR_TAIL_BUDGET
 from .workflow_messages import (
     _build_conflict_resolution_prompt as _build_conflict_resolution_prompt,
 )
+from .workflow_messages import _build_decompose_prompt as _build_decompose_prompt
+from .workflow_messages import _build_fix_prompt as _build_fix_prompt
+from .workflow_messages import _build_implement_prompt as _build_implement_prompt
 from .workflow_messages import (
     _build_pr_comment_followup as _build_pr_comment_followup,
 )
-from .workflow_messages import _post_pr_comment as _post_pr_comment
-from .workflow_messages import _recent_comments_text as _recent_comments_text
-# The names below are now consumed only by the stage modules under
-# `orchestrator.stages` (via `_wf.<name>`) and by tests that read them as
-# `workflow.<name>`. Re-export each one explicitly with `as <name>` so the
-# attribute stays on this module without tripping the F401 "unused import"
-# lint -- the redundant alias is the pyflakes/ruff convention for marking
-# an import as an intentional re-export.
-from .workflow_messages import _build_fix_prompt as _build_fix_prompt
-from .workflow_messages import _build_implement_prompt as _build_implement_prompt
 from .workflow_messages import _build_review_prompt as _build_review_prompt
 from .workflow_messages import _drift_ack_reason as _drift_ack_reason
 from .workflow_messages import (
     _format_stderr_diagnostics as _format_stderr_diagnostics,
 )
-from .workflow_messages import _parse_review_verdict as _parse_review_verdict
-from .workflow_messages import _stderr_log_tail as _stderr_log_tail
-# Re-exports for backward-compatible `workflow._foo` references in the test
-# suite. Each name is the helper module's authoritative definition; the
-# redundant `as <name>` aliasing is the pyflakes/ruff convention for marking
-# an import as an intentional re-export so F401 does not flag it.
-from .workflow_messages import _build_decompose_prompt as _build_decompose_prompt
-from .workflow_messages import _DRIFT_ACK_RE as _DRIFT_ACK_RE
 from .workflow_messages import _parse_manifest as _parse_manifest
-from .workflow_messages import _has_dep_cycle as _has_dep_cycle
-from .workflow_messages import _MANIFEST_RE as _MANIFEST_RE
-from .workflow_messages import _MAX_CHILDREN as _MAX_CHILDREN
-from .workflow_messages import _ORCH_COMMENT_ID_CAP as _ORCH_COMMENT_ID_CAP
+from .workflow_messages import _parse_review_verdict as _parse_review_verdict
+from .workflow_messages import _post_pr_comment as _post_pr_comment
+from .workflow_messages import _recent_comments_text as _recent_comments_text
 from .workflow_messages import _redact_secrets as _redact_secrets
-from .workflow_messages import _REDACT_MIN_VALUE_LEN as _REDACT_MIN_VALUE_LEN
-from .workflow_messages import _SECRET_KEY_NAMES as _SECRET_KEY_NAMES
-from .workflow_messages import _SECRET_KEY_SUFFIXES as _SECRET_KEY_SUFFIXES
-from .workflow_messages import _STDERR_TAIL_BUDGET as _STDERR_TAIL_BUDGET
-from .workflow_messages import (
-    _track_orchestrator_comment as _track_orchestrator_comment,
-)
-from .workflow_messages import _VERDICT_RE as _VERDICT_RE
+from .workflow_messages import _stderr_log_tail as _stderr_log_tail
 from .workflow_messages import _with_orch_marker as _with_orch_marker
-# Re-exports of the git / worktree plumbing. Stage handlers below call these
-# names unqualified (`_ensure_worktree(...)`, `_git(...)`, ...) so the
-# implementations live in `worktrees.py` but the bindings need to be in this
-# module's namespace -- both for the handler call sites and for the test
-# suite, which patches `workflow._foo` to intercept those calls.
 from .worktrees import _authed_fetch as _authed_fetch
 from .worktrees import _authed_target_fetch as _authed_target_fetch
 from .worktrees import _branch_ahead_behind as _branch_ahead_behind
 from .worktrees import _branch_name as _branch_name
 from .worktrees import _cleanup_decompose_worktree as _cleanup_decompose_worktree
 from .worktrees import _cleanup_terminal_branch as _cleanup_terminal_branch
-from .worktrees import _CONVENTIONAL_RE as _CONVENTIONAL_RE
 from .worktrees import _decompose_worktree_path as _decompose_worktree_path
 from .worktrees import _ensure_decompose_worktree as _ensure_decompose_worktree
 from .worktrees import _ensure_pr_worktree as _ensure_pr_worktree
 from .worktrees import _ensure_worktree as _ensure_worktree
 from .worktrees import _first_commit_subject as _first_commit_subject
 from .worktrees import _git as _git
-from .worktrees import _GIT_NO_PROMPT_ENV as _GIT_NO_PROMPT_ENV
 from .worktrees import _git_hardened as _git_hardened
 from .worktrees import _has_new_commits as _has_new_commits
 from .worktrees import _head_sha as _head_sha
 from .worktrees import _is_conventional_subject as _is_conventional_subject
 from .worktrees import _merge_base_into_worktree as _merge_base_into_worktree
-from .worktrees import _PR_REFRESH_DETOUR_LABELS as _PR_REFRESH_DETOUR_LABELS
-from .worktrees import _pr_title_from_commit_or_issue as _pr_title_from_commit_or_issue
+from .worktrees import (
+    _pr_title_from_commit_or_issue as _pr_title_from_commit_or_issue,
+)
 from .worktrees import _push_branch as _push_branch
 from .worktrees import _refresh_base_and_worktrees as _refresh_base_and_worktrees
-from .worktrees import _repo_worktrees_root as _repo_worktrees_root
-from .worktrees import (
-    _route_pr_worktree_to_resolving_conflict as _route_pr_worktree_to_resolving_conflict,
-)
 from .worktrees import _sanitize_slug as _sanitize_slug
-from .worktrees import _SLUG_SAFE_RE as _SLUG_SAFE_RE
 from .worktrees import _squash_and_force_push as _squash_and_force_push
 from .worktrees import _sync_worktree_with_base as _sync_worktree_with_base
 from .worktrees import _worktree_dirty_files as _worktree_dirty_files
 from .worktrees import _worktree_path as _worktree_path
-# Decomposition-stage handlers and their stage-private helpers live in
-# `stages/decomposition.py`. Re-export under the original names so direct
-# `workflow._handle_*` references in the test suite and the dispatcher
-# below keep working. The stage module accesses callees it needs back
-# here (`_park_awaiting_human`, `_run_agent_tracked`, the worktree
-# plumbing, `_handle_implementing`, ...) through `from .. import workflow`
-# at call time, so test patches against `workflow._foo` still take
-# effect when the call originates inside the stage module.
+from .stages.conflicts import (
+    _handle_resolving_conflict as _handle_resolving_conflict,
+)
 from .stages.decomposition import _handle_blocked as _handle_blocked
 from .stages.decomposition import _handle_decomposing as _handle_decomposing
 from .stages.decomposition import _handle_ready as _handle_ready
 from .stages.decomposition import _handle_umbrella as _handle_umbrella
-from .stages.decomposition import (
-    _read_decomposer_session as _read_decomposer_session,
-)
-from .stages.decomposition import (
-    _resume_decomposer_on_human_reply as _resume_decomposer_on_human_reply,
-)
-# Implementing-stage handlers and the developer-session lifecycle live in
-# `stages/implementing.py`. Re-export under the original names so direct
-# `workflow._handle_*` / `workflow._on_*` references in the test suite and
-# the dispatcher / other stage handlers keep working. The stage module
-# accesses callees it needs back here (`_park_awaiting_human`,
-# `_run_agent_tracked`, `_now_iso`, the worktree plumbing, ...) through
-# `from .. import workflow as _wf` at call time, so test patches against
-# `workflow._foo` still take effect when the call originates inside the
-# stage module.
-from .stages.implementing import (
-    _CLAUDE_STALE_SESSION_STDERR_MARKERS as _CLAUDE_STALE_SESSION_STDERR_MARKERS,
-)
+from .stages.decomposition import _read_decomposer_session as _read_decomposer_session
 from .stages.implementing import (
     _SILENT_PARKS_BEFORE_FRESH_SESSION as _SILENT_PARKS_BEFORE_FRESH_SESSION,
 )
 from .stages.implementing import (
     _check_and_increment_retry_budget as _check_and_increment_retry_budget,
 )
-from .stages.implementing import (
-    _drop_poisoned_dev_session as _drop_poisoned_dev_session,
-)
 from .stages.implementing import _handle_implementing as _handle_implementing
 from .stages.implementing import (
     _is_stale_session_failure as _is_stale_session_failure,
 )
-from .stages.implementing import _on_commits as _on_commits
 from .stages.implementing import _on_dirty_worktree as _on_dirty_worktree
 from .stages.implementing import _on_question as _on_question
 from .stages.implementing import _read_dev_session as _read_dev_session
@@ -187,69 +136,12 @@ from .stages.implementing import _resume_dev_with_text as _resume_dev_with_text
 from .stages.implementing import (
     _resume_developer_on_human_reply as _resume_developer_on_human_reply,
 )
-# Validating-stage handler and the reviewer-session lifecycle live in
-# `stages/validating.py`. Re-export under the original names so direct
-# `workflow._foo` references in the test suite, the dispatcher, and the
-# in_review / resolving_conflict handlers (which call `_handle_dev_fix_result`
-# / `_post_user_content_change_result` unqualified) keep working. The
-# stage module accesses callees it needs back here (`_park_awaiting_human`,
-# `_run_agent_tracked`, `_now_iso`, the worktree plumbing, the messaging
-# helpers, ...) through `from .. import workflow as _wf` at call time, so
-# test patches against `workflow._foo` still take effect when the call
-# originates inside the stage module.
-from .stages.validating import (
-    _VALIDATING_TRANSIENT_PARK_REASONS as _VALIDATING_TRANSIENT_PARK_REASONS,
-)
+from .stages.in_review import _handle_in_review as _handle_in_review
 from .stages.validating import _handle_dev_fix_result as _handle_dev_fix_result
 from .stages.validating import _handle_validating as _handle_validating
 from .stages.validating import _latest_pr_comment_ids as _latest_pr_comment_ids
 from .stages.validating import (
     _post_user_content_change_result as _post_user_content_change_result,
-)
-from .stages.validating import _seed_watermark_past_self as _seed_watermark_past_self
-from .stages.validating import (
-    _try_recover_validating_transient_park as _try_recover_validating_transient_park,
-)
-# In-review-stage handler and the PR-side primitives it owns live in
-# `stages/in_review.py`. Re-export under the original names so direct
-# `workflow._handle_in_review` references in the test suite and the
-# dispatcher keep working. The stage module accesses callees it needs
-# back here (`_park_awaiting_human`, `_handle_dev_fix_result`,
-# `_post_user_content_change_result`, `_resume_dev_with_text`, `_now_iso`,
-# the worktree plumbing, the drift / messaging helpers, ...) through
-# `from .. import workflow as _wf` at call time, so test patches against
-# `workflow._foo` still take effect when the call originates inside the
-# stage module.
-from .stages.in_review import _TRANSIENT_PARK_REASONS as _TRANSIENT_PARK_REASONS
-from .stages.in_review import (
-    _auto_merge_gates_pass as _auto_merge_gates_pass,
-)
-from .stages.in_review import (
-    _bump_in_review_watermarks as _bump_in_review_watermarks,
-)
-from .stages.in_review import _comment_created_at as _comment_created_at
-from .stages.in_review import _handle_in_review as _handle_in_review
-from .stages.in_review import (
-    _seed_legacy_in_review_watermarks as _seed_legacy_in_review_watermarks,
-)
-# Resolving-conflict-stage handler and its merge-loop primitives live in
-# `stages/conflicts.py`. Re-export under the original names so direct
-# `workflow._handle_resolving_conflict` references in the test suite and
-# the dispatcher keep working. The stage module accesses callees it needs
-# back here (`_park_awaiting_human`, `_post_user_content_change_result`,
-# `_resume_dev_with_text`, `_on_question`, `_on_dirty_worktree`,
-# `_now_iso`, the worktree plumbing, the drift / messaging helpers, ...)
-# through `from .. import workflow as _wf` at call time, so test patches
-# against `workflow._foo` still take effect when the call originates
-# inside the stage module.
-from .stages.conflicts import (
-    _emit_conflict_round_incremented as _emit_conflict_round_incremented,
-)
-from .stages.conflicts import (
-    _handle_resolving_conflict as _handle_resolving_conflict,
-)
-from .stages.conflicts import (
-    _post_conflict_resolution_result as _post_conflict_resolution_result,
 )
 
 log = logging.getLogger(__name__)
