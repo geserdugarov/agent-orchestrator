@@ -189,6 +189,23 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     state = gh.read_pinned_state(issue)
 
+    # Human closed the Q&A thread: that's the terminal signal. Do NOT
+    # spawn the agent (the question is moot once the issue is closed),
+    # stamp terminal state, flip the workflow label to `done`, and tear
+    # down the per-issue worktree + local branch. `list_pollable_issues`
+    # is what surfaces a closed `question` issue here in the first place;
+    # once we flip the label to `done`, the closed-issue sweep no longer
+    # yields it and the tick cost stays bounded in steady state. Even
+    # an unsafe park's preserved worktree is reaped here -- by closing
+    # the issue the operator has signaled they're done with it, so the
+    # inspection window ends.
+    if getattr(issue, "state", "open") == "closed":
+        state.set("question_closed_at", _wf._now_iso())
+        gh.set_workflow_label(issue, "done")
+        gh.write_pinned_state(issue, state)
+        _wf._cleanup_question_worktree(spec, issue.number)
+        return
+
     # Tracks whether to KEEP the per-issue worktree past this tick.
     # The question stage is read-only, so the default is to tear it
     # down (see `_cleanup_question_worktree` for the leak this

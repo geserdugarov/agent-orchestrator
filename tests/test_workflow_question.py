@@ -254,6 +254,217 @@ class HandleQuestionAwaitingHumanResumeTest(
         self.assertEqual(data["park_reason"], "question_answer")
         self.assertIn("Y is defined in y.py.", gh.posted_comments[-1][1])
 
+    def test_multi_round_qa_advances_watermark_each_tick(self) -> None:
+        # Three-round conversation: fresh spawn answers Q1, human asks
+        # Q2, agent answers Q2, human asks Q3, agent answers Q3.
+        # Each round the watermark must advance past the orchestrator's
+        # OWN answer comment so the next no-reply tick is a no-op (i.e.
+        # bot comments do not feed back into the resume loop) AND past
+        # the consumed human comment so the same reply is not replayed.
+        gh = FakeGitHubClient()
+        issue = make_issue(40, label="question", body="open question?")
+        gh.add_issue(issue)
+
+        # Round 1: fresh spawn.
+        self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="q-sess-rolling",
+                last_message="round-1 answer",
+            ),
+            has_new_commits=False,
+        )
+        data = gh.pinned_data(40)
+        self.assertTrue(data["awaiting_human"])
+        self.assertEqual(data["park_reason"], "question_answer")
+        wm_after_r1 = data["last_action_comment_id"]
+        # Watermark is at or past the orchestrator's just-posted answer
+        # comment (the one carrying the answer body). The subsequent
+        # pinned-state comment also lives on the issue but is filtered
+        # out of `comments_after` by its marker, so the relevant id to
+        # compare against is the answer comment, not the latest overall.
+        answer_comments = [
+            c for c in issue.comments if "round-1 answer" in (c.body or "")
+        ]
+        self.assertEqual(len(answer_comments), 1)
+        self.assertGreaterEqual(wm_after_r1, answer_comments[0].id)
+        self.assertEqual(data["question_session_id"], "q-sess-rolling")
+
+        # A no-reply tick between rounds must be a no-op: the
+        # orchestrator's own comment is below the watermark and
+        # `comments_after` returns nothing.
+        mocks_noop = self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="should not run"),
+        )
+        mocks_noop["run_agent"].assert_not_called()
+
+        # Round 2: human replies.
+        issue.comments.append(
+            FakeComment(id=wm_after_r1 + 100, body="follow-up Q2"),
+        )
+        mocks_r2 = self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="q-sess-rolling",
+                last_message="round-2 answer",
+            ),
+            has_new_commits=False,
+        )
+        # The resume hit the locked session, NOT a fresh spawn.
+        self.assertEqual(
+            mocks_r2["run_agent"].call_args.kwargs.get("resume_session_id"),
+            "q-sess-rolling",
+        )
+        # The prompt quoted the new human reply, not the prior bot answer.
+        prompt_r2 = mocks_r2["run_agent"].call_args.args[1]
+        self.assertIn("follow-up Q2", prompt_r2)
+        self.assertNotIn("round-1 answer", prompt_r2)
+        data = gh.pinned_data(40)
+        self.assertTrue(data["awaiting_human"])
+        self.assertEqual(data["park_reason"], "question_answer")
+        wm_after_r2 = data["last_action_comment_id"]
+        self.assertGreater(wm_after_r2, wm_after_r1)
+
+        # Round 3: another human reply.
+        issue.comments.append(
+            FakeComment(id=wm_after_r2 + 100, body="follow-up Q3"),
+        )
+        mocks_r3 = self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="q-sess-rolling",
+                last_message="round-3 answer",
+            ),
+            has_new_commits=False,
+        )
+        self.assertEqual(
+            mocks_r3["run_agent"].call_args.kwargs.get("resume_session_id"),
+            "q-sess-rolling",
+        )
+        prompt_r3 = mocks_r3["run_agent"].call_args.args[1]
+        self.assertIn("follow-up Q3", prompt_r3)
+        # The prior bot answers did not leak into the resume prompt.
+        self.assertNotIn("round-1 answer", prompt_r3)
+        self.assertNotIn("round-2 answer", prompt_r3)
+        data = gh.pinned_data(40)
+        wm_after_r3 = data["last_action_comment_id"]
+        self.assertGreater(wm_after_r3, wm_after_r2)
+
+        # All three orchestrator answer comments were posted to the
+        # issue thread (and the issue carries them plus the two human
+        # replies). The agent only ran three times across the three
+        # rounds; the no-reply tick in between did not spawn it.
+        answer_bodies = [body for _, body in gh.posted_comments]
+        self.assertEqual(
+            sum(1 for b in answer_bodies if "round-1 answer" in b), 1,
+        )
+        self.assertEqual(
+            sum(1 for b in answer_bodies if "round-2 answer" in b), 1,
+        )
+        self.assertEqual(
+            sum(1 for b in answer_bodies if "round-3 answer" in b), 1,
+        )
+
+
+class HandleQuestionClosedIssueTerminalTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """A human closing a `question`-labeled issue is the terminal
+    signal: `_handle_question` must NOT spawn the agent, must stamp
+    terminal state, flip the workflow label to `done`, and clean up
+    the per-issue worktree + local branch via
+    `_cleanup_question_worktree`.
+
+    The closed-issue sweep in `list_pollable_issues` is what surfaces
+    the closed `question` issue here; once we flip the label to `done`
+    the sweep no longer yields it and the cost stays bounded in
+    steady state.
+    """
+
+    def test_closed_issue_skips_agent_and_finalizes_to_done(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(50, label="question")
+        issue.closed = True
+        gh.add_issue(issue)
+        # Mid-conversation state from a prior tick; the close is the
+        # terminal signal regardless of where the conversation was.
+        gh.seed_state(
+            50,
+            awaiting_human=True,
+            last_action_comment_id=70000,
+            question_agent=config.DECOMPOSE_AGENT_SPEC,
+            question_session_id="q-sess-prior",
+            park_reason="question_answer",
+        )
+        mocks = self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="should not run"),
+        )
+        mocks["run_agent"].assert_not_called()
+        # No new comment posted, no PR, no resume.
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.opened_prs, [])
+        # Workflow label flipped to `done`.
+        self.assertEqual(gh.label_history, [(50, "done")])
+        # Terminal stamp in pinned state.
+        data = gh.pinned_data(50)
+        self.assertIn("question_closed_at", data)
+        # Cleanup ran.
+        mocks["_cleanup_question_worktree"].assert_called_once_with(
+            _TEST_SPEC, 50,
+        )
+
+    def test_closed_issue_with_unsafe_park_still_cleans_up(self) -> None:
+        # When the operator closes an issue parked with an unsafe
+        # park reason (commits / dirty / timeout left the worktree
+        # intact for inspection), closing IS the operator's "I'm
+        # done with this" signal -- the inspection window ends and
+        # cleanup runs unconditionally.
+        gh = FakeGitHubClient()
+        issue = make_issue(51, label="question")
+        issue.closed = True
+        gh.add_issue(issue)
+        gh.seed_state(
+            51,
+            awaiting_human=True,
+            park_reason="question_commits",
+            question_agent=config.DECOMPOSE_AGENT_SPEC,
+            question_session_id="q-sess-prior",
+            last_action_comment_id=71000,
+        )
+        mocks = self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="should not run"),
+        )
+        mocks["run_agent"].assert_not_called()
+        self.assertEqual(gh.label_history, [(51, "done")])
+        mocks["_cleanup_question_worktree"].assert_called_once_with(
+            _TEST_SPEC, 51,
+        )
+
+    def test_closed_issue_without_prior_state_finalizes_cleanly(self) -> None:
+        # No pinned state at all -- e.g. the issue was labeled
+        # `question` and immediately closed before the orchestrator
+        # spawned anything. The terminal handler still finalizes
+        # cleanly: no agent spawn, label flips to `done`, cleanup
+        # runs (idempotent best-effort if nothing exists on disk).
+        gh = FakeGitHubClient()
+        issue = make_issue(52, label="question")
+        issue.closed = True
+        gh.add_issue(issue)
+        mocks = self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="should not run"),
+        )
+        mocks["run_agent"].assert_not_called()
+        self.assertEqual(gh.label_history, [(52, "done")])
+        data = gh.pinned_data(52)
+        self.assertIn("question_closed_at", data)
+        mocks["_cleanup_question_worktree"].assert_called_once_with(
+            _TEST_SPEC, 52,
+        )
+
 
 class HandleQuestionWorktreeCleanupTest(
     unittest.TestCase, _PatchedWorkflowMixin,

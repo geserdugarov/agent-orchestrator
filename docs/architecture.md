@@ -174,7 +174,7 @@ A `gh.get_pr` failure is treated as "leave alone" so the handler retries from a 
 
 Rebase is used across both paths to keep issue branches linear after sibling PRs land. Dirty worktrees (in-flight agent edits, crash-recovered trees) are skipped, and on a pre-PR content conflict the rebase is aborted so the worktree stays on its pre-rebase SHA. For PR branches, every pushed rebase resets `review_round`, so the reviewer must approve the rewritten head before auto-merge can proceed. Failures are logged and swallowed; keeping every issue moving matters more than perfect base sync.
 
-Then `gh.list_pollable_issues()` yields all open non-PR issues plus closed non-PR issues still labeled `in_review` or `resolving_conflict`. The closed-`in_review`/`resolving_conflict` sweep is what makes the manual-merge path land cleanly: a human-merged PR with a `Resolves #N` footer auto-closes issue N before the orchestrator can flip the label, and without the sweep `_handle_in_review` / `_handle_resolving_conflict` would never run on it.
+Then `gh.list_pollable_issues()` yields all open non-PR issues plus closed non-PR issues still labeled `in_review`, `resolving_conflict`, or `question`. The closed-`in_review`/`resolving_conflict` sweep is what makes the manual-merge path land cleanly: a human-merged PR with a `Resolves #N` footer auto-closes issue N before the orchestrator can flip the label, and without the sweep `_handle_in_review` / `_handle_resolving_conflict` would never run on it. The closed-`question` sweep does the same for the Q&A path: a human closing the issue is the terminal signal `_handle_question` consumes to finalize the issue to `done` and clean up the per-issue worktree/branch.
 
 For every yielded issue:
 
