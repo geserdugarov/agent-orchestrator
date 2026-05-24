@@ -175,6 +175,83 @@ journalctl --user-unit agent.service -f      # tail the wrapper's stdout/stderr
 
 systemd's journal captures `run.sh` and orchestrator stdout/stderr (process lifecycle, exit codes, restart messages). The orchestrator's own structured log lives at `logs/orchestrator.log` under `WorkingDirectory` (rotated, ~10 MiB × 5). Check the journal first for "did it start / did it die", then `logs/orchestrator.log` for per-issue handler detail.
 
+## Applying `.env` changes
+
+`.env` is read once, when `python -m orchestrator.main` starts. The orchestrator process never reloads it, so most edits take effect on the **next fresh Python start** — there is no signal you can send to a running process to make it re-read configuration. `run.sh` is the usual restart mechanism: each loop iteration launches a new Python process (and `git pull --ff-only`s the orchestrator checkout to `ORCHESTRATOR_BASE_BRANCH` along the way, see [Run modes](#run-modes)).
+
+### What survives a restart
+
+Per-issue progress lives in the issue's pinned JSON comment on GitHub and in the per-issue worktree on disk. Restarting between ticks loses nothing — the next tick picks each issue back up from its label and pinned state. Two restart-time hazards are worth knowing:
+
+- **A live `codex` / `claude` child.** Stage handlers spawn agent subprocesses that may run for as long as `AGENT_TIMEOUT`. Killing the orchestrator while a child is mid-session also kills the child, which can leave the issue parked on `awaiting_human`, routed through timeout recovery on the next tick, or sitting on a dirty worktree that needs manual cleanup.
+- **In-flight agent spec is pinned.** When a `codex` / `claude` session starts, the orchestrator writes the full `DEV_AGENT` / `DECOMPOSE_AGENT` spec into pinned state and re-parses it (not the current `.env`) on every resume. Flipping `DEV_AGENT` or `DECOMPOSE_AGENT` after a session is locked does nothing for that issue until it reaches `done` or `rejected`. `REVIEW_AGENT` is not pinned — the reviewer spawns fresh each round, so a new value applies on the next reviewer spawn after restart.
+
+### Safe restart guidance
+
+- **Idle / between ticks — safe.** Restart freely; the next tick resumes from GitHub state.
+- **Issue mid-stage with no agent child — generally safe.** Workflow state is on GitHub and in the worktree, so the next tick resumes from the same label and pinned state.
+- **Live `codex` / `claude` child — avoid.** Wait for the agent to exit. Forcing a restart here can park the issue or leave a dirty worktree behind.
+
+Useful inspection commands before restarting:
+
+```sh
+pgrep -af 'python -m orchestrator.main|codex|claude|run.sh'
+tail -f logs/orchestrator.log
+journalctl --user -u agent.service -f   # systemd users
+```
+
+If `pgrep` lists a `codex` or `claude` process under the orchestrator, an agent session is live — wait it out unless you are deliberately discarding that work.
+
+### Per launch style
+
+**Foreground terminal (`./run.sh` in a shell).**
+
+1. Edit `.env`.
+2. Confirm no agent child is running (`pgrep -af 'codex|claude'`).
+3. Ctrl+C the terminal. `run.sh` exits with code 130 and skips the restart loop.
+4. Re-run `./run.sh`.
+
+A second Ctrl+C while `run.sh` is mid-shutdown terminates immediately.
+
+**`tmux` / `screen` session.**
+
+1. Attach (`tmux attach -t orchestrator`, or `screen -r`).
+2. Check the live output for an in-flight stage handler; cross-check with `pgrep -af 'codex|claude'` from another shell.
+3. At a safe point, Ctrl+C the orchestrator and re-run `./run.sh` inside the session.
+4. Detach (Ctrl+B then D for tmux, Ctrl+A then D for screen).
+
+The session keeps its shell environment, so any `GITHUB_TOKEN` exported there persists across the restart.
+
+**systemd user service.**
+
+1. Edit `.env` in the orchestrator's working directory (the unit's `WorkingDirectory=`).
+2. **Skip `systemctl --user daemon-reload`** unless the `.service` unit file itself changed — `daemon-reload` reloads unit definitions, not the orchestrator's `.env`, so running it is a no-op for config edits.
+3. When safe (no live agent child), restart the service:
+   ```sh
+   systemctl --user restart agent.service
+   ```
+4. Tail logs to confirm the new process started cleanly:
+   ```sh
+   journalctl --user -u agent.service -f
+   ```
+
+When `GITHUB_TOKEN` is supplied via the unit's `EnvironmentFile=` directive, edit that file and restart the service — systemd reads the file's contents at service start, so no `daemon-reload` is needed. When the token is hard-coded in an inline `Environment=` line in the unit (or a drop-in), changing the value requires editing the unit *and then* a `daemon-reload` before the restart, because systemd only re-reads unit directives when unit definitions are reloaded.
+
+**Direct `python -m orchestrator.main --once`.**
+
+Each `--once` invocation is a fresh Python process and reads the current `.env` on every call. There is no long-running process to restart — edit `.env` and rerun the command.
+
+### Setting-by-setting expectations
+
+| Setting | When the change takes effect |
+| ------- | ---------------------------- |
+| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `AUTO_MERGE`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `EVENT_LOG_PATH`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
+| `MAX_PARALLEL_ISSUES_PER_REPO`, `MAX_PARALLEL_ISSUES_GLOBAL` | next Python start. Per-`REPOS` `parallel_limit` overrides take precedence over `MAX_PARALLEL_ISSUES_PER_REPO`, so editing the default only affects entries that omit the fifth field |
+| `DEV_AGENT`, `DECOMPOSE_AGENT` | next Python start, **except** for issues whose pinned state already names a `dev_agent` / `decomposer_agent` — those keep the pinned spec until the issue reaches `done` or `rejected` |
+| `REVIEW_AGENT` | next reviewer spawn after the next Python start (not pinned per issue) |
+| `GITHUB_TOKEN` | not loaded from `.env`. Update the process environment (foreground/tmux: re-export before relaunch; systemd `EnvironmentFile=`: edit the file and restart the service; inline systemd `Environment=`: edit the unit, `daemon-reload`, then restart) or rewrite the file at `ORCHESTRATOR_TOKEN_FILE` (default `~/.config/<owner>/<repo>/token`) before the next start |
+| `ORCHESTRATOR_BASE_BRANCH` | `run.sh` captures this once before its restart loop, so editing it only takes effect after `run.sh` itself is restarted (Ctrl+C the wrapper or `systemctl --user restart` the service, then relaunch). The Python process picks it up on the same next start |
+
 ## Control labels
 
 | Label | Purpose |
