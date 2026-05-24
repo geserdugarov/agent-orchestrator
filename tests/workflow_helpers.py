@@ -86,6 +86,7 @@ class _PatchedWorkflowMixin:
         squash_result=(True, None, 0, None),
         branch_ahead_behind=(0, 0),
         rebase_in_progress=False,
+        verify_result=None,
     ):
         rc_mock = _as_mock(run_agent)
         hnc_seq = has_new_commits if isinstance(has_new_commits, (list, tuple)) else None
@@ -130,6 +131,17 @@ class _PatchedWorkflowMixin:
         # the squash path see no agent_approved_sha override.
         squash_mock = MagicMock(return_value=tuple(squash_result))
         rebase_in_progress_mock = MagicMock(return_value=bool(rebase_in_progress))
+        # Verify-commands runner shells out to the operator's configured
+        # commands. Default: "ok" so tests not exercising the verify gate
+        # see no behavior change. The default-empty `VERIFY_COMMANDS` also
+        # short-circuits the helper to ok before it spawns anything, but
+        # the mock is in place so a test that sets VERIFY_COMMANDS does
+        # not accidentally shell out.
+        from orchestrator.worktrees import VerifyResult
+        verify_mock = MagicMock(
+            return_value=verify_result if verify_result is not None
+            else VerifyResult(status="ok")
+        )
 
         with patch.object(workflow, "run_agent", rc_mock), \
              patch.object(workflow, "_ensure_worktree", wt_mock), \
@@ -144,6 +156,7 @@ class _PatchedWorkflowMixin:
              patch.object(workflow, "_head_sha", head_mock), \
              patch.object(workflow, "_first_commit_subject", first_subject_mock), \
              patch.object(workflow, "_squash_and_force_push", squash_mock), \
+             patch.object(workflow, "_run_verify_commands", verify_mock), \
              patch.object(workflow, "_authed_fetch", authed_fetch_ok), \
              patch.object(workflow, "_branch_ahead_behind", ahead_behind_mock), \
              patch.object(workflow, "_rebase_in_progress", rebase_in_progress_mock):
@@ -163,6 +176,7 @@ class _PatchedWorkflowMixin:
             "_head_sha": head_mock,
             "_first_commit_subject": first_subject_mock,
             "_squash_and_force_push": squash_mock,
+            "_run_verify_commands": verify_mock,
             "_authed_fetch": authed_fetch_ok,
             "_branch_ahead_behind": ahead_behind_mock,
             "_rebase_in_progress": rebase_in_progress_mock,

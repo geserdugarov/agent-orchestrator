@@ -550,3 +550,40 @@ DECOMPOSE: bool = os.environ.get("DECOMPOSE", "on").strip().lower() in (
 SQUASH_ON_APPROVAL: bool = os.environ.get(
     "SQUASH_ON_APPROVAL", "on"
 ).strip().lower() in ("1", "true", "on", "yes")
+
+
+def _parse_verify_commands(raw: str) -> tuple[str, ...]:
+    """Parse VERIFY_COMMANDS into an ordered tuple of shell command strings.
+
+    Each command is a single non-empty line; ``;`` is also accepted as a
+    separator so the value can fit on one line in a ``.env`` file (the
+    simple ``_load_dotenv`` parser cannot represent newlines inside a
+    value, mirroring how ``REPOS`` is parsed). Blank lines and lines
+    starting with ``#`` are skipped. Commands are executed via the shell
+    in `_run_verify_commands`, so quoting / pipes / `&&` work the way an
+    operator would type them.
+    """
+    commands: list[str] = []
+    for raw_line in raw.replace(";", "\n").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        commands.append(line)
+    return tuple(commands)
+
+
+# Local verification commands run in the per-issue worktree on
+# VERDICT: APPROVED, before the issue is labeled `in_review`. Default
+# empty -- no verification, preserving legacy behavior. Commands run
+# sequentially via the shell with a bounded `VERIFY_TIMEOUT`; on a
+# non-zero exit, a timeout, or a dirty worktree left behind, the issue
+# is parked in `validating` with the failing command, exit/timeout, and
+# a redacted/truncated tail of the output. CI is still the later
+# auto-merge gate.
+VERIFY_COMMANDS: tuple[str, ...] = _parse_verify_commands(
+    os.environ.get("VERIFY_COMMANDS", "")
+)
+# Per-command wall-clock cap in seconds. Each command in VERIFY_COMMANDS
+# is run with this timeout; a single slow command parks the issue rather
+# than burning the orchestrator's tick budget.
+VERIFY_TIMEOUT: int = int(os.environ.get("VERIFY_TIMEOUT", "600"))

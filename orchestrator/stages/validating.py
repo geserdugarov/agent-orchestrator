@@ -485,6 +485,81 @@ def _latest_pr_comment_ids(
     )
 
 
+_VERIFY_STATUS_TO_REASON = {
+    "failed": "verify_failed",
+    "timeout": "verify_timeout",
+    "dirty": "verify_dirty",
+    "head_changed": "verify_head_changed",
+}
+
+
+def _park_verify_failure(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    verify,
+) -> None:
+    """Park `validating` on a local-verify failure.
+
+    The park comment names the failing command, its exit code (or
+    timeout), and a redacted / truncated tail of the captured output so
+    the operator can triage without pulling the orchestrator's logs.
+    `park_reason` is set to a stable token (`verify_failed`,
+    `verify_timeout`, or `verify_dirty`) so dashboards and future
+    transient-recovery logic can branch on the failure mode.
+    """
+    from .. import workflow as _wf
+
+    reason = _VERIFY_STATUS_TO_REASON.get(verify.status, "verify_failed")
+    if verify.status == "timeout":
+        detail = (
+            f"`{verify.command}` timed out after "
+            f"{config.VERIFY_TIMEOUT}s"
+        )
+    elif verify.status == "dirty":
+        files = ", ".join(f"`{p}`" for p in verify.dirty_files[:10])
+        if len(verify.dirty_files) > 10:
+            files += f", … (+{len(verify.dirty_files) - 10} more)"
+        detail = (
+            f"`{verify.command}` left the worktree dirty: {files}"
+        )
+    elif verify.status == "head_changed":
+        # The verify command produced a new commit (or otherwise moved
+        # HEAD) on its own. Surface both SHAs so the operator can
+        # `git show` the commit and decide whether to keep it
+        # (re-spawn the reviewer on the new HEAD) or revert it before
+        # re-trying. Show short SHAs for legibility; the full SHAs
+        # remain in pinned state via `agent_approved_sha` bookkeeping.
+        before = (verify.head_before or "")[:12] or "(no HEAD)"
+        after = (verify.head_after or "")[:12] or "(no HEAD)"
+        detail = (
+            f"`{verify.command}` moved HEAD ({before} -> {after}); "
+            "verify commands must not commit"
+        )
+    else:
+        detail = (
+            f"`{verify.command}` exited with code "
+            f"{verify.exit_code if verify.exit_code is not None else '?'}"
+        )
+
+    message = (
+        f"{config.HITL_MENTIONS} local verification failed; PR not handed "
+        f"off to in_review. {detail}."
+    )
+    # `verify.output` is already redacted-then-truncated by the runner;
+    # re-redacting here would be a no-op for any match `_redact_secrets`
+    # already collapsed to `***`, AND would not catch a partial secret
+    # that straddled the truncation cut -- the only safe way to handle
+    # that case is the redact-before-truncate pass inside the runner.
+    output = verify.output or ""
+    if output.strip():
+        quoted = "> " + output.rstrip().replace("\n", "\n> ")
+        message += f"\n\n_Verify output (tail):_\n\n{quoted}"
+
+    _wf._park_awaiting_human(gh, issue, state, message, reason=reason)
+    state.set("park_reason", reason)
+
+
 def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     from .. import workflow as _wf
 
@@ -760,6 +835,22 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     )
 
     if verdict == "approved":
+        # Local verification gate: run the configured `VERIFY_COMMANDS` in
+        # the per-issue worktree before posting the approval or relabeling
+        # to `in_review`. Default-empty `VERIFY_COMMANDS` short-circuits to
+        # "ok" so the legacy "no verification" behaviour is unchanged. A
+        # failed / timed-out command, or a dirty tree left behind, parks
+        # awaiting_human in `validating` with a stable `park_reason` so the
+        # operator can fix the breakage; CI remains the later auto-merge
+        # gate but is no longer the FIRST gate after the reviewer agent.
+        verify = _wf._run_verify_commands(
+            wt, config.VERIFY_COMMANDS, config.VERIFY_TIMEOUT,
+        )
+        if verify.status != "ok":
+            _park_verify_failure(gh, issue, state, verify)
+            gh.write_pinned_state(issue, state)
+            return
+
         if pr_number is not None:
             try:
                 _wf._post_pr_comment(

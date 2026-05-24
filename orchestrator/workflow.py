@@ -110,6 +110,7 @@ from .worktrees import (
 from .worktrees import _push_branch as _push_branch
 from .worktrees import _refresh_base_and_worktrees as _refresh_base_and_worktrees
 from .worktrees import _rebase_in_progress as _rebase_in_progress
+from .worktrees import _run_verify_commands as _run_verify_commands
 from .worktrees import _sanitize_slug as _sanitize_slug
 from .worktrees import _squash_and_force_push as _squash_and_force_push
 from .worktrees import _sync_worktree_with_base as _sync_worktree_with_base
