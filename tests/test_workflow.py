@@ -1191,6 +1191,21 @@ class ListPollableIssuesTest(unittest.TestCase):
         out = {i.number for i in gh.list_pollable_issues()}
         self.assertEqual(out, {1, 7})
 
+    def test_includes_closed_question_for_terminal_cleanup(self) -> None:
+        # A human closing a `question`-labeled Q&A issue is the terminal
+        # signal `_handle_question` consumes to finalize the issue to
+        # `done` and clean up the per-issue worktree/branch. Without the
+        # closed-issue sweep including `question`, the dispatcher would
+        # never re-visit the closed issue and the worktree would linger.
+        gh = FakeGitHubClient()
+        open_issue = make_issue(1, label="implementing")
+        closed_question = make_issue(9, label="question")
+        closed_question.closed = True
+        for i in (open_issue, closed_question):
+            gh.add_issue(i)
+        out = {i.number for i in gh.list_pollable_issues()}
+        self.assertEqual(out, {1, 9})
+
 
 class WorktreePathSlugNamespaceTest(unittest.TestCase):
     """Two repos with the same issue number must produce distinct worktree

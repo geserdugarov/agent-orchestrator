@@ -199,8 +199,8 @@ class GitHubClient:
         return GitHubClient(token=self._token, repo_slug=self._repo_slug)
 
     def list_pollable_issues(self, since: Optional[datetime] = None) -> Iterable[Issue]:
-        """Open issues plus closed issues still labeled `in_review` or
-        `resolving_conflict`.
+        """Open issues plus closed issues still labeled `in_review`,
+        `resolving_conflict`, or `question`.
 
         The closed-issue sweep is what makes the manual-merge path work:
         when a human merges a PR with a `Resolves #N` footer, GitHub
@@ -215,6 +215,12 @@ class GitHubClient:
         too: `Resolves #N` closes the issue, the PR moves to merged, and
         `_handle_resolving_conflict`'s terminal branch handles it -- but
         only if the closed issue actually surfaces here.
+
+        `question` joins the sweep so a human closing an open Q&A thread
+        is recognized as a terminal signal: `_handle_question` finalizes
+        the issue to `done` and cleans up the per-issue worktree/branch
+        instead of letting an answered-but-then-closed question keep its
+        worktree on disk indefinitely.
         """
         seen: set[int] = set()
 
@@ -241,7 +247,7 @@ class GitHubClient:
         # sweep" and skip rather than raising. Multi-label-OR is achieved
         # by issuing one query per label (the GitHub Issues API treats
         # `labels` as AND, not OR).
-        for label_name in ("in_review", "resolving_conflict"):
+        for label_name in ("in_review", "resolving_conflict", "question"):
             try:
                 label_obj = self.repo.get_label(label_name)
             except GithubException as e:

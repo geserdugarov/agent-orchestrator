@@ -1992,34 +1992,39 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         client.repo.get_issues.return_value = iter([])
         in_review_label = MagicMock(name="in_review_label")
         resolving_label = MagicMock(name="resolving_conflict_label")
+        question_label = MagicMock(name="question_label")
 
         def fake_get_label(name: str):
             return {
                 "in_review": in_review_label,
                 "resolving_conflict": resolving_label,
+                "question": question_label,
             }[name]
 
         client.repo.get_label.side_effect = fake_get_label
 
         list(client.list_pollable_issues())
 
-        # Both labels are looked up by name (one query per label because
-        # the GitHub Issues API treats `labels` as AND, not OR -- a single
-        # query for "either label" is impossible).
+        # All three sweep labels are looked up by name (one query per
+        # label because the GitHub Issues API treats `labels` as AND,
+        # not OR -- a single query for "any of these labels" is
+        # impossible).
         looked_up = [
             ca.args[0] for ca in client.repo.get_label.call_args_list
         ]
         self.assertIn("in_review", looked_up)
         self.assertIn("resolving_conflict", looked_up)
+        self.assertIn("question", looked_up)
         # The closed sweeps were invoked with Label OBJECTS, not strings.
         closed_calls = [
             ca for ca in client.repo.get_issues.call_args_list
             if ca.kwargs.get("state") == "closed"
         ]
-        self.assertEqual(len(closed_calls), 2)
+        self.assertEqual(len(closed_calls), 3)
         labels_passed = [ca.kwargs["labels"] for ca in closed_calls]
         self.assertIn([in_review_label], labels_passed)
         self.assertIn([resolving_label], labels_passed)
+        self.assertIn([question_label], labels_passed)
 
     def test_missing_label_skips_closed_sweep_without_raising(self) -> None:
         # If `get_label` raises (under-scoped PAT, label not yet bootstrapped)
