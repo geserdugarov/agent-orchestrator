@@ -119,6 +119,7 @@ from .stages.decomposition import _handle_decomposing as _handle_decomposing
 from .stages.decomposition import _handle_ready as _handle_ready
 from .stages.decomposition import _handle_umbrella as _handle_umbrella
 from .stages.decomposition import _read_decomposer_session as _read_decomposer_session
+from .stages.documenting import _handle_documenting as _handle_documenting
 from .stages.implementing import (
     _SILENT_PARKS_BEFORE_FRESH_SESSION as _SILENT_PARKS_BEFORE_FRESH_SESSION,
 )
@@ -498,6 +499,8 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         _handle_umbrella(gh, spec, issue)
     elif label == "implementing":
         _handle_implementing(gh, spec, issue)
+    elif label == "documenting":
+        _handle_documenting(gh, spec, issue)
     elif label == "validating":
         _handle_validating(gh, spec, issue)
     elif label == "in_review":

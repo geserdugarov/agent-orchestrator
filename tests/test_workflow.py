@@ -4416,5 +4416,104 @@ class QuestionLabelRoutingTest(unittest.TestCase):
         self.assertEqual(gh.write_state_calls, 0)
 
 
+class DocumentingLabelRoutingTest(unittest.TestCase):
+    """`documenting` is registered as a workflow label so the dispatcher
+    routes it to the stub stage handler instead of falling through to
+    pickup or implementation. The implementing stage does not auto-apply
+    this label yet (parent #149), so any issue carrying it arrived via a
+    manual operator action -- the stub parks awaiting human rather than
+    silently skipping, otherwise the issue would sit forever waiting for a
+    non-existent handler to advance it.
+    """
+
+    def test_documenting_label_is_recognized_as_workflow_label(self) -> None:
+        from orchestrator.github import WORKFLOW_LABELS
+
+        self.assertIn("documenting", WORKFLOW_LABELS)
+
+    def test_documenting_label_is_in_bootstrap_specs(self) -> None:
+        # Label bootstrap iterates WORKFLOW_LABEL_SPECS; if the spec entry
+        # is missing, `ensure_workflow_labels` would never create the
+        # label on a fresh repo and operators would be unable to apply it.
+        from orchestrator.github import WORKFLOW_LABEL_SPECS
+
+        names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
+        self.assertIn("documenting", names)
+
+    def test_documenting_label_sits_between_implementing_and_validating(
+        self,
+    ) -> None:
+        # Lifecycle order matters: the planned documenting stage runs after
+        # implementing and before validating, so the spec tuple must place
+        # the label between them (the order is the only durable encoding
+        # of lifecycle ordering in code).
+        from orchestrator.github import WORKFLOW_LABEL_SPECS
+
+        names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
+        impl_idx = names.index("implementing")
+        doc_idx = names.index("documenting")
+        val_idx = names.index("validating")
+        self.assertEqual(doc_idx, impl_idx + 1)
+        self.assertEqual(val_idx, doc_idx + 1)
+
+    def test_documenting_label_is_not_family_aware(self) -> None:
+        # Open `documenting` issues touch only their own pinned state and
+        # worktree, so the label must stay out of `_FAMILY_AWARE_LABELS`
+        # -- otherwise the parallel tick path would route it through the
+        # single-threaded family bucket and defeat fan-out concurrency.
+        self.assertNotIn("documenting", workflow._FAMILY_AWARE_LABELS)
+
+    def test_dispatcher_routes_documenting_to_handler(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(901, label="documenting")
+        gh.add_issue(issue)
+
+        with patch.object(workflow, "_handle_documenting") as handler, \
+             patch.object(workflow, "_handle_pickup") as pickup, \
+             patch.object(workflow, "_handle_implementing") as impl, \
+             patch.object(workflow, "_handle_validating") as val:
+            workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        handler.assert_called_once_with(gh, _TEST_SPEC, issue)
+        pickup.assert_not_called()
+        impl.assert_not_called()
+        val.assert_not_called()
+
+    def test_documenting_stub_parks_awaiting_human(self) -> None:
+        # End-to-end with the real (stub) handler: a manually-applied
+        # `documenting` label must park awaiting human rather than
+        # silently skipping documentation, so the operator gets a clear
+        # signal that the stage is not implemented yet.
+        gh = FakeGitHubClient()
+        issue = make_issue(902, label="documenting")
+        gh.add_issue(issue)
+
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        self.assertEqual(len(gh.posted_comments), 1)
+        issue_number, body = gh.posted_comments[0]
+        self.assertEqual(issue_number, 902)
+        self.assertIn("documenting", body)
+        self.assertTrue(gh.pinned_data(902).get("awaiting_human"))
+        # The label is NOT flipped: parking surfaces the situation but
+        # leaves the operator in control of the next move (remove the
+        # label to resume, or wait for the real handler to land).
+        self.assertEqual(gh.label_history, [])
+
+    def test_documenting_stub_is_idempotent_when_already_parked(self) -> None:
+        # A second tick on an already-parked documenting issue must not
+        # re-post the parking comment or re-emit the audit event --
+        # otherwise every polling tick would spam the issue.
+        gh = FakeGitHubClient()
+        issue = make_issue(903, label="documenting")
+        gh.add_issue(issue)
+        gh.seed_state(903, awaiting_human=True)
+
+        workflow._process_issue(gh, _TEST_SPEC, issue)
+
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.write_state_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
