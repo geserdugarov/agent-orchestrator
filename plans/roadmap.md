@@ -6,11 +6,13 @@ The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 `umbrella` → `implementing` → `validating` → `in_review` → `fixing`
 (on fresh PR feedback) or `resolving_conflict` (auto-merge detour) →
 `done` / `rejected`) is wired end-to-end. `_handle_fixing` owns the
-PR-feedback quiet window and the dev-resume / push / bounce-back-to-
-`validating` cycle, with watermark advancement on success and on
+PR-feedback quiet window and the dev-resume / push / route-through-
+`documenting` cycle, with watermark advancement on success and on
 failure-park; the in_review route, the closed-issue sweep, the
 PR-worktree refresh detour, and the PR-state terminal arcs are all in
-place. The operator-applied `question` label adds a read-only Q&A
+place. A pushed fix flips to `documenting` so the docs pass runs
+against the new head before the reviewer re-evaluates; the
+no-new-feedback bounce still flips directly to `validating`. The operator-applied `question` label adds a read-only Q&A
 side-branch (`_handle_question`) that runs the decomposer backend in
 the per-issue worktree to answer clarifying questions without opening
 a PR; closing the issue is the terminal signal.
@@ -122,8 +124,16 @@ PR merged → `done` + branch cleanup; PR closed unmerged → `rejected`;
 fresh actionable PR feedback on any of the four comment surfaces →
 record pending-fix metadata in pinned state and flip the label to
 `fixing` immediately (no debounce wait, no dev spawn from this
-handler — the `fixing` stage owns the resume + push + bounce-back-to-
-`validating` cycle, with debouncing applied there);
+handler — the `fixing` stage owns the resume + push + route-through-
+`documenting` cycle, with debouncing applied there);
+user-content drift (a human edited the issue title/body while the PR
+was open) resumes the dev directly from `_handle_in_review`; a pushed
+outcome routes through `documenting` (so the docs pass runs against
+the updated body before the reviewer re-evaluates) and a no-commit
+ACK outcome bounces directly back to `validating` (the docs hop is
+skipped because no commit landed). Both outcomes still reset
+`review_round` and clear `agent_approved_sha` so AUTO_MERGE waits for
+a fresh reviewer approval;
 `AUTO_MERGE=on` + agent-or-human approval + no veto + mergeable +
 green CI → SHA-pinned `gh.merge_pr` → `done`.
 
@@ -136,11 +146,15 @@ keys are bookmarks (a hint for the fixing handler / forensics), not
 watermarks.
 
 **Fixing stage.** `fixing` is the routable workflow label that sits
-between `in_review` and `validating` in the PR-feedback fix loop.
+between `in_review` and `documenting` in the PR-feedback fix loop.
 The label means unread in-review feedback or a human CI-fix request is
 queued during the quiet window or actively being addressed; a
-successful fix returns to `validating` so the reviewer re-approves
-the new head before auto-merge can proceed.
+successful fix routes through `documenting` (so the docs pass runs
+against the new head) and then back through `validating` so the
+reviewer re-approves before auto-merge can proceed. When the rescan
+finds no unread feedback at all, the bounce skips the docs hop and
+flips directly to `validating` — no fix work landed, so the docs pass
+has nothing new to react to.
 `_handle_fixing` rescans unread feedback from the three in_review
 watermarks each tick (filtering orchestrator-authored comments by id
 AND by the hidden `<!--orchestrator-comment-->` body marker), debounces
@@ -157,7 +171,9 @@ success and the failure path -- the orchestrator's own park comment is
 filtered by id + body marker on the next tick's rescan, so the broad
 bump is unnecessary). On a pushed fix the handler clears the
 `pending_fix_*` bookmarks, resets `review_round`, drops the now-stale
-`agent_approved_sha`, and flips the label to `validating`. On a failed
+`agent_approved_sha`, and flips the label to `documenting` so the
+docs pass runs against the new head before the reviewer re-evaluates
+(mirrors the validating-side pushed-fix exits). On a failed
 resume (timeout / dirty / push fail / no-commit) the validating-side
 `_handle_dev_fix_result` parks awaiting human and the issue stays in
 `fixing` until the human reply unsticks it. PR-state terminal arcs

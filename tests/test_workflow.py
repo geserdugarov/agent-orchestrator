@@ -3529,10 +3529,15 @@ class NoCommitAckDoesNotParkTest(
         self,
     ) -> None:
         # A no-commit "ack" reply from the dev on an in_review drift
-        # MUST bounce back to `validating` and invalidate the stale
-        # `agent_approved_sha`. Leaving the issue at `in_review` would
-        # let the AUTO_MERGE gate land the PR against a review that
-        # never saw the changed requirements.
+        # MUST bounce DIRECTLY back to `validating` (NOT through
+        # `documenting`) -- the pre-rollout no-commit ACK behaviour is
+        # preserved because no new commit landed for the docs pass to
+        # react to; spawning `documenting` here would just emit
+        # `DOCS: NO_CHANGE` against the unchanged head and waste a
+        # tick. The other ACK guarantees still hold: the stale
+        # `agent_approved_sha` is cleared (the snapshot was for the
+        # old requirements, so AUTO_MERGE cannot land the PR until the
+        # reviewer re-snapshots) and `review_round` resets.
         gh = FakeGitHubClient()
         issue = make_issue(700, label="in_review", body="clarified body")
         gh.add_issue(issue)
@@ -3565,12 +3570,14 @@ class NoCommitAckDoesNotParkTest(
         data = gh.pinned_data(700)
         # Must NOT park (the dev acknowledged, not asked a question).
         self.assertFalse(data.get("awaiting_human"))
-        # MUST bounce back to validating so the reviewer re-evaluates
-        # against the updated requirements before AUTO_MERGE can land.
+        # MUST bounce directly to validating (no documenting hop) so
+        # the reviewer re-evaluates against the updated body before
+        # AUTO_MERGE can land.
         self.assertIn((700, "validating"), gh.label_history)
+        # And NOT through documenting -- no commit landed.
+        self.assertNotIn((700, "documenting"), gh.label_history)
         # Stale agent_approved_sha cleared so AUTO_MERGE cannot pass on
-        # the pre-edit snapshot if it somehow re-enters in_review before
-        # the reviewer re-runs.
+        # the pre-edit snapshot before the reviewer re-runs.
         self.assertIsNone(data.get("agent_approved_sha"))
         # review_round reset so the validating cap counts fresh rounds.
         self.assertEqual(data.get("review_round"), 0)

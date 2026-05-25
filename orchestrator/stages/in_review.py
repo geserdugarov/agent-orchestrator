@@ -219,10 +219,18 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     feedback on any of the four surfaces (issue thread, PR conversation,
     inline review, review summary) records pending-fix metadata in pinned
     state and flips the label to `fixing` immediately -- the dev resume and
-    bounce-back-to-`validating` cycle moves to the `fixing` handler. Auto-
+    route-through-`documenting` cycle moves to the `fixing` handler. Auto-
     merge is gated by `AUTO_MERGE` (default off); without it, the loop only
     handles state transitions and feedback hand-off -- humans still click
     Merge.
+
+    User-content drift (a human edited the issue title/body while the PR
+    was open) takes the dev-resume path here; a pushed fix flips to
+    `documenting` so the docs pass runs against the new head before the
+    reviewer re-evaluates, while a no-commit ACK bounces directly back
+    to `validating` (with `agent_approved_sha` cleared and
+    `review_round` reset) -- nothing landed for the docs pass to react
+    to, so spawning `documenting` would just produce a no-op tick.
     """
     from .. import workflow as _wf
 
@@ -396,9 +404,12 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # silently waiting through the debounce window or spawning the dev
         # agent here. Recording the per-namespace high ids in pinned state
         # gives the fixing handler a bookmark of what triggered the route
-        # so it can resume the dev session, push a fix, and bounce back to
-        # `validating` -- all without `_handle_in_review` having to keep
-        # the comment-debounce / dev-resume machinery in its own body.
+        # so it can resume the dev session, push a fix, route the issue
+        # through `documenting` (so the docs pass runs against the new
+        # head before the reviewer re-evaluates), and eventually hand
+        # back to `validating` -- all without `_handle_in_review` having
+        # to keep the comment-debounce / dev-resume machinery in its own
+        # body.
         #
         # Deliberately NOT honoring the debounce window before the flip: the
         # in_review handler used to wait IN_REVIEW_DEBOUNCE_SECONDS so a
@@ -437,8 +448,9 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # we just consumed via the fixing route. The hash covers title +
         # body + human issue-thread comments, so any issue-thread comment
         # in `new_issue_side` shifts the hash; leaving the old hash in
-        # pinned state would have the drift path resume the dev (and flip
-        # to `validating`) the moment a human relabels the issue back to
+        # pinned state would have the drift path resume the dev (and
+        # route through `documenting` on pushed / bounce to `validating`
+        # on ACK) the moment a human relabels the issue back to
         # `in_review`, undoing the fixing route. `_compute_user_content_hash`
         # is a pure read of the current issue state, so reading it here is
         # cheap and self-contained -- the bookmark and the hash both
@@ -461,9 +473,11 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # User-content drift: a human edited the issue title/body after the PR
     # opened (no fresh comment surface triggered the fixing route above).
     # Notify on both surfaces, resume the dev session on its locked
-    # backend with the new body, and on a successful pushed fix bounce back
-    # to `validating` so the reviewer agent re-runs on the new diff next
-    # tick.
+    # backend with the new body, and on a successful pushed fix route
+    # through `documenting` (so the docs pass runs against the updated
+    # body / new head before the reviewer agent re-runs); the no-commit
+    # ACK outcome bounces directly back to `validating` because no
+    # commit landed for the docs pass to react to.
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is not None:
         state.set("user_content_hash", new_hash)
@@ -500,9 +514,10 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # in_review watermarks past anything posted on this tick. The
         # dev sees the full thread via `_recent_comments_text` in the
         # resume prompt, so a later validating->in_review handoff (after
-        # the "pushed" branch flips to validating and the reviewer
-        # approves) and the in_review's own watermark check must not
-        # replay these comments as fresh feedback.
+        # the "pushed" branch routes through `documenting`, validating
+        # re-runs, and the reviewer approves) and the in_review's own
+        # watermark check must not replay these comments as fresh
+        # feedback.
         _wf._mark_drift_comments_consumed(gh, issue, state)
         wt = _wf._worktree_path(spec, issue.number)
         if not wt.exists():
@@ -536,8 +551,9 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         )
         # Always bump in_review watermarks past the orchestrator's notice
         # and any comments we just consumed, regardless of outcome. On
-        # "pushed" the next tick will be in validating, but if the
-        # reviewer later approves and bounces back to in_review,
+        # "pushed" the next tick will be in `documenting` (then
+        # `validating` once the docs pass hands off), but if the reviewer
+        # later approves and bounces back to in_review,
         # `_seed_watermark_past_self` would otherwise stop at the
         # original human comment and trigger a duplicate resume. Passing
         # `unread_pr_conv` ensures PR-conversation ids ABOVE the
@@ -548,23 +564,35 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh, issue, state, issue_space_new=unread_pr_conv,
         )
         if outcome in ("pushed", "ack"):
-            # The drift invalidated the prior validation: the reviewer
-            # agent approved against the OLD requirements, so its
-            # `agent_approved_sha` snapshot is stale. Bounce back to
-            # `validating` (reset `review_round=0`) so the reviewer
-            # re-evaluates against the updated body/comments before
-            # AUTO_MERGE is allowed to land the PR.
+            # The drift invalidated the prior validation either way: the
+            # reviewer agent approved against the OLD requirements, so
+            # its `agent_approved_sha` snapshot is stale and
+            # `review_round` must reset before AUTO_MERGE is allowed to
+            # land the PR.
             #
-            # An "ack" outcome (no commit; dev said the existing work
-            # already satisfies the edit) MUST also bounce: leaving the
-            # issue at `in_review` with the old `agent_approved_sha`
-            # would let the AUTO_MERGE gate pass on the next tick even
-            # though the reviewer never saw the changed requirements.
-            # Clear `agent_approved_sha` defensively in case any future
-            # auto-merge path reads it before the reviewer re-snapshots.
+            # Destination diverges by outcome:
+            #
+            #   * "pushed" (code-changing exit) routes through
+            #     `documenting` so the docs pass runs against the new
+            #     head before the reviewer re-evaluates the freshened
+            #     diff. Mirrors the fixing-stage pushed-fix exit so
+            #     every code-changing drift exit reaches `validating`
+            #     via the same documenting hop.
+            #
+            #   * "ack" (no commit; dev said the existing work already
+            #     satisfies the edit) preserves the pre-rollout
+            #     behaviour and bounces DIRECTLY back to `validating`.
+            #     With no new commit there is nothing for the docs pass
+            #     to react to, so spawning `documenting` would just
+            #     produce a `DOCS: NO_CHANGE` no-op and waste a tick.
+            #     `agent_approved_sha` is still cleared so AUTO_MERGE
+            #     cannot land the PR against the stale snapshot.
             state.set("review_round", 0)
             state.set("agent_approved_sha", None)
-            gh.set_workflow_label(issue, "validating")
+            if outcome == "pushed":
+                gh.set_workflow_label(issue, "documenting")
+            else:
+                gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
 

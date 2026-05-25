@@ -3,11 +3,12 @@
 """Fixing stage handler.
 
 `_handle_fixing` owns the PR-feedback quiet window and the dev-resume /
-push / bounce-to-`validating` cycle. `_handle_in_review` flips the label
-to `fixing` the moment fresh PR feedback (issue-thread, PR-conversation,
-inline-review, or review-summary) is detected; the in_review handler
-deliberately leaves the in_review watermarks behind so this handler can
-read the triggering comments for its dev-resume prompt.
+push / route-through-`documenting` cycle. `_handle_in_review` flips the
+label to `fixing` the moment fresh PR feedback (issue-thread,
+PR-conversation, inline-review, or review-summary) is detected; the
+in_review handler deliberately leaves the in_review watermarks behind
+so this handler can read the triggering comments for its dev-resume
+prompt.
 
 Each tick the handler rescans unread feedback from the existing watermarks
 (NOT the `pending_fix_*_max_id` bookmarks recorded by the route -- those
@@ -23,13 +24,23 @@ On a pushed fix the handler advances `pr_last_comment_id`,
 `pr_last_review_comment_id`, and `pr_last_review_summary_id` past the
 just-consumed feedback (mirrors the legacy in_review fix path), clears
 the bookmarks, resets `review_round`, drops the stale `agent_approved_sha`
-(the SHA just moved), and flips the label to `validating` so the reviewer
-re-runs on the new diff next tick. On a failed resume (timeout, dirty
-worktree, push failure, no-commit question) the disposition helpers from
-`stages.validating` (`_handle_dev_fix_result`) handle the park; the
-watermarks STILL advance past the feedback the dev did see, otherwise the
-next tick would replay the original triggering comment indefinitely and
-the awaiting-human gate could never unstick on a fresh human reply.
+(the SHA just moved), and flips the label to `documenting` so the docs
+pass runs against the new head BEFORE the reviewer agent re-evaluates
+next tick. Routing through `documenting` (rather than directly to
+`validating`) keeps the dev-fix exit symmetric with the validating-side
+pushed-fix exits and gives the documenting handler a chance to update
+any README / docs / plans touched by the fix before the reviewer sees
+the diff. On a failed resume (timeout, dirty worktree, push failure,
+no-commit question) the disposition helpers from `stages.validating`
+(`_handle_dev_fix_result`) handle the park; the watermarks STILL
+advance past the feedback the dev did see, otherwise the next tick
+would replay the original triggering comment indefinitely and the
+awaiting-human gate could never unstick on a fresh human reply.
+
+The no-new-feedback bounce (rescan finds nothing past the watermarks
+even though the bookmarks recorded triggering ids) still relabels to
+`validating` directly: there is no fix work to do, so spending an
+extra docs pass before re-evaluating would be wasted effort.
 
 PR-state terminals (merged / closed-without-merge / open-PR-with-closed-issue)
 mirror the in_review arcs so an external manual merge or rejection while
@@ -240,9 +251,12 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     # Watermarks already cover the triggering bookmarks (a prior tick
     # consumed them, or an operator advanced them manually). Nothing
-    # left to address; clear the route bookkeeping and bounce back to
-    # `validating` so the reviewer can re-evaluate against the current
-    # head instead of leaving the issue stuck in `fixing` with no work.
+    # left to address; clear the route bookkeeping and bounce DIRECTLY
+    # back to `validating` (NOT through `documenting`) so the reviewer
+    # can re-evaluate against the current head instead of leaving the
+    # issue stuck in `fixing` with no work. Skipping the documenting
+    # hop here is deliberate: there is no fix work and therefore no
+    # new commit that would need a docs pass before re-validation.
     if not new_feedback:
         _clear_pending_fix_bookmarks(state)
         gh.set_workflow_label(issue, "validating")
@@ -346,10 +360,20 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # AUTO_MERGE can land it). The bookmarks served their purpose;
     # clear them so a later in_review -> fixing route writes fresh
     # values rather than mixing rounds.
+    #
+    # Route through `documenting` (NOT directly to `validating`) so the
+    # docs pass runs against the new head before the reviewer agent
+    # re-evaluates. The dev fix may have touched code that needs a
+    # README / docs update, and skipping documenting here would let the
+    # reviewer approve a commit whose docs the documenting handler has
+    # not had a chance to refresh. Mirrors the validating-side pushed-
+    # fix exits (CHANGES_REQUESTED, awaiting-human resume, drift
+    # pushed, transient-park push) which all route through
+    # `documenting` for the same reason.
     _clear_pending_fix_bookmarks(state)
     state.set("review_round", 0)
     state.set("agent_approved_sha", None)
-    gh.set_workflow_label(issue, "validating")
+    gh.set_workflow_label(issue, "documenting")
     gh.write_pinned_state(issue, state)
 
 

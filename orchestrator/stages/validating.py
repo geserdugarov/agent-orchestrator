@@ -189,12 +189,17 @@ def _post_user_content_change_result(
       acknowledgement via the `ACK: ...` marker emitted by
       `_build_user_content_change_prompt`. The reply is posted on the
       issue as an FYI and the handler does NOT park `awaiting_human`.
-      Caller stays on the current label.
+      Caller decides what to do with the label: validating stays put
+      (the reviewer reruns on the current head); in_review bounces
+      back to `validating` (the prior reviewer approval was for the
+      old requirements, so AUTO_MERGE must wait for a re-approval)
+      WITHOUT spawning `documenting` -- no commit landed for the docs
+      pass to react to.
     * ``"pushed"`` -- new commit landed and the push succeeded. Caller
-      advances the label per its own rules (in_review bounces to
-      validating; validating bumps `review_round` and routes through
-      `documenting` so the docs pass runs against the new head before
-      the reviewer re-evaluates).
+      advances the label per its own rules (both in_review and
+      validating route through `documenting` -- validating also bumps
+      `review_round` -- so the docs pass runs against the new head
+      before the reviewer re-evaluates).
     * ``"parked"`` -- timeout, dirty tree, push fail, silent crash
       (empty `last_message`), OR a no-commit response WITHOUT the
       `ACK:` marker (treated as a clarification question via

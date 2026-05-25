@@ -580,7 +580,9 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Past-debounce feedback also hands off to the fixing stage rather
         # than spawning the dev inline. The fixing handler owns the
-        # resume / push / bounce-back-to-validating cycle.
+        # resume / push / route-through-`documenting` cycle (a pushed fix
+        # flips to `documenting` so the docs pass runs against the new
+        # head before `validating` re-evaluates).
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertIn((30, "fixing"), gh.label_history)
@@ -1350,7 +1352,8 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
     unset. Without the first-tick migration, every historical comment --
     including the orchestrator's own pickup / PR-opened / approval messages
     -- would surface as fresh PR feedback once the debounce expired,
-    resuming the dev and bouncing the PR back to validating.
+    routing the issue to `fixing` (then through `documenting` on the
+    eventual pushed fix, and finally back to `validating`).
     """
 
     PR_NUMBER = 300
@@ -2426,11 +2429,17 @@ class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):
 class HandleInReviewResumeOnHashChangeTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
-    def test_body_drift_resumes_dev_and_bounces_to_validating(self) -> None:
+    def test_body_drift_resumes_dev_and_routes_through_documenting(
+        self,
+    ) -> None:
         # The in_review handler must mirror the comment-driven dev resume:
         # post a notice on the PR (not just the issue), resume the locked
-        # dev session with the new body, push the fix, and bounce back to
-        # `validating` so the reviewer re-runs.
+        # dev session with the new body, push the fix, and route through
+        # `documenting` (NOT directly to `validating`) so the docs pass
+        # runs against the updated body / new head before the reviewer
+        # re-evaluates the freshened diff. Mirrors the fixing-stage
+        # pushed-fix exit so both paths reach validating via the same
+        # documenting hop.
         gh = FakeGitHubClient()
         issue = make_issue(80, label="in_review", body="new acceptance")
         gh.add_issue(issue)
@@ -2446,6 +2455,7 @@ class HandleInReviewResumeOnHashChangeTest(
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
             branch="orchestrator/issue-80",
+            agent_approved_sha="stale-approved-sha",
         )
 
         self._run(
@@ -2459,8 +2469,10 @@ class HandleInReviewResumeOnHashChangeTest(
             head_shas=["before", "after"],
         )
 
-        # Bounced back to validating after a successful resume.
-        self.assertIn((80, "validating"), gh.label_history)
+        # Routed through documenting after the pushed drift resume.
+        self.assertIn((80, "documenting"), gh.label_history)
+        # And NOT directly to validating -- documenting must run first.
+        self.assertNotIn((80, "validating"), gh.label_history)
         # Notice posted on the PR conversation surface.
         self.assertTrue(any(
             "issue body changed" in body
@@ -2471,6 +2483,109 @@ class HandleInReviewResumeOnHashChangeTest(
         self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
         # review_round reset because this is a new diff.
         self.assertEqual(data.get("review_round"), 0)
+        # Stale agent approval cleared so AUTO_MERGE cannot land before
+        # the reviewer re-snapshots after documenting.
+        self.assertIsNone(data.get("agent_approved_sha"))
+
+    def test_body_drift_ack_bounces_directly_to_validating(self) -> None:
+        # A drift ACK reply (no commit, explicit `ACK:` marker) is an
+        # acknowledgement that the existing work already satisfies the
+        # edit. The pre-rollout no-commit ACK behaviour is preserved:
+        # the issue bounces DIRECTLY back to `validating` (NOT through
+        # `documenting`) because no new commit landed for the docs
+        # pass to react to -- a documenting hop here would just emit
+        # `DOCS: NO_CHANGE` against the unchanged head and waste a
+        # tick. The other ACK guarantees are still upheld:
+        # `agent_approved_sha` is cleared (the snapshot was for the
+        # old requirements, so AUTO_MERGE cannot land the PR until
+        # the reviewer re-snapshots) and `review_round` is reset so
+        # the reviewer round cap counts fresh rounds.
+        gh = FakeGitHubClient()
+        issue = make_issue(81, label="in_review", body="new acceptance")
+        gh.add_issue(issue)
+        pr = FakePR(number=801, head_branch="orchestrator/issue-81")
+        gh.add_pr(pr)
+        gh.seed_state(
+            81,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_number=pr.number,
+            pr_last_comment_id=0,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/issue-81",
+            agent_approved_sha="stale-approved-sha",
+            review_round=2,
+        )
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="ACK: prior commits already satisfy the edit.",
+            ),
+            dirty_files=(),
+            push_branch=True,
+            # No commit landed -- before/after SHA match.
+            head_shas=["same-sha", "same-sha"],
+        )
+
+        # Bounced directly to validating (preserved ACK behaviour).
+        self.assertIn((81, "validating"), gh.label_history)
+        # And NOT through documenting -- no commit landed so the docs
+        # pass would be a no-op.
+        self.assertNotIn((81, "documenting"), gh.label_history)
+        data = gh.pinned_data(81)
+        # `agent_approved_sha` cleared so AUTO_MERGE cannot land before
+        # the reviewer re-snapshots against the updated body.
+        self.assertIsNone(data.get("agent_approved_sha"))
+        # `review_round` reset so the reviewer round cap counts fresh.
+        self.assertEqual(data.get("review_round"), 0)
+        # ACK was surfaced as an FYI on the issue thread (matches the
+        # `_post_user_content_change_result` ack branch).
+        self.assertTrue(any(
+            "existing work satisfies" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_body_drift_park_does_not_route_to_documenting(self) -> None:
+        # On a parked outcome (timeout / dirty / push fail / no-commit
+        # without ACK) the handler must NOT flip to documenting OR
+        # validating -- the dev fix didn't land and the issue stays in
+        # `in_review` awaiting human. Preserves the failure-path
+        # contract while the success path routes through `documenting`
+        # and the ACK path bounces directly back to `validating`.
+        gh = FakeGitHubClient()
+        issue = make_issue(82, label="in_review", body="new acceptance")
+        gh.add_issue(issue)
+        pr = FakePR(number=802, head_branch="orchestrator/issue-82")
+        gh.add_pr(pr)
+        gh.seed_state(
+            82,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_number=pr.number,
+            pr_last_comment_id=0,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/issue-82",
+            agent_approved_sha="stale-approved-sha",
+        )
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(timed_out=True),
+            head_shas=["before"],
+        )
+
+        # Did NOT advance into documenting / validating; awaiting human
+        # in `in_review`.
+        self.assertNotIn((82, "documenting"), gh.label_history)
+        self.assertNotIn((82, "validating"), gh.label_history)
+        data = gh.pinned_data(82)
+        self.assertTrue(data.get("awaiting_human"))
 
 
 class InReviewFreshFeedbackRouteCoversBothSurfacesTest(

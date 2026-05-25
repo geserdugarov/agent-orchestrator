@@ -113,18 +113,33 @@ orchestrator/
                            transient park-reason set, the quiet auto-merge
                            gate re-check, legacy watermark migration, and the
                            cross-namespace watermark ratchet
-                           (`_bump_in_review_watermarks`).
+                           (`_bump_in_review_watermarks`). User-content
+                           drift pushed fixes route through `documenting`
+                           (NOT directly to `validating`) so the docs
+                           pass runs against the updated body / new head
+                           before the reviewer re-evaluates and
+                           AUTO_MERGE can land; the no-commit ACK
+                           outcome still bounces DIRECTLY back to
+                           `validating` (the docs hop is skipped because
+                           no commit landed for the docs pass to react
+                           to). Both outcomes reset `review_round` and
+                           clear `agent_approved_sha`.
     fixing.py           — `_handle_fixing` owns the PR-feedback quiet
-                           window and the dev-resume / push / bounce-back-
-                           to-`validating` cycle. Stage entered when
-                           `_handle_in_review` detects fresh PR feedback and
-                           routes the issue there instead of spawning the
-                           dev itself; rescans unread feedback from the
-                           in_review watermarks each tick, debounces against
-                           the freshest comment timestamp, and resumes via
-                           `_resume_dev_with_text` with a
-                           `_build_pr_comment_followup` prompt over all
-                           unread surfaces.
+                           window and the dev-resume / push /
+                           route-through-`documenting` cycle. Stage entered
+                           when `_handle_in_review` detects fresh PR
+                           feedback and routes the issue there instead of
+                           spawning the dev itself; rescans unread feedback
+                           from the in_review watermarks each tick,
+                           debounces against the freshest comment
+                           timestamp, and resumes via `_resume_dev_with_text`
+                           with a `_build_pr_comment_followup` prompt over
+                           all unread surfaces. Pushed fixes flip to
+                           `documenting` so the docs pass runs against
+                           the new head before the reviewer re-evaluates;
+                           the no-new-feedback bounce still flips
+                           directly to `validating` because there is no
+                           fix work for the docs pass to react to.
     conflicts.py        — `_handle_resolving_conflict` plus
                            `_post_conflict_resolution_result` and the
                            `conflict_round` audit-event emitter.
@@ -155,7 +170,7 @@ A second control label `backlog` is created for postponed work. While present on
 | `implementing` | The dev agent is producing commits in a per-issue worktree. |
 | `validating` | The reviewer agent is checking the diff and may bounce fixes back to the dev agent. |
 | `in_review` | A PR is open and ready for human review or auto-merge gates. |
-| `fixing` | Unread in-review feedback (issue thread / PR conversation / inline review / PR review summary) or a human CI-fix request is queued during the quiet window or actively being addressed by the dev fix-loop. A successful fix bounces back to `validating` so the reviewer re-approves the new head before auto-merge can proceed. |
+| `fixing` | Unread in-review feedback (issue thread / PR conversation / inline review / PR review summary) or a human CI-fix request is queued during the quiet window or actively being addressed by the dev fix-loop. A successful fix routes through `documenting` (so the docs pass runs against the new head) and then back through `validating` so the reviewer re-approves before auto-merge can proceed. When the rescan finds no unread feedback at all, the bounce skips the docs hop and goes straight to `validating`. |
 | `resolving_conflict` | The orchestrator is trying to rebase an approved but unmergeable PR branch onto `origin/<base>`. |
 | `question` | Operator-applied read-only Q&A label: the orchestrator runs the decomposer agent in the per-issue worktree, posts the answer to the issue thread, and waits on a human reply or a manual close. No PR is opened on this label. |
 | `done` | Terminal success; the PR merged, an umbrella parent resolved after all children reached `done`, or a `question` issue was closed by the operator. |
@@ -237,8 +252,8 @@ Per-issue durable state lives in a single **"pinned" comment** on the issue (`<!
   The watermark *only* advances from review IDs that survived `gh.pr_reviews_after`'s state/body filter — non-empty `CHANGES_REQUESTED` or `COMMENTED` — so `APPROVED`, `DISMISSED`, `PENDING`, and empty-body reviews **never** bump it. `_bump_in_review_watermarks` mirrors the same filter and advances strictly from the filtered list.
 
   This is safe because the same filter runs on every scan, so an `APPROVED` review id sitting above the watermark is harmlessly re-skipped each tick rather than re-forwarded.
-- `agent_approved_sha` — the head SHA the reviewer agent OK'd; `_handle_in_review` keys AUTO_MERGE on this since the agent posts an issue comment, not a real PR review. Cleared by `_handle_fixing` whenever it pushes a fix so AUTO_MERGE cannot land the PR until the reviewer re-approves the new head.
-- `pending_fix_at` — ISO timestamp recorded by `_handle_in_review` when it routes fresh PR feedback to `fixing`. Surfaces to operators that the issue is in the `fixing` quiet window or actively being fixed; cleared on a pushed fix or when the rescan finds no unread feedback and bounces back to `validating`.
+- `agent_approved_sha` — the head SHA the reviewer agent OK'd; `_handle_in_review` keys AUTO_MERGE on this since the agent posts an issue comment, not a real PR review. Cleared by `_handle_fixing` whenever it pushes a fix (which then routes through `documenting`) and by `_handle_in_review`'s drift pushed and ACK outcomes (pushed routes through `documenting`, ACK bounces directly back to `validating`) so AUTO_MERGE cannot land the PR until the reviewer re-approves against the updated body.
+- `pending_fix_at` — ISO timestamp recorded by `_handle_in_review` when it routes fresh PR feedback to `fixing`. Surfaces to operators that the issue is in the `fixing` quiet window or actively being fixed; cleared on a pushed fix (which then routes through `documenting`) or when the rescan finds no unread feedback and bounces directly back to `validating`.
 - `pending_fix_issue_max_id` / `pending_fix_review_max_id` / `pending_fix_review_summary_max_id` — per-namespace bookmarks for the PR-feedback ids that triggered the `fixing` route. They are hints for `_handle_fixing` and forensics, NOT watermarks — the in_review watermarks are deliberately left behind so the fixing rescan can re-discover the triggering comments and build the dev-resume prompt. Cleared alongside `pending_fix_at` on the same exits.
 - `merged_at` / `closed_without_merge_at` — terminal stamps.
 - etc. (see `github.PINNED_STATE_MARKER` / `PINNED_STATE_RE` and `read_pinned_state` / `write_pinned_state`).
@@ -284,7 +299,7 @@ Author-login matching is intentionally avoided because the orchestrator PAT is o
 
     Result routing in `_post_user_content_change_result`:
 
-    - a clean pushed fix routes to `documenting` from `resolving_conflict` (the docs pass runs on the rewritten tree before the reviewer re-runs), routes to `documenting` from `validating` with `review_round++` (so the docs pass runs against the updated body + new diff before the reviewer re-evaluates), flips back to `validating` from `in_review`, or runs the implementing `_on_commits` path to open/push the PR from `implementing`;
+    - a clean pushed fix routes to `documenting` from `resolving_conflict` (the docs pass runs on the rewritten tree before the reviewer re-runs), from `in_review` (so the docs pass runs against the updated body + new diff before the reviewer re-evaluates), and from `validating` (with `review_round++`), or runs the implementing `_on_commits` path to open/push the PR from `implementing`;
     - a no-commit reply is treated as an ack ONLY when it carries the explicit `ACK: <reason>` marker the resume prompt instructs the dev to emit when the existing work already satisfies the edit.
 
       The dev's justification is posted on the issue as an FYI and the handler does NOT park awaiting_human, so a harmless clarification doesn't stall the issue;
@@ -296,7 +311,7 @@ Author-login matching is intentionally avoided because the orchestrator PAT is o
 
     Per-stage specifics:
 
-    - For the `in_review` drift specifically, BOTH the "pushed" and "ack" outcomes bounce back to `validating` and clear `agent_approved_sha`: a content drift invalidates the prior reviewer approval (it was for the old requirements), so even when the dev confirms the existing code already satisfies the edit, AUTO_MERGE must not land the PR until the reviewer agent re-evaluates against the updated body/comments.
+    - For the `in_review` drift specifically, BOTH the "pushed" and "ack" outcomes reset `review_round` and clear `agent_approved_sha` -- a content drift invalidates the prior reviewer approval (it was for the old requirements), so AUTO_MERGE must not land the PR until the reviewer re-evaluates against the updated body/comments. The destination diverges by outcome: a "pushed" outcome (code-changing exit) routes through `documenting` so the docs pass runs against the new head before the reviewer re-evaluates the freshened diff; an "ack" outcome (no commit; dev said the existing work already satisfies the edit) preserves the pre-rollout behaviour and bounces DIRECTLY back to `validating`, since no commit landed for the docs pass to react to and spawning `documenting` would just emit `DOCS: NO_CHANGE` against the unchanged head and waste a tick.
 
       The in_review drift also captures unread PR-conversation comments past `pr_last_comment_id` BEFORE posting the orchestrator's notice and includes them in the dev's followup prompt — issue thread and PR conversation share the IssueComment id space, so an unread PR comment whose id falls between the prior watermark and the issue-thread max would otherwise be silently consumed by `_bump_in_review_watermarks` (which advances the shared watermark based on `latest_comment_id(issue)`) and never forwarded.
     - For `implementing` specifically, the drift path only resumes the dev session when a `dev_session_id` is already recorded.
@@ -470,7 +485,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 
      Without the `pr_reviews_after` surface, a "Comment" review with a request in the body would be silently ignored (and may be auto-merged over), and a `CHANGES_REQUESTED` review with body but no inline comments would block merge via `pr_has_changes_requested` without ever reaching the dev agent.
 
-     If any source is newer than its watermark, record pending-fix metadata in pinned state (`pending_fix_at` ISO timestamp plus per-namespace `pending_fix_issue_max_id` / `pending_fix_review_max_id` / `pending_fix_review_summary_max_id` bookmarks) and flip the label to `fixing` immediately. The `_handle_in_review` handler deliberately does NOT honor `IN_REVIEW_DEBOUNCE_SECONDS` here or spawn the dev itself — the `fixing` stage owns debouncing, the dev resume, the push, and the bounce back to `validating` so the in_review handler stays focused on PR-state terminals and the auto-merge gate. Watermarks are deliberately NOT advanced on this route so the `fixing` handler can read the triggering comments to build its dev-resume prompt; the `pending_fix_*_max_id` keys are bookmarks (a hint for the `fixing` handler / for observability), not watermarks. If `awaiting_human` / `park_reason` were carried over from a prior transient park, they are cleared as part of the route (the human comment that triggered the route is the resume signal).
+     If any source is newer than its watermark, record pending-fix metadata in pinned state (`pending_fix_at` ISO timestamp plus per-namespace `pending_fix_issue_max_id` / `pending_fix_review_max_id` / `pending_fix_review_summary_max_id` bookmarks) and flip the label to `fixing` immediately. The `_handle_in_review` handler deliberately does NOT honor `IN_REVIEW_DEBOUNCE_SECONDS` here or spawn the dev itself — the `fixing` stage owns debouncing, the dev resume, the push, and the route through `documenting` (which then advances to `validating`) so the in_review handler stays focused on PR-state terminals and the auto-merge gate. Watermarks are deliberately NOT advanced on this route so the `fixing` handler can read the triggering comments to build its dev-resume prompt; the `pending_fix_*_max_id` keys are bookmarks (a hint for the `fixing` handler / for observability), not watermarks. If `awaiting_human` / `park_reason` were carried over from a prior transient park, they are cleared as part of the route (the human comment that triggered the route is the resume signal).
   4. **Auto-merge gate** (only reached when there are no new comments to act on). Off unless `AUTO_MERGE=on`. Sequence:
      - **Standing CHANGES_REQUESTED veto** — `gh.pr_has_changes_requested(pr, head_sha=head_sha)` runs *before* the approval check and silently returns on True.
 
@@ -495,7 +510,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
   6. Every park inside this handler bumps the in_review watermarks past the orchestrator's own park comment via `_bump_in_review_watermarks`, so the next tick does not see the HITL ping as fresh PR feedback and resume the dev agent against it.
 - **Output**: label moved to `done` / `rejected` (terminal) OR a relabel to `fixing` (fresh PR feedback) OR a relabel to `resolving_conflict` (under `AUTO_MERGE=on` when the PR is unmergeable past the approval gates) OR a HITL park OR a no-op tick.
 
-The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage owns the dev-resume + push + bounce-back-to-`validating` cycle so the in_review handler stays focused on PR-state terminals and the auto-merge gate. The follow-up dev resume and reviewer re-run still happen — they just live in a different stage — so the "validating re-runs after a fix" guarantee holds.
+The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage owns the dev-resume + push + route-through-`documenting` cycle so the in_review handler stays focused on PR-state terminals and the auto-merge gate. The follow-up docs pass, dev resume, and reviewer re-run still happen — they just live in different stages — so the "validating re-runs after a fix" guarantee holds (now with a documenting hop in between so any docs touched by the fix are refreshed before the reviewer sees the new diff).
 
 `_park_awaiting_human` posts on the issue (not the PR) so the HITL ping appears alongside the rest of orchestrator state. The PR comment that triggers a route to `fixing` is the human signal; awaiting-human is reserved for *unrecoverable* states (failed checks / push fail / missing pr_number — note: under `AUTO_MERGE=on` "not mergeable" detours to `resolving_conflict` instead of parking).
 
@@ -511,12 +526,12 @@ The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage
   3. Open issue with no `pr_number` (manual relabel from outside the in_review route) → park awaiting human with `park_reason="missing_pr_number"`. The dev-resume path needs the PR to push a fix, so we cannot proceed without it.
   4. Rescan unread feedback from the three watermarks across all four surfaces (issue thread + PR conversation share the IssueComment id space; inline-review and review-summary live in their own id spaces). Orchestrator-authored comments are filtered by recorded id AND by the hidden `<!--orchestrator-comment-->` body marker. The route from `_handle_in_review` deliberately leaves the watermarks behind, so the initial fixing tick re-discovers the triggering comments; later ticks pick up additional comments that landed while the label was already `fixing` (which is what naturally extends the debounce window).
   5. If awaiting-human is set (a prior failed resume parked the issue) and the rescan finds no new feedback past the watermarks, return: the gate stays held until a fresh human reply or new PR-side feedback. With new feedback in hand, clear the park flags and fall through.
-  6. If no unread feedback at all (watermarks already cover the bookmarks — a prior tick consumed them or an operator advanced them manually), clear the `pending_fix_*` bookmarks and bounce the label back to `validating` so the reviewer re-evaluates against the current head.
+  6. If no unread feedback at all (watermarks already cover the bookmarks — a prior tick consumed them or an operator advanced them manually), clear the `pending_fix_*` bookmarks and bounce the label DIRECTLY back to `validating` so the reviewer re-evaluates against the current head. This is the one fixing exit that skips the documenting hop: no fix work landed, so the docs pass has nothing new to react to.
   7. **Quiet window**: compute the newest `created_at` (or `submitted_at` for review summaries) across the unread feedback; if that timestamp is younger than `IN_REVIEW_DEBOUNCE_SECONDS`, return and wait. A comment arriving on the next tick is naturally picked up by the rescan and resets the wait because the freshest timestamp controls the gate.
   8. **Resume**: build a `_build_pr_comment_followup` prompt over ALL unread surfaces (issue thread + PR conversation + inline + summaries), resume the locked dev session via `_resume_dev_with_text`, then refresh `user_content_hash` (the hash covers title + body + human issue-thread comments, so any issue-thread comment we just fed to the dev would otherwise re-fire `_handle_validating`'s drift check next tick and resume the dev a second time on input it already handled). Apply the validating-side `_handle_dev_fix_result` disposition (timeout / no-commit / dirty / push fail park flows are identical to the validating fix-loop).
   9. **Watermark advance**: regardless of dev outcome, the handler calls `_advance_consumed_watermarks`, which advances each of the three in_review watermarks ONLY to the max id consumed on that surface (ratcheted against the existing watermark). Deliberately does NOT include `gh.latest_comment_id(issue)` or `last_action_comment_id` -- a human comment that landed AFTER the rescan but BEFORE this write was never quoted in `_build_pr_comment_followup`, so silently moving the watermark past it would swallow real feedback (breaks the "comments arriving while already labeled `fixing`" contract on the failure paths AND lets AUTO_MERGE land the PR over unread feedback on the success path). The orchestrator's own park comment posted by `_park_awaiting_human` does NOT need a watermark bump to avoid replay: the next tick's rescan filters orchestrator-authored comments by recorded id AND by the hidden `<!--orchestrator-comment-->` body marker, so the park comment is dropped even when the watermark sits below it. The legacy in_review pushed-fix path had the same constraint.
-  10. **On a pushed fix**: clear the `pending_fix_*` bookmarks (they served their purpose), reset `review_round` to 0 so the reviewer starts fresh on the new diff, drop the now-stale `agent_approved_sha` (the head just moved — the reviewer must re-approve), write pinned state, and flip the label to `validating`.
-- **Output**: terminal `done` / `rejected` (PR-state arcs) OR label flipped to `validating` (pushed fix) OR a HITL park (timeout / dirty / push fail / no-commit) OR a no-op tick (quiet-window wait, missing-PR park already set).
+  10. **On a pushed fix**: clear the `pending_fix_*` bookmarks (they served their purpose), reset `review_round` to 0 so the reviewer starts fresh on the new diff, drop the now-stale `agent_approved_sha` (the head just moved — the reviewer must re-approve), write pinned state, and flip the label to `documenting`. Routing through `documenting` (rather than directly to `validating`) mirrors the validating-side pushed-fix exits and gives the docs pass a chance to refresh any README / docs / plans touched by the fix before the reviewer sees the diff.
+- **Output**: terminal `done` / `rejected` (PR-state arcs) OR label flipped to `documenting` (pushed fix) OR label flipped to `validating` (no-new-feedback bounce) OR a HITL park (timeout / dirty / push fail / no-commit) OR a no-op tick (quiet-window wait, missing-PR park already set).
 
 ### `_handle_resolving_conflict` (label `resolving_conflict`)
 - **Trigger**: each tick while label is `resolving_conflict` (set by `_handle_in_review`'s auto-merge gate when an approved PR is unmergeable under `AUTO_MERGE=on`). Also runs on closed-`resolving_conflict` issues yielded by the closed-issue sweep, mirroring the in_review terminal handling so a manually-merged PR finalizes to `done` even when `Resolves #N` already closed the issue.
@@ -863,7 +878,9 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
    │                          survives the bump):                    │    │
    │                            push ok ─► clear bookmarks,          │    │
    │                              review_round=0, drop                │    │
-   │                              agent_approved_sha, label=validating│   │
+   │                              agent_approved_sha, label=          │    │
+   │                              documenting (docs pass runs before  │    │
+   │                              validating re-evaluates)            │    │
    │                            failure ─► park awaiting human       │    │
    │                                                                 │    │
    │     resolving_conflict ──► _handle_resolving_conflict           │    │
@@ -932,7 +949,7 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 | **stages/documenting.py** | `_handle_documenting` — docs pass on the existing PR worktree (fetch + ahead/behind guard, dirty-check before any outcome, advance to `validating` after push or explicit no-change verdict) |
 | **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
 | **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives; routes fresh PR feedback to `fixing` |
-| **stages/fixing.py** | `_handle_fixing` — PR-feedback quiet window, dev resume via `_resume_dev_with_text`, watermark advance, and bounce back to `validating` on a pushed fix |
+| **stages/fixing.py** | `_handle_fixing` — PR-feedback quiet window, dev resume via `_resume_dev_with_text`, watermark advance, and route through `documenting` on a pushed fix (the no-new-feedback bounce flips directly to `validating`) |
 | **stages/conflicts.py** | `_handle_resolving_conflict` + rebase-loop primitives |
 | **stages/question.py** | `_handle_question` + question-session lifecycle (read-only Q&A on the `question` label, no PR) |
 | **agents.py** | dispatch + spawn codex/claude subprocess, capture session id + last message |
@@ -960,7 +977,13 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
      in_review --(PR merged)─────────────► done
      in_review --(PR closed unmerged)────► rejected
      in_review --(fresh PR feedback)─────► fixing
-       fixing --(quiet window expires, dev fix pushed)──► validating
+       fixing --(quiet window expires, dev fix pushed)──► documenting ──► validating
+       fixing --(rescan finds no unread feedback)───────► validating
+     in_review --(user-content drift, pushed)──► documenting ──► validating
+       (review_round=0, agent_approved_sha cleared)
+     in_review --(user-content drift, ACK no-commit)──► validating
+       (review_round=0, agent_approved_sha cleared; docs hop skipped --
+        nothing for the docs pass to react to)
      in_review --(AUTO_MERGE on, approved, gates pass)──► merge ─► done
      in_review --(AUTO_MERGE on, approved, unmergeable past gates)──►
        resolving_conflict --(any pushed resolution: clean rebase,
@@ -1033,7 +1056,9 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
      comment is filtered by id + body marker on the next tick's
      rescan, so the broad bump is unnecessary). On a pushed fix clear
      bookmarks, reset `review_round`, drop `agent_approved_sha`, and
-     flip to `validating`. On failure (timeout / dirty / push fail /
+     flip to `documenting` (so the docs pass runs against the new
+     head before the reviewer re-evaluates -- mirrors the validating-
+     side pushed-fix exits). On failure (timeout / dirty / push fail /
      no-commit) park awaiting human; the next tick's
      `awaiting_human and not new_feedback` gate becomes true once the
      park comment is the only unread item (everything else has been

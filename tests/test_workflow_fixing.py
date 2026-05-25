@@ -7,8 +7,14 @@ any of the four comment surfaces. The fixing handler rescans the
 existing in_review watermarks each tick, debounces the quiet window
 against the newest comment timestamp, resumes the locked dev session via
 `_resume_dev_with_text` once the window expires, advances watermarks
-past the consumed feedback, and on a pushed fix flips the label back to
-`validating` with `review_round=0` and a cleared `agent_approved_sha`.
+past the consumed feedback, and on a pushed fix flips the label to
+`documenting` (NOT directly to `validating`) with `review_round=0` and
+a cleared `agent_approved_sha`. Routing through `documenting` mirrors
+the validating-side pushed-fix exits and gives the docs pass a chance
+to refresh any README / docs / plans touched by the fix before the
+reviewer agent sees the new diff. The no-new-feedback bounce is the
+one fixing exit that still flips directly to `validating` -- with no
+fix work landed, the docs hop has nothing to do.
 
 The PR-terminal arcs (merged / closed / open-PR-with-closed-issue),
 dispatcher routing, label-bookkeeping, and missing-`pr_number` park
@@ -237,9 +243,15 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(880).get("pr_last_comment_id"), 2001,
         )
 
-    # --- dev resume + push --> flip to validating ------------------------
+    # --- dev resume + push --> flip to documenting -----------------------
 
-    def test_pushed_fix_flips_to_validating_with_reset_state(self) -> None:
+    def test_pushed_fix_flips_to_documenting_with_reset_state(self) -> None:
+        # A pushed fix routes through `documenting` (NOT directly to
+        # `validating`) so the docs pass runs against the new head before
+        # the reviewer agent re-evaluates. The dev fix may have touched
+        # code that needs a README / docs update, and skipping
+        # documenting here would let the reviewer approve a commit whose
+        # docs the documenting handler has not had a chance to refresh.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         comment = FakeComment(
             id=2000, body="please address the typo",
@@ -259,11 +271,14 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 push_branch=True,
             )
 
-        # Dev pushed; label flipped to validating.
+        # Dev pushed; label flipped to documenting.
         mocks["_push_branch"].assert_called_once()
-        self.assertIn((880, "validating"), gh.label_history)
+        self.assertIn((880, "documenting"), gh.label_history)
+        # And NOT directly to validating -- documenting must run first.
+        self.assertNotIn((880, "validating"), gh.label_history)
         data = gh.pinned_data(880)
-        # Review round reset so validating starts fresh on the new diff.
+        # Review round reset so validating starts fresh on the new diff
+        # after documenting hands off.
         self.assertEqual(data.get("review_round"), 0)
         # Stale agent approval dropped (the head just moved).
         self.assertIsNone(data.get("agent_approved_sha"))
@@ -298,7 +313,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Watermark advanced even though no fix landed -- the dev saw
         # the feedback via the resume prompt.
         self.assertGreaterEqual(data.get("pr_last_comment_id"), 2000)
-        # Did NOT flip to validating; stays in fixing for the operator.
+        # Did NOT advance into either downstream stage; stays in fixing
+        # for the operator.
+        self.assertNotIn((880, "documenting"), gh.label_history)
         self.assertNotIn((880, "validating"), gh.label_history)
 
     # --- watermark advancement across all three surfaces ----------------
@@ -347,7 +364,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks["_push_branch"].assert_called_once()
-        self.assertIn((880, "validating"), gh.label_history)
+        self.assertIn((880, "documenting"), gh.label_history)
         data = gh.pinned_data(880)
         self.assertGreaterEqual(data.get("pr_last_comment_id"), 2000)
         self.assertEqual(data.get("pr_last_review_comment_id"), 3000)
@@ -362,12 +379,13 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self,
     ) -> None:
         # When fixing feeds a fresh issue-thread comment to the dev,
-        # the next tick's `_handle_validating` would otherwise see
-        # the same comment as user-content drift (the hash covers
+        # the next tick's `_handle_documenting` (and the eventual
+        # `_handle_validating` once docs hands off) would otherwise
+        # see the same comment as user-content drift (the hash covers
         # title + body + human issue-thread comments) and resume the
         # dev a second time on input it already handled. The hash
-        # must advance with the consumption so the validating drift
-        # check is a no-op on the next tick.
+        # must advance with the consumption so the documenting /
+        # validating drift checks are no-ops on the next tick.
         from orchestrator.workflow_drift import _compute_user_content_hash
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         comment = FakeComment(
@@ -394,12 +412,13 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         data = gh.pinned_data(880)
-        # Pushed successfully, flipped to validating.
-        self.assertIn((880, "validating"), gh.label_history)
+        # Pushed successfully, flipped to documenting (the docs pass
+        # runs before the reviewer agent re-evaluates).
+        self.assertIn((880, "documenting"), gh.label_history)
         # The stored hash matches the current computed hash, i.e.
-        # the validating tick's `_detect_user_content_change` will
-        # be a no-op rather than re-resuming the dev on the
-        # already-consumed comment.
+        # the documenting / validating tick's
+        # `_detect_user_content_change` will be a no-op rather than
+        # re-resuming the dev on the already-consumed comment.
         from orchestrator.workflow_messages import _orchestrator_ids
         expected = _compute_user_content_hash(
             issue,
@@ -491,8 +510,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         data = gh.pinned_data(880)
-        # Label flipped (push succeeded).
-        self.assertIn((880, "validating"), gh.label_history)
+        # Label flipped to documenting (push succeeded; docs pass runs
+        # before the reviewer agent re-evaluates).
+        self.assertIn((880, "documenting"), gh.label_history)
         # Watermark advanced past the consumed triggering comment but
         # NOT past the concurrent one -- the next in_review tick must
         # still see id=2500 as fresh feedback.
@@ -633,18 +653,23 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         data = gh.pinned_data(880)
         # Park flags cleared (either by _resume_dev_with_text or after
         # the successful push). After a successful push we end up in
-        # validating.
+        # documenting so the docs pass runs against the new head before
+        # the reviewer re-evaluates.
         self.assertFalse(data.get("awaiting_human"))
         self.assertIsNone(data.get("park_reason"))
-        self.assertIn((880, "validating"), gh.label_history)
+        self.assertIn((880, "documenting"), gh.label_history)
+        self.assertNotIn((880, "validating"), gh.label_history)
 
     # --- no unread feedback at all --------------------------------------
 
     def test_no_unread_feedback_bounces_back_to_validating(self) -> None:
         # Defensive recovery: if the rescan finds nothing (watermarks
         # already cover the bookmarks), there is no fix work to do.
-        # Bounce the label back to `validating` so the reviewer
-        # re-evaluates and the issue is not stranded in `fixing`.
+        # Bounce the label DIRECTLY back to `validating` (NOT through
+        # `documenting`) so the reviewer re-evaluates and the issue is
+        # not stranded in `fixing`. Skipping the documenting hop here is
+        # deliberate: there is no fix work and therefore no new commit
+        # that would need a docs pass before re-validation.
         pr = self._open_pr()
         gh, issue = self._seed(
             pr=pr,
@@ -663,6 +688,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks["run_agent"].assert_not_called()
         self.assertIn((880, "validating"), gh.label_history)
+        # And NOT through documenting -- the no-feedback bounce is the
+        # one fixing exit that skips the docs hop.
+        self.assertNotIn((880, "documenting"), gh.label_history)
         data = gh.pinned_data(880)
         self.assertIsNone(data.get("pending_fix_at"))
         self.assertIsNone(data.get("pending_fix_issue_max_id"))
@@ -827,17 +855,19 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_called_once()
         call_args = mocks["run_agent"].call_args
         self.assertIsNone(call_args.kwargs.get("resume_session_id"))
-        # Did NOT park -- the issue made progress instead.
+        # Did NOT park -- the issue made progress instead (advancing to
+        # documenting; the docs pass runs before validating).
         data = gh.pinned_data(880)
         self.assertFalse(data.get("awaiting_human"))
-        self.assertIn((880, "validating"), gh.label_history)
+        self.assertIn((880, "documenting"), gh.label_history)
+        self.assertNotIn((880, "validating"), gh.label_history)
 
     def test_push_failure_parks_in_fixing_with_transient_reason(self) -> None:
         # Push failure on the dev fix -> park awaiting_human in `fixing`
         # with the transient `push_failed` reason. The workflow label
         # MUST stay at `fixing` so the operator can see where the issue
-        # is in the lifecycle; flipping to `validating` would imply the
-        # fix landed when it did not.
+        # is in the lifecycle; flipping to `documenting` (or directly to
+        # `validating`) would imply the fix landed when it did not.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         comment = FakeComment(
             id=2000, body="please address the typo",
@@ -859,7 +889,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         data = gh.pinned_data(880)
         self.assertTrue(data.get("awaiting_human"))
         self.assertEqual(data.get("park_reason"), "push_failed")
-        # Label stayed at `fixing` -- no relabel to `validating`.
+        # Label stayed at `fixing` -- no relabel to `documenting` or
+        # `validating`.
+        self.assertNotIn((880, "documenting"), gh.label_history)
         self.assertNotIn((880, "validating"), gh.label_history)
         # Watermark advanced past the consumed feedback so the next
         # fixing tick does not replay it on top of the park.
@@ -891,6 +923,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `_on_dirty_worktree` clears `park_reason` (terminal, needs
         # human reply); the audit event still records the reason.
         self.assertIsNone(data.get("park_reason"))
+        self.assertNotIn((880, "documenting"), gh.label_history)
         self.assertNotIn((880, "validating"), gh.label_history)
         # Watermark advanced past the consumed feedback.
         self.assertGreaterEqual(data.get("pr_last_comment_id"), 2000)
@@ -921,6 +954,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         data = gh.pinned_data(880)
         self.assertTrue(data.get("awaiting_human"))
+        self.assertNotIn((880, "documenting"), gh.label_history)
         self.assertNotIn((880, "validating"), gh.label_history)
         # Agent's question was surfaced to the human.
         joined = "\n".join(b for _, b in gh.posted_comments)
@@ -954,6 +988,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         data = gh.pinned_data(880)
         self.assertTrue(data.get("awaiting_human"))
         self.assertEqual(data.get("park_reason"), "agent_silent")
+        self.assertNotIn((880, "documenting"), gh.label_history)
         self.assertNotIn((880, "validating"), gh.label_history)
         # Silent-park streak counter ticked so the next resume can
         # drop the poisoned session after the configured threshold.
@@ -1005,8 +1040,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # watermarks rather than relying on in-memory state.
         prompt = mocks["run_agent"].call_args.args[1]
         self.assertIn("please fix the off-by-one", prompt)
-        # Push succeeded -> back to validating; bookmarks cleared.
-        self.assertIn((880, "validating"), gh.label_history)
+        # Push succeeded -> documenting (the docs pass runs before the
+        # reviewer agent re-evaluates); bookmarks cleared.
+        self.assertIn((880, "documenting"), gh.label_history)
+        self.assertNotIn((880, "validating"), gh.label_history)
         data = gh.pinned_data(880)
         self.assertIsNone(data.get("pending_fix_at"))
         self.assertIsNone(data.get("pending_fix_issue_max_id"))
