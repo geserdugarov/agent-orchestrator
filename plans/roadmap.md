@@ -1,11 +1,15 @@
 # Agent Orchestrator — Roadmap
 
-## Status as of 2026-05-24
+## Status as of 2026-05-25
 
 The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
-`umbrella` → `implementing` → `validating` → `in_review` → `fixing`
-(on fresh PR feedback) or `resolving_conflict` (auto-merge detour) →
-`done` / `rejected`) is wired end-to-end. `_handle_fixing` owns the
+`umbrella` → `implementing` → `documenting` → `validating` →
+`in_review` → `fixing` (on fresh PR feedback) or `resolving_conflict`
+(auto-merge detour) → `done` / `rejected`) is wired end-to-end.
+Every code-changing branch update (initial implementation, any
+`validating` pushed fix, any `fixing` PR-feedback push, any `in_review`
+drift push, and any `resolving_conflict` push) routes through
+`documenting` before the reviewer re-runs. `_handle_fixing` owns the
 PR-feedback quiet window and the dev-resume / push / route-through-
 `documenting` cycle, with watermark advancement on success and on
 failure-park; the in_review route, the closed-issue sweep, the
@@ -90,12 +94,37 @@ Children link via `Parent: #<n>` (never `Resolves`).
 **Implementing stage.** `_handle_implementing` ensures a per-issue
 worktree at `<WORKTREES_DIR>/<owner>__<name>/issue-<n>` from
 `origin/<base>`. New commits + clean tree → push, open / reuse PR, flip
-to `validating`; dirty tree or no commits → park.
+to `documenting` (the docs pass advances to `validating` on the next
+tick); dirty tree or no commits → park.
 
 Awaiting-human replies resume the dev session on its locked spec
 (backend + args, re-parsed from `dev_agent`). PR titles and commits
 follow Conventional Commits, reusing the agent's first commit subject
 when conformant.
+
+**Documenting stage.** `_handle_documenting` runs on the existing PR
+worktree between `implementing` and `validating` AND after every later
+code-changing branch update (a `validating` CHANGES_REQUESTED /
+awaiting-human / drift / transient-park push, a `fixing` PR-feedback
+push, an `in_review` user-content drift push, and any
+`resolving_conflict` resolution push) so docs always reach the reviewer
+in sync with the diff. The handler resumes the dev session via
+`_build_documentation_prompt`, fetches `<remote>/<branch>` and refuses
+to act on a stale or diverged PR branch, and dirty-checks before any
+outcome. A `docs:` commit lands → push + advance to `validating`. An
+explicit `DOCS: NO_CHANGE` marker (against a remote-clean branch) →
+advance without pushing. Recovered ahead-of-remote commits from a
+previous tick whose push crashed are pushed without re-spawning the
+agent. Timeout / dirty / push-fail / silent-agent parks reuse the
+implementing / validating disposition tokens (`agent_timeout`,
+`dirty_worktree`, `push_failed`, `agent_silent`, `agent_question`).
+Open `documenting` issues are fan-out-safe (not in
+`_FAMILY_AWARE_LABELS`).
+
+Because every code-changing branch update routes through this stage,
+split decompositions no longer need a synthetic final docs child:
+`_build_decompose_prompt` was retired of that rule, and docs land
+through the documenting hop on each child's PR instead.
 
 **Validating stage.** `_handle_validating` spawns a fresh reviewer on
 `git diff origin/<base>...HEAD` and parses the last `VERDICT:` marker.
@@ -269,11 +298,13 @@ the per-repo `tick` loop, family-aware / fan-out label partitioning, the
 (`_handle_pickup`), `_park_awaiting_human`, and `_run_agent_tracked`.
 Stage handler bodies live under `orchestrator/stages/` —
 `decomposition.py` (decomposing / ready / blocked / umbrella),
-`implementing.py` (developer-session lifecycle), `validating.py`
-(reviewer-session lifecycle), `in_review.py` (PR watermarks and the
-auto-merge gate), `conflicts.py` (`_handle_resolving_conflict`), and
-`question.py` (`_handle_question` — read-only Q&A on the `question`
-label, no PR).
+`implementing.py` (developer-session lifecycle), `documenting.py`
+(docs pass on the PR worktree, run on every code-changing branch
+update), `validating.py` (reviewer-session lifecycle), `in_review.py`
+(PR watermarks and the auto-merge gate), `fixing.py` (PR-feedback
+quiet-window + dev resume + route through `documenting`),
+`conflicts.py` (`_handle_resolving_conflict`), and `question.py`
+(`_handle_question` — read-only Q&A on the `question` label, no PR).
 Shared support helpers live in `workflow_drift.py` (user-content drift),
 `workflow_messages.py` (prompts, parsers, comment posting), and
 `worktrees.py` (git/branch/worktree plumbing, hardened fetch/push).
@@ -367,10 +398,6 @@ for long-lived deployments).
 - **Architectural review at `validating`.** Add an optional reviewer pass
   that flags structural issues such as oversized files that should be
   split. Not yet implemented.
-- **Documentation stage.** Add an explicit stage that keeps README,
-  `docs/`, and `plans/` in sync as code changes land. The decomposer
-  prompt currently asks split issues to create a final docs child, but a
-  stage would make that expectation visible and enforceable.
 - **Dynamic workflow.** Add a planner agent ahead of execution that picks
   the stages a given issue needs, such as extra architectural
   exploration or skipping acceptance for trivial fixes. Judged excessive

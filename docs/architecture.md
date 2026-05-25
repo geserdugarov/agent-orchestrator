@@ -353,7 +353,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      - **invalid manifest** → park awaiting human with the parse error and the agent's last message quoted (same recovery as a malformed reviewer verdict).
      - **no fenced block** → treat as a question; park with the message quoted (mirrors `_on_question` from implementing).
      - **decision == "single"** → post a one-line "fits in one context" comment with the rationale, set label `ready`, stamp `decomposed_at`. `_handle_ready` picks it up next tick.
-     - **decision == "split"** → crash-safe creation in three phases. The decomposer prompt requires the last child to be a documentation-update task whose `depends_on` lists every preceding child, so docs updates land after the code changes they describe.
+     - **decision == "split"** → crash-safe creation in three phases. The decomposer is no longer asked to emit a final docs-update child — every code-changing branch update (initial implementation, validating fix, fixing-stage PR-feedback fix, in_review drift push, and any resolving_conflict push) now flows through the `documenting` stage before the reviewer re-runs, so docs stay in sync without a synthetic child.
        1. For each child call `gh.create_child_issue(...)` with label `blocked` regardless of dependencies, and seed the child's pinned state with `parent_number`. `create_child_issue` prepends `Parent: #<n>` to the body (no auto-close keyword).
 
           Child-state seeding is mandatory — failure persists the partial `children` list and parks awaiting human, so no orphan child is left runnable.
@@ -425,13 +425,13 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      Then spawn via `run_agent(dev_backend, prompt, wt, extra_args=dev_args)`. On a new session id, also persist `dev_session_id`.
   6. Branch on result:
      - `timed_out` → park awaiting human (`@HITL_HANDLE`).
-     - new commits + clean tree → `_on_commits`: push branch, open PR (or reuse an existing open one), comment `:sparkles: PR opened: #N`, set label `validating`, reset `review_round=0` and `retry_count=0` (next bounce back into implementing starts fresh).
+     - new commits + clean tree → `_on_commits`: push branch, open PR (or reuse an existing open one), comment `:sparkles: PR opened: #N`, set label `documenting` (NOT `validating` — the docs pass runs on the new PR worktree before the reviewer sees the diff), reset `review_round=0` and `retry_count=0` (next bounce back into implementing starts fresh).
      - new commits + dirty files → `_on_dirty_worktree`: park; refuse to publish a partial branch.
      - no new commits → `_on_question`: post the agent's last message as a HITL question, park.
-- **Output**: a pushed branch + open PR + label moved to `validating`, OR a HITL park.
+- **Output**: a pushed branch + open PR + label moved to `documenting` (the docs pass advances to `validating` on the next tick), OR a HITL park.
 
 ### `_handle_validating` (label `validating`)
-- **Trigger**: each tick while label is `validating` (set after PR opens).
+- **Trigger**: each tick while label is `validating` (set by `_handle_documenting` after its docs pass pushes a `docs:` commit or emits `DOCS: NO_CHANGE` — `_handle_implementing` hands off to `documenting` after PR open, NOT directly to `validating`).
 - **Input**: PR #, branch, `dev_agent`/`dev_session_id` (or legacy `codex_session_id`), pinned state, `review_round`.
 - **Internal flow**:
   1. Awaiting-human path: same resume mechanic as implementing (resume on the dev's locked spec (backend + args)); on a successful pushed fix, bump `review_round` and relabel to `documenting` so the docs pass runs against the new head before the reviewer re-evaluates next tick. A no-commit / ACK reply keeps the issue on `validating`.
