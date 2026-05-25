@@ -349,6 +349,19 @@ dispatch decision; the log is append-only audit / observability and is
 safe to truncate or rotate (no built-in rotation — pair with `logrotate`
 for long-lived deployments).
 
+**Analytics sink.** Separate project-local JSONL sink at
+`ANALYTICS_LOG_PATH` (default `<LOG_DIR>/analytics.jsonl`, the project
+log area; set empty / `off` / `disabled` / `none` to disable writes).
+`orchestrator/analytics.py` exposes `build_record(...)`,
+`append_record(...)`, and `prune_old_records(...)` for raw metric
+records keyed by `{ts, repo, issue, event, optional stage, ...}`,
+with `ANALYTICS_RETENTION_DAYS` (default `90`, set `0` to keep raw
+data indefinitely) bounding the retention window. The prune step
+removes records older than the window without touching pinned GitHub
+state; the sink is filesystem / JSONL only — no PostgreSQL,
+Streamlit, or external services — and is the foundation layer that
+future aggregation / reporting work can call into.
+
 ## Future work
 
 - **Spec-first split / separate test writer.** Add a `specifying` stage

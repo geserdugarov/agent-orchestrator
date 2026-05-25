@@ -696,6 +696,20 @@ An `OSError` during the append is caught and downgraded to a `log.warning` so a 
 
 If the two disagree — a write failed and was logged-and-swallowed, the file was truncated by `logrotate`, events were lost during a disk-full window, or a crash interleaved partially-flushed lines — trust pinned state. The append-only log is therefore safe to truncate or delete at any time without affecting workflow correctness; it does not contribute to durability.
 
+## Analytics sink (`ANALYTICS_LOG_PATH`)
+
+Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`. The audit event log is wired through `GitHubClient.emit_event` for stage transitions / agent lifecycle events; the analytics sink is a foundation layer for future aggregation and reporting work that opts in or out independently via the `ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` config knobs and the helpers in `orchestrator/analytics.py`.
+
+**Filesystem only.** No PostgreSQL, Streamlit, or external services — the sink is one JSONL file under the project log area. Default path is `<LOG_DIR>/analytics.jsonl`, already covered by the `logs/` `.gitignore` rule. Set `ANALYTICS_LOG_PATH=` (empty) or to `off` / `disabled` / `none` to disable writes entirely; in that mode `append_record` and `prune_old_records` are silent no-ops and no file is opened.
+
+**Schema.** Every record is built by `analytics.build_record` and carries `ts` (UTC ISO-8601 at second precision), `repo` (the slug `owner/name`), `issue` (issue number, int), and `event` (the kind). `stage` is included when the caller passes one; extras whose value is `None` are dropped so callers can pass optional context (`session_id`, `review_round`, ...) unconditionally without polluting records that don't carry them. `json.dumps` is called with `sort_keys=True` so the on-disk order is stable across writers.
+
+**Append.** `analytics.append_record(record)` reopens the file in append mode for every record (`path.open("a", ...)` after `path.parent.mkdir(parents=True, exist_ok=True)`). An `OSError` during append is caught and downgraded to a `log.warning` so a misconfigured path (read-only mount, disk full, permission failure) cannot stop the per-issue tick from making progress; the pinned state on GitHub remains correct regardless.
+
+**Retention pruning.** `analytics.prune_old_records(*, now=None)` reads the file and removes records whose `ts` is older than `ANALYTICS_RETENTION_DAYS`. It is a no-op (returns `0`) when the sink is disabled, retention is non-positive (the documented "keep raw data indefinitely" knob), or the file does not exist yet. The rewrite goes through a temp file in the same directory followed by `os.replace` so a crash mid-prune cannot truncate the analytics file. Records with a missing, non-string, or unparseable `ts` (and any line that is not valid JSON) are preserved verbatim so the prune step never silently drops data it cannot interpret; an operator can clean those lines up.
+
+**Pinned GitHub state is unaffected.** The prune touches only the local file — no issue comment, label, or other GitHub state is rewritten. The analytics sink is local-filesystem observability and is safe to truncate or delete at any time without affecting workflow correctness.
+
 ## Summary of "what runs when"
 
 | Component | Type | Trigger | Cadence |

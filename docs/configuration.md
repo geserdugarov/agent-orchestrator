@@ -149,9 +149,11 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 
 ## Observability
 
-| Variable          | Default     | Purpose                                                                                                                       |
-| ----------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `EVENT_LOG_PATH`  | _(unset)_   | optional JSONL audit sink; one event per line, no built-in rotation. See the [audit event log section in `architecture.md`](architecture.md#audit-event-log-event_log_path) for schema, event kinds, and the pinned-state-is-authoritative precedence rule. |
+| Variable                   | Default                          | Purpose                                                                                                                       |
+| -------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `EVENT_LOG_PATH`           | _(unset)_                        | optional JSONL audit sink; one event per line, no built-in rotation. See the [audit event log section in `architecture.md`](architecture.md#audit-event-log-event_log_path) for schema, event kinds, and the pinned-state-is-authoritative precedence rule. |
+| `ANALYTICS_LOG_PATH`       | `LOG_DIR/analytics.jsonl`        | project-local analytics sink for raw metric records (`{ts, repo, issue, event, optional stage, ...}`). Filesystem / JSONL only — no PostgreSQL, Streamlit, or external services. Set to `` (empty) or to `off` / `disabled` / `none` to disable writes entirely. See the [analytics sink section in `architecture.md`](architecture.md#analytics-sink-analytics_log_path) for the helper API and prune semantics. |
+| `ANALYTICS_RETENTION_DAYS` | `90`                             | retention window for `ANALYTICS_LOG_PATH`. `analytics.prune_old_records(...)` removes records whose `ts` is older than this window without touching pinned GitHub state. Set to `0` (or any non-positive value) to keep raw data indefinitely — the prune helper becomes a no-op. |
 
 ## Run modes
 
@@ -285,7 +287,7 @@ Each `--once` invocation is a fresh Python process and reads the current `.env` 
 
 | Setting | When the change takes effect |
 | ------- | ---------------------------- |
-| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `AUTO_MERGE`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `EVENT_LOG_PATH`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
+| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `AUTO_MERGE`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `EVENT_LOG_PATH`, `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
 | `MAX_PARALLEL_ISSUES_PER_REPO`, `MAX_PARALLEL_ISSUES_GLOBAL` | next Python start. Per-`REPOS` `parallel_limit` overrides take precedence over `MAX_PARALLEL_ISSUES_PER_REPO`, so editing the default only affects entries that omit the fifth field |
 | `DEV_AGENT`, `DECOMPOSE_AGENT` | next Python start, **except** for issues whose pinned state already names a `dev_agent` / `decomposer_agent` / `question_agent` — those keep the pinned spec until the issue reaches `done` or `rejected` (`DECOMPOSE_AGENT` also seeds the question stage on first spawn) |
 | `REVIEW_AGENT` | next reviewer spawn after the next Python start (not pinned per issue) |
