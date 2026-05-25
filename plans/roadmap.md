@@ -373,9 +373,14 @@ dependency added to `pyproject.toml`) and silently tolerate
 malformed JSONL lines. A CLI-reported `total_cost_usd` always wins;
 otherwise a first-party Anthropic / OpenAI price table baked into the
 module produces a best-effort estimate, and an unknown SKU yields
-`unknown-price` (the parser refuses to guess). The parser is
-foundation work for parent `#161`; wiring it into the analytics sink
-for per-agent cost records is a separate change.
+`unknown-price` (the parser refuses to guess). `workflow._run_agent_tracked`
+calls `parse_agent_usage` after every tracked agent run and appends
+one `event="agent_exit"` analytics record per invocation with the
+configured `agent_spec`, resume/session context, retry / review-round
+counters, exit metadata, parsed token counts, model list, `cost_usd`,
+and `cost_source`. Prompts, raw stdout / stderr, secrets, and worktree
+contents are intentionally excluded; a parser or sink IO failure is
+swallowed so an analytics misconfiguration cannot stall the tick.
 
 ## Future work
 

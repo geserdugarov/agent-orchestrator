@@ -92,6 +92,32 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_called_once()
         self.assertIn((201, "validating"), gh.label_history)
 
+    def test_agent_lifecycle_events_carry_review_round(self) -> None:
+        # Documenting runs after implementing (`review_round=0`) and again
+        # after each round of review fixes (later rounds). The pinned
+        # `review_round` must ride along on the spawn / exit audit events
+        # (and the analytics record), so a downstream consumer can tell
+        # which reviewer round the docs pass belonged to.
+        gh, issue = self._seeded(review_round=2)
+        self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="docs: updated README",
+            ),
+            push_branch=True,
+            head_shas=["aaa", "bbb"],
+            branch_ahead_behind=(0, 0),
+        )
+        lifecycle = [
+            e for e in gh.recorded_events
+            if e["event"] in ("agent_spawn", "agent_exit")
+            and e.get("stage") == "documenting"
+        ]
+        self.assertEqual(len(lifecycle), 2)
+        for ev in lifecycle:
+            self.assertEqual(ev.get("review_round"), 2)
+
         data = gh.pinned_data(201)
         self.assertEqual(data.get("docs_verdict"), "updated")
         self.assertEqual(data.get("docs_checked_sha"), "bbb")

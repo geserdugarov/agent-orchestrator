@@ -118,8 +118,8 @@ def _resume_question_on_human_reply(
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _wf._ensure_worktree(spec, issue.number)
-    _, question_backend, question_args, question_sid = _read_question_session(
-        state
+    question_spec, question_backend, question_args, question_sid = (
+        _read_question_session(state)
     )
     # When we have a live session to resume, the brief follow-up
     # prompt is enough -- the agent already has the issue body /
@@ -146,6 +146,7 @@ def _resume_question_on_human_reply(
         backend=question_backend,
         prompt=prompt,
         cwd=wt,
+        agent_spec=question_spec,
         resume_session_id=question_sid,
         extra_args=question_args,
     )
@@ -268,6 +269,7 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 backend=question_backend,
                 prompt=prompt,
                 cwd=wt,
+                agent_spec=question_spec,
                 extra_args=question_args,
             )
             if result.session_id:

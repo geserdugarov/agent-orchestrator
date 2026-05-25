@@ -274,8 +274,10 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             backend=dev_backend,
             prompt=prompt,
             cwd=wt,
+            agent_spec=dev_spec,
             resume_session_id=dev_sid,
             extra_args=dev_args,
+            review_round=state.get("review_round"),
             retry_count=state.get("retry_count"),
         )
         if result.session_id:

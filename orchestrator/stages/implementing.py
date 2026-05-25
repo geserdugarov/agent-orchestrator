@@ -240,7 +240,7 @@ def _resume_dev_with_text(
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _wf._ensure_worktree(spec, issue.number)
-    _, dev_backend, dev_args, dev_sid = _read_dev_session(state)
+    dev_spec, dev_backend, dev_args, dev_sid = _read_dev_session(state)
     silent_count = int(state.get("silent_park_count") or 0)
     fresh_spawn = (
         dev_sid is not None
@@ -270,6 +270,7 @@ def _resume_dev_with_text(
         backend=dev_backend,
         prompt=followup_text,
         cwd=wt,
+        agent_spec=dev_spec,
         resume_session_id=dev_sid,
         extra_args=dev_args,
         review_round=state.get("review_round"),
@@ -303,6 +304,7 @@ def _resume_dev_with_text(
             backend=dev_backend,
             prompt=followup_text,
             cwd=wt,
+            agent_spec=dev_spec,
             resume_session_id=None,
             extra_args=dev_args,
             review_round=state.get("review_round"),
@@ -669,6 +671,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 backend=dev_backend,
                 prompt=prompt,
                 cwd=wt,
+                agent_spec=dev_spec,
                 extra_args=dev_args,
                 retry_count=state.get("retry_count"),
             )

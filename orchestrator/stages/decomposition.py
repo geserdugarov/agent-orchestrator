@@ -90,7 +90,7 @@ def _resume_decomposer_on_human_reply(
     wt = _wf._decompose_worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _wf._ensure_decompose_worktree(spec, issue.number)
-    _, decomposer_backend, decomposer_args, decomposer_sid = (
+    decomposer_spec, decomposer_backend, decomposer_args, decomposer_sid = (
         _read_decomposer_session(state)
     )
     result = _wf._run_agent_tracked(
@@ -100,6 +100,7 @@ def _resume_decomposer_on_human_reply(
         backend=decomposer_backend,
         prompt=followup,
         cwd=wt,
+        agent_spec=decomposer_spec,
         resume_session_id=decomposer_sid,
         extra_args=decomposer_args,
         retry_count=state.get("retry_count"),
@@ -348,6 +349,7 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 backend=decomposer_backend,
                 prompt=prompt,
                 cwd=wt,
+                agent_spec=decomposer_spec,
                 extra_args=decomposer_args,
                 retry_count=state.get("retry_count"),
             )

@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from github.Issue import Issue
 
-from . import config
+from . import analytics, config, usage
 from .agents import AgentResult, run_agent
 from .config import RepoSpec
 from .github import (
@@ -239,6 +239,7 @@ def _run_agent_tracked(
     backend: str,
     prompt: str,
     cwd: Path,
+    agent_spec: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     timeout: Optional[int] = None,
     extra_args: tuple[str, ...] = (),
@@ -246,7 +247,7 @@ def _run_agent_tracked(
     retry_count: Optional[int] = None,
 ) -> AgentResult:
     """Run an agent, bookending the spawn with `agent_spawn` / `agent_exit`
-    audit events.
+    audit events and appending a per-invocation analytics record on exit.
 
     Thin wrapper around `run_agent` -- the spawn behaviour is unchanged.
     Optional context (`review_round`, `retry_count`, resume session id) is
@@ -258,6 +259,24 @@ def _run_agent_tracked(
     propagates -- the audit log will show a spawn without a matching
     exit, which is intentional (the per-issue `tick()` catch above logs
     the traceback).
+
+    After the audit `agent_exit` is emitted, an analytics record is
+    appended to `config.ANALYTICS_LOG_PATH` via `analytics.append_record`
+    (a no-op when the sink is disabled). The record carries the same
+    contextual fields (`repo`, `issue`, `stage`, `agent_role`, `backend`,
+    `agent_spec`, `resume_session_id` / `session_id`, `review_round`,
+    `retry_count`, `duration_s`, `exit_code`, `timed_out`) plus parsed
+    token counts, model list, `cost_usd`, and `cost_source` extracted
+    from `result.stdout` by `usage.parse_agent_usage`. The configured
+    model is pulled out of `extra_args` (via `_configured_model`) and
+    passed as the parser's `fallback_model` so a codex run whose stdout
+    omits the model name still records the configured model and an
+    estimated cost when the SKU is in the price table. Prompts, raw
+    stdout/stderr, secrets, and worktree contents are intentionally NOT
+    stored -- the sink is a foundation for usage / cost aggregation, not
+    a debugging mirror, and `result.stdout` may contain user-issue text.
+    A parser failure or a sink IO error is swallowed so an analytics
+    misconfiguration cannot stop the per-issue tick.
     """
     start = time.monotonic()
     gh.emit_event(
@@ -293,7 +312,120 @@ def _run_agent_tracked(
         review_round=review_round,
         retry_count=retry_count,
     )
+    _record_agent_analytics(
+        gh,
+        issue_number=issue_number,
+        stage=stage,
+        agent_role=agent_role,
+        backend=backend,
+        agent_spec=agent_spec,
+        resume_session_id=resume_session_id,
+        result=result,
+        duration_s=duration_s,
+        review_round=review_round,
+        retry_count=retry_count,
+        fallback_model=_configured_model(backend, extra_args),
+    )
     return result
+
+
+def _configured_model(
+    backend: str, extra_args: tuple[str, ...]
+) -> Optional[str]:
+    """Pull the configured model name out of a backend's `extra_args`.
+
+    codex selects the model with `-m <model>` (or `-m=<model>`); claude
+    uses `--model <model>` (or `--model=<model>`). Whichever is present
+    is forwarded to `usage.parse_agent_usage` as `fallback_model` so a
+    codex run whose stdout carries usage frames but omits the model
+    (resume frames, minimal completions, schema drift) still produces a
+    populated `models` list and -- when the model is in the price table
+    -- an estimated `cost_usd`. Returns `None` when neither flag is
+    set so the parser keeps its own "unknown" handling.
+
+    The split-form (`-m gpt-5`) and `=`-form (`--model=gpt-5`) are both
+    accepted because `shlex.split` produces either shape depending on
+    the operator's quoting; only one needs to win.
+    """
+    flag = "-m" if backend == "codex" else "--model"
+    eq_prefix = flag + "="
+    for i, tok in enumerate(extra_args):
+        if tok == flag and i + 1 < len(extra_args):
+            value = extra_args[i + 1].strip()
+            return value or None
+        if tok.startswith(eq_prefix):
+            value = tok[len(eq_prefix):].strip()
+            return value or None
+    return None
+
+
+def _record_agent_analytics(
+    gh: GitHubClient,
+    *,
+    issue_number: int,
+    stage: str,
+    agent_role: str,
+    backend: str,
+    agent_spec: Optional[str],
+    resume_session_id: Optional[str],
+    result: AgentResult,
+    duration_s: float,
+    review_round: Optional[int],
+    retry_count: Optional[int],
+    fallback_model: Optional[str] = None,
+) -> None:
+    """Parse usage from agent stdout and append a single analytics record.
+
+    Pulled out of `_run_agent_tracked` so the parse + append step has a
+    single try/except boundary: a malformed JSONL stream from a flaky
+    backend, an unknown-price model rev, or a transient IO failure on
+    the sink path must NEVER propagate out of the wrapper -- the audit
+    `agent_exit` is already emitted and the agent itself has exited.
+    `analytics.append_record` is internally hardened against OSError; the
+    wrapper here additionally guards the parse step.
+
+    `fallback_model` is the configured-spec model name (from
+    `_configured_model`) the codex parser uses when no usage frame
+    carries one; the claude parser ignores it (claude streams always
+    include `message.model`).
+    """
+    try:
+        metrics = usage.parse_agent_usage(
+            backend, result.stdout, fallback_model=fallback_model,
+        )
+    except Exception:
+        log.exception(
+            "issue=#%d analytics: parse_agent_usage(%s) failed; "
+            "skipping record",
+            issue_number, backend,
+        )
+        return
+    record = analytics.build_record(
+        repo=getattr(gh, "_repo_slug", None) or "",
+        issue=issue_number,
+        event="agent_exit",
+        stage=stage,
+        agent_role=agent_role,
+        backend=backend,
+        agent_spec=agent_spec,
+        resume_session_id=resume_session_id,
+        session_id=result.session_id,
+        review_round=review_round,
+        retry_count=retry_count,
+        duration_s=duration_s,
+        exit_code=result.exit_code,
+        timed_out=result.timed_out,
+        input_tokens=metrics.input_tokens,
+        output_tokens=metrics.output_tokens,
+        cached_tokens=metrics.cached_tokens,
+        cache_read_tokens=metrics.cache_read_tokens,
+        cache_write_tokens=metrics.cache_write_tokens,
+        models=list(metrics.models),
+        turns=metrics.turns,
+        cost_usd=metrics.cost_usd,
+        cost_source=metrics.cost_source,
+    )
+    analytics.append_record(record)
 
 
 def tick(

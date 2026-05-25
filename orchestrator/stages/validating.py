@@ -842,6 +842,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         backend=config.REVIEW_AGENT,
         prompt=review_prompt,
         cwd=wt,
+        agent_spec=config.REVIEW_AGENT_SPEC,
         timeout=config.REVIEW_TIMEOUT,
         extra_args=config.REVIEW_AGENT_ARGS,
         review_round=round_n,
@@ -1097,7 +1098,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     fix_prompt = _wf._build_fix_prompt(feedback)
     before_sha = _wf._head_sha(wt)
-    _, dev_backend, dev_args, dev_sid = _wf._read_dev_session(state)
+    dev_spec, dev_backend, dev_args, dev_sid = _wf._read_dev_session(state)
     dev_result = _wf._run_agent_tracked(
         gh, issue.number,
         agent_role="developer",
@@ -1105,6 +1106,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         backend=dev_backend,
         prompt=fix_prompt,
         cwd=wt,
+        agent_spec=dev_spec,
         resume_session_id=dev_sid,
         extra_args=dev_args,
         review_round=round_n,

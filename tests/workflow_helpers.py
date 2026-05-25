@@ -88,7 +88,18 @@ class _PatchedWorkflowMixin:
         rebase_in_progress=False,
         verify_result=None,
         authed_fetch_result=None,
+        analytics_log_path=None,
     ):
+        # `_run_agent_tracked` reads `config.ANALYTICS_LOG_PATH` at call
+        # time and appends a JSONL record per tracked agent run. The
+        # config module's default points at `<LOG_DIR>/analytics.jsonl`
+        # under the repo root, so leaving it untouched lets every
+        # workflow test that drives a stage handler scribble into the
+        # operator's real log directory. Default the patch to None
+        # (sink disabled, the documented "off" knob) so the suite is
+        # hermetic; analytics-specific tests opt into a temp path with
+        # the `analytics_log_path` kwarg below.
+        analytics_path_target = analytics_log_path
         rc_mock = _as_mock(run_agent)
         hnc_seq = has_new_commits if isinstance(has_new_commits, (list, tuple)) else None
         hnc_mock = MagicMock()
@@ -164,6 +175,7 @@ class _PatchedWorkflowMixin:
         )
 
         with patch.object(workflow, "run_agent", rc_mock), \
+             patch.object(config, "ANALYTICS_LOG_PATH", analytics_path_target), \
              patch.object(workflow, "_ensure_worktree", wt_mock), \
              patch.object(workflow, "_ensure_pr_worktree", pr_wt_mock), \
              patch.object(workflow, "_ensure_decompose_worktree", decompose_wt_mock), \
