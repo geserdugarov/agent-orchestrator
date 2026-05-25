@@ -7,15 +7,34 @@ optional `stage`. Distinct from the audit event log at
 `config.EVENT_LOG_PATH`: the audit log is wired through
 `GitHubClient.emit_event` for stage transitions / agent lifecycle
 events, while this analytics sink is a foundation layer for future
-aggregation that can be opted in or out independently.
+aggregation that can be opted in or out independently. The raw JSONL
+is intended to be ingested later into a structured database
+(SQLite / DuckDB / Postgres) for aggregation and reporting; one
+record per line keeps the ingestion path streaming.
+
+Event kinds written today:
+
+- `stage_enter` -- one record per workflow label transition, emitted
+  by `GitHubClient._emit_stage_enter` alongside the audit event of
+  the same name.
+- `stage_evaluation` -- one record per `workflow._process_issue`
+  dispatch, carrying `stage` (the current workflow label, omitted
+  when the issue has none), `duration_s`, and `result` (`"ok"` on a
+  clean return, `"error"` when the handler raised). Backlog-skips
+  short-circuit before the timing wrapper and are NOT recorded.
+- `agent_exit` -- one record per tracked agent invocation, written
+  from `workflow._run_agent_tracked` with parsed usage / cost.
 
 `append_record` is a no-op when `config.ANALYTICS_LOG_PATH` is None.
 `prune_old_records` removes records older than
 `config.ANALYTICS_RETENTION_DAYS`; it is a no-op when the sink is
-disabled or retention is non-positive (keep forever). The pinned
-GitHub state on each issue is the authoritative durable state -- this
-sink is local-filesystem observability and may be truncated or deleted
-at any time without affecting workflow correctness.
+disabled or retention is non-positive (keep forever). `main._run_tick`
+calls `prune_old_records` once per polling tick after every configured
+repo drains, so retention is applied without operator intervention.
+The pinned GitHub state on each issue is the authoritative durable
+state -- this sink is local-filesystem observability and may be
+truncated or deleted at any time without affecting workflow
+correctness.
 """
 from __future__ import annotations
 

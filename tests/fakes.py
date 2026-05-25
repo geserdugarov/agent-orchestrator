@@ -13,6 +13,7 @@ from datetime import datetime
 from itertools import count
 from typing import Any, Iterable, Optional
 
+from orchestrator import analytics
 from orchestrator.github import (
     PINNED_STATE_MARKER,
     PinnedState,
@@ -279,6 +280,19 @@ class FakeGitHubClient:
                 "stage_enter",
                 issue_number=issue.number,
                 stage=new_label,
+            )
+            # Mirror `GitHubClient._emit_stage_enter`: the audit event
+            # above lands on EVENT_LOG_PATH, but the analytics-compatible
+            # `stage_enter` record also lands on ANALYTICS_LOG_PATH so
+            # non-agent stages contribute timing context to the same sink
+            # `_run_agent_tracked` writes to.
+            analytics.append_record(
+                analytics.build_record(
+                    repo=self._repo_slug,
+                    issue=issue.number,
+                    event="stage_enter",
+                    stage=new_label,
+                )
             )
 
     def emit_event(

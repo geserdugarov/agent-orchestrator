@@ -21,7 +21,7 @@ from github.IssueComment import IssueComment
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
-from . import config
+from . import analytics, config
 
 log = logging.getLogger(__name__)
 
@@ -326,12 +326,26 @@ class GitHubClient:
         """Record a `stage_enter` event for `issue` transitioning to `stage`.
 
         Centralized hook called from `set_workflow_label` so every callsite
-        emits identically without per-handler bookkeeping.
+        emits identically without per-handler bookkeeping. The audit event
+        lands on `EVENT_LOG_PATH` via `emit_event`; an analytics-compatible
+        copy lands on `ANALYTICS_LOG_PATH` so non-agent stages contribute
+        timing context to the same sink `_run_agent_tracked` writes to.
+        Both sinks are independently opt-in/out via their respective
+        config knobs; pinned GitHub state stays authoritative regardless.
         """
+        issue_number = getattr(issue, "number", 0) or 0
         self.emit_event(
             "stage_enter",
-            issue_number=getattr(issue, "number", 0) or 0,
+            issue_number=issue_number,
             stage=stage,
+        )
+        analytics.append_record(
+            analytics.build_record(
+                repo=self._repo_slug,
+                issue=issue_number,
+                event="stage_enter",
+                stage=stage,
+            )
         )
 
     def comment(self, issue: Issue, body: str) -> IssueComment:
