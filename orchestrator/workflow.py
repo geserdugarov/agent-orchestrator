@@ -640,7 +640,8 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # state machine entirely until the label is removed. Checked before
     # reading the workflow label so the orchestrator never decomposes,
     # spawns an agent, or otherwise reacts while the operator is using
-    # the label as a "not yet" signal.
+    # the label as a "not yet" signal. Backlog-skips are NOT counted as a
+    # stage evaluation: no handler runs and there is nothing to time.
     if issue_has_label(issue, BACKLOG_LABEL):
         log.info(
             "repo=%s issue=#%s has %r; skipping",
@@ -649,36 +650,62 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         return
     label = gh.workflow_label(issue)
     log.info("repo=%s issue=#%s label=%r", spec.slug, issue.number, label)
-    if label is None:
-        _handle_pickup(gh, spec, issue)
-    elif label == "decomposing":
-        _handle_decomposing(gh, spec, issue)
-    elif label == "ready":
-        _handle_ready(gh, spec, issue)
-    elif label == "blocked":
-        _handle_blocked(gh, spec, issue)
-    elif label == "umbrella":
-        _handle_umbrella(gh, spec, issue)
-    elif label == "implementing":
-        _handle_implementing(gh, spec, issue)
-    elif label == "documenting":
-        _handle_documenting(gh, spec, issue)
-    elif label == "validating":
-        _handle_validating(gh, spec, issue)
-    elif label == "in_review":
-        _handle_in_review(gh, spec, issue)
-    elif label == "fixing":
-        _handle_fixing(gh, spec, issue)
-    elif label == "resolving_conflict":
-        _handle_resolving_conflict(gh, spec, issue)
-    elif label == "question":
-        _handle_question(gh, spec, issue)
-    elif label in ("done", "rejected"):
-        return
-    else:
-        log.warning(
-            "repo=%s issue=#%s label=%r not implemented yet; leaving alone",
-            spec.slug, issue.number, label,
+    # Time the handler dispatch and append a single `stage_evaluation`
+    # analytics record on exit. `result` flips to "error" inside the
+    # except clause so an unhandled exception still produces a timing
+    # record before propagating -- the tick loop's per-issue try/except
+    # already logs and isolates the failure, so re-raising here keeps
+    # the existing dispatch / exception contract intact. The append
+    # itself is internally hardened against OSError; an analytics
+    # misconfiguration cannot stop the per-issue tick from advancing.
+    start = time.monotonic()
+    result = "ok"
+    try:
+        if label is None:
+            _handle_pickup(gh, spec, issue)
+        elif label == "decomposing":
+            _handle_decomposing(gh, spec, issue)
+        elif label == "ready":
+            _handle_ready(gh, spec, issue)
+        elif label == "blocked":
+            _handle_blocked(gh, spec, issue)
+        elif label == "umbrella":
+            _handle_umbrella(gh, spec, issue)
+        elif label == "implementing":
+            _handle_implementing(gh, spec, issue)
+        elif label == "documenting":
+            _handle_documenting(gh, spec, issue)
+        elif label == "validating":
+            _handle_validating(gh, spec, issue)
+        elif label == "in_review":
+            _handle_in_review(gh, spec, issue)
+        elif label == "fixing":
+            _handle_fixing(gh, spec, issue)
+        elif label == "resolving_conflict":
+            _handle_resolving_conflict(gh, spec, issue)
+        elif label == "question":
+            _handle_question(gh, spec, issue)
+        elif label in ("done", "rejected"):
+            return
+        else:
+            log.warning(
+                "repo=%s issue=#%s label=%r not implemented yet; leaving alone",
+                spec.slug, issue.number, label,
+            )
+    except Exception:
+        result = "error"
+        raise
+    finally:
+        duration_s = round(time.monotonic() - start, 3)
+        analytics.append_record(
+            analytics.build_record(
+                repo=getattr(gh, "_repo_slug", None) or "",
+                issue=issue.number,
+                event="stage_evaluation",
+                stage=label,
+                duration_s=duration_s,
+                result=result,
+            )
         )
 
 

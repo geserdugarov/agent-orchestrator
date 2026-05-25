@@ -356,11 +356,22 @@ log area; set empty / `off` / `disabled` / `none` to disable writes).
 `append_record(...)`, and `prune_old_records(...)` for raw metric
 records keyed by `{ts, repo, issue, event, optional stage, ...}`,
 with `ANALYTICS_RETENTION_DAYS` (default `90`, set `0` to keep raw
-data indefinitely) bounding the retention window. The prune step
-removes records older than the window without touching pinned GitHub
-state; the sink is filesystem / JSONL only — no PostgreSQL,
-Streamlit, or external services — and is the foundation layer that
-future aggregation / reporting work can call into.
+data indefinitely) bounding the retention window. The polling loop
+calls the prune helper once per tick (after every configured repo
+drains) so retention is applied without operator intervention; the
+prune step removes records older than the window without touching
+pinned GitHub state. Three event kinds are written today:
+`stage_enter` (one per workflow label transition, emitted by
+`GitHubClient._emit_stage_enter` alongside the audit event),
+`stage_evaluation` (one per `_process_issue` dispatch, carrying
+`stage` / `duration_s` / `result=ok\|error` so non-agent stages get
+the same timing context as agent-driven ones), and `agent_exit`
+(token / model / cost details from `_run_agent_tracked` — see
+below). The sink is filesystem / JSONL only — no PostgreSQL,
+Streamlit, or external services in-process — and is the foundation
+layer that future aggregation / reporting work (ingesting the raw
+JSONL into a structured database like SQLite / DuckDB / Postgres)
+can call into.
 
 **Agent usage / cost parser.** `orchestrator/usage.py` decodes the
 JSONL stdout that `agents.AgentResult` carries into a `UsageMetrics`

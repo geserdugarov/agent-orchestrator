@@ -20,7 +20,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
-from . import config, workflow
+from . import analytics, config, workflow
 from .github import GitHubClient
 
 log = logging.getLogger("orchestrator")
@@ -197,6 +197,7 @@ def _run_tick(
             workflow.tick(gh, spec, global_semaphore=global_semaphore)
         except Exception:
             log.exception("tick failed for repo=%s; continuing", spec.slug)
+        _prune_analytics()
         return
 
     def _tick_one(spec: config.RepoSpec, gh: GitHubClient) -> None:
@@ -236,6 +237,28 @@ def _run_tick(
                     "repo=%s tick worker raised unexpectedly",
                     futures[fut],
                 )
+    _prune_analytics()
+
+
+def _prune_analytics() -> None:
+    """Drop analytics records past `ANALYTICS_RETENTION_DAYS` once per tick.
+
+    A no-op when the sink is disabled or retention is non-positive (the
+    documented "keep raw data indefinitely" knob). The helper itself
+    handles the absent-file / unparseable-line / IO-failure cases, but
+    a runaway programming error here must not abort the polling loop --
+    analytics is observability, never authoritative workflow state -- so
+    any escape is logged and swallowed. Per-tick cadence is cheap: the
+    helper reads the file at most once and only rewrites it when at
+    least one record is older than the retention window.
+    """
+    try:
+        removed = analytics.prune_old_records()
+    except Exception:
+        log.exception("analytics retention prune raised; continuing")
+        return
+    if removed:
+        log.info("analytics retention prune removed %d record(s)", removed)
 
 
 if __name__ == "__main__":
