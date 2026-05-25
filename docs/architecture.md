@@ -710,6 +710,16 @@ Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`.
 
 **Pinned GitHub state is unaffected.** The prune touches only the local file — no issue comment, label, or other GitHub state is rewritten. The analytics sink is local-filesystem observability and is safe to truncate or delete at any time without affecting workflow correctness.
 
+## Usage parser (`orchestrator/usage.py`)
+
+Pure-Python helpers that decode the JSONL stdout `agents.AgentResult` carries into a `UsageMetrics` dataclass — backend, distinct model(s), turn count, input / output / cached / cache-read / cache-write token totals, `cost_usd`, and a `cost_source` tag of `reported` / `estimated` / `unknown-price` / `no-usage`. No external dependency: the parser is jq-free so the orchestrator does not inherit the shell-reference's runtime requirement on a jq binary.
+
+**Two parsers, one dispatcher.** `parse_claude_usage(stdout)` consumes claude `--output-format stream-json` events, groups assistant frames by `message.id` so the final-frame usage wins (claude streams partial counts on intermediate frames), and sums per-model. `parse_codex_usage(stdout, fallback_model=None)` consumes codex `--json` events and treats usage as cumulative across the session: the *last* non-zero usage record is the authoritative total rather than a sum of per-event deltas. `parse_agent_usage(backend, stdout, fallback_model=None)` dispatches by backend string the same way `agents.run_agent` does, so callers can pass the configured backend straight through.
+
+**Cost precedence.** A `total_cost_usd` reported by the CLI itself always wins (`cost_source="reported"`); otherwise the parser walks first-party Anthropic / OpenAI price tables baked into the module and produces an estimate (`"estimated"`). When usage is present but the model SKU does not match any priced family, the parser returns `cost_source="unknown-price"` and `cost_usd=None` rather than guess at zero or bill cached tokens at the input rate. An empty stream — or one with no usage frames at all — yields `"no-usage"`.
+
+**Resilience.** Malformed JSON lines (banner text, truncated frames, partial flushes) are silently skipped, mirroring the shell reference's `fromjson?` tolerance, so a single bad line never invalidates the rest of the stream. The module is a parser only; wiring it into the [analytics sink](#analytics-sink-analytics_log_path) for per-agent cost records is foundation work tracked by the parent (`#161`) and remains a separate change.
+
 ## Summary of "what runs when"
 
 | Component | Type | Trigger | Cadence |

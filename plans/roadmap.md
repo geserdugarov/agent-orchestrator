@@ -362,6 +362,21 @@ state; the sink is filesystem / JSONL only — no PostgreSQL,
 Streamlit, or external services — and is the foundation layer that
 future aggregation / reporting work can call into.
 
+**Agent usage / cost parser.** `orchestrator/usage.py` decodes the
+JSONL stdout that `agents.AgentResult` carries into a `UsageMetrics`
+dataclass: backend, distinct model(s), turn count, input / output /
+cached / cache-read / cache-write token totals, `cost_usd`, and a
+`cost_source` tag of `reported` / `estimated` / `unknown-price` /
+`no-usage`. `parse_claude_usage`, `parse_codex_usage`, and the
+`parse_agent_usage` dispatcher are jq-free (pure Python, no
+dependency added to `pyproject.toml`) and silently tolerate
+malformed JSONL lines. A CLI-reported `total_cost_usd` always wins;
+otherwise a first-party Anthropic / OpenAI price table baked into the
+module produces a best-effort estimate, and an unknown SKU yields
+`unknown-price` (the parser refuses to guess). The parser is
+foundation work for parent `#161`; wiring it into the analytics sink
+for per-agent cost records is a separate change.
+
 ## Future work
 
 - **Spec-first split / separate test writer.** Add a `specifying` stage
