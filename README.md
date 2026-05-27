@@ -10,43 +10,14 @@ State lives entirely in the issue itself — one workflow label plus one pinned 
 
 It is meant for solo or small-team setups that already have a `codex` or `claude` login and want autonomy without standing up a separate planner, queue, or database.
 
-For design and stage definitions, see [`docs/architecture.md`](docs/architecture.md). For agent roles and command specs, see [`docs/workflow.md`](docs/workflow.md). The implementation roadmap is in [`plans/roadmap.md`](plans/roadmap.md).
+For design and stage definitions, see [`docs/architecture.md`](docs/architecture.md). For agent roles and command specs, see [`docs/workflow.md`](docs/workflow.md). For env vars and run modes, see [`docs/configuration.md`](docs/configuration.md). The implementation roadmap is in [`plans/roadmap.md`](plans/roadmap.md).
 
 ## Requirements
 
-### System
-
-- Linux (developed and tested on Ubuntu 24.04 / WSL2)
-- Git
-- Python 3.12+
-- [`uv`](https://github.com/astral-sh/uv) — Python package and venv manager (alternative: `python3-venv` + `pip`)
-
-### CLI agents
-
-The orchestrator spawns these as subprocesses on the host. The defaults are `claude` for implementation and decomposition, `codex` for review — so most setups need both authenticated.
-
-A single-backend deployment can skip the other; the role mapping is configured via `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` (see [`docs/workflow.md`](docs/workflow.md)).
-
-- [`codex`](https://github.com/openai/codex) — invoked with `--dangerously-bypass-approvals-and-sandbox`. Run `codex login` once. The host is the sandbox boundary.
-- [`claude`](https://docs.anthropic.com/en/docs/claude-code) — invoked with `--dangerously-skip-permissions`. Authenticate via `claude` once.
-
-### GitHub
-
-- A repository the orchestrator will manage (default: this one).
-- A **fine-grained Personal Access Token** scoped to that repository, with these permissions:
-  - **Contents**: Read and write — push branches
-  - **Issues**: Read and write — read issues, post comments, set/create labels
-  - **Pull requests**: Read and write — open PRs
-  - **Checks**: Read-only — required when enabling `AUTO_MERGE` so Actions-only PRs are not parked with `check_state='none'`
-  - **Metadata**: Read-only — required and forced on
-
-  Generate at <https://github.com/settings/personal-access-tokens>.
-
-### Python dependencies
-
-Pinned in [`pyproject.toml`](pyproject.toml):
-
-- `PyGithub >= 2.1`
+- Linux (developed on Ubuntu 24.04 / WSL2), Git, Python 3.12+, and [`uv`](https://github.com/astral-sh/uv) (or `python3-venv` + `pip`).
+- The CLI agents you actually route to must be authenticated on the host. Defaults: [`claude`](https://docs.anthropic.com/en/docs/claude-code) for decomposition + implementation, [`codex`](https://github.com/openai/codex) for review; either can be remapped via `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` (see [`docs/workflow.md`](docs/workflow.md)). They are spawned with `--dangerously-bypass-approvals-and-sandbox` / `--dangerously-skip-permissions`, so the host is the sandbox boundary.
+- A GitHub repository to manage plus a fine-grained PAT scoped to it (read/write on Contents, Issues, Pull requests; Metadata read-only; Checks read-only when `AUTO_MERGE=on`). Full rationale and the generation URL are in [`.env.example`](.env.example).
+- `PyGithub >= 2.1`, pinned in [`pyproject.toml`](pyproject.toml). No other dependencies.
 
 ## Quick start
 
@@ -108,17 +79,11 @@ Pinned in [`pyproject.toml`](pyproject.toml):
    > **Title:** Add a `hello()` function to the orchestrator package
    > **Body:** Add `hello()` to `orchestrator/__init__.py` returning the string `"hello, world"`. Add `tests/test_hello.py` asserting the return value. Don't change anything else.
 
-   Within ~1 minute the orchestrator should comment "picking this up" and label the issue `decomposing`. The decomposer agent declares the task fits one context, the label flips to `ready` and then `implementing`, and the dev agent runs in a fresh worktree at `../wt-orchestrator/geserdugarov__agent-orchestrator/issue-N`.
-
-   The orchestrator then pushes the branch, opens a PR, labels the issue `documenting`, and runs a docs pass on the same PR worktree (updating `README.md`, `docs/`, or `plans/` to match what landed, or emitting an explicit `DOCS: NO_CHANGE` verdict when nothing needs updating). The same documenting hop runs on every later code-changing branch update — reviewer-requested fixes from `validating`, PR-feedback fixes from the `fixing` stage, in_review user-content drift pushes, and any `resolving_conflict` rebase push — so docs always reach `validating` in sync with the diff the reviewer will see. Split decompositions therefore no longer need a synthetic final docs child. On the next tick the label advances to `validating`, the reviewer agent runs a fresh session against the diff, and on `VERDICT: APPROVED` the optional local `VERIFY_COMMANDS` (default empty) run in the worktree before the issue moves to `in_review`. A verify failure parks on `validating` with a typed `park_reason` and the failing command's output; GitHub CI remains the later auto-merge gate. See [`docs/configuration.md#local-verification-gate`](docs/configuration.md#local-verification-gate) for the verify-command reference.
-
-   With `AUTO_MERGE=on`, the orchestrator then merges the PR itself once GitHub reports it mergeable with green checks, flips the label to `done`, and closes the issue. With `AUTO_MERGE=off` (the default), review and merge the PR manually.
-
-   If a human posts PR feedback (issue thread, PR conversation, inline review, or PR review summary) while the issue is `in_review`, the orchestrator flips the label to `fixing` and queues the comments. After the `IN_REVIEW_DEBOUNCE_SECONDS` quiet window expires (newer comments arriving in the meantime reset the timer), the dev agent resumes against the unread feedback, pushes the fix, and the label routes through `documenting` (so the docs pass runs against the new head and refreshes any README / docs / plans touched by the fix) and then back through `validating` so the reviewer re-approves before auto-merge can proceed. If the rescan finds no unread feedback at all (the watermarks already covered the bookmarked comments), the label bounces directly back to `validating` without the documenting hop, since there is no fix work for the docs pass to react to.
+   Within ~1 minute the orchestrator should comment "picking this up" and label the issue `decomposing`, then walk it through `implementing` → `documenting` → `validating` → `in_review`, opening a PR along the way. With `AUTO_MERGE=on` it merges the PR itself once GitHub reports it mergeable with green checks; with `AUTO_MERGE=off` (the default) you review and merge manually. PR feedback posted while the issue is `in_review` flips it to `fixing` and routes the dev's fix back through `documenting` + `validating` before merge can proceed. For the full state-machine narrative — including the local verify gate, conflict resolution, and the split-decomposition path — see [`docs/architecture.md`](docs/architecture.md).
 
 ## Asking the orchestrator a question
 
-Apply the workflow label `question` to any open issue to get a read-only answer instead of an implementation. The orchestrator spawns the configured `DECOMPOSE_AGENT` in the issue's `issue-N` worktree, posts the agent's answer (or its own clarifying follow-up) as an issue comment that pings `HITL_HANDLE`, and parks awaiting a human reply. No branch is pushed, no PR is opened, and a commit / dirty tree from the agent is treated as a read-only-violation park. Subsequent human comments resume the same locked agent session for a multi-turn conversation; **closing the issue** is the terminal signal — `_handle_question` then flips the label to `done` and tears the worktree down.
+Apply the `question` label to any open issue to get a read-only answer instead of an implementation. The orchestrator spawns the configured `DECOMPOSE_AGENT` in the issue's worktree with a read-only prompt and posts the answer as an issue comment that pings `HITL_HANDLE`; subsequent human replies resume the same locked session, and closing the issue is the terminal signal. See [`docs/workflow.md#question-stage--read-only-qa-on-the-question-label`](docs/workflow.md#question-stage--read-only-qa-on-the-question-label) for the full lifecycle and the read-only-violation park reasons.
 
 ## Continuous integration
 
