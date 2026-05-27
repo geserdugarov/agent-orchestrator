@@ -244,6 +244,20 @@ swallowed.
   exploration or skipping acceptance for trivial fixes. Judged excessive
   for the original 2-week budget; revisit once the static flow is fully
   dogfooded.
+- **Symphony-inspired per-repo policy and hooks.** See
+  [`plans/symphony-spec-review.md`](symphony-spec-review.md) for the full
+  review. Two proposals survived the critical filter: a narrow
+  `<target_root>/.agent-orchestrator/policy.toml` overrides file
+  (verify commands, retry / review-round budgets, auto-merge) with
+  hot-reload on file change, and three workspace lifecycle hooks
+  (`after_create`, `before_run`, `after_run`) under
+  `<target_root>/.agent-orchestrator/hooks/` so target repos can do
+  bootstrap work without bloating agent prompts. Both stay opt-in; an
+  absent file leaves behavior identical to today. The review also
+  documents the rest of Symphony's surface (HTTP server, SSH worker
+  pool, in-worker continuation loop, per-state caps, event-stream stall
+  detection, `linear_graphql` tool, strict template engine, full
+  `WORKFLOW.md` adoption) as deliberately not adopted.
 
 ## Risks
 
