@@ -10,7 +10,7 @@ State lives entirely in the issue itself — one workflow label plus one pinned 
 
 It is meant for solo or small-team setups that already have a `codex` or `claude` login and want autonomy without standing up a separate planner, queue, or database.
 
-For design and stage definitions, see [`docs/architecture.md`](docs/architecture.md). For agent roles and command specs, see [`docs/workflow.md`](docs/workflow.md). For env vars and run modes, see [`docs/configuration.md`](docs/configuration.md). The implementation roadmap is in [`plans/roadmap.md`](plans/roadmap.md).
+For design and stage definitions, see [`docs/architecture.md`](docs/architecture.md). For agent roles and command specs, see [`docs/workflow.md`](docs/workflow.md). For env vars, run modes, and project CI, see [`docs/configuration.md`](docs/configuration.md). The implementation roadmap is in [`plans/roadmap.md`](plans/roadmap.md).
 
 ## Requirements
 
@@ -84,10 +84,6 @@ For design and stage definitions, see [`docs/architecture.md`](docs/architecture
 ## Asking the orchestrator a question
 
 Apply the `question` label to any open issue to get a read-only answer instead of an implementation. The orchestrator spawns the configured `DECOMPOSE_AGENT` in the issue's worktree with a read-only prompt and posts the answer as an issue comment that pings `HITL_HANDLE`; subsequent human replies resume the same locked session, and closing the issue is the terminal signal. See [`docs/workflow.md#question-stage--read-only-qa-on-the-question-label`](docs/workflow.md#question-stage--read-only-qa-on-the-question-label) for the full lifecycle and the read-only-violation park reasons.
-
-## Continuous integration
-
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff check` and `pytest` on Python 3.12 for every push to `main` and every pull request. Lint rules are configured in [`pyproject.toml`](pyproject.toml) under `[tool.ruff.lint]`.
 
 ## Configuration
 
