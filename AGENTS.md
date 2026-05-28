@@ -25,15 +25,16 @@ It is loaded into every agent session — keep it short. For anything beyond a p
 
 ## Running and testing
 
-The repo targets Python 3.12+. Local development uses [`uv`](https://github.com/astral-sh/uv) for the venv.
+The repo targets Python 3.12+. Local development uses [`uv`](https://github.com/astral-sh/uv) and installs from the lockfile.
 
 ```sh
-uv venv --python 3.12
-uv pip install PyGithub
-.venv/bin/python -m pytest          # run the test suite
-.venv/bin/python -m orchestrator.main --once  # one polling tick then exit
-.venv/bin/python -m orchestrator.main --log-level DEBUG
+uv sync --locked                              # creates .venv/ and installs runtime + dev deps from uv.lock
+uv run pytest                                 # run the test suite
+uv run python -m orchestrator.main --once     # one polling tick then exit
+uv run python -m orchestrator.main --log-level DEBUG
 ```
+
+Dev tools (`pytest`, `ruff`) live in the `dev` dependency group in `pyproject.toml`; exact versions are pinned in `uv.lock`. CI installs the same set via `uv sync --locked`.
 
 Tests are the primary correctness gate. Add or update tests for any behavioral change. Prefer extending the in-memory fakes in `tests/fakes.py` over mocking PyGithub directly.
 
@@ -46,7 +47,7 @@ Tests are the primary correctness gate. Add or update tests for any behavioral c
   ```
 - **Commits.** Conventional Commits: `<type>: <subject>` with types `feat`, `fix`, `chore`, `docs`, `refactor`, `test`. Subject line only — no body, no `Co-Authored-By` trailer. Imperative mood, short.
 - **Comments.** Sparse — only when the *why* is non-obvious (hidden constraint, race window, GitHub quirk).
-- **Dependencies.** `pyproject.toml` pins only `PyGithub`. Anything else needs justification.
+- **Dependencies.** `pyproject.toml` pins only `PyGithub` as a runtime dep; `pytest` and `ruff` live in the `dev` group. `uv.lock` is the source of truth for exact versions and is committed — regenerate it (`uv lock`) whenever `pyproject.toml` changes. Anything else needs justification.
 - **Secrets.** `GITHUB_TOKEN` is deliberately *not* loaded from `.env`. Tokens live in `~/.config/<owner>/<repo>/token` or the process environment. Rationale: [`.env.example`](.env.example).
 
 ## Out of scope without explicit ask

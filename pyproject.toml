@@ -9,6 +9,9 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = ["PyGithub>=2.1"]
 
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
 [tool.ruff.lint]
 # `l` is used pervasively as a loop variable over GitHub labels; banning it
 # would force noise-only renames across the codebase.

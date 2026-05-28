@@ -157,7 +157,7 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 
 ## Continuous integration
 
-[`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `ruff check` and `pytest` on Python 3.12 for every push to `main` and every pull request. Lint rules are configured in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`.
+[`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `ruff check` and `pytest` on Python 3.12 for every push to `main` and every pull request. CI installs from the committed [`../uv.lock`](../uv.lock) via `uv sync --locked`, so the exact runtime and dev versions are reproducible. Lint rules are configured in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; dev tools (`pytest`, `ruff`) are declared in its `[dependency-groups]` table.
 
 ## Run modes
 

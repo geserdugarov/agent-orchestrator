@@ -17,7 +17,7 @@ For design and stage definitions, see [`docs/architecture.md`](docs/architecture
 - Linux (developed on Ubuntu 24.04 / WSL2), Git, Python 3.12+, and [`uv`](https://github.com/astral-sh/uv) (or `python3-venv` + `pip`).
 - The CLI agents you actually route to must be authenticated on the host. Defaults: [`claude`](https://docs.anthropic.com/en/docs/claude-code) for decomposition + implementation, [`codex`](https://github.com/openai/codex) for review; either can be remapped via `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` (see [`docs/workflow.md`](docs/workflow.md)). They are spawned with `--dangerously-bypass-approvals-and-sandbox` / `--dangerously-skip-permissions`, so the host is the sandbox boundary.
 - A GitHub repository to manage plus a fine-grained PAT scoped to it (read/write on Contents, Issues, Pull requests; Metadata read-only; Checks read-only when `AUTO_MERGE=on`). Full rationale and the generation URL are in [`.env.example`](.env.example).
-- `PyGithub >= 2.1`, pinned in [`pyproject.toml`](pyproject.toml). No other dependencies.
+- `PyGithub >= 2.1` is the only runtime dependency, declared in [`pyproject.toml`](pyproject.toml). Dev tools (`pytest`, `ruff`) live in a `dev` dependency group. Exact versions are pinned in [`uv.lock`](uv.lock); CI installs from it.
 
 ## Quick start
 
@@ -28,12 +28,15 @@ For design and stage definitions, see [`docs/architecture.md`](docs/architecture
    cd agent-orchestrator
    ```
 
-2. **Create a venv and install dependencies**
+2. **Install from the lockfile**
 
    ```sh
-   uv venv --python 3.12
-   uv pip install PyGithub
+   uv sync --locked
    ```
+
+   This creates `.venv/` and installs the exact runtime and dev versions
+   recorded in `uv.lock`. For a runtime-only install (no `pytest` / `ruff`),
+   add `--no-dev`.
 
 3. **Configure environment**
 
