@@ -41,7 +41,7 @@ from typing import Optional, Tuple
 from github.Issue import Issue
 
 from . import config
-from .agents import _FORBIDDEN_AGENT_ENV
+from .agents import _filter_agent_env
 from .config import RepoSpec
 from .github import (
     BACKLOG_LABEL,
@@ -493,8 +493,13 @@ def _run_verify_commands(
     `&&` work the way an operator would type them; stdout and stderr are
     merged so a failing build with all its diagnostics on stderr surfaces
     in one block in the park comment. The shell runs with a child
-    environment stripped of GitHub credentials (`_FORBIDDEN_AGENT_ENV`),
-    matching what `agents._agent_env` strips for agent subprocesses.
+    environment stripped of GitHub credentials, production-secret-shaped
+    variables, AND the agent's own provider-auth keys (`_filter_agent_env`
+    with `allow_provider_auth=False`) -- stricter than the agent-subprocess
+    strip, because a verify command is operator-configured shell that
+    executes the agent-produced code and a hostile dependency reading
+    `$ANTHROPIC_API_KEY` would gain billable access to the operator's
+    model account.
 
     The first non-zero exit, timeout, post-run dirty tree, or HEAD
     advance wins -- later commands are not run, since the gate is
@@ -518,19 +523,22 @@ def _run_verify_commands(
     # only an unchanged "" afterwards (which means no HEAD ever
     # existed). Anything else is a fail-closed park.
     head_before = _head_sha(worktree)
-    # Strip GitHub credentials from the child environment exactly the
-    # way `agents._agent_env` does for the implementer/reviewer agents.
-    # Verify commands run operator-configured shell against code the
-    # agent just produced; without this, a prompt-injected `pytest`
-    # plugin (or a hostile dependency the agent pulled in) could read
-    # `$GITHUB_TOKEN` straight out of the orchestrator's environment
-    # and push or call the API as us. The orchestrator owns all GitHub
-    # writes; verify commands must never see those vars. Provider auth
-    # (ANTHROPIC_API_KEY etc.) is left intact since it does not
-    # authenticate to GitHub.
-    child_env = {
-        k: v for k, v in os.environ.items() if k not in _FORBIDDEN_AGENT_ENV
-    }
+    # Strip GitHub credentials, production-secret-shaped variables,
+    # write-credential locators (SSH-agent / askpass), AND the agent's
+    # own provider-auth keys from the child environment. Verify commands
+    # run operator-configured shell against code the agent just produced;
+    # without this, a prompt-injected `pytest` plugin (or a hostile
+    # dependency the agent pulled in) could read `$GITHUB_TOKEN` /
+    # `$STRIPE_API_KEY` / `$ANTHROPIC_API_KEY` / `$SSH_AUTH_SOCK` / ...
+    # straight out of the orchestrator's environment and exfiltrate or
+    # push as the operator. `allow_provider_auth=False` is stricter than
+    # the agent subprocess case: the agent CLI needs its provider key to
+    # reach its model, but the verify shell does not. An operator who
+    # legitimately needs a secret in a verify command must load it from
+    # disk inside a wrapper script (`VERIFY_COMMANDS=./run-verify.sh`);
+    # inline `KEY=value pytest ...` is unsafe because the failure park
+    # comment publishes `verify.command` verbatim on the issue.
+    child_env = _filter_agent_env(dict(os.environ), allow_provider_auth=False)
     for command in commands:
         # `start_new_session=True` puts the shell in its own process
         # group (and session) so a timeout-kill can tear down EVERY

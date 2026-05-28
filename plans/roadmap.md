@@ -51,10 +51,23 @@ env-var flips cannot migrate live work. `AGENT_TIMEOUT` /
 `REVIEW_TIMEOUT` cap wall-clock time; `MAX_RETRIES_PER_DAY` bounds
 fresh spawns per issue.
 
-**Security hardening.** Agent env strips GitHub tokens; PAT must come
-from process env or a file outside `REPO_ROOT`. `git push` is hardened
-via `GIT_ASKPASS`, a neutered git-config envelope, explicit refspec,
-and a stamped commit identity (`AGENT_GIT_NAME` / `AGENT_GIT_EMAIL`).
+**Security hardening.** Agent and verify-command env strip GitHub
+tokens, production-secret-shaped vars (`*_TOKEN`/`*_KEY`/`*_SECRET`
+/`*_PASSWORD`/`*_PAT`/`*_CREDENTIAL` and bare-name variants),
+credential-file locators (`*_TOKEN_FILE`/`*_CREDENTIALS`/
+`*_CREDENTIALS_FILE`, e.g. `ORCHESTRATOR_TOKEN_FILE`,
+`GOOGLE_APPLICATION_CREDENTIALS`, `AWS_SHARED_CREDENTIALS_FILE`), and
+write-credential locators (`SSH_AUTH_SOCK`, `SSH_ASKPASS`, `GIT_ASKPASS`,
+`GIT_SSH_COMMAND` — non-secret-shaped pointers to the operator's
+loaded auth that would otherwise let a subprocess push or authenticate
+as them). Provider auth (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) is
+allowlisted by exact name for agent subprocesses only; verify commands
+run with provider keys stripped too, because a hostile dependency in
+agent-produced code would otherwise gain billable model access. The
+orchestrator's own PAT must come from process env or a file outside
+`REPO_ROOT`. `git push` is hardened via `GIT_ASKPASS`, a neutered
+git-config envelope, explicit refspec, and a stamped commit identity
+(`AGENT_GIT_NAME` / `AGENT_GIT_EMAIL`).
 
 **Decomposing stage.** `_handle_decomposing` runs `DECOMPOSE_AGENT` and
 parses a fenced `orchestrator-manifest` JSON block: `single` flips parent

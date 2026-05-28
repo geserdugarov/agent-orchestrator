@@ -136,25 +136,32 @@ def _post_pr_comment(
 # all -- see #36) would otherwise bloat the issue body past GitHub's limit.
 _STDERR_TAIL_BUDGET = 1024
 
-# Provider auth (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...) is intentionally
-# left in the agent's environment by agents._agent_env -- the agent CLI
-# needs it to talk to its own model. A noisy backend, a buggy test, or a
-# prompt-injected command that echoed one of those values to stderr would
-# otherwise be republished verbatim in the park comment we post to the
-# issue. Match by suffix to cover the long tail of provider names
-# (HF_TOKEN, GEMINI_API_KEY, ...) without an explicit enumeration. The
-# orchestrator's own GITHUB_TOKEN is stripped from the agent env upstream
-# but still lives in this process; env-derived ones are caught by the
-# loop below, and the token-file path (ORCHESTRATOR_TOKEN_FILE / default
-# ~/.config/<repo>/token) is caught by the explicit config.GITHUB_TOKEN
-# pass in `_redact_secrets` -- without that pass the file-loaded token
-# would never appear in os.environ and would leak unredacted.
+# Defense-in-depth redaction of secret-shaped env values before any stderr
+# is surfaced to GitHub or the orchestrator log. `agents._filter_agent_env`
+# already strips both GitHub-token aliases AND the broader secret-shape
+# family (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `*_PAT`,
+# `*_CREDENTIAL`, plus credential-file locators) from the agent's and the
+# verify command's environment, so a well-behaved subprocess cannot
+# read those values to begin with. The redactor below catches the
+# remaining narrow leaks:
+#   * provider auth the agent IS allowed to see (the
+#     `_AGENT_PROVIDER_AUTH_ALLOWLIST` -- ANTHROPIC_API_KEY, OPENAI_API_KEY,
+#     …) -- a noisy backend or buggy test that echoes its own provider
+#     key to stderr would otherwise republish it verbatim in the park
+#     comment we post to the issue;
+#   * vars the orchestrator process itself holds but the subprocess was
+#     supposed to never see -- if a git/gh subprocess that DID get the
+#     PAT (the orchestrator's own pushes) leaks it on stderr we still
+#     redact before posting;
+#   * the file-backed GITHUB_TOKEN -- when resolved from
+#     ORCHESTRATOR_TOKEN_FILE (or the default ~/.config/<repo>/token) it
+#     never appears in os.environ, so the env loop alone misses it and
+#     we redact the cached value explicitly below.
+# Match by suffix to keep the long tail of provider/secret names
+# (`HF_TOKEN`, `GEMINI_API_KEY`, `DATABASE_PASSWORD`, …) covered without
+# enumerating every variant, plus a small bare-name set (some build
+# systems set unprefixed `TOKEN` / `PASSWORD`).
 _SECRET_KEY_SUFFIXES = ("_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PAT", "_CREDENTIAL")
-# Exact names cover two cases the suffix predicate misses: GitHub-token
-# aliases that don't end in any suffix above, and bare-named secrets
-# (`TOKEN`, `PASSWORD`, ...) some build systems still set unprefixed --
-# those would otherwise pass through _agent_env and leak unredacted if a
-# prompt-injected stderr echoed `$TOKEN`.
 _SECRET_KEY_NAMES = frozenset({
     "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT",
     "TOKEN", "KEY", "SECRET", "PASSWORD", "PAT", "CREDENTIAL",
