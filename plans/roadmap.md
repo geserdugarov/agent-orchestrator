@@ -160,8 +160,12 @@ helpers live in `tests/workflow_helpers.py` and in-memory fakes in
 debounce, auto-merge, squash, conflicts, umbrella, multi-repo
 dispatch, and park-comment-replay prevention.
 
-**Project CI.** GitHub Actions runs `ruff` and `pytest` on PRs; the
-auto-merge gate consults `pr_combined_check_state`.
+**Project CI.** GitHub Actions runs `ruff` and `pytest` on PRs under a
+top-level `contents: read` token so the workflow is read-only and
+non-publishing; the auto-merge gate consults `pr_combined_check_state`.
+Dependabot opens weekly update PRs for the `github-actions` and `uv`
+ecosystems, and a `dependency-review` workflow blocks PRs that introduce
+vulnerable or non-compliant dependencies.
 
 **Audit event log.** Optional opt-in JSONL sink at `EVENT_LOG_PATH`.
 `GitHubClient.emit_event` appends one record per workflow event

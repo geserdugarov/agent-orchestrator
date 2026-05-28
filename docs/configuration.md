@@ -159,6 +159,10 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 
 [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `ruff check` and `pytest` on Python 3.12 for every push to `main` and every pull request. CI installs from the committed [`../uv.lock`](../uv.lock) via `uv sync --locked`, so the exact runtime and dev versions are reproducible. Lint rules are configured in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; dev tools (`pytest`, `ruff`) are declared in its `[dependency-groups]` table.
 
+The workflow declares `permissions: contents: read` at the top level so the `GITHUB_TOKEN` minted for each run is read-only and cannot publish artifacts, push tags, or comment on PRs. The job uses no repository secrets, so PRs from forks run safely under the same scope.
+
+[`../.github/dependabot.yml`](../.github/dependabot.yml) opens weekly update PRs for the `github-actions` and `uv` (Python `pyproject.toml` + `uv.lock`) ecosystems. [`../.github/workflows/dependency-review.yml`](../.github/workflows/dependency-review.yml) runs `actions/dependency-review-action` on every pull request and fails the check when a PR introduces a vulnerable or non-compliant dependency.
+
 ## Run modes
 
 - `./run.sh` — production. Continuous polling. `run.sh` does `git pull --ff-only origin "$ORCHESTRATOR_BASE_BRANCH"` (read from `.env`, default `main`) and re-launches the orchestrator after each clean exit, so a self-modifying merge picks up the new code automatically.
