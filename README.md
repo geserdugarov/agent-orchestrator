@@ -10,7 +10,7 @@ State lives entirely in the issue itself — one workflow label plus one pinned 
 
 It is meant for solo or small-team setups that already have a `codex` or `claude` login and want autonomy without standing up a separate planner, queue, or database.
 
-For design and stage definitions, see [`docs/architecture.md`](docs/architecture.md). For agent roles and command specs, see [`docs/workflow.md`](docs/workflow.md). For env vars, run modes, and project CI, see [`docs/configuration.md`](docs/configuration.md). The implementation roadmap is in [`plans/roadmap.md`](plans/roadmap.md).
+For design and stage definitions, see [`docs/architecture.md`](docs/architecture.md). For agent roles and command specs, see [`docs/workflow.md`](docs/workflow.md). For env vars, run modes, and project CI, see [`docs/configuration.md`](docs/configuration.md). For the security checklist and operator-owned GitHub / org settings, see [`docs/security.md`](docs/security.md). The implementation roadmap is in [`plans/roadmap.md`](plans/roadmap.md).
 
 ## Requirements
 
