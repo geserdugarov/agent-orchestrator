@@ -179,6 +179,25 @@ else:
 ANALYTICS_RETENTION_DAYS: int = int(
     os.environ.get("ANALYTICS_RETENTION_DAYS", "90")
 )
+
+# libpq URL for the analytics Postgres service consumed by
+# `orchestrator.analytics_sync`. None (the default) leaves the sync
+# disabled; the orchestrator's polling tick does not read this var
+# directly, so an unset value has no effect on workflow correctness.
+# The sync is a standalone CLI (`python -m orchestrator.analytics_sync`)
+# that an operator runs on demand to replay JSONL records into Postgres.
+#
+# Sentinel values `off` / `disabled` / `none` (case-insensitive) and the
+# empty string all disable the sync, matching `ANALYTICS_LOG_PATH`'s
+# disable knob so the two can be turned off together with parallel
+# spellings.
+_ANALYTICS_DB_URL_RAW = os.environ.get("ANALYTICS_DB_URL", "").strip()
+if not _ANALYTICS_DB_URL_RAW or _ANALYTICS_DB_URL_RAW.lower() in (
+    "off", "disabled", "none",
+):
+    ANALYTICS_DB_URL = None
+else:
+    ANALYTICS_DB_URL = _ANALYTICS_DB_URL_RAW
 REVIEW_TIMEOUT: int = int(os.environ.get("REVIEW_TIMEOUT", str(AGENT_TIMEOUT)))
 MAX_REVIEW_ROUNDS: int = int(os.environ.get("MAX_REVIEW_ROUNDS", "3"))
 # Cap on how many auto-conflict-resolution attempts one PR can use before

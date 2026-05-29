@@ -51,10 +51,23 @@ env-var flips cannot migrate live work. `AGENT_TIMEOUT` /
 `REVIEW_TIMEOUT` cap wall-clock time; `MAX_RETRIES_PER_DAY` bounds
 fresh spawns per issue.
 
-**Security hardening.** Agent env strips GitHub tokens; PAT must come
-from process env or a file outside `REPO_ROOT`. `git push` is hardened
-via `GIT_ASKPASS`, a neutered git-config envelope, explicit refspec,
-and a stamped commit identity (`AGENT_GIT_NAME` / `AGENT_GIT_EMAIL`).
+**Security hardening.** Agent and verify-command env strip GitHub
+tokens, production-secret-shaped vars (`*_TOKEN`/`*_KEY`/`*_SECRET`
+/`*_PASSWORD`/`*_PAT`/`*_CREDENTIAL` and bare-name variants),
+credential-file locators (`*_TOKEN_FILE`/`*_CREDENTIALS`/
+`*_CREDENTIALS_FILE`, e.g. `ORCHESTRATOR_TOKEN_FILE`,
+`GOOGLE_APPLICATION_CREDENTIALS`, `AWS_SHARED_CREDENTIALS_FILE`), and
+write-credential locators (`SSH_AUTH_SOCK`, `SSH_ASKPASS`, `GIT_ASKPASS`,
+`GIT_SSH_COMMAND` — non-secret-shaped pointers to the operator's
+loaded auth that would otherwise let a subprocess push or authenticate
+as them). Provider auth (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) is
+allowlisted by exact name for agent subprocesses only; verify commands
+run with provider keys stripped too, because a hostile dependency in
+agent-produced code would otherwise gain billable model access. The
+orchestrator's own PAT must come from process env or a file outside
+`REPO_ROOT`. `git push` is hardened via `GIT_ASKPASS`, a neutered
+git-config envelope, explicit refspec, and a stamped commit identity
+(`AGENT_GIT_NAME` / `AGENT_GIT_EMAIL`).
 
 **Decomposing stage.** `_handle_decomposing` runs `DECOMPOSE_AGENT` and
 parses a fenced `orchestrator-manifest` JSON block: `single` flips parent
@@ -180,8 +193,27 @@ truncate or rotate.
 `prune_old_records`; `ANALYTICS_RETENTION_DAYS` (default 90) bounds
 retention and the polling loop prunes once per tick. Three event kinds
 write today: `stage_enter`, `stage_evaluation` (timing per dispatch),
-and `agent_exit` (token / cost). Filesystem-only — no DB or external
-services in-process.
+and `agent_exit` (token / cost). Orchestrator-side remains
+filesystem-only — no DB driver or external services in-process.
+
+**Analytics database.** Repo-local `analytics-db/` ships the Docker
+Compose service (`postgres:16`, `127.0.0.1`-pinned, host-bind data
+volume) and the `analytics_events` schema mirroring the JSONL record
+shape (typed columns plus `extras` JSONB for forward-compat, plus
+`source_path` / `source_line` for forensic context and a
+`content_hash` plain unique index for dedup, kept non-partial so the
+sync's `ON CONFLICT (content_hash)` arbiter resolves without
+repeating the predicate). `ANALYTICS_DB_URL` is
+a single libpq URL so swapping local for remote managed Postgres is a
+one-line repoint. `orchestrator/analytics_sync.py` is the operator-
+driven CLI (`python -m orchestrator.analytics_sync`) that replays
+JSONL records into Postgres with `INSERT ... ON CONFLICT
+(content_hash) DO NOTHING`, idempotent across repeated runs and
+across `prune_old_records` rewrites. The driver is `psycopg[binary]`
+(pinned in `pyproject.toml`) and lazy-imported so the polling tick
+remains driver-free. The sync is deliberately not wired into the
+polling loop — orchestrator correctness must not depend on database
+availability.
 
 **Agent usage / cost parser.** `orchestrator/usage.py` decodes the
 JSONL stdout carried by `AgentResult` into a `UsageMetrics` dataclass:

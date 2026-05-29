@@ -9,6 +9,9 @@
 .env
 .env.local
 
+# local analytics Postgres host volume (see analytics-db/compose.yml)
+analytics-db/data/
+
 # editors
 .idea/
 .vscode/

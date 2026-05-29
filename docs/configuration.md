@@ -71,6 +71,10 @@ When the reviewer agent emits `VERDICT: APPROVED`, `_handle_validating` runs the
 
 The verify gate is the **first** gate after the reviewer agent. GitHub CI remains the later auto-merge gate consulted by `_handle_in_review` — the verify gate does not replace it, it catches regressions locally so an obviously-broken branch never reaches the PR-side merge path.
 
+The verify shell shares the agent's environment filter (`agents._filter_agent_env`, called with `allow_provider_auth=False`): GitHub-token aliases (`GITHUB_TOKEN`, `GH_TOKEN`, …), production-secret-shaped vars (anything matching `*_TOKEN` / `*_KEY` / `*_SECRET` / `*_PASSWORD` / `*_PAT` / `*_CREDENTIAL`, plus the bare names `TOKEN` / `KEY` / `SECRET` / `PASSWORD` / `PAT` / `CREDENTIAL`), credential-file locators (`*_TOKEN_FILE`, `*_KEY_FILE`, `*_SECRET_FILE`, `*_PASSWORD_FILE`, `*_CREDENTIAL_FILE`, `*_CREDENTIALS`, `*_CREDENTIALS_FILE`, plus bare `TOKEN_FILE` / `CREDENTIALS` / `CREDENTIALS_FILE`), write-credential locators (`SSH_AUTH_SOCK`, `SSH_ASKPASS`, `GIT_ASKPASS`, `GIT_SSH_COMMAND` — these aren't secret-shaped but let the subprocess push or authenticate as the operator), AND the agent's own provider-auth keys (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`) are **not** inherited from the orchestrator process. The provider-key strip is stricter than the agent-subprocess case: the agent CLI needs its provider key to reach its model, but a verify command runs operator-configured shell against agent-produced code, and a hostile dependency reading `$ANTHROPIC_API_KEY` would gain billable access to the operator's model account. The locator strip explicitly covers `ORCHESTRATOR_TOKEN_FILE`, `GOOGLE_APPLICATION_CREDENTIALS`, and `AWS_SHARED_CREDENTIALS_FILE` — the verify shell runs as the same OS user, so leaving the pointer in env would let a hostile dependency `cat` the target file.
+
+**Do not embed secret literals in `VERIFY_COMMANDS`.** Verify failures park `awaiting_human` with the offending command string published *verbatim* in the GitHub issue comment (`_park_verify_failure` quotes `verify.command` so the operator can triage), so an inline `ANTHROPIC_API_KEY=sk-… pytest` entry would leak the literal secret to GitHub on the first failure. If a verify command legitimately needs a secret-shaped var (advanced provider auth, a service-account key for an integration test, …), load it from disk inside a wrapper script and reference the script from `VERIFY_COMMANDS` — `VERIFY_COMMANDS=./scripts/run-verify.sh` where the script reads the value from a file outside the worktree (`~/.config/<provider>/key`) and exports it before running tests. The script path is what gets published on failure, not the secret value.
+
 | Variable          | Default | Purpose                                                                                                                |
 | ----------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `VERIFY_COMMANDS` | _(empty — no verification)_ | Ordered shell commands run sequentially in the per-issue worktree on `VERDICT: APPROVED`. Entries are separated by `;` or newlines; blank lines and `#`-comment lines are skipped. Each entry runs via the shell so quoting, pipes, and `&&` work; stdout and stderr are merged into one captured block. Default empty preserves the legacy behavior (no local verification — go straight to `in_review`). |
@@ -154,6 +158,36 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 | `EVENT_LOG_PATH`           | _(unset)_                        | optional JSONL audit sink; one event per line, no built-in rotation. See the [audit event log section in `architecture.md`](architecture.md#audit-event-log-event_log_path) for schema, event kinds, and the pinned-state-is-authoritative precedence rule. |
 | `ANALYTICS_LOG_PATH`       | `LOG_DIR/analytics.jsonl`        | project-local analytics sink for raw metric records (`{ts, repo, issue, event, optional stage, ...}`). Records today: `stage_enter` (label transitions), `stage_evaluation` (per-dispatch timing with `duration_s` and `result=ok\|error`), and `agent_exit` (token / model / cost details). The raw JSONL is intended for later ingestion into a structured database; one record per line keeps that path streaming. Filesystem only — no PostgreSQL, Streamlit, or external services in-process. Set to `` (empty) or to `off` / `disabled` / `none` to disable writes entirely. See the [analytics sink section in `architecture.md`](architecture.md#analytics-sink-analytics_log_path) for the per-event schema and prune semantics. |
 | `ANALYTICS_RETENTION_DAYS` | `90`                             | retention window for `ANALYTICS_LOG_PATH`. The polling loop calls `analytics.prune_old_records(...)` once per tick to remove records whose `ts` is older than this window without touching pinned GitHub state. Set to `0` (or any non-positive value) to keep raw data indefinitely — the prune helper becomes a no-op. |
+| `ANALYTICS_DB_URL`         | _(unset)_                        | libpq connection string for the analytics Postgres service defined in [`../analytics-db/compose.yml`](../analytics-db/compose.yml). Consumed by the operator-driven CLI `python -m orchestrator.analytics_sync`, which replays records from `ANALYTICS_LOG_PATH` into the database with `INSERT ... ON CONFLICT (content_hash) DO NOTHING` so repeated runs are idempotent. NOT read by the polling loop — orchestrator correctness does not depend on database availability. Empty value and the sentinels `off` / `disabled` / `none` (case-insensitive) disable the sync, matching `ANALYTICS_LOG_PATH`'s disable knob. See the [analytics database section in `architecture.md`](architecture.md#analytics-database-analytics-db) for the service contract, schema, malformed-line tolerance, and operator workflow. |
+
+### Local analytics database
+
+`analytics-db/compose.yml` runs a single Postgres 16 container on the orchestrator host as the aggregation target for the JSONL sink. The port is bound to `127.0.0.1` and credentials default to `orchestrator` / `orchestrator`; override `POSTGRES_PASSWORD` (and any other field) via `analytics-db/.env` before exposing the port off-host or storing real data — `docker compose` reads `.env` from the compose-file directory, not the orchestrator root. The endpoint is deliberately shaped as a single libpq URL (`ANALYTICS_DB_URL`) so moving the database to a remote managed Postgres later is a one-line config change.
+
+```sh
+cd analytics-db
+docker compose up -d                  # start the local service (data lives in ./data, gitignored)
+docker compose down                   # stop the container; data on the ./data bind mount is preserved
+docker compose down && rm -rf ./data  # stop and wipe history (the ./data bind is a host directory, not a docker volume, so `down -v` does NOT remove it)
+```
+
+The init script at [`../analytics-db/init/01-schema.sql`](../analytics-db/init/01-schema.sql) runs once when the data volume is empty. It is idempotent (`CREATE TABLE / INDEX IF NOT EXISTS` plus trailing `ALTER TABLE ADD COLUMN IF NOT EXISTS` / `CREATE UNIQUE INDEX IF NOT EXISTS` for `content_hash`), so re-running against an existing instance via `psql -f` is safe — and an instance created before the `content_hash` column existed picks up the new dedup key without dropping the data volume.
+
+To apply or re-apply the schema against an already-running compose service:
+
+```sh
+cd analytics-db
+docker compose exec -T analytics-db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/01-schema.sql'
+```
+
+Run the sync on demand:
+
+```sh
+uv run python -m orchestrator.analytics_sync               # uses the configured env vars
+uv run python -m orchestrator.analytics_sync --log-path /path/to/rotated.jsonl --db-url postgresql://other/db
+```
+
+The sync inserts each record with `INSERT ... ON CONFLICT (content_hash) DO NOTHING`, so repeated runs are idempotent — even after `analytics.prune_old_records` rewrites the JSONL file and shifts source-line numbering. Malformed lines (blank, non-JSON, non-object, or missing the required `ts` / `repo` / `issue` / `event` keys) are logged and counted but never abort the sync; the JSONL file is treated as read-only. A driver-level error mid-stream rolls the transaction back and propagates, so the CLI exits non-zero rather than reporting "success" on a half-inserted batch. With either env var unset (or the JSONL file absent) the sync is a no-op — no connection is attempted, so the CLI is safe to schedule before the Postgres service is deployed.
 
 ## Continuous integration
 
@@ -296,6 +330,7 @@ Each `--once` invocation is a fresh Python process and reads the current `.env` 
 | Setting | When the change takes effect |
 | ------- | ---------------------------- |
 | `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `AUTO_MERGE`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `EVENT_LOG_PATH`, `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
+| `ANALYTICS_DB_URL` | next `python -m orchestrator.analytics_sync` invocation. The polling loop does not read this setting, so changing it does not require restarting the long-running orchestrator |
 | `MAX_PARALLEL_ISSUES_PER_REPO`, `MAX_PARALLEL_ISSUES_GLOBAL` | next Python start. Per-`REPOS` `parallel_limit` overrides take precedence over `MAX_PARALLEL_ISSUES_PER_REPO`, so editing the default only affects entries that omit the fifth field |
 | `DEV_AGENT`, `DECOMPOSE_AGENT` | next Python start, **except** for issues whose pinned state already names a `dev_agent` / `decomposer_agent` / `question_agent` — those keep the pinned spec until the issue reaches `done` or `rejected` (`DECOMPOSE_AGENT` also seeds the question stage on first spawn) |
 | `REVIEW_AGENT` | next reviewer spawn after the next Python start (not pinned per issue) |
