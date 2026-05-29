@@ -31,7 +31,7 @@ Postgres service can run the CLI without configuring it. To move the
 database off-host, repoint the URL -- no code change required.
 
 The sync is operator-driven: not wired into the polling loop. Run
-`python -m orchestrator.analytics_sync` (or import
+`python -m orchestrator.analytics.sync` (or import
 `sync_jsonl_to_postgres` directly) on whatever cadence the operator
 prefers. Wiring it into the tick is out of scope for this child --
 the polling loop's correctness must not depend on database
@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from . import config
+from .. import config
 
 log = logging.getLogger(__name__)
 
@@ -411,7 +411,7 @@ def _configure_cli_logging(level: str) -> None:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m orchestrator.analytics_sync",
+        prog="python -m orchestrator.analytics.sync",
         description=(
             "Replay records from ANALYTICS_LOG_PATH into the Postgres "
             "analytics service at ANALYTICS_DB_URL. Deduplicates by "

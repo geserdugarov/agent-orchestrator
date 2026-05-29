@@ -181,10 +181,10 @@ ANALYTICS_RETENTION_DAYS: int = int(
 )
 
 # libpq URL for the analytics Postgres service consumed by
-# `orchestrator.analytics_sync`. None (the default) leaves the sync
+# `orchestrator.analytics.sync`. None (the default) leaves the sync
 # disabled; the orchestrator's polling tick does not read this var
 # directly, so an unset value has no effect on workflow correctness.
-# The sync is a standalone CLI (`python -m orchestrator.analytics_sync`)
+# The sync is a standalone CLI (`python -m orchestrator.analytics.sync`)
 # that an operator runs on demand to replay JSONL records into Postgres.
 #
 # Sentinel values `off` / `disabled` / `none` (case-insensitive) and the

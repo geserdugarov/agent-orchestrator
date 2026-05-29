@@ -3,7 +3,7 @@
 """Streamlit analytics dashboard.
 
 Interactive view over the `analytics_events` Postgres table
-populated by `orchestrator.analytics_sync`. Reads run through
+populated by `orchestrator.analytics.sync`. Reads run through
 `orchestrator.analytics_read` (which already handles unset DB,
 connection errors, and lazy psycopg import) so this module owns
 only the UI shape: sidebar filter controls, high-level metrics, a

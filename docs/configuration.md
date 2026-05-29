@@ -158,7 +158,7 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 | `EVENT_LOG_PATH`           | _(unset)_                        | optional JSONL audit sink; one event per line, no built-in rotation. See the [audit event log section in `architecture.md`](architecture.md#audit-event-log-event_log_path) for schema, event kinds, and the pinned-state-is-authoritative precedence rule. |
 | `ANALYTICS_LOG_PATH`       | `LOG_DIR/analytics.jsonl`        | project-local analytics sink for raw metric records (`{ts, repo, issue, event, optional stage, ...}`). Records today: `stage_enter` (label transitions), `stage_evaluation` (per-dispatch timing with `duration_s` and `result=ok\|error`), and `agent_exit` (token / model / cost details). The raw JSONL is intended for later ingestion into a structured database; one record per line keeps that path streaming. Filesystem only — no PostgreSQL, Streamlit, or external services in-process. Set to `` (empty) or to `off` / `disabled` / `none` to disable writes entirely. See the [analytics sink section in `architecture.md`](architecture.md#analytics-sink-analytics_log_path) for the per-event schema and prune semantics. |
 | `ANALYTICS_RETENTION_DAYS` | `90`                             | retention window for `ANALYTICS_LOG_PATH`. The polling loop calls `analytics.prune_old_records(...)` once per tick to remove records whose `ts` is older than this window without touching pinned GitHub state. Set to `0` (or any non-positive value) to keep raw data indefinitely — the prune helper becomes a no-op. |
-| `ANALYTICS_DB_URL`         | _(unset)_                        | libpq connection string for the analytics Postgres service defined in [`../analytics-db/compose.yml`](../analytics-db/compose.yml). Consumed by the operator-driven CLI `python -m orchestrator.analytics_sync` (which replays records from `ANALYTICS_LOG_PATH` into the database with `INSERT ... ON CONFLICT (content_hash) DO NOTHING` so repeated runs are idempotent) and by the `orchestrator.analytics_read` data-access functions the Streamlit dashboard calls into. NOT read by the polling loop — orchestrator correctness does not depend on database availability. Empty value and the sentinels `off` / `disabled` / `none` (case-insensitive) disable both surfaces, matching `ANALYTICS_LOG_PATH`'s disable knob; on the read side an unset URL short-circuits every function to an empty / zero-valued result without attempting a connection. See the [analytics database section in `architecture.md`](architecture.md#analytics-database-analytics-db) for the service contract, schema, malformed-line tolerance, read-model functions, and operator workflow. |
+| `ANALYTICS_DB_URL`         | _(unset)_                        | libpq connection string for the analytics Postgres service defined in [`../analytics-db/compose.yml`](../analytics-db/compose.yml). Consumed by the operator-driven CLI `python -m orchestrator.analytics.sync` (which replays records from `ANALYTICS_LOG_PATH` into the database with `INSERT ... ON CONFLICT (content_hash) DO NOTHING` so repeated runs are idempotent) and by the `orchestrator.analytics_read` data-access functions the Streamlit dashboard calls into. NOT read by the polling loop — orchestrator correctness does not depend on database availability. Empty value and the sentinels `off` / `disabled` / `none` (case-insensitive) disable both surfaces, matching `ANALYTICS_LOG_PATH`'s disable knob; on the read side an unset URL short-circuits every function to an empty / zero-valued result without attempting a connection. See the [analytics database section in `architecture.md`](architecture.md#analytics-database-analytics-db) for the service contract, schema, malformed-line tolerance, read-model functions, and operator workflow. |
 
 ### Analytics dashboard end-to-end
 
@@ -176,7 +176,7 @@ The dashboard pipeline is opt-in and layered: the orchestrator writes JSONL (`AN
 4. **Populate Postgres from JSONL.** Run the sync on demand:
 
    ```sh
-   uv run python -m orchestrator.analytics_sync
+   uv run python -m orchestrator.analytics.sync
    ```
 
    Inserts dedupe by `content_hash`, so re-running is idempotent — even across `analytics.prune_old_records` rewrites. The sync is a no-op (no connection attempt, exit `0`) when `ANALYTICS_DB_URL` is unset or disabled, when `ANALYTICS_LOG_PATH` is explicitly disabled (set to `` / `off` / `disabled` / `none` — note the env var **defaults to a real path**, `LOG_DIR/analytics.jsonl`, so leaving it untouched keeps the sink on), or when the JSONL file does not exist on disk yet. Schedule it on whatever cadence you prefer (cron / systemd timer / manual); the polling loop never invokes it.
@@ -214,8 +214,8 @@ docker compose exec -T analytics-db sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGR
 Run the sync on demand:
 
 ```sh
-uv run python -m orchestrator.analytics_sync               # uses the configured env vars
-uv run python -m orchestrator.analytics_sync --log-path /path/to/rotated.jsonl --db-url postgresql://other/db
+uv run python -m orchestrator.analytics.sync               # uses the configured env vars
+uv run python -m orchestrator.analytics.sync --log-path /path/to/rotated.jsonl --db-url postgresql://other/db
 ```
 
 The sync inserts each record with `INSERT ... ON CONFLICT (content_hash) DO NOTHING`, so repeated runs are idempotent — even after `analytics.prune_old_records` rewrites the JSONL file and shifts source-line numbering. Malformed lines (blank, non-JSON, non-object, or missing the required `ts` / `repo` / `issue` / `event` keys) are logged and counted but never abort the sync; the JSONL file is treated as read-only. A driver-level error mid-stream rolls the transaction back and propagates, so the CLI exits non-zero rather than reporting "success" on a half-inserted batch. The sync is a no-op (no connection attempt) when `ANALYTICS_DB_URL` is unset or disabled, when `ANALYTICS_LOG_PATH` is explicitly disabled (`ANALYTICS_LOG_PATH` defaults to `LOG_DIR/analytics.jsonl` — only the empty value or `off` / `disabled` / `none` turns the sink off), or when the JSONL file is absent — so the CLI is safe to schedule before the Postgres service is deployed.
@@ -252,7 +252,7 @@ The dashboard never raises an unhandled exception at the user — every missing-
 
 If a sidebar multi-select is **explicitly cleared** (no items selected), every dependent widget falls back to "no data" — that is the documented "show nothing for this dimension" signal, not a bug. Re-select the items (or hit the `↺` reset chip Streamlit renders on the widget) to restore the default unfiltered shape.
 
-If `python -m orchestrator.analytics_sync` runs cleanly (non-zero `inserted=`) but the dashboard still shows zero rows, double-check the `ANALYTICS_DB_URL` the sync used: passing `--db-url postgresql://other/db` (or running the CLI with a different shell environment) populates a different database than the one the dashboard is reading.
+If `python -m orchestrator.analytics.sync` runs cleanly (non-zero `inserted=`) but the dashboard still shows zero rows, double-check the `ANALYTICS_DB_URL` the sync used: passing `--db-url postgresql://other/db` (or running the CLI with a different shell environment) populates a different database than the one the dashboard is reading.
 
 ## Continuous integration
 
@@ -395,7 +395,7 @@ Each `--once` invocation is a fresh Python process and reads the current `.env` 
 | Setting | When the change takes effect |
 | ------- | ---------------------------- |
 | `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `AUTO_MERGE`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `EVENT_LOG_PATH`, `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
-| `ANALYTICS_DB_URL` | next `python -m orchestrator.analytics_sync` invocation. The polling loop does not read this setting, so changing it does not require restarting the long-running orchestrator |
+| `ANALYTICS_DB_URL` | next `python -m orchestrator.analytics.sync` invocation. The polling loop does not read this setting, so changing it does not require restarting the long-running orchestrator |
 | `MAX_PARALLEL_ISSUES_PER_REPO`, `MAX_PARALLEL_ISSUES_GLOBAL` | next Python start. Per-`REPOS` `parallel_limit` overrides take precedence over `MAX_PARALLEL_ISSUES_PER_REPO`, so editing the default only affects entries that omit the fifth field |
 | `DEV_AGENT`, `DECOMPOSE_AGENT` | next Python start, **except** for issues whose pinned state already names a `dev_agent` / `decomposer_agent` / `question_agent` — those keep the pinned spec until the issue reaches `done` or `rejected` (`DECOMPOSE_AGENT` also seeds the question stage on first spawn) |
 | `REVIEW_AGENT` | next reviewer spawn after the next Python start (not pinned per issue) |

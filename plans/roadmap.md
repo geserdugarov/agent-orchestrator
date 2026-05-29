@@ -217,8 +217,8 @@ shape (typed columns plus `extras` JSONB for forward-compat, plus
 sync's `ON CONFLICT (content_hash)` arbiter resolves without
 repeating the predicate). `ANALYTICS_DB_URL` is
 a single libpq URL so swapping local for remote managed Postgres is a
-one-line repoint. `orchestrator/analytics_sync.py` is the operator-
-driven CLI (`python -m orchestrator.analytics_sync`) that replays
+one-line repoint. `orchestrator/analytics/sync.py` is the operator-
+driven CLI (`python -m orchestrator.analytics.sync`) that replays
 JSONL records into Postgres with `INSERT ... ON CONFLICT
 (content_hash) DO NOTHING`, idempotent across repeated runs and
 across `prune_old_records` rewrites. `orchestrator/analytics_read.py`
