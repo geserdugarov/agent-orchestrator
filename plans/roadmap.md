@@ -211,11 +211,21 @@ one-line repoint. `orchestrator/analytics_sync.py` is the operator-
 driven CLI (`python -m orchestrator.analytics_sync`) that replays
 JSONL records into Postgres with `INSERT ... ON CONFLICT
 (content_hash) DO NOTHING`, idempotent across repeated runs and
-across `prune_old_records` rewrites. The driver is `psycopg[binary]`
-(pinned in `pyproject.toml`) and lazy-imported so the polling tick
-remains driver-free. The sync is deliberately not wired into the
-polling loop — orchestrator correctness must not depend on database
-availability.
+across `prune_old_records` rewrites. `orchestrator/analytics_read.py`
+is the read-side counterpart: a thin data-access module exposing
+plain-Python functions (`get_filter_options`, `get_summary`,
+`get_time_series`, `get_stage_breakdown`, `get_event_breakdown`,
+`get_recent_agent_exits`, `get_issues`, `get_issue_events`) that a
+future dashboard calls into. `distinct_issues` in `get_summary`
+counts `(repo, issue)` pairs so cross-repo windows do not collapse
+same-numbered issues. Unset `ANALYTICS_DB_URL` short-circuits every read to an
+empty / zero-valued result; connection / query failures wrap in a
+single `AnalyticsReadError`. Streamlit-free in this layer so the
+dashboard wiring can land independently. The driver is
+`psycopg[binary]` (pinned in `pyproject.toml`) and lazy-imported in
+both modules so the polling tick remains driver-free. Neither the
+sync nor the read model is wired into the polling loop —
+orchestrator correctness must not depend on database availability.
 
 **Agent usage / cost parser.** `orchestrator/usage.py` decodes the
 JSONL stdout carried by `AgentResult` into a `UsageMetrics` dataclass:
