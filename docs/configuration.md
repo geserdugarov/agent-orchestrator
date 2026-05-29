@@ -195,7 +195,7 @@ The sync inserts each record with `INSERT ... ON CONFLICT (content_hash) DO NOTH
 
 The workflow declares `permissions: contents: read` at the top level so the `GITHUB_TOKEN` minted for each run is read-only and cannot publish artifacts, push tags, or comment on PRs. The job uses no repository secrets, so PRs from forks run safely under the same scope.
 
-[`../.github/dependabot.yml`](../.github/dependabot.yml) opens weekly update PRs for the `github-actions` and `uv` (Python `pyproject.toml` + `uv.lock`) ecosystems. [`../.github/workflows/dependency-review.yml`](../.github/workflows/dependency-review.yml) runs `actions/dependency-review-action` on every pull request and fails the check when a PR introduces a vulnerable or non-compliant dependency.
+[`../.github/dependabot.yml`](../.github/dependabot.yml) opens weekly update PRs for the `github-actions` and `uv` (Python `pyproject.toml` + `uv.lock`) ecosystems. A 30-day `cooldown.default-days` window holds each version update until the upstream release has been out for at least a month, so freshly cut releases ripen before they land here. [`../.github/workflows/dependency-review.yml`](../.github/workflows/dependency-review.yml) runs `actions/dependency-review-action` on every pull request and fails the check when a PR introduces a vulnerable or non-compliant dependency.
 
 ## Run modes
 

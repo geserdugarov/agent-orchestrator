@@ -177,8 +177,10 @@ dispatch, and park-comment-replay prevention.
 top-level `contents: read` token so the workflow is read-only and
 non-publishing; the auto-merge gate consults `pr_combined_check_state`.
 Dependabot opens weekly update PRs for the `github-actions` and `uv`
-ecosystems, and a `dependency-review` workflow blocks PRs that introduce
-vulnerable or non-compliant dependencies.
+ecosystems with a 30-day `cooldown.default-days` window so freshly cut
+upstream releases ripen before they land here, and a `dependency-review`
+workflow blocks PRs that introduce vulnerable or non-compliant
+dependencies.
 
 **Audit event log.** Optional opt-in JSONL sink at `EVENT_LOG_PATH`.
 `GitHubClient.emit_event` appends one record per workflow event
