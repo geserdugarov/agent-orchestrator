@@ -349,13 +349,10 @@ class GitHubClient:
             issue_number=issue_number,
             stage=stage,
         )
-        analytics.append_record(
-            analytics.build_record(
-                repo=self._repo_slug,
-                issue=issue_number,
-                event="stage_enter",
-                stage=stage,
-            )
+        analytics.record_stage_enter(
+            repo=self._repo_slug,
+            issue=issue_number,
+            stage=stage,
         )
 
     def comment(self, issue: Issue, body: str) -> IssueComment:

@@ -287,13 +287,10 @@ class FakeGitHubClient:
             # `stage_enter` record also lands on ANALYTICS_LOG_PATH so
             # non-agent stages contribute timing context to the same sink
             # `_run_agent_tracked` writes to.
-            analytics.append_record(
-                analytics.build_record(
-                    repo=self._repo_slug,
-                    issue=issue.number,
-                    event="stage_enter",
-                    stage=new_label,
-                )
+            analytics.record_stage_enter(
+                repo=self._repo_slug,
+                issue=issue.number,
+                stage=new_label,
             )
 
     def emit_event(
