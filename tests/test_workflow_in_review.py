@@ -1963,6 +1963,9 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         # All get_issues calls (open sweep + per-label closed sweeps)
         # return nothing -- we only care about the call arguments.
         client.repo.get_issues.return_value = iter([])
+        implementing_label = MagicMock(name="implementing_label")
+        documenting_label = MagicMock(name="documenting_label")
+        validating_label = MagicMock(name="validating_label")
         in_review_label = MagicMock(name="in_review_label")
         fixing_label = MagicMock(name="fixing_label")
         resolving_label = MagicMock(name="resolving_conflict_label")
@@ -1970,6 +1973,9 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
 
         def fake_get_label(name: str):
             return {
+                "implementing": implementing_label,
+                "documenting": documenting_label,
+                "validating": validating_label,
                 "in_review": in_review_label,
                 "fixing": fixing_label,
                 "resolving_conflict": resolving_label,
@@ -1986,6 +1992,9 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         looked_up = [
             ca.args[0] for ca in client.repo.get_label.call_args_list
         ]
+        self.assertIn("implementing", looked_up)
+        self.assertIn("documenting", looked_up)
+        self.assertIn("validating", looked_up)
         self.assertIn("in_review", looked_up)
         self.assertIn("fixing", looked_up)
         self.assertIn("resolving_conflict", looked_up)
@@ -1995,8 +2004,11 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
             ca for ca in client.repo.get_issues.call_args_list
             if ca.kwargs.get("state") == "closed"
         ]
-        self.assertEqual(len(closed_calls), 4)
+        self.assertEqual(len(closed_calls), 7)
         labels_passed = [ca.kwargs["labels"] for ca in closed_calls]
+        self.assertIn([implementing_label], labels_passed)
+        self.assertIn([documenting_label], labels_passed)
+        self.assertIn([validating_label], labels_passed)
         self.assertIn([in_review_label], labels_passed)
         self.assertIn([fixing_label], labels_passed)
         self.assertIn([resolving_label], labels_passed)

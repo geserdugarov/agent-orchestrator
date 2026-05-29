@@ -750,7 +750,7 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     # A child closed manually (e.g. via the GitHub UI) before reaching
     # `in_review` is invisible to `list_pollable_issues`, which only
-    # sweeps closed issues for `in_review` (the externally-merged
+    # sweeps closed issues for a small label set (the externally-merged
     # path). Its workflow label stays frozen at whatever it was at
     # close -- ready/blocked/implementing/validating, or none at all
     # -- so without this branch the parent would read the stale label,
@@ -765,6 +765,22 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         if getattr(ci, "state", "open") == "closed"
         and child_labels.get(n) not in ("done", "rejected", "in_review")
     ]
+    # Before parking, retry each "manually closed" candidate against the
+    # PR-merge finalize helper: a human who merges a child's PR closes the
+    # issue, but its workflow label may still be a stale in-flight stage
+    # whose handler has no merged-PR check (e.g. `validating`). The
+    # finalize call flips the child to `done` and runs terminal cleanup so
+    # the parent's aggregation can proceed.
+    if manually_closed:
+        still_closed: list[int] = []
+        for n in manually_closed:
+            child_issue = child_issues[n]
+            child_state = gh.read_pinned_state(child_issue)
+            if _wf._finalize_if_pr_merged(gh, spec, child_issue, child_state):
+                child_labels[n] = "done"
+                continue
+            still_closed.append(n)
+        manually_closed = still_closed
     if manually_closed:
         if state.get("awaiting_human"):
             return
@@ -902,6 +918,20 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         if getattr(ci, "state", "open") == "closed"
         and child_labels.get(n) not in ("done", "rejected", "in_review")
     ]
+    # Mirrors `_handle_blocked`: retry each "manually closed" candidate
+    # against the PR-merge finalize helper before parking, so an
+    # externally-merged child whose label was never advanced past an
+    # in-flight stage no longer strands the umbrella aggregation.
+    if manually_closed:
+        still_closed: list[int] = []
+        for n in manually_closed:
+            child_issue = child_issues[n]
+            child_state = gh.read_pinned_state(child_issue)
+            if _wf._finalize_if_pr_merged(gh, spec, child_issue, child_state):
+                child_labels[n] = "done"
+                continue
+            still_closed.append(n)
+        manually_closed = still_closed
     if manually_closed:
         if state.get("awaiting_human"):
             return

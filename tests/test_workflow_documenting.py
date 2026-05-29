@@ -13,6 +13,8 @@ from orchestrator import workflow
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
+    FakePR,
+    FakePRRef,
     FakeUser,
     make_issue,
 )
@@ -1095,6 +1097,85 @@ class HandleDocumentingDriftTest(
         data = gh.pinned_data(701)
         self.assertEqual(data.get("docs_verdict"), "updated")
         self.assertEqual(data.get("docs_checked_sha"), "new-docs-sha")
+
+
+class HandleDocumentingExternalMergeTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """A human merged the PR before the docs pass ran. The handler must
+    short-circuit to `done` without fetching the branch or spawning the
+    docs agent.
+    """
+
+    def test_external_merge_finalizes_to_done(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(180, label="documenting")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=18000,
+            head_branch="orchestrator/issue-180",
+            head=FakePRRef(sha="cafe1234"),
+            merged=True,
+            state="closed",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            180, pr_number=18000, branch="orchestrator/issue-180",
+            dev_agent="claude", dev_session_id="dev-sess",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((180, "done"), gh.label_history)
+        self.assertIn("merged_at", gh.pinned_data(180))
+        self.assertTrue(issue.closed)
+        mocks["run_agent"].assert_not_called()
+        mocks["_cleanup_terminal_branch"].assert_called_once_with(
+            gh, _TEST_SPEC, 180,
+        )
+
+
+class HandleDocumentingClosedIssueTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """Closed `documenting` issues yielded by the new closed-issue sweep
+    must NOT spawn the docs agent. The handler flips to `rejected`
+    after the external-merge finalize returns False; the closed-PR-
+    without-merge variant additionally runs branch cleanup.
+    """
+
+    def test_closed_documenting_with_closed_pr_runs_cleanup(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(181, label="documenting")
+        issue.closed = True
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=18100,
+            head_branch="orchestrator/issue-181",
+            head=FakePRRef(sha="cafe1234"),
+            merged=False,
+            state="closed",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            181, pr_number=18100, branch="orchestrator/issue-181",
+            dev_agent="claude", dev_session_id="dev-sess",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((181, "rejected"), gh.label_history)
+        self.assertIn("closed_without_merge_at", gh.pinned_data(181))
+        mocks["run_agent"].assert_not_called()
+        mocks["_cleanup_terminal_branch"].assert_called_once_with(
+            gh, _TEST_SPEC, 181,
+        )
 
 
 if __name__ == "__main__":

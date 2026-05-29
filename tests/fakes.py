@@ -229,16 +229,16 @@ class FakeGitHubClient:
 
     def list_pollable_issues(self) -> Iterable[FakeIssue]:
         """Mirror the real client: open issues plus closed issues still
-        labeled `in_review`, `fixing`, `resolving_conflict`, OR
-        `question`. The closed-issue sweep is what catches an external
-        manual merge -- the linked issue auto-closes via "Resolves #N"
-        before the orchestrator can flip its label to `done`. `fixing`
-        and `resolving_conflict` join the sweep because an external
-        merge can land while the orchestrator is mid-fix or
-        mid-resolution too. `question` joins the sweep because a human
-        closing an open Q&A thread is the terminal signal
-        `_handle_question` consumes to finalize to `done` and clean up
-        the per-issue worktree/branch.
+        labeled with a non-terminal workflow label. The closed-issue
+        sweep is what catches an external manual merge -- the linked
+        issue auto-closes via "Resolves #N" before the orchestrator can
+        flip its label to `done`. `implementing`, `documenting`, and
+        `validating` join the legacy sweep set (`in_review`, `fixing`,
+        `resolving_conflict`, `question`) so a closed-with-merged-PR
+        issue stuck at an earlier stage surfaces here and the per-handler
+        `_finalize_if_pr_merged` check can flip it to `done` -- an
+        umbrella parent's aggregation otherwise waits forever on the
+        stale child label.
         """
         out: list[FakeIssue] = []
         seen: set[int] = set()
@@ -252,6 +252,7 @@ class FakeGitHubClient:
                 continue
             if any(
                 l.name in (
+                    "implementing", "documenting", "validating",
                     "in_review", "fixing", "resolving_conflict", "question",
                 )
                 for l in issue.labels

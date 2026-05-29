@@ -3954,3 +3954,85 @@ def shutil_quote(s: str) -> str:
     `shlex` at module scope when it is only used by one test."""
     import shlex
     return shlex.quote(s)
+
+
+class HandleValidatingExternalMergeTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """A human merged the PR while the reviewer was queued. `_handle_validating`
+    must short-circuit to `done` instead of running the reviewer against a
+    branch that already landed.
+    """
+
+    def test_external_merge_finalizes_to_done(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(120, label="validating")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=12000,
+            head_branch="orchestrator/issue-120",
+            head=FakePRRef(sha="cafe1234"),
+            merged=True,
+            state="closed",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            120, pr_number=12000, branch="orchestrator/issue-120",
+            dev_agent="claude", dev_session_id="dev-sess",
+            review_round=0,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((120, "done"), gh.label_history)
+        self.assertIn("merged_at", gh.pinned_data(120))
+        self.assertTrue(issue.closed)
+        # Reviewer was not spawned.
+        mocks["run_agent"].assert_not_called()
+        # Terminal cleanup runs for the external-merge arc.
+        mocks["_cleanup_terminal_branch"].assert_called_once_with(
+            gh, _TEST_SPEC, 120,
+        )
+
+
+class HandleValidatingClosedIssueTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """Closed `validating` issues yielded by the new closed-issue sweep
+    must NOT relabel back to `in_review` via the reviewer agent. The
+    handler now flips to `rejected` after the external-merge finalize
+    returns False.
+    """
+
+    def test_closed_validating_with_open_pr_flips_to_rejected(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(121, label="validating")
+        issue.closed = True
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=12100,
+            head_branch="orchestrator/issue-121",
+            head=FakePRRef(sha="cafe1234"),
+            merged=False,
+            state="open",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            121, pr_number=12100, branch="orchestrator/issue-121",
+            dev_agent="claude", dev_session_id="dev-sess",
+            review_round=0,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((121, "rejected"), gh.label_history)
+        self.assertIn("closed_without_merge_at", gh.pinned_data(121))
+        mocks["run_agent"].assert_not_called()
+        # The PR is still open: do not clobber it via cleanup.
+        mocks["_cleanup_terminal_branch"].assert_not_called()

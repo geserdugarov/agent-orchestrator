@@ -360,6 +360,21 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
 
     state = gh.read_pinned_state(issue)
 
+    # External merge short-circuit: a human merged the PR (or the PR was
+    # merged out-of-band) before the orchestrator finished implementing.
+    # Finalize to `done` here rather than spinning the dev session against
+    # a branch that already landed.
+    if _wf._finalize_if_pr_merged(gh, spec, issue, state):
+        return
+
+    # Closed-issue counterpart: the closed-`implementing` sweep yields
+    # issues a human closed without a merged PR (rejected outright,
+    # closed mid-implementation, or closed alongside a closed-without-
+    # merge PR). Flip to `rejected` so the dev agent is not spawned
+    # against a closed issue.
+    if _wf._finalize_if_issue_closed(gh, spec, issue, state):
+        return
+
     # Stale question-stage park: the operator relabeled from `question`
     # to `implementing`. `_handle_question` parks with
     # `awaiting_human=True` and `park_reason="question_*"` so its own

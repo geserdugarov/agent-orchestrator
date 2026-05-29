@@ -58,6 +58,18 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")
 
+    # External merge short-circuit: if the PR was merged before the docs
+    # pass ran, finalize to `done` rather than fetching the branch and
+    # running the documenting agent against an already-landed PR.
+    if _wf._finalize_if_pr_merged(gh, spec, issue, state):
+        return
+
+    # Closed-issue counterpart: the closed-`documenting` sweep yields
+    # issues a human closed without a merged PR. Flip to `rejected` so
+    # the docs agent does not run against a closed issue.
+    if _wf._finalize_if_issue_closed(gh, spec, issue, state):
+        return
+
     if pr_number is None:
         # Documenting only runs against an existing PR worktree.
         # Without a pinned `pr_number` we cannot anchor on the dev's

@@ -815,3 +815,154 @@ def _park_awaiting_human(
         stage=gh.workflow_label(issue),
         reason=reason,
     )
+
+
+def _finalize_if_pr_merged(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+) -> bool:
+    """Flip the issue to `done` when its linked PR has already merged.
+
+    Mirrors the terminal-merge arc in `_handle_in_review` / `_handle_fixing`
+    / `_handle_resolving_conflict` so the same finalize path can fire from
+    any stage. Used by handlers that previously had no merged-PR check
+    (`_handle_implementing`, `_handle_documenting`, `_handle_validating`)
+    and by the umbrella / blocked aggregation when a child PR was merged
+    externally but the child's workflow label was never advanced past the
+    in-flight stage -- the umbrella's all-`done` aggregation would
+    otherwise wait forever for that stale child.
+
+    Returns True when the helper finalized the issue (caller must return
+    immediately); False when there is nothing to do (no `pr_number`, PR
+    fetch failed, or PR is not merged).
+    """
+    pr_number = state.get("pr_number")
+    if pr_number is None:
+        return False
+    try:
+        pr = gh.get_pr(int(pr_number))
+    except Exception:
+        log.exception(
+            "issue=#%s could not fetch PR #%s while checking for "
+            "external merge; leaving alone", issue.number, pr_number,
+        )
+        return False
+    if gh.pr_state(pr) != "merged":
+        return False
+    stage = gh.workflow_label(issue)
+    state.set("merged_at", _now_iso())
+    gh.set_workflow_label(issue, "done")
+    gh.write_pinned_state(issue, state)
+    gh.emit_event(
+        "pr_merged",
+        issue_number=issue.number,
+        stage=stage,
+        pr_number=int(pr_number),
+        sha=getattr(pr.head, "sha", None) or None,
+        merge_method="external",
+        review_round=int(state.get("review_round") or 0),
+        conflict_round=state.get("conflict_round"),
+        retry_count=state.get("retry_count"),
+    )
+    if getattr(issue, "state", "open") != "closed":
+        try:
+            issue.edit(state="closed")
+        except Exception:
+            log.exception(
+                "issue=#%s could not close after detecting external merge",
+                issue.number,
+            )
+    _cleanup_terminal_branch(gh, spec, issue.number)
+    return True
+
+
+def _finalize_if_issue_closed(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+) -> bool:
+    """Flip a closed-but-not-merged issue to `rejected`.
+
+    Pairs with `_finalize_if_pr_merged`: that helper drains the merged-PR
+    arc, this one drains the closed-issue counterpart so closed issues
+    yielded by the new `implementing` / `documenting` / `validating`
+    sweep entries do NOT spawn the dev / docs / reviewer agent, push to
+    the per-issue branch, or post on the now-closed issue thread.
+    `_handle_in_review` / `_handle_fixing` carry equivalent guards
+    inline via their PR-state arcs; callers in the new sweep stages
+    invoke this helper right after `_finalize_if_pr_merged` so the
+    merged case is drained first and only the rejected case lands here.
+
+    Branch cleanup follows the in_review / fixing convention: only when
+    the linked PR itself is also closed (a closed PR without merge is
+    `pr_closed_without_merge`-emit territory and the branch is dead
+    weight). An open PR with a manually-closed issue is left alone so
+    the operator can salvage / reopen it; the orchestrator-owned branch
+    and worktree stay until the PR closes.
+
+    Returns True when the caller must NOT continue the handler this
+    tick: the issue was finalized to `rejected`, OR the issue is closed
+    but the linked PR state could not be confirmed yet (deferred to a
+    later tick so a transient fetch failure cannot permanently mis-
+    label a merged-PR issue, AND so the closed issue is not driven
+    through normal dev / docs / reviewer work). Returns False only
+    when the issue is still open and the handler should proceed.
+    """
+    if getattr(issue, "state", "open") != "closed":
+        return False
+    pr_number = state.get("pr_number")
+    pr = None
+    if pr_number is not None:
+        # Read the PR state BEFORE mutating issue state.
+        # `_finalize_if_pr_merged` ran first and returned False, but
+        # that helper returns False on BOTH "not merged" AND "could
+        # not fetch PR" -- the two are indistinguishable to the
+        # caller. Flipping to `rejected` without our own successful
+        # fetch could permanently terminal-label a merged-PR issue
+        # whose merge finalize hit a transient GitHub / network
+        # failure. Defer instead so the next tick's
+        # `_finalize_if_pr_merged` can re-attempt the merged path
+        # against a fresh PR state -- but still return True so the
+        # caller does NOT continue spawning the dev / docs / reviewer
+        # agent against an issue that is already closed.
+        try:
+            pr = gh.get_pr(int(pr_number))
+        except Exception:
+            log.exception(
+                "issue=#%s could not fetch PR #%s while finalizing a "
+                "closed issue; deferring (next tick retries the "
+                "merged-PR path)", issue.number, pr_number,
+            )
+            return True
+        if gh.pr_state(pr) == "merged":
+            # Our fetch succeeded and the PR IS merged -- the prior
+            # `_finalize_if_pr_merged` call hit a transient fetch
+            # failure of its own. Defer so the next tick runs the
+            # full merged-path cleanup (stamp `merged_at`, flip to
+            # `done`, emit `pr_merged` with `merge_method="external"`,
+            # cleanup branch). Flipping to `rejected` here would
+            # permanently mis-label this issue; returning True
+            # without state changes keeps the dev / docs / reviewer
+            # agent from running against a closed issue this tick.
+            return True
+    stage = gh.workflow_label(issue)
+    state.set("closed_without_merge_at", _now_iso())
+    gh.set_workflow_label(issue, "rejected")
+    gh.write_pinned_state(issue, state)
+    if pr is None:
+        return True
+    if gh.pr_state(pr) != "closed":
+        # Open PR + closed issue: do NOT emit `pr_closed_without_merge`
+        # (the PR is still open and may be reopened / salvaged) and do
+        # NOT clean up the branch. Mirrors the in_review / fixing
+        # open-PR + closed-issue arc.
+        return True
+    gh.emit_event(
+        "pr_closed_without_merge",
+        issue_number=issue.number,
+        stage=stage,
+        pr_number=int(pr_number),
+        sha=getattr(pr.head, "sha", None) or None,
+        review_round=int(state.get("review_round") or 0),
+        conflict_round=state.get("conflict_round"),
+        retry_count=state.get("retry_count"),
+    )
+    _cleanup_terminal_branch(gh, spec, issue.number)
+    return True

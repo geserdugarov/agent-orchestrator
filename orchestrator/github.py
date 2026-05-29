@@ -200,8 +200,8 @@ class GitHubClient:
         return GitHubClient(token=self._token, repo_slug=self._repo_slug)
 
     def list_pollable_issues(self, since: Optional[datetime] = None) -> Iterable[Issue]:
-        """Open issues plus closed issues still labeled `in_review`,
-        `fixing`, `resolving_conflict`, or `question`.
+        """Open issues plus closed issues still labeled with any non-terminal
+        workflow label.
 
         The closed-issue sweep is what makes the manual-merge path work:
         when a human merges a PR with a `Resolves #N` footer, GitHub
@@ -217,6 +217,15 @@ class GitHubClient:
         closes the issue, the PR moves to merged, and the matching
         handler's terminal branch finalizes the label -- but only if
         the closed issue actually surfaces here.
+
+        `implementing`, `documenting`, and `validating` join the sweep
+        for the same reason: a human who merges a PR early closes the
+        issue, and the per-stage handler's `_finalize_if_pr_merged`
+        check (added for these labels alongside the legacy in_review /
+        fixing / resolving_conflict terminals) flips the label to
+        `done`. Without the sweep that finalize would never fire on a
+        closed issue stuck at an early stage, and a parent umbrella
+        would aggregate on the stale label forever.
 
         `question` joins the sweep so a human closing an open Q&A thread
         is recognized as a terminal signal: `_handle_question` finalizes
@@ -250,6 +259,7 @@ class GitHubClient:
         # by issuing one query per label (the GitHub Issues API treats
         # `labels` as AND, not OR).
         for label_name in (
+            "implementing", "documenting", "validating",
             "in_review", "fixing", "resolving_conflict", "question",
         ):
             try:

@@ -110,7 +110,17 @@ approval + no veto + mergeable + green CI → SHA-pinned merge → `done`.
 Three independent watermarks separate IssueComment / PullRequestComment
 / PullRequestReview namespaces; the route to `fixing` deliberately
 leaves them un-advanced so the fixing handler can read the triggering
-comments.
+comments. A cross-stage `_finalize_if_pr_merged` check at the entry of
+`implementing`, `documenting`, and `validating` (and during the
+umbrella / blocked manually-closed child recovery) catches an
+externally-merged PR that landed before the issue reached `in_review`,
+so the issue still flips to `done` and the umbrella aggregation does
+not stall on a stale child label. A paired `_finalize_if_issue_closed`
+runs right after at the same three entries: closed `implementing` /
+`documenting` / `validating` issues yielded by the now-expanded
+closed-issue sweep flip to `rejected` instead of spawning the dev /
+docs / reviewer agent, with branch cleanup only when the linked PR
+is also closed.
 
 **Fixing stage.** `fixing` sits between `in_review` and `documenting`
 in the PR-feedback fix loop. `_handle_fixing` rescans unread feedback

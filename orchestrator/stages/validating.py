@@ -588,6 +588,21 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")
 
+    # External merge short-circuit: a human merged the PR while the
+    # reviewer was queued. Finalize to `done` here rather than running
+    # the reviewer agent against a branch that already landed; the
+    # in_review / fixing handlers have an equivalent terminal check.
+    if _wf._finalize_if_pr_merged(gh, spec, issue, state):
+        return
+
+    # Closed-issue counterpart: the closed-`validating` sweep yields
+    # issues a human closed without a merged PR (the operator rejected
+    # the change mid-review, or the PR was closed-without-merge). Flip
+    # to `rejected` so the reviewer agent does not spawn against a
+    # closed issue and the PR is not relabeled back to `in_review`.
+    if _wf._finalize_if_issue_closed(gh, spec, issue, state):
+        return
+
     # User-content drift: a human edited the issue title/body while the
     # reviewer was running. Re-decomposing now would discard the dev's
     # already-pushed work, so notify the human, resume the dev session on

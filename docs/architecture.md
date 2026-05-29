@@ -29,11 +29,31 @@ orchestrator/
   workflow.py           — slim facade: per-repo tick loop, `_FAMILY_AWARE_LABELS`
                            partitioning, `_process_issue` label dispatcher,
                            `_handle_pickup`, `_park_awaiting_human`,
-                           `_run_agent_tracked`. Re-exports the cross-module
-                           helpers and the stage entry handlers from the
-                           modules below under their original names so existing
-                           test patches (`patch.object(workflow, "_foo", ...)`)
-                           keep working. Stage-private helpers that no other
+                           `_finalize_if_pr_merged` (cross-stage external-merge
+                           short-circuit reused by the `implementing` /
+                           `documenting` / `validating` entry checks and by
+                           the `_handle_blocked` / `_handle_umbrella` child
+                           recovery), `_finalize_if_issue_closed` (closed-but-
+                           not-merged counterpart that flips the issue to
+                           `rejected`, emits `pr_closed_without_merge` when
+                           a closed PR is pinned, and runs
+                           `_cleanup_terminal_branch` only for the closed-PR
+                           case; called right after `_finalize_if_pr_merged`
+                           in the three new sweep handlers. Defers without
+                           mutating state when the pinned PR cannot be
+                           fetched, or when the second fetch reveals the
+                           PR IS actually merged -- in either case the
+                           helper still returns True so the caller does
+                           NOT continue dev / docs / reviewer work on a
+                           closed issue, and the next tick re-attempts
+                           `_finalize_if_pr_merged` against a fresh PR
+                           state),
+                           `_run_agent_tracked`. Re-exports the
+                           cross-module helpers and the stage entry handlers
+                           from the modules below under their original names
+                           so existing test patches
+                           (`patch.object(workflow, "_foo", ...)`) keep
+                           working. Stage-private helpers that no other
                            module needs (e.g. `_bump_in_review_watermarks`,
                            `_auto_merge_gates_pass`,
                            `_seed_legacy_in_review_watermarks`,
@@ -225,7 +245,7 @@ A `gh.get_pr` failure is treated as "leave alone" so the handler retries from a 
 
 Rebase is used across both paths to keep issue branches linear after sibling PRs land. Dirty worktrees (in-flight agent edits, crash-recovered trees) are skipped, and on a pre-PR content conflict the rebase is aborted so the worktree stays on its pre-rebase SHA. For PR branches, every pushed rebase resets `review_round`, so the reviewer must approve the rewritten head before auto-merge can proceed. Failures are logged and swallowed; keeping every issue moving matters more than perfect base sync.
 
-Then `gh.list_pollable_issues()` yields all open non-PR issues plus closed non-PR issues still labeled `in_review`, `fixing`, `resolving_conflict`, or `question`. The closed-`in_review` / `fixing` / `resolving_conflict` sweep is what makes the manual-merge path land cleanly: a human-merged PR with a `Resolves #N` footer auto-closes issue N before the orchestrator can flip the label, and without the sweep `_handle_in_review` / `_handle_fixing` / `_handle_resolving_conflict` would never run on it. The closed-`question` sweep does the same for the Q&A path: a human closing the issue is the terminal signal `_handle_question` consumes to finalize the issue to `done` and clean up the per-issue worktree/branch.
+Then `gh.list_pollable_issues()` yields all open non-PR issues plus closed non-PR issues still labeled with any non-terminal workflow label (`implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`, or `question`). The closed-`in_review` / `fixing` / `resolving_conflict` sweep is what makes the manual-merge path land cleanly: a human-merged PR with a `Resolves #N` footer auto-closes issue N before the orchestrator can flip the label, and without the sweep `_handle_in_review` / `_handle_fixing` / `_handle_resolving_conflict` would never run on it. The closed-`implementing` / `documenting` / `validating` sweep covers the same external-merge race when the human merges the PR before the orchestrator reached `in_review`: those handlers each run `_finalize_if_pr_merged` at entry, so surfacing the closed issue here is what lets them flip the label to `done` instead of leaving it stuck at the in-flight stage (an umbrella parent would otherwise aggregate on the stale child label forever). The closed-`question` sweep does the same for the Q&A path: a human closing the issue is the terminal signal `_handle_question` consumes to finalize the issue to `done` and clean up the per-issue worktree/branch.
 
 For every yielded issue:
 
@@ -385,9 +405,9 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
   2. If no `children` and no `parent_number` (manual relabel suspected), park awaiting human.
   3. Read each child's current workflow label via `gh.get_issue(n)` + `gh.workflow_label(child)`.
   4. If any child is `rejected` → park parent awaiting human (the human decides whether to re-decompose or close).
-  5. If any child is closed (`state=="closed"`) but its label is not `done`, `rejected`, or `in_review` → park parent awaiting human.
+  5. If any child is closed (`state=="closed"`) but its label is not `done`, `rejected`, or `in_review` → retry `_finalize_if_pr_merged(gh, spec, child, child_state)` against each such child before parking. If the child's pinned `pr_number` resolves to a merged PR, the helper flips the child to `done` (with the same `merged_at` stamp / `pr_merged` event / terminal cleanup as the per-stage finalize) and the parent treats that child as `done` for the aggregation. Only children whose PR is not merged (or who have no pinned `pr_number`) fall through to the manually-closed park.
 
-     A child closed manually (e.g. via the GitHub UI) before reaching `in_review` is invisible to `list_pollable_issues` (which only sweeps closed-but-`in_review` for the externally-merged path), so its workflow label stays frozen and the parent would otherwise wait forever for it. `in_review` is intentionally excluded — the closed-`in_review` sweep finalizes that transient on the next tick.
+     This finalize-on-poll is what stops a human merge of a child's PR — while the child label was still a stale in-flight stage like `validating` — from stranding the umbrella aggregation. A child closed manually before reaching `in_review` with no merged PR is still invisible to `list_pollable_issues` (the closed-issue sweep only yields the non-terminal label set, not closed-without-merge issues that happen to share those labels), so its workflow label stays frozen and the parent surfaces it to a human as before. `in_review` is intentionally excluded — the closed-`in_review` sweep finalizes that transient on the next tick.
   6. If every child is `done` → post a summary comment, flip parent → `ready`. The next tick `_handle_ready` picks it up and the implementer takes over.
   7. Otherwise walk children: any `blocked` child whose recorded dependencies are all `done` gets relabeled `ready`. A child with no recorded deps is also flipped (vacuous all-done over an empty list) — this recovers no-dep children that the decomposer's same-tick activation step left as `blocked`.
 
@@ -397,7 +417,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 ### `_handle_umbrella` (label `umbrella`)
 - **Trigger**: each tick while the label is `umbrella` (only ever a parent — set by the decomposer when the manifest's `umbrella` boolean is true).
 - **Input**: pinned `children` and optional `dep_graph` on the parent.
-- **Internal flow**: mirrors `_handle_blocked` for the rejected / manually-closed checks and the dep-graph activation walk; the only difference is the all-done terminal.
+- **Internal flow**: mirrors `_handle_blocked` for the rejected / manually-closed checks and the dep-graph activation walk; the only difference is the all-done terminal. The same `_finalize_if_pr_merged` recovery for `manually_closed` children runs here, so an externally-merged child whose label never advanced past an in-flight stage no longer strands the umbrella aggregation.
 
   An umbrella parent has no implementation work of its own — its purpose is purely aggregation — so when every child reaches `done`, the handler posts a checkmark comment, stamps `umbrella_resolved_at`, sets label `done`, and closes the issue (no flip back through `ready`/`implementing`).
 
@@ -408,6 +428,11 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 - **Trigger**: each tick while the label is `implementing`.
 - **Input**: issue + comments + pinned state (`dev_agent`/`dev_session_id`, retry-budget keys, etc.).
 - **Internal flow**:
+  0. **External-merge short-circuit.** Before any dev work runs, the handler calls `_finalize_if_pr_merged(gh, spec, issue, state)`: when a `pr_number` is pinned and the PR has already merged (an operator cherry-picked the change, or a sibling branch landed and the human merged this PR early), the helper stamps `merged_at`, flips the label to `done`, emits `pr_merged` with `merge_method="external"`, closes the issue if it is still open, and runs `_cleanup_terminal_branch`. The handler then returns — the dev session is not resumed, no fresh spawn fires, and the retry budget is untouched.
+
+     Immediately after that returns False, the handler also calls `_finalize_if_issue_closed(gh, spec, issue, state)`: now that the closed-issue sweep yields closed-`implementing` issues, a human-closed issue must NOT spawn the dev agent against a closed thread. The helper stamps `closed_without_merge_at`, flips the label to `rejected`, and writes pinned state; it then emits `pr_closed_without_merge` + runs `_cleanup_terminal_branch` only when the linked PR is also closed (an open PR with a manually-closed issue is left alone so the operator can salvage / reopen it, mirroring the in_review / fixing arc; a closed implementing issue with no `pr_number` flips to `rejected` without emitting the PR event or touching the branch).
+
+     When the pinned PR cannot be fetched, the helper defers without writing any state — `_finalize_if_pr_merged` returns False on BOTH "not merged" and "could not fetch PR", so flipping to `rejected` without a successful fetch here would permanently terminal-label a merged-PR issue whose merge finalize hit a transient GitHub / network failure. The same deferral fires when the closed-issue helper's own fetch reveals the PR IS actually merged (the prior merged finalize raced with a real fetch failure): rather than incorrectly mis-labeling a merged-PR issue as `rejected`, the helper returns True without state changes so the caller stops at the closed-issue guard this tick and the next tick re-runs `_finalize_if_pr_merged` against a fresh PR state.
   1. If `awaiting_human`: re-check for new human comments since `last_action_comment_id`; if any, **resume** the dev session via `run_agent(dev_agent, ...)` with that text. If no new comments, return.
 
      The full spec persisted in `dev_agent` — backend AND configured CLI args (model, reasoning effort, etc.) — is re-parsed via `_read_dev_session` and reused for the resume; flipping `DEV_AGENT` in env does not migrate in-flight issues (neither the backend nor the args).
@@ -434,6 +459,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 - **Trigger**: each tick while label is `validating` (set by `_handle_documenting` after its docs pass pushes a `docs:` commit or emits `DOCS: NO_CHANGE` — `_handle_implementing` hands off to `documenting` after PR open, NOT directly to `validating`).
 - **Input**: PR #, branch, `dev_agent`/`dev_session_id` (or legacy `codex_session_id`), pinned state, `review_round`.
 - **Internal flow**:
+  0. **External-merge short-circuit.** Identical to the implementing entry check: `_finalize_if_pr_merged` flips the label to `done` (and runs cleanup) when the PR was merged externally while the reviewer was queued. The reviewer is not spawned for an already-landed branch. `_handle_documenting` carries the same check at its own entry, so any non-PR-aware handler short-circuits identically. The same handler also chains `_finalize_if_issue_closed` right after, so a closed-`validating` issue (operator rejected mid-review, or the linked PR closed without merge) flips to `rejected` instead of reaching the reviewer and relabeling to `in_review`; the closed-PR variant additionally emits `pr_closed_without_merge` + runs `_cleanup_terminal_branch`, the open-PR variant leaves the branch alone for operator salvage. The same fetch-failure / merged-PR deferral the implementing handler relies on applies here too: when the linked PR's state cannot be confirmed, the closed-issue helper returns True without state changes so the reviewer does not spawn against a closed issue this tick and the next tick re-attempts `_finalize_if_pr_merged`.
   1. Awaiting-human path: same resume mechanic as implementing (resume on the dev's locked spec (backend + args)); on a successful pushed fix, bump `review_round` and relabel to `documenting` so the docs pass runs against the new head before the reviewer re-evaluates next tick. A no-commit / ACK reply keeps the issue on `validating`.
 
      Exception: on a `review_cap` park (`park_reason="review_cap"`), the human reply does **not** wake the dev session — resuming would just bump past the cap on the next tick. Instead, the operator must post `/orchestrator add-review-rounds N` on its own line; that resets `review_round` to `MAX_REVIEW_ROUNDS - N`, clears the park flags, and falls through to spawn the reviewer this same tick. A plain reply (or one with an invalid `N`) leaves the issue parked.
@@ -679,8 +705,8 @@ Extras whose value is `None` are dropped, so callers can pass optional context (
 | `review_verdict` | `_handle_validating` after `_parse_review_verdict` reads the reviewer's last message | `verdict` (`approved` / `changes_requested` / `unknown`), `review_round`, `pr_number`, `session_id` |
 | `park_awaiting_human` | every `_park_awaiting_human` call site, plus `_on_question`, `_on_dirty_worktree`, `_park_verify_failure`, and the question-stage `_park_question` funnel | `stage` (read from the current workflow label, not passed in), `reason` (`agent_timeout`, `push_failed`, `failed_checks`, `agent_question`, `agent_silent`, `dirty_worktree`, `reviewer_timeout` / `reviewer_failed`, `missing_pr_number`, `verify_failed` / `verify_timeout` / `verify_dirty` / `verify_head_changed`, `question_answer` / `question_silent` / `question_timeout` / `question_commits` / `question_dirty` / `question_unsafe_relabel`, ...) |
 | `pr_opened` | `_on_commits` after `gh.open_pr` succeeds | `pr_number`, `branch`, `sha`, `retry_count` |
-| `pr_merged` | `_handle_in_review`, `_handle_fixing`, and `_handle_resolving_conflict` terminal arcs (external merge OR successful `gh.merge_pr` under AUTO_MERGE) | `pr_number`, `sha`, `merge_method` (`external` / `squash`), `check_state`, `review_round`, `conflict_round`, `retry_count` |
-| `pr_closed_without_merge` | `_handle_in_review`, `_handle_fixing`, and `_handle_resolving_conflict` when the PR is closed without merge | `pr_number`, `sha`, `review_round`, `conflict_round`, `retry_count` |
+| `pr_merged` | `_handle_in_review`, `_handle_fixing`, and `_handle_resolving_conflict` terminal arcs (external merge OR successful `gh.merge_pr` under AUTO_MERGE); plus `_finalize_if_pr_merged` from `_handle_implementing` / `_handle_documenting` / `_handle_validating` entry checks and from the `_handle_blocked` / `_handle_umbrella` manually-closed child recovery (all `merge_method="external"`) | `pr_number`, `sha`, `merge_method` (`external` / `squash`), `check_state`, `review_round`, `conflict_round`, `retry_count`; `stage` reflects the workflow label at finalize entry (`implementing`, `documenting`, `validating`, `in_review`, `fixing`, or `resolving_conflict`) |
+| `pr_closed_without_merge` | `_handle_in_review`, `_handle_fixing`, and `_handle_resolving_conflict` when the PR is closed without merge; plus `_finalize_if_issue_closed` from the `_handle_implementing` / `_handle_documenting` / `_handle_validating` entry checks, but only when the linked PR itself is also closed (an open PR with a manually-closed issue is left alone and emits nothing here, mirroring the in_review / fixing arc; a closed issue with no `pr_number` flips to `rejected` without emitting either) | `pr_number`, `sha`, `review_round`, `conflict_round`, `retry_count`; `stage` reflects the workflow label at finalize entry |
 | `merge_attempt` | AUTO_MERGE `gh.merge_pr` call AND every `git rebase origin/<base>` inside `_handle_resolving_conflict` | `method` (`squash` / `base_rebase`), `result` (`success` / `failed` / `conflict`), `pr_number`, `sha`, `conflict_round`, `review_round`, `retry_count` |
 | `conflict_round` | `_route_pr_worktree_to_resolving_conflict` and the in_review unmergeable arc emit `action="entered"`; every increment site (`_emit_conflict_round_incremented`) emits `action="incremented"` with `outcome` | `pr_number`, `conflict_round`, `review_round`, `retry_count`, `outcome` (for increments), `sha` |
 
