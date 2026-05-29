@@ -1,0 +1,44 @@
+# Local Postgres analytics service for the orchestrator.
+#
+# Brings up a single Postgres 16 container on the same host as the
+# orchestrator. The service contract documented in
+# `docs/architecture.md` (analytics database section) is intentionally
+# endpoint-shaped (host + port + db + user + password), so an operator
+# can later replace this compose-managed instance with a managed remote
+# Postgres without touching the orchestrator code -- only the
+# `ANALYTICS_DB_URL` consumer added in a follow-up child needs to
+# repoint.
+#
+# Defaults are chosen for a single-operator local box:
+#   * The port binding is pinned to 127.0.0.1 so the database is not
+#     reachable off the host even if the firewall is permissive.
+#   * Credentials default to `orchestrator` / `orchestrator`; override
+#     via the sibling `.env` (see `.env.example`) before exposing the
+#     port off-host or storing real data.
+#   * The data volume is a host bind (`./data`) so an operator can take
+#     a backup with `tar` / `rsync` and so `docker compose down`
+#     followed by `up` does not lose history. `data/` is .gitignored.
+#   * The init directory is mounted read-only so the container cannot
+#     mutate the DDL on disk.
+
+services:
+  analytics-db:
+    image: postgres:16
+    container_name: orchestrator-analytics-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-orchestrator_analytics}
+      POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orchestrator}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER:-orchestrator}" -d "$${POSTGRES_DB:-orchestrator_analytics}"
+      interval: 10s
+      timeout: 5s
+      retries: 5

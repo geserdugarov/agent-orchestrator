@@ -193,8 +193,20 @@ truncate or rotate.
 `prune_old_records`; `ANALYTICS_RETENTION_DAYS` (default 90) bounds
 retention and the polling loop prunes once per tick. Three event kinds
 write today: `stage_enter`, `stage_evaluation` (timing per dispatch),
-and `agent_exit` (token / cost). Filesystem-only — no DB or external
-services in-process.
+and `agent_exit` (token / cost). Orchestrator-side remains
+filesystem-only — no DB driver or external services in-process.
+
+**Analytics database foundation.** Repo-local `analytics-db/` ships
+the Docker Compose service (`postgres:16`, `127.0.0.1`-pinned,
+host-bind data volume), the `analytics_events` schema mirroring the
+JSONL record shape (typed columns plus `extras` JSONB for
+forward-compat plus `source_path` / `source_line` for ingest dedup),
+and the operator-facing env knobs. `ANALYTICS_DB_URL` is reserved in
+`.env.example` / `docs/configuration.md` as a single libpq URL so
+swapping local for remote managed Postgres later is a one-line
+repoint. The orchestrator does not yet read `ANALYTICS_DB_URL` and
+`pyproject.toml` carries no Postgres driver — the JSONL→Postgres
+replay path is the open follow-up.
 
 **Agent usage / cost parser.** `orchestrator/usage.py` decodes the
 JSONL stdout carried by `AgentResult` into a `UsageMetrics` dataclass:
