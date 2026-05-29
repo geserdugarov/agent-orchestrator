@@ -702,7 +702,7 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 
 ## Analytics sink (`ANALYTICS_LOG_PATH`)
 
-Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`. The audit event log is wired through `GitHubClient.emit_event` for stage transitions / agent lifecycle events; the analytics sink is a foundation layer for future aggregation and reporting work that opts in or out independently via the `ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` config knobs and the helpers in `orchestrator/analytics.py`.
+Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`. The audit event log is wired through `GitHubClient.emit_event` for stage transitions / agent lifecycle events; the analytics sink is a foundation layer for future aggregation and reporting work that opts in or out independently via the `ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` config knobs and the helpers in `orchestrator/analytics/`.
 
 **Filesystem only.** No PostgreSQL, Streamlit, or external services — the sink is one JSONL file under the project log area. Default path is `<LOG_DIR>/analytics.jsonl`, already covered by the `logs/` `.gitignore` rule. Set `ANALYTICS_LOG_PATH=` (empty) or to `off` / `disabled` / `none` to disable writes entirely; in that mode `append_record` and `prune_old_records` are silent no-ops and no file is opened.
 

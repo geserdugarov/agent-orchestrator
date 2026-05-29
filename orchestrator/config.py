@@ -146,7 +146,7 @@ EVENT_LOG_PATH = Path(_EVENT_LOG_PATH_RAW) if _EVENT_LOG_PATH_RAW else None
 # Project-local analytics sink. Distinct from EVENT_LOG_PATH (the audit
 # event log emitted through `GitHubClient.emit_event`): the analytics
 # sink is a foundation layer for future aggregation / reporting work and
-# is opted in / out independently. `orchestrator/analytics.py` appends
+# is opted in / out independently. `orchestrator/analytics/` appends
 # one JSON object per line `{ts, repo, issue, event, optional stage,
 # ...}` and `prune_old_records` removes records older than
 # `ANALYTICS_RETENTION_DAYS`.

@@ -35,6 +35,16 @@ The pinned GitHub state on each issue is the authoritative durable
 state -- this sink is local-filesystem observability and may be
 truncated or deleted at any time without affecting workflow
 correctness.
+
+The sink API lives in this `__init__.py` rather than a submodule so
+the package's `config` binding matches the flat-module behavior it
+replaced: `tests/test_analytics.py` pops both `orchestrator.config`
+and `orchestrator.analytics` from `sys.modules` between cases and
+re-imports them in lockstep, and callers elsewhere patch their
+already-imported `orchestrator.config` reference. A submodule would
+re-bind `config` only when its own module entry was popped, which
+would diverge from both patterns. Future analytics surfaces that do
+NOT need that lockstep can land in sibling submodules.
 """
 from __future__ import annotations
 
@@ -45,7 +55,14 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from . import config
+from .. import config
+
+__all__ = [
+    "append_record",
+    "build_record",
+    "config",
+    "prune_old_records",
+]
 
 log = logging.getLogger(__name__)
 

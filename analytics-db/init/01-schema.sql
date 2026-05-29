@@ -4,7 +4,7 @@
 -- Analytics database schema for the orchestrator.
 --
 -- This file mirrors the JSONL record shape produced by
--- `orchestrator/analytics.py` (`build_record`) so a future ingestion job
+-- `orchestrator/analytics/` (`build_record`) so a future ingestion job
 -- can replay the on-disk log line-by-line into Postgres without lossy
 -- reshaping. Three event kinds write today (`stage_enter`,
 -- `stage_evaluation`, `agent_exit`); fields that only apply to a subset

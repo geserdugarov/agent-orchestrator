@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """JSONL -> Postgres replay for the analytics sink.
 
-`orchestrator/analytics.py` writes one JSON object per line to
+`orchestrator/analytics/` writes one JSON object per line to
 `config.ANALYTICS_LOG_PATH`. This module reads that file and inserts
 each record into the `analytics_events` table defined by
 `analytics-db/init/01-schema.sql`, deduplicating by the SHA-256 of the
@@ -55,8 +55,8 @@ log = logging.getLogger(__name__)
 
 # Columns the table promotes from the JSONL record; anything else lands
 # in `extras` JSONB so a JSONL record from a newer orchestrator version
-# never loses fields. Kept here (not in analytics.py) because it is a
-# database-shape concern, not a record-build concern.
+# never loses fields. Kept here (not in `orchestrator/analytics/`) because
+# it is a database-shape concern, not a record-build concern.
 _PROMOTED_COLUMNS = (
     "ts",
     "repo",

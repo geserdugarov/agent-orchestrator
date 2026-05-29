@@ -191,7 +191,7 @@ truncate or rotate.
 
 **Analytics sink.** Separate project-local JSONL sink at
 `ANALYTICS_LOG_PATH` (default `<LOG_DIR>/analytics.jsonl`).
-`orchestrator/analytics.py` exposes `build_record` / `append_record` /
+`orchestrator/analytics/` exposes `build_record` / `append_record` /
 `prune_old_records`; `ANALYTICS_RETENTION_DAYS` (default 90) bounds
 retention and the polling loop prunes once per tick. Three event kinds
 write today: `stage_enter`, `stage_evaluation` (timing per dispatch),
