@@ -24,14 +24,14 @@ def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _reload(env: dict[str, str] | None = None):
-    """Reload `orchestrator.config` and `orchestrator.analytics_sync`
+    """Reload `orchestrator.config` and `orchestrator.analytics.sync`
     against the given hermetic env.
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
-        sys.modules.pop("orchestrator.analytics_sync", None)
+        sys.modules.pop("orchestrator.analytics.sync", None)
         import orchestrator.config as config
-        import orchestrator.analytics_sync as analytics_sync
+        import orchestrator.analytics.sync as analytics_sync
         return config, analytics_sync
 
 

@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS analytics_events (
 
     -- SHA-256 over the canonical (sort_keys=True) JSON form of the
     -- record as it appeared on the JSONL line. Stable across prune
-    -- rewrites, so repeated `analytics_sync` runs that re-read a
+    -- rewrites, so repeated `analytics.sync` runs that re-read a
     -- pruned file do not re-insert rows whose content the database
     -- already holds. The unique index defined below combined with
     -- `ON CONFLICT (content_hash) DO NOTHING` is the only dedup

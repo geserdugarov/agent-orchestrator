@@ -4,13 +4,13 @@
 
 This module is a thin, testable data-access layer over the schema
 defined in `analytics-db/init/01-schema.sql` and populated by
-`orchestrator.analytics_sync`. It exposes plain-Python functions for
+`orchestrator.analytics.sync`. It exposes plain-Python functions for
 the shapes a dashboard needs (filter dropdowns, date-bounded summary
 counts, daily time-series, stage / event breakdowns, the most recent
 agent-exit rows, and per-issue event traces) without taking on the
 Streamlit / web layer itself -- that lives in a follow-up child.
 
-Why a separate module from `analytics_sync.py`: the sync owns the
+Why a separate module from `analytics/sync.py`: the sync owns the
 JSONL -> Postgres write path and its tolerance for malformed lines;
 reads have a completely different error story (no rollback, no
 content-hash dedup, no JSON adaptation) and a different injection
@@ -26,7 +26,7 @@ in `AnalyticsReadError` so a caller has one exception type to catch
 when the database is configured but unreachable / mis-schemaed.
 
 The psycopg import is deferred to call time inside `_default_connect`,
-mirroring `analytics_sync`: tests inject a fake `connect(db_url)`
+mirroring `analytics.sync`: tests inject a fake `connect(db_url)`
 factory and never touch the real driver, and the module load path
 stays driver-free for callers that only want the dataclass shapes.
 """
@@ -211,7 +211,7 @@ def _default_connect(db_url: str) -> Any:
     path must not surface an ImportError when imported by callers
     that only consume the dataclasses (typing, tests, docs builds).
     Deferring the import to call time keeps the module load path
-    driver-free, mirroring `analytics_sync._default_connect`.
+    driver-free, mirroring `analytics.sync._default_connect`.
     """
     try:
         import psycopg
@@ -283,7 +283,7 @@ def _distinct_strings(
 
     `column` is an unquoted identifier baked into the SQL by callers
     that pass a literal (never user input), mirroring how
-    `analytics_sync._build_insert_sql` interpolates known column
+    `analytics.sync._build_insert_sql` interpolates known column
     names.
     """
     sql = (
