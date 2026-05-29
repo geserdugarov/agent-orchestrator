@@ -12,6 +12,7 @@ It is loaded into every agent session — keep it short. For anything beyond a p
 - Architecture, stages, module map: [`docs/architecture.md`](docs/architecture.md)
 - Agent roles, command specs, session lifecycles: [`docs/workflow.md`](docs/workflow.md)
 - Configuration / env vars: [`docs/configuration.md`](docs/configuration.md) (and [`.env.example`](.env.example))
+- Security checklist and operator-owned controls: [`docs/security.md`](docs/security.md)
 - Roadmap: [`plans/roadmap.md`](plans/roadmap.md)
 
 ## Repository layout

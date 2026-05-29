@@ -36,11 +36,11 @@ _PRIORITY_KEYS = ("session_id", "conversation_id", "thread_id", "session", "id")
 # inherits these would let the agent push directly or call the API as us.
 # The orchestrator owns all GitHub writes; the agent must never see them.
 #
-# Scope is intentionally GitHub-only: the agent's own provider auth
-# (ANTHROPIC_API_KEY for claude, OpenAI keychain for codex, etc.) belongs to
-# the user's pre-existing CLI login on the host and MUST be left intact.
-# Do not add ANTHROPIC_API_KEY / OPENAI_API_KEY here "for symmetry" -- they
-# are how the agent talks to its own model and stripping them breaks the run.
+# Exact-name list, kept narrow to GitHub-specific aliases. Production
+# secret-shaped variables (anything matching `_AGENT_SECRET_SUFFIXES` /
+# `_AGENT_SECRET_BARE_NAMES`) are stripped separately by `_filter_agent_env`
+# below; the provider auth keys codex/claude actually need to talk to their
+# model are preserved by `_AGENT_PROVIDER_AUTH_ALLOWLIST`.
 _FORBIDDEN_AGENT_ENV = frozenset({
     "GITHUB_TOKEN",
     "GH_TOKEN",
@@ -50,6 +50,143 @@ _FORBIDDEN_AGENT_ENV = frozenset({
     "GIT_TOKEN",
     "GH_HOST",
 })
+
+# Write-credential locators that aren't secret-shaped but let a subprocess
+# use the operator's loaded auth to push or authenticate as them. None of
+# these are values per se; they point at a live socket, an askpass binary,
+# or a custom SSH command. Inheriting any of them lets the agent or a
+# verify command:
+#   * `SSH_AUTH_SOCK`   -- forward through the operator's ssh-agent and
+#                          push to any host whose key is loaded.
+#   * `SSH_ASKPASS`     -- pop up the operator's GUI/cli pass prompt.
+#   * `GIT_ASKPASS`     -- the orchestrator's push path sets its OWN tempfile
+#                          askpass; the operator's value would otherwise let
+#                          a subprocess execute that binary with our env.
+#   * `GIT_SSH_COMMAND` -- arbitrary SSH wrapper a subprocess could invoke
+#                          (or worse, the operator's already-configured one
+#                          that lets `git fetch ssh://...` succeed silently).
+# The orchestrator's own push path (`worktrees._push_branch`) constructs
+# `GIT_ASKPASS` in the env it hands to subprocess.run, so stripping the
+# operator's copy here does not break it.
+_AGENT_WRITE_CREDENTIAL_LOCATORS = frozenset({
+    "SSH_AUTH_SOCK",
+    "SSH_ASKPASS",
+    "GIT_ASKPASS",
+    "GIT_SSH_COMMAND",
+})
+
+# Production-secret-shaped variables that should NOT be inherited by agent /
+# verify subprocesses, even though they are not GitHub-specific. Two
+# overlapping concerns covered here:
+#
+# 1. Direct secret values in env (`STRIPE_API_KEY`, `DATABASE_PASSWORD`,
+#    `DEPLOY_TOKEN`, …) -- a sandbox-bypassed agent or operator-configured
+#    verify shell would otherwise read them straight out of os.environ.
+#
+# 2. Credential-file LOCATORS (`ORCHESTRATOR_TOKEN_FILE`,
+#    `GOOGLE_APPLICATION_CREDENTIALS`, `AWS_SHARED_CREDENTIALS_FILE`,
+#    `*_TOKEN_FILE`, `*_CREDENTIALS`, …) -- the value is a filesystem path,
+#    not a secret, but an agent running as the same OS user can simply
+#    open the file. Stripping the locator does not protect against the
+#    agent guessing the default path (`~/.config/<repo>/token`,
+#    `~/.aws/credentials`), but it removes the trivial "follow the
+#    env-var pointer" exfiltration path and forces the agent to use a
+#    well-known guess that the operator can audit independently. The
+#    `ORCHESTRATOR_TOKEN_FILE` strip is particularly important: a
+#    multi-repo deployment frequently points it at a non-default path,
+#    and that path IS the orchestrator's own write credential.
+#
+# Suffix matching plus a small bare-name set; the predicate is case-
+# insensitive so `database_password` gets the same treatment as
+# `DATABASE_PASSWORD`. Allowlisting for the agent's own provider auth
+# happens in `_AGENT_PROVIDER_AUTH_ALLOWLIST` below.
+_AGENT_SECRET_SUFFIXES = (
+    "_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PAT", "_CREDENTIAL",
+    # Credential-file locators -- the env-var value is a path that the
+    # subprocess can read as the same user. `_CREDENTIALS` (plural) and
+    # `_CREDENTIALS_FILE` cover GCP / AWS shapes; the `_FILE`-suffixed
+    # variants cover the long tail (`*_TOKEN_FILE`, `*_KEY_FILE`, …).
+    "_TOKEN_FILE", "_KEY_FILE", "_SECRET_FILE", "_PASSWORD_FILE",
+    "_CREDENTIAL_FILE", "_CREDENTIALS", "_CREDENTIALS_FILE",
+)
+_AGENT_SECRET_BARE_NAMES = frozenset({
+    "TOKEN", "KEY", "SECRET", "PASSWORD", "PAT", "CREDENTIAL",
+    "TOKEN_FILE", "CREDENTIALS", "CREDENTIALS_FILE",
+})
+
+# Provider-auth keys the agent needs to talk to its OWN model. The shape-based
+# filter would otherwise strip these (they all end in `_KEY` / `_TOKEN`), so we
+# allowlist by exact name. The scope is intentionally narrow to direct-API
+# usage of the two supported backends; advanced deployments (Bedrock, Vertex,
+# a self-hosted proxy with a custom env var) need to extend this set
+# explicitly rather than have it loosened via a shape match.
+_AGENT_PROVIDER_AUTH_ALLOWLIST = frozenset({
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+})
+
+
+def _is_secret_shaped(name: str) -> bool:
+    """True if `name` looks like a production-secret env var.
+
+    Suffix-based detection plus a small bare-name set, matching the shapes
+    `_redact_secrets` already treats as secrets. Case-insensitive so
+    operators who set `database_password` (lower-cased) get the same
+    protection as `DATABASE_PASSWORD`.
+    """
+    upper = name.upper()
+    if upper in _AGENT_SECRET_BARE_NAMES:
+        return True
+    return any(upper.endswith(suffix) for suffix in _AGENT_SECRET_SUFFIXES)
+
+
+def _filter_agent_env(
+    env: dict[str, str], *, allow_provider_auth: bool = True,
+) -> dict[str, str]:
+    """Return `env` with GitHub creds + secret-shaped vars stripped.
+
+    Drops keys in `_FORBIDDEN_AGENT_ENV` (the GitHub-specific exact-match
+    list), in `_AGENT_WRITE_CREDENTIAL_LOCATORS` (SSH-agent / askpass /
+    `GIT_SSH_COMMAND` -- write-credential pointers that aren't
+    secret-shaped but let a subprocess use the operator's loaded auth),
+    and any key matching `_is_secret_shaped`.
+
+    `allow_provider_auth` controls the narrow exception for the agent's
+    own provider auth keys (`_AGENT_PROVIDER_AUTH_ALLOWLIST`):
+
+    * ``True`` (default, agent subprocesses): the allowlist runs --
+      `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc. ride through so codex
+      and claude can reach their own model. Without this the agent CLI
+      fails at startup.
+    * ``False`` (verify-command subprocesses): the allowlist is bypassed
+      and the provider keys are stripped along with everything else.
+      Verify commands run untrusted code the agent just produced, so a
+      hostile dependency that could read `$ANTHROPIC_API_KEY` would
+      gain billable access to the operator's account. The agent CLI is
+      not invoked from a verify command in normal use; an operator who
+      legitimately needs to drive an agent from a verify command should
+      load the key from disk inside a wrapper script (e.g.
+      `VERIFY_COMMANDS=./scripts/run-verify.sh` where the script reads
+      `~/.config/<provider>/key` and exports it before running tests)
+      rather than embedding the literal value in `VERIFY_COMMANDS` --
+      the verify failure park comment publishes the offending command
+      string verbatim, so an `ANTHROPIC_API_KEY=sk-… pytest` entry
+      would leak the secret to GitHub on the first failure.
+    """
+    filtered: dict[str, str] = {}
+    for k, v in env.items():
+        if k in _FORBIDDEN_AGENT_ENV:
+            continue
+        if k in _AGENT_WRITE_CREDENTIAL_LOCATORS:
+            continue
+        if _is_secret_shaped(k):
+            if allow_provider_auth and k in _AGENT_PROVIDER_AUTH_ALLOWLIST:
+                filtered[k] = v
+            continue
+        filtered[k] = v
+    return filtered
 
 
 @dataclass
@@ -105,7 +242,7 @@ def parse_session_id(jsonl_output: str) -> Optional[str]:
 
 
 def _agent_env(extra_env: Optional[dict[str, str]]) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if k not in _FORBIDDEN_AGENT_ENV}
+    env = _filter_agent_env(dict(os.environ))
     # Stamp agent commits with the orchestrator's identity. Env vars take
     # precedence over user.name/user.email from any config scope, so the
     # host's git config is untouched and no per-worktree config is needed.
