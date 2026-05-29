@@ -65,11 +65,27 @@ CREATE TABLE IF NOT EXISTS analytics_events (
     -- data it doesn't recognise.
     extras              JSONB,
 
-    -- Source line for audit / dedup. The ingest job should populate
-    -- this from the JSONL byte offset or the source filename so
-    -- replaying the same log twice can be detected.
+    -- Source line for audit / dedup. The ingest job populates this
+    -- from the JSONL source filename and the 1-indexed line number so
+    -- replaying the same log twice can be detected. Line numbers shift
+    -- whenever `analytics.prune_old_records` rewrites the file, so
+    -- these are forensic-only -- the authoritative dedup key is
+    -- `content_hash` below.
     source_path         TEXT,
-    source_line         BIGINT
+    source_line         BIGINT,
+
+    -- SHA-256 over the canonical (sort_keys=True) JSON form of the
+    -- record as it appeared on the JSONL line. Stable across prune
+    -- rewrites, so repeated `analytics_sync` runs that re-read a
+    -- pruned file do not re-insert rows whose content the database
+    -- already holds. The unique index defined below combined with
+    -- `ON CONFLICT (content_hash) DO NOTHING` is the only dedup
+    -- guarantee the sync relies on; `source_path` / `source_line`
+    -- are forensic context. Nullable so pre-`content_hash` rows
+    -- migrated from an older schema coexist; Postgres treats NULL
+    -- values as distinct in a unique index so multiple legacy rows
+    -- with NULL hashes do not conflict.
+    content_hash        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS analytics_events_ts_idx
@@ -84,3 +100,20 @@ CREATE INDEX IF NOT EXISTS analytics_events_repo_issue_idx
 CREATE INDEX IF NOT EXISTS analytics_events_stage_idx
     ON analytics_events (stage)
     WHERE stage IS NOT NULL;
+
+-- Idempotent column / index additions so an operator who applies this
+-- file via `psql -f` against an instance created before the column
+-- existed picks up the new dedup key without dropping the data volume.
+ALTER TABLE analytics_events
+    ADD COLUMN IF NOT EXISTS content_hash TEXT;
+
+-- Plain (non-partial) unique index so `INSERT ... ON CONFLICT
+-- (content_hash) DO NOTHING` can infer this index as the arbiter --
+-- Postgres requires the partial predicate to be repeated in the
+-- conflict target otherwise, which would force the sync to carry a
+-- WHERE clause it has no business knowing about. Migration safety
+-- is unaffected: Postgres treats NULL values as distinct in a unique
+-- index, so multiple pre-`content_hash` rows with NULL hashes
+-- coexist under this same index without conflicts.
+CREATE UNIQUE INDEX IF NOT EXISTS analytics_events_content_hash_idx
+    ON analytics_events (content_hash);

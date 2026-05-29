@@ -196,17 +196,24 @@ write today: `stage_enter`, `stage_evaluation` (timing per dispatch),
 and `agent_exit` (token / cost). Orchestrator-side remains
 filesystem-only — no DB driver or external services in-process.
 
-**Analytics database foundation.** Repo-local `analytics-db/` ships
-the Docker Compose service (`postgres:16`, `127.0.0.1`-pinned,
-host-bind data volume), the `analytics_events` schema mirroring the
-JSONL record shape (typed columns plus `extras` JSONB for
-forward-compat plus `source_path` / `source_line` for ingest dedup),
-and the operator-facing env knobs. `ANALYTICS_DB_URL` is reserved in
-`.env.example` / `docs/configuration.md` as a single libpq URL so
-swapping local for remote managed Postgres later is a one-line
-repoint. The orchestrator does not yet read `ANALYTICS_DB_URL` and
-`pyproject.toml` carries no Postgres driver — the JSONL→Postgres
-replay path is the open follow-up.
+**Analytics database.** Repo-local `analytics-db/` ships the Docker
+Compose service (`postgres:16`, `127.0.0.1`-pinned, host-bind data
+volume) and the `analytics_events` schema mirroring the JSONL record
+shape (typed columns plus `extras` JSONB for forward-compat, plus
+`source_path` / `source_line` for forensic context and a
+`content_hash` plain unique index for dedup, kept non-partial so the
+sync's `ON CONFLICT (content_hash)` arbiter resolves without
+repeating the predicate). `ANALYTICS_DB_URL` is
+a single libpq URL so swapping local for remote managed Postgres is a
+one-line repoint. `orchestrator/analytics_sync.py` is the operator-
+driven CLI (`python -m orchestrator.analytics_sync`) that replays
+JSONL records into Postgres with `INSERT ... ON CONFLICT
+(content_hash) DO NOTHING`, idempotent across repeated runs and
+across `prune_old_records` rewrites. The driver is `psycopg[binary]`
+(pinned in `pyproject.toml`) and lazy-imported so the polling tick
+remains driver-free. The sync is deliberately not wired into the
+polling loop — orchestrator correctness must not depend on database
+availability.
 
 **Agent usage / cost parser.** `orchestrator/usage.py` decodes the
 JSONL stdout carried by `AgentResult` into a `UsageMetrics` dataclass:

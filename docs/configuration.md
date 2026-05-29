@@ -158,11 +158,11 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 | `EVENT_LOG_PATH`           | _(unset)_                        | optional JSONL audit sink; one event per line, no built-in rotation. See the [audit event log section in `architecture.md`](architecture.md#audit-event-log-event_log_path) for schema, event kinds, and the pinned-state-is-authoritative precedence rule. |
 | `ANALYTICS_LOG_PATH`       | `LOG_DIR/analytics.jsonl`        | project-local analytics sink for raw metric records (`{ts, repo, issue, event, optional stage, ...}`). Records today: `stage_enter` (label transitions), `stage_evaluation` (per-dispatch timing with `duration_s` and `result=ok\|error`), and `agent_exit` (token / model / cost details). The raw JSONL is intended for later ingestion into a structured database; one record per line keeps that path streaming. Filesystem only — no PostgreSQL, Streamlit, or external services in-process. Set to `` (empty) or to `off` / `disabled` / `none` to disable writes entirely. See the [analytics sink section in `architecture.md`](architecture.md#analytics-sink-analytics_log_path) for the per-event schema and prune semantics. |
 | `ANALYTICS_RETENTION_DAYS` | `90`                             | retention window for `ANALYTICS_LOG_PATH`. The polling loop calls `analytics.prune_old_records(...)` once per tick to remove records whose `ts` is older than this window without touching pinned GitHub state. Set to `0` (or any non-positive value) to keep raw data indefinitely — the prune helper becomes a no-op. |
-| `ANALYTICS_DB_URL`         | _(unset; reserved)_              | libpq connection string for the analytics Postgres service defined in [`../analytics-db/compose.yml`](../analytics-db/compose.yml). Reserved for the follow-up child that wires JSONL records into Postgres — the orchestrator does not read this variable yet, so setting it today has no effect. See the [analytics database section in `architecture.md`](architecture.md#analytics-database-analytics-db) for the service contract and schema. |
+| `ANALYTICS_DB_URL`         | _(unset)_                        | libpq connection string for the analytics Postgres service defined in [`../analytics-db/compose.yml`](../analytics-db/compose.yml). Consumed by the operator-driven CLI `python -m orchestrator.analytics_sync`, which replays records from `ANALYTICS_LOG_PATH` into the database with `INSERT ... ON CONFLICT (content_hash) DO NOTHING` so repeated runs are idempotent. NOT read by the polling loop — orchestrator correctness does not depend on database availability. Empty value and the sentinels `off` / `disabled` / `none` (case-insensitive) disable the sync, matching `ANALYTICS_LOG_PATH`'s disable knob. See the [analytics database section in `architecture.md`](architecture.md#analytics-database-analytics-db) for the service contract, schema, malformed-line tolerance, and operator workflow. |
 
 ### Local analytics database
 
-`analytics-db/compose.yml` runs a single Postgres 16 container on the orchestrator host for follow-up ingestion of the JSONL sink. The port is bound to `127.0.0.1` and credentials default to `orchestrator` / `orchestrator`; override `POSTGRES_PASSWORD` (and any other field) via `analytics-db/.env` before exposing the port off-host or storing real data — `docker compose` reads `.env` from the compose-file directory, not the orchestrator root. The endpoint is deliberately shaped as a single libpq URL (`ANALYTICS_DB_URL`) so moving the database to a remote managed Postgres later is a one-line config change.
+`analytics-db/compose.yml` runs a single Postgres 16 container on the orchestrator host as the aggregation target for the JSONL sink. The port is bound to `127.0.0.1` and credentials default to `orchestrator` / `orchestrator`; override `POSTGRES_PASSWORD` (and any other field) via `analytics-db/.env` before exposing the port off-host or storing real data — `docker compose` reads `.env` from the compose-file directory, not the orchestrator root. The endpoint is deliberately shaped as a single libpq URL (`ANALYTICS_DB_URL`) so moving the database to a remote managed Postgres later is a one-line config change.
 
 ```sh
 cd analytics-db
@@ -171,7 +171,16 @@ docker compose down                   # stop the container; data on the ./data b
 docker compose down && rm -rf ./data  # stop and wipe history (the ./data bind is a host directory, not a docker volume, so `down -v` does NOT remove it)
 ```
 
-The init script at [`../analytics-db/init/01-schema.sql`](../analytics-db/init/01-schema.sql) runs once when the data volume is empty. It is idempotent (`CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`), so re-running against an existing instance via `psql -f` is safe.
+The init script at [`../analytics-db/init/01-schema.sql`](../analytics-db/init/01-schema.sql) runs once when the data volume is empty. It is idempotent (`CREATE TABLE / INDEX IF NOT EXISTS` plus trailing `ALTER TABLE ADD COLUMN IF NOT EXISTS` / `CREATE UNIQUE INDEX IF NOT EXISTS` for `content_hash`), so re-running against an existing instance via `psql -f` is safe — and an instance created before the `content_hash` column existed picks up the new dedup key without dropping the data volume.
+
+Run the sync on demand:
+
+```sh
+uv run python -m orchestrator.analytics_sync               # uses the configured env vars
+uv run python -m orchestrator.analytics_sync --log-path /path/to/rotated.jsonl --db-url postgresql://other/db
+```
+
+The sync inserts each record with `INSERT ... ON CONFLICT (content_hash) DO NOTHING`, so repeated runs are idempotent — even after `analytics.prune_old_records` rewrites the JSONL file and shifts source-line numbering. Malformed lines (blank, non-JSON, non-object, or missing the required `ts` / `repo` / `issue` / `event` keys) are logged and counted but never abort the sync; the JSONL file is treated as read-only. A driver-level error mid-stream rolls the transaction back and propagates, so the CLI exits non-zero rather than reporting "success" on a half-inserted batch. With either env var unset (or the JSONL file absent) the sync is a no-op — no connection is attempted, so the CLI is safe to schedule before the Postgres service is deployed.
 
 ## Continuous integration
 
