@@ -158,6 +158,20 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 | `EVENT_LOG_PATH`           | _(unset)_                        | optional JSONL audit sink; one event per line, no built-in rotation. See the [audit event log section in `architecture.md`](architecture.md#audit-event-log-event_log_path) for schema, event kinds, and the pinned-state-is-authoritative precedence rule. |
 | `ANALYTICS_LOG_PATH`       | `LOG_DIR/analytics.jsonl`        | project-local analytics sink for raw metric records (`{ts, repo, issue, event, optional stage, ...}`). Records today: `stage_enter` (label transitions), `stage_evaluation` (per-dispatch timing with `duration_s` and `result=ok\|error`), and `agent_exit` (token / model / cost details). The raw JSONL is intended for later ingestion into a structured database; one record per line keeps that path streaming. Filesystem only — no PostgreSQL, Streamlit, or external services in-process. Set to `` (empty) or to `off` / `disabled` / `none` to disable writes entirely. See the [analytics sink section in `architecture.md`](architecture.md#analytics-sink-analytics_log_path) for the per-event schema and prune semantics. |
 | `ANALYTICS_RETENTION_DAYS` | `90`                             | retention window for `ANALYTICS_LOG_PATH`. The polling loop calls `analytics.prune_old_records(...)` once per tick to remove records whose `ts` is older than this window without touching pinned GitHub state. Set to `0` (or any non-positive value) to keep raw data indefinitely — the prune helper becomes a no-op. |
+| `ANALYTICS_DB_URL`         | _(unset; reserved)_              | libpq connection string for the analytics Postgres service defined in [`../analytics-db/compose.yml`](../analytics-db/compose.yml). Reserved for the follow-up child that wires JSONL records into Postgres — the orchestrator does not read this variable yet, so setting it today has no effect. See the [analytics database section in `architecture.md`](architecture.md#analytics-database-analytics-db) for the service contract and schema. |
+
+### Local analytics database
+
+`analytics-db/compose.yml` runs a single Postgres 16 container on the orchestrator host for follow-up ingestion of the JSONL sink. The port is bound to `127.0.0.1` and credentials default to `orchestrator` / `orchestrator`; override `POSTGRES_PASSWORD` (and any other field) via `analytics-db/.env` before exposing the port off-host or storing real data — `docker compose` reads `.env` from the compose-file directory, not the orchestrator root. The endpoint is deliberately shaped as a single libpq URL (`ANALYTICS_DB_URL`) so moving the database to a remote managed Postgres later is a one-line config change.
+
+```sh
+cd analytics-db
+docker compose up -d                  # start the local service (data lives in ./data, gitignored)
+docker compose down                   # stop the container; data on the ./data bind mount is preserved
+docker compose down && rm -rf ./data  # stop and wipe history (the ./data bind is a host directory, not a docker volume, so `down -v` does NOT remove it)
+```
+
+The init script at [`../analytics-db/init/01-schema.sql`](../analytics-db/init/01-schema.sql) runs once when the data volume is empty. It is idempotent (`CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`), so re-running against an existing instance via `psql -f` is safe.
 
 ## Continuous integration
 
