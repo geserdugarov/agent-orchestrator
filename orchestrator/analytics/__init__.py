@@ -29,8 +29,10 @@ Event kinds written today:
 `prune_old_records` removes records older than
 `config.ANALYTICS_RETENTION_DAYS`; it is a no-op when the sink is
 disabled or retention is non-positive (keep forever). `main._run_tick`
-calls `prune_old_records` once per polling tick after every configured
-repo drains, so retention is applied without operator intervention.
+calls `prune_with_retention_logging` once per polling tick after every
+configured repo drains, so retention is applied without operator
+intervention; that wrapper delegates to `prune_old_records`, swallowing
+exceptions and logging the removed-record count.
 The pinned GitHub state on each issue is the authoritative durable
 state -- this sink is local-filesystem observability and may be
 truncated or deleted at any time without affecting workflow
@@ -62,6 +64,8 @@ __all__ = [
     "build_record",
     "config",
     "prune_old_records",
+    "prune_with_retention_logging",
+    "record_stage_enter",
 ]
 
 log = logging.getLogger(__name__)
@@ -113,6 +117,47 @@ def append_record(record: dict) -> None:
             fh.write(json.dumps(record, sort_keys=True) + "\n")
     except OSError as e:
         log.warning("could not write analytics record to %s: %s", path, e)
+
+
+def record_stage_enter(*, repo: str, issue: int, stage: str) -> None:
+    """Append the `stage_enter` analytics record emitted alongside the audit
+    event of the same name.
+
+    Centralized so `GitHubClient._emit_stage_enter` and the in-memory fake
+    in `tests/fakes.py` agree on the record shape without re-inlining the
+    `build_record`/`append_record` pair. Disabled-sink behavior is
+    inherited from `append_record` (no-op when the sink is off).
+    """
+    append_record(
+        build_record(
+            repo=repo,
+            issue=int(issue),
+            event="stage_enter",
+            stage=stage,
+        )
+    )
+
+
+def prune_with_retention_logging() -> None:
+    """Drop analytics records past `ANALYTICS_RETENTION_DAYS` and log the
+    outcome. Intended for the per-tick caller in `main._run_tick`.
+
+    A no-op when the sink is disabled or retention is non-positive (the
+    documented "keep raw data indefinitely" knob); `prune_old_records`
+    itself handles the absent-file / unparseable-line / IO-failure cases.
+    A runaway programming error here must not abort the polling loop --
+    analytics is observability, never authoritative workflow state -- so
+    any escape is logged and swallowed. Per-tick cadence is cheap: the
+    helper reads the file at most once and only rewrites it when at
+    least one record is older than the retention window.
+    """
+    try:
+        removed = prune_old_records()
+    except Exception:
+        log.exception("analytics retention prune raised; continuing")
+        return
+    if removed:
+        log.info("analytics retention prune removed %d record(s)", removed)
 
 
 def prune_old_records(*, now: Optional[datetime] = None) -> int:

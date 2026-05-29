@@ -744,7 +744,7 @@ Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`.
 
 **Retention pruning.** `analytics.prune_old_records(*, now=None)` reads the file and removes records whose `ts` is older than `ANALYTICS_RETENTION_DAYS`. It is a no-op (returns `0`) when the sink is disabled, retention is non-positive (the documented "keep raw data indefinitely" knob), or the file does not exist yet. The rewrite goes through a temp file in the same directory followed by `os.replace` so a crash mid-prune cannot truncate the analytics file. Records with a missing, non-string, or unparseable `ts` (and any line that is not valid JSON) are preserved verbatim so the prune step never silently drops data it cannot interpret; an operator can clean those lines up.
 
-The polling loop wires retention in: `main._run_tick` calls `analytics.prune_old_records()` exactly once at the end of every tick (after both the single-repo and multi-repo paths drain), regardless of how many `RepoSpec` entries are configured -- the sink is process-wide, not per-repo, so a single prune per polling iteration is the right cadence. Per-tick cost is bounded: the helper reads the file at most once and only rewrites it when at least one record is older than the retention window. A runaway error inside the prune is logged and swallowed so an analytics misconfiguration cannot stop the poll loop -- analytics is observability, never authoritative workflow state.
+The polling loop wires retention in: `main._run_tick` calls `analytics.prune_with_retention_logging()` exactly once at the end of every tick (after both the single-repo and multi-repo paths drain), regardless of how many `RepoSpec` entries are configured -- the sink is process-wide, not per-repo, so a single prune per polling iteration is the right cadence. The wrapper lives in the analytics package and delegates to `prune_old_records`, catching exceptions and logging the `"removed N record(s)"` message so the call site in `main` stays a one-liner. Per-tick cost is bounded: the helper reads the file at most once and only rewrites it when at least one record is older than the retention window. A runaway error inside the prune is logged and swallowed so an analytics misconfiguration cannot stop the poll loop -- analytics is observability, never authoritative workflow state.
 
 **Pinned GitHub state is unaffected.** The prune touches only the local file — no issue comment, label, or other GitHub state is rewritten. The analytics sink is local-filesystem observability and is safe to truncate or delete at any time without affecting workflow correctness.
 
@@ -797,7 +797,7 @@ Pure-Python helpers that decode the JSONL stdout `agents.AgentResult` carries in
 | `_handle_question` | function call | issue label `question` (operator-applied) OR closed-`question` issue from the polling sweep | once per tick per such issue; closed terminal finalizes to `done` + tears down the worktree, open issue spawns the question agent (or resumes it on a new human comment) and parks awaiting human |
 | question agent (`DECOMPOSE_AGENT` backend) | subprocess (read-only; fresh first spawn, locked spec on resume) | `_handle_question` (no prior session OR new human comment on a parked Q&A) | one shot per tick when needed |
 | `git push` | subprocess | after dev produces clean commits | per fix |
-| `analytics.prune_old_records` | function call | end of each `main._run_tick` after every configured repo drains | once per tick (process-wide, not per-repo); no-op when the sink is disabled or `ANALYTICS_RETENTION_DAYS <= 0`; a runaway error is logged and swallowed so analytics misconfiguration cannot stop the loop |
+| `analytics.prune_with_retention_logging` | function call | end of each `main._run_tick` after every configured repo drains | once per tick (process-wide, not per-repo); wraps `analytics.prune_old_records` so the exception swallow and the "removed N record(s)" log message live in the analytics package; no-op when the sink is disabled or `ANALYTICS_RETENTION_DAYS <= 0` |
 | self-restart check | git fetch + diff | start of each tick | every tick |
 
 ## Architecture schema
@@ -1024,7 +1024,7 @@ Pure-Python helpers that decode the JSONL stdout `agents.AgentResult` carries in
 
 | Component | Role |
 |---|---|
-| **main.py** | polling loop + signal handling + self-restart + per-tick `analytics.prune_old_records` retention pass |
+| **main.py** | polling loop + signal handling + self-restart + per-tick `analytics.prune_with_retention_logging` retention pass |
 | **workflow.py** | facade: per-repo tick loop, family-aware/fan-out partitioning, `_process_issue` dispatcher, `_handle_pickup`, `_park_awaiting_human`, `_run_agent_tracked`; re-exports the cross-module helpers and stage entry handlers (`_comment_created_at` is re-exported because the `fixing` handler reuses it; other stage-private helpers stay private to their module) |
 | **workflow_drift.py** | user-content drift detection and re-route helpers |
 | **workflow_messages.py** | prompt builders, parsers, comment posting + orchestrator-comment markers, stderr redaction |

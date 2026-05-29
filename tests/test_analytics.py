@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -336,6 +336,104 @@ class AnalyticsPruneTest(unittest.TestCase):
             ])
             self.assertEqual(analytics.prune_old_records(now=now), 1)
             self.assertEqual(path.read_text(encoding="utf-8"), "")
+
+
+class PruneWithRetentionLoggingTest(unittest.TestCase):
+    """`prune_with_retention_logging` is the per-tick wrapper that
+    `main._run_tick` calls. It delegates to `prune_old_records`, catches
+    runaway exceptions so an analytics misconfiguration cannot abort the
+    polling loop, and logs the removed-record count. The helper itself
+    is local-filesystem only -- the prune never imports `github`, so it
+    cannot mutate pinned GitHub state regardless of where it is called
+    from.
+    """
+
+    def test_delegates_to_prune_old_records(self) -> None:
+        _, analytics = _reload()
+        with patch.object(
+            analytics, "prune_old_records", return_value=0,
+        ) as prune:
+            analytics.prune_with_retention_logging()
+        prune.assert_called_once_with()
+
+    def test_exception_is_swallowed(self) -> None:
+        # A runaway error inside `prune_old_records` must not propagate
+        # -- analytics is observability, never authoritative workflow
+        # state, so a misconfiguration must not abort the polling loop.
+        _, analytics = _reload()
+        with patch.object(
+            analytics,
+            "prune_old_records",
+            side_effect=RuntimeError("boom"),
+        ):
+            # No raise: the wrapper logs and swallows.
+            analytics.prune_with_retention_logging()
+
+    def test_helper_rewrites_file_without_github_writes(self) -> None:
+        # "Analytics is not authoritative workflow state" enforced at
+        # the boundary: the prune helper takes no GitHub client and the
+        # real `prune_old_records` implementation never imports `github`
+        # at all. This pairs with the main-loop wiring tests in
+        # `tests/test_main.py`: those verify the wrapper is called once
+        # per tick; this verifies that calling it cannot mutate pinned
+        # state through any client method.
+        from orchestrator.github import GitHubClient
+
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        new_ts = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory(prefix="analytics-retention-") as td:
+            path = Path(td) / "analytics.jsonl"
+            path.write_text(
+                json.dumps({
+                    "ts": old_ts, "repo": "o/r", "issue": 1,
+                    "event": "stage_enter", "stage": "implementing",
+                }) + "\n"
+                + json.dumps({
+                    "ts": new_ts, "repo": "o/r", "issue": 2,
+                    "event": "stage_evaluation", "stage": "validating",
+                    "duration_s": 0.001, "result": "ok",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            _, analytics = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_RETENTION_DAYS": "90",
+            })
+            mutators = (
+                "write_pinned_state", "comment", "set_workflow_label",
+                "create_child_issue", "open_pr", "pr_comment",
+                "merge_pr", "delete_remote_branch", "emit_event",
+            )
+            # Patch every GitHub-mutating method on the class so the
+            # prune cannot side-effect through any client instance that
+            # some future refactor accidentally routes it through.
+            patchers = [
+                patch.object(
+                    GitHubClient,
+                    name,
+                    MagicMock(
+                        side_effect=AssertionError(
+                            f"prune must not call GitHubClient.{name}"
+                        ),
+                    ),
+                )
+                for name in mutators
+            ]
+            for p in patchers:
+                p.start()
+            try:
+                removed = analytics.prune_old_records(now=now)
+            finally:
+                for p in patchers:
+                    p.stop()
+            self.assertEqual(removed, 1)
+            remaining = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0]["issue"], 2)
 
 
 if __name__ == "__main__":
