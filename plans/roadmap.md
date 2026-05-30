@@ -225,8 +225,8 @@ across `prune_old_records` rewrites. `orchestrator/analytics_read.py`
 is the read-side counterpart: a thin data-access module exposing
 plain-Python functions (`get_filter_options`, `get_summary`,
 `get_time_series`, `get_stage_breakdown`, `get_event_breakdown`,
-`get_recent_agent_exits`, `get_issues`, `get_issue_events`) that a
-future dashboard calls into. `distinct_issues` in `get_summary`
+`get_recent_agent_exits`, `get_issues`, `get_issue_events`) that
+`orchestrator/dashboard.py` calls into. `distinct_issues` in `get_summary`
 counts `(repo, issue)` pairs so cross-repo windows do not collapse
 same-numbered issues. Unset `ANALYTICS_DB_URL` short-circuits every read to an
 empty / zero-valued result; connection / query failures wrap in a
