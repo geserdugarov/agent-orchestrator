@@ -325,14 +325,37 @@ def _build_window_where(
     start: Optional[datetime],
     end: Optional[datetime],
     repo: Optional[str],
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
 ) -> tuple[str, list[Any]]:
     """Compose the shared `WHERE` clause for window-scoped queries.
 
     Returns (clause, params); the clause includes a leading `WHERE`
     when at least one filter is set, or an empty string otherwise.
     Callers concatenate this directly into their SQL so the same
-    filter shape (start / end / repo) is available across every
-    aggregate.
+    filter shape (start / end / repo / events / stages / issue) is
+    available across every aggregate.
+
+    ``events`` / ``stages`` distinguish three cases on purpose:
+
+    - ``None`` (the default) means "no filter on this column" --
+      every row is eligible. This is what dashboard callers pass
+      when the user has not interacted with the multiselect.
+    - A non-empty sequence emits a parameterised ``IN (...)``
+      clause -- the dashboard sends the user's selected subset.
+    - An empty sequence emits a tautologically-false predicate
+      (``FALSE``) so the query returns no rows. The dashboard
+      treats a cleared multiselect as "show nothing for this
+      dimension" rather than the previous "show everything"
+      behavior; encoding that as SQL is what makes summary /
+      time-series / breakdown / agent-run / issues counts move
+      together when the operator drags a filter to empty.
+
+    ``issue`` narrows to a single GitHub issue number. GitHub issue
+    numbers are only unique within a repo, so the dashboard refuses
+    to apply this filter when ``repo`` is not also set; the helper
+    itself does not enforce that -- it just emits the predicate.
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -345,6 +368,23 @@ def _build_window_where(
     if repo is not None:
         conditions.append("repo = %s")
         params.append(repo)
+    if issue is not None:
+        conditions.append("issue = %s")
+        params.append(int(issue))
+    if events is not None:
+        if not events:
+            conditions.append("FALSE")
+        else:
+            placeholders = ", ".join(["%s"] * len(events))
+            conditions.append(f"event IN ({placeholders})")
+            params.extend(events)
+    if stages is not None:
+        if not stages:
+            conditions.append("FALSE")
+        else:
+            placeholders = ", ".join(["%s"] * len(stages))
+            conditions.append(f"stage IN ({placeholders})")
+            params.extend(stages)
     if not conditions:
         return "", params
     return " WHERE " + " AND ".join(conditions), params
@@ -355,6 +395,9 @@ def get_summary(
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> Summary:
@@ -362,14 +405,20 @@ def get_summary(
 
     `start` is inclusive, `end` is exclusive -- matching how callers
     typically build day-boundary windows (`[day, day + 1)`). `repo`
-    filters to a single repo slug when set. Returns a zero-valued
-    `Summary` when the DB URL is unset or the window holds no rows.
+    filters to a single repo slug when set. `events` / `stages` /
+    `issue` apply the same `_build_window_where` rules: ``None`` =
+    no filter, non-empty sequence = ``IN (...)``, empty sequence =
+    no rows match. Returns a zero-valued `Summary` when the DB URL
+    is unset or the (post-filter) window holds no rows.
     """
     url = _resolve_db_url(db_url)
     if not url:
         return Summary()
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(start=start, end=end, repo=repo)
+    where, params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=events, stages=stages, issue=issue,
+    )
 
     totals_sql = (
         "SELECT "
@@ -407,7 +456,8 @@ def get_summary(
     by_event = {row[0]: int(row[1]) for row in by_event_rows}
 
     stage_where, stage_params = _build_window_where(
-        start=start, end=end, repo=repo
+        start=start, end=end, repo=repo,
+        events=events, stages=stages, issue=issue,
     )
     stage_clause = (
         f"{stage_where} AND stage IS NOT NULL"
@@ -438,6 +488,9 @@ def get_time_series(
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> list[TimeSeriesPoint]:
@@ -451,7 +504,10 @@ def get_time_series(
     if not url:
         return []
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(start=start, end=end, repo=repo)
+    where, params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=events, stages=stages, issue=issue,
+    )
     sql = (
         "SELECT date_trunc('day', ts)::date AS day, event, COUNT(*) AS c "
         f"FROM analytics_events{where} "
@@ -475,6 +531,9 @@ def get_stage_breakdown(
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> list[StageBreakdown]:
@@ -488,7 +547,10 @@ def get_stage_breakdown(
     if not url:
         return []
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(start=start, end=end, repo=repo)
+    where, params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=events, stages=stages, issue=issue,
+    )
     clause = (
         f"{where} AND stage IS NOT NULL"
         if where
@@ -517,6 +579,9 @@ def get_event_breakdown(
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> list[EventBreakdown]:
@@ -529,7 +594,10 @@ def get_event_breakdown(
     if not url:
         return []
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(start=start, end=end, repo=repo)
+    where, params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=events, stages=stages, issue=issue,
+    )
     sql = (
         "SELECT event, COUNT(*) AS c "
         f"FROM analytics_events{where} "
@@ -542,7 +610,12 @@ def get_event_breakdown(
 def get_recent_agent_exits(
     *,
     limit: int = 50,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
     repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> list[AgentExitRow]:
@@ -552,18 +625,47 @@ def get_recent_agent_exits(
     cleanly, but a negative value would be a SQL error -- guard at
     the application layer). Filters to `event='agent_exit'` so the
     table only carries rows whose agent / cost columns are populated.
+    `start` / `end` apply the same window the dashboard uses for
+    every other widget so the recent-runs table moves with the date
+    range. `events` / `stages` / `issue` follow the same shape as in
+    the other readers: ``None`` = no filter, empty = no rows match,
+    non-empty = ``IN (...)``. The event filter is intersected with
+    the hardcoded ``event = 'agent_exit'``, so deselecting
+    ``agent_exit`` from the multiselect produces an empty table --
+    which is the consistent answer when the operator excludes the
+    rows this widget displays.
     """
     url = _resolve_db_url(db_url)
     if not url:
         return []
     if limit <= 0:
         return []
+    # Operator deselected agent_exit from the events multiselect;
+    # this widget is exclusively about agent_exit rows, so short
+    # circuit to an empty table without a DB round trip.
+    if events is not None and "agent_exit" not in events:
+        return []
     connect_fn = connect or _default_connect
     conditions = ["event = %s"]
     params: list[Any] = ["agent_exit"]
+    if start is not None:
+        conditions.append("ts >= %s")
+        params.append(start)
+    if end is not None:
+        conditions.append("ts < %s")
+        params.append(end)
     if repo is not None:
         conditions.append("repo = %s")
         params.append(repo)
+    if issue is not None:
+        conditions.append("issue = %s")
+        params.append(int(issue))
+    if stages is not None:
+        if not stages:
+            return []
+        placeholders = ", ".join(["%s"] * len(stages))
+        conditions.append(f"stage IN ({placeholders})")
+        params.extend(stages)
     where = " WHERE " + " AND ".join(conditions)
     params.append(int(limit))
     sql = (
@@ -628,6 +730,9 @@ def get_issues(
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
     limit: int = 100,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
@@ -655,7 +760,10 @@ def get_issues(
     if limit <= 0:
         return []
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(start=start, end=end, repo=repo)
+    where, params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=events, stages=stages, issue=issue,
+    )
     sql = (
         "SELECT "
         "repo, issue, "
@@ -715,28 +823,56 @@ def get_issue_events(
     *,
     repo: str,
     issue: int,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> list[IssueEventRow]:
     """Every event for a single `(repo, issue)`, oldest first.
 
     Powers the per-issue drill-down view. Returns an empty list when
-    the DB URL is unset or the issue has no recorded events. `repo`
-    is matched exactly (case-sensitive, matching how
-    `analytics.build_record` writes it).
+    the DB URL is unset or the (post-filter) issue has no recorded
+    events. `repo` is matched exactly (case-sensitive, matching how
+    `analytics.build_record` writes it). `start` / `end` apply the
+    same window the dashboard uses for every other widget so the
+    drill-down narrows along with the sidebar date range. `events`
+    / `stages` follow the standard shape: ``None`` = no filter,
+    empty = no rows match, non-empty = ``IN (...)``.
     """
     url = _resolve_db_url(db_url)
     if not url:
         return []
+    if events is not None and not events:
+        return []
+    if stages is not None and not stages:
+        return []
     connect_fn = connect or _default_connect
+    conditions = ["repo = %s", "issue = %s"]
+    params: list[Any] = [repo, int(issue)]
+    if start is not None:
+        conditions.append("ts >= %s")
+        params.append(start)
+    if end is not None:
+        conditions.append("ts < %s")
+        params.append(end)
+    if events:
+        placeholders = ", ".join(["%s"] * len(events))
+        conditions.append(f"event IN ({placeholders})")
+        params.extend(events)
+    if stages:
+        placeholders = ", ".join(["%s"] * len(stages))
+        conditions.append(f"stage IN ({placeholders})")
+        params.extend(stages)
     sql = (
         "SELECT ts, event, stage, duration_s, result, "
         "agent_role, backend, exit_code, cost_usd "
         "FROM analytics_events "
-        "WHERE repo = %s AND issue = %s "
+        f"WHERE {' AND '.join(conditions)} "
         "ORDER BY ts ASC, id ASC"
     )
-    rows = _query(connect_fn, url, sql, (repo, int(issue)))
+    rows = _query(connect_fn, url, sql, params)
     out: list[IssueEventRow] = []
     for row in rows:
         (
