@@ -237,6 +237,49 @@ both modules so the polling tick remains driver-free. Neither the
 sync nor the read model is wired into the polling loop —
 orchestrator correctness must not depend on database availability.
 
+**Analytics dashboard.** `orchestrator/dashboard.py` is the
+Streamlit app over the read model. Sidebar controls cover the date
+window, repo selector, event / stage multi-selects, and a
+`#123` / `123` issue-number input; the body renders summary
+metrics (events / distinct issues / repos / cost / tokens), a daily
+time-series bar chart, side-by-side stage / event breakdowns, the
+recent `agent_exit` table with token / cost columns, the
+date-bounded issues overview, and a per-issue event drill-down.
+Every filter is threaded through the read model's SQL via
+`_build_window_where`, so every widget narrows together rather
+than diverging by surface. The event / stage selections
+distinguish three cases: ``None`` (no filter on the column), a
+non-empty sequence (parameterised ``IN (...)``), and an empty
+sequence (a tautologically-false predicate so the cleared-
+multiselect case shows nothing rather than reverting to "all").
+The event multiselect maps straight to that contract because
+`event` is `NOT NULL` in the schema; the stage multiselect routes
+through `resolve_stage_filter` so the all-selected default (and
+the no-stage-options case) collapses to ``None`` rather than
+``IN (every-non-null-stage)`` -- ``options.stages`` lists only
+non-null stages, so the latter would silently exclude legitimate
+NULL-stage rows (`stage_evaluation` records on issues with no
+workflow label).
+The issue input acts as a SQL-level filter that narrows every
+widget when a specific repo is selected and triggers the
+drill-down section; without a repo it stays inert (GitHub issue
+numbers are not unique across repos) and the drill-down renders
+an instructive notice. `get_recent_agent_exits` accepts the same
+window / event / stage / issue shape so the recent-runs table
+moves with the date range; deselecting `agent_exit` from the
+events multiselect short-circuits that widget to empty without
+a DB round trip. Streamlit (and its transitive pandas) are
+imported lazily inside `main()` so the polling tick stays free of
+the dashboard's footprint, and the module loads cleanly even when
+`streamlit` is not installed (a `tests/test_dashboard.py` guard
+asserts the invariant). The dependency lives in a separate
+`dashboard` group in `pyproject.toml` so `uv sync --locked` keeps
+installing only the minimum runtime; `uv sync --group dashboard`
+then `uv run streamlit run orchestrator/dashboard.py` is the
+launch path. Missing-DB and `AnalyticsReadError` cases surface as
+in-app `st.warning` / `st.error` banners that stop further
+rendering rather than crashing the app.
+
 **Agent usage / cost parser.** `orchestrator/usage.py` decodes the
 JSONL stdout carried by `AgentResult` into a `UsageMetrics` dataclass:
 backend, model(s), turn count, token totals, `cost_usd`, and a
