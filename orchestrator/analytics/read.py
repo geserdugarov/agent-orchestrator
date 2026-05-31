@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Callable, Optional, Sequence
 
-from . import config
+from .. import config
 
 log = logging.getLogger(__name__)
 
@@ -217,7 +217,7 @@ def _default_connect(db_url: str) -> Any:
         import psycopg
     except ImportError as e:
         raise AnalyticsReadError(
-            "psycopg is required for analytics_read; "
+            "psycopg is required for analytics.read; "
             "run `uv sync --locked` to install it"
         ) from e
     try:
@@ -270,7 +270,7 @@ def _query(
         try:
             conn.close()
         except Exception:
-            log.exception("analytics_read: connection close failed")
+            log.exception("analytics.read: connection close failed")
     return list(rows or [])
 
 

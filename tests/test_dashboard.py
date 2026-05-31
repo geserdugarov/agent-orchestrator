@@ -45,7 +45,8 @@ def _reload(env: dict[str, str] | None = None):
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
-        sys.modules.pop("orchestrator.analytics_read", None)
+        sys.modules.pop("orchestrator.analytics.read", None)
+        sys.modules.pop("orchestrator.analytics", None)
         sys.modules.pop("orchestrator.dashboard", None)
         import orchestrator.config as config
         import orchestrator.dashboard as dashboard
@@ -184,7 +185,8 @@ class LazyImportTest(unittest.TestCase):
     def test_streamlit_absent_from_sys_modules_after_load(self) -> None:
         with patch.dict(os.environ, _hermetic_env(), clear=True):
             sys.modules.pop("orchestrator.config", None)
-            sys.modules.pop("orchestrator.analytics_read", None)
+            sys.modules.pop("orchestrator.analytics.read", None)
+            sys.modules.pop("orchestrator.analytics", None)
             sys.modules.pop("orchestrator.dashboard", None)
             sys.modules.pop("streamlit", None)
             sys.modules.pop("pandas", None)

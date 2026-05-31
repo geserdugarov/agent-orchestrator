@@ -4,7 +4,7 @@
 
 Interactive view over the `analytics_events` Postgres table
 populated by `orchestrator.analytics.sync`. Reads run through
-`orchestrator.analytics_read` (which already handles unset DB,
+`orchestrator.analytics.read` (which already handles unset DB,
 connection errors, and lazy psycopg import) so this module owns
 only the UI shape: sidebar filter controls, high-level metrics, a
 time-series chart, stage / event breakdowns, the recent-agent-run
@@ -52,7 +52,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from orchestrator import analytics_read, config  # noqa: E402
+from orchestrator import config  # noqa: E402
+from orchestrator.analytics import read as analytics_read  # noqa: E402
 
 log = logging.getLogger(__name__)
 

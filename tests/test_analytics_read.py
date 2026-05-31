@@ -20,22 +20,24 @@ def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _reload(env: dict[str, str] | None = None):
-    """Reload `orchestrator.config` and `orchestrator.analytics_read`
+    """Reload `orchestrator.config` and `orchestrator.analytics.read`
     against the given hermetic env, mirroring `test_analytics_sync`.
 
     Import order matters: `config` must come first so its fresh module
     object is installed as the `orchestrator.config` package attribute
-    before `analytics_read`'s `from . import config` runs. Otherwise
+    before `analytics.read`'s `from .. import config` runs. Otherwise
     Python's `_handle_fromlist` shortcut returns the stale attribute
     that conftest's eager `from orchestrator import config` left
-    behind, and `analytics_read.config` keeps reading the
-    pre-`patch.dict` env values.
+    behind, and `analytics.read.config` keeps reading the
+    pre-`patch.dict` env values. The `orchestrator.analytics` package
+    is popped alongside so its parent-`config` binding also reloads.
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
-        sys.modules.pop("orchestrator.analytics_read", None)
+        sys.modules.pop("orchestrator.analytics.read", None)
+        sys.modules.pop("orchestrator.analytics", None)
         import orchestrator.config as config
-        import orchestrator.analytics_read as analytics_read
+        from orchestrator.analytics import read as analytics_read
         return config, analytics_read
 
 

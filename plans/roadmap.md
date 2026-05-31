@@ -221,7 +221,7 @@ one-line repoint. `orchestrator/analytics/sync.py` is the operator-
 driven CLI (`python -m orchestrator.analytics.sync`) that replays
 JSONL records into Postgres with `INSERT ... ON CONFLICT
 (content_hash) DO NOTHING`, idempotent across repeated runs and
-across `prune_old_records` rewrites. `orchestrator/analytics_read.py`
+across `prune_old_records` rewrites. `orchestrator/analytics/read.py`
 is the read-side counterpart: a thin data-access module exposing
 plain-Python functions (`get_filter_options`, `get_summary`,
 `get_time_series`, `get_stage_breakdown`, `get_event_breakdown`,
