@@ -4030,15 +4030,14 @@ class NoCommitAckDoesNotParkTest(
         self,
     ) -> None:
         # A no-commit "ack" reply from the dev on an in_review drift
-        # MUST bounce DIRECTLY back to `validating` (NOT through
-        # `documenting`) -- the pre-rollout no-commit ACK behaviour is
-        # preserved because no new commit landed for the docs pass to
-        # react to; spawning `documenting` here would just emit
-        # `DOCS: NO_CHANGE` against the unchanged head and waste a
-        # tick. The other ACK guarantees still hold: the stale
-        # `agent_approved_sha` is cleared (the snapshot was for the
-        # old requirements, so AUTO_MERGE cannot land the PR until the
-        # reviewer re-snapshots) and `review_round` resets.
+        # MUST bounce DIRECTLY back to `validating` (same destination
+        # as the pushed-fix exit; the pre-approval drift exit skips
+        # the `documenting` hop for both outcomes -- docs land in the
+        # final-docs pass after reviewer approval). The other ACK
+        # guarantees still hold: the stale `agent_approved_sha` is
+        # cleared (the snapshot was for the old requirements, so
+        # AUTO_MERGE cannot land the PR until the reviewer
+        # re-snapshots) and `review_round` resets.
         gh = FakeGitHubClient()
         issue = make_issue(700, label="in_review", body="clarified body")
         gh.add_issue(issue)

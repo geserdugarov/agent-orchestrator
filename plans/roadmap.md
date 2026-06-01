@@ -6,19 +6,21 @@ The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 `umbrella` → `implementing` → `documenting` → `validating` →
 `in_review` → `fixing` (on fresh PR feedback) or `resolving_conflict`
 (auto-merge detour) → `done` / `rejected`) is wired end-to-end.
-Most code-changing branch updates (initial implementation, any
-`validating` pushed fix, any `fixing` PR-feedback push, any `in_review`
-drift push) still route through `documenting` before the reviewer
-re-runs; `resolving_conflict` pushes hand straight back to `validating`
-instead (the single docs pass runs after the reviewer's final approval
-via `docs_final_pending`). `_handle_fixing` owns the
-PR-feedback quiet window and the dev-resume / push / route-through-
-`documenting` cycle, with watermark advancement on success and on
-failure-park; the in_review route, the closed-issue sweep, the
-PR-worktree refresh detour, and the PR-state terminal arcs are all in
-place. A pushed fix flips to `documenting` so the docs pass runs
-against the new head before the reviewer re-evaluates; the
-no-new-feedback bounce still flips directly to `validating`. The operator-applied `question` label adds a read-only Q&A
+The validating-side pushed-fix exits (CHANGES_REQUESTED dev fix,
+awaiting-human resume, user-content drift, transient-park recovery)
+and the initial implementation hand-off still route through
+`documenting` before the reviewer re-runs; the pre-approval pushed-fix
+/ drift exits in `fixing` and `in_review`, plus every
+`resolving_conflict` push, flip DIRECTLY back to `validating` (the
+single docs pass runs after the reviewer's final approval via
+`docs_final_pending`, so docs land against the approved/squashed head
+without spending a no-op pass on each pre-approval push).
+`_handle_fixing` owns the PR-feedback quiet window and the
+dev-resume / push / hand-back-to-`validating` cycle, with watermark
+advancement on success and on failure-park; the in_review route, the
+closed-issue sweep, the PR-worktree refresh detour, and the PR-state
+terminal arcs are all in place. Both the pushed-fix exit and the
+no-new-feedback bounce flip directly to `validating`. The operator-applied `question` label adds a read-only Q&A
 side-branch (`_handle_question`) that runs the decomposer backend in
 the per-issue worktree to answer clarifying questions without opening
 a PR; closing the issue is the terminal signal.
@@ -87,9 +89,13 @@ Awaiting-human replies resume the locked dev session. PR titles and
 commits follow Conventional Commits.
 
 **Documenting stage.** `_handle_documenting` runs on the PR worktree
-between `implementing` and `validating`, after every later
-code-changing branch update, AND once more after reviewer approval as
-the **final-docs hop** before `in_review`. A `docs:` commit lands → push
+between `implementing` and `validating` and after the validating-side
+pushed-fix exits, AND once more after reviewer approval as the
+**final-docs hop** before `in_review`. The pre-approval pushed-fix /
+drift exits in `fixing` and `in_review`, plus every
+`resolving_conflict` pushed exit, bypass it and route directly to
+`validating`; their fixes are covered by the final-docs hop once the
+reviewer approves. A `docs:` commit lands → push
 + advance (to `validating` on pre-approval trips, to `in_review` on the
 final-docs hop; on the final-docs hop the push also updates
 `agent_approved_sha` to the new head so AUTO_MERGE survives, gated on
@@ -106,7 +112,8 @@ NO_CHANGE` marker on a remote-clean branch advances without pushing.
 The discriminator is the `docs_final_pending` marker set by
 `_handle_validating`'s approval branch. Timeout / dirty / push-fail /
 silent parks reuse the shared disposition tokens. Because every
-code-changing update routes through this stage, split decompositions
+code-changing update either routes through this stage or is covered
+by the final-docs hop after reviewer approval, split decompositions
 no longer need a synthetic final docs child.
 
 **Validating stage.** `_handle_validating` spawns a fresh reviewer on
@@ -140,16 +147,19 @@ closed-issue sweep flip to `rejected` instead of spawning the dev /
 docs / reviewer agent, with branch cleanup only when the linked PR
 is also closed.
 
-**Fixing stage.** `fixing` sits between `in_review` and `documenting`
+**Fixing stage.** `fixing` sits between `in_review` and `validating`
 in the PR-feedback fix loop. `_handle_fixing` rescans unread feedback
 each tick (filtering orchestrator comments by id and hidden body
 marker), debounces against the freshest comment timestamp
 (`IN_REVIEW_DEBOUNCE_SECONDS`), then resumes the locked dev session
 with a prompt built across all unread surfaces. A pushed fix clears
 the bookmarks, resets `review_round`, drops `agent_approved_sha`, and
-flips to `documenting`; a no-new-feedback bounce flips directly to
-`validating`. Failed resumes park awaiting human. PR-state terminals
-and the closed-issue sweep mirror `_handle_in_review`.
+flips DIRECTLY back to `validating`; the no-new-feedback bounce also
+flips to `validating`. The pre-approval pushed-fix exit deliberately
+skips the `documenting` hop -- docs land in the final-docs pass
+after reviewer approval. Failed resumes park awaiting human.
+PR-state terminals and the closed-issue sweep mirror
+`_handle_in_review`.
 
 **Conflict resolution stage.** Under `AUTO_MERGE=on`, approved-but-
 unmergeable PRs route to `resolving_conflict`.
@@ -369,13 +379,10 @@ swallowed.
   exploration or skipping acceptance for trivial fixes. Judged excessive
   for the original 2-week budget; revisit once the static flow is fully
   dogfooded.
-- **Single-pass `documenting` after reviewer approval.** Today many
-  code-changing branch updates (initial implementation, validating fix,
-  fixing-stage PR-feedback push, in_review drift push) still route
-  through `documenting` before the reviewer re-runs. The proposed
-  simplification routes those pushes to `validating` instead and runs a
-  single docs pass after the reviewer emits `VERDICT: APPROVED`, before
-  the `in_review` handoff. See
+- **Single-pass `documenting` after reviewer approval.** The proposed
+  simplification routes pre-approval pushes directly to `validating`
+  and runs a single docs pass after the reviewer emits
+  `VERDICT: APPROVED`, before the `in_review` handoff. See
   [`plans/review-stages-lifecycle.md`](review-stages-lifecycle.md) for
   the full transition map (every `set_workflow_label` call site grouped
   by stage, every current entry into `documenting`, and the proposed
@@ -389,14 +396,15 @@ swallowed.
   `gh.get_pr()` succeeded AND `_head_sha()` returned a non-empty local
   SHA — so AUTO_MERGE survives; when either fails and the sentinel is
   absent, the docs push leaves any stale `agent_approved_sha` untouched
-  so AUTO_MERGE stays gated). **Issue #269 landed the resolving_conflict
-  half**: every pushed conflict-resolution path (drift resolve,
-  recovered push, clean rebase, agent-resolved, awaiting-human resume)
-  now hands straight back to `validating` alongside the existing
-  base-up-to-date no-op. Collapsing the remaining pre-approval
-  `documenting` entries (implementing, validating fix loop, fixing,
-  in_review drift) into direct `validating` routes is the remaining
-  work under #262.
+  so AUTO_MERGE stays gated). **Issue #268 collapsed the
+  PR-feedback `fixing` push and the `in_review` user-content drift
+  push** into direct `validating` routes; **issue #269 collapsed
+  every `resolving_conflict` pushed path** (drift resolve, recovered
+  push, clean rebase, agent-resolved, awaiting-human resume) likewise,
+  alongside the existing base-up-to-date no-op. Collapsing the
+  remaining pre-approval `documenting` entries (initial implementation
+  hand-off and the validating fix loop's pushed-fix exits) into direct
+  `validating` routes is the remaining work under #262.
 - **Symphony-inspired per-repo policy and hooks.** See
   [`plans/symphony-spec-review.md`](symphony-spec-review.md) for the full
   review. Two proposals survived the critical filter: a narrow

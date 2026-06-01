@@ -171,19 +171,17 @@ orchestrator/
                            gate re-check, legacy watermark migration, and the
                            cross-namespace watermark ratchet
                            (`_bump_in_review_watermarks`). User-content
-                           drift pushed fixes route through `documenting`
-                           (NOT directly to `validating`) so the docs
-                           pass runs against the updated body / new head
-                           before the reviewer re-evaluates and
-                           AUTO_MERGE can land; the no-commit ACK
-                           outcome still bounces DIRECTLY back to
-                           `validating` (the docs hop is skipped because
-                           no commit landed for the docs pass to react
-                           to). Both outcomes reset `review_round` and
-                           clear `agent_approved_sha`.
+                           drift bounces DIRECTLY back to `validating` on
+                           both the pushed-fix and no-commit ACK
+                           outcomes so the reviewer re-evaluates against
+                           the updated body. The pre-approval drift exit
+                           deliberately skips the `documenting` hop:
+                           docs land in the final-docs pass after
+                           reviewer approval. Both outcomes reset
+                           `review_round` and clear `agent_approved_sha`.
     fixing.py           — `_handle_fixing` owns the PR-feedback quiet
                            window and the dev-resume / push /
-                           route-through-`documenting` cycle. Stage entered
+                           hand-back-to-`validating` cycle. Stage entered
                            when `_handle_in_review` detects fresh PR
                            feedback and routes the issue there instead of
                            spawning the dev itself; rescans unread feedback
@@ -191,12 +189,12 @@ orchestrator/
                            debounces against the freshest comment
                            timestamp, and resumes via `_resume_dev_with_text`
                            with a `_build_pr_comment_followup` prompt over
-                           all unread surfaces. Pushed fixes flip to
-                           `documenting` so the docs pass runs against
-                           the new head before the reviewer re-evaluates;
-                           the no-new-feedback bounce still flips
-                           directly to `validating` because there is no
-                           fix work for the docs pass to react to.
+                           all unread surfaces. Both the pushed-fix exit
+                           and the no-new-feedback bounce flip DIRECTLY
+                           back to `validating`. The pre-approval pushed-
+                           fix exit deliberately skips the `documenting`
+                           hop -- docs land in the final-docs pass after
+                           reviewer approval.
     conflicts.py        — `_handle_resolving_conflict` plus
                            `_post_conflict_resolution_result` and the
                            `conflict_round` audit-event emitter.
@@ -418,7 +416,7 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | **stages/documenting.py** | `_handle_documenting` — docs pass on the existing PR worktree (fetch + ahead/behind guard, dirty-check before any outcome). Routes to `validating` on pre-approval trips and to `in_review` on the **final-docs hop** (marker `docs_final_pending=True` set by `_handle_validating`'s approval branch). The final-docs success exits update `agent_approved_sha` to the new pushed head (only when validating seeded a fresh approval this round, signalled by `final_docs_approval_seeded`) and ratchet `pr_last_comment_id` past any consumed awaiting-human reply. |
 | **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
 | **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives; routes fresh PR feedback to `fixing` |
-| **stages/fixing.py** | `_handle_fixing` — PR-feedback quiet window, dev resume via `_resume_dev_with_text`, watermark advance, and route through `documenting` on a pushed fix (the no-new-feedback bounce flips directly to `validating`) |
+| **stages/fixing.py** | `_handle_fixing` — PR-feedback quiet window, dev resume via `_resume_dev_with_text`, watermark advance, and a direct flip back to `validating` on both the pushed-fix and the no-new-feedback bounce exits (pre-approval pushed-fix exit skips the `documenting` hop -- docs land in the final-docs pass after reviewer approval) |
 | **stages/conflicts.py** | `_handle_resolving_conflict` + rebase-loop primitives |
 | **stages/question.py** | `_handle_question` + question-session lifecycle (read-only Q&A on the `question` label, no PR) |
 | **agents.py** | dispatch + spawn codex/claude subprocess, capture session id + last message |

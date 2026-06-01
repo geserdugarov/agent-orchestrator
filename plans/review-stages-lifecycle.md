@@ -96,8 +96,7 @@ are collapsed under a single "Terminal" entry per handler.
 | `in_review` | `rejected` | in_review.py:284 | PR closed without merge |
 | `in_review` | `rejected` | in_review.py:331 | Open PR + issue closed manually (human stop signal) |
 | `in_review` | `fixing` | in_review.py:469 | Fresh PR feedback on any of four surfaces (issue/PR-conv/inline/summary) |
-| `in_review` | **`documenting`** | in_review.py:593 | **User-content drift dev resume pushed a commit** (`outcome == "pushed"`) |
-| `in_review` | `validating` | in_review.py:595 | User-content drift dev resume returned an `ACK` (no commit) |
+| `in_review` | `validating` | in_review.py:576 | User-content drift dev resume — both the "pushed" and "ACK" outcomes bounce directly back to `validating` (pre-approval drift exit skips the `documenting` hop; docs land in the final-docs pass after reviewer approval) |
 | `in_review` | `resolving_conflict` | in_review.py:747 | AUTO_MERGE on, no human CHANGES_REQUESTED, approved for current head, but PR is not mergeable (route fires BEFORE the combined-check gate at in_review.py:750, so green CI is not a precondition) |
 
 ### `_handle_fixing` — label `fixing`
@@ -106,8 +105,8 @@ are collapsed under a single "Terminal" entry per handler.
 | ---- | -- | --------- | ------- |
 | `fixing` | `done` | fixing.py:105 | PR merged externally while fixing |
 | `fixing` | `rejected` | fixing.py:129 / 155 | PR closed-without-merge OR issue closed manually |
-| `fixing` | `validating` | fixing.py:262 | Rescan finds no unread feedback past the watermarks — skip docs (no fix work) |
-| `fixing` | **`documenting`** | fixing.py:376 | **Dev resume pushed a fix in response to PR feedback** |
+| `fixing` | `validating` | fixing.py:259 | Rescan finds no unread feedback past the watermarks — skip docs (no fix work) |
+| `fixing` | `validating` | fixing.py:369 | Dev resume pushed a fix in response to PR feedback (pre-approval pushed-fix exit skips the `documenting` hop; docs land in the final-docs pass after reviewer approval) |
 
 ### `_handle_resolving_conflict` — label `resolving_conflict`
 
@@ -134,10 +133,11 @@ are collapsed under a single "Terminal" entry per handler.
 
 ## 2. Every current entry into `documenting`
 
-Today `documenting` is entered after **every code-changing branch update**,
-**plus** the new final-docs hop after reviewer approval. The docs pass is
-rerun for every fix, every drift resume, every conflict-resolution push,
-AND once more between approval and `in_review`. The complete entry set:
+`documenting` is entered after most code-changing branch updates **plus**
+the final-docs hop after reviewer approval. After issue #268 the
+PR-feedback `fixing` push and the `in_review` user-content drift push
+flip DIRECTLY back to `validating` (no docs hop). The remaining entry
+set:
 
 1. **implementing.py:793** — `_on_commits`: dev's initial implementation
    commits, PR opened.
@@ -154,10 +154,11 @@ AND once more between approval and `in_review`. The complete entry set:
    this trip advances to `in_review` rather than back to `validating`.
 6. **validating.py:1153** — `_handle_validating` CHANGES_REQUESTED fix
    loop pushed a clean dev fix.
-7. **in_review.py:593** — `_handle_in_review` user-content drift dev
-   resume pushed a commit (`outcome == "pushed"`).
-8. **fixing.py:376** — `_handle_fixing` resumed the dev on PR comment
-   feedback and pushed a clean fix.
+7. ~~**in_review.py:593**~~ — removed under #268; the user-content
+   drift dev resume now hands straight back to `validating` on both
+   the "pushed" and the "ACK" outcomes.
+8. ~~**fixing.py:376**~~ — removed under #268; the PR-feedback
+   pushed-fix exit now hands straight back to `validating`.
 9. ~~**conflicts.py:244**~~ — removed under #269; the user-content
    drift dev resume now hands straight back to `validating`.
 10. ~~**conflicts.py:405**~~ — removed under #269; the ahead-of-remote
@@ -172,14 +173,12 @@ Cross-cutting observations:
 
 - Validating-side dev resumes still route through `documenting` because
   each can land code that the README / docs / plans must reflect.
-- The resolving-conflict pushed paths used to route through
-  `documenting` too; under #269 they hand straight back to `validating`
-  alongside the existing base-up-to-date no-op (conflicts.py:502), so
-  the single docs pass after final reviewer approval covers the
-  rewritten branch.
-- The `in_review` "ACK" drift outcome (in_review.py:595) likewise
-  bounces directly to `validating`: nothing landed for the docs pass
-  to react to.
+- The `fixing`, `in_review` drift, and resolving-conflict pushed paths
+  used to route through `documenting` too; under #268 and #269 they
+  hand straight back to `validating` (alongside the long-standing
+  bypasses fixing.py:259 / in_review.py "ACK" / conflicts.py:502
+  base-up-to-date no-op), so the single docs pass after final
+  reviewer approval covers the fresh branch.
 
 ## 3. Proposed simplification target (no code changes in this child)
 
@@ -203,7 +202,7 @@ Under that target, the transition map collapses to:
 | `resolving_conflict` | `validating` | Every clean / recovered / agent-resolved / awaiting-human resumed push (no docs hop); the base-up-to-date no-op already targets `validating` |
 | `in_review` drift "pushed" | `validating` | Symmetric with the new fixing/conflict routes — no docs hop until the reviewer approves the next round |
 
-### Status note (after issue #266)
+### Status note (after issues #266, #268, and #269)
 
 Issue #266 has landed the **final-docs handoff** half of the target above:
 the `validating` -> `documenting` -> `in_review` chain now exists on the
@@ -216,18 +215,29 @@ actually persisted a non-empty approval SHA this round — both
 SHA — so the AUTO_MERGE invariant survives; when either fails the
 sentinel is absent and any stale `agent_approved_sha` left over from a
 prior round stays untouched so AUTO_MERGE remains gated until the next
-reviewer round explicitly approves). The pre-approval `documenting` entries
-(rows 1–4, 6–12 in section 2) are still present — collapsing those into
-direct `validating` routes is the remainder of the parent #262 work and
+reviewer round explicitly approves).
+
+Issue #268 has collapsed the **PR-feedback `fixing` push** and the
+**`in_review` user-content drift push** entries into direct
+`validating` routes (the no-new-feedback bounce and the drift "ACK"
+already targeted `validating`; the drift "pushed" outcome now joins
+them). Issue #269 has done the same for **every `resolving_conflict`
+pushed path** (alongside the long-standing base-up-to-date no-op).
+The remaining pre-approval `documenting` entries (rows 1–6 in
+section 2) are still present — collapsing those into direct
+`validating` routes is the remainder of the parent #262 work and
 lives in subsequent children.
 
-Concretely, the following call sites become `set_workflow_label(issue, "validating")`
-(or are removed if redundant) under the target:
+Concretely, the following call sites still need to become
+`set_workflow_label(issue, "validating")` (or be removed if redundant)
+under the target:
 
 - implementing.py:793
 - validating.py:678 / 768 / 807 / 1153
-- in_review.py:593
-- fixing.py:376
+- ~~in_review.py:593~~ — landed under #268; the user-content drift
+  push now flips to `validating` directly (both "pushed" and "ACK").
+- ~~fixing.py:376~~ — landed under #268; the PR-feedback pushed-fix
+  exit now flips to `validating` directly.
 - ~~conflicts.py:244 / 405 / 531 / 655~~ — landed under #269; every
   resolving_conflict pushed path now flips to `validating` directly,
   alongside the existing base-up-to-date no-op.
@@ -270,9 +280,10 @@ for this child and lives in subsequent children.
 
 ### Out of scope here
 
-- Collapsing the pre-approval `documenting` entries (rows 1–4, 6–12 in
-  section 2) into direct `validating` routes — those code-changing
-  pushes still hop through `documenting` before the reviewer re-runs.
+- Collapsing the remaining pre-approval `documenting` entries (rows
+  1–6 and 7–10 in section 2) into direct `validating` routes — those
+  code-changing pushes still hop through `documenting` before the
+  reviewer re-runs.
 - Docs-stage prompt rewording for the post-approval pass — the existing
   prompt is still used unchanged on the final-docs hop.
 - The validating-side squash/watermark-seeding relocation; squash +

@@ -3,7 +3,7 @@
 """Fixing stage handler.
 
 `_handle_fixing` owns the PR-feedback quiet window and the dev-resume /
-push / route-through-`documenting` cycle. `_handle_in_review` flips the
+push / hand-back-to-`validating` cycle. `_handle_in_review` flips the
 label to `fixing` the moment fresh PR feedback (issue-thread,
 PR-conversation, inline-review, or review-summary) is detected; the
 in_review handler deliberately leaves the in_review watermarks behind
@@ -24,23 +24,22 @@ On a pushed fix the handler advances `pr_last_comment_id`,
 `pr_last_review_comment_id`, and `pr_last_review_summary_id` past the
 just-consumed feedback (mirrors the legacy in_review fix path), clears
 the bookmarks, resets `review_round`, drops the stale `agent_approved_sha`
-(the SHA just moved), and flips the label to `documenting` so the docs
-pass runs against the new head BEFORE the reviewer agent re-evaluates
-next tick. Routing through `documenting` (rather than directly to
-`validating`) keeps the dev-fix exit symmetric with the validating-side
-pushed-fix exits and gives the documenting handler a chance to update
-any README / docs / plans touched by the fix before the reviewer sees
-the diff. On a failed resume (timeout, dirty worktree, push failure,
-no-commit question) the disposition helpers from `stages.validating`
-(`_handle_dev_fix_result`) handle the park; the watermarks STILL
-advance past the feedback the dev did see, otherwise the next tick
-would replay the original triggering comment indefinitely and the
-awaiting-human gate could never unstick on a fresh human reply.
+(the SHA just moved), and flips the label DIRECTLY back to `validating`
+so the reviewer agent re-evaluates the freshened diff next tick. The
+pre-approval pushed-fix exit deliberately skips the `documenting` hop:
+docs land in the final-docs pass after reviewer approval, so running
+the docs stage against an unapproved diff here would just push a no-op
+and waste a tick. On a failed resume (timeout, dirty worktree, push
+failure, no-commit question) the disposition helpers from
+`stages.validating` (`_handle_dev_fix_result`) handle the park; the
+watermarks STILL advance past the feedback the dev did see, otherwise
+the next tick would replay the original triggering comment indefinitely
+and the awaiting-human gate could never unstick on a fresh human reply.
 
 The no-new-feedback bounce (rescan finds nothing past the watermarks
-even though the bookmarks recorded triggering ids) still relabels to
-`validating` directly: there is no fix work to do, so spending an
-extra docs pass before re-evaluating would be wasted effort.
+even though the bookmarks recorded triggering ids) also relabels to
+`validating` directly: there is no fix work to do, so the reviewer
+re-evaluates the existing head.
 
 PR-state terminals (merged / closed-without-merge / open-PR-with-closed-issue)
 mirror the in_review arcs so an external manual merge or rejection while
@@ -251,12 +250,10 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     # Watermarks already cover the triggering bookmarks (a prior tick
     # consumed them, or an operator advanced them manually). Nothing
-    # left to address; clear the route bookkeeping and bounce DIRECTLY
-    # back to `validating` (NOT through `documenting`) so the reviewer
-    # can re-evaluate against the current head instead of leaving the
-    # issue stuck in `fixing` with no work. Skipping the documenting
-    # hop here is deliberate: there is no fix work and therefore no
-    # new commit that would need a docs pass before re-validation.
+    # left to address; clear the route bookkeeping and bounce back to
+    # `validating` so the reviewer re-evaluates against the current
+    # head instead of leaving the issue stuck in `fixing` with no
+    # work.
     if not new_feedback:
         _clear_pending_fix_bookmarks(state)
         gh.set_workflow_label(issue, "validating")
@@ -361,19 +358,15 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # clear them so a later in_review -> fixing route writes fresh
     # values rather than mixing rounds.
     #
-    # Route through `documenting` (NOT directly to `validating`) so the
-    # docs pass runs against the new head before the reviewer agent
-    # re-evaluates. The dev fix may have touched code that needs a
-    # README / docs update, and skipping documenting here would let the
-    # reviewer approve a commit whose docs the documenting handler has
-    # not had a chance to refresh. Mirrors the validating-side pushed-
-    # fix exits (CHANGES_REQUESTED, awaiting-human resume, drift
-    # pushed, transient-park push) which all route through
-    # `documenting` for the same reason.
+    # Flip DIRECTLY to `validating` so the reviewer re-evaluates the
+    # new head next tick. The pre-approval pushed-fix exit deliberately
+    # skips the `documenting` hop: docs land in the final-docs pass
+    # after reviewer approval, so running the docs stage against an
+    # unapproved diff here would just push a no-op and waste a tick.
     _clear_pending_fix_bookmarks(state)
     state.set("review_round", 0)
     state.set("agent_approved_sha", None)
-    gh.set_workflow_label(issue, "documenting")
+    gh.set_workflow_label(issue, "validating")
     gh.write_pinned_state(issue, state)
 
 
@@ -393,12 +386,17 @@ def _advance_consumed_watermarks(
     """Advance the three in_review watermarks ONLY to the max id consumed
     per surface, ratcheted against the existing watermark.
 
-    Used on the pushed-fix handoff so a concurrent human comment that
-    landed between `new_feedback` and this call survives to the next
-    tick (where the validating->in_review handoff will rediscover it
-    as fresh PR feedback). The park/failure path uses the broader
-    `_bump_in_review_watermarks` instead so the next tick can advance
-    past the orchestrator's just-posted park comment.
+    Called once on every dev-result outcome (BOTH the pushed-fix path
+    AND the park/failure path) before the pushed/non-pushed split, so
+    a concurrent human comment that landed between `new_feedback` and
+    this call survives to the next tick on either branch. The broader
+    `_bump_in_review_watermarks` is deliberately NOT used here: it
+    also pulls in `gh.latest_comment_id(issue)`, which could leap the
+    watermark past a concurrent issue-thread comment the dev never saw
+    in its prompt -- silently swallowing real feedback on the pushed
+    path (the next in_review tick would miss it) and on the
+    park/failure path (the next fixing tick's
+    `awaiting_human and not new_feedback` gate would drop it).
     """
     cur_issue_wm = state.get("pr_last_comment_id")
     if issue_space_new:

@@ -4,14 +4,16 @@
 
 The documenting stage runs on two distinct trips through the workflow:
 
-  * Pre-approval: after the implementer's PR has been opened (or every
-    pushed-fix exit from `validating` / `fixing` / `in_review` drift).
-    `_handle_resolving_conflict` is deliberately NOT in this set: its
-    pushed exits hand straight back to `validating` and rely on the
-    single post-approval docs hop below. The docs pass commits
-    README / docs / plans edits, pushes them, and advances to
-    `validating` so the reviewer agent sees the docs commit in the
-    diff it reviews.
+  * Pre-approval: after the implementer's PR has been opened, or
+    after every `validating` pushed-fix exit (CHANGES_REQUESTED /
+    awaiting-human resume / user-content drift / transient-park
+    recovery). The `fixing` PR-feedback push, the `in_review`
+    user-content drift push, and every `resolving_conflict` pushed
+    exit deliberately bypass this trip and hand straight back to
+    `validating`; their docs land in the final-docs hop below after
+    reviewer approval. The docs pass commits README / docs / plans
+    edits, pushes them, and advances to `validating` so the reviewer
+    agent sees the docs commit in the diff it reviews.
   * Final-docs handoff: after the reviewer agent emits
     `VERDICT: APPROVED` and `validating` finishes the local-verify +
     squash + watermark seed. `validating` flips the label here with
