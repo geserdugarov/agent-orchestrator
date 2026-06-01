@@ -28,17 +28,18 @@ def _reload(env: dict[str, str] | None = None):
     `orchestrator.analytics.sync` against the given hermetic env.
 
     The analytics package owns its own `ANALYTICS_LOG_PATH` /
-    `ANALYTICS_RETENTION_DAYS` parsing, and `analytics.sync` reads
-    `ANALYTICS_LOG_PATH` off the parent package at call time, so the
+    `ANALYTICS_RETENTION_DAYS` / `ANALYTICS_DB_URL` parsing, and
+    `analytics.sync` reads both `ANALYTICS_LOG_PATH` and
+    `ANALYTICS_DB_URL` off the parent package at call time, so the
     parent must be popped alongside `sync` for the test env to land.
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
         sys.modules.pop("orchestrator.analytics", None)
         sys.modules.pop("orchestrator.analytics.sync", None)
-        import orchestrator.config as config
+        import orchestrator.analytics as analytics
         import orchestrator.analytics.sync as analytics_sync
-        return config, analytics_sync
+        return analytics, analytics_sync
 
 
 class _FakeCursor:
@@ -143,35 +144,35 @@ def _sample_record(
 
 
 class AnalyticsDbUrlConfigTest(unittest.TestCase):
-    """`ANALYTICS_DB_URL` parses at import: empty / sentinel disables;
-    a real URL passes through verbatim so a libpq URL is the
-    single-knob endpoint contract.
+    """`ANALYTICS_DB_URL` parses at import inside the analytics
+    package: empty / sentinel disables; a real URL passes through
+    verbatim so a libpq URL is the single-knob endpoint contract.
     """
 
     def test_default_is_disabled(self) -> None:
-        config, _ = _reload()
-        self.assertIsNone(config.ANALYTICS_DB_URL)
+        analytics, _ = _reload()
+        self.assertIsNone(analytics.ANALYTICS_DB_URL)
 
     def test_empty_string_disables(self) -> None:
-        config, _ = _reload({"ANALYTICS_DB_URL": ""})
-        self.assertIsNone(config.ANALYTICS_DB_URL)
+        analytics, _ = _reload({"ANALYTICS_DB_URL": ""})
+        self.assertIsNone(analytics.ANALYTICS_DB_URL)
 
     def test_sentinel_values_disable(self) -> None:
         for value in ("off", "OFF", " off ", "disabled", "none", "None"):
             with self.subTest(value=value):
-                config, _ = _reload({"ANALYTICS_DB_URL": value})
-                self.assertIsNone(config.ANALYTICS_DB_URL)
+                analytics, _ = _reload({"ANALYTICS_DB_URL": value})
+                self.assertIsNone(analytics.ANALYTICS_DB_URL)
 
     def test_real_url_passes_through(self) -> None:
         url = "postgresql://u:p@db.example.com:5432/orchestrator_analytics"
-        config, _ = _reload({"ANALYTICS_DB_URL": url})
-        self.assertEqual(config.ANALYTICS_DB_URL, url)
+        analytics, _ = _reload({"ANALYTICS_DB_URL": url})
+        self.assertEqual(analytics.ANALYTICS_DB_URL, url)
 
     def test_whitespace_stripped(self) -> None:
-        config, _ = _reload(
+        analytics, _ = _reload(
             {"ANALYTICS_DB_URL": "  postgresql://h/db  "}
         )
-        self.assertEqual(config.ANALYTICS_DB_URL, "postgresql://h/db")
+        self.assertEqual(analytics.ANALYTICS_DB_URL, "postgresql://h/db")
 
 
 class AnalyticsSyncDisabledTest(unittest.TestCase):

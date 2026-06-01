@@ -25,7 +25,8 @@ Event kinds written today:
 - `agent_exit` -- one record per tracked agent invocation, written
   from `workflow._run_agent_tracked` with parsed usage / cost.
 
-`ANALYTICS_LOG_PATH` and `ANALYTICS_RETENTION_DAYS` are parsed at
+`ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, and the libpq URL
+for the analytics Postgres service (`ANALYTICS_DB_URL`) are parsed at
 import here -- not in `orchestrator.config` -- so the sink owns its own
 configuration surface and `config` does not pull analytics defaults in
 transitively. `append_record` is a no-op when
@@ -68,6 +69,7 @@ from .. import config, usage
 from ..agents import AgentResult
 
 __all__ = [
+    "ANALYTICS_DB_URL",
     "ANALYTICS_LOG_PATH",
     "ANALYTICS_RETENTION_DAYS",
     "append_record",
@@ -111,11 +113,30 @@ def _parse_retention_days() -> int:
     return int(os.environ.get("ANALYTICS_RETENTION_DAYS", "90"))
 
 
+def _parse_db_url() -> Optional[str]:
+    """Resolve `ANALYTICS_DB_URL` from the environment.
+
+    Unset / empty value and the sentinels `off` / `disabled` / `none`
+    (case-insensitive) disable the Postgres surfaces (sync + read
+    model) entirely; a real URL passes through verbatim so a libpq
+    connection string is the single-knob endpoint contract. The
+    orchestrator's polling tick does not read this var, so an unset
+    value has no effect on workflow correctness. Matches
+    `ANALYTICS_LOG_PATH`'s disable knob so the two can be turned off
+    together with parallel spellings.
+    """
+    raw = os.environ.get("ANALYTICS_DB_URL", "").strip()
+    if not raw or raw.lower() in ("off", "disabled", "none"):
+        return None
+    return raw
+
+
 # Sink configuration. Parsed at import so a fresh process picks up the
 # operator's env immediately; tests patch these module attributes
 # directly (`patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`).
 ANALYTICS_LOG_PATH: Optional[Path] = _parse_log_path()
 ANALYTICS_RETENTION_DAYS: int = _parse_retention_days()
+ANALYTICS_DB_URL: Optional[str] = _parse_db_url()
 
 
 def build_record(

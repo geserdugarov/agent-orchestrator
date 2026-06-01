@@ -24,7 +24,7 @@ same way. Tolerance is the point -- this sink is local-filesystem
 observability and the JSONL on disk may carry partial flushes from a
 crashed write or hand-edits by an operator.
 
-Connection settings come from `config.ANALYTICS_DB_URL`, a single
+Connection settings come from `analytics.ANALYTICS_DB_URL`, a single
 libpq URL. There is no hardcoded localhost fallback; the sync is a
 no-op when the URL is unset so operators who have not deployed the
 Postgres service can run the CLI without configuring it. To move the
@@ -50,7 +50,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .. import analytics as _analytics
-from .. import config
 
 log = logging.getLogger(__name__)
 
@@ -280,7 +279,7 @@ def sync_jsonl_to_postgres(
     """Replay every record in `log_path` into Postgres at `db_url`.
 
     Defaults come from `analytics.ANALYTICS_LOG_PATH` and
-    `config.ANALYTICS_DB_URL`; either being None or the JSONL file
+    `analytics.ANALYTICS_DB_URL`; either being None or the JSONL file
     being absent yields an empty SyncResult (the no-op path so the
     CLI is safe to schedule before the operator deploys Postgres).
 
@@ -296,7 +295,7 @@ def sync_jsonl_to_postgres(
     if log_path is None:
         log_path = _analytics.ANALYTICS_LOG_PATH
     if db_url is None:
-        db_url = config.ANALYTICS_DB_URL
+        db_url = _analytics.ANALYTICS_DB_URL
     connect_fn = connect or _default_connect
     json_adapter_fn = json_adapter or _default_json_adapter
 

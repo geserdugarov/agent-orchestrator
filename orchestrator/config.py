@@ -144,31 +144,14 @@ _EVENT_LOG_PATH_RAW: str = os.environ.get("EVENT_LOG_PATH", "").strip()
 EVENT_LOG_PATH = Path(_EVENT_LOG_PATH_RAW) if _EVENT_LOG_PATH_RAW else None
 
 # Sink settings for the project-local analytics JSONL file
-# (`ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`) live in
+# (`ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`) and the libpq URL
+# for the analytics Postgres service (`ANALYTICS_DB_URL`) live in
 # `orchestrator.analytics`; that package owns its own parsing /
 # defaulting so consumers of `config.LOG_DIR` do not pull the analytics
 # defaults in transitively. The audit event log (`EVENT_LOG_PATH`)
 # above stays here because `GitHubClient.emit_event` is a
 # general-purpose audit surface, not analytics-specific.
 
-# libpq URL for the analytics Postgres service consumed by
-# `orchestrator.analytics.sync`. None (the default) leaves the sync
-# disabled; the orchestrator's polling tick does not read this var
-# directly, so an unset value has no effect on workflow correctness.
-# The sync is a standalone CLI (`python -m orchestrator.analytics.sync`)
-# that an operator runs on demand to replay JSONL records into Postgres.
-#
-# Sentinel values `off` / `disabled` / `none` (case-insensitive) and the
-# empty string all disable the sync, matching `ANALYTICS_LOG_PATH`'s
-# disable knob so the two can be turned off together with parallel
-# spellings.
-_ANALYTICS_DB_URL_RAW = os.environ.get("ANALYTICS_DB_URL", "").strip()
-if not _ANALYTICS_DB_URL_RAW or _ANALYTICS_DB_URL_RAW.lower() in (
-    "off", "disabled", "none",
-):
-    ANALYTICS_DB_URL = None
-else:
-    ANALYTICS_DB_URL = _ANALYTICS_DB_URL_RAW
 REVIEW_TIMEOUT: int = int(os.environ.get("REVIEW_TIMEOUT", str(AGENT_TIMEOUT)))
 MAX_REVIEW_ROUNDS: int = int(os.environ.get("MAX_REVIEW_ROUNDS", "3"))
 # Cap on how many auto-conflict-resolution attempts one PR can use before

@@ -11,9 +11,9 @@ the lazy-import invariant -- the module must load even when
 hermetic regardless of which dependency group an operator synced.
 
 The module-reload pattern mirrors `tests/test_analytics_read.py`:
-re-import under a hermetic env so the dashboard's `from . import
-config` picks up the patched `ANALYTICS_DB_URL` instead of whatever
-the earlier test-session import left cached.
+re-import under a hermetic env so the dashboard's `from orchestrator
+import analytics` picks up the patched `ANALYTICS_DB_URL` instead of
+whatever the earlier test-session import left cached.
 """
 from __future__ import annotations
 
@@ -35,22 +35,26 @@ def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _reload(env: dict[str, str] | None = None):
-    """Reload `config` + `dashboard` against the hermetic env.
+    """Reload `analytics` + `dashboard` against the hermetic env.
 
-    Import order matters: `config` must come back first so its fresh
-    module object is installed as the `orchestrator.config` package
-    attribute before `dashboard`'s `from . import config` runs --
-    otherwise `_handle_fromlist` returns the conftest-cached module
-    and `dashboard.config.ANALYTICS_DB_URL` keeps the pre-patch value.
+    Import order matters: `analytics` must come back first so its
+    fresh module object is installed as the
+    `orchestrator.analytics` package attribute before `dashboard`'s
+    `from orchestrator import analytics` runs -- otherwise
+    `_handle_fromlist` returns the conftest-cached module and
+    `dashboard.analytics.ANALYTICS_DB_URL` keeps the pre-patch value.
+    `config` is popped too so the analytics package's
+    `from .. import config` reloads against the patched env (it
+    still reads `LOG_DIR` for the JSONL default).
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
         sys.modules.pop("orchestrator.analytics.read", None)
         sys.modules.pop("orchestrator.analytics", None)
         sys.modules.pop("orchestrator.dashboard", None)
-        import orchestrator.config as config
+        import orchestrator.analytics as analytics
         import orchestrator.dashboard as dashboard
-        return config, dashboard
+        return analytics, dashboard
 
 
 class DefaultDateRangeTest(unittest.TestCase):

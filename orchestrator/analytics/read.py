@@ -17,13 +17,14 @@ content-hash dedup, no JSON adaptation) and a different injection
 shape for tests. Keeping them apart means a dashboard never imports
 ingest code and the sync never grows query helpers.
 
-Connection settings come from `config.ANALYTICS_DB_URL`. There is no
-hardcoded localhost fallback; reads are a no-op when the URL is unset
-so a dashboard process can boot before the operator has deployed
-Postgres (every function returns an empty / zero-valued result and
-never raises in that mode). Connection or query failures get wrapped
-in `AnalyticsReadError` so a caller has one exception type to catch
-when the database is configured but unreachable / mis-schemaed.
+Connection settings come from `analytics.ANALYTICS_DB_URL`. There is
+no hardcoded localhost fallback; reads are a no-op when the URL is
+unset so a dashboard process can boot before the operator has
+deployed Postgres (every function returns an empty / zero-valued
+result and never raises in that mode). Connection or query failures
+get wrapped in `AnalyticsReadError` so a caller has one exception
+type to catch when the database is configured but unreachable /
+mis-schemaed.
 
 The psycopg import is deferred to call time inside `_default_connect`,
 mirroring `analytics.sync`: tests inject a fake `connect(db_url)`
@@ -37,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Callable, Optional, Sequence
 
-from .. import config
+from .. import analytics as _analytics
 
 log = logging.getLogger(__name__)
 
@@ -230,7 +231,7 @@ def _default_connect(db_url: str) -> Any:
 
 def _resolve_db_url(db_url: Optional[str]) -> Optional[str]:
     if db_url is None:
-        return config.ANALYTICS_DB_URL
+        return _analytics.ANALYTICS_DB_URL
     return db_url
 
 

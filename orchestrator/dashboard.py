@@ -52,7 +52,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from orchestrator import config  # noqa: E402
+from orchestrator import analytics  # noqa: E402
 from orchestrator.analytics import read as analytics_read  # noqa: E402
 
 log = logging.getLogger(__name__)
@@ -122,11 +122,11 @@ def db_unconfigured_message() -> Optional[str]:
 
     Returns the user-facing string when `ANALYTICS_DB_URL` is unset
     (or set to one of the disable sentinels `off` / `disabled` /
-    `none`, which `config.ANALYTICS_DB_URL` already collapses to
+    `none`, which `analytics.ANALYTICS_DB_URL` already collapses to
     `None`). Returns `None` when the URL is configured so the caller
     can branch on the optional cleanly.
     """
-    if not config.ANALYTICS_DB_URL:
+    if not analytics.ANALYTICS_DB_URL:
         return UNCONFIGURED_DB_MESSAGE
     return None
 

@@ -20,25 +20,24 @@ def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _reload(env: dict[str, str] | None = None):
-    """Reload `orchestrator.config` and `orchestrator.analytics.read`
-    against the given hermetic env, mirroring `test_analytics_sync`.
+    """Reload `orchestrator.config`, `orchestrator.analytics`, and
+    `orchestrator.analytics.read` against the given hermetic env,
+    mirroring `test_analytics_sync`.
 
-    Import order matters: `config` must come first so its fresh module
-    object is installed as the `orchestrator.config` package attribute
-    before `analytics.read`'s `from .. import config` runs. Otherwise
-    Python's `_handle_fromlist` shortcut returns the stale attribute
-    that conftest's eager `from orchestrator import config` left
-    behind, and `analytics.read.config` keeps reading the
-    pre-`patch.dict` env values. The `orchestrator.analytics` package
-    is popped alongside so its parent-`config` binding also reloads.
+    The analytics package owns the `ANALYTICS_DB_URL` parsing now,
+    and `analytics.read` reads it off the parent package at call
+    time, so the parent must be popped alongside `read` for the test
+    env to land. `config` is popped too so `analytics.__init__`'s
+    `from .. import config` reloads against the patched env (it
+    still reads `LOG_DIR` for the JSONL default).
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
         sys.modules.pop("orchestrator.analytics.read", None)
         sys.modules.pop("orchestrator.analytics", None)
-        import orchestrator.config as config
+        import orchestrator.analytics as analytics
         from orchestrator.analytics import read as analytics_read
-        return config, analytics_read
+        return analytics, analytics_read
 
 
 class _FakeCursor:
@@ -573,11 +572,11 @@ class ErrorHandlingTest(unittest.TestCase):
 
 
 class DefaultDbUrlTest(unittest.TestCase):
-    """When no `db_url` kwarg is passed, `config.ANALYTICS_DB_URL`
+    """When no `db_url` kwarg is passed, `analytics.ANALYTICS_DB_URL`
     is the default."""
 
     def test_config_url_used_when_kwarg_omitted(self) -> None:
-        config, analytics_read = _reload(
+        analytics, analytics_read = _reload(
             {"ANALYTICS_DB_URL": "postgresql://from-env/db"}
         )
         seen: list[str] = []
@@ -588,7 +587,7 @@ class DefaultDbUrlTest(unittest.TestCase):
 
         analytics_read.get_filter_options(connect=_capture_connect)
         self.assertEqual(seen[0], "postgresql://from-env/db")
-        self.assertEqual(config.ANALYTICS_DB_URL, "postgresql://from-env/db")
+        self.assertEqual(analytics.ANALYTICS_DB_URL, "postgresql://from-env/db")
 
     def test_explicit_kwarg_overrides_config(self) -> None:
         _, analytics_read = _reload(
