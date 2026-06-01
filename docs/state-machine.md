@@ -25,7 +25,7 @@ A second control label `backlog` is created for postponed work. While present on
 | `blocked` | The issue is waiting on child issues or dependency edges. |
 | `umbrella` | Parent issue with no implementation of its own; closes to `done` when all children resolve. |
 | `implementing` | The dev agent is producing commits in a per-issue worktree. |
-| `documenting` | The dev session runs a docs pass on the existing PR worktree. Reached on two trips: (a) **pre-approval** — after every code-changing branch update (initial PR open from `implementing`, validating fix, fixing-stage PR-feedback fix, in_review drift push, every `resolving_conflict` push). On this trip the docs pass advances to `validating` so the reviewer sees the docs commit in the diff. (b) **final-docs handoff** — after `_handle_validating` approves + verifies + squashes, the marker `docs_final_pending=True` is set and the label flips to `documenting`. On this trip the docs pass advances to `in_review` (updating `agent_approved_sha` to the new pushed head when a docs commit lands AND validating already seeded that slot, so the AUTO_MERGE `agent_approved_sha == pr.head.sha` invariant survives; if validating's PR snapshot failed and left the slot unset, the docs push leaves it unset too so AUTO_MERGE stays gated). Either trip: an explicit `DOCS: NO_CHANGE` verdict against a remote-clean head advances without pushing. |
+| `documenting` | The dev session runs a docs pass on the existing PR worktree. Reached on two trips: (a) **pre-approval** — after a code-changing branch update on the implementing / validating / fixing / in_review-drift paths (initial PR open from `implementing`, validating fix, fixing-stage PR-feedback fix, in_review drift push). `resolving_conflict` pushes deliberately do **not** route through here: every pushed conflict-resolution exit hands straight back to `validating` (alongside the existing base-up-to-date no-op), so a rebased branch only sees the single post-approval docs pass. On the pre-approval trip the docs pass advances to `validating` so the reviewer sees the docs commit in the diff. (b) **final-docs handoff** — after `_handle_validating` approves + verifies + squashes, the marker `docs_final_pending=True` is set and the label flips to `documenting`. On this trip the docs pass advances to `in_review` (updating `agent_approved_sha` to the new pushed head when a docs commit lands AND validating already seeded that slot, so the AUTO_MERGE `agent_approved_sha == pr.head.sha` invariant survives; if validating's PR snapshot failed and left the slot unset, the docs push leaves it unset too so AUTO_MERGE stays gated). Either trip: an explicit `DOCS: NO_CHANGE` verdict against a remote-clean head advances without pushing. |
 | `validating` | The reviewer agent is checking the diff and may bounce fixes back to the dev agent. |
 | `in_review` | A PR is open and ready for human review or auto-merge gates. |
 | `fixing` | Unread in-review feedback (issue thread / PR conversation / inline review / PR review summary) or a human CI-fix request is queued during the quiet window or actively being addressed by the dev fix-loop. A successful fix routes through `documenting` (so the docs pass runs against the new head) and then back through `validating` so the reviewer re-approves before auto-merge can proceed. When the rescan finds no unread feedback at all, the bounce skips the docs hop and goes straight to `validating`. |
@@ -56,7 +56,7 @@ Inside `workflow.tick(gh, spec)`, before any issue is dispatched the tick runs `
 Two paths depending on whether a PR already exists for the issue:
 
 - **Pre-PR worktrees** (no `pr_number` in pinned state) get a clean-tree `git rebase origin/<base>` directly — there is no remote to push to, so the local branch can be kept linear without publishing a rewrite.
-- **PR-having worktrees** in `validating` / `in_review` / `fixing` are detoured to `resolving_conflict` instead (via `_route_pr_worktree_to_resolving_conflict`: post a PR notice, seed `conflict_round` only when absent, flip the label) so the existing `_handle_resolving_conflict` handler does rebase + force-with-lease push + relabel-to-`documenting` (or `validating` on a base-up-to-date no-op) in one consistent flow.
+- **PR-having worktrees** in `validating` / `in_review` / `fixing` are detoured to `resolving_conflict` instead (via `_route_pr_worktree_to_resolving_conflict`: post a PR notice, seed `conflict_round` only when absent, flip the label) so the existing `_handle_resolving_conflict` handler does rebase + force-with-lease push + relabel-to-`validating` (the same target as the base-up-to-date no-op) in one consistent flow.
 
 Applying `hold_base_sync` to an issue skips both paths for that issue; removing the label lets the next tick perform the accumulated base sync once. The `question` workflow label skips base sync unconditionally for the same read-only reason `_handle_question` already tears down its own worktree on every safe exit — merging `origin/<base>` into a question worktree would either accrete commits on a read-only branch or mask the inspection state of an unsafe park (`question_commits` / `question_dirty` / `question_timeout`).
 
@@ -148,7 +148,7 @@ Author-login matching is intentionally avoided because the orchestrator PAT is o
 
     Result routing in `_post_user_content_change_result`:
 
-    - a clean pushed fix routes to `documenting` from `resolving_conflict` (the docs pass runs on the rewritten tree before the reviewer re-runs), from `in_review` (so the docs pass runs against the updated body + new diff before the reviewer re-evaluates), and from `validating` (with `review_round++`), or runs the implementing `_on_commits` path to open/push the PR from `implementing`;
+    - a clean pushed fix hands straight back to `validating` from `resolving_conflict` (the single docs pass is deferred to the post-approval hop, so the reviewer re-runs against the rewritten branch directly), routes to `documenting` from `in_review` (so the docs pass runs against the updated body + new diff before the reviewer re-evaluates), and from `validating` (with `review_round++`), or runs the implementing `_on_commits` path to open/push the PR from `implementing`;
     - a no-commit reply is treated as an ack ONLY when it carries the explicit `ACK: <reason>` marker the resume prompt instructs the dev to emit when the existing work already satisfies the edit.
 
       The dev's justification is posted on the issue as an FYI and the handler does NOT park awaiting_human, so a harmless clarification doesn't stall the issue;
@@ -202,7 +202,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      - **invalid manifest** → park awaiting human with the parse error and the agent's last message quoted (same recovery as a malformed reviewer verdict).
      - **no fenced block** → treat as a question; park with the message quoted (mirrors `_on_question` from implementing).
      - **decision == "single"** → post a one-line "fits in one context" comment with the rationale, set label `ready`, stamp `decomposed_at`. `_handle_ready` picks it up next tick.
-     - **decision == "split"** → crash-safe creation in three phases. The decomposer is no longer asked to emit a final docs-update child — every code-changing branch update (initial implementation, validating fix, fixing-stage PR-feedback fix, in_review drift push, and any resolving_conflict push) now flows through the `documenting` stage before the reviewer re-runs, so docs stay in sync without a synthetic child.
+     - **decision == "split"** → crash-safe creation in three phases. The decomposer is no longer asked to emit a final docs-update child — code-changing branch updates flow through the `documenting` stage (initial implementation, validating fix, fixing-stage PR-feedback fix, in_review drift push) before the reviewer re-runs, or hand straight back to `validating` (every `resolving_conflict` push), with the single final docs pass running after the reviewer's `VERDICT: APPROVED`, so docs stay in sync without a synthetic child.
        1. For each child call `gh.create_child_issue(...)` with label `blocked` regardless of dependencies, and seed the child's pinned state with `parent_number`. `create_child_issue` prepends `Parent: #<n>` to the body (no auto-close keyword).
 
           Child-state seeding is mandatory — failure persists the partial `children` list and parks awaiting human, so no orphan child is left runnable.
@@ -285,7 +285,7 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 - **Output**: a pushed branch + open PR + label moved to `documenting` (the docs pass advances to `validating` on the next tick), OR a HITL park.
 
 ### `_handle_documenting` (label `documenting`)
-- **Trigger**: each tick while the label is `documenting`. Set on two distinct trips: (a) **pre-approval** by `_handle_implementing` after `_on_commits` opens the PR, and by every pushed-fix exit in `_handle_validating` (CHANGES_REQUESTED / awaiting-human resume / user-content drift / transient-park recovery) / `_handle_fixing` / `_handle_in_review` drift / `_handle_resolving_conflict`; (b) **final-docs handoff** by `_handle_validating`'s approval branch (after verify + squash) with the marker `docs_final_pending=True`. Also runs on closed-`documenting` issues yielded by the polling sweep so an externally-merged PR finalizes to `done`.
+- **Trigger**: each tick while the label is `documenting`. Set on two distinct trips: (a) **pre-approval** by `_handle_implementing` after `_on_commits` opens the PR, and by every pushed-fix exit in `_handle_validating` (CHANGES_REQUESTED / awaiting-human resume / user-content drift / transient-park recovery) / `_handle_fixing` / `_handle_in_review` drift (`_handle_resolving_conflict` hands every pushed exit straight back to `validating`, NOT through `documenting`); (b) **final-docs handoff** by `_handle_validating`'s approval branch (after verify + squash) with the marker `docs_final_pending=True`. Also runs on closed-`documenting` issues yielded by the polling sweep so an externally-merged PR finalizes to `done`.
 - **Input**: pinned `pr_number`, `branch`, `dev_agent`/`dev_session_id` (the docs pass runs AS the dev role and reuses the same locked spec / session id — there is no separate `documenting_agent`), plus `docs_checked_sha` / `docs_verdict` / `silent_park_count` watermarks. The `docs_final_pending` boolean discriminates the two trips: when True (set only by `_handle_validating`'s approval branch), success exits advance to `in_review` instead of `validating`, and a pushed docs commit also updates `agent_approved_sha` to the new head so the AUTO_MERGE `agent_approved_sha == pr.head.sha` invariant survives the final docs commit.
 - **Internal flow**:
   0. **External-merge / closed-issue short-circuit.** Identical to the implementing / validating entry checks: `_finalize_if_pr_merged` flips a merged PR to `done`; `_finalize_if_issue_closed` flips a closed issue to `rejected` (only emitting `pr_closed_without_merge` + running `_cleanup_terminal_branch` when the linked PR is also closed). The same fetch-failure / merged-PR deferral the implementing handler relies on applies here.
@@ -440,14 +440,14 @@ The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage
   7. Refresh `origin/<branch>` over `_authed_fetch` (the same hardened authenticated channel `_push_branch` uses); a stale local `origin/<branch>` would mis-classify a real "remote moved out from under us" situation as in-sync.
   8. Compare HEAD to the freshly-fetched `origin/<branch>`:
      - `behind > 0` (worktree diverged) → park: force-pushing local state would clobber the real PR head.
-     - `ahead > 0` (recovered unpushed commits from a previous tick that crashed before `_push_branch` returned) → run the same dirty-tree check `_on_dirty_worktree` uses, then push the recovered work and flip to `documenting` (the pushed diff must run through the docs pass before the reviewer re-runs) with `review_round=0`, `conflict_round += 1`.
+     - `ahead > 0` (recovered unpushed commits from a previous tick that crashed before `_push_branch` returned) → run the same dirty-tree check `_on_dirty_worktree` uses, then push the recovered work and flip to `validating` (the single docs pass is deferred to the post-approval hop, so the reviewer re-runs against the recovered commit directly) with `review_round=0`, `conflict_round += 1`.
      - `(0, 0)` (in sync) → fall through.
   9. Refresh `origin/<base>` over the same hardened path, then run `git rebase origin/<base>` in the worktree under `_git_hardened` (drops global/system git config, disables hooks/fsmonitor/credential helpers/commit signing, and disables rebase autostash — the agent owns the worktree and could otherwise plant a hook to execute attacker code mid-rebase).
   10. **Clean rebase succeeded**: dirty-tree check first (a leftover edit from a crashed prior tick must not silently survive into validating).
 
-      If the HEAD SHA did not move (already up-to-date — `git rebase` returned success without applying anything), skip the push and flip STRAIGHT to `validating` with `review_round=0`, `conflict_round += 1`; no branch diff changed, so re-running the docs pass would have nothing to react to. Counting the no-op against the cap surfaces a perpetually-unmergeable-due-to-branch-protection PR within `MAX_CONFLICT_ROUNDS` ticks instead of letting it ping-pong between handlers forever.
+      If the HEAD SHA did not move (already up-to-date — `git rebase` returned success without applying anything), skip the push and flip back to `validating` with `review_round=0`, `conflict_round += 1`. Counting the no-op against the cap surfaces a perpetually-unmergeable-due-to-branch-protection PR within `MAX_CONFLICT_ROUNDS` ticks instead of letting it ping-pong between handlers forever.
 
-      If HEAD moved, force-with-lease push the rebased branch, clear any stale `agent_approved_sha`, and flip to `documenting` (the pushed diff goes through the docs pass before the reviewer re-runs; same other state writes).
+      If HEAD moved, force-with-lease push the rebased branch, clear any stale `agent_approved_sha`, and flip to `validating` (same target as the no-op path; the single docs pass is deferred to the post-approval hop, so the reviewer re-runs against the rebased branch directly).
   11. **Conflicted rebase**: build a conflict-resolution prompt via `_build_conflict_resolution_prompt` (lists up to 20 conflicted paths, instructs the agent to resolve and continue the rebase, and not push), resume the dev session on the locked spec (backend + args) with that prompt, then run `_post_conflict_resolution_result`.
   12. `_post_conflict_resolution_result` is the shared post-agent funnel:
       - timeout → park (HITL);
@@ -455,12 +455,12 @@ The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage
       - no new commit → `_on_question` park;
       - dirty tree → `_on_dirty_worktree` park;
       - push fail → park;
-      - success → force-with-lease push, clear any stale `agent_approved_sha`, set `last_conflict_resolved_at`, increment `conflict_round`, reset `review_round=0`, flip to `documenting` (the pushed diff goes through the docs pass before the reviewer re-runs).
+      - success → force-with-lease push, clear any stale `agent_approved_sha`, set `last_conflict_resolved_at`, increment `conflict_round`, reset `review_round=0`, flip to `validating` (the single docs pass is deferred to the post-approval hop, so the reviewer re-runs against the resolved branch directly).
 
       Fresh conflicted-rebase pushes pin the lease to the pre-rebase PR head captured after the branch/head equality gate. Awaiting-human resume pushes deliberately use `_push_branch`'s live `ls-remote` lease fallback, because the local `before_sha` may be an intermediate rebase or recovered commit SHA rather than the remote PR head.
 
       The counter increments only on the success path so a timeout/dirty/push-fail does not eat a slot from the cap.
-- **Output**: label moved to `documenting` (any pushed conflict-resolution path — clean rebase, recovered push, agent-resolved conflicts, awaiting-human resume push, or drift-pushed fix) OR `validating` (base-up-to-date no-op, no diff changed) OR `done`/`rejected` (terminal arcs) OR a HITL park (cap exhausted, dirty worktree, push fail, agent timeout, agent silence, fetch fail, diverged worktree, missing pr_number).
+- **Output**: label moved to `validating` (every exit path — base-up-to-date no-op, clean rebase pushed, recovered push, agent-resolved conflicts, awaiting-human resume push, drift-pushed fix) OR `done`/`rejected` (terminal arcs) OR a HITL park (cap exhausted, dirty worktree, push fail, agent timeout, agent silence, fetch fail, diverged worktree, missing pr_number).
 
 The rebase path deliberately rewrites the PR branch to keep history linear after other issue PRs land. Every pushed rebase resets `review_round`, so the reviewer agent must re-approve the rewritten head before AUTO_MERGE can pass.
 
@@ -527,7 +527,8 @@ The Q&A flow deliberately keeps state minimal: no PR is ever opened, no branch i
      in_review --(AUTO_MERGE on, approved, unmergeable past gates)──►
        resolving_conflict --(any pushed resolution: clean rebase,
          recovered push, agent/human-resume push, drift push)──►
-         documenting ──► docs pass ──► validating
+         validating  (no pre-approval docs hop; the single docs pass
+                      runs after the reviewer's final approval)
        resolving_conflict --(base up-to-date no-op, no diff)──► validating
        resolving_conflict --(round ≥ MAX_CONFLICT_ROUNDS)──► park HITL
 
@@ -605,17 +606,19 @@ The Q&A flow deliberately keeps state minimal: no PR is ever opened, no branch i
 
    resolving_conflict (AUTO_MERGE only, capped by MAX_CONFLICT_ROUNDS):
      git rebase origin/<base> clean (HEAD moved) ─► push,
-       label=documenting (++conflict_round)
+       label=validating (++conflict_round)
      git rebase origin/<base> no-op (HEAD unchanged, no diff) ─►
        label=validating (++conflict_round, no push)
      conflicts ─► dev resumes, continues rebase, push ─►
-       label=documenting (++conflict_round)
+       label=validating (++conflict_round)
      ahead-of-remote recovered commits ─► push ─►
-       label=documenting (++conflict_round)
+       label=validating (++conflict_round)
      awaiting-human resume push / drift push ─►
-       label=documenting (++conflict_round)
+       label=validating (++conflict_round)
      conflict_round >= MAX_CONFLICT_ROUNDS ─► park awaiting human
      pr merged/closed mid-stage ─► done / rejected (terminal)
+     (no pre-approval documenting hop -- the single docs pass runs
+      after the reviewer's final approval via docs_final_pending)
 
    question (operator-applied; no automatic in/out transitions):
      fresh spawn ─► DECOMPOSE_AGENT runs read-only in issue-N worktree,

@@ -6,10 +6,12 @@ The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 `umbrella` → `implementing` → `documenting` → `validating` →
 `in_review` → `fixing` (on fresh PR feedback) or `resolving_conflict`
 (auto-merge detour) → `done` / `rejected`) is wired end-to-end.
-Every code-changing branch update (initial implementation, any
+Most code-changing branch updates (initial implementation, any
 `validating` pushed fix, any `fixing` PR-feedback push, any `in_review`
-drift push, and any `resolving_conflict` push) routes through
-`documenting` before the reviewer re-runs. `_handle_fixing` owns the
+drift push) still route through `documenting` before the reviewer
+re-runs; `resolving_conflict` pushes hand straight back to `validating`
+instead (the single docs pass runs after the reviewer's final approval
+via `docs_final_pending`). `_handle_fixing` owns the
 PR-feedback quiet window and the dev-resume / push / route-through-
 `documenting` cycle, with watermark advancement on success and on
 failure-park; the in_review route, the closed-issue sweep, the
@@ -152,11 +154,12 @@ and the closed-issue sweep mirror `_handle_in_review`.
 **Conflict resolution stage.** Under `AUTO_MERGE=on`, approved-but-
 unmergeable PRs route to `resolving_conflict`.
 `_handle_resolving_conflict` fetches base and runs `git rebase` under
-the hardened envelope. Pushed resolutions flip to `documenting`; a
-base-up-to-date no-op bounces straight back to `validating`. Real
-conflicts resume the dev with up to 20 conflicted paths.
-`MAX_CONFLICT_ROUNDS` (default 3) caps attempts; every pushed rebase
-drops `agent_approved_sha`.
+the hardened envelope. Every exit — pushed resolution or
+base-up-to-date no-op — hands straight back to `validating`; the
+single docs pass runs after the reviewer's final approval via
+`docs_final_pending`. Real conflicts resume the dev with up to 20
+conflicted paths. `MAX_CONFLICT_ROUNDS` (default 3) caps attempts;
+every pushed rebase drops `agent_approved_sha`.
 
 **Question stage.** The operator-applied `question` label runs
 `_handle_question` as a read-only side-branch: no implementation, no
@@ -366,13 +369,13 @@ swallowed.
   exploration or skipping acceptance for trivial fixes. Judged excessive
   for the original 2-week budget; revisit once the static flow is fully
   dogfooded.
-- **Single-pass `documenting` after reviewer approval.** Today every
-  code-changing branch update (initial implementation, validating fix,
-  fixing-stage PR-feedback push, in_review drift push, every
-  resolving_conflict push) routes through `documenting` before the
-  reviewer re-runs. The proposed simplification routes those pushes to
-  `validating` instead and runs a single docs pass after the reviewer
-  emits `VERDICT: APPROVED`, before the `in_review` handoff. See
+- **Single-pass `documenting` after reviewer approval.** Today many
+  code-changing branch updates (initial implementation, validating fix,
+  fixing-stage PR-feedback push, in_review drift push) still route
+  through `documenting` before the reviewer re-runs. The proposed
+  simplification routes those pushes to `validating` instead and runs a
+  single docs pass after the reviewer emits `VERDICT: APPROVED`, before
+  the `in_review` handoff. See
   [`plans/review-stages-lifecycle.md`](review-stages-lifecycle.md) for
   the full transition map (every `set_workflow_label` call site grouped
   by stage, every current entry into `documenting`, and the proposed
@@ -386,9 +389,14 @@ swallowed.
   `gh.get_pr()` succeeded AND `_head_sha()` returned a non-empty local
   SHA — so AUTO_MERGE survives; when either fails and the sentinel is
   absent, the docs push leaves any stale `agent_approved_sha` untouched
-  so AUTO_MERGE stays gated).
-  Collapsing the pre-approval `documenting` entries into direct
-  `validating` routes is the remaining work under #262.
+  so AUTO_MERGE stays gated). **Issue #269 landed the resolving_conflict
+  half**: every pushed conflict-resolution path (drift resolve,
+  recovered push, clean rebase, agent-resolved, awaiting-human resume)
+  now hands straight back to `validating` alongside the existing
+  base-up-to-date no-op. Collapsing the remaining pre-approval
+  `documenting` entries (implementing, validating fix loop, fixing,
+  in_review drift) into direct `validating` routes is the remaining
+  work under #262.
 - **Symphony-inspired per-repo policy and hooks.** See
   [`plans/symphony-spec-review.md`](symphony-spec-review.md) for the full
   review. Two proposals survived the critical filter: a narrow

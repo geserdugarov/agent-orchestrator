@@ -993,12 +993,11 @@ class HandleResolvingConflictTest(
             )
         return mocks, merge_mock, git_mock
 
-    def test_clean_rebase_pushes_and_flips_to_documenting(self) -> None:
-        # A clean base rebase that actually moved HEAD changes the
-        # branch diff, so the docs pass must run on the rebased tree
-        # before the reviewer re-runs. Route through `documenting`,
-        # NOT straight to `validating` (the no-op case below keeps
-        # going straight to validating because no diff changed).
+    def test_clean_rebase_pushes_and_flips_to_validating(self) -> None:
+        # A clean base rebase that actually moved HEAD pushes the
+        # rebased branch and hands straight back to `validating`; the
+        # single docs pass runs after the reviewer's final approval, so
+        # no pre-approval `documenting` detour is interposed.
         gh, issue, pr = self._seed(
             extra_state={"agent_approved_sha": "stale-approval"},
         )
@@ -1018,8 +1017,8 @@ class HandleResolvingConflictTest(
             self.BRANCH,
             force_with_lease="beforehead",
         )
-        self.assertIn((200, "documenting"), gh.label_history)
-        self.assertNotIn((200, "validating"), gh.label_history)
+        self.assertIn((200, "validating"), gh.label_history)
+        self.assertNotIn((200, "documenting"), gh.label_history)
         data = gh.pinned_data(200)
         self.assertEqual(data.get("review_round"), 0)
         self.assertIsNone(data.get("agent_approved_sha"))
@@ -1051,10 +1050,10 @@ class HandleResolvingConflictTest(
         # branch protection), the rebase is a no-op and there is nothing to
         # push. The handler must still increment `conflict_round` so the
         # cap eventually fires -- otherwise the in_review <-> resolving
-        # cycle would loop forever. Because no branch diff changed, the
-        # no-op path hands STRAIGHT back to `validating` (skipping the
-        # `documenting` detour used by every pushed path) -- the docs
-        # pass would have nothing new to react to.
+        # cycle would loop forever. The label hands back to `validating`
+        # so AUTO_MERGE can re-evaluate; every other resolving_conflict
+        # exit also targets `validating` now, so there's no `documenting`
+        # detour to skip relative to the pushed paths.
         gh, issue, pr = self._seed()
         mocks, merge_mock, git_mock = self._run_with_merge(
             gh, issue,
@@ -1097,13 +1096,13 @@ class HandleResolvingConflictTest(
         merge_mock2.assert_not_called()
         self.assertTrue(gh.pinned_data(200).get("awaiting_human"))
 
-    def test_conflict_resolved_by_agent_pushes_and_flips_to_documenting(
+    def test_conflict_resolved_by_agent_pushes_and_flips_to_validating(
         self,
     ) -> None:
-        # Agent-resolved conflict push changes the branch diff, so the
-        # docs pass must run on the resolved tree before the reviewer
-        # re-runs. Route through `documenting`, not straight to
-        # `validating`.
+        # Agent-resolved conflict push pushes the resolved branch and
+        # hands straight back to `validating`; the single docs pass runs
+        # after the reviewer's final approval, so no pre-approval
+        # `documenting` detour is interposed.
         gh, issue, pr = self._seed(
             extra_state={"agent_approved_sha": "stale-approval"},
         )
@@ -1129,8 +1128,8 @@ class HandleResolvingConflictTest(
             self.BRANCH,
             force_with_lease="beforehead",
         )
-        self.assertIn((200, "documenting"), gh.label_history)
-        self.assertNotIn((200, "validating"), gh.label_history)
+        self.assertIn((200, "validating"), gh.label_history)
+        self.assertNotIn((200, "documenting"), gh.label_history)
         data = gh.pinned_data(200)
         self.assertEqual(data.get("review_round"), 0)
         self.assertIsNone(data.get("agent_approved_sha"))
@@ -1379,10 +1378,10 @@ class HandleResolvingConflictTest(
         prompt = mocks["run_agent"].call_args.args[1]
         self.assertIn("try harder", prompt)
         merge_mock.assert_not_called()
-        # Successful resume pushes the branch and routes through
-        # `documenting` (the resumed agent produced a fresh commit, so
-        # the docs pass must run on the resolved tree before the
-        # reviewer re-runs).
+        # Successful resume pushes the branch and hands straight back
+        # to `validating`; the single docs pass is deferred to the
+        # post-approval hop, so no pre-approval `documenting` detour
+        # is interposed.
         mocks["_push_branch"].assert_called_once_with(
             _TEST_SPEC,
             _FAKE_WT,
@@ -1393,8 +1392,8 @@ class HandleResolvingConflictTest(
         self.assertEqual(data.get("review_round"), 0)
         self.assertIsNone(data.get("agent_approved_sha"))
         self.assertEqual(data.get("conflict_round"), 2)
-        self.assertIn((200, "documenting"), gh.label_history)
-        self.assertNotIn((200, "validating"), gh.label_history)
+        self.assertIn((200, "validating"), gh.label_history)
+        self.assertNotIn((200, "documenting"), gh.label_history)
         # Watermark advanced past the consumed comment.
         self.assertEqual(data.get("last_action_comment_id"), 2000)
 
@@ -1461,12 +1460,12 @@ class HandleResolvingConflictTest(
             calls, ["poisoned-sess", None],
             "stale-session resume must be transparently retried as fresh",
         )
-        # Successful retry pushes the branch and routes through
-        # `documenting` (NOT straight to `validating`) WITHOUT parking
-        # agent_silent.
+        # Successful retry pushes the branch and hands straight back to
+        # `validating` WITHOUT parking agent_silent; the single docs
+        # pass is deferred to the post-approval hop.
         mocks["_push_branch"].assert_called_once()
-        self.assertIn((200, "documenting"), gh.label_history)
-        self.assertNotIn((200, "validating"), gh.label_history)
+        self.assertIn((200, "validating"), gh.label_history)
+        self.assertNotIn((200, "documenting"), gh.label_history)
         data = gh.pinned_data(200)
         self.assertFalse(
             data.get("awaiting_human"),
@@ -1572,14 +1571,14 @@ class HandleResolvingConflictTest(
         mocks["run_agent"].assert_not_called()
         # Round completed: counter incremented, label flipped, marker
         # stamped exactly as on the happy-path resolve. The recovered
-        # push changes the branch diff, so route through `documenting`
-        # before the reviewer re-runs.
+        # push hands straight back to `validating`; the single docs
+        # pass is deferred to the post-approval hop.
         data = gh.pinned_data(200)
         self.assertEqual(data.get("review_round"), 0)
         self.assertEqual(data.get("conflict_round"), 1)
         self.assertIn("last_conflict_resolved_at", data)
-        self.assertIn((200, "documenting"), gh.label_history)
-        self.assertNotIn((200, "validating"), gh.label_history)
+        self.assertIn((200, "validating"), gh.label_history)
+        self.assertNotIn((200, "documenting"), gh.label_history)
 
     def test_stale_worktree_parks_awaiting_human(self) -> None:
         # Worktree behind `origin/<branch>` (someone pushed to the PR
@@ -1764,10 +1763,10 @@ class HandleResolvingConflictHashDriftTest(
             head_shas=["before", "after", "after"],
         )
 
-        # Pushed drift fix -> route through `documenting` so the docs
-        # pass runs on the updated tree before the reviewer re-runs.
-        self.assertIn((500, "documenting"), gh.label_history)
-        self.assertNotIn((500, "validating"), gh.label_history)
+        # Pushed drift fix -> hand straight back to `validating`; the
+        # single docs pass is deferred to the post-approval hop.
+        self.assertIn((500, "validating"), gh.label_history)
+        self.assertNotIn((500, "documenting"), gh.label_history)
         # Notice posted on the PR.
         self.assertTrue(any(
             "issue body changed" in body
