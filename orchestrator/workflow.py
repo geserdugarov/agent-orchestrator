@@ -261,7 +261,7 @@ def _run_agent_tracked(
     the traceback).
 
     After the audit `agent_exit` is emitted, an analytics record is
-    appended to `config.ANALYTICS_LOG_PATH` via `analytics.append_record`
+    appended to `analytics.ANALYTICS_LOG_PATH` via `analytics.append_record`
     (a no-op when the sink is disabled). The record carries the same
     contextual fields (`repo`, `issue`, `stage`, `agent_role`, `backend`,
     `agent_spec`, `resume_session_id` / `session_id`, `review_round`,

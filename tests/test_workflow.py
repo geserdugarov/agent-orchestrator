@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import config, workflow, worktrees
+from orchestrator import analytics, config, workflow, worktrees
 from orchestrator.agents import AgentResult
 from orchestrator.github import BACKLOG_LABEL, BASE_SYNC_HOLD_LABEL
 from orchestrator.workflow import _parse_documentation_verdict, _parse_review_verdict
@@ -1238,7 +1238,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # the price-table estimate.
         with tempfile.TemporaryDirectory(prefix="analytics-codex-fallback-") as td:
             path = Path(td) / "analytics.jsonl"
-            with patch.object(config, "ANALYTICS_LOG_PATH", path), \
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(workflow, "run_agent") as run_mock:
                 run_mock.return_value = AgentResult(
                     session_id="sess-codex",
@@ -1285,7 +1285,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # reflect the stream-reported model, not the fallback.
         with tempfile.TemporaryDirectory(prefix="analytics-claude-fallback-") as td:
             path = Path(td) / "analytics.jsonl"
-            with patch.object(config, "ANALYTICS_LOG_PATH", path), \
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(workflow, "run_agent") as run_mock:
                 run_mock.return_value = AgentResult(
                     session_id="sess-claude",
@@ -5738,7 +5738,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             gh = FakeGitHubClient()
             issue = make_issue(8001, label="implementing")
             gh.add_issue(issue)
-            with patch.object(config, "ANALYTICS_LOG_PATH", path), \
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(workflow, "_handle_implementing"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
             records = [
@@ -5768,7 +5768,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             gh = FakeGitHubClient()
             issue = make_issue(8002)
             gh.add_issue(issue)
-            with patch.object(config, "ANALYTICS_LOG_PATH", path), \
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(workflow, "_handle_pickup"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
             records = [
@@ -5795,7 +5795,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             gh = FakeGitHubClient()
             issue = make_issue(8003, label="validating")
             gh.add_issue(issue)
-            with patch.object(config, "ANALYTICS_LOG_PATH", path), \
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(
                      workflow, "_handle_validating", side_effect=sentinel,
                  ):
@@ -5825,7 +5825,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             issue = make_issue(8004, label="implementing")
             issue.labels.append(FakeLabel(BACKLOG_LABEL))
             gh.add_issue(issue)
-            with patch.object(config, "ANALYTICS_LOG_PATH", path), \
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(workflow, "_handle_implementing") as handler:
                 workflow._process_issue(gh, _TEST_SPEC, issue)
             handler.assert_not_called()
@@ -5840,7 +5840,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             gh = FakeGitHubClient()
             issue = make_issue(8005, label="implementing")
             gh.add_issue(issue)
-            with patch.object(config, "ANALYTICS_LOG_PATH", None), \
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", None), \
                  patch.object(workflow, "_handle_implementing"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
             self.assertFalse(sentinel.exists())
@@ -5868,7 +5868,7 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
     def test_label_transition_writes_analytics_stage_enter(self) -> None:
         with tempfile.TemporaryDirectory(prefix="analytics-stage-enter-") as td:
             path = Path(td) / "analytics.jsonl"
-            with patch.object(config, "ANALYTICS_LOG_PATH", path):
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", path):
                 gh = FakeGitHubClient()
                 issue = make_issue(8101)
                 gh.add_issue(issue)
@@ -5892,7 +5892,7 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
         # `stage_enter` analytics record.
         with tempfile.TemporaryDirectory(prefix="analytics-stage-none-") as td:
             path = Path(td) / "analytics.jsonl"
-            with patch.object(config, "ANALYTICS_LOG_PATH", path):
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", path):
                 gh = FakeGitHubClient()
                 issue = make_issue(8102, label="implementing")
                 gh.add_issue(issue)
