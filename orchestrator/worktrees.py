@@ -1669,14 +1669,16 @@ def _sync_worktree_with_base(
     Pre-PR: rebase onto `origin/<base>` directly. PR-having + behind base +
     label in {validating, in_review, fixing}: detour the issue to
     `resolving_conflict` so the existing handler does rebase + push +
-    relabel-to-`documenting` (the pushed diff goes through the docs pass
-    before the reviewer re-runs; a base-up-to-date no-op with no diff
-    bypasses `documenting` and bounces straight back to `validating`) in
-    one consistent flow. Skips a dirty worktree or a worktree already up
-    to date (no pre-PR rebase attempted, no PR detour fired). On a pre-PR
-    content conflict, aborts the rebase so the worktree stays on its
-    pre-rebase SHA -- conflict resolution lives in
-    `_handle_resolving_conflict`, not here.
+    relabel back to `validating` (every pushed conflict-resolution path
+    hands straight back to `validating` so the reviewer re-runs against
+    the rebased branch directly; docs do not run here, the single docs
+    pass runs after reviewer approval before `in_review` via the
+    final-docs handoff driven by `docs_final_pending` in
+    `_handle_validating`) in one consistent flow. Skips a dirty worktree
+    or a worktree already up to date (no pre-PR rebase attempted, no PR
+    detour fired). On a pre-PR content conflict, aborts the rebase so
+    the worktree stays on its pre-rebase SHA -- conflict resolution
+    lives in `_handle_resolving_conflict`, not here.
     """
     try:
         issue = gh.get_issue(issue_number)
@@ -1790,11 +1792,13 @@ def _route_pr_worktree_to_resolving_conflict(
     Mirrors `_handle_in_review`'s unmergeable detour, just driven by a
     base advance instead of a PyGithub `mergeable=False`. The handler
     then runs `git rebase origin/<base>` in the worktree, pushes, and
-    relabels to `documenting` so the docs pass runs on the rewritten
-    tree before the reviewer re-runs (a base-up-to-date no-op with no
-    diff bypasses `documenting` and bounces straight back to
-    `validating`) -- the only safe pattern for PR-having worktrees,
-    since a local-only rebase would diverge local HEAD from
+    relabels back to `validating` so the reviewer re-runs against the
+    rebased branch directly (a base-up-to-date no-op with no diff
+    targets `validating` too). Docs do not run here -- the single docs
+    pass runs after reviewer approval before `in_review` via the
+    final-docs handoff driven by `docs_final_pending` in
+    `_handle_validating`. This is the only safe pattern for PR-having
+    worktrees, since a local-only rebase would diverge local HEAD from
     `pr.head.sha` and break every downstream gate that compares the
     two. Works under both AUTO_MERGE on (replaces the unmergeable
     trigger) and AUTO_MERGE off (the only auto-rebase path under that

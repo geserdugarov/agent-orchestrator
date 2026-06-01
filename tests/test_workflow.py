@@ -4031,9 +4031,9 @@ class NoCommitAckDoesNotParkTest(
     ) -> None:
         # A no-commit "ack" reply from the dev on an in_review drift
         # MUST bounce DIRECTLY back to `validating` (same destination
-        # as the pushed-fix exit; the pre-approval drift exit skips
-        # the `documenting` hop for both outcomes -- docs land in the
-        # final-docs pass after reviewer approval). The other ACK
+        # as the pushed-fix exit; docs do not run on the drift exit,
+        # the single docs pass runs after reviewer approval before
+        # `in_review` via the final-docs handoff). The other ACK
         # guarantees still hold: the stale `agent_approved_sha` is
         # cleared (the snapshot was for the old requirements, so
         # AUTO_MERGE cannot land the PR until the reviewer

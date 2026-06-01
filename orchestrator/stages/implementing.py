@@ -785,9 +785,8 @@ def _on_commits(
     # silent-park streak so a future blip doesn't tip an otherwise-healthy
     # session past the fresh-session threshold.
     state.set("silent_park_count", 0)
-    # Hand off straight to `validating`. The docs pass now runs as the
-    # final-docs handoff after the reviewer agent approves, so the
-    # initial implementation no longer takes a pre-review docs hop.
+    # Hand off straight to `validating`. The docs pass runs only as the
+    # final-docs handoff after the reviewer agent approves.
     gh.set_workflow_label(issue, "validating")
 
 

@@ -80,10 +80,10 @@ def _handle_resolving_conflict(
     (branch already up-to-date) skip the push and flip straight to
     `validating` too. On real content conflicts, resume the dev session
     on the locked backend with a conflict-resolution prompt, push the
-    resolved commit, and likewise flip to `validating`. The pre-approval
-    docs hop is no longer interposed: a single docs pass runs after the
-    reviewer's final `VERDICT: APPROVED` (driven by `docs_final_pending`
-    in `_handle_validating`), so every pushed conflict-resolution path
+    resolved commit, and likewise flip to `validating`. Docs do not run
+    here: the single docs pass runs after the reviewer's final
+    `VERDICT: APPROVED` (driven by `docs_final_pending` in
+    `_handle_validating`), so every pushed conflict-resolution path
     targets `validating` directly. Cap loops via `MAX_CONFLICT_ROUNDS`
     (parks awaiting human on exhaustion). On agent timeout / dirty
     tree / push failure, park awaiting human and let the operator

@@ -571,13 +571,13 @@ def _build_documentation_prompt(
     issue: Issue,
     comments_text: str,
 ) -> str:
-    """Prompt for the documentation pass that runs after `implementing`.
+    """Prompt for the documentation pass that runs as the final-docs
+    handoff between reviewer approval and `in_review`.
 
     Reuses the dev agent role -- the documentation pass commits to the same
     branch as the implementer, so it is operating as a developer and not a
-    reviewer. No separate backend env var is introduced for this stage in
-    this child; the eventual stage handler should invoke the existing dev
-    backend.
+    reviewer. No separate backend env var is introduced for this stage;
+    the stage handler invokes the existing dev backend on the PR worktree.
     """
     body = issue.body or "(no body)"
     convo = comments_text or "(no prior comments)"
