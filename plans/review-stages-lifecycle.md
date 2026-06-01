@@ -114,11 +114,11 @@ are collapsed under a single "Terminal" entry per handler.
 | From | To | File:line | Trigger |
 | ---- | -- | --------- | ------- |
 | `resolving_conflict` | `done` / `rejected` | conflicts.py:118 / 142 / 183 | PR terminal arcs (merged externally, closed-without-merge, issue closed) |
-| `resolving_conflict` | **`documenting`** | conflicts.py:244 | **User-content drift dev resume pushed** a resolution |
-| `resolving_conflict` | **`documenting`** | conflicts.py:405 | **Recovered commit pushed** (ahead-of-remote crash recovery) |
-| `resolving_conflict` | `validating` | conflicts.py:502 | Clean rebase, branch already up-to-date with base (no diff to docs) |
-| `resolving_conflict` | **`documenting`** | conflicts.py:531 | **Clean rebase produced a new HEAD and pushed** |
-| `resolving_conflict` | **`documenting`** | conflicts.py:655 | **Agent-resolved conflicts or awaiting-human resume pushed** |
+| `resolving_conflict` | `validating` | conflicts.py:244 | User-content drift dev resume pushed a resolution (#269 collapsed the pre-approval docs hop) |
+| `resolving_conflict` | `validating` | conflicts.py:405 | Recovered commit pushed (ahead-of-remote crash recovery; #269 collapsed the pre-approval docs hop) |
+| `resolving_conflict` | `validating` | conflicts.py:502 | Clean rebase, branch already up-to-date with base (no diff) |
+| `resolving_conflict` | `validating` | conflicts.py:531 | Clean rebase produced a new HEAD and pushed (#269 collapsed the pre-approval docs hop) |
+| `resolving_conflict` | `validating` | conflicts.py:655 | Agent-resolved conflicts or awaiting-human resume pushed (#269 collapsed the pre-approval docs hop) |
 
 ### `_handle_question` — label `question`
 
@@ -158,23 +158,25 @@ AND once more between approval and `in_review`. The complete entry set:
    resume pushed a commit (`outcome == "pushed"`).
 8. **fixing.py:376** — `_handle_fixing` resumed the dev on PR comment
    feedback and pushed a clean fix.
-9. **conflicts.py:244** — `_handle_resolving_conflict` user-content
-   drift resume pushed a commit.
-10. **conflicts.py:405** — `_handle_resolving_conflict` recovered (crash
-    recovery) commit ahead of remote pushed.
-11. **conflicts.py:531** — `_handle_resolving_conflict` clean rebase
-    produced a new HEAD and pushed.
-12. **conflicts.py:655** — `_handle_resolving_conflict` agent-resolved
-    or awaiting-human resumed conflict push (`_post_conflict_resolution_result`).
+9. ~~**conflicts.py:244**~~ — removed under #269; the user-content
+   drift dev resume now hands straight back to `validating`.
+10. ~~**conflicts.py:405**~~ — removed under #269; the ahead-of-remote
+    recovered commit push now hands straight back to `validating`.
+11. ~~**conflicts.py:531**~~ — removed under #269; the clean-rebase
+    pushed branch now hands straight back to `validating`.
+12. ~~**conflicts.py:655**~~ — removed under #269; both the
+    agent-resolved and awaiting-human resumed conflict pushes now hand
+    straight back to `validating` via `_post_conflict_resolution_result`.
 
 Cross-cutting observations:
 
-- Both validating and conflict-resolution dev resumes route through
-  `documenting` because each can land code that the README / docs /
-  plans must reflect.
-- Two paths bypass `documenting` deliberately because no diff lands:
-  fixing.py:262 (no unread feedback → straight back to `validating`)
-  and conflicts.py:502 (base-up-to-date no-op).
+- Validating-side dev resumes still route through `documenting` because
+  each can land code that the README / docs / plans must reflect.
+- The resolving-conflict pushed paths used to route through
+  `documenting` too; under #269 they hand straight back to `validating`
+  alongside the existing base-up-to-date no-op (conflicts.py:502), so
+  the single docs pass after final reviewer approval covers the
+  rewritten branch.
 - The `in_review` "ACK" drift outcome (in_review.py:595) likewise
   bounces directly to `validating`: nothing landed for the docs pass
   to react to.
@@ -226,7 +228,9 @@ Concretely, the following call sites become `set_workflow_label(issue, "validati
 - validating.py:678 / 768 / 807 / 1153
 - in_review.py:593
 - fixing.py:376
-- conflicts.py:244 / 405 / 531 / 655
+- ~~conflicts.py:244 / 405 / 531 / 655~~ — landed under #269; every
+  resolving_conflict pushed path now flips to `validating` directly,
+  alongside the existing base-up-to-date no-op.
 
 A new transition from `validating` (approval branch) into `documenting`,
 with the `documenting` handler then advancing to `in_review` instead of

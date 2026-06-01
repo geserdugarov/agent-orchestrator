@@ -75,16 +75,19 @@ def _handle_resolving_conflict(
     """Drive an unmergeable PR back to mergeable.
 
     Rebase the per-issue branch onto `origin/<base>`. On a clean rebase
-    that actually moved HEAD, push and flip to `documenting` so the docs
-    pass runs on the rebased tree before the reviewer re-runs; if the
-    base hasn't moved (branch already up-to-date) skip the push and
-    flip straight to `validating` (no diff means there is nothing for
-    the docs pass to react to). On real content conflicts, resume the
-    dev session on the locked backend with a conflict-resolution
-    prompt, push the resolved commit, and likewise route through
-    `documenting`. Cap loops via `MAX_CONFLICT_ROUNDS` (parks awaiting
-    human on exhaustion). On agent timeout / dirty tree / push failure,
-    park awaiting human and let the operator unstick.
+    that actually moved HEAD, push and flip to `validating` so the
+    reviewer re-runs against the rebased tree; if the base hasn't moved
+    (branch already up-to-date) skip the push and flip straight to
+    `validating` too. On real content conflicts, resume the dev session
+    on the locked backend with a conflict-resolution prompt, push the
+    resolved commit, and likewise flip to `validating`. The pre-approval
+    docs hop is no longer interposed: a single docs pass runs after the
+    reviewer's final `VERDICT: APPROVED` (driven by `docs_final_pending`
+    in `_handle_validating`), so every pushed conflict-resolution path
+    targets `validating` directly. Cap loops via `MAX_CONFLICT_ROUNDS`
+    (parks awaiting human on exhaustion). On agent timeout / dirty
+    tree / push failure, park awaiting human and let the operator
+    unstick.
 
     Rebasing rewrites commit SHAs, so every pushed rebase resets
     `review_round`; validation must re-approve the rebased branch before
@@ -197,11 +200,11 @@ def _handle_resolving_conflict(
     # User-content drift: a human edited the issue body while the dev
     # was resolving conflicts. Resuming with the new body+comments lets
     # the dev decide whether the edit affects the conflict resolution.
-    # On a successful pushed fix we route through `documenting` so the
-    # docs pass runs on the updated tree before the reviewer re-runs;
-    # on an ack (no commit but a reply) we stay in `resolving_conflict`
-    # without parking so a harmless clarification doesn't stall the
-    # rebase.
+    # On a successful pushed fix we hand straight to `validating` so the
+    # reviewer re-runs against the updated tree; the docs pass is
+    # deferred to the single post-approval hop. On an ack (no commit
+    # but a reply) we stay in `resolving_conflict` without parking so a
+    # harmless clarification doesn't stall the rebase.
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is not None:
         state.set("user_content_hash", new_hash)
@@ -211,9 +214,8 @@ def _handle_resolving_conflict(
         )
         # Mark issue-thread comments as consumed: the dev sees the full
         # thread via `_recent_comments_text`, and the eventual
-        # documenting->validating->in_review handoff (after a
-        # successful pushed resolution flips to documenting) must not
-        # replay them.
+        # validating->in_review handoff (after a successful pushed
+        # resolution flips back to validating) must not replay them.
         _wf._mark_drift_comments_consumed(gh, issue, state)
         wt = _wf._worktree_path(spec, issue.number)
         if not wt.exists():
@@ -239,9 +241,9 @@ def _handle_resolving_conflict(
                 outcome="drift_resolved",
                 sha=_wf._head_sha(wt) or None,
             )
-            # Pushed branch diff -> route through documenting so the docs
-            # pass runs on the updated tree before the reviewer re-runs.
-            gh.set_workflow_label(issue, "documenting")
+            # Pushed branch diff -> hand straight back to validating;
+            # the single docs pass runs after final reviewer approval.
+            gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
 
@@ -400,9 +402,9 @@ def _handle_resolving_conflict(
             outcome="recovered_push",
             sha=_wf._head_sha(wt) or None,
         )
-        # Pushed branch diff -> route through documenting so the docs
-        # pass runs on the recovered commit before the reviewer re-runs.
-        gh.set_workflow_label(issue, "documenting")
+        # Pushed branch diff -> hand straight back to validating; the
+        # single docs pass runs after final reviewer approval.
+        gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
 
@@ -496,9 +498,10 @@ def _handle_resolving_conflict(
                 outcome="base_up_to_date",
                 sha=after_sha,
             )
-            # No branch diff changed -- hand straight to validating
-            # (skip documenting). Re-running the docs pass on a tree
-            # the dev has not touched would just burn agent tokens.
+            # No branch diff changed -- hand straight back to validating
+            # so AUTO_MERGE can re-evaluate. Every other resolving_conflict
+            # exit also targets validating now; the single docs pass is
+            # deferred to the post-approval hop.
             gh.set_workflow_label(issue, "validating")
             gh.write_pinned_state(issue, state)
             return
@@ -526,9 +529,9 @@ def _handle_resolving_conflict(
             outcome="base_rebased_clean",
             sha=after_sha,
         )
-        # Pushed branch diff -> route through documenting so the docs
-        # pass runs on the rebased tree before the reviewer re-runs.
-        gh.set_workflow_label(issue, "documenting")
+        # Pushed branch diff -> hand straight back to validating; the
+        # single docs pass runs after final reviewer approval.
+        gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
 
@@ -575,9 +578,10 @@ def _post_conflict_resolution_result(
     `conflict_round` only on the success path -- failure paths leave
     the counter alone so a human-reply resume that lands cleanly still
     consumes a slot, but a timeout/dirty/push-failure on the same
-    counter does not. A successful push routes through `documenting`
-    (not `validating`) so the docs pass runs on the resolved tree
-    before the reviewer re-evaluates the rewritten branch.
+    counter does not. A successful push hands straight back to
+    `validating` so the reviewer re-runs against the resolved branch;
+    the single docs pass is deferred to the post-approval hop driven
+    by `docs_final_pending` in `_handle_validating`.
     """
     from .. import workflow as _wf
 
@@ -650,7 +654,7 @@ def _post_conflict_resolution_result(
             sha=after_sha,
         )
     # Pushed branch diff (fresh conflict resolution OR awaiting-human
-    # resume that landed a commit) -> route through documenting so the
-    # docs pass runs on the resolved tree before the reviewer re-runs.
-    gh.set_workflow_label(issue, "documenting")
+    # resume that landed a commit) -> hand straight back to validating;
+    # the single docs pass runs after final reviewer approval.
+    gh.set_workflow_label(issue, "validating")
     gh.write_pinned_state(issue, state)

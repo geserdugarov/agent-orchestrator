@@ -1595,14 +1595,15 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
       (the lease compares against the un-rebased remote tip), and
       AUTO_MERGE's `agent_approved_sha == pr.head.sha` gate. So instead
       we route the issue to `resolving_conflict`: the existing handler
-      does the rebase, pushes, and flips to `documenting` so the docs
-      pass runs on the rewritten tree before the reviewer re-runs (a
-      base-up-to-date no-op with no diff bypasses `documenting` and
-      bounces straight back to `validating`). Applying the
-      `hold_base_sync` label to an issue pauses both the pre-PR local
-      rebase and the PR detour until the label is removed. This works
-      under `AUTO_MERGE=off` too -- `_handle_resolving_conflict` never
-      reads AUTO_MERGE, it just does the rebase+push+relabel cycle.
+      does the rebase, pushes, and flips back to `validating` (the same
+      target as the base-up-to-date no-op exit) so the reviewer re-runs
+      against the rewritten branch directly; the single docs pass is
+      deferred to the post-approval hop driven by `docs_final_pending`
+      in `_handle_validating`. Applying the `hold_base_sync` label to
+      an issue pauses both the pre-PR local rebase and the PR detour
+      until the label is removed. This works under `AUTO_MERGE=off`
+      too -- `_handle_resolving_conflict` never reads AUTO_MERGE, it
+      just does the rebase+push+relabel cycle.
       Issues already labeled `resolving_conflict` are left alone (the
       handler runs this tick anyway); other labels are skipped (no PR
       worktree to refresh in those states).
