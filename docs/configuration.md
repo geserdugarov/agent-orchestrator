@@ -67,7 +67,7 @@ The first token of each role spec selects the backend (`codex` / `claude`); any 
 
 ## Local verification gate
 
-When the reviewer agent emits `VERDICT: APPROVED`, `_handle_validating` runs the configured `VERIFY_COMMANDS` in the per-issue worktree **before** posting the approval comment, squashing, seeding watermarks, or relabeling to `in_review`. A clean run advances the issue as usual; any failure parks the issue on `validating` with `awaiting_human=True` and a typed `park_reason`, so an operator can fix the breakage and resume.
+When the reviewer agent emits `VERDICT: APPROVED`, `_handle_validating` runs the configured `VERIFY_COMMANDS` in the per-issue worktree **before** posting the approval comment, squashing, seeding watermarks, or relabeling to `documenting` (the final-docs hop that precedes `in_review`). A clean run advances the issue as usual; any failure parks the issue on `validating` with `awaiting_human=True` and a typed `park_reason`, so an operator can fix the breakage and resume.
 
 The verify gate is the **first** gate after the reviewer agent. GitHub CI remains the later auto-merge gate consulted by `_handle_in_review` — the verify gate does not replace it, it catches regressions locally so an obviously-broken branch never reaches the PR-side merge path.
 
@@ -77,7 +77,7 @@ The verify shell shares the agent's environment filter (`agents._filter_agent_en
 
 | Variable          | Default | Purpose                                                                                                                |
 | ----------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `VERIFY_COMMANDS` | _(empty — no verification)_ | Ordered shell commands run sequentially in the per-issue worktree on `VERDICT: APPROVED`. Entries are separated by `;` or newlines; blank lines and `#`-comment lines are skipped. Each entry runs via the shell so quoting, pipes, and `&&` work; stdout and stderr are merged into one captured block. Default empty preserves the legacy behavior (no local verification — go straight to `in_review`). |
+| `VERIFY_COMMANDS` | _(empty — no verification)_ | Ordered shell commands run sequentially in the per-issue worktree on `VERDICT: APPROVED`. Entries are separated by `;` or newlines; blank lines and `#`-comment lines are skipped. Each entry runs via the shell so quoting, pipes, and `&&` work; stdout and stderr are merged into one captured block. Default empty preserves the legacy behavior (no local verification — approval flows straight through the final `documenting` hop and into `in_review`). |
 | `VERIFY_TIMEOUT`  | `600`   | Per-command wall-clock cap in seconds. A single slow command parks with `verify_timeout` instead of burning the orchestrator's tick budget. Ignored when `VERIFY_COMMANDS` is empty.                                                                                                                                                                  |
 
 ### Failure modes and `park_reason` tokens

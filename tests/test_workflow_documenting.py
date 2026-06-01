@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
@@ -13,6 +14,7 @@ from orchestrator import workflow
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
+    FakeLabel,
     FakePR,
     FakePRRef,
     FakeUser,
@@ -1175,6 +1177,419 @@ class HandleDocumentingClosedIssueTest(
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 181,
+        )
+
+
+class HandleDocumentingFinalDocsHandoffTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """Issue #266: when `_handle_validating` approves and seeds
+    `docs_final_pending=True`, the next `_handle_documenting` tick must
+    advance to `in_review` (NOT back to `validating`) on every success
+    exit. A new docs commit also updates `agent_approved_sha` to the
+    pushed head so the AUTO_MERGE `agent_approved_sha == pr.head.sha`
+    invariant survives the final docs commit.
+    """
+
+    PR_NUMBER = 71
+    BRANCH = "orchestrator/issue-707"
+
+    def _seeded(self, **state):
+        gh = FakeGitHubClient()
+        issue = make_issue(707, label="documenting")
+        gh.add_issue(issue)
+        defaults = dict(
+            pr_number=self.PR_NUMBER,
+            branch=self.BRANCH,
+            dev_agent="codex",
+            dev_session_id="dev-sess",
+            review_round=2,
+            agent_approved_sha="approvedSha",
+            docs_final_pending=True,
+            # Mirror validating's approval branch: the sentinel is set in
+            # the SAME code block that seeds `agent_approved_sha` so the
+            # docs handoff knows the snapshot is fresh and the SHA update
+            # path can promote `agent_approved_sha` to the docs head.
+            final_docs_approval_seeded=True,
+            pr_last_comment_id=999,
+        )
+        defaults.update(state)
+        gh.seed_state(707, **defaults)
+        return gh, issue
+
+    def test_docs_commit_pushed_advances_to_in_review_and_updates_sha(
+        self,
+    ) -> None:
+        gh, issue = self._seeded()
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="docs: refresh README to match feature",
+            ),
+            push_branch=True,
+            # before_sha (= approved/squashed head) -> after_sha (docs commit)
+            head_shas=["approvedSha", "docsSha"],
+            branch_ahead_behind=(0, 0),
+        )
+
+        mocks["_push_branch"].assert_called_once()
+        # Routed to `in_review` (the final-docs hop terminates here),
+        # NOT back to `validating`.
+        self.assertIn((707, "in_review"), gh.label_history)
+        self.assertNotIn((707, "validating"), gh.label_history)
+        data = gh.pinned_data(707)
+        # Marker cleared so a stray re-entry can't loop the routing.
+        self.assertFalse(data.get("docs_final_pending"))
+        # AUTO_MERGE invariant: agent_approved_sha tracks the new head.
+        self.assertEqual(data.get("agent_approved_sha"), "docsSha")
+        # Watermark seeded by validating rides through untouched.
+        self.assertEqual(data.get("pr_last_comment_id"), 999)
+
+    def test_no_change_verdict_advances_to_in_review_preserving_sha(
+        self,
+    ) -> None:
+        gh, issue = self._seeded()
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message=(
+                    "Inspected diff; no user-facing change.\n"
+                    "DOCS: NO_CHANGE"
+                ),
+            ),
+            push_branch=True,
+            # No commit landed: before_sha == after_sha == approved head.
+            head_shas=["approvedSha", "approvedSha"],
+            branch_ahead_behind=(0, 0),
+        )
+
+        mocks["_push_branch"].assert_not_called()
+        self.assertIn((707, "in_review"), gh.label_history)
+        self.assertNotIn((707, "validating"), gh.label_history)
+        data = gh.pinned_data(707)
+        self.assertFalse(data.get("docs_final_pending"))
+        # No commit -> PR head unchanged, agent_approved_sha untouched.
+        self.assertEqual(data.get("agent_approved_sha"), "approvedSha")
+        self.assertEqual(data.get("docs_verdict"), "no_change")
+
+    def test_no_change_with_recovered_ahead_advances_to_in_review(
+        self,
+    ) -> None:
+        # A previous final-docs tick committed but parked before the
+        # push landed. The resume's no-change verdict triggers the
+        # ahead-push branch; the recovered commit is now the new PR
+        # head and `agent_approved_sha` must follow it.
+        gh, issue = self._seeded(awaiting_human=True, park_reason="push_failed")
+        issue.comments.append(
+            FakeComment(id=2000, body="retry please", user=FakeUser("alice")),
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message=(
+                    "Re-checked diff; the existing docs commit "
+                    "already covers it.\nDOCS: NO_CHANGE"
+                ),
+            ),
+            push_branch=True,
+            # before_sha (awaiting-human resume snapshot) == after_sha
+            # (no new commit), but ahead=1 (the recovered docs commit
+            # from a prior tick) -- the helper pushes it and routes.
+            head_shas=["recoveredDocsSha", "recoveredDocsSha"],
+            branch_ahead_behind=(1, 0),
+        )
+
+        mocks["_push_branch"].assert_called_once()
+        self.assertIn((707, "in_review"), gh.label_history)
+        data = gh.pinned_data(707)
+        self.assertFalse(data.get("docs_final_pending"))
+        self.assertEqual(
+            data.get("agent_approved_sha"), "recoveredDocsSha",
+            "ahead-push of a recovered docs commit on the final-docs "
+            "handoff must update agent_approved_sha to the new head",
+        )
+
+    def test_no_marker_keeps_legacy_validating_route(self) -> None:
+        # Pre-approval docs passes (no `docs_final_pending` marker)
+        # continue to bounce back to `validating` so the reviewer sees
+        # the docs commit in the diff. Without the discriminator a
+        # validating CHANGES_REQUESTED fix would mis-route directly to
+        # in_review without re-review.
+        gh = FakeGitHubClient()
+        issue = make_issue(801, label="documenting")
+        gh.add_issue(issue)
+        gh.seed_state(
+            801,
+            pr_number=8100,
+            branch="orchestrator/issue-801",
+            dev_agent="codex",
+            dev_session_id="dev-sess",
+            # No `docs_final_pending` and no `agent_approved_sha`.
+        )
+
+        self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="docs: tidy plans/roadmap.md",
+            ),
+            push_branch=True,
+            head_shas=["aaa", "bbb"],
+            branch_ahead_behind=(0, 0),
+        )
+
+        self.assertIn((801, "validating"), gh.label_history)
+        self.assertNotIn((801, "in_review"), gh.label_history)
+        # Should not have set `agent_approved_sha` -- this is the pre-
+        # approval docs pass.
+        self.assertIsNone(gh.pinned_data(801).get("agent_approved_sha"))
+
+    def test_user_content_drift_invalidates_final_marker(self) -> None:
+        # A human body edit during the final-docs hop invalidates the
+        # prior approval (the reviewer voted on stale requirements).
+        # Mirror `_handle_in_review`'s drift handling: drop the marker,
+        # clear `agent_approved_sha`, and reset `review_round=0`. The
+        # post-spawn helpers see no marker and route back to
+        # `validating` so the reviewer re-evaluates the freshened diff.
+        gh, issue = self._seeded(user_content_hash="oldhash")
+
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="docs: align README with edit",
+            ),
+            push_branch=True,
+            head_shas=["approvedSha", "docsSha"],
+            branch_ahead_behind=(0, 0),
+        )
+
+        mocks["_push_branch"].assert_called_once()
+        # Drift posted the issue-thread notice.
+        self.assertTrue(any(
+            "issue body changed" in body
+            for _, body in gh.posted_comments
+        ))
+        # Approval was invalidated; route back through `validating`.
+        self.assertIn((707, "validating"), gh.label_history)
+        self.assertNotIn((707, "in_review"), gh.label_history)
+        data = gh.pinned_data(707)
+        self.assertFalse(data.get("docs_final_pending"))
+        self.assertIsNone(data.get("agent_approved_sha"))
+        self.assertEqual(data.get("review_round"), 0)
+
+    def test_docs_push_does_not_seed_sha_when_validating_skipped_it(
+        self,
+    ) -> None:
+        # When `_handle_validating`'s `gh.get_pr()` fails on the approval
+        # tick (recoverable network/PyGithub blip), it deliberately
+        # leaves `agent_approved_sha` (and the in_review watermarks)
+        # unset so AUTO_MERGE cannot fire. The final-docs hop must NOT
+        # rescue that state by forwarding the docs push's SHA into
+        # `agent_approved_sha` -- the reviewer never confirmed any head,
+        # and AUTO_MERGE on the next in_review tick would otherwise land
+        # the PR against a SHA the reviewer never saw (and with
+        # legacy/missing watermarks that would re-feed orchestrator
+        # comments as fresh feedback).
+        gh = FakeGitHubClient()
+        issue = make_issue(708, label="documenting")
+        gh.add_issue(issue)
+        gh.seed_state(
+            708,
+            pr_number=72,
+            branch="orchestrator/issue-708",
+            dev_agent="codex",
+            dev_session_id="dev-sess",
+            review_round=2,
+            # docs_final_pending is set (validating reached the relabel)
+            # but agent_approved_sha is unset AND the
+            # `final_docs_approval_seeded` sentinel is absent (PR snapshot
+            # failed inside the seeding block) -- the exact post-approval
+            # shape when `gh.get_pr()` raises.
+            docs_final_pending=True,
+        )
+
+        self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="docs: refresh README",
+            ),
+            push_branch=True,
+            head_shas=["approvedSha", "docsSha"],
+            branch_ahead_behind=(0, 0),
+        )
+
+        # Route still advances (the docs commit landed on the PR), but
+        # `agent_approved_sha` stays None -- AUTO_MERGE remains gated.
+        self.assertIn((708, "in_review"), gh.label_history)
+        data = gh.pinned_data(708)
+        self.assertFalse(data.get("docs_final_pending"))
+        self.assertIsNone(
+            data.get("agent_approved_sha"),
+            "the final-docs push must NOT seed `agent_approved_sha` "
+            "when validating left it unset; AUTO_MERGE has to stay "
+            "off until the next reviewer round seeds it explicitly",
+        )
+
+    def test_docs_push_does_not_promote_stale_non_none_agent_approved_sha(
+        self,
+    ) -> None:
+        # Stronger variant of the above. `agent_approved_sha` is left at
+        # a stale non-None value (e.g. set by an earlier round, then
+        # never cleared because the operator manually relabeled back to
+        # `validating`). This round's `_handle_validating` approval
+        # branch ran but its `gh.get_pr()` raised, so the seeding block
+        # did NOT execute: `agent_approved_sha` is still the OLD SHA and
+        # the watermarks are not freshly seeded. The
+        # `final_docs_approval_seeded` sentinel was therefore never set
+        # this round, and the final-docs handoff MUST refuse to promote
+        # the stale value to the new docs head -- otherwise AUTO_MERGE
+        # could land the PR at a SHA THIS round's reviewer never
+        # confirmed AND with un-seeded watermarks that would re-feed
+        # orchestrator comments as fresh PR feedback.
+        gh = FakeGitHubClient()
+        issue = make_issue(710, label="documenting")
+        gh.add_issue(issue)
+        gh.seed_state(
+            710,
+            pr_number=74,
+            branch="orchestrator/issue-710",
+            dev_agent="codex",
+            dev_session_id="dev-sess",
+            review_round=2,
+            agent_approved_sha="staleSha",
+            docs_final_pending=True,
+            # NO `final_docs_approval_seeded`: validating's get_pr raised
+            # this round so it never reached the seeding block.
+        )
+
+        self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="docs: refresh README",
+            ),
+            push_branch=True,
+            head_shas=["staleSha", "docsSha"],
+            branch_ahead_behind=(0, 0),
+        )
+
+        self.assertIn((710, "in_review"), gh.label_history)
+        data = gh.pinned_data(710)
+        self.assertFalse(data.get("docs_final_pending"))
+        self.assertFalse(data.get("final_docs_approval_seeded"))
+        # Stale value preserved, NOT promoted to docsSha. The auto-merge
+        # gate naturally rejects `staleSha != pr.head.sha` until the
+        # next reviewer round seeds a fresh snapshot.
+        self.assertEqual(
+            data.get("agent_approved_sha"), "staleSha",
+            "the final-docs push must not silently promote a stale "
+            "`agent_approved_sha` from a previous round when this "
+            "round's validating snapshot failed; AUTO_MERGE has to "
+            "stay gated until a fresh approval seeds it",
+        )
+
+    def test_resume_consumed_reply_does_not_replay_as_in_review_feedback(
+        self,
+    ) -> None:
+        # Lifecycle: validating approves at SHA `approvedSha` and seeds
+        # `pr_last_comment_id=900` (past its pickup / PR-opened /
+        # approval orchestrator comments). The first documenting tick
+        # asks a question and parks at id=950 (orchestrator park
+        # comment). A human replies at id=1100 on the issue thread.
+        # The next documenting tick's awaiting-human resume consumes
+        # 1100 (advances `last_action_comment_id=1100`), the dev
+        # produces a docs commit, the helper pushes and relabels to
+        # `in_review`. Without the watermark ratchet,
+        # `pr_last_comment_id` stays at 900, and the next in_review
+        # tick scans `comments_after(900)`, sees 1100 as fresh PR
+        # feedback, and bounces to `fixing` over work the docs pass
+        # already addressed.
+        gh = FakeGitHubClient()
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        issue = make_issue(709, label="documenting", comments=[
+            FakeComment(
+                id=900, body=":robot: orchestrator picking this up.",
+                user=FakeUser("orchestrator"), created_at=long_ago,
+            ),
+            FakeComment(
+                id=950, body=":sos: agent needs your input to proceed",
+                user=FakeUser("orchestrator"), created_at=long_ago,
+            ),
+            FakeComment(
+                id=1100, body="please cover edge case X in README",
+                user=FakeUser("alice"), created_at=long_ago,
+            ),
+        ])
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=73,
+            head_branch="orchestrator/issue-709",
+            head=FakePRRef(sha="docsSha"),
+            mergeable=True, check_state="success",
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            709,
+            pr_number=73,
+            branch="orchestrator/issue-709",
+            dev_agent="codex",
+            dev_session_id="dev-sess",
+            review_round=1,
+            agent_approved_sha="approvedSha",
+            docs_final_pending=True,
+            pr_last_comment_id=900,
+            pickup_comment_id=900,
+            orchestrator_comment_ids=[900, 950],
+            awaiting_human=True,
+            park_reason="agent_question",
+            last_action_comment_id=950,
+        )
+
+        # Documenting tick: awaiting-human resume consumes id=1100,
+        # docs commit lands, advance to in_review.
+        self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="docs: cover edge case X",
+            ),
+            push_branch=True,
+            head_shas=["approvedSha", "docsSha"],
+            branch_ahead_behind=(0, 0),
+        )
+
+        self.assertIn((709, "in_review"), gh.label_history)
+        data = gh.pinned_data(709)
+        self.assertFalse(data.get("docs_final_pending"))
+        self.assertEqual(data.get("last_action_comment_id"), 1100)
+        self.assertGreaterEqual(
+            data.get("pr_last_comment_id"), 1100,
+            "pr_last_comment_id must ratchet past the consumed human "
+            "issue-thread reply on the final-docs handoff so the next "
+            "in_review tick does not replay it as fresh PR feedback",
+        )
+
+        # In_review tick: ensure the consumed reply is NOT replayed as
+        # fresh feedback (the actual route-to-fixing bug the ratchet
+        # guards against).
+        if not any(l.name == "in_review" for l in issue.labels):
+            issue.labels = [FakeLabel("in_review")]
+        mocks_ir = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        mocks_ir["run_agent"].assert_not_called()
+        self.assertNotIn(
+            (709, "fixing"), gh.label_history,
+            "in_review must not bounce to `fixing` over a human reply "
+            "the documenting awaiting-human resume already consumed",
         )
 
 

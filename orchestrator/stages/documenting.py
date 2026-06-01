@@ -2,12 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """Documenting stage handler.
 
-The documenting stage runs after the implementer's PR has been opened
-and before the reviewer agent gets a look in `validating`. It spawns a
-documentation pass against the same per-issue branch, commits any
-README / docs / plans edits the agent produces, pushes them to the
-existing PR branch, and advances the issue to `validating` so the
-reviewer agent sees the docs commit in the diff it reviews.
+The documenting stage runs on two distinct trips through the workflow:
+
+  * Pre-approval: after the implementer's PR has been opened (or every
+    pushed-fix exit from `validating` / `fixing` / `in_review` drift /
+    `resolving_conflict`). The docs pass commits README / docs / plans
+    edits, pushes them, and advances to `validating` so the reviewer
+    agent sees the docs commit in the diff it reviews.
+  * Final-docs handoff: after the reviewer agent emits
+    `VERDICT: APPROVED` and `validating` finishes the local-verify +
+    squash + watermark seed. `validating` flips the label here with
+    `docs_final_pending=True` so this handler advances to `in_review`
+    (not back to `validating`) and updates `agent_approved_sha` to the
+    new pushed head when a docs commit lands, preserving the AUTO_MERGE
+    `agent_approved_sha == pr.head.sha` invariant across the docs hop.
 
 Locking and session semantics mirror `implementing`'s dev role: the
 documentation pass operates AS the developer (it commits to the dev's
@@ -49,7 +57,136 @@ from github.Issue import Issue
 from .. import config
 from ..agents import AgentResult
 from ..config import RepoSpec
-from ..github import GitHubClient
+from ..github import GitHubClient, PinnedState
+
+
+def _ratchet_in_review_watermark_for_final_docs(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> None:
+    """Ratchet `pr_last_comment_id` past issue-thread comments the docs
+    pass already consumed during the final-docs hop.
+
+    During documenting's awaiting-human resume the handler advances
+    `last_action_comment_id` past the human reply it fed into the
+    `_build_documentation_prompt` resume. The final-docs handoff then
+    relabels to `in_review`, which scans `comments_after(issue,
+    pr_last_comment_id)` and falls back to `last_action_comment_id`
+    only when `pr_last_comment_id is None`. Without this ratchet a
+    `pr_last_comment_id` validating seeded BEFORE the human's reply
+    keeps the older value, the consumed reply replays as fresh PR
+    feedback, and in_review bounces the issue to `fixing` over work
+    the dev has already addressed.
+
+    Reuse `_latest_pr_comment_ids` (the same seed-walk validating uses
+    at its approval handoff) so a PR-conversation comment with id
+    between the prior `pr_last_comment_id` and the consumed-through
+    threshold is NOT swallowed -- the walk stops at the first unread
+    non-orchestrator comment on either surface. `consumed_through` is
+    applied to the issue thread only inside the walk, which is what
+    keeps PR-conversation feedback visible to in_review's
+    fresh-feedback scan. Ratchets via `max` so a previous in_review
+    tick's higher watermark is never regressed.
+
+    A PR fetch failure is treated as best-effort: log and skip, so the
+    docs handoff itself still advances. In the worst case in_review
+    will route to `fixing` and the rescan there is debounced and
+    correct on its own.
+    """
+    from .. import workflow as _wf
+
+    pr_number = state.get("pr_number")
+    if pr_number is None:
+        return
+    try:
+        pr = gh.get_pr(int(pr_number))
+    except Exception as e:
+        _wf.log.warning(
+            "issue=#%s could not fetch PR #%s to ratchet "
+            "`pr_last_comment_id` on the final-docs handoff: %s",
+            issue.number, pr_number, e,
+        )
+        return
+
+    candidate, _ = _wf._latest_pr_comment_ids(gh, issue, pr, state)
+    prev_wm = state.get("pr_last_comment_id")
+    if isinstance(prev_wm, int):
+        candidate = (
+            prev_wm if candidate is None
+            else max(candidate, prev_wm)
+        )
+    if candidate is None:
+        return
+    state.set("pr_last_comment_id", candidate)
+
+
+def _advance_after_docs_push(
+    gh: GitHubClient, issue: Issue, state: PinnedState, after_sha: str,
+) -> None:
+    """Route the issue forward after a successful docs push.
+
+    On the final-docs handoff (the `docs_final_pending` marker set by
+    `_handle_validating`'s approval branch), the freshly-pushed `after_sha`
+    becomes the new PR head, so `agent_approved_sha` must move with it or
+    the AUTO_MERGE `agent_approved_sha == pr.head.sha` invariant would
+    silently bar the merge on the next `_handle_in_review` tick. Clear
+    the marker and advance to `in_review` -- the approval-comment,
+    squash-comment, and PR watermarks set by validating remain on state
+    untouched, with the in-review issue-comment watermark ratcheted past
+    anything the awaiting-human resume already consumed.
+
+    The SHA update is gated on the `final_docs_approval_seeded` sentinel
+    that validating sets in the SAME code block where it persists
+    `agent_approved_sha` + watermarks (inside the `else` branch of its
+    `gh.get_pr()` try). When validating's PR snapshot raised, that block
+    never ran: `agent_approved_sha` is left as whatever stale value the
+    pinned state still carried from an earlier round (could be `None`,
+    could be the previous round's SHA) and the watermarks were not
+    seeded. Without the sentinel gate a stale non-`None`
+    `agent_approved_sha` would be silently promoted to the docs commit
+    here and AUTO_MERGE could land the PR against a SHA THIS round's
+    reviewer never confirmed (and with un-seeded watermarks that would
+    re-feed orchestrator comments as fresh feedback). Leaving the slot
+    untouched preserves validating's "AUTO_MERGE off" contract on
+    snapshot failure.
+
+    Pre-approval docs passes (no marker) keep the legacy route to
+    `validating` so the reviewer sees the docs commit in the diff.
+    """
+    if state.get("docs_final_pending"):
+        state.set("docs_final_pending", False)
+        seeded_fresh = state.get("final_docs_approval_seeded")
+        state.set("final_docs_approval_seeded", False)
+        if after_sha and seeded_fresh:
+            state.set("agent_approved_sha", after_sha)
+        _ratchet_in_review_watermark_for_final_docs(gh, issue, state)
+        gh.set_workflow_label(issue, "in_review")
+        return
+    gh.set_workflow_label(issue, "validating")
+
+
+def _advance_after_docs_no_change(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> None:
+    """Route the issue forward after a clean no-change docs verdict.
+
+    No commit landed, so the PR head still matches the SHA validating
+    snapshotted into `agent_approved_sha`. On the final-docs handoff the
+    AUTO_MERGE invariant therefore survives untouched; just clear the
+    marker (and the `final_docs_approval_seeded` sentinel so a stray
+    re-entry can't be promoted into AUTO_MERGE later), ratchet the
+    in-review issue-comment watermark past any issue-thread reply the
+    awaiting-human resume already consumed, and advance to `in_review`.
+
+    Pre-approval docs passes (no marker) keep the legacy route to
+    `validating`.
+    """
+    if state.get("docs_final_pending"):
+        state.set("docs_final_pending", False)
+        state.set("final_docs_approval_seeded", False)
+        _ratchet_in_review_watermark_for_final_docs(gh, issue, state)
+        gh.set_workflow_label(issue, "in_review")
+        return
+    gh.set_workflow_label(issue, "validating")
 
 
 def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
@@ -122,6 +259,21 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # not (agent_question / dirty_worktree).
         state.set("awaiting_human", False)
         state.set("park_reason", None)
+        # If we were mid-final-docs-handoff, the prior reviewer approval
+        # was for the OLD requirements and `agent_approved_sha` is now
+        # stale. Drop the marker so this tick's spawn routes back through
+        # `validating` (the post-spawn helpers branch on the marker), and
+        # clear the approval bookkeeping so AUTO_MERGE cannot land the PR
+        # against the stale snapshot. Mirrors `_handle_in_review`'s drift
+        # invalidation (review_round reset + agent_approved_sha cleared).
+        # Drop the `final_docs_approval_seeded` sentinel too so a later
+        # round cannot promote a stale `agent_approved_sha` via the
+        # `_advance_after_docs_push` SHA-update path.
+        if state.get("docs_final_pending"):
+            state.set("docs_final_pending", False)
+            state.set("final_docs_approval_seeded", False)
+            state.set("agent_approved_sha", None)
+            state.set("review_round", 0)
 
     # Already-parked, no-new-input fast path: when `awaiting_human` is
     # set and no human comment has arrived since the park (and drift
@@ -359,7 +511,7 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 "issue=#%s could not post docs-pushed notice to PR #%s",
                 issue.number, pr_number,
             )
-        gh.set_workflow_label(issue, "validating")
+        _advance_after_docs_push(gh, issue, state, after_sha)
         gh.write_pinned_state(issue, state)
         return
 
@@ -403,7 +555,7 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                     "issue=#%s could not post recovered-docs notice to "
                     "PR #%s", issue.number, pr_number,
                 )
-            gh.set_workflow_label(issue, "validating")
+            _advance_after_docs_push(gh, issue, state, after_sha)
             gh.write_pinned_state(issue, state)
             return
         # Persist the SHA the dev evaluated even on a "nothing
@@ -437,7 +589,10 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 "issue=#%s could not post docs-no-change notice to PR #%s",
                 issue.number, pr_number,
             )
-        gh.set_workflow_label(issue, "validating")
+        # No commit landed, so `agent_approved_sha` (set in validating's
+        # approval branch and unchanged here) still matches the PR head
+        # and the AUTO_MERGE invariant survives the docs hop untouched.
+        _advance_after_docs_no_change(gh, issue, state)
         gh.write_pinned_state(issue, state)
         return
 

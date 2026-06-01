@@ -87,8 +87,9 @@ orchestrator/
                            `_refresh_base_and_worktrees`,
                            `_cleanup_terminal_branch`, and the local-verify
                            runner (`_run_verify_commands` + `VerifyResult`)
-                           used by `_handle_validating`'s pre-`in_review`
-                           gate.
+                           used by `_handle_validating`'s pre-handoff
+                           gate (before the final-docs flip to
+                           `documenting` and the eventual `in_review`).
   stages/
     __init__.py         — package marker; the dispatcher in `workflow.py`
                            still owns label→handler routing.
@@ -107,7 +108,30 @@ orchestrator/
     documenting.py      — `_handle_documenting`: a docs pass that resumes the
                            dev session on the existing PR worktree, commits
                            any README / docs / plans updates, pushes them,
-                           and advances to `validating`. Refuses to act on
+                           and routes the issue forward. Pre-approval trips
+                           advance to `validating` so the reviewer sees the
+                           docs commit in the diff; the **final-docs hop**
+                           (marker `docs_final_pending=True` set by
+                           `_handle_validating`'s approval branch) advances
+                           to `in_review` instead, and a pushed docs commit
+                           also updates `agent_approved_sha` to the new head
+                           via `_advance_after_docs_push` so the AUTO_MERGE
+                           `agent_approved_sha == pr.head.sha` invariant
+                           survives the final docs commit. The SHA update
+                           is gated on `final_docs_approval_seeded` — the
+                           companion sentinel validating sets only when it
+                           actually persisted a non-empty `agent_approved_sha`
+                           this round (PR snapshot succeeded AND `_head_sha()`
+                           returned a non-empty local SHA). When the
+                           sentinel is absent, the docs push refuses to
+                           promote any SHA so AUTO_MERGE stays gated until
+                           a fresh reviewer round approves explicitly. The
+                           final-docs exit also ratchets `pr_last_comment_id`
+                           via `_ratchet_in_review_watermark_for_final_docs`
+                           past any issue-thread reply the awaiting-human
+                           resume consumed, so the next in_review tick
+                           does not replay it as fresh PR feedback and
+                           bounce to `fixing`. Refuses to act on
                            a stale or diverged PR branch (fetch + behind
                            check) and routes unrecognized outcomes through
                            the existing dirty / question / push park helpers.
@@ -122,13 +146,26 @@ orchestrator/
                            can route pushed recoveries through documenting),
                            the local-verify gate park helper
                            (`_park_verify_failure`), and the watermark
-                           seeding for the validating→in_review handoff.
-                           Pushed dev fixes (CHANGES_REQUESTED,
-                           awaiting-human resume, drift pushed,
-                           transient-park recovery push) relabel to
-                           `documenting`, NOT `validating`, so the docs
-                           pass runs against the new head before the
-                           reviewer re-evaluates.
+                           seeding for the validating→`documenting` (final-
+                           docs) →`in_review` handoff. On approval (verify +
+                           squash succeeded) the handler sets
+                           `docs_final_pending=True` and relabels to
+                           `documenting` (NOT directly to `in_review`); the
+                           marker tells `_handle_documenting` to advance to
+                           `in_review` on its success exits. Pushed dev fixes
+                           (CHANGES_REQUESTED, awaiting-human resume, drift
+                           pushed, transient-park recovery push) relabel to
+                           `documenting` without the marker, so the docs
+                           pass runs against the new head and bounces back
+                           to `validating` before the reviewer re-evaluates.
+                           Stale markers are cleared at the top of every
+                           validating tick so an aborted prior approval
+                           cycle (operator relabel back from documenting,
+                           drift unwind, PR-worktree refresh detour) cannot
+                           let a later CHANGES_REQUESTED / awaiting-human /
+                           drift / transient-park exit carry a stale
+                           `docs_final_pending` into documenting and skip
+                           the required re-review.
     in_review.py        — `_handle_in_review` plus PR-side primitives:
                            transient park-reason set, the quiet auto-merge
                            gate re-check, legacy watermark migration, and the
@@ -378,7 +415,7 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | **worktrees.py** | git/branch/worktree plumbing, hardened fetch/push, squash-on-approval, per-tick base refresh, terminal cleanup |
 | **stages/decomposition.py** | `_handle_decomposing` / `_handle_ready` / `_handle_blocked` / `_handle_umbrella` |
 | **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle (relabels to `documenting` after PR opens) |
-| **stages/documenting.py** | `_handle_documenting` — docs pass on the existing PR worktree (fetch + ahead/behind guard, dirty-check before any outcome, advance to `validating` after push or explicit no-change verdict) |
+| **stages/documenting.py** | `_handle_documenting` — docs pass on the existing PR worktree (fetch + ahead/behind guard, dirty-check before any outcome). Routes to `validating` on pre-approval trips and to `in_review` on the **final-docs hop** (marker `docs_final_pending=True` set by `_handle_validating`'s approval branch). The final-docs success exits update `agent_approved_sha` to the new pushed head (only when validating seeded a fresh approval this round, signalled by `final_docs_approval_seeded`) and ratchet `pr_last_comment_id` past any consumed awaiting-human reply. |
 | **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
 | **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives; routes fresh PR feedback to `fixing` |
 | **stages/fixing.py** | `_handle_fixing` — PR-feedback quiet window, dev resume via `_resume_dev_with_text`, watermark advance, and route through `documenting` on a pushed fix (the no-new-feedback bounce flips directly to `validating`) |

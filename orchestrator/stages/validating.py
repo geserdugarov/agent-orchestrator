@@ -603,6 +603,23 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     if _wf._finalize_if_issue_closed(gh, spec, issue, state):
         return
 
+    # Stale final-docs markers cannot survive a re-entry into validating.
+    # The only legitimate setter for `docs_final_pending` /
+    # `final_docs_approval_seeded` is the APPROVED branch below, and it
+    # sets them right before relabeling to `documenting`; once the issue
+    # is labeled `validating` again (operator relabel back from
+    # documenting, drift-induced unwind in documenting that routes here,
+    # PR-worktree refresh detour that lands on validating, etc.) the
+    # prior approval is implicitly invalidated. Clear up front so the
+    # CHANGES_REQUESTED fix-loop, awaiting-human resume push,
+    # transient-park recovery push, and drift-pushed exits cannot
+    # accidentally hand documenting a stale marker that would route the
+    # next docs commit straight to `in_review` and skip the required
+    # re-review of the dev's fix. The approval branch resets them to
+    # True on a successful new approval.
+    state.set("docs_final_pending", False)
+    state.set("final_docs_approval_seeded", False)
+
     # User-content drift: a human edited the issue title/body while the
     # reviewer was running. Re-decomposing now would discard the dev's
     # already-pushed work, so notify the human, resume the dev session on
@@ -1002,8 +1019,26 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 # then naturally rejects the branch-update race: if the
                 # remote moves past this SHA, agent_approved_sha won't
                 # match and AUTO_MERGE waits for a fresh review round.
+                #
+                # The sentinel `final_docs_approval_seeded` is set
+                # ONLY when we actually persist a non-empty
+                # `agent_approved_sha` this round. If `_head_sha()`
+                # returned empty earlier (worktree HEAD unreadable,
+                # disk transient) we never seed the approval SHA, and
+                # the sentinel must stay False so the final-docs
+                # handoff in documenting refuses to forward the docs
+                # commit's SHA into `agent_approved_sha`. Otherwise a
+                # stale `agent_approved_sha` left in pinned state from
+                # an earlier round (or, equivalently, no approval SHA
+                # at all but the sentinel was set under the old
+                # ordering) would be silently promoted to the docs SHA
+                # and re-enable AUTO_MERGE on a SHA the reviewer never
+                # confirmed. Documenting clears the sentinel on every
+                # success exit AND in its drift block so a stray
+                # re-entry cannot loop the gate.
                 if new_head_sha:
                     state.set("agent_approved_sha", new_head_sha)
+                    state.set("final_docs_approval_seeded", True)
                 issue_wm, review_wm = _latest_pr_comment_ids(
                     gh, issue, pr, state
                 )
@@ -1053,7 +1088,18 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                     else 0
                 )
                 state.set("pr_last_review_summary_id", summary_wm)
-        gh.set_workflow_label(issue, "in_review")
+        # Route through `documenting` for a final docs pass on the
+        # approved (and possibly squashed) head before in_review picks
+        # up. The marker tells `_handle_documenting` to advance to
+        # `in_review` on the success exits (and to update
+        # `agent_approved_sha` when a docs commit moves the head, so the
+        # AUTO_MERGE `agent_approved_sha == pr.head.sha` invariant
+        # survives the final docs commit). All other state established
+        # here -- `agent_approved_sha`, the PR watermarks, the approval
+        # comment, the squash comment -- is preserved across the
+        # documenting hop unchanged.
+        state.set("docs_final_pending", True)
+        gh.set_workflow_label(issue, "documenting")
         gh.write_pinned_state(issue, state)
         return
 

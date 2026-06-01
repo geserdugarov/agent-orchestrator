@@ -85,23 +85,38 @@ Awaiting-human replies resume the locked dev session. PR titles and
 commits follow Conventional Commits.
 
 **Documenting stage.** `_handle_documenting` runs on the PR worktree
-between `implementing` and `validating` and after every later
-code-changing branch update so docs always reach the reviewer in sync
-with the diff. A `docs:` commit lands → push + advance to `validating`;
-an explicit `DOCS: NO_CHANGE` marker on a remote-clean branch advances
-without pushing. Timeout / dirty / push-fail / silent parks reuse the
-shared disposition tokens. Because every code-changing update routes
-through this stage, split decompositions no longer need a synthetic
-final docs child.
+between `implementing` and `validating`, after every later
+code-changing branch update, AND once more after reviewer approval as
+the **final-docs hop** before `in_review`. A `docs:` commit lands → push
++ advance (to `validating` on pre-approval trips, to `in_review` on the
+final-docs hop; on the final-docs hop the push also updates
+`agent_approved_sha` to the new head so AUTO_MERGE survives, gated on
+the companion sentinel `final_docs_approval_seeded` that validating
+sets only when it actually persisted a non-empty `agent_approved_sha`
+this round (both `gh.get_pr()` succeeded AND `_head_sha()` returned a
+non-empty local SHA). When either fails the sentinel is absent and any
+stale `agent_approved_sha` left over from a prior round stays untouched
+so AUTO_MERGE remains gated). The final-docs exit additionally ratchets
+`pr_last_comment_id` past any issue-thread reply consumed by the
+awaiting-human resume, so the next in_review tick does not replay it
+as fresh PR feedback and bounce to `fixing`. An explicit `DOCS:
+NO_CHANGE` marker on a remote-clean branch advances without pushing.
+The discriminator is the `docs_final_pending` marker set by
+`_handle_validating`'s approval branch. Timeout / dirty / push-fail /
+silent parks reuse the shared disposition tokens. Because every
+code-changing update routes through this stage, split decompositions
+no longer need a synthetic final docs child.
 
 **Validating stage.** `_handle_validating` spawns a fresh reviewer on
 `git diff origin/<base>...HEAD` and parses the last `VERDICT:` marker.
 On `APPROVED` it runs `VERIFY_COMMANDS` (default empty), snapshots
-`agent_approved_sha`, optionally squashes (`SQUASH_ON_APPROVAL`), and
-flips to `in_review`. Verify failures park with a typed `park_reason`.
-`CHANGES_REQUESTED` resumes the dev; a clean pushed fix routes through
-`documenting` before the next review. `MAX_REVIEW_ROUNDS` (default 3)
-caps iterations.
+`agent_approved_sha`, optionally squashes (`SQUASH_ON_APPROVAL`), sets
+`docs_final_pending=True`, and flips to `documenting` — the final-docs
+hop runs against the squashed head before `in_review` picks up. Verify
+failures park with a typed `park_reason`. `CHANGES_REQUESTED` resumes
+the dev; a clean pushed fix routes through `documenting` (without the
+marker) and back to `validating` before the next review.
+`MAX_REVIEW_ROUNDS` (default 3) caps iterations.
 
 **In-review terminals and auto-merge.** `_handle_in_review` covers PR
 merged → `done`; PR closed unmerged → `rejected`; fresh actionable PR
@@ -361,8 +376,19 @@ swallowed.
   [`plans/review-stages-lifecycle.md`](review-stages-lifecycle.md) for
   the full transition map (every `set_workflow_label` call site grouped
   by stage, every current entry into `documenting`, and the proposed
-  target shape). No runtime change yet -- the audit is the input for a
-  follow-up implementer child under #262.
+  target shape). **Issue #266 landed the final-docs handoff half**: on
+  `VERDICT: APPROVED` `_handle_validating` now sets
+  `docs_final_pending=True` and flips to `documenting`, and
+  `_handle_documenting` advances to `in_review` on its success exits
+  (updating `agent_approved_sha` when a docs commit lands AND the
+  companion sentinel `final_docs_approval_seeded` confirms validating
+  actually persisted a non-empty approval SHA this round — both
+  `gh.get_pr()` succeeded AND `_head_sha()` returned a non-empty local
+  SHA — so AUTO_MERGE survives; when either fails and the sentinel is
+  absent, the docs push leaves any stale `agent_approved_sha` untouched
+  so AUTO_MERGE stays gated).
+  Collapsing the pre-approval `documenting` entries into direct
+  `validating` routes is the remaining work under #262.
 - **Symphony-inspired per-repo policy and hooks.** See
   [`plans/symphony-spec-review.md`](symphony-spec-review.md) for the full
   review. Two proposals survived the critical filter: a narrow
