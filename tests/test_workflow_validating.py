@@ -1187,9 +1187,9 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         # Approval routes through `documenting` first; the final-docs
-        # marker tells the next tick's `_handle_documenting` to advance
-        # to `in_review` (vs. the normal pre-approval docs pass that
-        # bounces back to `validating`).
+        # marker rides with the label flip so the next tick's
+        # `_handle_documenting` carries the approval bookkeeping
+        # forward to `in_review`.
         self.assertIn((5, "documenting"), gh.label_history)
         data = gh.pinned_data(5)
         self.assertTrue(data.get("docs_final_pending"))
@@ -1405,9 +1405,9 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Reviewer ran once -- the only run_agent call on the approval path.
         self.assertEqual(mocks_v["run_agent"].call_count, 1)
         # Approval hands off through `documenting` (final docs pass);
-        # the marker tells `_handle_documenting` to advance to `in_review`
-        # on its success exits. `agent_approved_sha` and the squash /
-        # watermark state ride through the hop untouched.
+        # `_handle_documenting`'s success exits advance unconditionally to
+        # `in_review`. `agent_approved_sha` and the squash / watermark
+        # state ride through the hop untouched.
         self.assertIn((5, "documenting"), gh.label_history)
         data = gh.pinned_data(5)
         self.assertTrue(data.get("docs_final_pending"))
@@ -4119,12 +4119,15 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
 ):
     """Issue #266: after `VERDICT: APPROVED` + verify + squash/force-push,
     `_handle_validating` hands the issue off to `documenting` (not directly
-    to `in_review`) with `docs_final_pending=True`. The marker tells the
-    next tick's `_handle_documenting` to advance to `in_review` instead of
-    bouncing back to `validating`. The approval SHA, PR watermarks,
-    approval comment, and squash comment are preserved across the hop so
-    the AUTO_MERGE invariant `agent_approved_sha == pr.head.sha` survives
-    untouched.
+    to `in_review`) with `docs_final_pending=True`. `_handle_documenting`'s
+    success exits advance to `in_review` unconditionally now (#270
+    removed the `validating` fallback), so the marker is just the
+    "approval handoff in flight" flag: documenting clears it on every
+    success exit, and validating clears it at the top of every tick so
+    a stale marker from an aborted prior approval cannot ride into a
+    future docs hop. The approval SHA, PR watermarks, approval comment,
+    and squash comment are preserved across the hop so the AUTO_MERGE
+    invariant `agent_approved_sha == pr.head.sha` survives untouched.
     """
 
     PR_NUMBER = 91
@@ -4177,8 +4180,9 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         data = gh.pinned_data(9)
         self.assertTrue(
             data.get("docs_final_pending"),
-            "approval must set the final-docs handoff marker so "
-            "documenting routes to in_review (not back to validating)",
+            "approval must set the in-flight handoff marker so "
+            "validating's top-of-tick wipe can invalidate stale handoffs "
+            "from prior cycles on re-entry",
         )
         # The fresh-snapshot sentinel must be set in the same code block
         # that seeds `agent_approved_sha` -- documenting's SHA-update
@@ -4228,9 +4232,11 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         # Squash failure parks awaiting human on `validating`; the
         # final-docs marker must NOT be set, since the original commits
         # (now stale w.r.t. the operator's intended squashed head) sit
-        # on the branch and the operator has to adjudicate. Without
-        # this guard, an eventual operator relabel to `documenting`
-        # would mis-route to `in_review` over the unsquashed branch.
+        # on the branch and the operator has to adjudicate. The marker
+        # tracks "an approval handoff is in flight"; setting it after
+        # the squash failed would let validating's top-of-tick wipe
+        # mistake the parked-on-validating state for an aborted prior
+        # cycle the next tick.
         gh, issue, pr = self._setup()
 
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
@@ -4255,9 +4261,10 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
     def test_changes_requested_does_not_set_final_marker(self) -> None:
         # The validating CHANGES_REQUESTED fix-loop stays on `validating`
         # (no documenting hop) -- the dev's fix has to be reviewed AGAIN
-        # before AUTO_MERGE can land. The marker must stay clear so an
-        # operator relabel to `documenting` from outside cannot mis-route
-        # the fix to `in_review` as if it were a final-docs handoff.
+        # before AUTO_MERGE can land. The marker tracks "an approval
+        # handoff is in flight"; setting it here would mis-tag the
+        # parked-on-validating fix as an approved handoff and confuse
+        # validating's top-of-tick stale-marker wipe on the next tick.
         gh, issue, pr = self._setup(review_round=0)
         review = _agent(
             session_id="rev-sess",
@@ -4276,10 +4283,11 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         self.assertNotIn((9, "documenting"), gh.label_history)
         self.assertFalse(
             data.get("docs_final_pending"),
-            "CHANGES_REQUESTED fix-loop must NOT set the final-docs "
-            "marker -- the dev's fix needs to be reviewed AGAIN, and the "
-            "marker would otherwise mis-route a later docs hop to "
-            "in_review",
+            "CHANGES_REQUESTED fix-loop must NOT set the in-flight "
+            "handoff marker -- the dev's fix needs to be reviewed "
+            "AGAIN, and a stale marker would survive into the next "
+            "approval cycle and confuse validating's top-of-tick "
+            "stale-marker wipe.",
         )
 
     def test_approval_with_empty_head_sha_does_not_set_seeded_sentinel(
@@ -4335,14 +4343,15 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         # from a previous approval cycle whose handoff to `documenting`
         # was aborted (operator relabeled back to `validating`, drift-
         # induced unwind, PR-worktree refresh detour that landed here,
-        # etc.). When this round's verdict is CHANGES_REQUESTED the
-        # fix-loop pushes the dev fix and stays on `validating`;
-        # without clearing the markers, an operator relabel to
-        # `documenting` afterwards would mis-route the fix straight to
-        # `in_review` as a final-docs handoff. Clear them at the top of
-        # `_handle_validating` so the markers cannot survive a re-entry.
-        # Also clear the stale `agent_approved_sha` so AUTO_MERGE cannot
-        # land the new head against a snapshot from a prior round.
+        # etc.). Clear them at the top of `_handle_validating` so a
+        # later operator relabel to `documenting` cannot ride a stale
+        # `final_docs_approval_seeded` from the prior cycle and let
+        # documenting's push promote a SHA the current round's
+        # reviewer never confirmed into `agent_approved_sha`
+        # (documenting's `_advance_after_docs_push` gates the SHA
+        # update on the sentinel). Also clear the stale
+        # `agent_approved_sha` so AUTO_MERGE cannot land the new head
+        # against a snapshot from a prior round.
         gh, issue, pr = self._setup(
             review_round=0,
             docs_final_pending=True,
@@ -4367,9 +4376,11 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         self.assertFalse(
             data.get("docs_final_pending"),
             "stale `docs_final_pending` from a prior aborted approval "
-            "must be cleared on every re-entry into validating so an "
-            "operator relabel to documenting cannot mis-route a later "
-            "tick as a final-docs handoff",
+            "must be cleared on every re-entry into validating so a "
+            "later operator relabel to documenting cannot ride a stale "
+            "`final_docs_approval_seeded` from the prior cycle and let "
+            "the docs push promote an unconfirmed SHA into "
+            "`agent_approved_sha`",
         )
         self.assertFalse(data.get("final_docs_approval_seeded"))
         self.assertIsNone(

@@ -11,8 +11,8 @@ past the consumed feedback, and on a pushed fix flips the label
 DIRECTLY back to `validating` with `review_round=0` and a cleared
 `agent_approved_sha` so the reviewer re-evaluates the new diff next
 tick. The no-new-feedback bounce also flips directly to `validating`.
-The pre-approval pushed-fix exit deliberately skips the `documenting`
-hop — docs land in the final-docs pass after reviewer approval.
+Docs do not run on the pushed-fix exit -- the single docs pass runs
+after reviewer approval before `in_review` via the final-docs handoff.
 
 The PR-terminal arcs (merged / closed / open-PR-with-closed-issue),
 dispatcher routing, label-bookkeeping, and missing-`pr_number` park
@@ -246,9 +246,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_pushed_fix_flips_to_validating_with_reset_state(self) -> None:
         # A pushed fix flips DIRECTLY back to `validating` so the
         # reviewer agent re-evaluates the freshened diff next tick.
-        # The pre-approval pushed-fix exit deliberately skips the
-        # `documenting` hop: docs land in the final-docs pass after
-        # reviewer approval, so running the docs stage against an
+        # Docs do not run on the pushed-fix exit -- the single docs
+        # pass runs after reviewer approval before `in_review` via the
+        # final-docs handoff, so running the docs stage against an
         # unapproved diff here would just push a no-op and waste a tick.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         comment = FakeComment(
@@ -272,7 +272,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Dev pushed; label flipped directly to validating.
         mocks["_push_branch"].assert_called_once()
         self.assertIn((880, "validating"), gh.label_history)
-        # And NOT through documenting -- the pre-approval exit skips it.
+        # And NOT through documenting -- docs run after reviewer
+        # approval before `in_review`, not on the pushed-fix exit.
         self.assertNotIn((880, "documenting"), gh.label_history)
         data = gh.pinned_data(880)
         # Review round reset so validating starts fresh on the new diff.

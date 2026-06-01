@@ -995,9 +995,9 @@ class HandleResolvingConflictTest(
 
     def test_clean_rebase_pushes_and_flips_to_validating(self) -> None:
         # A clean base rebase that actually moved HEAD pushes the
-        # rebased branch and hands straight back to `validating`; the
-        # single docs pass runs after the reviewer's final approval, so
-        # no pre-approval `documenting` detour is interposed.
+        # rebased branch and hands straight back to `validating`. Docs
+        # do not run here -- the single docs pass runs after reviewer
+        # approval before `in_review` via the final-docs handoff.
         gh, issue, pr = self._seed(
             extra_state={"agent_approved_sha": "stale-approval"},
         )
@@ -1100,9 +1100,9 @@ class HandleResolvingConflictTest(
         self,
     ) -> None:
         # Agent-resolved conflict push pushes the resolved branch and
-        # hands straight back to `validating`; the single docs pass runs
-        # after the reviewer's final approval, so no pre-approval
-        # `documenting` detour is interposed.
+        # hands straight back to `validating`. Docs do not run here --
+        # the single docs pass runs after reviewer approval before
+        # `in_review` via the final-docs handoff.
         gh, issue, pr = self._seed(
             extra_state={"agent_approved_sha": "stale-approval"},
         )
@@ -1379,9 +1379,9 @@ class HandleResolvingConflictTest(
         self.assertIn("try harder", prompt)
         merge_mock.assert_not_called()
         # Successful resume pushes the branch and hands straight back
-        # to `validating`; the single docs pass is deferred to the
-        # post-approval hop, so no pre-approval `documenting` detour
-        # is interposed.
+        # to `validating`. Docs do not run here -- the single docs pass
+        # runs after reviewer approval before `in_review` via the
+        # final-docs handoff.
         mocks["_push_branch"].assert_called_once_with(
             _TEST_SPEC,
             _FAKE_WT,

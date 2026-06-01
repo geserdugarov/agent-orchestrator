@@ -228,9 +228,9 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     was open) takes the dev-resume path here; both a pushed fix and a
     no-commit ACK bounce DIRECTLY back to `validating` (with
     `agent_approved_sha` cleared and `review_round` reset) so the
-    reviewer re-evaluates against the updated body. The pre-approval
-    drift exit deliberately skips the `documenting` hop: docs land in
-    the final-docs pass after reviewer approval.
+    reviewer re-evaluates against the updated body. Docs do not run on
+    the drift exit: the single docs pass is deferred to the final-docs
+    handoff after reviewer approval.
     """
     from .. import workflow as _wf
 
@@ -473,9 +473,9 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # Notify on both surfaces, resume the dev session on its locked
     # backend with the new body, and on either outcome (pushed fix or
     # no-commit ACK) bounce DIRECTLY back to `validating` so the
-    # reviewer re-evaluates against the updated body. The pre-approval
-    # drift exit deliberately skips the `documenting` hop: docs land
-    # in the final-docs pass after reviewer approval.
+    # reviewer re-evaluates against the updated body. Docs do not run
+    # on the drift exit: the single docs pass is deferred to the
+    # final-docs handoff after reviewer approval.
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is not None:
         state.set("user_content_hash", new_hash)
@@ -568,9 +568,9 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             # `review_round` must reset before AUTO_MERGE is allowed to
             # land the PR. Both outcomes bounce DIRECTLY back to
             # `validating` so the reviewer re-evaluates against the
-            # updated body; the pre-approval drift exit deliberately
-            # skips the `documenting` hop (docs land in the final-docs
-            # pass after reviewer approval).
+            # updated body; docs do not run here (the single docs pass
+            # is deferred to the final-docs handoff after reviewer
+            # approval).
             state.set("review_round", 0)
             state.set("agent_approved_sha", None)
             gh.set_workflow_label(issue, "validating")

@@ -198,9 +198,10 @@ def _post_user_content_change_result(
     * ``"pushed"`` -- new commit landed and the push succeeded.
       Validating stays on `validating` (and bumps `review_round`) so
       the reviewer re-evaluates the new head; in_review also hands
-      straight back to `validating` (post-#268, the pre-approval docs
-      hop was collapsed there too). Any stale approval state must be
-      reset by the caller before relabeling.
+      straight back to `validating`. Docs are not run on this exit --
+      the single docs pass is deferred to the final-docs handoff after
+      reviewer approval. Any stale approval state must be reset by
+      the caller before relabeling.
     * ``"parked"`` -- timeout, dirty tree, push fail, silent crash
       (empty `last_message`), OR a no-commit response WITHOUT the
       `ACK:` marker (treated as a clarification question via
@@ -611,13 +612,15 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # is labeled `validating` again (operator relabel back from
     # documenting, drift-induced unwind in documenting that routes here,
     # PR-worktree refresh detour that lands on validating, etc.) the
-    # prior approval is implicitly invalidated. Clear up front so an
-    # operator relabel to `documenting` after a pushed dev fix (which
-    # now stays on `validating` instead of routing through documenting)
-    # cannot mis-route the next docs commit straight to `in_review` as
-    # a final-docs handoff and skip the required re-review of the
-    # dev's fix. The approval branch resets them to True on a
-    # successful new approval.
+    # prior approval is implicitly invalidated. Clear up front so a
+    # later operator relabel to `documenting` cannot ride a stale
+    # `final_docs_approval_seeded` from a previous approval cycle and
+    # let the docs push promote a SHA THIS round's reviewer never
+    # confirmed into `agent_approved_sha`; the approval branch sets
+    # both flags again on the next successful approval. (Documenting's
+    # `_advance_after_docs_*` helpers advance to `in_review`
+    # unconditionally now — the marker is just the "approval handoff
+    # in flight" flag, not a routing discriminator.)
     state.set("docs_final_pending", False)
     state.set("final_docs_approval_seeded", False)
 
@@ -711,7 +714,8 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # but on a clean pushed fix we bump the round AND clear the stale
     # `agent_approved_sha` while staying on `validating` (no relabel
     # emitted) so the reviewer re-evaluates the new head on the next
-    # tick without a pre-review docs hop.
+    # tick. Docs are not run here; they are deferred to the final-docs
+    # handoff after reviewer approval.
     if state.get("awaiting_human"):
         # Transient-park recovery: when the original park reason is something
         # that can resolve without a human comment (a push race that the
@@ -1102,14 +1106,18 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 state.set("pr_last_review_summary_id", summary_wm)
         # Route through `documenting` for a final docs pass on the
         # approved (and possibly squashed) head before in_review picks
-        # up. The marker tells `_handle_documenting` to advance to
-        # `in_review` on the success exits (and to update
-        # `agent_approved_sha` when a docs commit moves the head, so the
-        # AUTO_MERGE `agent_approved_sha == pr.head.sha` invariant
-        # survives the final docs commit). All other state established
-        # here -- `agent_approved_sha`, the PR watermarks, the approval
-        # comment, the squash comment -- is preserved across the
-        # documenting hop unchanged.
+        # up. `_handle_documenting`'s success exits always advance to
+        # `in_review` and, when a docs commit moves the head, update
+        # `agent_approved_sha` so the AUTO_MERGE `agent_approved_sha
+        # == pr.head.sha` invariant survives the final docs commit.
+        # The marker itself is the "approval handoff in flight" flag:
+        # validating clears it at the top of every tick to invalidate
+        # stale handoffs (operator relabel back from documenting,
+        # drift unwind, PR-worktree refresh detour landing on
+        # validating), and documenting clears it on every success
+        # exit. All other state established here -- `agent_approved_sha`,
+        # the PR watermarks, the approval comment, the squash comment
+        # -- is preserved across the documenting hop unchanged.
         state.set("docs_final_pending", True)
         gh.set_workflow_label(issue, "documenting")
         gh.write_pinned_state(issue, state)

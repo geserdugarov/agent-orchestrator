@@ -2,26 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 """Documenting stage handler.
 
-The documenting stage runs on two distinct trips through the workflow:
-
-  * Pre-approval: this trip is now empty. `_handle_implementing`'s
-    initial PR open (#267), every pushed dev fix in `_handle_validating`
-    (#267), every `_handle_fixing` PR-feedback fix and `_handle_in_review`
-    user-content drift "pushed" outcome (#268), and every
-    `_handle_resolving_conflict` pushed exit (#269) all hand straight
-    back to `validating` and rely on the single post-approval docs hop
-    below. The pre-approval branch in this handler stays in place as a
-    safety net for a manual operator relabel; the docs pass commits
-    README / docs / plans edits, pushes them, and advances to
-    `validating` so the reviewer agent sees the docs commit in the diff
-    it reviews.
-  * Final-docs handoff: after the reviewer agent emits
-    `VERDICT: APPROVED` and `validating` finishes the local-verify +
-    squash + watermark seed. `validating` flips the label here with
-    `docs_final_pending=True` so this handler advances to `in_review`
-    (not back to `validating`) and updates `agent_approved_sha` to the
-    new pushed head when a docs commit lands, preserving the AUTO_MERGE
-    `agent_approved_sha == pr.head.sha` invariant across the docs hop.
+The documenting stage runs exactly once per reviewer-approval handoff,
+between reviewer approval and `in_review`: after the reviewer agent
+emits `VERDICT: APPROVED` and `_handle_validating` finishes the
+local-verify + squash + watermark seed, it relabels to `documenting`.
+The docs pass commits any README / docs / plans edits, pushes them,
+and advances to `in_review`; on a pushed commit it also updates
+`agent_approved_sha` to the new head so the AUTO_MERGE
+`agent_approved_sha == pr.head.sha` invariant survives the final docs
+commit (gated on the companion `final_docs_approval_seeded` sentinel
+that validating sets only when it persisted a non-empty
+`agent_approved_sha` this round). A PR can therefore visit
+`documenting` more than once over its life: if PR feedback later
+bounces the issue to `fixing` and the dev pushes a fix, the next
+reviewer approval triggers another final-docs pass before the next
+`in_review` handoff. There is no pre-approval entry: every
+`_handle_implementing` PR open, every pushed dev fix in
+`_handle_validating` / `_handle_fixing` / `_handle_in_review`'s drift
+exit, and every `_handle_resolving_conflict` pushed exit hand straight
+back to `validating` so the reviewer re-runs against the new branch.
 
 Locking and session semantics mirror `implementing`'s dev role: the
 documentation pass operates AS the developer (it commits to the dev's
@@ -30,12 +29,19 @@ state. A locked-backend resume is used for any human reply that
 follows a park.
 
 Outcomes the handler distinguishes:
-  * A `docs:` commit landed on the worktree -> push + advance.
-  * The agent emitted the explicit `DOCS: NO_CHANGE` marker -> persist
-    the verdict, post a one-liner, advance without pushing.
+  * A `docs:` commit landed on the worktree -> push + advance to
+    `in_review`.
+  * The agent emitted the explicit `DOCS: NO_CHANGE` marker against a
+    remote-clean head -> persist the verdict, post a one-liner, advance
+    to `in_review` without pushing.
   * No commit and no marker -> park awaiting human via `_on_question`.
   * Timeout / dirty worktree / push failure -> park with the same
     `park_reason` tokens implementing and validating use.
+  * User-content drift mid-hop -> the prior approval was for stale
+    requirements, so the handler clears `agent_approved_sha` + resets
+    `review_round=0` and relabels back to `validating` without
+    spawning the docs agent. The reviewer re-evaluates the updated
+    body on the next tick.
 
 Restart idempotency: on re-entry the helper reuses the existing PR
 worktree. If the worktree carries commits ahead of `<remote>/<branch>`
@@ -130,15 +136,15 @@ def _advance_after_docs_push(
 ) -> None:
     """Route the issue forward after a successful docs push.
 
-    On the final-docs handoff (the `docs_final_pending` marker set by
-    `_handle_validating`'s approval branch), the freshly-pushed `after_sha`
-    becomes the new PR head, so `agent_approved_sha` must move with it or
-    the AUTO_MERGE `agent_approved_sha == pr.head.sha` invariant would
-    silently bar the merge on the next `_handle_in_review` tick. Clear
-    the marker and advance to `in_review` -- the approval-comment,
-    squash-comment, and PR watermarks set by validating remain on state
-    untouched, with the in-review issue-comment watermark ratcheted past
-    anything the awaiting-human resume already consumed.
+    The freshly-pushed `after_sha` becomes the new PR head, so
+    `agent_approved_sha` must move with it or the AUTO_MERGE
+    `agent_approved_sha == pr.head.sha` invariant would silently bar
+    the merge on the next `_handle_in_review` tick. Clear the
+    `docs_final_pending` marker and advance to `in_review` -- the
+    approval comment, squash comment, and PR watermarks set by
+    validating remain on state untouched, with the in-review
+    issue-comment watermark ratcheted past anything the awaiting-human
+    resume already consumed.
 
     The SHA update is gated on the `final_docs_approval_seeded` sentinel
     that validating sets in the SAME code block where it persists
@@ -154,20 +160,14 @@ def _advance_after_docs_push(
     re-feed orchestrator comments as fresh feedback). Leaving the slot
     untouched preserves validating's "AUTO_MERGE off" contract on
     snapshot failure.
-
-    Pre-approval docs passes (no marker) keep the legacy route to
-    `validating` so the reviewer sees the docs commit in the diff.
     """
-    if state.get("docs_final_pending"):
-        state.set("docs_final_pending", False)
-        seeded_fresh = state.get("final_docs_approval_seeded")
-        state.set("final_docs_approval_seeded", False)
-        if after_sha and seeded_fresh:
-            state.set("agent_approved_sha", after_sha)
-        _ratchet_in_review_watermark_for_final_docs(gh, issue, state)
-        gh.set_workflow_label(issue, "in_review")
-        return
-    gh.set_workflow_label(issue, "validating")
+    state.set("docs_final_pending", False)
+    seeded_fresh = state.get("final_docs_approval_seeded")
+    state.set("final_docs_approval_seeded", False)
+    if after_sha and seeded_fresh:
+        state.set("agent_approved_sha", after_sha)
+    _ratchet_in_review_watermark_for_final_docs(gh, issue, state)
+    gh.set_workflow_label(issue, "in_review")
 
 
 def _advance_after_docs_no_change(
@@ -176,23 +176,17 @@ def _advance_after_docs_no_change(
     """Route the issue forward after a clean no-change docs verdict.
 
     No commit landed, so the PR head still matches the SHA validating
-    snapshotted into `agent_approved_sha`. On the final-docs handoff the
-    AUTO_MERGE invariant therefore survives untouched; just clear the
+    snapshotted into `agent_approved_sha` and the AUTO_MERGE invariant
+    survives the docs hop untouched. Clear the `docs_final_pending`
     marker (and the `final_docs_approval_seeded` sentinel so a stray
     re-entry can't be promoted into AUTO_MERGE later), ratchet the
     in-review issue-comment watermark past any issue-thread reply the
     awaiting-human resume already consumed, and advance to `in_review`.
-
-    Pre-approval docs passes (no marker) keep the legacy route to
-    `validating`.
     """
-    if state.get("docs_final_pending"):
-        state.set("docs_final_pending", False)
-        state.set("final_docs_approval_seeded", False)
-        _ratchet_in_review_watermark_for_final_docs(gh, issue, state)
-        gh.set_workflow_label(issue, "in_review")
-        return
-    gh.set_workflow_label(issue, "validating")
+    state.set("docs_final_pending", False)
+    state.set("final_docs_approval_seeded", False)
+    _ratchet_in_review_watermark_for_final_docs(gh, issue, state)
+    gh.set_workflow_label(issue, "in_review")
 
 
 def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
@@ -235,51 +229,227 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     branch = _wf._branch_name(issue.number)
 
-    # User-content drift: a human edited the issue title/body while
-    # documenting was in flight. Since the docs prompt embeds the
-    # issue body verbatim, the simplest correct behaviour is to clear
-    # any prior park, refresh the baseline hash, post a notice, and
-    # let the rest of the handler (the fresh-spawn branch) re-run the
-    # docs pass against the updated body. We deliberately do NOT
-    # build a separate user-content-change resume prompt the way
-    # validating does -- documenting's prompt already quotes
-    # `issue.body` so a normal fresh spawn picks up the edit without
-    # an additional resume detour. `_mark_drift_comments_consumed`
-    # advances `last_action_comment_id` past every visible
-    # issue-thread comment so a subsequent validating -> in_review
-    # handoff cannot replay them as fresh PR feedback.
+    # User-content drift: a human edited the issue title/body while the
+    # final-docs hop was in flight. The reviewer approved the OLD
+    # requirements, so `agent_approved_sha` is now stale and the docs
+    # pass would be running against a body the reviewer never saw.
+    # Mirror `_handle_in_review`'s drift invalidation: clear the
+    # approval bookkeeping (drop the marker, the sentinel, the snapshot,
+    # reset `review_round=0`), post the notice, mark issue-thread
+    # comments consumed, refresh the baseline hash, and relabel to
+    # `validating` so the reviewer re-evaluates the updated body on the
+    # next tick. Do NOT spawn the docs agent: the prior approval is
+    # gone and a docs commit on top would just need to be re-reviewed
+    # alongside any impl change.
+    #
+    # If a recovered local docs commit is sitting in the worktree (a
+    # prior tick committed but parked before the push landed -- ahead
+    # > 0 vs. `<remote>/<branch>`), DISCARD it before handing back to
+    # validating. The commit was authored against the OLD body, and
+    # leaving it on disk would let the next final-docs tick's
+    # recovered-commit shortcut push it without ever spawning a fresh
+    # docs agent against the new requirements -- especially under
+    # `SQUASH_ON_APPROVAL=off`, where the reviewer-approved head is
+    # the dev's PR head (no rewrite gap), so the recovered docs
+    # commit applies cleanly on top of the next approval. Reset to
+    # `<remote>/<branch>` after a successful fetch so the next
+    # approved round starts from the actual PR head. On fetch
+    # failure, park instead of relabeling -- a stale local commit
+    # silently riding into the next approval is worse than parking.
     new_hash = _wf._detect_user_content_change(gh, issue, state)
-    drift_detected = new_hash is not None
-    if drift_detected:
-        state.set("user_content_hash", new_hash)
-        _wf._post_issue_comment(
-            gh, issue, state,
-            ":pencil2: issue body changed; resuming docs pass on the "
-            "updated requirements.",
-        )
-        _wf._mark_drift_comments_consumed(gh, issue, state)
-        # Clear any stale park so the fresh-spawn branch fires this
-        # tick. The drift IS the unblock signal -- the dev now has new
-        # context to act on, regardless of whether the prior park was
-        # transient (push_failed / fetch_failed / diverged_branch) or
-        # not (agent_question / dirty_worktree).
+    fresh_drift = new_hash is not None
+    pending_unwind = bool(state.get("docs_drift_unwind_pending"))
+    # If a prior tick's drift unwind couldn't finish (the worktree
+    # reconcile failed and parked) and nothing fresh has happened
+    # since, stay silent. The fast-path check here means the parked
+    # state survives operator inspection without re-posting the same
+    # park comment every tick. Operator unpark (`awaiting_human=False`)
+    # OR new human comments fall through to the unwind-retry block
+    # below, which idempotently retries the reconcile + relabel.
+    if pending_unwind and not fresh_drift and state.get("awaiting_human"):
+        last_action_id = state.get("last_action_comment_id")
+        if not gh.comments_after(issue, last_action_id):
+            return
+    if fresh_drift or pending_unwind:
+        if fresh_drift:
+            state.set("user_content_hash", new_hash)
+            _wf._post_issue_comment(
+                gh, issue, state,
+                ":pencil2: issue body changed; routing back to "
+                "`validating` so the reviewer re-evaluates the "
+                "updated requirements.",
+            )
+            _wf._mark_drift_comments_consumed(gh, issue, state)
+        # Set/keep the drift-unwind sentinel. The marker survives
+        # every park inside this block, so an operator unpark or a
+        # later human comment (without a fresh drift) re-enters this
+        # block on the next tick and retries the reconcile + relabel.
+        # The marker is cleared ONLY on the success path that
+        # relabels to `validating`; without it, an operator unpark on
+        # a failed reconcile would fall through to the normal flow
+        # below and (via the recovered-commit shortcut or a fresh
+        # docs spawn) advance to `in_review` against the OLD body --
+        # skipping the required `validating` re-review.
+        state.set("docs_drift_unwind_pending", True)
         state.set("awaiting_human", False)
         state.set("park_reason", None)
-        # If we were mid-final-docs-handoff, the prior reviewer approval
-        # was for the OLD requirements and `agent_approved_sha` is now
-        # stale. Drop the marker so this tick's spawn routes back through
-        # `validating` (the post-spawn helpers branch on the marker), and
-        # clear the approval bookkeeping so AUTO_MERGE cannot land the PR
-        # against the stale snapshot. Mirrors `_handle_in_review`'s drift
-        # invalidation (review_round reset + agent_approved_sha cleared).
-        # Drop the `final_docs_approval_seeded` sentinel too so a later
-        # round cannot promote a stale `agent_approved_sha` via the
-        # `_advance_after_docs_push` SHA-update path.
-        if state.get("docs_final_pending"):
-            state.set("docs_final_pending", False)
-            state.set("final_docs_approval_seeded", False)
-            state.set("agent_approved_sha", None)
-            state.set("review_round", 0)
+        # Clear the approval bookkeeping BEFORE any fallible cleanup
+        # (fetch / reset). Drift means the prior reviewer approval is
+        # stale regardless of whether the on-disk reset succeeds, so
+        # `docs_final_pending` / `final_docs_approval_seeded` /
+        # `agent_approved_sha` / `review_round` must drop now. If we
+        # park on fetch failure below, an operator unpark or manual
+        # relabel must not be able to ride the stale approval into a
+        # new final-docs handoff that skips the required re-review.
+        state.set("docs_final_pending", False)
+        state.set("final_docs_approval_seeded", False)
+        state.set("agent_approved_sha", None)
+        state.set("review_round", 0)
+        wt = _wf._worktree_path(spec, issue.number)
+        if wt.exists():
+            fetch_branch = _wf._authed_fetch(
+                spec,
+                f"+refs/heads/{branch}:"
+                f"refs/remotes/{spec.remote_name}/{branch}",
+                cwd=wt,
+            )
+            if fetch_branch.returncode != 0:
+                _wf.log.error(
+                    "issue=#%d documenting drift fetch failed: %s",
+                    issue.number, (fetch_branch.stderr or "").strip(),
+                )
+                _wf._park_awaiting_human(
+                    gh, issue, state,
+                    f"{config.HITL_MENTIONS} `git fetch "
+                    f"{spec.remote_name} {branch}` failed while routing "
+                    "documenting drift back to `validating`; the local "
+                    "worktree may carry an unpushed docs commit against "
+                    "the OLD body -- see orchestrator logs.",
+                    reason="fetch_failed",
+                )
+                state.set("park_reason", "fetch_failed")
+                gh.write_pinned_state(issue, state)
+                return
+            # Run the ahead/behind probe inline so a probe failure is
+            # distinguishable from a real "in sync" result.
+            # `_branch_ahead_behind` swallows git errors as `(0, 0)`,
+            # which would silently let an unpushed local docs commit
+            # against the OLD body survive into the next final-docs
+            # hop's recovered-commit shortcut. Use the same git
+            # invocation that helper uses but check the exit code +
+            # parse here.
+            probe = _wf._git_hardened(
+                "rev-list", "--left-right", "--count",
+                f"refs/remotes/{spec.remote_name}/{branch}...HEAD",
+                cwd=wt,
+            )
+            ahead = None
+            behind = None
+            if probe.returncode == 0:
+                parts = (probe.stdout or "").strip().split()
+                if len(parts) == 2:
+                    try:
+                        behind = int(parts[0])
+                        ahead = int(parts[1])
+                    except ValueError:
+                        behind = None
+                        ahead = None
+            if ahead is None or behind is None:
+                _wf.log.error(
+                    "issue=#%d documenting drift ahead/behind probe "
+                    "failed (rc=%s stderr=%s stdout=%s)",
+                    issue.number, probe.returncode,
+                    (probe.stderr or "").strip(),
+                    (probe.stdout or "").strip(),
+                )
+                _wf._park_awaiting_human(
+                    gh, issue, state,
+                    f"{config.HITL_MENTIONS} could not probe local vs. "
+                    f"`{spec.remote_name}/{branch}` while routing "
+                    "documenting drift back to `validating`; the local "
+                    "worktree may carry an unpushed docs commit against "
+                    "the OLD body -- see orchestrator logs.",
+                    reason="worktree_reset_failed",
+                )
+                state.set("park_reason", "worktree_reset_failed")
+                gh.write_pinned_state(issue, state)
+                return
+            # Also reconcile uncommitted edits: a prior docs run may
+            # have edited files without committing (parked via
+            # `_on_dirty_worktree` / `_on_question` / `agent_timeout`)
+            # before the body edit landed. `_worktree_dirty_files`
+            # surfaces both modified-tracked AND untracked paths, so
+            # treat any non-empty list as a cleanup trigger. Without
+            # this the dirty docs edits would ride into the next
+            # reviewer round under the new body.
+            #
+            # And reconcile when the remote PR head moved past local
+            # HEAD (`behind > 0`): the reviewer must re-evaluate the
+            # actual PR head, not a stale local snapshot of an older
+            # commit. Without the reset, the next reviewer round
+            # would `git diff` against the un-fetched local HEAD and
+            # silently miss commits the remote already has.
+            dirty = _wf._worktree_dirty_files(wt)
+            if ahead > 0 or behind > 0 or dirty:
+                reset = _wf._git_hardened(
+                    "reset", "--hard",
+                    f"{spec.remote_name}/{branch}",
+                    cwd=wt,
+                )
+                if reset.returncode != 0:
+                    _wf.log.error(
+                        "issue=#%d documenting drift reset failed "
+                        "(rc=%s stderr=%s)",
+                        issue.number, reset.returncode,
+                        (reset.stderr or "").strip(),
+                    )
+                    _wf._park_awaiting_human(
+                        gh, issue, state,
+                        f"{config.HITL_MENTIONS} `git reset --hard "
+                        f"{spec.remote_name}/{branch}` failed while "
+                        "routing documenting drift back to "
+                        "`validating`; the local worktree still "
+                        "carries docs work against the OLD body -- "
+                        "see orchestrator logs.",
+                        reason="worktree_reset_failed",
+                    )
+                    state.set("park_reason", "worktree_reset_failed")
+                    gh.write_pinned_state(issue, state)
+                    return
+                # `git reset --hard` does not remove untracked files,
+                # so any untracked docs edits would still survive.
+                # `git clean -fd` removes them. The `-d` also clears
+                # untracked directories, which matters when the docs
+                # agent created new under-`docs/` subdirs that the
+                # reviewer never approved.
+                clean = _wf._git_hardened(
+                    "clean", "-fd", cwd=wt,
+                )
+                if clean.returncode != 0:
+                    _wf.log.error(
+                        "issue=#%d documenting drift clean failed "
+                        "(rc=%s stderr=%s)",
+                        issue.number, clean.returncode,
+                        (clean.stderr or "").strip(),
+                    )
+                    _wf._park_awaiting_human(
+                        gh, issue, state,
+                        f"{config.HITL_MENTIONS} `git clean -fd` "
+                        "failed while routing documenting drift back "
+                        "to `validating`; the local worktree may "
+                        "still carry untracked docs files against "
+                        "the OLD body -- see orchestrator logs.",
+                        reason="worktree_reset_failed",
+                    )
+                    state.set("park_reason", "worktree_reset_failed")
+                    gh.write_pinned_state(issue, state)
+                    return
+        # Reconcile succeeded (or the worktree didn't exist): the
+        # drift unwind is complete, clear the sentinel and relabel.
+        state.set("docs_drift_unwind_pending", False)
+        gh.set_workflow_label(issue, "validating")
+        gh.write_pinned_state(issue, state)
+        return
 
     # Already-parked, no-new-input fast path: when `awaiting_human` is
     # set and no human comment has arrived since the park (and drift
@@ -385,24 +555,16 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh, spec, issue, state, prompt,
         )
         recovered = False
-    elif ahead > 0 and not drift_detected:
+    elif ahead > 0:
         # Recovered worktree: a previous tick committed docs but
         # crashed before the push. Build a synthetic result and fall
         # through to the unified commit/dirty/push branch so an
         # uncommitted file left alongside the recovered commit parks
         # via `_on_dirty_worktree` instead of being silently dropped
-        # by the push (which only ships staged work).
-        #
-        # The `not drift_detected` gate matters: a docs commit
-        # produced before the body edit was reviewed against STALE
-        # requirements. Pushing it on this tick (via the shortcut
-        # below) would advance to `validating` with docs that no
-        # longer match the issue body. When drift fired this tick we
-        # deliberately FALL THROUGH to the fresh-spawn branch so the
-        # dev re-reads the updated body, decides whether the existing
-        # commit still satisfies it (and emits `DOCS: NO_CHANGE`, in
-        # which case the no-change-with-ahead branch below will push
-        # the existing commit), or adds further commits on top.
+        # by the push (which only ships staged work). A drift event
+        # this tick would have routed back to `validating` above
+        # before reaching this branch, so the recovered commit is
+        # always against the still-valid approved body.
         _wf.log.info(
             "issue=#%d documenting: %d recovered docs commit(s); "
             "skipping agent spawn and pushing",

@@ -582,8 +582,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # than spawning the dev inline. The fixing handler owns the
         # resume / push / hand-back-to-`validating` cycle (a pushed fix
         # flips DIRECTLY back to `validating` for the reviewer to
-        # re-evaluate; the pre-approval exit skips the `documenting`
-        # hop).
+        # re-evaluate; docs do not run here, the single docs pass runs
+        # after reviewer approval before `in_review`).
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertIn((30, "fixing"), gh.label_history)
@@ -2449,9 +2449,9 @@ class HandleInReviewResumeOnHashChangeTest(
         # post a notice on the PR (not just the issue), resume the locked
         # dev session with the new body, push the fix, and bounce
         # DIRECTLY back to `validating` so the reviewer re-evaluates the
-        # updated body / new head. The pre-approval drift exit
-        # deliberately skips the `documenting` hop: docs land in the
-        # final-docs pass after reviewer approval, so running the docs
+        # updated body / new head. Docs do not run on the drift exit --
+        # the single docs pass runs after reviewer approval before
+        # `in_review` via the final-docs handoff, so running the docs
         # stage against an unapproved diff here would just push a no-op
         # and waste a tick.
         gh = FakeGitHubClient()
@@ -2485,7 +2485,8 @@ class HandleInReviewResumeOnHashChangeTest(
 
         # Bounced directly to validating after the pushed drift resume.
         self.assertIn((80, "validating"), gh.label_history)
-        # And NOT through documenting -- the pre-approval exit skips it.
+        # And NOT through documenting -- docs run after reviewer
+        # approval before `in_review`, not on the drift exit.
         self.assertNotIn((80, "documenting"), gh.label_history)
         # Notice posted on the PR conversation surface.
         self.assertTrue(any(
@@ -2505,13 +2506,14 @@ class HandleInReviewResumeOnHashChangeTest(
         # A drift ACK reply (no commit, explicit `ACK:` marker) is an
         # acknowledgement that the existing work already satisfies the
         # edit. The issue bounces DIRECTLY back to `validating` (same
-        # destination as the pushed-fix exit; the pre-approval drift
-        # exit deliberately skips the `documenting` hop for both
-        # outcomes). The other ACK guarantees still hold:
-        # `agent_approved_sha` is cleared (the snapshot was for the
-        # old requirements, so AUTO_MERGE cannot land the PR until
-        # the reviewer re-snapshots) and `review_round` is reset so
-        # the reviewer round cap counts fresh rounds.
+        # destination as the pushed-fix exit; docs do not run on the
+        # drift exit, the single docs pass runs after reviewer approval
+        # before `in_review` via the final-docs handoff). The other
+        # ACK guarantees still hold: `agent_approved_sha` is cleared
+        # (the snapshot was for the old requirements, so AUTO_MERGE
+        # cannot land the PR until the reviewer re-snapshots) and
+        # `review_round` is reset so the reviewer round cap counts
+        # fresh rounds.
         gh = FakeGitHubClient()
         issue = make_issue(81, label="in_review", body="new acceptance")
         gh.add_issue(issue)
@@ -2544,8 +2546,9 @@ class HandleInReviewResumeOnHashChangeTest(
         )
 
         # Bounced directly to validating (same destination as the
-        # pushed-fix exit; pre-approval drift exits skip the
-        # `documenting` hop).
+        # pushed-fix exit; docs do not run on the drift exit, the
+        # single docs pass runs after reviewer approval before
+        # `in_review`).
         self.assertIn((81, "validating"), gh.label_history)
         self.assertNotIn((81, "documenting"), gh.label_history)
         data = gh.pinned_data(81)
