@@ -17,7 +17,7 @@ For design and stage definitions, see [`docs/architecture.md`](docs/architecture
 - Linux (developed on Ubuntu 24.04 / WSL2), Git, Python 3.12+, and [`uv`](https://github.com/astral-sh/uv) (or `python3-venv` + `pip`).
 - The CLI agents you actually route to must be authenticated on the host. Defaults: [`claude`](https://docs.anthropic.com/en/docs/claude-code) for decomposition + implementation, [`codex`](https://github.com/openai/codex) for review; either can be remapped via `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` (see [`docs/workflow.md`](docs/workflow.md)). They are spawned with `--dangerously-bypass-approvals-and-sandbox` / `--dangerously-skip-permissions`, so the host is the sandbox boundary.
 - A GitHub repository to manage plus a fine-grained PAT scoped to it (read/write on Contents, Issues, Pull requests; Metadata read-only; Checks read-only when `AUTO_MERGE=on`). Full rationale and the generation URL are in [`.env.example`](.env.example).
-- Runtime deps are `PyGithub` and `psycopg[binary]` (the latter for the optional analytics Postgres surface), declared in [`pyproject.toml`](pyproject.toml). Dev tools (`pytest`, `ruff`) live in a `dev` dependency group; the optional Streamlit analytics dashboard's `streamlit` lives in a separate `dashboard` group, so `uv sync --locked` keeps the default install minimal. Exact versions are pinned in [`uv.lock`](uv.lock); CI installs from it. See [`docs/configuration.md#analytics-dashboard-end-to-end`](docs/configuration.md#analytics-dashboard-end-to-end) for the full walkthrough from `analytics-db` up to launching the dashboard.
+- Runtime deps are `PyGithub` and `psycopg[binary]` (the latter for the optional analytics Postgres surface), declared in [`pyproject.toml`](pyproject.toml). Dev tools (`pytest`, `ruff`) live in a `dev` dependency group; the optional Streamlit analytics dashboard's `streamlit` lives in a separate `dashboard` group, so `uv sync --locked` keeps the default install minimal. Exact versions are pinned in [`uv.lock`](uv.lock); CI installs from it.
 
 ## Quick start
 
@@ -94,7 +94,7 @@ Common knobs live in [`.env.example`](.env.example). The full reference — requ
 
 ## Analytics dashboard (optional)
 
-Every polling tick appends to a local JSONL sink (`ANALYTICS_LOG_PATH`, default `logs/analytics.jsonl`) covering label transitions, per-dispatch timing, and agent token / cost details. The `analytics-db` compose service plus the `orchestrator.analytics.sync` CLI replay that JSONL into Postgres, and the opt-in Streamlit dashboard at [`orchestrator/dashboard.py`](orchestrator/dashboard.py) visualizes it. The pipeline is independent of the polling loop: the orchestrator never opens the Postgres connection itself, so deferring or disabling the dashboard never affects workflow correctness. The end-to-end setup-and-operation walkthrough — start `analytics-db`, configure `ANALYTICS_DB_URL`, populate Postgres, launch Streamlit, and interpret the in-app empty / error banners — is in [`docs/configuration.md#analytics-dashboard-end-to-end`](docs/configuration.md#analytics-dashboard-end-to-end).
+An opt-in pipeline replays the orchestrator's polling-tick metrics into a local Postgres and visualizes them in a Streamlit dashboard, independently of the polling loop so deferring or disabling it never affects workflow correctness. For the end-to-end setup-and-operation walkthrough, see [`docs/configuration.md#analytics-dashboard-end-to-end`](docs/configuration.md#analytics-dashboard-end-to-end).
 
 ## Managing multiple repositories
 
