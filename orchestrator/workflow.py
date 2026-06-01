@@ -2,26 +2,29 @@
 # SPDX-License-Identifier: Apache-2.0
 """State machine: drive issues through the orchestrator workflow.
 
-(no label) -> implementing -> documenting -> validating -> documenting
+(no label) -> implementing -> validating -> documenting (final-docs)
 -> in_review -> done|rejected.
-After the implementer commits and the PR opens, `_on_commits` relabels to
-`documenting`: a docs pass runs on the same PR branch, commits any
-README / docs / plans updates, pushes them, and advances to `validating`
-(or advances without pushing on an explicit `DOCS: NO_CHANGE` verdict).
-Validating then runs a fresh reviewer session; on changes-requested the dev
-session is resumed, the fix pushed, and the review rerun until APPROVED or
-MAX_REVIEW_ROUNDS is hit. After approval (+ verify + squash) the handler
-sets `docs_final_pending=True` and relabels to `documenting` for a
+After the implementer commits and the PR opens, `_on_commits` relabels
+straight to `validating` -- the docs pass only runs as the final-docs
+handoff after the reviewer approves, not as a pre-review hop. Validating
+then runs a fresh reviewer session; on changes-requested the dev session
+is resumed, the fix pushed, `agent_approved_sha` cleared so AUTO_MERGE
+cannot land the freshly-pushed head against a stale prior approval, and
+the reviewer rerun until APPROVED or MAX_REVIEW_ROUNDS is hit (the
+issue stays on `validating` throughout these fix rounds -- no docs hop).
+After approval (+ verify + squash) the handler sets
+`docs_final_pending=True` and relabels to `documenting` for a
 **final-docs** pass on the squashed head before in_review picks up; the
-marker tells `_handle_documenting` to advance to `in_review` (not back to
-`validating`) and to update `agent_approved_sha` to the new pushed head
-when a docs commit lands. In_review reacts to PR state (merged/closed) and
-hands fresh PR feedback (any of the four comment surfaces) off to the
-`fixing` stage by recording pending-fix metadata in pinned state and flipping
-the label -- no debounce wait, no dev spawn from in_review itself. When
-AUTO_MERGE is on, in_review merges PRs that the reviewer approved and that
-GitHub considers mergeable with green checks. Other labels are observed and
-logged as not-yet-implemented.
+marker tells `_handle_documenting` to advance to `in_review` (not back
+to `validating`) and to update `agent_approved_sha` to the new pushed
+head when a docs commit lands. In_review reacts to PR state
+(merged/closed) and hands fresh PR feedback (any of the four comment
+surfaces) off to the `fixing` stage by recording pending-fix metadata
+in pinned state and flipping the label -- no debounce wait, no dev
+spawn from in_review itself. When AUTO_MERGE is on, in_review merges
+PRs that the reviewer approved and that GitHub considers mergeable
+with green checks. Other labels are observed and logged as
+not-yet-implemented.
 """
 from __future__ import annotations
 

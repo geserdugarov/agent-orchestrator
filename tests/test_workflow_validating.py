@@ -96,9 +96,10 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         ))
         mocks["_push_branch"].assert_called_once()
         self.assertEqual(gh.pinned_data(5).get("review_round"), 1)
-        # Pushed dev fix routes through `documenting` first; the reviewer
-        # re-evaluates against the docs-updated head on the next tick.
-        self.assertIn((5, "documenting"), gh.label_history)
+        # Pushed dev fix stays on `validating` (no documenting hop) so
+        # the reviewer re-evaluates the new head on the next tick. The
+        # docs pass only runs as the final-docs handoff after approval.
+        self.assertNotIn((5, "documenting"), gh.label_history)
         self.assertNotIn((5, "in_review"), gh.label_history)
 
     def test_unknown_verdict_parks_with_quoted_message(self) -> None:
@@ -412,10 +413,10 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
         data = gh.pinned_data(7)
         self.assertFalse(data.get("awaiting_human"))
         self.assertEqual(data.get("review_round"), 2)
-        # A successful awaiting-human resume now routes through
-        # `documenting` so the docs pass runs against the new head before
-        # the reviewer re-runs.
-        self.assertIn((7, "documenting"), gh.label_history)
+        # A successful awaiting-human resume stays on `validating` (no
+        # documenting hop) so the reviewer re-runs against the new head
+        # on the next tick.
+        self.assertNotIn((7, "documenting"), gh.label_history)
         self.assertNotIn((7, "in_review"), gh.label_history)
 
     def test_successful_dev_fix_resets_silent_park_streak(self) -> None:
@@ -461,18 +462,18 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
         )
 
 
-class ValidatingRoutesPushedFixesToDocumentingTest(
+class ValidatingPushedFixesStayOnValidatingTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
-    """Validating-side dev fixes that PUSH go through `documenting` first.
+    """Validating-side dev fixes that PUSH stay on `validating`.
 
-    Mirrors the implementing -> documenting handoff: any time the dev's
-    fix lands on the PR branch during validating (CHANGES_REQUESTED,
-    awaiting-human resume, user-content drift, or a transient-park
-    recovery that finishes a push), the issue is relabeled to
-    `documenting` so the docs pass runs against the new head before the
-    reviewer agent re-evaluates. No-commit ACK / reviewer-only recovery
-    must stay on `validating` because nothing on the PR changed.
+    Any time the dev's fix lands on the PR branch during validating
+    (CHANGES_REQUESTED, awaiting-human resume, user-content drift, or
+    a transient-park recovery that finishes a push), the issue stays
+    on `validating` -- the docs pass only runs as the final-docs
+    handoff after a reviewer approval, not as a pre-review hop --
+    and any stale `agent_approved_sha` from an earlier round is
+    cleared so AUTO_MERGE can't land the PR against the pre-fix snapshot.
     """
 
     def _validating_issue(
@@ -500,7 +501,7 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
         gh.seed_state(issue_number, **defaults)
         return gh, issue
 
-    def test_changes_requested_pushed_fix_routes_to_documenting(self) -> None:
+    def test_changes_requested_pushed_fix_stays_on_validating(self) -> None:
         gh, issue = self._validating_issue(issue_number=301, review_round=1)
         review = _agent(
             session_id="rev-sess",
@@ -520,7 +521,7 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
 
         data = gh.pinned_data(301)
         self.assertEqual(data.get("review_round"), 2)
-        self.assertIn((301, "documenting"), gh.label_history)
+        self.assertNotIn((301, "documenting"), gh.label_history)
         self.assertNotIn((301, "in_review"), gh.label_history)
 
     def test_changes_requested_no_commit_stays_on_validating(self) -> None:
@@ -551,12 +552,13 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
         self.assertNotIn((302, "documenting"), gh.label_history)
         self.assertNotIn((302, "in_review"), gh.label_history)
 
-    def test_awaiting_human_resume_routes_to_documenting_on_push(self) -> None:
+    def test_awaiting_human_resume_stays_on_validating_on_push(self) -> None:
         gh, issue = self._validating_issue(
             issue_number=303,
             awaiting_human=True,
             last_action_comment_id=900,
             review_round=1,
+            agent_approved_sha="previously-approved-sha",
             comments=[
                 FakeComment(
                     id=1000, body="please add a test",
@@ -576,14 +578,18 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
         data = gh.pinned_data(303)
         self.assertFalse(data.get("awaiting_human"))
         self.assertEqual(data.get("review_round"), 2)
-        self.assertIn((303, "documenting"), gh.label_history)
+        self.assertNotIn((303, "documenting"), gh.label_history)
+        # The pushed fix invalidates any prior approval; AUTO_MERGE
+        # must not land the new head against the stale snapshot.
+        self.assertIsNone(data.get("agent_approved_sha"))
 
-    def test_drift_pushed_fix_routes_to_documenting(self) -> None:
+    def test_drift_pushed_fix_stays_on_validating(self) -> None:
         gh, issue = self._validating_issue(
             issue_number=304,
             body="updated criteria after drift",
             user_content_hash="stale-hash",
             review_round=1,
+            agent_approved_sha="previously-approved-sha",
         )
 
         self._run(
@@ -596,14 +602,16 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
 
         data = gh.pinned_data(304)
         self.assertEqual(data.get("review_round"), 2)
-        self.assertIn((304, "documenting"), gh.label_history)
+        self.assertNotIn((304, "documenting"), gh.label_history)
         self.assertNotIn((304, "in_review"), gh.label_history)
+        # The pushed drift fix invalidates any prior approval; the
+        # prior reviewer voted on the OLD body + diff.
+        self.assertIsNone(data.get("agent_approved_sha"))
 
     def test_drift_ack_keeps_validating_label(self) -> None:
         # A drift ACK reply (no commit, explicit `ACK:` marker) is an
         # acknowledgement that the existing work already satisfies the
-        # edit. Nothing pushed -- so the documenting pass has nothing
-        # new to chew on, and we must stay on `validating` to let the
+        # edit. Nothing pushed -- so we stay on `validating` to let the
         # reviewer re-run on the current head next tick.
         gh, issue = self._validating_issue(
             issue_number=305,
@@ -637,9 +645,8 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
 
     def test_reviewer_timeout_recovery_keeps_validating_label(self) -> None:
         # No commit happened during a reviewer-side park (the reviewer
-        # crashed, the dev never ran). Recovery clears the flags but
-        # MUST NOT route to documenting -- the PR head is unchanged and
-        # the docs pass has nothing new to inspect.
+        # crashed, the dev never ran). Recovery clears the flags and
+        # stays on `validating` -- the PR head is unchanged.
         gh, issue = self._validating_issue(
             issue_number=306,
             awaiting_human=True,
@@ -665,8 +672,7 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
     def test_agent_timeout_clean_recovery_keeps_validating_label(self) -> None:
         # The dev session timed out without producing a new commit (HEAD
         # unchanged from the pre-agent watermark). Recovery clears the
-        # flags and stays on validating; documenting is reserved for
-        # pushed changes.
+        # flags and stays on validating.
         gh, issue = self._validating_issue(
             issue_number=307,
             awaiting_human=True,
@@ -690,11 +696,11 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
         self.assertEqual(data.get("review_round"), 1)
         self.assertNotIn((307, "documenting"), gh.label_history)
 
-    def test_agent_timeout_pushed_recovery_routes_to_documenting(self) -> None:
+    def test_agent_timeout_pushed_recovery_stays_on_validating(self) -> None:
         # The dev committed before the timeout killed it; recovery
-        # finishes the push. Because a new SHA landed on the PR, the
-        # issue routes through `documenting` before the next reviewer
-        # round.
+        # finishes the push. A new SHA landed on the PR but the issue
+        # stays on `validating` so the reviewer re-evaluates on the
+        # next tick.
         gh, issue = self._validating_issue(
             issue_number=308,
             awaiting_human=True,
@@ -702,6 +708,7 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
             pre_dev_fix_sha="cafe1234",
             last_action_comment_id=10_000,
             review_round=1,
+            agent_approved_sha="previously-approved-sha",
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
@@ -715,18 +722,18 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
 
         data = gh.pinned_data(308)
         self.assertEqual(data.get("review_round"), 2)
-        self.assertIn((308, "documenting"), gh.label_history)
+        self.assertNotIn((308, "documenting"), gh.label_history)
+        # The recovery push landed a new SHA; any prior approval is
+        # stale and must be cleared so AUTO_MERGE re-gates on the
+        # next reviewer round.
+        self.assertIsNone(data.get("agent_approved_sha"))
 
-    def test_handoff_preserves_stale_agent_approved_sha(self) -> None:
-        # `agent_approved_sha` is only refreshed on a successful APPROVED
-        # handoff (which goes to `in_review`, not `documenting`). The
-        # documenting route must NOT touch it -- the staleness check
-        # lives on `_handle_in_review`'s auto-merge gate, which compares
-        # `agent_approved_sha` against `pr.head.sha`. Mutating it here
-        # would either drop a still-valid approval (if equal) or paper
-        # over a real branch-update race (if cleared to None). Letting
-        # it sit stale is exactly the behavior the AUTO_MERGE gate
-        # already handles.
+    def test_pushed_fix_clears_stale_agent_approved_sha(self) -> None:
+        # A pushed dev fix during validating is an explicit signal that
+        # any prior reviewer approval is for the pre-fix head and must
+        # not gate AUTO_MERGE. The handler clears `agent_approved_sha`
+        # before the next tick so the freshly-pushed head is re-reviewed
+        # before AUTO_MERGE can fire.
         gh, issue = self._validating_issue(
             issue_number=309,
             review_round=1,
@@ -747,12 +754,8 @@ class ValidatingRoutesPushedFixesToDocumentingTest(
         )
 
         data = gh.pinned_data(309)
-        self.assertIn((309, "documenting"), gh.label_history)
-        # Stale approval preserved as-is; the in_review gate will
-        # invalidate it via its own SHA mismatch check.
-        self.assertEqual(
-            data.get("agent_approved_sha"), "previously-approved-sha",
-        )
+        self.assertNotIn((309, "documenting"), gh.label_history)
+        self.assertIsNone(data.get("agent_approved_sha"))
 
 
 class HandleValidatingReviewCapAddRoundsCommandTest(
@@ -2082,7 +2085,10 @@ class ValidatingTransientParkRecoveryTest(
         return gh, issue
 
     def test_push_failed_park_recovers_when_push_succeeds(self) -> None:
-        gh, issue = self._parked_issue(park_reason="push_failed")
+        gh, issue = self._parked_issue(
+            park_reason="push_failed",
+            agent_approved_sha="previously-approved-sha",
+        )
 
         # Force the worktree-existence check to pass; "/tmp" always exists
         # on Linux. The recovery only retries the push when the worktree
@@ -2107,10 +2113,15 @@ class ValidatingTransientParkRecoveryTest(
         self.assertFalse(data.get("awaiting_human"))
         self.assertIsNone(data.get("park_reason"))
         self.assertEqual(data.get("review_round"), 2)
-        # Routes through `documenting` first so the docs pass runs against
-        # the recovered head before the reviewer re-evaluates.
-        self.assertEqual(gh.label_history, [(170, "documenting")])
+        # Stays on `validating` (no documenting hop) so the reviewer
+        # re-evaluates the recovered head on the next tick.
+        self.assertEqual(gh.label_history, [])
+        self.assertNotIn((170, "documenting"), gh.label_history)
         self.assertNotIn((170, "in_review"), gh.label_history)
+        # The deferred push landed a new SHA; any prior approval is
+        # stale and must be cleared so AUTO_MERGE re-gates on the
+        # next reviewer round.
+        self.assertIsNone(data.get("agent_approved_sha"))
 
     def test_push_failed_park_stays_parked_when_push_still_fails(self) -> None:
         # Recovery must not re-post the park message when the push still
@@ -2406,6 +2417,7 @@ class ValidatingTransientParkRecoveryTest(
         gh, issue = self._parked_issue(
             park_reason="agent_timeout",
             pre_dev_fix_sha="cafe1234",
+            agent_approved_sha="previously-approved-sha",
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
@@ -2426,10 +2438,13 @@ class ValidatingTransientParkRecoveryTest(
         # Bumped: a real fix landed.
         self.assertEqual(data.get("review_round"), 2)
         self.assertIsNone(data.get("pre_dev_fix_sha"))
-        # A pushed recovery now routes through `documenting` so the docs
-        # pass runs against the recovered head before the reviewer
-        # re-evaluates.
-        self.assertIn((170, "documenting"), gh.label_history)
+        # Stays on `validating` (no documenting hop) so the reviewer
+        # re-evaluates the recovered head on the next tick.
+        self.assertNotIn((170, "documenting"), gh.label_history)
+        # The recovery push landed a new SHA; any prior approval is
+        # stale and must be cleared so AUTO_MERGE re-gates on the
+        # next reviewer round.
+        self.assertIsNone(data.get("agent_approved_sha"))
 
     def test_agent_timeout_with_unpushed_commits_push_fails_stays_parked(
         self,
@@ -3242,12 +3257,12 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
 class HandleValidatingResumeOnHashChangeTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
-    def test_body_drift_resumes_dev_and_routes_to_documenting(self) -> None:
+    def test_body_drift_resumes_dev_and_stays_on_validating(self) -> None:
         # While validating (PR is open), a human edit must not discard the
         # dev's already-pushed work. Notify and resume; on a successful
-        # pushed fix, route through `documenting` so the docs pass runs
-        # against the updated body and the new diff before the reviewer
-        # re-evaluates.
+        # pushed fix, stay on `validating` so the reviewer re-evaluates
+        # the new diff next tick. The docs pass only runs as the
+        # final-docs handoff after a fresh approval.
         gh = FakeGitHubClient()
         issue = make_issue(70, label="validating", body="updated criteria")
         gh.add_issue(issue)
@@ -3274,9 +3289,10 @@ class HandleValidatingResumeOnHashChangeTest(
             head_shas=["before-sha", "after-sha"],
         )
 
-        # Routed to `documenting`, NOT `in_review`. The reviewer is NOT
-        # spawned this tick -- the only run_agent call was the dev resume.
-        self.assertIn((70, "documenting"), gh.label_history)
+        # Stays on `validating`: no documenting hop, and the reviewer
+        # has NOT been spawned this tick (the only run_agent call was
+        # the dev resume).
+        self.assertNotIn((70, "documenting"), gh.label_history)
         self.assertNotIn((70, "in_review"), gh.label_history)
         # Notice posted on the issue thread.
         self.assertTrue(any(
@@ -4237,11 +4253,11 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         self.assertNotIn((9, "in_review"), gh.label_history)
 
     def test_changes_requested_does_not_set_final_marker(self) -> None:
-        # The validating CHANGES_REQUESTED fix-loop already routes
-        # through `documenting`, but it's NOT the final-docs handoff:
-        # the dev's fix has to be reviewed AGAIN before AUTO_MERGE can
-        # land. The marker must stay clear on this branch so the docs
-        # pass bounces back to `validating` rather than to `in_review`.
+        # The validating CHANGES_REQUESTED fix-loop stays on `validating`
+        # (no documenting hop) -- the dev's fix has to be reviewed AGAIN
+        # before AUTO_MERGE can land. The marker must stay clear so an
+        # operator relabel to `documenting` from outside cannot mis-route
+        # the fix to `in_review` as if it were a final-docs handoff.
         gh, issue, pr = self._setup(review_round=0)
         review = _agent(
             session_id="rev-sess",
@@ -4257,12 +4273,13 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         )
 
         data = gh.pinned_data(9)
-        self.assertIn((9, "documenting"), gh.label_history)
+        self.assertNotIn((9, "documenting"), gh.label_history)
         self.assertFalse(
             data.get("docs_final_pending"),
             "CHANGES_REQUESTED fix-loop must NOT set the final-docs "
-            "marker -- the docs pass has to bounce back to validating "
-            "for re-review, not to in_review",
+            "marker -- the dev's fix needs to be reviewed AGAIN, and the "
+            "marker would otherwise mis-route a later docs hop to "
+            "in_review",
         )
 
     def test_approval_with_empty_head_sha_does_not_set_seeded_sentinel(
@@ -4319,12 +4336,13 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         # was aborted (operator relabeled back to `validating`, drift-
         # induced unwind, PR-worktree refresh detour that landed here,
         # etc.). When this round's verdict is CHANGES_REQUESTED the
-        # fix-loop pushes the dev fix and relabels to `documenting`;
-        # without clearing the markers, the next `_handle_documenting`
-        # tick treats it as the final-docs handoff and skips the
-        # required re-review, routing the dev fix straight to
-        # `in_review`. Clear them at the top of `_handle_validating`
-        # so the relabel hands documenting a pre-approval shape.
+        # fix-loop pushes the dev fix and stays on `validating`;
+        # without clearing the markers, an operator relabel to
+        # `documenting` afterwards would mis-route the fix straight to
+        # `in_review` as a final-docs handoff. Clear them at the top of
+        # `_handle_validating` so the markers cannot survive a re-entry.
+        # Also clear the stale `agent_approved_sha` so AUTO_MERGE cannot
+        # land the new head against a snapshot from a prior round.
         gh, issue, pr = self._setup(
             review_round=0,
             docs_final_pending=True,
@@ -4345,12 +4363,18 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         )
 
         data = gh.pinned_data(9)
-        self.assertIn((9, "documenting"), gh.label_history)
+        self.assertNotIn((9, "documenting"), gh.label_history)
         self.assertFalse(
             data.get("docs_final_pending"),
             "stale `docs_final_pending` from a prior aborted approval "
-            "must be cleared before the CHANGES_REQUESTED relabel to "
-            "documenting; otherwise documenting would route the dev "
-            "fix to in_review and skip the required re-review",
+            "must be cleared on every re-entry into validating so an "
+            "operator relabel to documenting cannot mis-route a later "
+            "tick as a final-docs handoff",
         )
         self.assertFalse(data.get("final_docs_approval_seeded"))
+        self.assertIsNone(
+            data.get("agent_approved_sha"),
+            "a pushed CHANGES_REQUESTED fix must clear the stale "
+            "approval SHA so AUTO_MERGE cannot land the freshly-pushed "
+            "head against a prior round's snapshot",
+        )

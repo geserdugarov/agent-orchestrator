@@ -105,11 +105,11 @@ def _handle_dev_fix_result(
     """Post-agent handling for a dev fix during validating.
 
     Returns True if a fix was committed, pushed, and the caller should
-    advance the label (validating routes the issue through `documenting`
-    on True so the docs pass runs against the new head before the
-    reviewer re-evaluates). Returns False if the run produced no fix
-    (timeout, no-new-commit, dirty tree, or push failure); caller should
-    write state and return.
+    advance the label (validating routes the issue back to `validating`
+    on True so the reviewer re-runs against the new head; any stale
+    approval state must be reset by the caller before relabeling).
+    Returns False if the run produced no fix (timeout, no-new-commit,
+    dirty tree, or push failure); caller should write state and return.
     """
     from .. import workflow as _wf
 
@@ -195,11 +195,12 @@ def _post_user_content_change_result(
       old requirements, so AUTO_MERGE must wait for a re-approval)
       WITHOUT spawning `documenting` -- no commit landed for the docs
       pass to react to.
-    * ``"pushed"`` -- new commit landed and the push succeeded. Caller
-      advances the label per its own rules (both in_review and
-      validating route through `documenting` -- validating also bumps
-      `review_round` -- so the docs pass runs against the new head
-      before the reviewer re-evaluates).
+    * ``"pushed"`` -- new commit landed and the push succeeded.
+      Validating stays on `validating` (and bumps `review_round`) so
+      the reviewer re-evaluates the new head; in_review also hands
+      straight back to `validating` (post-#268, the pre-approval docs
+      hop was collapsed there too). Any stale approval state must be
+      reset by the caller before relabeling.
     * ``"parked"`` -- timeout, dirty tree, push fail, silent crash
       (empty `last_message`), OR a no-commit response WITHOUT the
       `ACK:` marker (treated as a clarification question via
@@ -284,9 +285,9 @@ def _try_recover_validating_transient_park(
       * ``"pushed"`` -- a dev fix was finished off during recovery
         (a deferred push of `push_failed`, or the trailing push of an
         `agent_timeout` that had committed before being killed).
-        Caller clears the flags and routes the issue through
-        `documenting` so the docs pass runs against the new head before
-        the reviewer sees it.
+        Caller clears the flags, resets stale approval state, and
+        stays on `validating` so the reviewer re-evaluates the new
+        head.
 
     Must not spawn the agent or post issue/PR comments -- the caller owns
     the visible side of the recovery so a still-stuck tick produces no
@@ -610,13 +611,13 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # is labeled `validating` again (operator relabel back from
     # documenting, drift-induced unwind in documenting that routes here,
     # PR-worktree refresh detour that lands on validating, etc.) the
-    # prior approval is implicitly invalidated. Clear up front so the
-    # CHANGES_REQUESTED fix-loop, awaiting-human resume push,
-    # transient-park recovery push, and drift-pushed exits cannot
-    # accidentally hand documenting a stale marker that would route the
-    # next docs commit straight to `in_review` and skip the required
-    # re-review of the dev's fix. The approval branch resets them to
-    # True on a successful new approval.
+    # prior approval is implicitly invalidated. Clear up front so an
+    # operator relabel to `documenting` after a pushed dev fix (which
+    # now stays on `validating` instead of routing through documenting)
+    # cannot mis-route the next docs commit straight to `in_review` as
+    # a final-docs handoff and skip the required re-review of the
+    # dev's fix. The approval branch resets them to True on a
+    # successful new approval.
     state.set("docs_final_pending", False)
     state.set("final_docs_approval_seeded", False)
 
@@ -624,11 +625,12 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # reviewer was running. Re-decomposing now would discard the dev's
     # already-pushed work, so notify the human, resume the dev session on
     # its locked backend with the new body, and on a successful pushed fix
-    # bump `review_round` and route through `documenting` so the docs
-    # pass runs against the updated body + new diff before the reviewer
-    # re-evaluates next tick. An ACK reply (no commit) keeps the issue
-    # on `validating`. On a failed resume (timeout, dirty, no commit),
-    # the standard park flags land via `_handle_dev_fix_result`.
+    # bump `review_round` and clear the stale `agent_approved_sha` while
+    # staying on `validating` (no relabel emitted) so the reviewer
+    # re-evaluates the updated body + new diff on the next tick. An ACK
+    # reply (no commit) keeps the issue on `validating`. On a failed
+    # resume (timeout, dirty, no commit), the standard park flags land
+    # via `_handle_dev_fix_result`.
     #
     # Exception: when the issue is parked with a reviewer-side park reason
     # (`reviewer_timeout` / `reviewer_failed`) OR on the review-round cap
@@ -688,11 +690,15 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             if outcome == "pushed":
                 round_n = int(state.get("review_round") or 0)
                 state.set("review_round", round_n + 1)
-                # New head landed: route through `documenting` so the
-                # docs pass runs against the updated body + new diff
-                # before the reviewer re-evaluates. The `ack` outcome
-                # (no commit) stays in `validating`.
-                gh.set_workflow_label(issue, "documenting")
+                # New head landed: any prior approval was for the OLD
+                # body + diff, so drop `agent_approved_sha` before the
+                # reviewer re-evaluates the freshened head on the next
+                # `validating` tick. The label stays on `validating`
+                # (no relabel emitted) so the docs pass only runs as
+                # the final-docs handoff after a fresh approval. The
+                # `ack` outcome (no commit) stays put without
+                # resetting -- nothing on the PR changed.
+                state.set("agent_approved_sha", None)
             gh.write_pinned_state(issue, state)
             return
         # reviewer-side park OR review_cap: fall through to the
@@ -702,9 +708,10 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     # Awaiting-human path: human replied after a park; resume the developer
     # codex with their feedback. Identical mechanic to implementing's resume,
-    # but on a clean pushed fix we bump the round AND route through
-    # `documenting` so the docs pass runs against the new head before the
-    # reviewer re-evaluates next tick.
+    # but on a clean pushed fix we bump the round AND clear the stale
+    # `agent_approved_sha` while staying on `validating` (no relabel
+    # emitted) so the reviewer re-evaluates the new head on the next
+    # tick without a pre-review docs hop.
     if state.get("awaiting_human"):
         # Transient-park recovery: when the original park reason is something
         # that can resolve without a human comment (a push race that the
@@ -779,10 +786,12 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             if recovery == "pushed":
                 # A dev fix finished landing during recovery (push_failed
                 # retried successfully, or an agent_timeout whose dev
-                # had committed before the kill). Route through
-                # `documenting` so the docs pass runs against the new
-                # head before the reviewer agent re-evaluates.
-                gh.set_workflow_label(issue, "documenting")
+                # had committed before the kill). Any prior approval was
+                # for the pre-fix head, so drop `agent_approved_sha`
+                # before the reviewer re-evaluates the freshened head on
+                # the next `validating` tick. The label stays on
+                # `validating` (no relabel emitted).
+                state.set("agent_approved_sha", None)
             gh.write_pinned_state(issue, state)
             return
         elif (
@@ -818,10 +827,13 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 return
             round_n = int(state.get("review_round") or 0)
             state.set("review_round", round_n + 1)
-            # A clean dev fix landed: route through `documenting` so the
-            # docs pass runs against the new head before the reviewer
-            # re-evaluates.
-            gh.set_workflow_label(issue, "documenting")
+            # A clean dev fix landed: any prior approval was for the
+            # pre-fix head, so drop `agent_approved_sha` before the
+            # reviewer re-evaluates the freshened head on the next
+            # `validating` tick. The label stays on `validating` (no
+            # relabel emitted); the docs pass only runs as the
+            # final-docs handoff after a fresh approval.
+            state.set("agent_approved_sha", None)
             gh.write_pinned_state(issue, state)
             return
 
@@ -1182,8 +1194,11 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         return
 
     state.set("review_round", round_n + 1)
-    # A clean dev fix landed in response to CHANGES_REQUESTED: route
-    # through `documenting` so the docs pass runs against the new head
-    # before the reviewer re-evaluates.
-    gh.set_workflow_label(issue, "documenting")
+    # A clean dev fix landed in response to CHANGES_REQUESTED: any
+    # prior approval was for the pre-fix head, so drop
+    # `agent_approved_sha` before the reviewer re-evaluates the
+    # freshened head on the next `validating` tick. The label stays on
+    # `validating` (no relabel emitted); the docs pass only runs as
+    # the final-docs handoff after a fresh approval.
+    state.set("agent_approved_sha", None)
     gh.write_pinned_state(issue, state)

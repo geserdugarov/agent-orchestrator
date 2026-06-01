@@ -7,12 +7,12 @@ any of the four comment surfaces. The fixing handler rescans the
 existing in_review watermarks each tick, debounces the quiet window
 against the newest comment timestamp, resumes the locked dev session via
 `_resume_dev_with_text` once the window expires, advances watermarks
-past the consumed feedback, and on a pushed fix flips the label DIRECTLY
-back to `validating` with `review_round=0` and a cleared
+past the consumed feedback, and on a pushed fix flips the label
+DIRECTLY back to `validating` with `review_round=0` and a cleared
 `agent_approved_sha` so the reviewer re-evaluates the new diff next
 tick. The no-new-feedback bounce also flips directly to `validating`.
 The pre-approval pushed-fix exit deliberately skips the `documenting`
-hop -- docs land in the final-docs pass after reviewer approval.
+hop — docs land in the final-docs pass after reviewer approval.
 
 The PR-terminal arcs (merged / closed / open-PR-with-closed-issue),
 dispatcher routing, label-bookkeeping, and missing-`pr_number` park

@@ -66,7 +66,7 @@ are collapsed under a single "Terminal" entry per handler.
 | ---- | -- | --------- | ------- |
 | `implementing` | `done` | workflow.py:786 (via `_finalize_if_pr_merged`) | External PR merge while still implementing |
 | `implementing` | `rejected` | workflow.py:880 (via `_finalize_if_issue_closed`) | Issue closed without merged PR |
-| `implementing` | **`documenting`** | implementing.py:793 (in `_on_commits`) | **Dev produced commits, branch pushed, PR opened (or reused)** |
+| `implementing` | **`validating`** | implementing.py (in `_on_commits`) | **Dev produced commits, branch pushed, PR opened (or reused)** — straight handoff after issue #267 removed the pre-review docs hop |
 
 ### `_handle_documenting` — label `documenting`
 
@@ -82,11 +82,11 @@ are collapsed under a single "Terminal" entry per handler.
 | From | To | File:line | Trigger |
 | ---- | -- | --------- | ------- |
 | `validating` | `done` / `rejected` | workflow.py:786 / 880 | External merge or issue close |
-| `validating` | **`documenting`** | validating.py:678 | **User-content drift dev resume pushed** a new commit (`outcome == "pushed"`); no `docs_final_pending` marker — pre-approval pass |
-| `validating` | **`documenting`** | validating.py:768 | **Transient-park recovery push** finished (`push_failed` retried, or `agent_timeout` that had actually committed); no marker |
-| `validating` | **`documenting`** | validating.py:807 | **Awaiting-human resume produced a pushed dev fix**; no marker |
-| `validating` | **`documenting`** | validating.py:1067 | **Reviewer `VERDICT: APPROVED` + verify gate clean + squash succeeded (or disabled)** — sets `docs_final_pending=True` so the docs pass hands off to `in_review` (NOT back to `validating`) |
-| `validating` | **`documenting`** | validating.py:1153 | **CHANGES_REQUESTED dev-fix loop pushed** a new commit; no marker |
+| `validating` | `validating` (re-run) | validating.py (user-content drift push) | **User-content drift dev resume pushed** a new commit (`outcome == "pushed"`) — no label flip; clears `agent_approved_sha` and bumps `review_round`; the reviewer re-evaluates on the next tick (issue #267) |
+| `validating` | `validating` (re-run) | validating.py (transient-park recovery push) | **Transient-park recovery push** finished (`push_failed` retried, or `agent_timeout` that had actually committed) — no label flip; clears `agent_approved_sha` (issue #267) |
+| `validating` | `validating` (re-run) | validating.py (awaiting-human resume push) | **Awaiting-human resume produced a pushed dev fix** — no label flip; clears `agent_approved_sha` and bumps `review_round` (issue #267) |
+| `validating` | **`documenting`** | validating.py (approval branch) | **Reviewer `VERDICT: APPROVED` + verify gate clean + squash succeeded (or disabled)** — sets `docs_final_pending=True` so the docs pass hands off to `in_review` (NOT back to `validating`) |
+| `validating` | `validating` (re-run) | validating.py (CHANGES_REQUESTED) | **CHANGES_REQUESTED dev-fix loop pushed** a new commit — no label flip; clears `agent_approved_sha` and bumps `review_round` (issue #267) |
 
 ### `_handle_in_review` — label `in_review`
 
@@ -133,52 +133,53 @@ are collapsed under a single "Terminal" entry per handler.
 
 ## 2. Every current entry into `documenting`
 
-`documenting` is entered after most code-changing branch updates **plus**
-the final-docs hop after reviewer approval. After issue #268 the
-PR-feedback `fixing` push and the `in_review` user-content drift push
-flip DIRECTLY back to `validating` (no docs hop). The remaining entry
-set:
+After issues #266 (final-docs handoff), #267 (remove pre-review docs
+hop from implementing/validating), #268 (route fixing PR-feedback and
+in_review drift pushes straight to validating), and #269 (route
+resolving_conflict pushes straight to validating), every pre-approval
+`documenting` entry is gone. The only remaining entry is the
+final-docs hop:
 
-1. **implementing.py:793** — `_on_commits`: dev's initial implementation
-   commits, PR opened.
-2. **validating.py:678** — `_handle_validating` user-content drift dev
-   resume pushed a commit.
-3. **validating.py:768** — `_handle_validating` awaiting-human transient
-   recovery (push_failed retry / agent_timeout that committed) finished
-   landing the dev's fix.
-4. **validating.py:807** — `_handle_validating` awaiting-human resume:
-   human reply produced a clean dev-fix push.
-5. **validating.py:1067** — `_handle_validating` reviewer `VERDICT:
-   APPROVED` + verify gate clean + squash succeeded (or disabled). The
-   only entry that sets `docs_final_pending=True`; the docs pass on
-   this trip advances to `in_review` rather than back to `validating`.
-6. **validating.py:1153** — `_handle_validating` CHANGES_REQUESTED fix
-   loop pushed a clean dev fix.
-7. ~~**in_review.py:593**~~ — removed under #268; the user-content
+1. **validating.py (approval branch)** — `_handle_validating` reviewer
+   `VERDICT: APPROVED` + verify gate clean + squash succeeded (or
+   disabled). Sets `docs_final_pending=True`; the docs pass on this
+   trip advances to `in_review` rather than back to `validating`. This
+   is the **final-docs hop**, and it is now the SOLE producer of
+   `documenting`.
+2. ~~**in_review.py:593**~~ — removed under #268; the user-content
    drift dev resume now hands straight back to `validating` on both
    the "pushed" and the "ACK" outcomes.
-8. ~~**fixing.py:376**~~ — removed under #268; the PR-feedback
+3. ~~**fixing.py:376**~~ — removed under #268; the PR-feedback
    pushed-fix exit now hands straight back to `validating`.
-9. ~~**conflicts.py:244**~~ — removed under #269; the user-content
+4. ~~**conflicts.py:244**~~ — removed under #269; the user-content
    drift dev resume now hands straight back to `validating`.
-10. ~~**conflicts.py:405**~~ — removed under #269; the ahead-of-remote
-    recovered commit push now hands straight back to `validating`.
-11. ~~**conflicts.py:531**~~ — removed under #269; the clean-rebase
-    pushed branch now hands straight back to `validating`.
-12. ~~**conflicts.py:655**~~ — removed under #269; both the
-    agent-resolved and awaiting-human resumed conflict pushes now hand
-    straight back to `validating` via `_post_conflict_resolution_result`.
+5. ~~**conflicts.py:405**~~ — removed under #269; the ahead-of-remote
+   recovered commit push now hands straight back to `validating`.
+6. ~~**conflicts.py:531**~~ — removed under #269; the clean-rebase
+   pushed branch now hands straight back to `validating`.
+7. ~~**conflicts.py:655**~~ — removed under #269; both the
+   agent-resolved and awaiting-human resumed conflict pushes now hand
+   straight back to `validating` via `_post_conflict_resolution_result`.
 
 Cross-cutting observations:
 
-- Validating-side dev resumes still route through `documenting` because
-  each can land code that the README / docs / plans must reflect.
-- The `fixing`, `in_review` drift, and resolving-conflict pushed paths
-  used to route through `documenting` too; under #268 and #269 they
-  hand straight back to `validating` (alongside the long-standing
-  bypasses fixing.py:259 / in_review.py "ACK" / conflicts.py:502
-  base-up-to-date no-op), so the single docs pass after final
-  reviewer approval covers the fresh branch.
+- The `implementing` initial PR open and every `validating` pushed-fix
+  exit now route straight to `validating` (issue #267): no docs hop, and
+  the validating handler clears `agent_approved_sha` on every pushed
+  fix so AUTO_MERGE cannot land the freshly-pushed head against a
+  stale prior approval.
+- The `fixing` and `in_review` drift pushed paths used to route through
+  `documenting` too; under #268 they hand straight back to `validating`.
+  The `in_review` "ACK" no-commit drift outcome already did the same.
+- The `resolving_conflict` pushed paths used to route through
+  `documenting` too; under #269 they hand straight back to `validating`
+  alongside the existing base-up-to-date no-op (conflicts.py:502).
+- Net result: no pre-approval `documenting` entry remains. The single
+  docs pass after reviewer approval covers every code-changing branch
+  update, regardless of which stage produced it.
+- Two paths bypass `documenting` deliberately because no diff lands:
+  fixing.py:259 (no unread feedback → straight back to `validating`)
+  and conflicts.py:502 (base-up-to-date no-op).
 
 ## 3. Proposed simplification target (no code changes in this child)
 
@@ -202,70 +203,62 @@ Under that target, the transition map collapses to:
 | `resolving_conflict` | `validating` | Every clean / recovered / agent-resolved / awaiting-human resumed push (no docs hop); the base-up-to-date no-op already targets `validating` |
 | `in_review` drift "pushed" | `validating` | Symmetric with the new fixing/conflict routes — no docs hop until the reviewer approves the next round |
 
-### Status note (after issues #266, #268, and #269)
+### Status note (after issues #266, #267, #268, and #269)
 
-Issue #266 has landed the **final-docs handoff** half of the target above:
-the `validating` -> `documenting` -> `in_review` chain now exists on the
-approval branch via the `docs_final_pending=True` marker, with
-`_handle_documenting`'s success exits routing to `in_review` (and updating
-`agent_approved_sha` to the new head when a docs commit lands AND the
-companion sentinel `final_docs_approval_seeded` confirms validating
-actually persisted a non-empty approval SHA this round — both
-`gh.get_pr()` succeeded AND `_head_sha()` returned a non-empty local
-SHA — so the AUTO_MERGE invariant survives; when either fails the
-sentinel is absent and any stale `agent_approved_sha` left over from a
-prior round stays untouched so AUTO_MERGE remains gated until the next
-reviewer round explicitly approves).
+**Issue #266** landed the **final-docs handoff** half of the target
+above: the `validating` -> `documenting` -> `in_review` chain now
+exists on the approval branch via the `docs_final_pending=True`
+marker, with `_handle_documenting`'s success exits routing to
+`in_review` (and updating `agent_approved_sha` to the new head when a
+docs commit lands AND the companion sentinel
+`final_docs_approval_seeded` confirms validating actually persisted a
+non-empty approval SHA this round — both `gh.get_pr()` succeeded AND
+`_head_sha()` returned a non-empty local SHA — so the AUTO_MERGE
+invariant survives; when either fails the sentinel is absent and any
+stale `agent_approved_sha` left over from a prior round stays
+untouched so AUTO_MERGE remains gated until the next reviewer round
+explicitly approves).
 
-Issue #268 has collapsed the **PR-feedback `fixing` push** and the
-**`in_review` user-content drift push** entries into direct
-`validating` routes (the no-new-feedback bounce and the drift "ACK"
-already targeted `validating`; the drift "pushed" outcome now joins
-them). Issue #269 has done the same for **every `resolving_conflict`
-pushed path** (alongside the long-standing base-up-to-date no-op).
-The remaining pre-approval `documenting` entries (rows 1–6 in
-section 2) are still present — collapsing those into direct
-`validating` routes is the remainder of the parent #262 work and
-lives in subsequent children.
+**Issue #267** landed the **implementing / validating half**:
+`_handle_implementing`'s `_on_commits` now relabels straight to
+`validating` (no pre-review docs hop), and every pushed-fix exit in
+`_handle_validating` (CHANGES_REQUESTED, awaiting-human resume,
+user-content drift "pushed" outcome, transient-park recovery push)
+stays on `validating` without emitting a label change and clears
+`agent_approved_sha` so AUTO_MERGE cannot land the freshly-pushed head
+against a stale prior approval. The reviewer re-evaluates on the next
+tick.
 
-Concretely, the following call sites still need to become
-`set_workflow_label(issue, "validating")` (or be removed if redundant)
-under the target:
+**Issue #268** landed the **`fixing` / `in_review` drift half**: the
+PR-feedback `fixing` pushed-fix exit and the `in_review` user-content
+drift "pushed" outcome both now flip to `validating` directly. The
+no-new-feedback fixing bounce and the in_review drift "ACK" outcome
+already targeted `validating` before this change.
 
-- implementing.py:793
-- validating.py:678 / 768 / 807 / 1153
-- ~~in_review.py:593~~ — landed under #268; the user-content drift
-  push now flips to `validating` directly (both "pushed" and "ACK").
-- ~~fixing.py:376~~ — landed under #268; the PR-feedback pushed-fix
-  exit now flips to `validating` directly.
-- ~~conflicts.py:244 / 405 / 531 / 655~~ — landed under #269; every
-  resolving_conflict pushed path now flips to `validating` directly,
-  alongside the existing base-up-to-date no-op.
+**Issue #269** landed the **`resolving_conflict` half**: every
+pushed resolving_conflict path (clean rebase, recovered push,
+agent-resolved, awaiting-human resume, drift-pushed fix) now hands
+straight back to `validating`, alongside the existing
+base-up-to-date no-op.
 
-A new transition from `validating` (approval branch) into `documenting`,
-with the `documenting` handler then advancing to `in_review` instead of
-`validating`, **has landed in #266**. The documenting success exits now
-branch on `docs_final_pending`: when set (final-docs handoff), they route
-to `in_review` via `_advance_after_docs_push` / `_advance_after_docs_no_change`;
-otherwise they keep the legacy route to `validating`.
+Combined effect: every pre-approval `documenting` entry from section
+2 is gone. The final-docs handoff (validating approval branch) is the
+sole producer of `documenting` now.
 
-The validating-side reviewer-approval branch (validating.py:1067) **now**
-sets `docs_final_pending=True` and flips to `documenting` after squash +
-watermark seeding (it previously flipped directly to `in_review`). The
-squash + approval-comment + watermark-seeding bookkeeping stays in
-validating, where `agent_approved_sha` and the companion sentinel
-`final_docs_approval_seeded` are set together inside the `else` arm of
-its `gh.get_pr()` try AND inside the `if new_head_sha:` block — so an
-empty local SHA leaves both untouched and the sentinel stays False;
-documenting only ratchets `pr_last_comment_id` on the handoff for any
-issue-thread reply the awaiting-human resume consumed, and updates
-`agent_approved_sha` to the new pushed head when a docs commit lands
-AND `final_docs_approval_seeded` confirms this round actually persisted
-a non-empty approval SHA (so the AUTO_MERGE
-`agent_approved_sha == pr.head.sha` invariant survives). The remainder
-of the parent #262 target — collapsing the pre-approval `documenting`
-entries listed above into direct `validating` routes — is out of scope
-for this child and lives in subsequent children.
+Concretely, the call sites converted to direct `validating` routes (or
+in-place state resets without a relabel) across all four issues:
+
+- implementing.py — `_on_commits` (was `documenting`, now `validating`)
+- validating.py — user-content drift "pushed", transient-park recovery
+  "pushed", awaiting-human resume push, CHANGES_REQUESTED dev-fix push
+  (all were `documenting`, now stay on `validating` with
+  `agent_approved_sha=None`)
+- in_review.py:593 — user-content drift "pushed" outcome
+- fixing.py:376 — PR-feedback dev-fix push
+- conflicts.py:244 / 405 / 531 / 655 — every resolving_conflict
+  pushed path
+
+The parent #262 target is now fully reached.
 
 ### Net contract change
 
@@ -280,10 +273,9 @@ for this child and lives in subsequent children.
 
 ### Out of scope here
 
-- Collapsing the remaining pre-approval `documenting` entries (rows
-  1–6 and 7–10 in section 2) into direct `validating` routes — those
-  code-changing pushes still hop through `documenting` before the
-  reviewer re-runs.
+- No remaining pre-approval `documenting` entries to collapse — issues
+  #267 (implementing/validating), #268 (fixing / in_review drift), and
+  #269 (resolving_conflict) finished off the parent #262 target.
 - Docs-stage prompt rewording for the post-approval pass — the existing
   prompt is still used unchanged on the final-docs hop.
 - The validating-side squash/watermark-seeding relocation; squash +

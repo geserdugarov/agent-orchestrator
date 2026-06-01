@@ -5092,21 +5092,25 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
         self.assertIn("documenting", names)
 
-    def test_documenting_label_sits_between_implementing_and_validating(
+    def test_documenting_label_sits_between_validating_and_in_review(
         self,
     ) -> None:
-        # Lifecycle order matters: the planned documenting stage runs after
-        # implementing and before validating, so the spec tuple must place
-        # the label between them (the order is the only durable encoding
-        # of lifecycle ordering in code).
+        # The happy-path lifecycle is implementing -> validating ->
+        # documenting (final-docs hop) -> in_review; the spec tuple
+        # places the labels in roughly that order so a reader scanning
+        # WORKFLOW_LABEL_SPECS top-to-bottom sees the actual flow.
+        # Lifecycle routing itself lives in the stage handlers, not
+        # this tuple, but the order shouldn't actively mislead.
         from orchestrator.github import WORKFLOW_LABEL_SPECS
 
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
         impl_idx = names.index("implementing")
-        doc_idx = names.index("documenting")
         val_idx = names.index("validating")
-        self.assertEqual(doc_idx, impl_idx + 1)
-        self.assertEqual(val_idx, doc_idx + 1)
+        doc_idx = names.index("documenting")
+        in_review_idx = names.index("in_review")
+        self.assertEqual(val_idx, impl_idx + 1)
+        self.assertEqual(doc_idx, val_idx + 1)
+        self.assertEqual(in_review_idx, doc_idx + 1)
 
     def test_documenting_label_is_not_family_aware(self) -> None:
         # Open `documenting` issues touch only their own pinned state and

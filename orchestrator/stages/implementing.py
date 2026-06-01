@@ -785,12 +785,10 @@ def _on_commits(
     # silent-park streak so a future blip doesn't tip an otherwise-healthy
     # session past the fresh-session threshold.
     state.set("silent_park_count", 0)
-    # Hand off to the documenting stage: the docs pass runs after the
-    # implementer's PR opens and before the reviewer agent sees the
-    # diff, so the reviewer evaluates the implementation + docs
-    # together. The documenting handler advances to `validating` once
-    # docs are pushed (or it parses an explicit no-change verdict).
-    gh.set_workflow_label(issue, "documenting")
+    # Hand off straight to `validating`. The docs pass now runs as the
+    # final-docs handoff after the reviewer agent approves, so the
+    # initial implementation no longer takes a pre-review docs hop.
+    gh.set_workflow_label(issue, "validating")
 
 
 def _on_question(

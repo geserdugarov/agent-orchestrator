@@ -29,15 +29,19 @@ PINNED_STATE_MARKER = "<!--orchestrator-state"
 PINNED_STATE_RE = re.compile(r"<!--orchestrator-state\s+(\{.*?\})\s*-->", re.DOTALL)
 PINNED_STATE_TEMPLATE = "<!--orchestrator-state {payload}-->"
 
-# (name, hex color, description) for each workflow label. Order = lifecycle.
+# (name, hex color, description) for each workflow label. Order roughly
+# tracks the happy-path lifecycle (implementing -> validating ->
+# documenting -> in_review) but is otherwise only the order in which
+# `ensure_workflow_labels` creates labels on a fresh repo; lifecycle
+# routing itself is driven by the stage handlers, not by this tuple.
 WORKFLOW_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
     ("decomposing", "fbca04", "Orchestrator is breaking this issue into sub-issues"),
     ("ready", "0e8a16", "Decomposed and ready for implementation"),
     ("blocked", "b60205", "Blocked on another issue"),
     ("umbrella", "ededed", "Parent of child issues with no implementation of its own"),
     ("implementing", "1d76db", "A coding agent is working on this"),
-    ("documenting", "c2e0c6", "Documentation pass after implementation, before validation"),
     ("validating", "8a2be2", "Automated review/tests are running"),
+    ("documenting", "c2e0c6", "Documentation pass after reviewer approval (final-docs hop), before in_review"),
     ("in_review", "d93f0b", "PR is open, awaiting human review"),
     ("fixing", "fef2c0", "Addressing PR feedback before the next reviewer round"),
     ("resolving_conflict", "e99695", "Auto-resolving merge conflicts after a sibling PR landed first"),
