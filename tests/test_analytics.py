@@ -36,45 +36,46 @@ def _reload(env: dict[str, str] | None = None):
 
 
 class AnalyticsConfigTest(unittest.TestCase):
-    """`ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` parse at import:
-    default-enabled under `LOG_DIR`, sentinel values disable, retention
-    defaults to 90 days and 0 means keep raw data indefinitely.
+    """`ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` parse at import
+    inside the analytics package: default-enabled under `config.LOG_DIR`,
+    sentinel values disable, retention defaults to 90 days and 0 means
+    keep raw data indefinitely.
     """
 
     def test_default_path_under_log_dir(self) -> None:
-        config, _ = _reload()
+        config, analytics = _reload()
         self.assertEqual(
-            config.ANALYTICS_LOG_PATH, config.LOG_DIR / "analytics.jsonl"
+            analytics.ANALYTICS_LOG_PATH, config.LOG_DIR / "analytics.jsonl"
         )
 
     def test_default_retention_is_ninety_days(self) -> None:
-        config, _ = _reload()
-        self.assertEqual(config.ANALYTICS_RETENTION_DAYS, 90)
+        _, analytics = _reload()
+        self.assertEqual(analytics.ANALYTICS_RETENTION_DAYS, 90)
 
     def test_explicit_path_overrides_default(self) -> None:
-        config, _ = _reload({"ANALYTICS_LOG_PATH": "/var/log/orch/a.jsonl"})
+        _, analytics = _reload({"ANALYTICS_LOG_PATH": "/var/log/orch/a.jsonl"})
         self.assertEqual(
-            config.ANALYTICS_LOG_PATH, Path("/var/log/orch/a.jsonl")
+            analytics.ANALYTICS_LOG_PATH, Path("/var/log/orch/a.jsonl")
         )
 
     def test_empty_value_disables(self) -> None:
         # Explicit empty assignment in .env is the documented disable knob.
-        config, _ = _reload({"ANALYTICS_LOG_PATH": ""})
-        self.assertIsNone(config.ANALYTICS_LOG_PATH)
+        _, analytics = _reload({"ANALYTICS_LOG_PATH": ""})
+        self.assertIsNone(analytics.ANALYTICS_LOG_PATH)
 
     def test_sentinel_values_disable(self) -> None:
         for value in ("off", "OFF", " off ", "disabled", "none", "None"):
             with self.subTest(value=value):
-                config, _ = _reload({"ANALYTICS_LOG_PATH": value})
-                self.assertIsNone(config.ANALYTICS_LOG_PATH)
+                _, analytics = _reload({"ANALYTICS_LOG_PATH": value})
+                self.assertIsNone(analytics.ANALYTICS_LOG_PATH)
 
     def test_zero_retention_means_keep_forever(self) -> None:
-        config, _ = _reload({"ANALYTICS_RETENTION_DAYS": "0"})
-        self.assertEqual(config.ANALYTICS_RETENTION_DAYS, 0)
+        _, analytics = _reload({"ANALYTICS_RETENTION_DAYS": "0"})
+        self.assertEqual(analytics.ANALYTICS_RETENTION_DAYS, 0)
 
     def test_retention_env_override(self) -> None:
-        config, _ = _reload({"ANALYTICS_RETENTION_DAYS": "30"})
-        self.assertEqual(config.ANALYTICS_RETENTION_DAYS, 30)
+        _, analytics = _reload({"ANALYTICS_RETENTION_DAYS": "30"})
+        self.assertEqual(analytics.ANALYTICS_RETENTION_DAYS, 30)
 
 
 class AnalyticsDisabledModeTest(unittest.TestCase):

@@ -24,11 +24,17 @@ def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _reload(env: dict[str, str] | None = None):
-    """Reload `orchestrator.config` and `orchestrator.analytics.sync`
-    against the given hermetic env.
+    """Reload `orchestrator.config`, `orchestrator.analytics`, and
+    `orchestrator.analytics.sync` against the given hermetic env.
+
+    The analytics package owns its own `ANALYTICS_LOG_PATH` /
+    `ANALYTICS_RETENTION_DAYS` parsing, and `analytics.sync` reads
+    `ANALYTICS_LOG_PATH` off the parent package at call time, so the
+    parent must be popped alongside `sync` for the test env to land.
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
+        sys.modules.pop("orchestrator.analytics", None)
         sys.modules.pop("orchestrator.analytics.sync", None)
         import orchestrator.config as config
         import orchestrator.analytics.sync as analytics_sync

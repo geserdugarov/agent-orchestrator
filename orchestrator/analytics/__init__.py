@@ -25,9 +25,12 @@ Event kinds written today:
 - `agent_exit` -- one record per tracked agent invocation, written
   from `workflow._run_agent_tracked` with parsed usage / cost.
 
-`append_record` is a no-op when `config.ANALYTICS_LOG_PATH` is None.
-`prune_old_records` removes records older than
-`config.ANALYTICS_RETENTION_DAYS`; it is a no-op when the sink is
+`ANALYTICS_LOG_PATH` and `ANALYTICS_RETENTION_DAYS` are parsed at
+import here -- not in `orchestrator.config` -- so the sink owns its own
+configuration surface and `config` does not pull analytics defaults in
+transitively. `append_record` is a no-op when
+`ANALYTICS_LOG_PATH` is None. `prune_old_records` removes records older
+than `ANALYTICS_RETENTION_DAYS`; it is a no-op when the sink is
 disabled or retention is non-positive (keep forever). `main._run_tick`
 calls `prune_with_retention_logging` once per polling tick after every
 configured repo drains, so retention is applied without operator
@@ -39,14 +42,17 @@ truncated or deleted at any time without affecting workflow
 correctness.
 
 The sink API lives in this `__init__.py` rather than a submodule so
-the package's `config` binding matches the flat-module behavior it
-replaced: `tests/test_analytics.py` pops both `orchestrator.config`
-and `orchestrator.analytics` from `sys.modules` between cases and
-re-imports them in lockstep, and callers elsewhere patch their
-already-imported `orchestrator.config` reference. A submodule would
-re-bind `config` only when its own module entry was popped, which
-would diverge from both patterns. Future analytics surfaces that do
-NOT need that lockstep can land in sibling submodules.
+the package's `config` binding and the `ANALYTICS_LOG_PATH` /
+`ANALYTICS_RETENTION_DAYS` module attributes match the flat-module
+behavior the package replaced: `tests/test_analytics.py` pops both
+`orchestrator.config` and `orchestrator.analytics` from `sys.modules`
+between cases and re-imports them in lockstep, and callers elsewhere
+patch their already-imported `orchestrator.analytics` reference
+(`patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`). A submodule
+would re-bind `config` (and the sink settings) only when its own
+module entry was popped, which would diverge from both patterns.
+Future analytics surfaces that do NOT need that lockstep can land in
+sibling submodules.
 """
 from __future__ import annotations
 
@@ -55,12 +61,15 @@ import logging
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from .. import config, usage
 from ..agents import AgentResult
 
 __all__ = [
+    "ANALYTICS_LOG_PATH",
+    "ANALYTICS_RETENTION_DAYS",
     "append_record",
     "build_record",
     "config",
@@ -72,6 +81,41 @@ __all__ = [
 ]
 
 log = logging.getLogger(__name__)
+
+
+def _parse_log_path() -> Optional[Path]:
+    """Resolve `ANALYTICS_LOG_PATH` from the environment.
+
+    Unset -> default under `config.LOG_DIR` (already covered by the
+    `logs/` .gitignore rule). Empty value and the sentinels `off` /
+    `disabled` / `none` (case-insensitive) disable the sink entirely;
+    `append_record` and `prune_old_records` become silent no-ops in
+    that mode and no file is ever opened.
+    """
+    raw = os.environ.get("ANALYTICS_LOG_PATH")
+    if raw is None:
+        return config.LOG_DIR / "analytics.jsonl"
+    stripped = raw.strip()
+    if not stripped or stripped.lower() in ("off", "disabled", "none"):
+        return None
+    return Path(stripped)
+
+
+def _parse_retention_days() -> int:
+    """Resolve `ANALYTICS_RETENTION_DAYS` from the environment.
+
+    Default 90 days. 0 (or any non-positive value) keeps raw data
+    indefinitely -- `prune_old_records` becomes a no-op so operators
+    can opt out of cleanup without disabling the sink itself.
+    """
+    return int(os.environ.get("ANALYTICS_RETENTION_DAYS", "90"))
+
+
+# Sink configuration. Parsed at import so a fresh process picks up the
+# operator's env immediately; tests patch these module attributes
+# directly (`patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`).
+ANALYTICS_LOG_PATH: Optional[Path] = _parse_log_path()
+ANALYTICS_RETENTION_DAYS: int = _parse_retention_days()
 
 
 def build_record(
@@ -104,14 +148,14 @@ def build_record(
 
 
 def append_record(record: dict) -> None:
-    """Append one JSONL line to `config.ANALYTICS_LOG_PATH` if configured.
+    """Append one JSONL line to `ANALYTICS_LOG_PATH` if configured.
 
     No-op when the sink is disabled. OSError is logged and swallowed so
     a misconfigured path (read-only mount, disk full, permission
     failure) cannot stop the per-issue tick from making progress; the
     pinned state on GitHub remains correct regardless.
     """
-    path = config.ANALYTICS_LOG_PATH
+    path = ANALYTICS_LOG_PATH
     if path is None:
         return
     try:
@@ -264,6 +308,9 @@ def prune_with_retention_logging() -> None:
 def prune_old_records(*, now: Optional[datetime] = None) -> int:
     """Remove records whose `ts` is older than `ANALYTICS_RETENTION_DAYS`.
 
+    Reads the module-level `ANALYTICS_LOG_PATH` /
+    `ANALYTICS_RETENTION_DAYS` parsed from the env at import.
+
     Returns the number of records removed. No-op (returns 0) when the
     sink is disabled, retention is non-positive (keep forever), or the
     file does not exist yet. `now` defaults to the current UTC time and
@@ -278,10 +325,10 @@ def prune_old_records(*, now: Optional[datetime] = None) -> int:
     by `os.replace` so a crash mid-prune cannot truncate the analytics
     file.
     """
-    path = config.ANALYTICS_LOG_PATH
+    path = ANALYTICS_LOG_PATH
     if path is None:
         return 0
-    days = config.ANALYTICS_RETENTION_DAYS
+    days = ANALYTICS_RETENTION_DAYS
     if days <= 0:
         return 0
     if not path.exists():

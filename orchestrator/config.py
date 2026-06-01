@@ -143,42 +143,13 @@ LOG_DIR: Path = Path(os.environ.get("LOG_DIR", str(REPO_ROOT / "logs")))
 _EVENT_LOG_PATH_RAW: str = os.environ.get("EVENT_LOG_PATH", "").strip()
 EVENT_LOG_PATH = Path(_EVENT_LOG_PATH_RAW) if _EVENT_LOG_PATH_RAW else None
 
-# Project-local analytics sink. Distinct from EVENT_LOG_PATH (the audit
-# event log emitted through `GitHubClient.emit_event`): the analytics
-# sink is a foundation layer for future aggregation / reporting work and
-# is opted in / out independently. `orchestrator/analytics/` appends
-# one JSON object per line `{ts, repo, issue, event, optional stage,
-# ...}` and `prune_old_records` removes records older than
-# `ANALYTICS_RETENTION_DAYS`.
-#
-# Default path lives under `LOG_DIR` so the sink writes inside the
-# project's existing log area (already covered by the `logs/`
-# .gitignore rule). Set `ANALYTICS_LOG_PATH=` (empty) or to one of
-# `off` / `disabled` / `none` to disable writes entirely -- in that
-# mode `append_record` and `prune_old_records` are silent no-ops and
-# no file is opened. Pruning never touches the pinned GitHub state on
-# any issue; the analytics file is local-filesystem observability only.
-_ANALYTICS_LOG_PATH_RAW = os.environ.get("ANALYTICS_LOG_PATH")
-if _ANALYTICS_LOG_PATH_RAW is None:
-    ANALYTICS_LOG_PATH = LOG_DIR / "analytics.jsonl"
-else:
-    _stripped_analytics = _ANALYTICS_LOG_PATH_RAW.strip()
-    if not _stripped_analytics or _stripped_analytics.lower() in (
-        "off", "disabled", "none",
-    ):
-        ANALYTICS_LOG_PATH = None
-    else:
-        ANALYTICS_LOG_PATH = Path(_stripped_analytics)
-
-# Retention window for `ANALYTICS_LOG_PATH` in days. Records whose `ts`
-# is older than this window are removed by
-# `analytics.prune_old_records(...)`. Default 90 days. 0 (or any
-# non-positive value) keeps raw data indefinitely -- the prune helper
-# becomes a no-op so operators can opt out of cleanup without disabling
-# the sink itself.
-ANALYTICS_RETENTION_DAYS: int = int(
-    os.environ.get("ANALYTICS_RETENTION_DAYS", "90")
-)
+# Sink settings for the project-local analytics JSONL file
+# (`ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`) live in
+# `orchestrator.analytics`; that package owns its own parsing /
+# defaulting so consumers of `config.LOG_DIR` do not pull the analytics
+# defaults in transitively. The audit event log (`EVENT_LOG_PATH`)
+# above stays here because `GitHubClient.emit_event` is a
+# general-purpose audit surface, not analytics-specific.
 
 # libpq URL for the analytics Postgres service consumed by
 # `orchestrator.analytics.sync`. None (the default) leaves the sync

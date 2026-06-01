@@ -3,7 +3,7 @@
 """JSONL -> Postgres replay for the analytics sink.
 
 `orchestrator/analytics/` writes one JSON object per line to
-`config.ANALYTICS_LOG_PATH`. This module reads that file and inserts
+`analytics.ANALYTICS_LOG_PATH`. This module reads that file and inserts
 each record into the `analytics_events` table defined by
 `analytics-db/init/01-schema.sql`, deduplicating by the SHA-256 of the
 canonical (`sort_keys=True`) JSON form of each record so repeated runs
@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .. import analytics as _analytics
 from .. import config
 
 log = logging.getLogger(__name__)
@@ -278,7 +279,7 @@ def sync_jsonl_to_postgres(
 ) -> SyncResult:
     """Replay every record in `log_path` into Postgres at `db_url`.
 
-    Defaults come from `config.ANALYTICS_LOG_PATH` and
+    Defaults come from `analytics.ANALYTICS_LOG_PATH` and
     `config.ANALYTICS_DB_URL`; either being None or the JSONL file
     being absent yields an empty SyncResult (the no-op path so the
     CLI is safe to schedule before the operator deploys Postgres).
@@ -293,7 +294,7 @@ def sync_jsonl_to_postgres(
     psycopg connection and the default `Json` wrapper.
     """
     if log_path is None:
-        log_path = config.ANALYTICS_LOG_PATH
+        log_path = _analytics.ANALYTICS_LOG_PATH
     if db_url is None:
         db_url = config.ANALYTICS_DB_URL
     connect_fn = connect or _default_connect
