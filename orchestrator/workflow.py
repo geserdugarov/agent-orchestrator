@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from github.Issue import Issue
 
-from . import analytics, config, usage
+from . import analytics, config
 from .agents import AgentResult, run_agent
 from .config import RepoSpec
 from .github import (
@@ -312,9 +312,9 @@ def _run_agent_tracked(
         review_round=review_round,
         retry_count=retry_count,
     )
-    _record_agent_analytics(
-        gh,
-        issue_number=issue_number,
+    analytics.record_agent_exit(
+        repo=getattr(gh, "_repo_slug", None) or "",
+        issue=issue_number,
         stage=stage,
         agent_role=agent_role,
         backend=backend,
@@ -357,75 +357,6 @@ def _configured_model(
             value = tok[len(eq_prefix):].strip()
             return value or None
     return None
-
-
-def _record_agent_analytics(
-    gh: GitHubClient,
-    *,
-    issue_number: int,
-    stage: str,
-    agent_role: str,
-    backend: str,
-    agent_spec: Optional[str],
-    resume_session_id: Optional[str],
-    result: AgentResult,
-    duration_s: float,
-    review_round: Optional[int],
-    retry_count: Optional[int],
-    fallback_model: Optional[str] = None,
-) -> None:
-    """Parse usage from agent stdout and append a single analytics record.
-
-    Pulled out of `_run_agent_tracked` so the parse + append step has a
-    single try/except boundary: a malformed JSONL stream from a flaky
-    backend, an unknown-price model rev, or a transient IO failure on
-    the sink path must NEVER propagate out of the wrapper -- the audit
-    `agent_exit` is already emitted and the agent itself has exited.
-    `analytics.append_record` is internally hardened against OSError; the
-    wrapper here additionally guards the parse step.
-
-    `fallback_model` is the configured-spec model name (from
-    `_configured_model`) the codex parser uses when no usage frame
-    carries one; the claude parser ignores it (claude streams always
-    include `message.model`).
-    """
-    try:
-        metrics = usage.parse_agent_usage(
-            backend, result.stdout, fallback_model=fallback_model,
-        )
-    except Exception:
-        log.exception(
-            "issue=#%d analytics: parse_agent_usage(%s) failed; "
-            "skipping record",
-            issue_number, backend,
-        )
-        return
-    record = analytics.build_record(
-        repo=getattr(gh, "_repo_slug", None) or "",
-        issue=issue_number,
-        event="agent_exit",
-        stage=stage,
-        agent_role=agent_role,
-        backend=backend,
-        agent_spec=agent_spec,
-        resume_session_id=resume_session_id,
-        session_id=result.session_id,
-        review_round=review_round,
-        retry_count=retry_count,
-        duration_s=duration_s,
-        exit_code=result.exit_code,
-        timed_out=result.timed_out,
-        input_tokens=metrics.input_tokens,
-        output_tokens=metrics.output_tokens,
-        cached_tokens=metrics.cached_tokens,
-        cache_read_tokens=metrics.cache_read_tokens,
-        cache_write_tokens=metrics.cache_write_tokens,
-        models=list(metrics.models),
-        turns=metrics.turns,
-        cost_usd=metrics.cost_usd,
-        cost_source=metrics.cost_source,
-    )
-    analytics.append_record(record)
 
 
 def tick(
@@ -697,15 +628,12 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         raise
     finally:
         duration_s = round(time.monotonic() - start, 3)
-        analytics.append_record(
-            analytics.build_record(
-                repo=getattr(gh, "_repo_slug", None) or "",
-                issue=issue.number,
-                event="stage_evaluation",
-                stage=label,
-                duration_s=duration_s,
-                result=result,
-            )
+        analytics.record_stage_evaluation(
+            repo=getattr(gh, "_repo_slug", None) or "",
+            issue=issue.number,
+            stage=label,
+            duration_s=duration_s,
+            result=result,
         )
 
 

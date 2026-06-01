@@ -57,7 +57,8 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from .. import config
+from .. import config, usage
+from ..agents import AgentResult
 
 __all__ = [
     "append_record",
@@ -65,7 +66,9 @@ __all__ = [
     "config",
     "prune_old_records",
     "prune_with_retention_logging",
+    "record_agent_exit",
     "record_stage_enter",
+    "record_stage_evaluation",
 ]
 
 log = logging.getLogger(__name__)
@@ -134,6 +137,104 @@ def record_stage_enter(*, repo: str, issue: int, stage: str) -> None:
             issue=int(issue),
             event="stage_enter",
             stage=stage,
+        )
+    )
+
+
+def record_stage_evaluation(
+    *,
+    repo: str,
+    issue: int,
+    stage: Optional[str],
+    duration_s: float,
+    result: str,
+) -> None:
+    """Append one `stage_evaluation` analytics record for a dispatch.
+
+    Centralized so `workflow._process_issue` does not re-inline the
+    `build_record`/`append_record` pair. `stage` is `None` when the
+    issue has no workflow label (the `_handle_pickup` arc) -- `build_record`
+    drops the field rather than encoding "no stage" as a sentinel string.
+    Disabled-sink behavior is inherited from `append_record`.
+    """
+    append_record(
+        build_record(
+            repo=repo,
+            issue=int(issue),
+            event="stage_evaluation",
+            stage=stage,
+            duration_s=duration_s,
+            result=result,
+        )
+    )
+
+
+def record_agent_exit(
+    *,
+    repo: str,
+    issue: int,
+    stage: str,
+    agent_role: str,
+    backend: str,
+    agent_spec: Optional[str],
+    resume_session_id: Optional[str],
+    result: AgentResult,
+    duration_s: float,
+    review_round: Optional[int],
+    retry_count: Optional[int],
+    fallback_model: Optional[str] = None,
+) -> None:
+    """Parse usage from agent stdout and append a single `agent_exit` record.
+
+    Pulled out of `workflow._run_agent_tracked` so the parse + append step
+    has a single try/except boundary: a malformed JSONL stream from a
+    flaky backend, an unknown-price model rev, or a transient IO failure
+    on the sink path must NEVER propagate out of the wrapper -- the audit
+    `agent_exit` is already emitted and the agent itself has exited.
+    `append_record` is internally hardened against OSError; the helper
+    here additionally guards the parse step.
+
+    `fallback_model` is the configured-spec model name (from
+    `workflow._configured_model`) the codex parser uses when no usage
+    frame carries one; the claude parser ignores it (claude streams always
+    include `message.model`).
+    """
+    try:
+        metrics = usage.parse_agent_usage(
+            backend, result.stdout, fallback_model=fallback_model,
+        )
+    except Exception:
+        log.exception(
+            "issue=#%d analytics: parse_agent_usage(%s) failed; "
+            "skipping record",
+            issue, backend,
+        )
+        return
+    append_record(
+        build_record(
+            repo=repo,
+            issue=int(issue),
+            event="agent_exit",
+            stage=stage,
+            agent_role=agent_role,
+            backend=backend,
+            agent_spec=agent_spec,
+            resume_session_id=resume_session_id,
+            session_id=result.session_id,
+            review_round=review_round,
+            retry_count=retry_count,
+            duration_s=duration_s,
+            exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            input_tokens=metrics.input_tokens,
+            output_tokens=metrics.output_tokens,
+            cached_tokens=metrics.cached_tokens,
+            cache_read_tokens=metrics.cache_read_tokens,
+            cache_write_tokens=metrics.cache_write_tokens,
+            models=list(metrics.models),
+            turns=metrics.turns,
+            cost_usd=metrics.cost_usd,
+            cost_source=metrics.cost_source,
         )
     )
 
