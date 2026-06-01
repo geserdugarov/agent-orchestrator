@@ -351,6 +351,18 @@ swallowed.
   exploration or skipping acceptance for trivial fixes. Judged excessive
   for the original 2-week budget; revisit once the static flow is fully
   dogfooded.
+- **Single-pass `documenting` after reviewer approval.** Today every
+  code-changing branch update (initial implementation, validating fix,
+  fixing-stage PR-feedback push, in_review drift push, every
+  resolving_conflict push) routes through `documenting` before the
+  reviewer re-runs. The proposed simplification routes those pushes to
+  `validating` instead and runs a single docs pass after the reviewer
+  emits `VERDICT: APPROVED`, before the `in_review` handoff. See
+  [`plans/review-stages-lifecycle.md`](review-stages-lifecycle.md) for
+  the full transition map (every `set_workflow_label` call site grouped
+  by stage, every current entry into `documenting`, and the proposed
+  target shape). No runtime change yet -- the audit is the input for a
+  follow-up implementer child under #262.
 - **Symphony-inspired per-repo policy and hooks.** See
   [`plans/symphony-spec-review.md`](symphony-spec-review.md) for the full
   review. Two proposals survived the critical filter: a narrow
