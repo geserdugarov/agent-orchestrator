@@ -9,7 +9,8 @@ It is loaded into every agent session — keep it short. For anything beyond a p
 `agent-orchestrator` is a GitHub-Issue-driven workflow that watches issues on configured repos, drives them through a label-based state machine, and spawns local CLI agents (`codex`, `claude`) in per-issue git worktrees to implement them and open PRs. State lives entirely in GitHub (one workflow label + one pinned JSON comment per issue), so the orchestrator process is stateless.
 
 - User-facing overview: [`README.md`](README.md)
-- Architecture, stages, module map: [`docs/architecture.md`](docs/architecture.md)
+- Architecture, module map, process / agent / push model: [`docs/architecture.md`](docs/architecture.md)
+- Workflow state machine (labels, per-tick flow, stage handlers): [`docs/state-machine.md`](docs/state-machine.md)
 - Agent roles, command specs, session lifecycles: [`docs/workflow.md`](docs/workflow.md)
 - Configuration / env vars: [`docs/configuration.md`](docs/configuration.md) (and [`.env.example`](.env.example))
 - Security checklist and operator-owned controls: [`docs/security.md`](docs/security.md)
@@ -57,4 +58,4 @@ Tests are the primary correctness gate. Add or update tests for any behavioral c
 - Reformatting unrelated files or churning whitespace.
 - "Future-proofing" abstractions for hypothetical features. The roadmap drives feature work.
 
-When touching the state machine, agent invocation, or stage handlers, read [`docs/architecture.md`](docs/architecture.md) and [`docs/workflow.md`](docs/workflow.md) first — labels and the pinned-state JSON schema are part of the public contract that live issues already carry.
+When touching the state machine, agent invocation, or stage handlers, read [`docs/state-machine.md`](docs/state-machine.md) and [`docs/workflow.md`](docs/workflow.md) first — labels and the pinned-state JSON schema are part of the public contract that live issues already carry.

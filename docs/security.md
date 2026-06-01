@@ -45,7 +45,7 @@ Add a branch-protection rule for `main` (and any release branch) at `Settings �
 
 - **Require a pull request before merging** — the orchestrator only ever merges via PR (see [`architecture.md`](architecture.md)), so this matches the actual flow.
 - **Require status checks to pass before merging** — list the checks named in [Required checks](#required-checks).
-- **Require branches to be up to date before merging** — keeps the [`resolving_conflict`](architecture.md) detour honest.
+- **Require branches to be up to date before merging** — keeps the [`resolving_conflict`](state-machine.md#_handle_resolving_conflict-label-resolving_conflict) detour honest.
 - **Do not allow force pushes.** The orchestrator's own push path forbids force-pushes to `main` for safety; this is the GitHub-side enforcement that catches a human bypass too.
 - **Do not allow deletions.**
 - **Restrict who can push** to `main`. GitHub's push restriction applies to **every update of the protected branch — including PR merges**, not just direct `git push` (see [GitHub docs on protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)), so the right entry depends on who performs the merge:
@@ -102,7 +102,7 @@ Today there are no publishing or deploy workflows in [`../.github/workflows/`](.
 GitHub holds the durable state for this project:
 
 - **Code and history** — the git repository on github.com.
-- **Per-issue workflow state** — the workflow label + pinned `<!--orchestrator-state ...-->` JSON comment on each Issue (see [`architecture.md`](architecture.md)). The orchestrator process is stateless; restoring an Issue restores progress.
+- **Per-issue workflow state** — the workflow label + pinned `<!--orchestrator-state ...-->` JSON comment on each Issue (see [`state-machine.md`](state-machine.md#per-tick-flow-workflowtick) for the label set and the pinned-state JSON schema). The orchestrator process is stateless; restoring an Issue restores progress.
 
 Operator drill checklist (run at least once after setup, then on a recurring cadence):
 
@@ -117,7 +117,7 @@ Worktrees under `WORKTREES_DIR` are cache, not state — losing them only forces
 
 Every PR opened by the orchestrator is AI-generated, so the policy is the workflow's normal path, not an extra step:
 
-- **Independent reviewer agent.** The `validating` stage spawns a fresh reviewer in its own session against `git diff origin/<base>...HEAD` ([`architecture.md`](architecture.md)). It is a different agent role from the implementer (`REVIEW_AGENT` vs. `DEV_AGENT`) and starts with no shared session state.
+- **Independent reviewer agent.** The `validating` stage spawns a fresh reviewer in its own session against `git diff origin/<base>...HEAD` ([`state-machine.md#_handle_validating-label-validating`](state-machine.md#_handle_validating-label-validating)). It is a different agent role from the implementer (`REVIEW_AGENT` vs. `DEV_AGENT`) and starts with no shared session state.
 - **Local verify gate.** When the reviewer says `APPROVED`, the orchestrator runs `VERIFY_COMMANDS` in the per-issue worktree before relabeling to `in_review` ([`configuration.md#local-verification-gate`](configuration.md#local-verification-gate)). Set `VERIFY_COMMANDS=python3 -m pytest -q;ruff check .` (or your project equivalent) so an AI-produced regression is caught locally before the PR-side merge path even sees it.
 - **CI on every PR.** [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) re-runs lint + tests on GitHub, and [`../.github/workflows/dependency-review.yml`](../.github/workflows/dependency-review.yml) blocks vulnerable / non-compliant deps. Both should be marked **required** in branch protection — see [Required checks](#required-checks).
 - **Human merge by default.** `AUTO_MERGE` is `off` by default ([`configuration.md`](configuration.md)). Flip it on only after dogfooding the loop on the repo for long enough to trust the reviewer + verify gates.

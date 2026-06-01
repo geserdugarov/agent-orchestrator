@@ -2,7 +2,7 @@
 
 This file documents the agent-role side of the workflow: which stage invokes which role, how the role command specs (`DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT`) are parsed, and how the spec used by an in-flight issue is pinned for the life of its session.
 
-For the full stage-by-stage state machine (label semantics, per-stage handler internals, multi-repo dispatch, push hardening), see [`architecture.md`](architecture.md). For the env-var reference and run modes, see [`configuration.md`](configuration.md). For the user-facing summary, see [`../README.md`](../README.md).
+For the full stage-by-stage state machine (label semantics, per-stage handler internals, the per-tick flow), see [`state-machine.md`](state-machine.md). For the higher-level design (multi-repo dispatch, push hardening, agent subprocess shape, event log, analytics), see [`architecture.md`](architecture.md). For the env-var reference and run modes, see [`configuration.md`](configuration.md). For the user-facing summary, see [`../README.md`](../README.md).
 
 ## Roles and the workflow stages that invoke them
 
@@ -98,4 +98,4 @@ How it works per role:
 - The spec format is parsed once at import (`config._parse_agent_spec`) and again at resume time from pinned state, so the same validation rules apply to both paths.
 - `CODEX_BIN` / `CLAUDE_BIN` are the only knobs for the executable path; the spec's first token is a backend selector, not a path.
 - The reviewer is fresh per round; the implementer and decomposer are pinned for the life of the issue session.
-- For the per-stage handler internals (worktree management, prompt construction, post-spawn branching) see [`architecture.md`](architecture.md#stage-handlers) and the [`Agent command specs`](architecture.md#agent-command-specs) section there.
+- For the per-stage handler internals (worktree management, prompt construction, post-spawn branching) see [`state-machine.md`](state-machine.md#stage-handlers) and the [`Agent command specs`](architecture.md#agent-command-specs) section in `architecture.md`.

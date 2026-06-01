@@ -10,7 +10,7 @@ State lives entirely in the issue itself — one workflow label plus one pinned 
 
 It is meant for solo or small-team setups that already have a `codex` or `claude` login and want autonomy without standing up a separate planner, queue, or database.
 
-For design and stage definitions, see [`docs/architecture.md`](docs/architecture.md). For agent roles and command specs, see [`docs/workflow.md`](docs/workflow.md). For env vars, run modes, and project CI, see [`docs/configuration.md`](docs/configuration.md). For the security checklist and operator-owned GitHub / org settings, see [`docs/security.md`](docs/security.md). The implementation roadmap is in [`plans/roadmap.md`](plans/roadmap.md).
+For the high-level design (process / agent / push / event-log model and module map), see [`docs/architecture.md`](docs/architecture.md). For the label-based state machine and per-stage handlers, see [`docs/state-machine.md`](docs/state-machine.md). For agent roles and command specs, see [`docs/workflow.md`](docs/workflow.md). For env vars, run modes, and project CI, see [`docs/configuration.md`](docs/configuration.md). For the security checklist and operator-owned GitHub / org settings, see [`docs/security.md`](docs/security.md). The implementation roadmap is in [`plans/roadmap.md`](plans/roadmap.md).
 
 ## Requirements
 
@@ -82,7 +82,7 @@ For design and stage definitions, see [`docs/architecture.md`](docs/architecture
    > **Title:** Add a `hello()` function to the orchestrator package
    > **Body:** Add `hello()` to `orchestrator/__init__.py` returning the string `"hello, world"`. Add `tests/test_hello.py` asserting the return value. Don't change anything else.
 
-   Within ~1 minute the orchestrator should comment "picking this up" and label the issue `decomposing`, then walk it through `implementing` → `documenting` → `validating` → `in_review`, opening a PR along the way. With `AUTO_MERGE=on` it merges the PR itself once GitHub reports it mergeable with green checks; with `AUTO_MERGE=off` (the default) you review and merge manually. PR feedback posted while the issue is `in_review` flips it to `fixing` and routes the dev's fix back through `documenting` + `validating` before merge can proceed. For the full state-machine narrative — including the local verify gate, conflict resolution, and the split-decomposition path — see [`docs/architecture.md`](docs/architecture.md).
+   Within ~1 minute the orchestrator should comment "picking this up" and label the issue `decomposing`, then walk it through `implementing` → `documenting` → `validating` → `in_review`, opening a PR along the way. With `AUTO_MERGE=on` it merges the PR itself once GitHub reports it mergeable with green checks; with `AUTO_MERGE=off` (the default) you review and merge manually. PR feedback posted while the issue is `in_review` flips it to `fixing` and routes the dev's fix back through `documenting` + `validating` before merge can proceed. For the full state-machine narrative — including the local verify gate, conflict resolution, and the split-decomposition path — see [`docs/state-machine.md`](docs/state-machine.md).
 
 ## Asking the orchestrator a question
 

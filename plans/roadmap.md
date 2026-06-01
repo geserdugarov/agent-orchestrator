@@ -30,9 +30,10 @@ run in parallel up to configurable caps. State lives in GitHub Issues
 themselves (one workflow label plus one pinned JSON comment), so the
 loop stays stateless and progress is observable on github.com.
 
-See `docs/architecture.md` for the design, stage semantics, and
-implementation walk-through. This file tracks what shipped and what is
-still open.
+See `docs/architecture.md` for the design and implementation
+walk-through, and `docs/state-machine.md` for the label set, per-tick
+flow, and stage-handler semantics. This file tracks what shipped and
+what is still open.
 
 ## Shipped
 

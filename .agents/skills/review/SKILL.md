@@ -39,6 +39,7 @@ After any handler or helper move, grep the PR for stale pointers and request fix
 
 - `AGENTS.md` / `CLAUDE.md`
 - `docs/architecture.md`
+- `docs/state-machine.md`
 - `docs/workflow.md`
 - `plans/roadmap.md`
 - module docstrings at the top of `workflow.py`, `workflow_drift.py`, `workflow_messages.py`, `worktrees.py`, `orchestrator/stages/*.py`

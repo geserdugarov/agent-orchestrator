@@ -44,6 +44,7 @@ When you move a handler, helper, or constant, grep for the symbol across these f
 
 - `AGENTS.md` (and its `CLAUDE.md` symlink)
 - `docs/architecture.md`
+- `docs/state-machine.md`
 - `docs/workflow.md`
 - `plans/roadmap.md`
 - the module docstrings at the top of `orchestrator/workflow.py`, `workflow_drift.py`, `workflow_messages.py`, `worktrees.py`, and `orchestrator/stages/*.py`
