@@ -205,8 +205,13 @@ truncate or rotate.
 `prune_old_records`; `ANALYTICS_RETENTION_DAYS` (default 90) bounds
 retention and the polling loop prunes once per tick. Three event kinds
 write today: `stage_enter`, `stage_evaluation` (timing per dispatch),
-and `agent_exit` (token / cost). Orchestrator-side remains
-filesystem-only — no DB driver or external services in-process.
+and `agent_exit` (token / cost). `ANALYTICS_LOG_PATH`,
+`ANALYTICS_RETENTION_DAYS`, and `ANALYTICS_DB_URL` (below) are parsed
+at import inside `orchestrator/analytics/__init__.py` rather than
+`orchestrator/config.py`, so the package owns its own configuration
+surface and consumers of `config.LOG_DIR` do not pull analytics
+defaults in transitively. Orchestrator-side remains filesystem-only —
+no DB driver or external services in-process.
 
 **Analytics database.** Repo-local `analytics-db/` ships the Docker
 Compose service (`postgres:16`, `127.0.0.1`-pinned, host-bind data

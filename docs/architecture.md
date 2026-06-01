@@ -728,7 +728,9 @@ If the two disagree — a write failed and was logged-and-swallowed, the file wa
 
 ## Analytics sink (`ANALYTICS_LOG_PATH`)
 
-Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`. The audit event log is wired through `GitHubClient.emit_event` for stage transitions / agent lifecycle events; the analytics sink is a foundation layer for future aggregation and reporting work that opts in or out independently via the `ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` config knobs and the helpers in `orchestrator/analytics/`.
+Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`. The audit event log is wired through `GitHubClient.emit_event` for stage transitions / agent lifecycle events; the analytics sink is a foundation layer for future aggregation and reporting work that opts in or out independently via the `ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` env knobs and the helpers in `orchestrator/analytics/`.
+
+**Settings ownership.** `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, and `ANALYTICS_DB_URL` are parsed at import inside `orchestrator/analytics/__init__.py` — *not* in `orchestrator/config.py` — so the analytics package owns its own configuration surface and consumers of `config.LOG_DIR` do not pull the analytics defaults in transitively. The values are exposed as module attributes (`analytics.ANALYTICS_LOG_PATH`, `analytics.ANALYTICS_RETENTION_DAYS`, `analytics.ANALYTICS_DB_URL`); tests patch them directly via `patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`. The audit event log (`config.EVENT_LOG_PATH`) intentionally stays in `config` because `GitHubClient.emit_event` is a general-purpose audit surface, not analytics-specific.
 
 **Filesystem only.** No PostgreSQL, Streamlit, or external services — the sink is one JSONL file under the project log area. Default path is `<LOG_DIR>/analytics.jsonl`, already covered by the `logs/` `.gitignore` rule. Set `ANALYTICS_LOG_PATH=` (empty) or to `off` / `disabled` / `none` to disable writes entirely; in that mode `append_record` and `prune_old_records` are silent no-ops and no file is opened.
 
