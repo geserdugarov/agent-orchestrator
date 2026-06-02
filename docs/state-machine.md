@@ -383,9 +383,9 @@ The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage
 - **Trigger**: each tick while label is `fixing` (set by `_handle_in_review` when fresh PR feedback arrives on any of the four comment surfaces — including a human CI-fix request, i.e. a "please fix CI" / "tests are red, fix" comment, which is handled identically to any other unread human comment). The label therefore means an unread human comment OR a human CI-fix request is queued during the quiet window or actively being addressed by the dev fix-loop. Also runs on closed-`fixing` issues yielded by the closed-issue sweep so an externally-merged PR can be finalized to `done`.
 - **Input**: pinned `pr_number`, `branch`, `dev_agent`/`dev_session_id`, plus the `pending_fix_at` ISO timestamp and per-namespace `pending_fix_*_max_id` bookmarks recorded by the in_review route. Reads the three in_review watermarks (`pr_last_comment_id`, `pr_last_review_comment_id`, `pr_last_review_summary_id`) which the route deliberately left behind so the rescan can re-discover the triggering feedback. `IN_REVIEW_DEBOUNCE_SECONDS` controls the quiet window.
 - **Internal flow**:
-  1. PR-state terminals mirror `_handle_in_review` (both stages delegate to the shared `_drain_review_pr_terminals` helper in `workflow.py` for these arcs) so the handler does not strand closed-`fixing` issues:
-     - `pr_state == "merged"` → label `done`, stamp `merged_at`, write pinned state, close the issue, emit `pr_merged` (`stage="fixing"`, `merge_method="external"`), and call `_cleanup_terminal_branch`.
-     - `pr_state == "closed"` (without merge) → label `rejected`, stamp `closed_without_merge_at`, write pinned state, close the issue, emit `pr_closed_without_merge`, and call `_cleanup_terminal_branch`.
+  1. PR-state terminals mirror `_handle_in_review` (both stages delegate to the shared `_drain_review_pr_terminals` helper in `workflow.py` for these arcs) so the handler does not strand closed-`fixing` issues. `_handle_fixing` never calls `gh.merge_pr` either, so any `merged` state observed below was produced by a human or bot landing the PR externally:
+     - `pr_state == "merged"` (external manual merge) → stamp `merged_at`, set label `done`, write pinned state, emit `pr_merged` (`stage="fixing"`, `merge_method="external"`), then `issue.edit(state="closed")`, then call `_cleanup_terminal_branch`.
+     - `pr_state == "closed"` (without merge) → stamp `closed_without_merge_at`, set label `rejected`, write pinned state, emit `pr_closed_without_merge`, then `issue.edit(state="closed")`, then call `_cleanup_terminal_branch`.
      - PR is open BUT the issue was closed manually (sweep yielded it) → flip to `rejected` without branch cleanup so the operator can salvage the still-open PR.
 
      The fixing handler catches `gh.get_pr` exceptions itself and hands `pr=None` to the helper, which is a no-op; the rest of the fixing body then short-circuits via its own `if pr is None: return` guard. The other two callers (`_handle_in_review`, `_handle_resolving_conflict`) let the fetch raise through to `_process_issue`'s catch.
@@ -406,8 +406,8 @@ The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage
 - **Internal flow**:
   1. If `pr_number` is missing (manual relabel suspected), park awaiting human and return.
   2. Read the PR via `gh.get_pr` and hand it to the shared `_drain_review_pr_terminals` helper (the same helper `_handle_in_review` and `_handle_fixing` call). `resolving_conflict` rebases the PR branch onto `origin/<base>`; it never merges the PR, so any `merged` state observed below was produced by a human or bot landing the PR externally. Branch on `gh.pr_state(pr)`:
-     - `merged` (external manual merge) → `done` (close issue, stamp `merged_at`, emit `pr_merged` with `merge_method="external"`, call `_cleanup_terminal_branch`).
-     - `closed` (without merge) → `rejected` (close issue, stamp `closed_without_merge_at`, emit `pr_closed_without_merge`, call `_cleanup_terminal_branch`).
+     - `merged` (external manual merge) → stamp `merged_at`, set label `done`, write pinned state, emit `pr_merged` (`stage="resolving_conflict"`, `merge_method="external"`), then `issue.edit(state="closed")`, then call `_cleanup_terminal_branch`.
+     - `closed` (without merge) → stamp `closed_without_merge_at`, set label `rejected`, write pinned state, emit `pr_closed_without_merge`, then `issue.edit(state="closed")`, then call `_cleanup_terminal_branch`.
      - `open` → fall through.
 
      Mirrors the in_review terminal arcs for the case where a human resolves manually mid-stage. Cleanup runs whenever the PR itself is gone so a declined PR doesn't leave its `orchestrator/issue-<n>` branch behind either.
