@@ -63,8 +63,8 @@ DEFAULT_ISSUE_ROWS = 200
 
 UNCONFIGURED_DB_MESSAGE = (
     "`ANALYTICS_DB_URL` is not configured. Set it in your environment "
-    "(see `.env.example` and `docs/configuration.md`) and reload the "
-    "dashboard to view analytics."
+    "(see `.env.example.advanced` and `docs/configuration.md`) and "
+    "reload the dashboard to view analytics."
 )
 
 

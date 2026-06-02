@@ -364,9 +364,9 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
         self.assertEqual(_strip_dotenv_quotes("\"mismatched'"), "\"mismatched'")
 
     def test_quoted_codex_spec_round_trips_through_dotenv(self) -> None:
-        # The exact spec shape advertised in .env.example and the issue
-        # body must parse cleanly when supplied through .env, not just
-        # when injected directly into os.environ.
+        # The exact spec shape advertised in .env.example.advanced and
+        # the issue body must parse cleanly when supplied through .env,
+        # not just when injected directly into os.environ.
         body = (
             "DEV_AGENT=codex -m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'\n"
         )

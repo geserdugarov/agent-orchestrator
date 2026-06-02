@@ -1,6 +1,6 @@
 # Configuration reference
 
-All settings load from `.env` (or the process environment). [`../.env.example`](../.env.example) is the annotated source of truth — this page summarizes the same knobs grouped by topic and points at the deeper docs for the things that have one.
+All settings load from `.env` (or the process environment). [`../.env.example`](../.env.example) holds only the basic parameters needed for a first run; [`../.env.example.advanced`](../.env.example.advanced) carries common advanced overrides and illustrative examples for opt-in settings (some entries are in-code defaults, others are placeholder values for knobs that have no meaningful default). This page is the source of truth — every setting and every default lives here, and both `.env.example*` files keep their inline comments terse and link back for the full rationale.
 
 The orchestrator is deliberately stateless: every setting here either selects backends and budgets at startup, or names files/paths outside the repo. Per-issue state lives in the issue's pinned JSON comment on GitHub.
 
@@ -11,6 +11,25 @@ The orchestrator is deliberately stateless: every setting here either selects ba
 | `GITHUB_TOKEN`            | _(required, env-only — not read from `.env`)_ | fine-grained PAT. Putting it in `.env` is rejected at startup.          |
 | `ORCHESTRATOR_TOKEN_FILE` | `~/.config/<owner>/<repo>/token` (from `REPO`) | path to the PAT file (used when `GITHUB_TOKEN` is not in env)          |
 | `HITL_HANDLE`             | `geserdugarov`                                | comma-separated GitHub logins to @-mention when a human is needed      |
+
+### GitHub PAT
+
+`GITHUB_TOKEN` is the fine-grained PAT the orchestrator uses for every GitHub call. Required scopes on the target repository:
+
+- **Contents** — read/write (worktree branches and squash commits)
+- **Issues** — read/write (label transitions, pinned-state comments, `HITL_HANDLE` @-mentions)
+- **Pull requests** — read/write (opening PRs, and merging when `AUTO_MERGE=on`)
+- **Metadata** — read-only (issue / PR enumeration)
+- **Checks** — read-only, only required when `AUTO_MERGE=on`. Without it, Actions-only PRs report `check_state='none'` and park indefinitely waiting for a human even when CI is green.
+
+Create the PAT at <https://github.com/settings/personal-access-tokens>.
+
+The token is deliberately NOT loaded from `.env`. The implementer agent runs in a sibling worktree with sandbox bypass, so anything readable inside `REPO_ROOT` (including `.env`) is recoverable by a prompt-injected agent via a relative-path read like `cat ../agent-orchestrator/.env`. `GITHUB_TOKEN` (and the aliases `GH_TOKEN`, `GITHUB_PAT`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_TOKEN`) found in `.env` is logged-and-skipped at startup so the misconfiguration cannot silently leak.
+
+Resolve the token via, in order of precedence:
+
+1. `GITHUB_TOKEN` exported in the orchestrator's launch environment.
+2. The file at `~/.config/<owner>/<repo>/token` — path derived from `REPO`, override with `ORCHESTRATOR_TOKEN_FILE`. Pick a path the agent worktree cannot reach via known relatives, and `chmod 600` it.
 
 ## Target repository
 
@@ -174,7 +193,7 @@ The dashboard pipeline is opt-in and layered: the orchestrator writes JSONL (`AN
    ANALYTICS_DB_URL=postgresql://orchestrator:orchestrator@127.0.0.1:5432/orchestrator_analytics
    ```
 
-   Putting the database password in `.env` is acceptable here — the URL is the only credential, it is scoped to the local-only Postgres instance, and it never grants write access to GitHub. This is intentionally different from `GITHUB_TOKEN`, which is kept out of `.env` because the implementer agent runs with sandbox bypass and could read a `.env` placed inside the worktree (see the [secrets section in `.env.example`](../.env.example) and the [token-storage rationale](../.env.example)). The polling loop does not re-read `ANALYTICS_DB_URL`, so the sync and the dashboard pick up a change on their next launch without a restart.
+   Putting the database password in `.env` is acceptable here — the URL is the only credential, it is scoped to the local-only Postgres instance, and it never grants write access to GitHub. This is intentionally different from `GITHUB_TOKEN`, which is kept out of `.env` because the implementer agent runs with sandbox bypass and could read a `.env` placed inside the worktree (see the [GitHub PAT](#github-pat) section for the full sandbox-bypass rationale and token-file paths). The polling loop does not re-read `ANALYTICS_DB_URL`, so the sync and the dashboard pick up a change on their next launch without a restart.
 4. **Populate Postgres from JSONL.** Run the sync on demand:
 
    ```sh

@@ -12,7 +12,7 @@ It is loaded into every agent session — keep it short. For anything beyond a p
 - Architecture, module map, process / agent / push model: [`docs/architecture.md`](docs/architecture.md)
 - Workflow state machine (labels, per-tick flow, stage handlers): [`docs/state-machine.md`](docs/state-machine.md)
 - Agent roles, command specs, session lifecycles: [`docs/workflow.md`](docs/workflow.md)
-- Configuration / env vars: [`docs/configuration.md`](docs/configuration.md) (and [`.env.example`](.env.example))
+- Configuration / env vars: [`docs/configuration.md`](docs/configuration.md) is the full reference; basic knobs in [`.env.example`](.env.example), common advanced overrides in [`.env.example.advanced`](.env.example.advanced)
 - Observability (audit event log, analytics sink / database, usage parser): [`docs/observability.md`](docs/observability.md)
 - Security checklist and operator-owned controls: [`docs/security.md`](docs/security.md)
 - Roadmap: [`plans/roadmap.md`](plans/roadmap.md)
@@ -24,7 +24,7 @@ It is loaded into every agent session — keep it short. For anything beyond a p
 - `docs/` — architecture, workflow, and configuration references.
 - `plans/roadmap.md` — implementation roadmap.
 - `run.sh` — production launcher that auto-restarts after self-modifying merges.
-- `.env.example` — annotated configuration reference.
+- `.env.example` / `.env.example.advanced` — basic and advanced configuration templates; full reference is in [`docs/configuration.md`](docs/configuration.md).
 
 ## Running and testing
 
@@ -51,7 +51,7 @@ Tests are the primary correctness gate. Add or update tests for any behavioral c
 - **Commits.** Conventional Commits: `<type>: <subject>` with types `feat`, `fix`, `chore`, `docs`, `refactor`, `test`. Subject line only — no body, no `Co-Authored-By` trailer. Imperative mood, short.
 - **Comments.** Sparse — only when the *why* is non-obvious (hidden constraint, race window, GitHub quirk).
 - **Dependencies.** `pyproject.toml` pins `PyGithub` and `psycopg[binary]` as runtime deps; `pytest` and `ruff` live in the `dev` group; the analytics dashboard's `streamlit` lives in the separate `dashboard` group so the default `uv sync --locked` stays minimal. `uv.lock` is the source of truth for exact versions and is committed — regenerate it (`uv lock`) whenever `pyproject.toml` changes. Anything else needs justification.
-- **Secrets.** `GITHUB_TOKEN` is deliberately *not* loaded from `.env`. Tokens live in `~/.config/<owner>/<repo>/token` or the process environment. Rationale: [`.env.example`](.env.example).
+- **Secrets.** `GITHUB_TOKEN` is deliberately *not* loaded from `.env`. Tokens live in `~/.config/<owner>/<repo>/token` or the process environment. Rationale: [`docs/configuration.md#github-pat`](docs/configuration.md#github-pat).
 
 ## Out of scope without explicit ask
 
