@@ -88,6 +88,12 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # finalizes to `done` on this tick instead of sitting closed +
     # `fixing` forever, and an external merge on an open issue also
     # short-circuits the resume cycle.
+    #
+    # PyGithub failures here are typically transient (network blip, rate
+    # limit, 5xx). Catch and bail with `pr=None` so the rescan below
+    # also short-circuits via the `if pr is None: return` guard --
+    # the next tick re-fetches and picks up wherever we left off; the
+    # watermarks are unchanged so no feedback is lost.
     if pr_number is not None:
         try:
             pr = gh.get_pr(int(pr_number))
@@ -97,63 +103,10 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 "branch; falling through", issue.number, pr_number,
             )
             pr = None
-        if pr is not None:
-            pr_status = gh.pr_state(pr)
-            if pr_status == "merged":
-                state.set("merged_at", _wf._now_iso())
-                gh.set_workflow_label(issue, "done")
-                gh.write_pinned_state(issue, state)
-                gh.emit_event(
-                    "pr_merged",
-                    issue_number=issue.number,
-                    stage="fixing",
-                    pr_number=int(pr_number),
-                    sha=getattr(pr.head, "sha", None) or None,
-                    merge_method="external",
-                    review_round=int(state.get("review_round") or 0),
-                    conflict_round=state.get("conflict_round"),
-                    retry_count=state.get("retry_count"),
-                )
-                try:
-                    issue.edit(state="closed")
-                except Exception:
-                    _wf.log.exception(
-                        "issue=#%s could not close after merge",
-                        issue.number,
-                    )
-                _wf._cleanup_terminal_branch(gh, spec, issue.number)
-                return
-            if pr_status == "closed":
-                state.set("closed_without_merge_at", _wf._now_iso())
-                gh.set_workflow_label(issue, "rejected")
-                gh.write_pinned_state(issue, state)
-                gh.emit_event(
-                    "pr_closed_without_merge",
-                    issue_number=issue.number,
-                    stage="fixing",
-                    pr_number=int(pr_number),
-                    sha=getattr(pr.head, "sha", None) or None,
-                    review_round=int(state.get("review_round") or 0),
-                    conflict_round=state.get("conflict_round"),
-                    retry_count=state.get("retry_count"),
-                )
-                try:
-                    issue.edit(state="closed")
-                except Exception:
-                    _wf.log.exception(
-                        "issue=#%s could not close after reject",
-                        issue.number,
-                    )
-                _wf._cleanup_terminal_branch(gh, spec, issue.number)
-                return
-            # Open PR + closed issue (human stop signal): mirror the
-            # in_review branch and flip to `rejected` without branch
-            # cleanup so the operator can salvage the still-open PR.
-            if getattr(issue, "state", "open") == "closed":
-                state.set("closed_without_merge_at", _wf._now_iso())
-                gh.set_workflow_label(issue, "rejected")
-                gh.write_pinned_state(issue, state)
-                return
+        if _wf._drain_review_pr_terminals(
+            gh, spec, issue, state, pr, stage="fixing",
+        ):
+            return
 
     # Closed issue with no PR (or a PR lookup failure): nothing to
     # finalize via the PR-state arcs above. Leave alone rather than

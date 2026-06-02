@@ -112,82 +112,26 @@ def _handle_resolving_conflict(
         return
 
     pr = gh.get_pr(int(pr_number))
-    pr_status = gh.pr_state(pr)
 
-    if pr_status == "merged":
-        # Mirror the in_review terminal: a human merged the PR (perhaps
-        # after manually resolving conflicts) while we were resolving.
-        state.set("merged_at", _wf._now_iso())
-        gh.set_workflow_label(issue, "done")
-        gh.write_pinned_state(issue, state)
-        gh.emit_event(
-            "pr_merged",
-            issue_number=issue.number,
-            stage="resolving_conflict",
-            pr_number=int(pr_number),
-            sha=getattr(pr.head, "sha", None) or None,
-            merge_method="external",
-            conflict_round=int(state.get("conflict_round") or 0),
-            review_round=int(state.get("review_round") or 0),
-            retry_count=state.get("retry_count"),
-        )
-        try:
-            issue.edit(state="closed")
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not close after merge", issue.number,
-            )
-        _wf._cleanup_terminal_branch(gh, spec, issue.number)
-        return
-
-    if pr_status == "closed":
-        state.set("closed_without_merge_at", _wf._now_iso())
-        gh.set_workflow_label(issue, "rejected")
-        gh.write_pinned_state(issue, state)
-        gh.emit_event(
-            "pr_closed_without_merge",
-            issue_number=issue.number,
-            stage="resolving_conflict",
-            pr_number=int(pr_number),
-            sha=getattr(pr.head, "sha", None) or None,
-            conflict_round=int(state.get("conflict_round") or 0),
-            review_round=int(state.get("review_round") or 0),
-            retry_count=state.get("retry_count"),
-        )
-        try:
-            issue.edit(state="closed")
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not close after reject", issue.number,
-            )
-        # The PR is gone; clean up the orchestrator-owned branch and
-        # worktree. Mirrors the merged-PR cleanup order: finalize GitHub
-        # state first, then tidy local + remote refs best-effort.
-        _wf._cleanup_terminal_branch(gh, spec, issue.number)
-        return
-
-    # PR is open but the issue itself was closed manually (the closed
-    # sweep in `list_pollable_issues` yielded it). Mirror in_review's
-    # human-stop handling: closing the issue while its PR is still open
-    # is a deliberate human signal; flip to `rejected` rather than
-    # continuing to spawn the dev agent. Deliberately NOT cleaning the
-    # branch here -- the PR is still open and the operator may want to
-    # inspect or salvage it.
+    # Drain the shared PR/issue terminal arcs (merged PR -> `done`,
+    # closed PR -> `rejected`, open PR + manually-closed issue ->
+    # `rejected` without branch cleanup). The merged branch fires for
+    # both "human merged after resolving conflicts manually" and
+    # "Resolves #N auto-closed the issue when the PR merged"; the
+    # open-PR + closed-issue arc only fires for issues a human closed
+    # directly.
     #
-    # Same caveat as the in_review counterpart: once this flips the
-    # label to `rejected`, the dispatcher is a no-op AND the closed-
-    # issue sweep in `list_pollable_issues` only covers `in_review` /
-    # `resolving_conflict`, so a later PR close is never observed by
-    # the orchestrator. The operator must clean up the worktree, local
-    # branch, and remote branch manually for the "close issue first,
-    # then close PR" ordering.
-    if getattr(issue, "state", "open") == "closed":
-        state.set("closed_without_merge_at", _wf._now_iso())
-        gh.set_workflow_label(issue, "rejected")
-        gh.write_pinned_state(issue, state)
-        # Deliberately no `pr_closed_without_merge` emit here: the PR is
-        # still open. That event is reserved for the actual closed-PR
-        # rejection arc above.
+    # Caveat carried over from the inline version: once the helper
+    # flips a manually-closed (PR-still-open) issue to `rejected`, the
+    # dispatcher's terminal-label branch is a no-op AND
+    # `list_pollable_issues` only sweeps closed issues still labeled
+    # `in_review` / `resolving_conflict`. A later PR close is never
+    # observed by the orchestrator, so the operator must clean up the
+    # worktree, local branch, and remote branch manually for the
+    # "close issue first, then close PR" ordering.
+    if _wf._drain_review_pr_terminals(
+        gh, spec, issue, state, pr, stage="resolving_conflict",
+    ):
         return
 
     if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
