@@ -1663,50 +1663,22 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(self._events_of(gh, "pr_opened"), [])
 
-    def test_merge_attempt_and_pr_merged_on_auto_merge_success(self) -> None:
+    def test_in_review_mergeable_does_not_emit_merge_events(self) -> None:
+        # The orchestrator is manual-merge-only: a mergeable PR in_review
+        # never produces a `merge_attempt` or orchestrator-initiated
+        # `pr_merged` event. The HITL ping is observable instead.
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
         gh, issue = self._seed_in_review(pr=pr)
 
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
 
-        attempts = self._events_of(gh, "merge_attempt")
-        merged = self._events_of(gh, "pr_merged")
-        self.assertEqual(len(attempts), 1)
-        self.assertEqual(attempts[0]["pr_number"], self.PR_NUMBER)
-        self.assertEqual(attempts[0]["sha"], "abc12345")
-        self.assertEqual(attempts[0]["method"], "squash")
-        self.assertEqual(attempts[0]["result"], "success")
-        self.assertEqual(attempts[0]["check_state"], "success")
-        self.assertEqual(attempts[0]["review_round"], 1)
-        self.assertEqual(len(merged), 1)
-        self.assertEqual(merged[0]["stage"], "in_review")
-        self.assertEqual(merged[0]["pr_number"], self.PR_NUMBER)
-        self.assertEqual(merged[0]["sha"], "abc12345")
-        self.assertEqual(merged[0]["merge_method"], "squash")
-        self.assertEqual(merged[0]["check_state"], "success")
-        self.assertEqual(merged[0]["review_round"], 1)
-
-    def test_merge_attempt_failed_does_not_emit_pr_merged(self) -> None:
-        # PyGithub returning False (405 / 409 / 422) records a failed
-        # attempt; no `pr_merged` event fires until the next tick succeeds.
-        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
-        gh, issue = self._seed_in_review(pr=pr)
-        gh.merge_returns_ok = False
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        attempts = self._events_of(gh, "merge_attempt")
-        self.assertEqual(len(attempts), 1)
-        self.assertEqual(attempts[0]["result"], "failed")
+        self.assertEqual(self._events_of(gh, "merge_attempt"), [])
         self.assertEqual(self._events_of(gh, "pr_merged"), [])
+        # And no orchestrator-driven label flip to `done`.
+        self.assertNotIn((50, "done"), gh.label_history)
 
     def test_pr_merged_event_on_external_merge_terminal(self) -> None:
         # A human (or another bot) merged the PR while we were in_review.
@@ -1745,27 +1717,20 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(closed[0]["stage"], "in_review")
         self.assertEqual(closed[0]["pr_number"], self.PR_NUMBER)
 
-    def test_conflict_round_entered_when_in_review_routes_to_resolving(self) -> None:
-        # AUTO_MERGE on + unmergeable: in_review seeds conflict_round=0
-        # and flips the label to resolving_conflict. A `conflict_round`
-        # event with action=entered surfaces the transition on the sink.
+    def test_in_review_unmergeable_does_not_emit_conflict_round(self) -> None:
+        # The orchestrator no longer routes from in_review to
+        # `resolving_conflict` via the auto-merge gate. An unmergeable PR
+        # parks awaiting human, so no `conflict_round` event is emitted
+        # from this stage.
         pr = self._open_pr(approved=True, mergeable=False, check_state="success")
         gh, issue = self._seed_in_review(pr=pr)
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-        rounds = self._events_of(gh, "conflict_round")
-        self.assertEqual(len(rounds), 1)
-        self.assertEqual(rounds[0]["stage"], "in_review")
-        self.assertEqual(rounds[0]["action"], "entered")
-        self.assertEqual(rounds[0]["conflict_round"], 0)
-        self.assertEqual(rounds[0]["pr_number"], self.PR_NUMBER)
-        # SHA is the gated head_sha the auto-merge route captured; the
-        # audit record carries it so the operator can correlate the
-        # conflict cycle with the head that triggered it.
-        self.assertEqual(rounds[0]["sha"], "abc12345")
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+        self.assertEqual(self._events_of(gh, "conflict_round"), [])
+        self.assertNotIn((50, "resolving_conflict"), gh.label_history)
+        self.assertTrue(gh.pinned_data(50).get("awaiting_human"))
 
 
 class EventEmissionDisabledTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -5632,10 +5597,11 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         # the triggering comment on its next tick.
         self.assertEqual(data.get("pr_last_comment_id"), 1999)
 
-    def test_no_fresh_feedback_preserves_auto_merge_behavior(self) -> None:
-        # The new in_review -> fixing route must NOT regress the
-        # no-feedback auto-merge path: an approved, mergeable, green PR
-        # with no fresh PR comments still flips to `done` via AUTO_MERGE.
+    def test_no_fresh_feedback_pings_hitl_for_manual_merge(self) -> None:
+        # The in_review -> fixing route must NOT preempt the mergeable /
+        # HITL-ping path: an approved, mergeable, green PR with no fresh
+        # PR comments earns a one-shot HITL ping (the orchestrator never
+        # merges) and stays open.
         pr = FakePR(
             number=self.PR_NUMBER, head_branch=self.BRANCH,
             head=FakePRRef(sha="cafe1234"),
@@ -5644,17 +5610,25 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         )
         gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
 
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
 
-        # Auto-merge proceeded; no fixing route fired.
-        self.assertEqual(gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")])
-        self.assertIn((880, "done"), gh.label_history)
+        # No merge, no fixing route, no terminal flip.
+        self.assertEqual(gh.merge_calls, [])
+        self.assertNotIn((880, "done"), gh.label_history)
         self.assertNotIn((880, "fixing"), gh.label_history)
         self.assertNotIn("pending_fix_at", gh.pinned_data(880))
+        # HITL ping fired exactly once.
+        ping_comments = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(ping_comments), 1)
+        self.assertEqual(
+            gh.pinned_data(880).get("ready_ping_sha"), "cafe1234",
+        )
 
     def test_no_fresh_feedback_preserves_pr_merged_terminal(self) -> None:
         # Existing terminal PR handling must still finalize the issue to

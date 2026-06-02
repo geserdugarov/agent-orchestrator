@@ -113,16 +113,17 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh, _TEST_SPEC, 30,
         )
 
-    def test_in_review_auto_merge_off_mergeable_pings_human(self) -> None:
-        # AUTO_MERGE off + PR mergeable: post a one-shot HITL ping so the
-        # human knows the PR is ready, but stay open (no merge, no label
-        # flip, no awaiting_human). The ping must mention every HITL handle
-        # so notifications fire even on a multi-handle deployment.
+    def test_in_review_mergeable_pings_human(self) -> None:
+        # PR mergeable: post a one-shot HITL ping so the human knows the
+        # PR is ready, but stay open (no merge, no label flip, no
+        # awaiting_human). The orchestrator is manual-merge-only -- it
+        # never calls `gh.merge_pr` from in_review. The ping must mention
+        # every HITL handle so notifications fire even on a multi-handle
+        # deployment.
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        with patch.object(config, "AUTO_MERGE", False), \
-             patch.object(config, "HITL_MENTIONS", "@alice @bob"):
+        with patch.object(config, "HITL_MENTIONS", "@alice @bob"):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -154,47 +155,112 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNotNone(ping_id)
         self.assertIn(ping_id, data.get("orchestrator_comment_ids", []))
 
-    def test_in_review_auto_merge_off_mergeable_dedups_same_head(self) -> None:
+    def test_in_review_mergeable_unapproved_does_not_ping(self) -> None:
+        # The ping advertises the PR as ready for review/merge; firing it
+        # on a mergeable-but-unapproved PR would invite a manual merge
+        # over a commit no reviewer has signed off on. The gate must
+        # require approval (agent_approved_sha for the current head, OR
+        # a human APPROVED review on the current head).
+        pr = self._open_pr(approved=False, mergeable=True, check_state="success")
+        gh, issue = self._seed(pr=pr)
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertEqual(gh.merge_calls, [])
+        self.assertEqual(gh.label_history, [])
+        self.assertEqual(gh.posted_comments, [])
+        data = gh.pinned_data(30)
+        self.assertIsNone(data.get("ready_ping_sha"))
+        self.assertFalse(data.get("awaiting_human"))
+
+    def test_in_review_mergeable_stale_agent_approval_does_not_ping(self) -> None:
+        # `agent_approved_sha` snapshotted the head the reviewer agent
+        # OK'd; a later push shifts pr.head.sha and the snapshot no
+        # longer matches. The ping must wait for the next reviewer round
+        # to re-approve the new head.
+        pr = self._open_pr(
+            approved=False, mergeable=True, check_state="success",
+            head=FakePRRef(sha="newhead99"),
+        )
+        gh, issue = self._seed(
+            pr=pr, extra_state={"agent_approved_sha": "cafe1234"},
+        )
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertEqual(gh.merge_calls, [])
+        self.assertEqual(gh.posted_comments, [])
+        data = gh.pinned_data(30)
+        self.assertIsNone(data.get("ready_ping_sha"))
+
+    def test_in_review_mergeable_changes_requested_does_not_ping(self) -> None:
+        # A standing human CHANGES_REQUESTED on the current head vetoes
+        # the ping even when the reviewer agent approved the same SHA;
+        # the orchestrator must not advertise the PR as ready while a
+        # human review is asking for changes.
+        pr = self._open_pr(
+            approved=True, mergeable=True, check_state="success",
+            changes_requested=True,
+        )
+        gh, issue = self._seed(
+            pr=pr, extra_state={"agent_approved_sha": "cafe1234"},
+        )
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertEqual(gh.merge_calls, [])
+        self.assertEqual(gh.posted_comments, [])
+        data = gh.pinned_data(30)
+        self.assertIsNone(data.get("ready_ping_sha"))
+
+    def test_in_review_mergeable_dedups_same_head(self) -> None:
         # Second tick on the same head SHA must NOT re-ping; the ping is
         # one-shot per head so a long-lived ready-for-merge PR doesn't spam
         # the HITL handles on every poll.
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        with patch.object(config, "AUTO_MERGE", False):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-            comments_after_first = list(gh.posted_comments)
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+        comments_after_first = list(gh.posted_comments)
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
 
         self.assertEqual(gh.posted_comments, comments_after_first)
 
-    def test_in_review_auto_merge_off_mergeable_repings_new_head(self) -> None:
+    def test_in_review_mergeable_repings_new_head(self) -> None:
         # A new commit on the PR branch shifts pr.head.sha; the ping is
         # keyed on the SHA we last pinged for, so the next tick must
         # re-ping on the new head.
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        with patch.object(config, "AUTO_MERGE", False):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-            pings_first = [
-                body for _, body in gh.posted_comments
-                if "ready for review/merge" in body
-            ]
-            pr.head = FakePRRef(sha="beefcafe")
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+        pings_first = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        pr.head = FakePRRef(sha="beefcafe")
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
 
         pings_total = [
             body for _, body in gh.posted_comments
@@ -234,8 +300,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
                 issue_arg.comments.append(human)
             return real_post(gh_arg, issue_arg, state_arg, body_arg)
 
-        with patch.object(config, "AUTO_MERGE", False), \
-             _patch_mock.object(workflow, "_post_issue_comment", post_with_race):
+        with _patch_mock.object(workflow, "_post_issue_comment", post_with_race):
             self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -261,237 +326,60 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(30).get("pending_fix_issue_max_id"), human.id,
         )
 
-    def test_in_review_auto_merge_happy_path(self) -> None:
-        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
-        gh, issue = self._seed(pr=pr)
-
-        with patch.object(config, "AUTO_MERGE", True):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")])
-        self.assertIn((30, "done"), gh.label_history)
-        self.assertIn("merged_at", gh.pinned_data(30))
-        self.assertTrue(issue.closed)
-        mocks["_cleanup_terminal_branch"].assert_called_once_with(
-            gh, _TEST_SPEC, 30,
-        )
-
-    def test_in_review_hold_base_sync_pauses_auto_merge(self) -> None:
+    def test_in_review_hold_base_sync_pauses_hitl_ping(self) -> None:
+        # BASE_SYNC_HOLD label suppresses the HITL ping so the operator's
+        # in-progress base sync can finish without spamming the issue
+        # thread.
         pr = self._open_pr(approved=True, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
         issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
 
-        with patch.object(config, "AUTO_MERGE", True):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
 
         mocks["run_agent"].assert_not_called()
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
-        self.assertNotIn("merged_at", gh.pinned_data(30))
-
-    def test_in_review_auto_merge_blocked_on_pending_checks(self) -> None:
-        pr = self._open_pr(approved=True, mergeable=True, check_state="pending")
-        gh, issue = self._seed(pr=pr)
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
         self.assertEqual(gh.merge_calls, [])
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.posted_comments, [])
         self.assertNotIn("merged_at", gh.pinned_data(30))
 
-    def test_in_review_auto_merge_blocked_on_no_approval(self) -> None:
-        pr = self._open_pr(approved=False, mergeable=True, check_state="success")
-        gh, issue = self._seed(pr=pr)
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
-        self.assertNotIn("merged_at", gh.pinned_data(30))
-
-    def test_in_review_auto_merge_blocked_on_failed_checks(self) -> None:
-        pr = self._open_pr(approved=True, mergeable=True, check_state="failure")
-        gh, issue = self._seed(pr=pr)
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [])
-        self.assertTrue(gh.pinned_data(30).get("awaiting_human"))
-        last_comment = gh.posted_comments[-1][1]
-        self.assertIn("checks are 'failure'", last_comment)
-        self.assertIn(f"PR #{self.PR_NUMBER}", last_comment)
-
-    def test_in_review_auto_merge_unmergeable_routes_to_resolving_conflict(self) -> None:
-        # AUTO_MERGE on + PR not mergeable: instead of parking awaiting
-        # human, the orchestrator flips the label to `resolving_conflict`,
-        # seeds a fresh `conflict_round` counter, and lets the dedicated
-        # handler attempt an automated merge of the base branch.
+    def test_in_review_unmergeable_parks_for_human(self) -> None:
+        # PR not mergeable: park awaiting human with
+        # `park_reason="unmergeable"`. The orchestrator never routes from
+        # in_review to `resolving_conflict`; the human drives the merge
+        # (or relabels manually).
         pr = self._open_pr(approved=True, mergeable=False, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [])
-        self.assertIn((30, "resolving_conflict"), gh.label_history)
-        data = gh.pinned_data(30)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertEqual(data.get("conflict_round"), 0)
-        # PR comment notifies that auto-resolution is being attempted.
-        self.assertTrue(gh.posted_pr_comments)
-        last_pr_comment = gh.posted_pr_comments[-1][1]
-        self.assertIn("auto-resolution", last_pr_comment)
-
-    def test_in_review_hold_base_sync_skips_unmergeable_route(self) -> None:
-        pr = self._open_pr(approved=True, mergeable=False, check_state="success")
-        gh, issue = self._seed(pr=pr)
-        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
-
-        with patch.object(config, "AUTO_MERGE", True):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        mocks["run_agent"].assert_not_called()
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.posted_pr_comments, [])
-        self.assertNotIn((30, "resolving_conflict"), gh.label_history)
-        data = gh.pinned_data(30)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertNotIn("conflict_round", data)
-
-    def test_in_review_unmergeable_preserves_existing_conflict_round(self) -> None:
-        # A PR that already went through one auto-resolution round and
-        # bounced back to `in_review` still unmergeable (e.g. branch
-        # protection) must NOT have its conflict_round reset on re-entry.
-        # Resetting would make `MAX_CONFLICT_ROUNDS` ineffective for the
-        # branch-protection / out-of-date-base heuristic case.
-        pr = self._open_pr(approved=True, mergeable=False, check_state="success")
-        gh, issue = self._seed(pr=pr, extra_state={"conflict_round": 2})
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertIn((30, "resolving_conflict"), gh.label_history)
-        data = gh.pinned_data(30)
-        # Counter preserved at 2, not reset to 0.
-        self.assertEqual(data.get("conflict_round"), 2)
-
-    def test_in_review_unmergeable_unapproved_does_not_route(self) -> None:
-        # Resolving_conflict resumes / pushes dev work; routing an
-        # unapproved PR there would push unreviewed merges past the
-        # original gating that the old `unmergeable` park honored. The
-        # approval gate must run BEFORE the unmergeable check.
-        pr = self._open_pr(
-            approved=False, mergeable=False, check_state="success",
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
         )
-        gh, issue = self._seed(pr=pr)
-
-        with patch.object(config, "AUTO_MERGE", True):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
 
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
-        # No resolving_conflict relabel and no PR comment about
-        # auto-resolution.
-        self.assertNotIn((30, "resolving_conflict"), gh.label_history)
-        self.assertEqual(gh.posted_pr_comments, [])
-        data = gh.pinned_data(30)
-        self.assertFalse(data.get("awaiting_human"))
-        # No conflict_round seeded -- we never entered the route.
-        self.assertNotIn("conflict_round", data)
-
-    def test_in_review_unmergeable_changes_requested_does_not_route(self) -> None:
-        # A standing human CHANGES_REQUESTED on the current head vetoes
-        # the resolving_conflict route. Without this gate, the dev
-        # session would resume and push merge work over the human's
-        # objection.
-        pr = self._open_pr(
-            approved=True, mergeable=False, check_state="success",
-            changes_requested=True,
-        )
-        gh, issue = self._seed(pr=pr)
-
-        with patch.object(config, "AUTO_MERGE", True):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        mocks["run_agent"].assert_not_called()
-        self.assertEqual(gh.merge_calls, [])
-        self.assertNotIn((30, "resolving_conflict"), gh.label_history)
-        self.assertEqual(gh.posted_pr_comments, [])
-        data = gh.pinned_data(30)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertNotIn("conflict_round", data)
-
-    def test_in_review_auto_merge_off_unmergeable_parks_legacy(self) -> None:
-        # Legacy fallback: AUTO_MERGE off + unmergeable parks awaiting
-        # human with `park_reason="unmergeable"`. Operators who haven't
-        # opted into AUTO_MERGE still get visibility into the unmergeable
-        # state, and the existing transient-park recovery picks the issue
-        # back up if AUTO_MERGE is later flipped on.
-        pr = self._open_pr(approved=True, mergeable=False, check_state="success")
-        gh, issue = self._seed(pr=pr)
-
-        with patch.object(config, "AUTO_MERGE", False):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        mocks["run_agent"].assert_not_called()
-        self.assertEqual(gh.merge_calls, [])
-        # AUTO_MERGE off must NOT route to resolving_conflict.
+        # Must NOT route to resolving_conflict.
         self.assertNotIn((30, "resolving_conflict"), gh.label_history)
         data = gh.pinned_data(30)
         self.assertTrue(data.get("awaiting_human"))
         self.assertEqual(data.get("park_reason"), "unmergeable")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("not mergeable", last_comment)
-        # AUTO_MERGE off does not seed the conflict_round budget.
+        # No conflict_round seeded -- the orchestrator never enters the
+        # auto-resolution route from here.
         self.assertNotIn("conflict_round", data)
 
-    def test_in_review_hold_base_sync_skips_auto_merge_off_park(self) -> None:
+    def test_in_review_hold_base_sync_skips_unmergeable_park(self) -> None:
         pr = self._open_pr(approved=True, mergeable=False, check_state="success")
         gh, issue = self._seed(pr=pr)
         issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
 
-        with patch.object(config, "AUTO_MERGE", False):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
 
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
@@ -501,17 +389,16 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertFalse(data.get("awaiting_human"))
         self.assertIsNone(data.get("park_reason"))
 
-    def test_in_review_auto_merge_mergeable_pending(self) -> None:
-        # mergeable=None means GitHub is still computing. Don't merge, don't
-        # park; the next tick re-checks once GitHub has decided.
+    def test_in_review_mergeable_pending(self) -> None:
+        # mergeable=None means GitHub is still computing. Don't ping,
+        # don't park; the next tick re-checks once GitHub has decided.
         pr = self._open_pr(approved=True, mergeable=None, check_state="success")
         gh, issue = self._seed(pr=pr)
 
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
 
         self.assertEqual(gh.merge_calls, [])
         self.assertEqual(gh.label_history, [])
@@ -540,8 +427,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             pr=pr, extra_state={"pr_last_comment_id": 1999}
         )
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -592,25 +478,6 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("pending_fix_at", data)
         self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
 
-    def test_in_review_sha_mismatch_on_merge(self) -> None:
-        # merge_pr returning False (409 SHA mismatch / 405 / 422) leaves the
-        # issue in_review for the next tick to retry; no park, no label flip.
-        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
-        gh, issue = self._seed(pr=pr)
-        gh.merge_returns_ok = False
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")])
-        self.assertEqual(gh.label_history, [])
-        self.assertFalse(gh.pinned_data(30).get("awaiting_human"))
-        self.assertNotIn("merged_at", gh.pinned_data(30))
-        self.assertFalse(issue.closed)
-
     def test_in_review_pr_number_missing(self) -> None:
         # Manually-relabeled in_review without a pinned PR -- park once.
         gh, issue = self._seed(pr=None, with_pr_number=False)
@@ -633,54 +500,6 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(len(gh.posted_comments), before)
 
-    def test_in_review_agent_approval_unlocks_auto_merge(self) -> None:
-        # The reviewer agent posts an issue comment, not a real PR review,
-        # so pr_is_approved (which inspects pr.get_reviews()) is False even
-        # after the agent emits VERDICT: APPROVED. The validating handler
-        # persists `agent_approved_sha` for the head it reviewed; that key
-        # is what the in_review auto-merge gate keys on.
-        pr = self._open_pr(
-            approved=False, mergeable=True, check_state="success",
-            head=FakePRRef(sha="cafe1234"),
-        )
-        gh, issue = self._seed(
-            pr=pr,
-            extra_state={"agent_approved_sha": "cafe1234"},
-        )
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")])
-        self.assertIn((30, "done"), gh.label_history)
-
-    def test_in_review_stale_agent_approval_blocks_auto_merge(self) -> None:
-        # If the head moved after the agent approved (e.g., a human force-
-        # pushed) the snapshot SHA no longer matches and pr_is_approved is
-        # also False -- nothing auto-merges. We don't park here either; the
-        # next event (new comment / close / re-approval bouncing back
-        # through validating) is what unsticks us.
-        pr = self._open_pr(
-            approved=False, mergeable=True, check_state="success",
-            head=FakePRRef(sha="newhead99"),
-        )
-        gh, issue = self._seed(
-            pr=pr,
-            extra_state={"agent_approved_sha": "cafe1234"},
-        )
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
-        self.assertFalse(gh.pinned_data(30).get("awaiting_human"))
 
 
 class HandleInReviewClosedIssueExternalMergeTest(
@@ -714,70 +533,18 @@ class HandleInReviewClosedIssueExternalMergeTest(
         self.assertIn("merged_at", gh.pinned_data(40))
 
 
-class StaleHumanApprovalAutoMergeTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """A human APPROVED review on an older head must NOT unlock auto-merge
-    when a newer commit was pushed without re-approval. Otherwise a
-    contributor could push code AFTER the human approval and have the
-    orchestrator merge it unreviewed.
-    """
-
-    def test_stale_human_approval_blocks_auto_merge(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(50, label="in_review")
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=88, head_branch="orchestrator/issue-50",
-            head=FakePRRef(sha="newhead"),
-            approved=True,                  # human approved
-            approval_head_sha="oldhead",    # ...but on the previous commit
-            mergeable=True, check_state="success",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(50, pr_number=88, branch="orchestrator/issue-50")
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        # No merge: stale approval is treated as missing.
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
-        self.assertFalse(gh.pinned_data(50).get("awaiting_human"))
-
-    def test_current_head_human_approval_allows_auto_merge(self) -> None:
-        # Same setup but approval IS for the current head -- merge proceeds.
-        gh = FakeGitHubClient()
-        issue = make_issue(51, label="in_review")
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=89, head_branch="orchestrator/issue-51",
-            head=FakePRRef(sha="newhead"),
-            approved=True, approval_head_sha="newhead",
-            mergeable=True, check_state="success",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(51, pr_number=89, branch="orchestrator/issue-51")
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [(89, "newhead", "squash")])
-        self.assertIn((51, "done"), gh.label_history)
-
-
 class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
     """A park inside `_handle_in_review` posts an issue comment. The watermark
     must be bumped past that comment so the next tick does not see the
-    orchestrator's own HITL ping as fresh PR feedback and resume the dev
-    agent against it.
+    orchestrator's own HITL park message as fresh PR feedback and route
+    the issue to `fixing` against it.
     """
 
-    def _setup_failed_checks(self):
+    def test_unmergeable_park_does_not_replay_on_next_tick(self) -> None:
+        # An unmergeable PR parks awaiting human on the first tick. The
+        # park message is recorded as orchestrator-authored and the
+        # watermark is bumped past it; subsequent ticks must not surface
+        # the park message as fresh PR feedback.
         gh = FakeGitHubClient()
         issue = make_issue(60, label="in_review")
         gh.add_issue(issue)
@@ -785,7 +552,7 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
             number=70, head_branch="orchestrator/issue-60",
             head=FakePRRef(sha="cafe1234"),
             approved=True, approval_head_sha="cafe1234",
-            mergeable=True, check_state="failure",
+            mergeable=False, check_state="success",
         )
         gh.add_pr(pr)
         gh.seed_state(
@@ -793,18 +560,14 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
             dev_agent="claude", dev_session_id="dev-sess",
             pr_last_comment_id=900,  # an old watermark from validating handoff
         )
-        return gh, issue
 
-    def test_failed_checks_park_does_not_replay_on_next_tick(self) -> None:
-        gh, issue = self._setup_failed_checks()
-
-        with patch.object(config, "AUTO_MERGE", True):
-            # Tick 1: fail-checks park.
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        # Tick 1: unmergeable park.
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
         self.assertTrue(gh.pinned_data(60).get("awaiting_human"))
+        self.assertEqual(gh.pinned_data(60).get("park_reason"), "unmergeable")
         comments_after_park = len(gh.posted_comments)
         self.assertGreater(comments_after_park, 0)
         # Watermark must have been bumped past the park comment -- which
@@ -812,48 +575,16 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         latest_id = gh.latest_comment_id(issue)
         self.assertEqual(gh.pinned_data(60).get("pr_last_comment_id"), latest_id)
 
-        with patch.object(config, "AUTO_MERGE", True):
-            # Tick 2: nothing new; must NOT resume the dev agent.
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        # Tick 2: nothing new; must NOT route the orchestrator's park
+        # message back through the fixing route.
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
         mocks["run_agent"].assert_not_called()
-        # No additional comments posted (no second park, no dev-resume ping).
+        # No additional comments posted (no second park, no fixing route).
         self.assertEqual(len(gh.posted_comments), comments_after_park)
-
-    def test_unmergeable_in_review_route_does_not_replay_on_next_tick(self) -> None:
-        # An unmergeable PR routes to `resolving_conflict` on the first
-        # in_review tick. The label change means the dispatcher hands the
-        # next tick to `_handle_resolving_conflict`, not `_handle_in_review`,
-        # so the in_review handler must not be re-triggered against the
-        # auto-resolution-in-progress PR.
-        gh = FakeGitHubClient()
-        issue = make_issue(61, label="in_review")
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=71, head_branch="orchestrator/issue-61",
-            head=FakePRRef(sha="cafe1234"),
-            approved=True, approval_head_sha="cafe1234",
-            mergeable=False, check_state="success",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            61, pr_number=71, branch="orchestrator/issue-61",
-            dev_agent="claude", dev_session_id="dev-sess",
-            pr_last_comment_id=900,
-        )
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-        # First tick flips to resolving_conflict (no awaiting_human park).
-        self.assertIn((61, "resolving_conflict"), gh.label_history)
-        data = gh.pinned_data(61)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertEqual(data.get("conflict_round"), 0)
+        self.assertNotIn((60, "fixing"), gh.label_history)
 
 
 class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -948,107 +679,14 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.pinned_data(65).get("pending_fix_review_max_id"), 5)
 
 
-class HumanChangesRequestedVetoTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """A human CHANGES_REQUESTED review on the PR's current head must veto
-    auto-merge regardless of how the reviewer agent voted. Without the veto,
-    the `agent_approved_sha == head_sha` short-circuit would let the
-    orchestrator merge over a standing human objection on the same SHA.
-    """
-
-    def test_changes_requested_blocks_auto_merge_even_when_agent_approved(self) -> None:
-        gh = FakeGitHubClient()
-        issue = make_issue(80, label="in_review")
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=120, head_branch="orchestrator/issue-80",
-            head=FakePRRef(sha="cafe1234"),
-            mergeable=True, check_state="success",
-            changes_requested=True,  # human vetoed the current head
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            80, pr_number=120, branch="orchestrator/issue-80",
-            agent_approved_sha="cafe1234",  # agent approved same head
-        )
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        # Veto wins over agent approval; no merge, no label flip.
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
-        self.assertFalse(gh.pinned_data(80).get("awaiting_human"))
-
-    def test_changes_requested_blocks_auto_merge_even_with_human_approval(self) -> None:
-        # APPROVED + CHANGES_REQUESTED on the same head: GitHub considers
-        # the PR not approved. pr_is_approved already filters this out, but
-        # the orthogonal veto check is what guarantees the agent path can't
-        # bypass it via agent_approved_sha.
-        gh = FakeGitHubClient()
-        issue = make_issue(81, label="in_review")
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=121, head_branch="orchestrator/issue-81",
-            head=FakePRRef(sha="cafe1234"),
-            mergeable=True, check_state="success",
-            approved=True, approval_head_sha="cafe1234",
-            changes_requested=True,
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            81, pr_number=121, branch="orchestrator/issue-81",
-            agent_approved_sha="cafe1234",
-        )
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
-
-    def test_stale_changes_requested_does_not_block(self) -> None:
-        # CHANGES_REQUESTED on an OLD head (force-pushed past) must not
-        # block auto-merge: a stale veto on a no-longer-current SHA is
-        # equivalent to no veto. Mirrors the stale-approval gating.
-        gh = FakeGitHubClient()
-        issue = make_issue(82, label="in_review")
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=122, head_branch="orchestrator/issue-82",
-            head=FakePRRef(sha="newhead"),
-            mergeable=True, check_state="success",
-            changes_requested=True, changes_requested_head_sha="oldhead",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            82, pr_number=122, branch="orchestrator/issue-82",
-            agent_approved_sha="newhead",
-        )
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [(122, "newhead", "squash")])
-        self.assertIn((82, "done"), gh.label_history)
-
-
 class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
     """A human can leave PR feedback either through inline review comments
     or through the *review summary* body (the textbox above the
     Approve / Request Changes / Comment buttons). The summary lives in the
     PullRequestReview id namespace, distinct from issue comments and inline
-    review comments. Without surfacing it, a "Comment" review with body is
-    silently auto-merged over and a CHANGES_REQUESTED summary blocks merge
-    without the dev ever seeing the feedback.
+    review comments. Without surfacing it, a "Comment" review with body or
+    a CHANGES_REQUESTED summary would never be routed to `fixing` -- the
+    dev would never see the feedback.
     """
 
     PR_NUMBER = 130
@@ -1089,8 +727,7 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         gh, issue, pr = self._setup_with_review(review)
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -1109,11 +746,10 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data.get("pr_last_review_summary_id"), 0)
 
     def test_commented_review_with_body_routes_to_fixing(self) -> None:
-        # A "Comment" review (state=COMMENTED) doesn't block via
-        # pr_has_changes_requested, so without surfacing the body the
-        # auto-merge gate would proceed and merge over the human's note.
-        # With the in_review -> fixing route, the body still has to be
-        # detected as fresh feedback and the label flipped immediately.
+        # A "Comment" review (state=COMMENTED) needs to surface as fresh
+        # feedback even though it does not block via
+        # pr_has_changes_requested -- without the route to `fixing` the
+        # human's note would never reach the dev session.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         review = FakePRReview(
             id=4243,
@@ -1124,15 +760,13 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         gh, issue, pr = self._setup_with_review(review)
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
         mocks["run_agent"].assert_not_called()
-        # Auto-merge did NOT fire over the human's comment.
         self.assertEqual(gh.merge_calls, [])
         self.assertIn((90, "fixing"), gh.label_history)
         self.assertEqual(
@@ -1143,77 +777,78 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_approved_review_body_does_not_trigger_resume(self) -> None:
         # APPROVED reviews are excluded from the summary surface even when
         # they carry an informational body. The human approved the PR --
-        # their note is not a request for changes.
+        # their note is not a request for changes, so the handler must not
+        # route to `fixing` and must instead ping the HITL handles for
+        # manual merge.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         review = FakePRReview(
             id=4244, body="LGTM, ship it", state="APPROVED",
             user=FakeUser("alice"), submitted_at=long_ago,
         )
         gh, issue, pr = self._setup_with_review(review)
-        # APPROVED on the live head also satisfies the auto-merge gate
-        # via pr_is_approved.
         pr.approved = True
         pr.approval_head_sha = "cafe1234"
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
         mocks["run_agent"].assert_not_called()
-        # Auto-merge proceeds; the summary surface ignored the APPROVED body.
-        self.assertEqual(
-            gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")]
-        )
-        self.assertIn((90, "done"), gh.label_history)
+        # No fixing route; the handler pings HITL for a manual merge.
+        self.assertEqual(gh.merge_calls, [])
+        self.assertNotIn((90, "fixing"), gh.label_history)
+        self.assertNotIn((90, "done"), gh.label_history)
+        ping_comments = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(ping_comments), 1)
 
     def test_empty_body_review_is_ignored(self) -> None:
         # A CHANGES_REQUESTED review with no body has nothing to forward to
-        # the dev. pr_has_changes_requested still vetoes auto-merge (correct),
-        # but no follow-up prompt is generated.
+        # the dev. The handler must not route to `fixing` for the empty
+        # body; it falls through to the normal mergeable / ping path
+        # (mergeable=True here -> the HITL ping fires).
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         review = FakePRReview(
             id=4245, body="", state="CHANGES_REQUESTED",
             user=FakeUser("alice"), submitted_at=long_ago,
         )
         gh, issue, pr = self._setup_with_review(review)
-        # Mirror the pr_has_changes_requested veto path.
         pr.changes_requested = True
         pr.changes_requested_head_sha = "cafe1234"
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
         mocks["run_agent"].assert_not_called()
-        # Veto blocked the merge; no label flip.
         self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
+        self.assertNotIn((90, "fixing"), gh.label_history)
 
 
 class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
     """Operators commonly run the orchestrator with a personal PAT and also
     review PRs by hand from that same GitHub account. The self-comment filter
     must not key on author login -- if it did, real human review feedback from
-    that account would be dropped as bot noise and AUTO_MERGE could land a
-    'please do not merge' comment.
+    that account would be dropped as bot noise and the fixing route would
+    silently swallow the human's 'please do not merge' comment.
 
     The fix tracks orchestrator-authored comments by exact id (recorded when
     the orchestrator posts them via `_post_issue_comment` /
     `_post_pr_comment`). A human comment from the PAT login carries an id the
-    orchestrator never recorded, so it surfaces as fresh PR feedback and the
-    auto-merge gate stays closed.
+    orchestrator never recorded, so it surfaces as fresh PR feedback and
+    routes to `fixing`.
     """
 
     PR_NUMBER = 200
     BRANCH = "orchestrator/issue-100"
 
-    def test_same_account_human_pr_comment_blocks_auto_merge(self) -> None:
+    def test_same_account_human_pr_comment_routes_to_fixing(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(100, label="in_review")
         gh.add_issue(issue)
@@ -1251,14 +886,14 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             pickup_comment_id=900,
         )
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
-        # Auto-merge must not fire over the human's standing objection.
+        # No merge (humans drive the merge), and the human's standing
+        # objection routes the issue to `fixing`.
         self.assertEqual(gh.merge_calls, [])
         self.assertNotIn((100, "done"), gh.label_history)
         # The human comment is treated as fresh feedback and routes the
@@ -1275,7 +910,8 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         # issue thread (under the same account that owns the PAT) while
         # validating is still running. Without the id-based filter, the
         # handoff would advance the watermark past the human comment as if
-        # it were the orchestrator's own self-run, then auto-merge over it.
+        # it were the orchestrator's own self-run, then silently swallow
+        # it on the next in_review tick.
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         issue = make_issue(101, label="validating", comments=[
@@ -1327,12 +963,11 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         # Step 2: in_review tick. Human comment is still past the watermark
-        # and the in_review handler hands it off to `fixing` (no
-        # auto-merge, no inline dev resume).
+        # and the in_review handler hands it off to `fixing` (no inline
+        # dev resume).
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -1420,8 +1055,7 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_legacy_first_tick_does_not_replay_history(self) -> None:
         gh, issue, pr = self._legacy_setup()
 
-        with patch.object(config, "AUTO_MERGE", False), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -1438,27 +1072,34 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data.get("pr_last_review_comment_id"), 30)
         self.assertEqual(data.get("pr_last_review_summary_id"), 4000)
 
-    def test_legacy_first_tick_does_not_block_auto_merge(self) -> None:
-        # AUTO_MERGE on with all gates passing: the migration must not park
-        # or otherwise block the merge -- it only treats already-visible
-        # comments as consumed.
+    def test_legacy_first_tick_pings_hitl_for_mergeable_pr(self) -> None:
+        # All gates passing: the migration must not park or otherwise
+        # block the handler from posting the HITL ping -- it only treats
+        # already-visible comments as consumed.
         gh, issue, pr = self._legacy_setup()
-        # Drop the historical review-summary so pr_has_changes_requested
-        # doesn't veto via a separate path; the migration should still seed
-        # the summary watermark past the inline review and then merge.
+        # Drop the historical review-summary so the summary watermark
+        # seeds past the inline review and the handler reaches the
+        # mergeable / ping path.
         pr.reviews = []
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
+        # No merge (humans drive the merge); HITL ping fires for the
+        # mergeable PR.
+        self.assertEqual(gh.merge_calls, [])
+        self.assertNotIn((150, "done"), gh.label_history)
+        ping_comments = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(ping_comments), 1)
         self.assertEqual(
-            gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")]
+            gh.pinned_data(150).get("ready_ping_sha"), "cafe1234",
         )
-        self.assertIn((150, "done"), gh.label_history)
 
 
 class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -1500,16 +1141,15 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
             orchestrator_comment_ids=[4242],
         )
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
-        # Inline review comment id=4242 surfaces despite colliding with the
-        # recorded IssueComment id 4242; auto-merge does not fire and the
-        # handler routes to `fixing` instead.
+        # Inline review comment id=4242 surfaces despite colliding with
+        # the recorded IssueComment id 4242; the handler routes to
+        # `fixing` instead.
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
         self.assertIn((160, "fixing"), gh.label_history)
@@ -1547,8 +1187,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
             orchestrator_comment_ids=[5000],
         )
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -1563,12 +1202,13 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
 
-class TransientParkRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """An auto-merge candidate that parked on failed checks or unmergeability
-    must auto-recover when the underlying GitHub state changes silently
-    (CI rerun goes green, rebase resolves a conflict). Otherwise a human
-    who fixes the transient condition without leaving a comment leaves the
-    issue stuck in_review forever.
+class AwaitingHumanParkStaysParkedTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """An issue parked awaiting human must stay parked when no new comments
+    surface. The handler is manual-merge-only -- there is no auto-recovery
+    branch that re-checks the mergeability gate. A human reply (comment or
+    relabel) is what unsticks the issue.
     """
 
     PR_NUMBER = 500
@@ -1598,86 +1238,32 @@ class TransientParkRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_failed_checks_park_recovers_when_checks_go_green(self) -> None:
-        gh, issue, pr = self._parked_issue(
-            park_reason="failed_checks",
-            pr_kwargs=dict(mergeable=True, check_state="success"),
-        )
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(
-            gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")]
-        )
-        self.assertIn((170, "done"), gh.label_history)
-        # Park flags cleared so subsequent ticks proceed normally.
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
-
-    def test_unmergeable_park_recovers_when_pr_becomes_mergeable(self) -> None:
+    def test_unmergeable_park_stays_parked_when_pr_becomes_mergeable(
+        self,
+    ) -> None:
+        # Even if the PR silently becomes mergeable (rebase resolved a
+        # conflict, branch protection dropped), the handler does NOT
+        # auto-recover -- the orchestrator never merges from in_review.
+        # Park flags stay so the operator notices and drives the merge.
         gh, issue, pr = self._parked_issue(
             park_reason="unmergeable",
             pr_kwargs=dict(mergeable=True, check_state="success"),
         )
 
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(
-            gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")]
-        )
-        self.assertIn((170, "done"), gh.label_history)
-
-    def test_failed_checks_park_stays_parked_when_checks_still_failing(
-        self,
-    ) -> None:
-        # Recovery must not re-post the park message when the gate still
-        # fails -- otherwise every poll would spam the issue.
-        gh, issue, pr = self._parked_issue(
-            park_reason="failed_checks",
-            pr_kwargs=dict(mergeable=True, check_state="failure"),
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
         )
 
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
+        mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
         self.assertEqual(gh.label_history, [])
         # No new park comment posted on this tick.
         self.assertEqual(gh.posted_comments, [])
-        # Park flags preserved for the next recovery attempt.
+        # Park flags preserved.
         data = gh.pinned_data(170)
         self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "failed_checks")
-
-    def test_non_transient_park_stays_parked_even_when_gates_pass(self) -> None:
-        # A park whose reason is not in the transient set (e.g. a missing
-        # pr_number, a dev-fix failure) needs explicit human action and must
-        # not recover from gate state alone.
-        gh, issue, pr = self._parked_issue(
-            park_reason="dev_fix_failed",
-            pr_kwargs=dict(mergeable=True, check_state="success"),
-        )
-
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
+        self.assertEqual(data.get("park_reason"), "unmergeable")
 
 
 class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -1685,8 +1271,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
     The closed-in_review sweep yields the issue (so a Resolves-#N auto-close
     can finalize to `done`), but if the linked PR is still open the sweep
     has surfaced a manually-closed issue and `_handle_in_review` must mark
-    it rejected before the auto-merge gates can run -- otherwise AUTO_MERGE
-    can land the PR over the human's rejection.
+    it rejected before the mergeable / HITL-ping path runs.
     """
 
     PR_NUMBER = 700
@@ -1718,18 +1303,18 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_manually_closed_with_open_pr_marks_rejected(self) -> None:
         gh, issue, pr = self._setup()
 
-        with patch.object(config, "AUTO_MERGE", True):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
 
-        # AUTO_MERGE must not fire over a manually-closed issue even though
-        # every gate (approval, mergeable, success) would otherwise pass.
+        # The handler must not fall through to the HITL ping over a
+        # manually-closed issue even though the PR is otherwise mergeable.
         self.assertEqual(gh.merge_calls, [])
         self.assertIn((250, "rejected"), gh.label_history)
         self.assertNotIn((250, "done"), gh.label_history)
         self.assertIn("closed_without_merge_at", gh.pinned_data(250))
+        self.assertEqual(gh.posted_comments, [])
         # Closing the issue while the PR is still open is a human stop
         # signal. The PR may still be useful for inspection / salvage, so
         # cleanup must NOT delete the branch here -- the operator drives
@@ -1747,11 +1332,10 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         # is therefore never observed by the orchestrator and the
         # operator must clean up the branch / worktree by hand.
         gh, issue, pr = self._setup()
-        with patch.object(config, "AUTO_MERGE", False):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
         self.assertIn((250, "rejected"), gh.label_history)
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
@@ -1779,8 +1363,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
             ),
         )
 
-        with patch.object(config, "AUTO_MERGE", False), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -1823,9 +1406,9 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
     migration would previously leave the watermark unset and re-fire next
     tick -- the FIRST human inline / summary review added in between would
     then be consumed by the migration before _handle_in_review built
-    new_comments, allowing AUTO_MERGE to land the PR over that first
-    review. The migration must persist 0 even on empty surfaces so the
-    next tick scans new comments instead of re-migrating.
+    new_comments, silently swallowing that first review and skipping the
+    `fixing` route. The migration must persist 0 even on empty surfaces
+    so the next tick scans new comments instead of re-migrating.
     """
 
     PR_NUMBER = 900
@@ -1856,11 +1439,10 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
 
         # Tick 1: legacy migration runs, surfaces have nothing to seed past.
         # The migration must persist 0 on every namespace anyway.
-        with patch.object(config, "AUTO_MERGE", False):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
         data = gh.pinned_data(400)
         self.assertEqual(data.get("pr_last_review_comment_id"), 0)
         self.assertEqual(data.get("pr_last_review_summary_id"), 0)
@@ -1877,8 +1459,7 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
             ),
         )
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -1896,22 +1477,20 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
 
     def test_first_review_summary_after_migration_surfaces(self) -> None:
         # Same shape on the review-summary surface. A COMMENTED summary
-        # body is the dangerous case here: pr_has_changes_requested does
-        # not veto and AUTO_MERGE could otherwise land the PR over it.
+        # body must still surface through the fresh-feedback scan; without
+        # the migration persisting 0, the body would be migrated past and
+        # the human would never reach the dev.
         gh, issue, pr = self._legacy_setup()
-        # Need agent_approved_sha so the auto-merge path doesn't bail on
-        # missing approval -- mirrors a freshly-handed-off issue.
         gh.seed_state(
             400, pr_number=self.PR_NUMBER, branch=self.BRANCH,
             dev_agent="claude", dev_session_id="dev-sess",
             agent_approved_sha="cafe1234",
         )
 
-        with patch.object(config, "AUTO_MERGE", False):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
         data = gh.pinned_data(400)
         self.assertEqual(data.get("pr_last_review_summary_id"), 0)
 
@@ -1926,8 +1505,7 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
             ),
         )
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -2047,8 +1625,8 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
     "scan all from the beginning". The in_review fallback to
     `last_action_comment_id` must not discard 0 in favor of a higher prior
     park-comment id; otherwise lower-id human feedback (e.g. an implementing-
-    time "do not merge yet") sits below the watermark and AUTO_MERGE can
-    land the PR over it.
+    time "do not merge yet") sits below the watermark and the in_review ->
+    fixing route would silently skip it.
     """
 
     PR_NUMBER = 1100
@@ -2095,19 +1673,17 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
             orchestrator_comment_ids=[920],
         )
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
-        # AUTO_MERGE must NOT fire over the human's id=910 comment.
+        # No merge attempt; the human's id=910 comment surfaces as fresh
+        # feedback and routes the issue to `fixing` (the in_review handler
+        # no longer drives the dev resume itself).
         self.assertEqual(gh.merge_calls, [])
         self.assertNotIn((600, "done"), gh.label_history)
-        # The human comment is treated as fresh feedback and routes the
-        # issue to `fixing` (the in_review handler no longer drives the
-        # dev resume itself).
         mocks["run_agent"].assert_not_called()
         self.assertIn((600, "fixing"), gh.label_history)
         self.assertEqual(
@@ -2118,11 +1694,10 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
 class StaleParkReasonClearedOnFixingRouteTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
-    """A transient AUTO_MERGE park (failed_checks/unmergeable) followed by
-    a fresh PR comment must clear the stale `park_reason` and
-    `awaiting_human` flags as part of the in_review -> fixing route.
-    Otherwise the next tick's recovery branch sees a transient reason,
-    re-checks gates, and merges over the human's standing follow-up.
+    """A transient in_review park (unmergeable) followed by a fresh PR
+    comment must clear the stale `park_reason` and `awaiting_human` flags
+    as part of the in_review -> fixing route so the fixing handler is not
+    greeted with stale park state.
     """
 
     PR_NUMBER = 1200
@@ -2131,7 +1706,7 @@ class StaleParkReasonClearedOnFixingRouteTest(
     def test_stale_park_reason_cleared_on_route_to_fixing(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        # Tick 0 already parked for failed_checks; the human posted a
+        # Tick 0 already parked for unmergeable; the human posted a
         # follow-up comment ("any update?") to nudge the orchestrator.
         issue = make_issue(700, label="in_review", comments=[
             FakeComment(
@@ -2156,15 +1731,13 @@ class StaleParkReasonClearedOnFixingRouteTest(
             pr_last_review_summary_id=0,
             # Carryover from the original transient park.
             awaiting_human=True,
-            park_reason="failed_checks",
+            park_reason="unmergeable",
         )
 
         # Tick A: the new comment arrives; the handler routes to `fixing`
         # and clears both the stale `park_reason` and `awaiting_human`
-        # flag so the transient-park recovery branch can't re-fire on the
-        # next tick and merge over the human's follow-up.
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        # flag so the fixing handler is not greeted with stale park state.
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -2180,11 +1753,10 @@ class StaleParkReasonClearedOnFixingRouteTest(
         )
         self.assertIsNone(
             data.get("park_reason"),
-            "stale 'failed_checks' park reason must be cleared by the "
-            "route to fixing",
+            "stale 'unmergeable' park reason must be cleared by the route "
+            "to fixing",
         )
         self.assertEqual(data.get("pending_fix_issue_max_id"), 3000)
-        # Auto-merge must not fire on this tick either.
         self.assertEqual(gh.merge_calls, [])
 
 
@@ -2255,104 +1827,6 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
         # No ERROR for non-403 failures.
         error_records = [r for r in cm.records if r.levelname == "ERROR"]
         self.assertEqual(error_records, [])
-
-
-class AutoMergeSHAShiftDuringMergeabilityCheckTest(
-    unittest.TestCase, _PatchedWorkflowMixin
-):
-    """`gh.pr_is_mergeable(pr)` calls `pr.update()` when the cached
-    mergeable is None, which can refresh `pr.head.sha`. The approval and
-    changes-requested gates ran against the earlier head_sha, so a commit
-    landing during that refresh must NOT slip through to the merge call:
-    AUTO_MERGE must NOT merge the refreshed (unreviewed) head.
-    """
-
-    PR_NUMBER = 30
-    BRANCH = "orchestrator/issue-7"
-
-    def _setup(self):
-        gh = FakeGitHubClient()
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        issue = make_issue(7, label="in_review", comments=[
-            FakeComment(
-                id=900, body=":robot: orchestrator picking this up.",
-                user=FakeUser("orchestrator"), created_at=long_ago,
-            ),
-            FakeComment(
-                id=901, body=":sparkles: PR opened: #30",
-                user=FakeUser("orchestrator"), created_at=long_ago,
-            ),
-        ])
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha="reviewedSHA"),
-            mergeable=True, check_state="success",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            7, pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
-            review_round=0,
-            orchestrator_comment_ids=[900, 901],
-            pickup_comment_id=900,
-            agent_approved_sha="reviewedSHA",
-            pr_last_comment_id=999,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-        )
-        return gh, issue, pr
-
-    def test_sha_shift_during_pr_is_mergeable_blocks_merge(self) -> None:
-        gh, issue, pr = self._setup()
-
-        # Simulate what GitHub's lazy `pr.update()` does inside
-        # `pr_is_mergeable`: a commit landed between the gate checks and
-        # the mergeability resolution, so the refresh moves pr.head.sha to
-        # an UNREVIEWED commit. The approval gate already ran against
-        # 'reviewedSHA'; the merge must NOT proceed against 'unreviewedSHA'.
-        def mergeable_with_refresh(pr_arg):
-            pr_arg.head = FakePRRef(sha="unreviewedSHA")
-            return True
-
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600), \
-             patch.object(gh, "pr_is_mergeable", mergeable_with_refresh):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        # Critical: no merge happened. Without the SHA-shift bail (and the
-        # head_sha pin on merge_pr), AUTO_MERGE would have called
-        # merge_pr(pr, sha='unreviewedSHA') and merged the unreviewed head.
-        self.assertEqual(
-            gh.merge_calls, [],
-            "merge must not fire when pr.head.sha shifted between the "
-            "approval gate and the merge call",
-        )
-        # Issue stayed in_review; next tick will re-evaluate against the
-        # new head SHA (which is not yet approved).
-        self.assertNotIn((7, "done"), gh.label_history)
-
-    def test_sha_unchanged_during_pr_is_mergeable_merges_normally(self) -> None:
-        # Sanity check: the SHA-shift guard must not regress the happy path
-        # when `pr_is_mergeable` does NOT refresh the head. Same setup but
-        # without the head mutation.
-        gh, issue, pr = self._setup()
-
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        self.assertEqual(
-            gh.merge_calls, [(self.PR_NUMBER, "reviewedSHA", "squash")],
-            "happy path must still merge against the gated head_sha",
-        )
-        self.assertIn((7, "done"), gh.label_history)
 
 
 class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):

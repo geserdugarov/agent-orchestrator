@@ -8,23 +8,23 @@ After the implementer commits and the PR opens, `_on_commits` relabels
 straight to `validating` -- the docs pass only runs as the final-docs
 handoff after the reviewer approves, not as a pre-review hop. Validating
 then runs a fresh reviewer session; on changes-requested the dev session
-is resumed, the fix pushed, `agent_approved_sha` cleared so AUTO_MERGE
-cannot land the freshly-pushed head against a stale prior approval, and
-the reviewer rerun until APPROVED or MAX_REVIEW_ROUNDS is hit (the
-issue stays on `validating` throughout these fix rounds -- the single
-docs pass is deferred to the final-docs handoff after reviewer
-approval). After approval (+ verify + squash) the handler relabels
-to `documenting` for the **final-docs** pass on the squashed head
-before in_review picks up;
+is resumed, the fix pushed, `agent_approved_sha` cleared so the next
+reviewer round re-snapshots the freshly-pushed head, and the reviewer
+rerun until APPROVED or MAX_REVIEW_ROUNDS is hit (the issue stays on
+`validating` throughout these fix rounds -- the single docs pass is
+deferred to the final-docs handoff after reviewer approval). After
+approval (+ verify + squash) the handler relabels to `documenting` for
+the **final-docs** pass on the squashed head before in_review picks up;
 `_handle_documenting` advances straight to `in_review` and updates
-`agent_approved_sha` to the new pushed head when a docs commit lands. In_review reacts to PR state
-(merged/closed) and hands fresh PR feedback (any of the four comment
-surfaces) off to the `fixing` stage by recording pending-fix metadata
-in pinned state and flipping the label -- no debounce wait, no dev
-spawn from in_review itself. When AUTO_MERGE is on, in_review merges
-PRs that the reviewer approved and that GitHub considers mergeable
-with green checks. Other labels are observed and logged as
-not-yet-implemented.
+`agent_approved_sha` to the new pushed head when a docs commit lands.
+In_review reacts to PR state (merged/closed) and hands fresh PR
+feedback (any of the four comment surfaces) off to the `fixing` stage
+by recording pending-fix metadata in pinned state and flipping the
+label -- no debounce wait, no dev spawn from in_review itself. The
+orchestrator never merges from in_review: humans drive the merge. A
+mergeable PR earns a one-shot HITL ping per head SHA; an unmergeable PR
+parks awaiting human attention. Other labels are observed and logged
+as not-yet-implemented.
 """
 from __future__ import annotations
 
@@ -723,12 +723,10 @@ def _park_awaiting_human(
 
     Caller is responsible for `gh.write_pinned_state` afterwards (mirrors the
     existing _on_question / _on_dirty_worktree contract). Clears any stale
-    `park_reason` -- a transient AUTO_MERGE park (failed_checks/unmergeable)
+    `park_reason` -- a transient park (e.g. in_review `unmergeable`)
     followed by a follow-up question/timeout park would otherwise leave
-    the transient reason behind and let the in_review recovery branch
-    auto-merge over the dev's standing question on the next tick. Callers
-    that re-park for a transient reason (the AUTO_MERGE failed-checks /
-    unmergeable paths) re-set `park_reason` immediately after this call.
+    the transient reason behind. Callers that re-park for a transient
+    reason re-set `park_reason` immediately after this call.
 
     `reason` is recorded only in the emitted `park_awaiting_human` audit
     event; the durable `park_reason` field in pinned state is still cleared

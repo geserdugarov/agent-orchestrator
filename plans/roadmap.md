@@ -5,20 +5,23 @@
 The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 `umbrella` → `implementing` → `validating` → `documenting` (final-docs
 hop) → `in_review` → `fixing` (on fresh PR feedback) or
-`resolving_conflict` (auto-merge detour) → `done` / `rejected`) is wired
-end-to-end. The single docs pass runs after the reviewer's final
-approval via the `documenting` handoff, so docs land against the
-approved/squashed head without spending a no-op pass on each
-code-changing push. Every pre-approval code-changing route lands
-directly back on `validating`: the initial `implementing` PR open,
-every `validating` pushed fix (CHANGES_REQUESTED, awaiting-human
-resume, user-content drift, transient-park recovery), the
-PR-feedback `fixing` pushed-fix exit, the `in_review` user-content
-drift, and every `resolving_conflict` pushed exit (clean rebase,
-recovered push, agent-resolved, awaiting-human resume, drift-pushed
-fix) all clear `agent_approved_sha` and stay on (or return to)
-`validating` so AUTO_MERGE cannot land the freshly-pushed head
-against a stale prior approval. `_handle_documenting`'s own success
+`resolving_conflict` (operator relabel or per-tick base-sync detour)
+→ `done` / `rejected`) is wired end-to-end. The single docs pass runs
+after the reviewer's final approval via the `documenting` handoff, so
+docs land against the approved/squashed head without spending a no-op
+pass on each code-changing push. The orchestrator is permanently
+manual-merge-only — `_handle_in_review` pings HITL once per head SHA
+for a mergeable PR, parks awaiting human attention for an unmergeable
+PR, and never calls `gh.merge_pr`. Every pre-approval code-changing
+route lands directly back on `validating`: the initial `implementing`
+PR open, every `validating` pushed fix (CHANGES_REQUESTED,
+awaiting-human resume, user-content drift, transient-park recovery),
+the PR-feedback `fixing` pushed-fix exit, the `in_review`
+user-content drift, and every `resolving_conflict` pushed exit (clean
+rebase, recovered push, agent-resolved, awaiting-human resume,
+drift-pushed fix) all clear `agent_approved_sha` and stay on (or
+return to) `validating` so the next reviewer round re-snapshots the
+freshly-pushed head. `_handle_documenting`'s own success
 exits always advance to `in_review`; its drift block relabels
 directly to `validating` without spawning the docs agent when a
 body edit invalidates the prior approval mid-hop. `_handle_fixing` owns the PR-feedback quiet window
@@ -105,13 +108,12 @@ to `in_review` — `_advance_after_docs_push` / `_advance_after_docs_no_change`
 both target `in_review` unconditionally on every success exit.
 A `docs:` commit lands → push + advance to
 `in_review`. The push also updates `agent_approved_sha` to the new
-head so AUTO_MERGE survives, gated on the companion sentinel
-`final_docs_approval_seeded` that validating sets only when it
-actually persisted a non-empty `agent_approved_sha` this round (both
-`gh.get_pr()` succeeded AND `_head_sha()` returned a non-empty local
-SHA). When either fails the sentinel is absent and any stale
-`agent_approved_sha` left over from a prior round stays untouched so
-AUTO_MERGE remains gated. The final-docs exit additionally ratchets
+head, gated on the companion sentinel `final_docs_approval_seeded`
+that validating sets only when it actually persisted a non-empty
+`agent_approved_sha` this round (both `gh.get_pr()` succeeded AND
+`_head_sha()` returned a non-empty local SHA). When either fails the
+sentinel is absent and any stale `agent_approved_sha` left over from
+a prior round stays untouched. The final-docs exit additionally ratchets
 `pr_last_comment_id` past any issue-thread reply consumed by the
 awaiting-human resume, so the next in_review tick does not replay it
 as fresh PR feedback and bounce to `fixing`. An explicit `DOCS:
@@ -158,16 +160,19 @@ On `APPROVED` it runs `VERIFY_COMMANDS` (default empty), snapshots
 hop runs against the squashed head before `in_review` picks up. Verify
 failures park with a typed `park_reason`. `CHANGES_REQUESTED` resumes
 the dev; a clean pushed fix stays on `validating` (no docs hop) and
-clears `agent_approved_sha` so AUTO_MERGE cannot land the
-freshly-pushed head against a stale prior approval; the reviewer
-re-evaluates on the next tick. `MAX_REVIEW_ROUNDS` (default 3) caps
+clears `agent_approved_sha` so the next reviewer round re-snapshots
+the freshly-pushed head. `MAX_REVIEW_ROUNDS` (default 3) caps
 iterations.
 
-**In-review terminals and auto-merge.** `_handle_in_review` covers PR
+**In-review terminals and HITL ping.** `_handle_in_review` covers PR
 merged → `done`; PR closed unmerged → `rejected`; fresh actionable PR
 feedback → flip to `fixing` (the fixing stage owns the resume cycle);
-user-content drift resumes the dev directly. `AUTO_MERGE=on` +
-approval + no veto + mergeable + green CI → SHA-pinned merge → `done`.
+user-content drift resumes the dev directly. The orchestrator is
+permanently manual-merge-only: a mergeable PR earns a one-shot HITL
+ping per head SHA so the human knows the PR is ready, and an
+unmergeable PR parks awaiting human attention. No `gh.merge_pr` call,
+no `merge_attempt` / orchestrator-initiated `pr_merged` emission, and
+no `resolving_conflict` route from this stage.
 Three independent watermarks separate IssueComment / PullRequestComment
 / PullRequestReview namespaces; the route to `fixing` deliberately
 leaves them un-advanced so the fixing handler can read the triggering
@@ -203,15 +208,16 @@ reviewer approval. Failed resumes park awaiting human.
 PR-state terminals and the closed-issue sweep mirror
 `_handle_in_review`.
 
-**Conflict resolution stage.** Under `AUTO_MERGE=on`, approved-but-
-unmergeable PRs route to `resolving_conflict`.
-`_handle_resolving_conflict` fetches base and runs `git rebase` under
-the hardened envelope. Every exit — pushed resolution or
-base-up-to-date no-op — hands straight back to `validating`; the
-single docs pass runs after the reviewer's final approval via the
-`documenting` handoff. Real conflicts resume the dev with up to 20
-conflicted paths. `MAX_CONFLICT_ROUNDS` (default 3) caps attempts;
-every pushed rebase drops `agent_approved_sha`.
+**Conflict resolution stage.** `_handle_resolving_conflict` is reached
+via an operator relabel or the per-tick base-sync detour (a PR-having
+worktree behind `<remote>/<base>`). `_handle_resolving_conflict`
+fetches base and runs `git rebase` under the hardened envelope.
+Every exit — pushed resolution or base-up-to-date no-op — hands
+straight back to `validating`; the single docs pass runs after the
+reviewer's final approval via the `documenting` handoff. Real
+conflicts resume the dev with up to 20 conflicted paths.
+`MAX_CONFLICT_ROUNDS` (default 3) caps attempts; every pushed rebase
+drops `agent_approved_sha`.
 
 **Question stage.** The operator-applied `question` label runs
 `_handle_question` as a read-only side-branch: no implementation, no
@@ -251,12 +257,12 @@ existing `patch.object(workflow, ...)` tests keep working.
 every handler; `tests/test_workflow.py` covers the facade. Shared
 helpers live in `tests/workflow_helpers.py` and in-memory fakes in
 `tests/fakes.py`. Coverage spans the manifest parser, watermarks,
-debounce, auto-merge, squash, conflicts, umbrella, multi-repo
-dispatch, and park-comment-replay prevention.
+debounce, manual-merge HITL ping, squash, conflicts, umbrella,
+multi-repo dispatch, and park-comment-replay prevention.
 
 **Project CI.** GitHub Actions runs `ruff` and `pytest` on PRs under a
 top-level `contents: read` token so the workflow is read-only and
-non-publishing; the auto-merge gate consults `pr_combined_check_state`.
+non-publishing.
 Dependabot opens weekly update PRs for the `github-actions` and `uv`
 ecosystems with a 30-day `cooldown.default-days` window so freshly cut
 upstream releases ripen before they land here, and a `dependency-review`
@@ -425,8 +431,8 @@ swallowed.
   [`plans/symphony-spec-review.md`](symphony-spec-review.md) for the full
   review. Two proposals survived the critical filter: a narrow
   `<target_root>/.agent-orchestrator/policy.toml` overrides file
-  (verify commands, retry / review-round budgets, auto-merge) with
-  hot-reload on file change, and three workspace lifecycle hooks
+  (verify commands, retry / review-round budgets) with hot-reload on
+  file change, and three workspace lifecycle hooks
   (`after_create`, `before_run`, `after_run`) under
   `<target_root>/.agent-orchestrator/hooks/` so target repos can do
   bootstrap work without bloating agent prompts. Both stay opt-in; an

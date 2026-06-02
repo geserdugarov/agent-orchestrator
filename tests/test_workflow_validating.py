@@ -1243,8 +1243,7 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks_r = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -1252,11 +1251,15 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Critical assertion: NO dev resume on stale orchestrator comments.
         mocks_r["run_agent"].assert_not_called()
-        # And the auto-merge unlocked because agent_approved_sha matches.
-        self.assertEqual(
-            gh.merge_calls, [(self.PR_NUMBER, "newhead42", "squash")]
-        )
-        self.assertIn((5, "done"), gh.label_history)
+        # The orchestrator is manual-merge-only; in_review pings HITL
+        # for the manual merge instead of merging itself.
+        self.assertEqual(gh.merge_calls, [])
+        self.assertNotIn((5, "done"), gh.label_history)
+        ping_comments = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(ping_comments), 1)
 
     def test_second_handoff_ratchets_watermark(self) -> None:
         # An earlier in_review tick consumed a human PR comment (id 2000)
@@ -1440,20 +1443,26 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks_r = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
         mocks_r["run_agent"].assert_not_called()
+        # The orchestrator is manual-merge-only: the post-squash head
+        # earns a HITL ping for the human to merge by hand. No
+        # orchestrator-initiated merge call fires.
+        self.assertEqual(gh.merge_calls, [])
+        self.assertNotIn((5, "done"), gh.label_history)
+        ping_comments = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(ping_comments), 1)
         self.assertEqual(
-            gh.merge_calls, [(self.PR_NUMBER, self.SQUASHED_SHA, "squash")],
-            "AUTO_MERGE must land the post-squash SHA exactly once, "
-            "without re-running the reviewer",
+            gh.pinned_data(5).get("ready_ping_sha"), self.SQUASHED_SHA,
         )
-        self.assertIn((5, "done"), gh.label_history)
 
     def test_squash_failure_parks_awaiting_human_without_relabel(self) -> None:
         # Push rejected / lease violation / dirty tree all surface as
@@ -2023,22 +2032,29 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
                 c.created_at = long_ago
 
         # Step 2: in_review tick. With the fix, no comment is past the
-        # watermark, so auto-merge proceeds. Without the fix, the human
-        # comment id=850 surfaces as "new" and the dev gets resumed.
+        # watermark, so the handler reaches the mergeable / HITL-ping
+        # path. Without the fix, the human comment id=850 surfaces as
+        # "new" and the issue routes to `fixing`.
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
         mocks["run_agent"].assert_not_called()
-        self.assertEqual(
-            gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")]
-        )
-        self.assertIn((20, "done"), gh.label_history)
+        # Manual-merge-only: no orchestrator merge, but the HITL ping
+        # fires because the watermark fix kept the pre-pickup chatter
+        # out of `new_comments`.
+        self.assertEqual(gh.merge_calls, [])
+        self.assertNotIn((20, "done"), gh.label_history)
+        self.assertNotIn((20, "fixing"), gh.label_history)
+        ping_comments = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(ping_comments), 1)
 
 
 class ValidatingTransientParkRecoveryTest(
@@ -2865,11 +2881,10 @@ class ReviewedShaBranchUpdateRaceTest(unittest.TestCase, _PatchedWorkflowMixin):
     moves between the review and the validating handoff (force-push, an
     out-of-band commit, a stale worktree), `pr.head.sha` no longer matches
     the commit the agent inspected. Persisting `pr.head.sha` as
-    `agent_approved_sha` would mark an unreviewed commit as agent-approved
-    and AUTO_MERGE could then land it once gates pass. Persist the local
-    reviewed SHA instead; the auto-merge gate's existing
-    `agent_approved_sha == head_sha` check then naturally rejects the
-    race-introduced commit on the next in_review tick.
+    `agent_approved_sha` would mark an unreviewed commit as agent-approved.
+    Persist the local reviewed SHA instead; downstream consumers of
+    `agent_approved_sha` can then naturally reject the race-introduced
+    commit by SHA comparison.
     """
 
     PR_NUMBER = 1300
@@ -2909,10 +2924,10 @@ class ReviewedShaBranchUpdateRaceTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_remote_head_moved_during_review_blocks_auto_merge(self) -> None:
+    def test_remote_head_moved_during_review_recorded_as_reviewed_sha(self) -> None:
         gh, issue, pr = self._setup()
 
-        # Step 1: validating approves. The reviewer ran against the local
+        # Validating approves. The reviewer ran against the local
         # worktree at "reviewedAA". The remote PR shows "forced42".
         # `agent_approved_sha` must record what the agent actually saw.
         self._run(
@@ -2928,32 +2943,10 @@ class ReviewedShaBranchUpdateRaceTest(unittest.TestCase, _PatchedWorkflowMixin):
             "pr.head.sha at handoff time",
         )
 
-        # Step 2: in_review tick. AUTO_MERGE on, all gates would otherwise
-        # pass; the only reason the merge does NOT fire is the SHA
-        # mismatch between agent_approved_sha (reviewedAA) and the live
-        # head (forced42). Without this guard, AUTO_MERGE would land an
-        # unreviewed commit.
-        if not any(l.name == "in_review" for l in issue.labels):
-            issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            mocks = self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
-        mocks["run_agent"].assert_not_called()
-        self.assertEqual(
-            gh.merge_calls, [],
-            "AUTO_MERGE must not land 'forced42' when only 'reviewedAA' "
-            "was actually reviewed",
-        )
-        self.assertNotIn((800, "done"), gh.label_history)
-
-    def test_remote_head_unchanged_lets_auto_merge_proceed(self) -> None:
-        # Same setup, but the local reviewed SHA matches the remote PR
-        # head: AUTO_MERGE proceeds normally. This is the happy path that
-        # must keep working after the fix.
+    def test_remote_head_unchanged_records_matching_approved_sha(self) -> None:
+        # Same setup but the local reviewed SHA matches the remote PR
+        # head: `agent_approved_sha` is the live PR head, which is the
+        # post-rollout invariant for downstream consumers.
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         issue = make_issue(801, label="validating", comments=[
@@ -2987,28 +2980,18 @@ class ReviewedShaBranchUpdateRaceTest(unittest.TestCase, _PatchedWorkflowMixin):
             head_shas=("happyAA",),
         )
 
-        if not any(l.name == "in_review" for l in issue.labels):
-            issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
-            self._run(
-                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
-
         self.assertEqual(
-            gh.merge_calls, [(1301, "happyAA", "squash")]
+            gh.pinned_data(801).get("agent_approved_sha"), "happyAA",
         )
-        self.assertIn((801, "done"), gh.label_history)
 
 
 class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
     """A human reply consumed by `_resume_developer_on_human_reply` during
     implementing or validating must not re-surface as fresh PR feedback in
     in_review. The validating handoff watermark seed has to walk past such
-    already-consumed comments; otherwise the next in_review tick re-resumes
-    the dev on the same human input it has already addressed and can block
-    AUTO_MERGE indefinitely.
+    already-consumed comments; otherwise the next in_review tick re-routes
+    the issue to `fixing` on the same human input the dev has already
+    addressed.
     """
 
     PR_NUMBER = 1500
@@ -3073,22 +3056,27 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
             f"watermark must advance past consumed reply (id 920); got {wm}",
         )
 
-        # Step 2: in_review tick. AUTO_MERGE on; comment 920 must NOT
-        # surface and the merge proceeds.
+        # Step 2: in_review tick. Comment 920 must NOT surface and the
+        # handler reaches the manual-merge HITL ping path.
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
         mocks["run_agent"].assert_not_called()
-        self.assertEqual(
-            gh.merge_calls, [(self.PR_NUMBER, "cafe1234", "squash")]
-        )
-        self.assertIn((900, "done"), gh.label_history)
+        # Manual-merge-only: no merge call. The HITL ping fires because
+        # the seed kept the consumed reply out of `new_comments`.
+        self.assertEqual(gh.merge_calls, [])
+        self.assertNotIn((900, "done"), gh.label_history)
+        self.assertNotIn((900, "fixing"), gh.label_history)
+        ping_comments = [
+            body for _, body in gh.posted_comments
+            if "ready for review/merge" in body
+        ]
+        self.assertEqual(len(ping_comments), 1)
 
     def test_resume_bumps_last_action_comment_id_to_consumed_max(self) -> None:
         # Direct unit-level check on `_resume_developer_on_human_reply`:

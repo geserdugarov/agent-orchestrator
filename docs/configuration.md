@@ -18,9 +18,8 @@ The orchestrator is deliberately stateless: every setting here either selects ba
 
 - **Contents** — read/write (worktree branches and squash commits)
 - **Issues** — read/write (label transitions, pinned-state comments, `HITL_HANDLE` @-mentions)
-- **Pull requests** — read/write (opening PRs, and merging when `AUTO_MERGE=on`)
+- **Pull requests** — read/write (opening PRs and posting PR comments; the orchestrator never merges PRs — humans drive the merge)
 - **Metadata** — read-only (issue / PR enumeration)
-- **Checks** — read-only, only required when `AUTO_MERGE=on`. Without it, Actions-only PRs report `check_state='none'` and park indefinitely waiting for a human even when CI is green.
 
 Create the PAT at <https://github.com/settings/personal-access-tokens>.
 
@@ -88,7 +87,7 @@ The first token of each role spec selects the backend (`codex` / `claude`); any 
 
 When the reviewer agent emits `VERDICT: APPROVED`, `_handle_validating` runs the configured `VERIFY_COMMANDS` in the per-issue worktree **before** posting the approval comment, squashing, seeding watermarks, or relabeling to `documenting` (the final-docs hop that precedes `in_review`). A clean run advances the issue as usual; any failure parks the issue on `validating` with `awaiting_human=True` and a typed `park_reason`, so an operator can fix the breakage and resume.
 
-The verify gate is the **first** gate after the reviewer agent. GitHub CI remains the later auto-merge gate consulted by `_handle_in_review` — the verify gate does not replace it, it catches regressions locally so an obviously-broken branch never reaches the PR-side merge path.
+The verify gate is the first gate after the reviewer agent — it catches regressions locally so an obviously-broken branch never reaches `in_review`. GitHub CI still runs against the PR; the human merging the PR is the consumer of CI's verdict, since the orchestrator never merges from `in_review` itself.
 
 The verify shell shares the agent's environment filter (`agents._filter_agent_env`, called with `allow_provider_auth=False`): GitHub-token aliases (`GITHUB_TOKEN`, `GH_TOKEN`, …), production-secret-shaped vars (anything matching `*_TOKEN` / `*_KEY` / `*_SECRET` / `*_PASSWORD` / `*_PAT` / `*_CREDENTIAL`, plus the bare names `TOKEN` / `KEY` / `SECRET` / `PASSWORD` / `PAT` / `CREDENTIAL`), credential-file locators (`*_TOKEN_FILE`, `*_KEY_FILE`, `*_SECRET_FILE`, `*_PASSWORD_FILE`, `*_CREDENTIAL_FILE`, `*_CREDENTIALS`, `*_CREDENTIALS_FILE`, plus bare `TOKEN_FILE` / `CREDENTIALS` / `CREDENTIALS_FILE`), write-credential locators (`SSH_AUTH_SOCK`, `SSH_ASKPASS`, `GIT_ASKPASS`, `GIT_SSH_COMMAND` — these aren't secret-shaped but let the subprocess push or authenticate as the operator), AND the agent's own provider-auth keys (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`) are **not** inherited from the orchestrator process. The provider-key strip is stricter than the agent-subprocess case: the agent CLI needs its provider key to reach its model, but a verify command runs operator-configured shell against agent-produced code, and a hostile dependency reading `$ANTHROPIC_API_KEY` would gain billable access to the operator's model account. The locator strip explicitly covers `ORCHESTRATOR_TOKEN_FILE`, `GOOGLE_APPLICATION_CREDENTIALS`, and `AWS_SHARED_CREDENTIALS_FILE` — the verify shell runs as the same OS user, so leaving the pointer in env would let a hostile dependency `cat` the target file.
 
@@ -107,7 +106,7 @@ The park comment names the failing command, its exit code (or timeout), and a re
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `verify_failed`         | Command exited non-zero.                                                                                                                            |
 | `verify_timeout`        | Command exceeded `VERIFY_TIMEOUT`.                                                                                                                  |
-| `verify_dirty`          | Command exited 0 but left uncommitted changes in the worktree; handing off a dirty tree would let AUTO_MERGE land state the dev never committed.    |
+| `verify_dirty`          | Command exited 0 but left uncommitted changes in the worktree; handing off a dirty tree would advertise the PR as ready for human merge with state the dev never committed. |
 | `verify_head_changed`   | Command exited 0 and the tree is clean but the command moved `HEAD` (e.g. ran `git commit` on its own). The subsequent squash + force-push would otherwise publish an unreviewed commit; the park comment surfaces the before / after SHAs so the operator can inspect, keep, or revert. |
 
 Output is redacted via `_redact_secrets` **before** truncation so a secret straddling the cut cannot leak a partial value.
@@ -161,14 +160,13 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 | `AGENT_GIT_NAME`   | `agent-orchestrator`                          | `GIT_AUTHOR_NAME`/`GIT_COMMITTER_NAME` injected into agent spawns                                             |
 | `AGENT_GIT_EMAIL`  | `agent-orchestrator@users.noreply.github.com` | `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL` injected into agent spawns                                           |
 
-## Auto-merge
+## In-review behavior
+
+The orchestrator is permanently manual-merge-only: humans click Merge. `_handle_in_review` routes fresh PR feedback to `fixing`, pings the HITL handles once per head SHA for a mergeable PR, and parks awaiting human attention for an unmergeable PR.
 
 | Variable                     | Default | Purpose                                                                                              |
 | ---------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `AUTO_MERGE`                 | `off`   | merge approved PRs (green CI + mergeable) from `in_review`; flip to `on` once dogfooded             |
 | `IN_REVIEW_DEBOUNCE_SECONDS` | `600`   | quiet window the `fixing` stage honours before resuming the dev on PR feedback. Newer comments arriving while already labeled `fixing` reset the window; `_handle_in_review` itself routes fresh feedback to `fixing` immediately and does NOT apply the debounce |
-
-`AUTO_MERGE=on` requires the `Checks: Read` permission on the PAT — without it the orchestrator sees `check_state='none'` for Actions-only PRs and parks awaiting a human even when CI is green.
 
 ## Observability
 
@@ -415,7 +413,7 @@ Each `--once` invocation is a fresh Python process and reads the current `.env` 
 
 | Setting | When the change takes effect |
 | ------- | ---------------------------- |
-| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `AUTO_MERGE`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `EVENT_LOG_PATH`, `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
+| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `EVENT_LOG_PATH`, `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
 | `ANALYTICS_DB_URL` | next `python -m orchestrator.analytics.sync` invocation. The polling loop does not read this setting, so changing it does not require restarting the long-running orchestrator |
 | `MAX_PARALLEL_ISSUES_PER_REPO`, `MAX_PARALLEL_ISSUES_GLOBAL` | next Python start. Per-`REPOS` `parallel_limit` overrides take precedence over `MAX_PARALLEL_ISSUES_PER_REPO`, so editing the default only affects entries that omit the fifth field |
 | `DEV_AGENT`, `DECOMPOSE_AGENT` | next Python start, **except** for issues whose pinned state already names a `dev_agent` / `decomposer_agent` / `question_agent` — those keep the pinned spec until the issue reaches `done` or `rejected` (`DECOMPOSE_AGENT` also seeds the question stage on first spawn) |
@@ -427,5 +425,5 @@ Each `--once` invocation is a fresh Python process and reads the current `.env` 
 
 | Label | Purpose |
 | ----- | ------- |
-| `hold_base_sync` | Apply to an issue to pause per-tick base merges, `in_review` auto-merge/unmergeable handling, and `resolving_conflict` base merges. Remove it when prerequisite PRs have landed; the next tick performs the accumulated base sync once. |
+| `hold_base_sync` | Apply to an issue to pause per-tick base merges, `in_review` HITL ping / unmergeable park, and `resolving_conflict` base merges. Remove it when prerequisite PRs have landed; the next tick performs the accumulated base sync once. |
 | `backlog` | Apply to an issue (typically at creation) to keep the orchestrator from picking it up. The dispatcher skips the issue entirely while the label is present; remove the label to release the issue for processing. |

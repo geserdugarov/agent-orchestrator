@@ -2,16 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """In-review stage handler and its PR-side primitives.
 
-Owns `_handle_in_review` plus the in_review-private helpers: the transient
-park-reason set (`_TRANSIENT_PARK_REASONS`), the quiet auto-merge gate
-re-check (`_auto_merge_gates_pass`), the first-tick watermark migration
-(`_seed_legacy_in_review_watermarks`), the cross-namespace watermark
-ratchet (`_bump_in_review_watermarks`), and the debounce timestamp
-accessor (`_comment_created_at`).
+Owns `_handle_in_review` plus the in_review-private helpers: the
+first-tick watermark migration (`_seed_legacy_in_review_watermarks`),
+the cross-namespace watermark ratchet (`_bump_in_review_watermarks`),
+and the debounce timestamp accessor (`_comment_created_at`).
 
-`_handle_resolving_conflict` lives in `stages/conflicts.py` -- the
-in_review handler only routes TO it (via the workflow label flip) and
-does not import it directly.
+The handler is permanently manual-merge-only: humans drive the merge.
+Approved + mergeable PRs (no standing human CHANGES_REQUESTED on the
+current head) get a one-shot HITL ping per head SHA; unmergeable PRs
+park awaiting human attention; external merges/closes terminate the
+issue. The orchestrator never calls `gh.merge_pr` from here, never
+routes to `resolving_conflict` from a mergeability gate, and never
+emits `merge_attempt` / orchestrator-initiated `pr_merged` events.
 
 ALL workflow-owned helpers (`_park_awaiting_human`, `_handle_dev_fix_result`,
 `_post_user_content_change_result`, `_resume_dev_with_text`, `_now_iso`,
@@ -39,13 +41,6 @@ from ..github import (
     PinnedState,
     issue_has_label,
 )
-
-
-# Park reasons that auto-resolve when the underlying GitHub state changes
-# (CI rerun goes green, rebase resolves a conflict, branch protection drops
-# a stale required review). Other parks (`missing_pr_number`, dev-fix
-# failures) need explicit human action to unstick.
-_TRANSIENT_PARK_REASONS = frozenset({"failed_checks", "unmergeable"})
 
 
 def _comment_created_at(comment) -> Optional[datetime]:
@@ -79,12 +74,13 @@ def _bump_in_review_watermarks(
     """Push the in_review watermarks past anything we've seen so far AND past
     any park comment we just wrote on the issue thread.
 
-    Without this, a park-and-write at in_review (failed checks, unmergeable,
-    failed dev fix) leaves `pr_last_comment_id` lagging behind the orchestrator
-    park message it just posted; the next tick scans the issue thread from the
-    older watermark and resumes the dev agent on the orchestrator's own HITL
-    ping. The ratchet is one-way (only ever increases) so callers can pass
-    just-consumed comments or omit them and let `latest_comment_id` carry it.
+    Without this, a park-and-write at in_review (unmergeable PR, failed
+    dev fix) leaves `pr_last_comment_id` lagging behind the orchestrator
+    park message it just posted; the next tick scans the issue thread
+    from the older watermark and routes the orchestrator's own HITL ping
+    as fresh PR feedback to `fixing`. The ratchet is one-way (only ever
+    increases) so callers can pass just-consumed comments or omit them
+    and let `latest_comment_id` carry it.
     """
     candidates: list[int] = []
     cur_issue_wm = state.get("pr_last_comment_id")
@@ -120,34 +116,6 @@ def _bump_in_review_watermarks(
         state.set("pr_last_review_summary_id", max(summary_candidates))
 
 
-def _auto_merge_gates_pass(
-    gh: GitHubClient, pr, state: PinnedState
-) -> bool:
-    """All conditions required for auto-merge, evaluated quietly (no parking,
-    no PR comments, no state writes).
-
-    Used by the transient-park recovery path: when an awaiting_human issue
-    re-enters `_handle_in_review` with no new comments, we want to detect a
-    silently-resolved condition (CI now green, rebase made the PR mergeable)
-    and unstick the merge without re-posting the park message every tick.
-    Mirrors the inline gate sequence in `_handle_in_review` exactly so the
-    two cannot drift.
-    """
-    head_sha = pr.head.sha
-    if gh.pr_has_changes_requested(pr, head_sha=head_sha):
-        return False
-    approved_for_head = (
-        state.get("agent_approved_sha") == head_sha
-        or gh.pr_is_approved(pr, head_sha=head_sha)
-    )
-    if not approved_for_head:
-        return False
-    mergeable = gh.pr_is_mergeable(pr)
-    if mergeable is None or not mergeable:
-        return False
-    return gh.pr_combined_check_state(pr) == "success"
-
-
 def _seed_legacy_in_review_watermarks(
     gh: GitHubClient, issue: Issue, pr, state: PinnedState
 ) -> None:
@@ -162,8 +130,8 @@ def _seed_legacy_in_review_watermarks(
     all unset. Without this seed, the next tick would call
     `comments_after(..., None)` on each surface and treat every historical
     comment -- including the orchestrator's own pickup / PR-opened / approval
-    messages -- as fresh PR feedback once the debounce expires, resuming the
-    dev and bouncing the PR back to validating even with `AUTO_MERGE` off.
+    messages -- as fresh PR feedback once the debounce expires, routing the
+    issue to `fixing` over its own historical messages.
 
     Tests that want to drive `_handle_in_review` against pre-existing comments
     seed the relevant watermark explicitly so this helper is a no-op for them.
@@ -173,8 +141,8 @@ def _seed_legacy_in_review_watermarks(
     # 0 in the empty case is what stops the migration from re-firing on the
     # next tick: if we left the watermark unset, the FIRST human inline /
     # summary review added afterward would be consumed by a re-run of this
-    # seed before `_handle_in_review` builds `new_comments`, so AUTO_MERGE
-    # could land the PR over that first review.
+    # seed before `_handle_in_review` builds `new_comments`, so the fresh
+    # feedback route would silently swallow that first review.
     seeded = False
     if (
         state.get("pr_last_comment_id") is None
@@ -219,10 +187,12 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     feedback on any of the four surfaces (issue thread, PR conversation,
     inline review, review summary) records pending-fix metadata in pinned
     state and flips the label to `fixing` immediately -- the dev resume and
-    hand-back-to-`validating` cycle moves to the `fixing` handler. Auto-
-    merge is gated by `AUTO_MERGE` (default off); without it, the loop only
-    handles state transitions and feedback hand-off -- humans still click
-    Merge.
+    hand-back-to-`validating` cycle moves to the `fixing` handler. The
+    orchestrator never merges from here: humans drive the merge. An
+    approved + mergeable PR (no standing human CHANGES_REQUESTED on
+    the current head) earns a one-shot HITL ping per head SHA so the
+    human knows the PR is ready; an unmergeable PR parks awaiting
+    human attention (no `resolving_conflict` route from this stage).
 
     User-content drift (a human edited the issue title/body while the PR
     was open) takes the dev-resume path here; both a pushed fix and a
@@ -290,8 +260,8 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # fall back to `last_action_comment_id` (the id of a prior park
     # comment), which sits ABOVE any human "do not merge yet" comment
     # posted earlier during implementing/validating; that human comment
-    # would then never surface and AUTO_MERGE could land the PR over it.
-    # Treat 0 as a valid "scan from the beginning" watermark.
+    # would then never surface as fresh PR feedback. Treat 0 as a valid
+    # "scan from the beginning" watermark.
     issue_wm = state.get("pr_last_comment_id")
     if issue_wm is None:
         issue_wm = state.get("last_action_comment_id")
@@ -320,23 +290,8 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # us is a comment, a relabel, or closing/merging the PR. The first two
     # land in `new_comments`; the last two are caught by the `pr_status`
     # branches above.
-    #
-    # Exception: when the park reason is transient (failed checks or PR not
-    # yet mergeable) and `AUTO_MERGE` is on, re-evaluate the gates here. A
-    # human who reruns CI green or rebases the branch without leaving a
-    # comment would otherwise leave the issue stuck in_review forever.
     if state.get("awaiting_human") and not new_comments:
-        if not (
-            config.AUTO_MERGE
-            and state.get("park_reason") in _TRANSIENT_PARK_REASONS
-        ):
-            return
-        if not _auto_merge_gates_pass(gh, pr, state):
-            return  # still stuck, do not re-post the park comment
-        # Conditions resolved: clear the park flags and fall through to the
-        # auto-merge block, which re-checks the same gates and merges.
-        state.set("awaiting_human", False)
-        state.set("park_reason", None)
+        return
 
     if new_comments:
         # Hand the fresh PR feedback off to the `fixing` stage instead of
@@ -504,8 +459,8 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             # The drift invalidated the prior validation either way: the
             # reviewer agent approved against the OLD requirements, so
             # its `agent_approved_sha` snapshot is stale and
-            # `review_round` must reset before AUTO_MERGE is allowed to
-            # land the PR. Both outcomes bounce DIRECTLY back to
+            # `review_round` must reset before the issue can earn a
+            # fresh approval. Both outcomes bounce DIRECTLY back to
             # `validating` so the reviewer re-evaluates against the
             # updated body; docs do not run here (the single docs pass
             # is deferred to the final-docs handoff after reviewer
@@ -518,216 +473,79 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
         _wf.log.info(
-            "issue=#%d has %r; holding in_review auto-merge/base-sync gates",
+            "issue=#%d has %r; holding in_review HITL ping",
             issue.number, BASE_SYNC_HOLD_LABEL,
         )
         return
 
-    # No new comments. The two AUTO_MERGE branches diverge on what
-    # "unmergeable" means:
-    #
-    #   * AUTO_MERGE off: legacy fallback path. Humans drive the merge,
-    #     so an unmergeable PR just needs visibility -- park awaiting
-    #     human regardless of approval state. Unauthenticated humans
-    #     re-approve as part of fixing the unmergeable state, so gating
-    #     the legacy park on approval would silently hide the unmergeable
-    #     condition for any PR that hasn't been re-approved yet.
-    #
-    #   * AUTO_MERGE on: the resolving_conflict route REPLACES the old
-    #     unmergeable park, which only fired AFTER the changes-requested
-    #     and approval gates. Resuming dev work for an unapproved PR (or
-    #     one carrying a standing human CHANGES_REQUESTED) would push
-    #     unreviewed work past a human veto, so the gates run first and
-    #     the unmergeable check is gated behind them.
-    if not config.AUTO_MERGE:
-        mergeable = gh.pr_is_mergeable(pr)
-        if mergeable is None:
-            return  # GitHub still computing; try next tick
-        if not mergeable:
-            _wf._park_awaiting_human(
-                gh, issue, state,
-                f"{config.HITL_MENTIONS} PR #{pr_number} is not mergeable "
-                "(branch protection, conflicts, or out-of-date base); "
-                "manual merge needed.",
-                reason="unmergeable",
-            )
-            state.set("park_reason", "unmergeable")
-            _bump_in_review_watermarks(gh, issue, state)
-            gh.write_pinned_state(issue, state)
-            return
-        # mergeable: humans drive the merge. Ping HITL handles once per
-        # head SHA so the human knows the PR is ready. De-duplication is
-        # keyed on `ready_ping_sha` (the head we pinged for); a new commit
-        # pushed onto the branch shifts pr.head.sha and re-pings, while
-        # repeated ticks on the same head stay silent. Deliberately do NOT
-        # set `awaiting_human` -- the handler must still react to PR
-        # comments / external merge / a later unmergeable transition.
-        #
-        # Deliberately NOT calling `_bump_in_review_watermarks` here: that
-        # helper reads `gh.latest_comment_id(issue)`, which could include
-        # a human issue/PR-conversation comment that landed between the
-        # earlier comment scan and this point. Bumping the watermark past
-        # an unobserved human comment would silently swallow it -- the
-        # next tick's `comments_after` would skip it and the dev would
-        # never see the feedback. The ping is recorded in
-        # `orchestrator_comment_ids` by `_post_issue_comment`, so the
-        # next tick's id-set filter excludes it from `new_issue_side`
-        # without needing the watermark to move; a concurrent human
-        # comment naturally surfaces below the unchanged watermark.
-        head_sha = pr.head.sha
-        if state.get("ready_ping_sha") != head_sha:
-            _wf._post_issue_comment(
-                gh, issue, state,
-                f":bell: {config.HITL_MENTIONS} PR #{pr_number} is ready "
-                "for review/merge.",
-            )
-            state.set("ready_ping_sha", head_sha)
-            gh.write_pinned_state(issue, state)
+    # Manual-merge-only: humans drive the merge. An unmergeable PR parks
+    # awaiting human regardless of approval state -- the orchestrator
+    # never routes from here to `resolving_conflict` and never calls
+    # `gh.merge_pr`. A mergeable PR earns a one-shot HITL ping per head
+    # SHA so the human knows the PR is ready.
+    mergeable = gh.pr_is_mergeable(pr)
+    if mergeable is None:
+        return  # GitHub still computing; try next tick
+    if not mergeable:
+        _wf._park_awaiting_human(
+            gh, issue, state,
+            f"{config.HITL_MENTIONS} PR #{pr_number} is not mergeable "
+            "(branch protection, conflicts, or out-of-date base); "
+            "manual merge needed.",
+            reason="unmergeable",
+        )
+        state.set("park_reason", "unmergeable")
+        _bump_in_review_watermarks(gh, issue, state)
+        gh.write_pinned_state(issue, state)
         return
-
-    # AUTO_MERGE on. Run the original gating order: changes-requested
-    # and approval first, then mergeable. This matches the pre-rollout
-    # behavior and ensures the resolving_conflict route only fires for
-    # PRs that would have hit the old unmergeable park.
+    # mergeable: humans drive the merge. The ping advertises the PR as
+    # "ready for review/merge", so it must only fire when the PR is
+    # actually approved AND carries no standing human veto on the
+    # current head; otherwise we would be inviting a manual merge over
+    # a stale or rejected commit. Run the same gates the previous
+    # auto-merge path used (changes-requested first, then approval),
+    # but stop short of merging -- a human still clicks Merge.
     head_sha = pr.head.sha
-    # A human CHANGES_REQUESTED on the current head vetoes auto-merge
-    # regardless of how the reviewer agent voted. Without this check, the
-    # `agent_approved_sha == head_sha` short-circuit below would let the
-    # orchestrator merge over a standing human objection on the same SHA.
     if gh.pr_has_changes_requested(pr, head_sha=head_sha):
         return
     # Approval can come from either side: the reviewer agent persists
     # `agent_approved_sha` for the head it OK'd (the agent posts an issue
-    # comment, not a real PR review, so pr_is_approved alone would never be
-    # True for the agent flow), OR a human/bot submitted a real APPROVED
-    # review on the *current* head SHA. Stale human approvals on older
-    # commits do NOT count -- a commit pushed after a human approval must
-    # not auto-merge unless the human re-approves.
+    # comment, not a real PR review, so pr_is_approved alone would never
+    # be True for the agent flow), OR a human/bot submitted a real
+    # APPROVED review on the *current* head SHA. Stale human approvals
+    # on older commits do NOT count -- a commit pushed after a human
+    # approval must not advertise the PR as ready unless the human
+    # re-approves.
     approved_for_head = (
         state.get("agent_approved_sha") == head_sha
         or gh.pr_is_approved(pr, head_sha=head_sha)
     )
     if not approved_for_head:
         return
-    mergeable = gh.pr_is_mergeable(pr)
-    if mergeable is None:
-        return  # GitHub still computing; try next tick
-    if pr.head.sha != head_sha:
-        # `pr_is_mergeable` calls `pr.update()` to resolve a `None`
-        # mergeable, which refreshes `pr.head.sha`. The approval and
-        # changes-requested gates above ran against the earlier head_sha,
-        # so a commit landing during the refresh would otherwise let the
-        # subsequent failed-checks branch park on the WRONG sha or, worse,
-        # let an unreviewed head reach the merge call. Bail and re-evaluate
-        # all gates against the new head on the next tick.
-        return
-    if not mergeable:
-        # Approved + no human veto + still unmergeable: route to
-        # `resolving_conflict` for an automated merge-of-base /
-        # conflict-resolve attempt. PyGithub does not distinguish a
-        # content conflict from branch-protection / out-of-date-base
-        # on `mergeable=False`; we treat any unmergeable PR here as
-        # eligible. If the underlying cause is branch protection, the
-        # merge attempt is a no-op fast-forward and the `conflict_round`
-        # counter still ticks (so a perpetually-unmergeable PR cannot
-        # loop in_review <-> resolving_conflict forever).
-        #
-        # Initialize `conflict_round` only when absent: a PR that bounces
-        # back to `in_review` with the counter already set must NOT
-        # reset it -- the cap would be ineffective if every re-entry
-        # zeroed the counter, and a branch-protection-only PR would
-        # ping-pong between handlers indefinitely.
-        if state.get("conflict_round") is None:
-            state.set("conflict_round", 0)
-        try:
-            _wf._post_pr_comment(
-                gh, int(pr_number), state,
-                f":mag: PR is not mergeable; orchestrator is attempting "
-                f"auto-resolution by merging "
-                f"`{spec.remote_name}/{spec.base_branch}` "
-                "into the branch (label: `resolving_conflict`).",
-            )
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not post conflict-resolution notice to "
-                "PR #%s", issue.number, pr_number,
-            )
-        _bump_in_review_watermarks(gh, issue, state)
-        gh.emit_event(
-            "conflict_round",
-            issue_number=issue.number,
-            stage="in_review",
-            pr_number=int(pr_number),
-            sha=head_sha,
-            action="entered",
-            conflict_round=int(state.get("conflict_round") or 0),
-            review_round=int(state.get("review_round") or 0),
-            retry_count=state.get("retry_count"),
-        )
-        gh.set_workflow_label(issue, "resolving_conflict")
-        gh.write_pinned_state(issue, state)
-        return
-    check = gh.pr_combined_check_state(pr)
-    if check == "pending":
-        return
-    if check in ("failure", "none"):
-        # 'none' means no checks at all -- ambiguous, refuse to merge.
-        _wf._park_awaiting_human(
+    # Ping HITL handles once per head SHA so the human knows the PR is
+    # ready. De-duplication is keyed on `ready_ping_sha` (the head we
+    # pinged for); a new commit pushed onto the branch shifts
+    # pr.head.sha and re-pings, while repeated ticks on the same head
+    # stay silent. Deliberately do NOT set `awaiting_human` -- the
+    # handler must still react to PR comments / external merge / a
+    # later unmergeable transition.
+    #
+    # Deliberately NOT calling `_bump_in_review_watermarks` here: that
+    # helper reads `gh.latest_comment_id(issue)`, which could include
+    # a human issue/PR-conversation comment that landed between the
+    # earlier comment scan and this point. Bumping the watermark past
+    # an unobserved human comment would silently swallow it -- the
+    # next tick's `comments_after` would skip it and the dev would
+    # never see the feedback. The ping is recorded in
+    # `orchestrator_comment_ids` by `_post_issue_comment`, so the
+    # next tick's id-set filter excludes it from `new_issue_side`
+    # without needing the watermark to move; a concurrent human
+    # comment naturally surfaces below the unchanged watermark.
+    if state.get("ready_ping_sha") != head_sha:
+        _wf._post_issue_comment(
             gh, issue, state,
-            f"{config.HITL_MENTIONS} PR #{pr_number} checks are {check!r}; "
-            "refusing to auto-merge.",
-            reason="failed_checks",
+            f":bell: {config.HITL_MENTIONS} PR #{pr_number} is ready "
+            "for review/merge.",
         )
-        state.set("park_reason", "failed_checks")
-        _bump_in_review_watermarks(gh, issue, state)
+        state.set("ready_ping_sha", head_sha)
         gh.write_pinned_state(issue, state)
-        return
-
-    # Approved + mergeable + green: SHA-pinned merge to the head we GATED
-    # on, NOT the (possibly-refreshed) `pr.head.sha`. `pr_is_mergeable`
-    # may have refreshed `pr.head.sha` above; using that value here would
-    # let a commit landing during the refresh slip through past the
-    # approval and changes-requested gates. The SHA-shift check above
-    # already bails when this happens, but pinning to `head_sha` here is
-    # belt-and-suspenders: GitHub returns 409 for a SHA mismatch so a
-    # missed shift cannot merge an unreviewed head.
-    merged_ok = gh.merge_pr(pr, sha=head_sha)
-    gh.emit_event(
-        "merge_attempt",
-        issue_number=issue.number,
-        stage="in_review",
-        pr_number=int(pr_number),
-        sha=head_sha,
-        method="squash",
-        result="success" if merged_ok else "failed",
-        check_state=check,
-        review_round=int(state.get("review_round") or 0),
-        conflict_round=state.get("conflict_round"),
-        retry_count=state.get("retry_count"),
-    )
-    if not merged_ok:
-        # 405/409/422 -- next tick will re-evaluate; if it still won't merge,
-        # the GH UI shows why.
-        return
-    state.set("merged_at", _wf._now_iso())
-    gh.set_workflow_label(issue, "done")
-    gh.write_pinned_state(issue, state)
-    gh.emit_event(
-        "pr_merged",
-        issue_number=issue.number,
-        stage="in_review",
-        pr_number=int(pr_number),
-        sha=head_sha,
-        merge_method="squash",
-        check_state=check,
-        review_round=int(state.get("review_round") or 0),
-        conflict_round=state.get("conflict_round"),
-        retry_count=state.get("retry_count"),
-    )
-    try:
-        issue.edit(state="closed")
-    except Exception:
-        _wf.log.exception(
-            "issue=#%s could not close after auto-merge", issue.number,
-        )
-    _wf._cleanup_terminal_branch(gh, spec, issue.number)
