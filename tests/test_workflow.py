@@ -2366,6 +2366,24 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         self.assertIn((7, "resolving_conflict"), self.gh.label_history)
 
+    def test_pr_having_documenting_behind_also_routes(self) -> None:
+        # `documenting` is the brief final-docs hop between reviewer
+        # approval and `in_review`. The handler only checks ahead/behind
+        # against the PR branch, not the base, so a sibling-PR merge
+        # during the docs pass must be caught by the pre-tick detour --
+        # otherwise the docs commit would land on a stale base and only
+        # the next in_review tick would auto-rebase it. `hold_base_sync`
+        # must remain the only label that gates this auto-rebase.
+        from unittest.mock import MagicMock
+        self.gh.add_issue(make_issue(7, label="documenting"))
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self._add_pr()
+        git_mock = MagicMock(return_value=self._git_result(stdout="2\n"))
+        with patch.object(worktrees, "_worktree_dirty_files", return_value=[]), \
+             patch.object(worktrees, "_git", git_mock):
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+        self.assertIn((7, "resolving_conflict"), self.gh.label_history)
+
     def test_hold_base_sync_label_skips_pr_refresh_detour(self) -> None:
         from unittest.mock import MagicMock
         issue = make_issue(7, label="in_review")
@@ -5118,6 +5136,21 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         # -- otherwise the parallel tick path would route it through the
         # single-threaded family bucket and defeat fan-out concurrency.
         self.assertNotIn("documenting", workflow._FAMILY_AWARE_LABELS)
+
+    def test_documenting_label_is_in_pr_refresh_detour_set(self) -> None:
+        # Behind-base PR-having worktrees need to be routed through
+        # `resolving_conflict` by the pre-tick refresh. The brief final-
+        # docs hop is PR-having (its sibling labels validating /
+        # in_review / fixing already qualify), and the documenting
+        # handler only checks ahead/behind vs. the PR branch -- not
+        # base -- so without the detour a sibling-PR merge during the
+        # docs pass would leave the docs commit on a stale base and
+        # only the next in_review tick would catch it. Including the
+        # label here is what keeps `hold_base_sync` as the only label
+        # that gates auto-rebase for a PR-stage worktree.
+        from orchestrator.worktrees import _PR_REFRESH_DETOUR_LABELS
+
+        self.assertIn("documenting", _PR_REFRESH_DETOUR_LABELS)
 
     def test_dispatcher_routes_documenting_to_handler(self) -> None:
         gh = FakeGitHubClient()

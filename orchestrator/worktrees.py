@@ -1587,7 +1587,8 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
       the local worktree onto `origin/<base>` -- no remote yet, so there
       is nothing to push.
 
-    * **PR-having worktrees** (validating / in_review / fixing): rebasing
+    * **PR-having worktrees** (validating / documenting / in_review /
+      fixing): rebasing
       locally WITHOUT pushing would diverge local HEAD from `pr.head.sha` and
       break the validating reviewer (it reads local HEAD, so it would
       snapshot `agent_approved_sha` to a SHA that isn't on the PR),
@@ -1651,14 +1652,23 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
 
 # Workflow labels the pre-tick refresh is willing to detour into
 # `resolving_conflict` when the PR worktree is behind base. Validating,
-# in_review, and fixing are the long-lived PR-stage labels: validating may
-# run the reviewer again, in_review is parked waiting for AUTO_MERGE /
-# human merge, and fixing is between in_review and validating while a PR
-# feedback round is being addressed. `resolving_conflict` itself is
-# excluded -- the handler runs this tick regardless and will do the rebase
-# anyway. Other labels mean either no PR yet (pre-PR path applies instead)
-# or terminal (done/rejected, nothing to refresh).
-_PR_REFRESH_DETOUR_LABELS = frozenset({"validating", "in_review", "fixing"})
+# documenting, in_review, and fixing are the PR-stage labels: validating
+# may run the reviewer again, documenting is the brief final-docs hop
+# between reviewer approval and `in_review`, in_review is parked waiting
+# for AUTO_MERGE / human merge, and fixing is between in_review and
+# validating while a PR feedback round is being addressed. Documenting
+# only checks ahead/behind vs. the PR branch (not the base) itself, so
+# without this detour a sibling-PR merge during the docs pass would
+# leave the docs commit on a stale base and only the next in_review
+# tick would catch it; including the label here means only the
+# `hold_base_sync` control label gates a PR-stage worktree's auto-
+# rebase. `resolving_conflict` itself is excluded -- the handler runs
+# this tick regardless and will do the rebase anyway. Other labels
+# mean either no PR yet (pre-PR path applies instead) or terminal
+# (done/rejected, nothing to refresh).
+_PR_REFRESH_DETOUR_LABELS = frozenset(
+    {"validating", "documenting", "in_review", "fixing"},
+)
 
 
 def _sync_worktree_with_base(
@@ -1667,7 +1677,8 @@ def _sync_worktree_with_base(
     """Bring a single per-issue worktree up to date with `origin/<base>`.
 
     Pre-PR: rebase onto `origin/<base>` directly. PR-having + behind base +
-    label in {validating, in_review, fixing}: detour the issue to
+    label in {validating, documenting, in_review, fixing}: detour the
+    issue to
     `resolving_conflict` so the existing handler does rebase + push +
     relabel back to `validating` (every pushed conflict-resolution path
     hands straight back to `validating` so the reviewer re-runs against
@@ -1807,7 +1818,8 @@ def _route_pr_worktree_to_resolving_conflict(
     Skips the detour when:
 
     * The label is not one this refresh knows how to drive into
-      `resolving_conflict` (only `validating` / `in_review` / `fixing`);
+      `resolving_conflict` (only `validating` / `documenting` /
+      `in_review` / `fixing`);
       the `resolving_conflict` label itself is also skipped because the
       handler runs this tick anyway and will do the rebase regardless.
 
