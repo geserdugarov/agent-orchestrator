@@ -19,11 +19,12 @@ In_review reacts to PR state (merged/closed) and hands fresh PR
 feedback (any of the four comment surfaces) off to the `fixing` stage
 by recording pending-fix metadata in pinned state and flipping the
 label -- no debounce wait, no dev spawn from in_review itself. The
-orchestrator never merges from in_review: humans drive the merge. An
-approved + mergeable PR (real GitHub APPROVED review on the current
-head, no standing CHANGES_REQUESTED) earns a one-shot HITL ping per
-head SHA; an unmergeable PR parks awaiting human attention. Other
-labels are observed and logged as not-yet-implemented.
+orchestrator never merges from in_review: humans drive the merge. A
+mergeable PR whose current head completed the reviewer-approved
+final-docs handoff (or carries a real GitHub APPROVED review) and has
+no standing CHANGES_REQUESTED earns a one-shot HITL ping per head SHA;
+an unmergeable PR parks awaiting human attention. Other labels are
+observed and logged as not-yet-implemented.
 """
 from __future__ import annotations
 

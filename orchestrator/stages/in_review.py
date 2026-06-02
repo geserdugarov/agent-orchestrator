@@ -8,12 +8,13 @@ the cross-namespace watermark ratchet (`_bump_in_review_watermarks`),
 and the debounce timestamp accessor (`_comment_created_at`).
 
 The handler is permanently manual-merge-only: humans drive the merge.
-Approved + mergeable PRs (no standing human CHANGES_REQUESTED on the
-current head) get a one-shot HITL ping per head SHA; unmergeable PRs
-park awaiting human attention; external merges/closes terminate the
-issue. The orchestrator never calls `gh.merge_pr` from here, never
-routes to `resolving_conflict` from a mergeability gate, and never
-emits `merge_attempt` / orchestrator-initiated `pr_merged` events.
+Agent-approved + documented PR heads (or formally GitHub-approved
+heads) that are mergeable and carry no standing human CHANGES_REQUESTED
+get a one-shot HITL ping per head SHA; unmergeable PRs park awaiting
+human attention; external merges/closes terminate the issue. The
+orchestrator never calls `gh.merge_pr` from here, never routes to
+`resolving_conflict` from a mergeability gate, and never emits
+`merge_attempt` / orchestrator-initiated `pr_merged` events.
 
 ALL workflow-owned helpers (`_park_awaiting_human`, `_handle_dev_fix_result`,
 `_post_user_content_change_result`, `_resume_dev_with_text`, `_now_iso`,
@@ -178,6 +179,18 @@ def _seed_legacy_in_review_watermarks(
         gh.write_pinned_state(issue, state)
 
 
+def _final_docs_handoff_completed_for_head(
+    state: PinnedState, head_sha: str,
+) -> bool:
+    """True when the reviewer-approved final-docs handoff covers `head_sha`."""
+    if not head_sha:
+        return False
+    return (
+        state.get("docs_checked_sha") == head_sha
+        and state.get("docs_verdict") in ("updated", "no_change")
+    )
+
+
 def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     """Drive an in_review issue toward done / rejected, or hand fresh PR
     feedback off to the `fixing` stage.
@@ -188,11 +201,13 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     inline review, review summary) records pending-fix metadata in pinned
     state and flips the label to `fixing` immediately -- the dev resume and
     hand-back-to-`validating` cycle moves to the `fixing` handler. The
-    orchestrator never merges from here: humans drive the merge. An
-    approved + mergeable PR (no standing human CHANGES_REQUESTED on
-    the current head) earns a one-shot HITL ping per head SHA so the
-    human knows the PR is ready; an unmergeable PR parks awaiting
-    human attention (no `resolving_conflict` route from this stage).
+    orchestrator never merges from here: humans drive the merge. A
+    mergeable PR whose current head completed the reviewer-approved
+    final-docs handoff (or carries a real GitHub APPROVED review), with
+    no standing human CHANGES_REQUESTED on that head, earns a one-shot
+    HITL ping per head SHA so the human knows the PR is ready; an
+    unmergeable PR parks awaiting human attention (no `resolving_conflict`
+    route from this stage).
 
     User-content drift (a human edited the issue title/body while the PR
     was open) takes the dev-resume path here; both a pushed fix and a
@@ -478,10 +493,10 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # Manual-merge-only: humans drive the merge. An unmergeable PR parks
     # awaiting human regardless of approval state -- the orchestrator
     # never routes from here to `resolving_conflict` and never calls
-    # `gh.merge_pr`. An approved + mergeable PR (real GitHub APPROVED
-    # review on the current head, no standing CHANGES_REQUESTED) earns
-    # a one-shot HITL ping per head SHA so the human knows the PR is
-    # ready.
+    # `gh.merge_pr`. A mergeable PR earns a one-shot HITL ping per head
+    # SHA when either the agent-approved final-docs handoff covers that
+    # head OR GitHub carries a real APPROVED review on that head, and no
+    # standing CHANGES_REQUESTED veto exists.
     mergeable = gh.pr_is_mergeable(pr)
     if mergeable is None:
         return  # GitHub still computing; try next tick
@@ -498,21 +513,25 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         gh.write_pinned_state(issue, state)
         return
     # mergeable: humans drive the merge. The ping advertises the PR as
-    # "ready for review/merge", so it must only fire when the PR is
-    # actually approved AND carries no standing human veto on the
-    # current head; otherwise we would be inviting a manual merge over
-    # a stale or rejected commit. Gate the ping on the same changes-
-    # requested + approval checks any merge automation would have used,
-    # but stop short of merging -- the orchestrator is permanently
-    # manual-merge-only and a human still clicks Merge.
+    # "ready for review/merge", so it must only fire for a head the
+    # orchestrator has reviewer-approved and documented (or one a
+    # human/bot formally approved in GitHub) AND carries no standing
+    # human veto; otherwise we would be inviting a manual merge over a
+    # stale or rejected commit.
     head_sha = pr.head.sha
     if gh.pr_has_changes_requested(pr, head_sha=head_sha):
         return
-    # Approval gate: a real APPROVED review on the *current* head SHA.
-    # Stale human approvals on older commits do NOT count -- a commit
-    # pushed after a human approval must not advertise the PR as ready
-    # unless the human re-approves.
-    if not gh.pr_is_approved(pr, head_sha=head_sha):
+    # Approval gate: the final-docs pass records the exact head it
+    # checked after reviewer approval. If a later push changes the PR
+    # head, the docs marker no longer matches and the issue must bounce
+    # back through validating/documenting before it can ping again. A
+    # real GitHub APPROVED review on the current head remains a valid
+    # fallback for manually-driven review flows.
+    final_docs_ready = _final_docs_handoff_completed_for_head(state, head_sha)
+    github_approved = (
+        False if final_docs_ready else gh.pr_is_approved(pr, head_sha=head_sha)
+    )
+    if not (final_docs_ready or github_approved):
         return
     # Ping HITL handles once per head SHA so the human knows the PR is
     # ready. De-duplication is keyed on `ready_ping_sha` (the head we

@@ -113,15 +113,21 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh, _TEST_SPEC, 30,
         )
 
-    def test_in_review_mergeable_pings_human(self) -> None:
+    def test_in_review_mergeable_final_docs_handoff_pings_human(self) -> None:
         # PR mergeable: post a one-shot HITL ping so the human knows the
         # PR is ready, but stay open (no merge, no label flip, no
         # awaiting_human). The orchestrator is manual-merge-only -- it
         # never calls `gh.merge_pr` from in_review. The ping must mention
-        # every HITL handle so notifications fire even on a multi-handle
-        # deployment.
-        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
-        gh, issue = self._seed(pr=pr)
+        # every HITL handle so notifications fire even when the reviewer
+        # agent approved via comments rather than a formal GitHub review.
+        pr = self._open_pr(approved=False, mergeable=True, check_state="success")
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "docs_checked_sha": "cafe1234",
+                "docs_verdict": "no_change",
+            },
+        )
 
         with patch.object(config, "HITL_MENTIONS", "@alice @bob"):
             mocks = self._run(
@@ -155,11 +161,11 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNotNone(ping_id)
         self.assertIn(ping_id, data.get("orchestrator_comment_ids", []))
 
-    def test_in_review_mergeable_unapproved_does_not_ping(self) -> None:
+    def test_in_review_mergeable_without_approval_signal_does_not_ping(self) -> None:
         # The ping advertises the PR as ready for review/merge; firing it
-        # on a mergeable-but-unapproved PR would invite a manual merge
-        # over a commit no reviewer has signed off on. The gate must
-        # require a real APPROVED review on the current head.
+        # on a mergeable PR with neither a current final-docs handoff nor
+        # a formal GitHub approval would invite a manual merge over a
+        # commit no reviewer has signed off on.
         pr = self._open_pr(approved=False, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
 
@@ -178,12 +184,19 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_in_review_mergeable_changes_requested_does_not_ping(self) -> None:
         # A standing human CHANGES_REQUESTED on the current head vetoes
         # the ping; the orchestrator must not advertise the PR as ready
-        # while a human review is asking for changes.
+        # while a human review is asking for changes, even when the
+        # agent-approved final-docs handoff matches the current head.
         pr = self._open_pr(
-            approved=True, mergeable=True, check_state="success",
+            approved=False, mergeable=True, check_state="success",
             changes_requested=True,
         )
-        gh, issue = self._seed(pr=pr)
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "docs_checked_sha": "cafe1234",
+                "docs_verdict": "updated",
+            },
+        )
 
         self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
@@ -242,6 +255,29 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(len(pings_first), 1)
         self.assertEqual(len(pings_total), 2)
         self.assertEqual(gh.pinned_data(30).get("ready_ping_sha"), "beefcafe")
+
+    def test_in_review_stale_final_docs_head_does_not_ping_new_head(self) -> None:
+        # The final-docs marker is a head-SHA approval signal. If another
+        # commit lands after documenting, the old marker must not ping the
+        # new head; the issue needs another validating/documenting pass.
+        pr = self._open_pr(approved=False, mergeable=True, check_state="success")
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "docs_checked_sha": "cafe1234",
+                "docs_verdict": "no_change",
+                "ready_ping_sha": "cafe1234",
+            },
+        )
+        pr.head = FakePRRef(sha="beefcafe")
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.pinned_data(30).get("ready_ping_sha"), "cafe1234")
 
     def test_in_review_ready_ping_does_not_swallow_concurrent_human(self) -> None:
         # Race window: a human posts an issue comment AFTER the handler's

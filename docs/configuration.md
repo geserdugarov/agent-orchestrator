@@ -171,7 +171,7 @@ Non-positive or non-integer values for either cap (or for a per-entry `parallel_
 
 ## In-review behavior
 
-The orchestrator is permanently manual-merge-only: humans click Merge. `_handle_in_review` routes fresh PR feedback to `fixing`, pings the HITL handles once per head SHA when the PR is approved (real GitHub APPROVED review on the current head) and mergeable, and parks awaiting human attention for an unmergeable PR.
+The orchestrator is permanently manual-merge-only: humans click Merge. `_handle_in_review` routes fresh PR feedback to `fixing`, pings the HITL handles once per head SHA when the PR is mergeable and the current head completed the reviewer-approved final-docs handoff (or carries a real GitHub APPROVED review), and parks awaiting human attention for an unmergeable PR.
 
 | Variable                     | Default | Purpose                                                                                              |
 | ---------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |

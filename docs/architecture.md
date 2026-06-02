@@ -6,7 +6,7 @@ The dev/review/decompose roles are picked independently via `DEV_AGENT` / `REVIE
 
 New unlabeled issues route through a `decomposing` stage that asks the decomposer agent for a structured manifest: `decision=single` flips the issue to `ready` and the implementer takes over; `decision=split` creates child issues, persists the dep graph, and parks the parent on `blocked` (or `umbrella` when the manifest's `umbrella` flag is true — a parent with no implementation of its own that `_handle_umbrella` closes to `done` once every child resolves) until the matching handler walks the children. Decomposition can be disabled with `DECOMPOSE=off`, which reverts to the legacy direct-to-`implementing` pickup.
 
-Once the reviewer agent approves (squash, final-docs hop, hand-off to `in_review`) and the PR is mergeable, approved (real GitHub APPROVED review on the current head), and free of standing human `CHANGES_REQUESTED`, the orchestrator posts a one-shot HITL ping per head SHA on the issue thread so a human can click Merge — the orchestrator is permanently manual-merge-only and never calls `gh.merge_pr` from `in_review`. An unmergeable PR parks awaiting human attention; the `resolving_conflict` stage that rebases onto `origin/<base>` (capped by `MAX_CONFLICT_ROUNDS`) is reached via an operator relabel or the per-tick base-sync detour, not from `_handle_in_review`. Every `resolving_conflict` exit — pushed (clean rebase, recovered push, agent-resolved conflicts, human-reply resume, user-content drift pushed fixes) or the base-up-to-date no-op — hands straight back to `validating`; the single docs pass runs after the reviewer's final approval (via the `documenting` handoff in `_handle_validating`). An external human merge marks the issue `done`; a PR closed without merge lands on `rejected`.
+Once the reviewer agent approves (squash, final-docs hop, hand-off to `in_review`) and the PR is mergeable, current-head documented, and free of standing human `CHANGES_REQUESTED`, the orchestrator posts a one-shot HITL ping per head SHA on the issue thread so a human can click Merge — the orchestrator is permanently manual-merge-only and never calls `gh.merge_pr` from `in_review`. A formal GitHub APPROVED review on the current head can also satisfy the ping gate. An unmergeable PR parks awaiting human attention; the `resolving_conflict` stage that rebases onto `origin/<base>` (capped by `MAX_CONFLICT_ROUNDS`) is reached via an operator relabel or the per-tick base-sync detour, not from `_handle_in_review`. Every `resolving_conflict` exit — pushed (clean rebase, recovered push, agent-resolved conflicts, human-reply resume, user-content drift pushed fixes) or the base-up-to-date no-op — hands straight back to `validating`; the single docs pass runs after the reviewer's final approval (via the `documenting` handoff in `_handle_validating`). An external human merge marks the issue `done`; a PR closed without merge lands on `rejected`.
 
 ## Design constraints
 
@@ -297,12 +297,12 @@ orchestrator/
                            legacy watermark migration and the
                            cross-namespace watermark ratchet
                            (`_bump_in_review_watermarks`). The handler is
-                           permanently manual-merge-only: an approved
-                           + mergeable PR (real GitHub APPROVED review
-                           on the current head, no standing
-                           CHANGES_REQUESTED) earns a one-shot HITL
-                           ping per head SHA, an unmergeable PR parks
-                           awaiting human attention,
+                           permanently manual-merge-only: a mergeable PR
+                           whose current head completed the final-docs
+                           handoff (or carries a real GitHub APPROVED
+                           review), with no standing CHANGES_REQUESTED,
+                           earns a one-shot HITL ping per head SHA; an
+                           unmergeable PR parks awaiting human attention,
                            external merges/closes terminate the issue. No
                            orchestrator-initiated `gh.merge_pr` call,
                            `merge_attempt` / `pr_merged` emission, or
@@ -561,7 +561,7 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle (relabels straight to `validating` after PR opens — docs run once after reviewer approval, not here) |
 | **stages/documenting.py** | `_handle_documenting` — the single docs pass on the existing PR worktree, run only as the **final-docs handoff** between reviewer approval and `in_review` (the `documenting` label is set by `_handle_validating`'s approval branch). Success exits always advance to `in_review` and ratchet `pr_last_comment_id` past any consumed awaiting-human reply. A user-content drift mid-hop relabels back to `validating` for re-review without spawning the docs agent and, before the relabel, fetches `<remote>/<branch>`, probes HEAD inline, and runs `git reset --hard` + `git clean -fd` when the local branch is ahead of remote, behind remote, OR has uncommitted/untracked edits -- so the next reviewer round runs against the actual remote PR head and no docs work authored against the old body survives; parks with `fetch_failed` on fetch failure and `worktree_reset_failed` on probe / reset / clean failure. |
 | **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
-| **stages/in_review.py** | `_handle_in_review` + PR-watermark primitives; permanently manual-merge-only — routes fresh PR feedback to `fixing`, pings HITL once per head SHA when the PR is approved (real GitHub APPROVED review on the current head) and mergeable, parks unmergeable PRs for human attention |
+| **stages/in_review.py** | `_handle_in_review` + PR-watermark primitives; permanently manual-merge-only — routes fresh PR feedback to `fixing`, pings HITL once per head SHA when the PR is mergeable and the current head completed the final-docs handoff (or carries a real GitHub APPROVED review), parks unmergeable PRs for human attention |
 | **stages/fixing.py** | `_handle_fixing` — PR-feedback quiet window, dev resume via `_resume_dev_with_text`, watermark advance, and a direct flip back to `validating` on both the pushed-fix and the no-new-feedback bounce exits (docs do not run here -- the single docs pass is deferred to the final-docs handoff after reviewer approval) |
 | **stages/conflicts.py** | `_handle_resolving_conflict` + rebase-loop primitives |
 | **stages/question.py** | `_handle_question` + question-session lifecycle (read-only Q&A on the `question` label, no PR) |
