@@ -13,9 +13,9 @@ cannot land the freshly-pushed head against a stale prior approval, and
 the reviewer rerun until APPROVED or MAX_REVIEW_ROUNDS is hit (the
 issue stays on `validating` throughout these fix rounds -- the single
 docs pass is deferred to the final-docs handoff after reviewer
-approval). After approval (+ verify + squash) the handler sets
-`docs_final_pending=True` and relabels to `documenting` for the
-**final-docs** pass on the squashed head before in_review picks up;
+approval). After approval (+ verify + squash) the handler relabels
+to `documenting` for the **final-docs** pass on the squashed head
+before in_review picks up;
 `_handle_documenting` advances straight to `in_review` and updates
 `agent_approved_sha` to the new pushed head when a docs commit lands. In_review reacts to PR state
 (merged/closed) and hands fresh PR feedback (any of the four comment

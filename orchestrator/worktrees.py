@@ -1598,8 +1598,8 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
       does the rebase, pushes, and flips back to `validating` (the same
       target as the base-up-to-date no-op exit) so the reviewer re-runs
       against the rewritten branch directly; the single docs pass is
-      deferred to the post-approval hop driven by `docs_final_pending`
-      in `_handle_validating`. Applying the `hold_base_sync` label to
+      deferred to the post-approval handoff to `documenting` in
+      `_handle_validating`. Applying the `hold_base_sync` label to
       an issue pauses both the pre-PR local rebase and the PR detour
       until the label is removed. This works under `AUTO_MERGE=off`
       too -- `_handle_resolving_conflict` never reads AUTO_MERGE, it
@@ -1673,8 +1673,8 @@ def _sync_worktree_with_base(
     hands straight back to `validating` so the reviewer re-runs against
     the rebased branch directly; docs do not run here, the single docs
     pass runs after reviewer approval before `in_review` via the
-    final-docs handoff driven by `docs_final_pending` in
-    `_handle_validating`) in one consistent flow. Skips a dirty worktree
+    final-docs handoff to `documenting` in `_handle_validating`) in one
+    consistent flow. Skips a dirty worktree
     or a worktree already up to date (no pre-PR rebase attempted, no PR
     detour fired). On a pre-PR content conflict, aborts the rebase so
     the worktree stays on its pre-rebase SHA -- conflict resolution
@@ -1796,8 +1796,7 @@ def _route_pr_worktree_to_resolving_conflict(
     rebased branch directly (a base-up-to-date no-op with no diff
     targets `validating` too). Docs do not run here -- the single docs
     pass runs after reviewer approval before `in_review` via the
-    final-docs handoff driven by `docs_final_pending` in
-    `_handle_validating`. This is the only safe pattern for PR-having
+    final-docs handoff to `documenting` in `_handle_validating`. This is the only safe pattern for PR-having
     worktrees, since a local-only rebase would diverge local HEAD from
     `pr.head.sha` and break every downstream gate that compares the
     two. Works under both AUTO_MERGE on (replaces the unmergeable

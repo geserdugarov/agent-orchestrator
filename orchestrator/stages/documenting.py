@@ -139,12 +139,11 @@ def _advance_after_docs_push(
     The freshly-pushed `after_sha` becomes the new PR head, so
     `agent_approved_sha` must move with it or the AUTO_MERGE
     `agent_approved_sha == pr.head.sha` invariant would silently bar
-    the merge on the next `_handle_in_review` tick. Clear the
-    `docs_final_pending` marker and advance to `in_review` -- the
-    approval comment, squash comment, and PR watermarks set by
-    validating remain on state untouched, with the in-review
-    issue-comment watermark ratcheted past anything the awaiting-human
-    resume already consumed.
+    the merge on the next `_handle_in_review` tick. Advance to
+    `in_review` -- the approval comment, squash comment, and PR
+    watermarks set by validating remain on state untouched, with the
+    in-review issue-comment watermark ratcheted past anything the
+    awaiting-human resume already consumed.
 
     The SHA update is gated on the `final_docs_approval_seeded` sentinel
     that validating sets in the SAME code block where it persists
@@ -161,7 +160,6 @@ def _advance_after_docs_push(
     untouched preserves validating's "AUTO_MERGE off" contract on
     snapshot failure.
     """
-    state.set("docs_final_pending", False)
     seeded_fresh = state.get("final_docs_approval_seeded")
     state.set("final_docs_approval_seeded", False)
     if after_sha and seeded_fresh:
@@ -177,13 +175,12 @@ def _advance_after_docs_no_change(
 
     No commit landed, so the PR head still matches the SHA validating
     snapshotted into `agent_approved_sha` and the AUTO_MERGE invariant
-    survives the docs hop untouched. Clear the `docs_final_pending`
-    marker (and the `final_docs_approval_seeded` sentinel so a stray
-    re-entry can't be promoted into AUTO_MERGE later), ratchet the
-    in-review issue-comment watermark past any issue-thread reply the
+    survives the docs hop untouched. Clear the
+    `final_docs_approval_seeded` sentinel so a stray re-entry can't be
+    promoted into AUTO_MERGE later, ratchet the in-review
+    issue-comment watermark past any issue-thread reply the
     awaiting-human resume already consumed, and advance to `in_review`.
     """
-    state.set("docs_final_pending", False)
     state.set("final_docs_approval_seeded", False)
     _ratchet_in_review_watermark_for_final_docs(gh, issue, state)
     gh.set_workflow_label(issue, "in_review")
@@ -296,12 +293,11 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # Clear the approval bookkeeping BEFORE any fallible cleanup
         # (fetch / reset). Drift means the prior reviewer approval is
         # stale regardless of whether the on-disk reset succeeds, so
-        # `docs_final_pending` / `final_docs_approval_seeded` /
-        # `agent_approved_sha` / `review_round` must drop now. If we
-        # park on fetch failure below, an operator unpark or manual
-        # relabel must not be able to ride the stale approval into a
-        # new final-docs handoff that skips the required re-review.
-        state.set("docs_final_pending", False)
+        # `final_docs_approval_seeded` / `agent_approved_sha` /
+        # `review_round` must drop now. If we park on fetch failure
+        # below, an operator unpark or manual relabel must not be able
+        # to ride the stale approval into a new final-docs handoff that
+        # skips the required re-review.
         state.set("final_docs_approval_seeded", False)
         state.set("agent_approved_sha", None)
         state.set("review_round", 0)

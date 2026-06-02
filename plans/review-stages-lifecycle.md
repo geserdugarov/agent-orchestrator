@@ -76,7 +76,7 @@ are collapsed under a single "Terminal" entry per handler.
 | `documenting` | **`in_review`** | documenting.py (via `_advance_after_docs_push`) | Docs commit landed and pushed: always advance to `in_review` (and update `agent_approved_sha` to the new head when `final_docs_approval_seeded` confirms validating persisted a fresh approval this round); the legacy `validating` fallback was removed under #270 |
 | `documenting` | **`in_review`** | documenting.py (via `_advance_after_docs_push`) | Recovered docs commit pushed after a no-change confirmation: same final-docs advance as above |
 | `documenting` | **`in_review`** | documenting.py (via `_advance_after_docs_no_change`) | `DOCS: NO_CHANGE` verdict; nothing to push: always advance to `in_review` (head unchanged so `agent_approved_sha` already matches) |
-| `documenting` | `validating` | documenting.py (drift unwind) | User-content body edit during the final-docs hop invalidates the prior approval: clear `docs_final_pending` / `final_docs_approval_seeded` / `agent_approved_sha`, reset `review_round=0`, post the notice, set `docs_drift_unwind_pending=True`, and relabel without spawning the docs agent so the reviewer re-evaluates on the next tick. Before the relabel the handler fetches `<remote>/<branch>`, probes HEAD inline, and -- when ahead of remote, behind remote, OR the worktree is dirty -- runs `git reset --hard <remote>/<branch>` + `git clean -fd` so the next reviewer round runs against the actual remote PR head and no unpushed local docs commit / uncommitted / untracked docs edits authored against the OLD body cannot be reused by a future final-docs hop; parks with `fetch_failed` on fetch failure and `worktree_reset_failed` on probe / reset / clean failure instead of relabeling. The `docs_drift_unwind_pending` sentinel persists across every parked failure path inside the drift block; an operator unpark or fresh human comment re-enters the drift block on the next documenting tick to retry the reconcile + relabel, so a manual unpark cannot fall through to the normal docs-spawn / recovered-commit shortcut and skip the required `validating` re-review (#270) |
+| `documenting` | `validating` | documenting.py (drift unwind) | User-content body edit during the final-docs hop invalidates the prior approval: clear `final_docs_approval_seeded` / `agent_approved_sha`, reset `review_round=0`, post the notice, set `docs_drift_unwind_pending=True`, and relabel without spawning the docs agent so the reviewer re-evaluates on the next tick. Before the relabel the handler fetches `<remote>/<branch>`, probes HEAD inline, and -- when ahead of remote, behind remote, OR the worktree is dirty -- runs `git reset --hard <remote>/<branch>` + `git clean -fd` so the next reviewer round runs against the actual remote PR head and no unpushed local docs commit / uncommitted / untracked docs edits authored against the OLD body cannot be reused by a future final-docs hop; parks with `fetch_failed` on fetch failure and `worktree_reset_failed` on probe / reset / clean failure instead of relabeling. The `docs_drift_unwind_pending` sentinel persists across every parked failure path inside the drift block; an operator unpark or fresh human comment re-enters the drift block on the next documenting tick to retry the reconcile + relabel, so a manual unpark cannot fall through to the normal docs-spawn / recovered-commit shortcut and skip the required `validating` re-review (#270) |
 
 ### `_handle_validating` — label `validating`
 
@@ -86,7 +86,7 @@ are collapsed under a single "Terminal" entry per handler.
 | `validating` | `validating` (re-run) | validating.py (user-content drift push) | **User-content drift dev resume pushed** a new commit (`outcome == "pushed"`) — no label flip; clears `agent_approved_sha` and bumps `review_round`; the reviewer re-evaluates on the next tick (issue #267) |
 | `validating` | `validating` (re-run) | validating.py (transient-park recovery push) | **Transient-park recovery push** finished (`push_failed` retried, or `agent_timeout` that had actually committed) — no label flip; clears `agent_approved_sha` (issue #267) |
 | `validating` | `validating` (re-run) | validating.py (awaiting-human resume push) | **Awaiting-human resume produced a pushed dev fix** — no label flip; clears `agent_approved_sha` and bumps `review_round` (issue #267) |
-| `validating` | **`documenting`** | validating.py (approval branch) | **Reviewer `VERDICT: APPROVED` + verify gate clean + squash succeeded (or disabled)** — sets `docs_final_pending=True` so the docs pass hands off to `in_review` (NOT back to `validating`) |
+| `validating` | **`documenting`** | validating.py (approval branch) | **Reviewer `VERDICT: APPROVED` + verify gate clean + squash succeeded (or disabled)** — seeds `final_docs_approval_seeded` alongside `agent_approved_sha` and flips the label so the docs pass hands off to `in_review` (NOT back to `validating`) |
 | `validating` | `validating` (re-run) | validating.py (CHANGES_REQUESTED) | **CHANGES_REQUESTED dev-fix loop pushed** a new commit — no label flip; clears `agent_approved_sha` and bumps `review_round` (issue #267) |
 
 ### `_handle_in_review` — label `in_review`
@@ -145,10 +145,11 @@ entry is gone. The only remaining entry is the final-docs hop:
 
 1. **validating.py (approval branch)** — `_handle_validating` reviewer
    `VERDICT: APPROVED` + verify gate clean + squash succeeded (or
-   disabled). Sets `docs_final_pending=True`; the docs pass on this
-   trip advances to `in_review` rather than back to `validating`. This
-   is the **final-docs hop**, and it is now the SOLE producer of
-   `documenting`.
+   disabled). Seeds `final_docs_approval_seeded` alongside
+   `agent_approved_sha` and flips the label to `documenting`; the docs
+   pass on this trip advances to `in_review` rather than back to
+   `validating`. This is the **final-docs hop**, and it is now the SOLE
+   producer of `documenting`.
 2. ~~**in_review.py:593**~~ — removed under #268; the user-content
    drift dev resume now hands straight back to `validating` on both
    the "pushed" and the "ACK" outcomes.
@@ -210,12 +211,12 @@ Under that target, the transition map collapses to:
 
 **Issue #266** landed the **final-docs handoff** half of the target
 above: the `validating` -> `documenting` -> `in_review` chain now
-exists on the approval branch via the `docs_final_pending=True`
-marker, with `_handle_documenting`'s success exits routing to
-`in_review` (and updating `agent_approved_sha` to the new head when a
-docs commit lands AND the companion sentinel
-`final_docs_approval_seeded` confirms validating actually persisted a
-non-empty approval SHA this round — both `gh.get_pr()` succeeded AND
+exists on the approval branch via the `documenting` label flip, with
+`_handle_documenting`'s success exits routing to `in_review` (and
+updating `agent_approved_sha` to the new head when a docs commit
+lands AND the sentinel `final_docs_approval_seeded` confirms
+validating actually persisted a non-empty approval SHA this round —
+both `gh.get_pr()` succeeded AND
 `_head_sha()` returned a non-empty local SHA — so the AUTO_MERGE
 invariant survives; when either fails the sentinel is absent and any
 stale `agent_approved_sha` left over from a prior round stays
@@ -246,10 +247,10 @@ base-up-to-date no-op.
 
 **Issue #270** landed the **`_handle_documenting` cleanup**: the
 `_advance_after_docs_push` / `_advance_after_docs_no_change` helpers
-no longer carry a `docs_final_pending` discriminator — both always
-advance to `in_review`. The legacy fallback to `validating` (the
-"no marker → validating" route the helpers used during the
-#267-#269 migration) is removed. The user-content drift block in
+no longer carry a routing discriminator — both always advance to
+`in_review`. The legacy fallback to `validating` (the
+"no fresh-approval discriminator → validating" route the helpers
+used during the #267-#269 migration) is removed. The user-content drift block in
 `_handle_documenting` now relabels back to `validating` and returns
 early without spawning the docs agent, since the prior reviewer
 approval was for stale requirements; the reviewer re-evaluates on
@@ -292,8 +293,8 @@ in-place state resets without a relabel) across all four issues:
   failure and `worktree_reset_failed` on probe / reset / clean
   failure instead of relabeling; the approval bookkeeping is cleared
   before any fallible step so the parked state carries no stale
-  markers an operator unpark could ride into a new final-docs
-  handoff (#270)
+  `final_docs_approval_seeded` sentinel an operator unpark could ride
+  into a new final-docs handoff (#270)
 
 The parent #262 target is now fully reached.
 
