@@ -237,17 +237,26 @@ bound concurrent handlers. A single long-lived `IssueScheduler`
 (`orchestrator/scheduler.py`) is built at startup with those caps and
 threaded through every `workflow.tick(gh, spec, scheduler=...)` call:
 the tick enumerates pollable issues, classifies them as family-aware
-or fan-out, and submits one nonblocking callable per issue. The
-scheduler enforces the in-flight set, per-repo counter, family mutex
-(`decomposing`, `blocked`, `umbrella`, and unlabeled pickup never run
-two at a time on the same repo), and rejects duplicate active issues;
-rejected work re-tries on the next polling pass. The pre-tick base
-refresh consults `scheduler.is_active` per worktree so a base advance
-cannot rebase a pre-PR worktree under a running agent or relabel a
-PR-having worktree mid-handler. Each worker thread mints a fresh
-`GitHubClient` so PyGithub `Requester`s aren't shared; `main` shuts
-the scheduler down (`wait=True`) on process exit so in-flight workers
-complete cleanly.
+or fan-out, and hands work to the scheduler. Fan-out issues are
+submitted as one nonblocking callable per issue; family-aware issues
+(`decomposing`, `blocked`, `umbrella`, unlabeled pickup) are folded
+into ONE bucket submit per repo that drains them sequentially on a
+single executor worker, so a stale child cannot take the family slot
+and starve the parent umbrella. Each per-issue iteration inside the
+bucket wraps `_process_issue` in `scheduler.track_active(repo, n)`
+(claim lives in a separate set, so it does not inflate the global or
+per-repo cap counters) so the refresh-skip contract keeps holding for
+the family issue currently being processed. The scheduler enforces
+the in-flight set, per-repo counter, family mutex, and rejects
+duplicate active issues; every skip is logged with the reason
+(`duplicate_active` at DEBUG, `family_slot_held` / `global_cap` /
+`per_repo_cap` / `closed` at INFO), and rejected work re-tries on the
+next polling pass. The pre-tick base refresh consults
+`scheduler.is_active` per worktree so a base advance cannot rebase a
+pre-PR worktree under a running agent or relabel a PR-having worktree
+mid-handler. Each worker thread mints a fresh `GitHubClient` so
+PyGithub `Requester`s aren't shared; `main` shuts the scheduler down
+(`wait=True`) on process exit so in-flight workers complete cleanly.
 
 **Workflow module split.** `workflow.py` is a slim facade owning the
 tick loop, label dispatcher, unlabeled-pickup handler,
