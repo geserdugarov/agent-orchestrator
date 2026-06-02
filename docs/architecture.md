@@ -88,19 +88,39 @@ orchestrator/
                            review-verdict / drift-ACK parsers. The drift /
                            user-content-change prompt builder lives in
                            `workflow_drift.py`, not here.
+  git_plumbing.py       — hardened git subprocess layer: `_GIT_NO_PROMPT_ENV`,
+                           per-target_root locks (`_TARGET_ROOT_LOCKS`,
+                           `_TARGET_ROOT_LOCKS_LOCK`, `_target_root_lock`)
+                           that serialize writes to the parent clone's
+                           `.git/config` / `.git/refs` / `.git/packed-refs`,
+                           the thin `_git` subprocess wrapper, the
+                           agent-hostile-environment `_git_hardened` variant
+                           (no hooks / no fsmonitor / no credential helper /
+                           detached global+system config), and the
+                           authenticated push/fetch helpers (`_push_branch`,
+                           `_authed_fetch`, `_authed_target_fetch`) that
+                           deliver the GitHub PAT via tempfile askpass so
+                           the token never appears on argv. Every name
+                           here is re-exported from `worktrees.py` so
+                           existing imports and `patch.object(worktrees,
+                           "_foo", ...)` test patches keep working.
   worktrees.py          — git, branch, and worktree plumbing: `_branch_name`,
                            slug-safe per-repo worktree paths,
                            `_ensure_worktree` / `_ensure_pr_worktree` /
-                           `_ensure_decompose_worktree`, hardened git
-                           invocations (`_git`, `_git_hardened`), authenticated
-                           fetch/push (`_authed_fetch`, `_authed_target_fetch`,
-                           `_push_branch`), `_squash_and_force_push`,
+                           `_ensure_decompose_worktree`,
+                           `_squash_and_force_push`,
                            `_refresh_base_and_worktrees`,
                            `_cleanup_terminal_branch`, and the local-verify
                            runner (`_run_verify_commands` + `VerifyResult`)
                            used by `_handle_validating`'s pre-handoff
                            gate (before the final-docs flip to
                            `documenting` and the eventual `in_review`).
+                           The hardened-git subprocess layer
+                           (`_GIT_NO_PROMPT_ENV`, `_target_root_lock`,
+                           `_git`, `_git_hardened`, `_authed_fetch`,
+                           `_authed_target_fetch`, `_push_branch`) lives
+                           in `git_plumbing.py`; the names are re-exported
+                           here.
   stages/
     __init__.py         — package marker; the dispatcher in `workflow.py`
                            still owns label→handler routing.
@@ -473,7 +493,8 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | **workflow.py** | facade: per-repo tick loop, family-aware/fan-out partitioning, `_process_issue` dispatcher, `_handle_pickup`, `_park_awaiting_human`, `_run_agent_tracked`; re-exports the cross-module helpers and stage entry handlers (`_comment_created_at` is re-exported because the `fixing` handler reuses it; other stage-private helpers stay private to their module) |
 | **workflow_drift.py** | user-content drift detection and re-route helpers |
 | **workflow_messages.py** | prompt builders, parsers, comment posting + orchestrator-comment markers, stderr redaction |
-| **worktrees.py** | git/branch/worktree plumbing, hardened fetch/push, squash-on-approval, per-tick base refresh, terminal cleanup |
+| **git_plumbing.py** | hardened git subprocess layer: `_GIT_NO_PROMPT_ENV`, per-target_root locks, `_git` / `_git_hardened`, `_authed_fetch` / `_authed_target_fetch`, `_push_branch` (all re-exported from `worktrees.py`) |
+| **worktrees.py** | git/branch/worktree plumbing, squash-on-approval, per-tick base refresh, terminal cleanup; re-exports the `git_plumbing.py` helpers above |
 | **stages/decomposition.py** | `_handle_decomposing` / `_handle_ready` / `_handle_blocked` / `_handle_umbrella` |
 | **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle (relabels straight to `validating` after PR opens — docs run once after reviewer approval, not here) |
 | **stages/documenting.py** | `_handle_documenting` — the single docs pass on the existing PR worktree, run only as the **final-docs handoff** between reviewer approval and `in_review` (the `documenting` label is set by `_handle_validating`'s approval branch). Success exits always advance to `in_review` and ratchet `pr_last_comment_id` past any consumed awaiting-human reply. A user-content drift mid-hop relabels back to `validating` for re-review without spawning the docs agent and, before the relabel, fetches `<remote>/<branch>`, probes HEAD inline, and runs `git reset --hard` + `git clean -fd` when the local branch is ahead of remote, behind remote, OR has uncommitted/untracked edits -- so the next reviewer round runs against the actual remote PR head and no docs work authored against the old body survives; parks with `fetch_failed` on fetch failure and `worktree_reset_failed` on probe / reset / clean failure. |

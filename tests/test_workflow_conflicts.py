@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import config, workflow, worktrees
+from orchestrator import config, git_plumbing, workflow, worktrees
 from orchestrator.github import BASE_SYNC_HOLD_LABEL
 
 from tests.fakes import (
@@ -647,7 +647,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         with mock_patch("subprocess.run", side_effect=fake_run), \
              mock_patch.object(
                  workflow.config, "_resolve_github_token", return_value=""
-             ), self.assertLogs(worktrees.log, level="ERROR") as cm:
+             ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
             r = workflow._authed_fetch(
                 other_spec,
                 "+refs/heads/main:refs/remotes/origin/main",
@@ -831,7 +831,7 @@ class AuthedTargetFetchTest(unittest.TestCase):
         with mock_patch("subprocess.run", side_effect=fake_run), \
              mock_patch.object(
                  workflow.config, "_resolve_github_token", return_value="",
-             ), self.assertLogs(worktrees.log, level="ERROR") as cm:
+             ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
             r = workflow._authed_target_fetch(private_spec, "cache-branch")
 
         # Failed without ever shelling out.

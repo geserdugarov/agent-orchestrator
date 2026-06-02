@@ -243,10 +243,12 @@ out across the bounded executor. Each worker thread mints a fresh
 tick loop, label dispatcher, unlabeled-pickup handler,
 `_park_awaiting_human`, and `_run_agent_tracked`. Stage handler bodies
 live under `orchestrator/stages/`; shared helpers live in
-`workflow_drift.py`, `workflow_messages.py`, and `worktrees.py`. The
-facade re-exports cross-module helpers under their original names, and
-stage modules call back via `from .. import workflow as _wf` so
-existing `patch.object(workflow, ...)` tests keep working.
+`workflow_drift.py`, `workflow_messages.py`, `worktrees.py`, and
+`git_plumbing.py` (the hardened git subprocess layer extracted from
+`worktrees.py` and re-exported under its original names). The facade
+re-exports cross-module helpers under their original names, and stage
+modules call back via `from .. import workflow as _wf` so existing
+`patch.object(workflow, ...)` tests keep working.
 
 **Tests.** Per-stage suites under `tests/test_workflow_*.py` cover
 every handler; `tests/test_workflow.py` covers the facade. Shared
