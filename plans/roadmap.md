@@ -6,25 +6,22 @@ The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 `umbrella` → `implementing` → `validating` → `documenting` (final-docs
 hop) → `in_review` → `fixing` (on fresh PR feedback) or
 `resolving_conflict` (auto-merge detour) → `done` / `rejected`) is wired
-end-to-end. The pre-approval docs hop is removed across every stage:
-the initial `implementing` PR open and every `validating` pushed fix
-(CHANGES_REQUESTED, awaiting-human resume, user-content drift,
-transient-park recovery) go straight to `validating` and clear
-`agent_approved_sha` so AUTO_MERGE cannot land the freshly-pushed head
-against a stale prior approval (issue #267); the PR-feedback `fixing`
-pushed-fix exit and the `in_review` user-content drift "pushed"
-outcome hand straight back to `validating` (issue #268); every
-`resolving_conflict` pushed exit (clean rebase, recovered push,
-agent-resolved, awaiting-human resume, drift-pushed fix) does the
-same (issue #269); and `_handle_documenting`'s own success exits
-were collapsed to always advance to `in_review` (the legacy
-`validating` fallback that existed in `_advance_after_docs_*` during
-the migration is gone), with the documenting drift unwind now
-relabeling directly to `validating` without spawning the docs agent
-(issue #270). The single docs pass runs after the reviewer's final
+end-to-end. The single docs pass runs after the reviewer's final
 approval via `docs_final_pending`, so docs land against the
 approved/squashed head without spending a no-op pass on each
-code-changing push. `_handle_fixing` owns the PR-feedback quiet window
+code-changing push. Every pre-approval code-changing route lands
+directly back on `validating`: the initial `implementing` PR open,
+every `validating` pushed fix (CHANGES_REQUESTED, awaiting-human
+resume, user-content drift, transient-park recovery), the
+PR-feedback `fixing` pushed-fix exit, the `in_review` user-content
+drift, and every `resolving_conflict` pushed exit (clean rebase,
+recovered push, agent-resolved, awaiting-human resume, drift-pushed
+fix) all clear `agent_approved_sha` and stay on (or return to)
+`validating` so AUTO_MERGE cannot land the freshly-pushed head
+against a stale prior approval. `_handle_documenting`'s own success
+exits always advance to `in_review`; its drift block relabels
+directly to `validating` without spawning the docs agent when a
+body edit invalidates the prior approval mid-hop. `_handle_fixing` owns the PR-feedback quiet window
 and the dev-resume / push / hand-back-to-`validating` cycle, with
 watermark advancement on success and on failure-park; the in_review
 route, the closed-issue sweep, the PR-worktree refresh detour, and
@@ -105,9 +102,8 @@ open, every pushed fix in `validating` / `fixing`, every `in_review`
 drift push, and every `resolving_conflict` pushed exit hands straight
 back to `validating`. The handler's own success exits always advance
 to `in_review` — `_advance_after_docs_push` / `_advance_after_docs_no_change`
-no longer carry the migration-era `docs_final_pending` discriminator
-that picked between `in_review` and `validating` (#270 collapsed
-that fallback). A `docs:` commit lands → push + advance to
+both target `in_review` unconditionally on every success exit.
+A `docs:` commit lands → push + advance to
 `in_review`. The push also updates `agent_approved_sha` to the new
 head so AUTO_MERGE survives, gated on the companion sentinel
 `final_docs_approval_seeded` that validating sets only when it
@@ -419,55 +415,6 @@ swallowed.
   exploration or skipping acceptance for trivial fixes. Judged excessive
   for the original 2-week budget; revisit once the static flow is fully
   dogfooded.
-- **Single-pass `documenting` after reviewer approval.** Originally every
-  code-changing branch update (initial implementation, validating fix,
-  fixing-stage PR-feedback push, in_review drift push, every
-  resolving_conflict push) routed through `documenting` before the
-  reviewer re-ran. The simplification routes every pre-approval push
-  directly to `validating` and runs a single docs pass after the
-  reviewer emits `VERDICT: APPROVED`, before the `in_review` handoff.
-  See
-  [`plans/review-stages-lifecycle.md`](review-stages-lifecycle.md) for
-  the full transition map (every `set_workflow_label` call site grouped
-  by stage and the target shape). **Issue #266 landed the final-docs
-  handoff half**: on `VERDICT: APPROVED` `_handle_validating` now sets
-  `docs_final_pending=True` and flips to `documenting`, and
-  `_handle_documenting` advances to `in_review` on its success exits
-  (updating `agent_approved_sha` when a docs commit lands AND the
-  companion sentinel `final_docs_approval_seeded` confirms validating
-  actually persisted a non-empty approval SHA this round — both
-  `gh.get_pr()` succeeded AND `_head_sha()` returned a non-empty local
-  SHA — so AUTO_MERGE survives; when either fails and the sentinel is
-  absent, the docs push leaves any stale `agent_approved_sha` untouched
-  so AUTO_MERGE stays gated). **Issue #267 landed the implementing /
-  validating half**: `_handle_implementing` now hands off straight to
-  `validating` after the PR opens, and every pushed-fix exit in
-  `_handle_validating` (CHANGES_REQUESTED, awaiting-human resume,
-  user-content drift, transient-park recovery) stays on `validating`
-  and clears `agent_approved_sha` so AUTO_MERGE cannot land the
-  freshly-pushed head against a stale prior approval. **Issue #268
-  landed the `fixing` / `in_review` drift half**: the PR-feedback
-  pushed-fix exit and the `in_review` user-content drift "pushed"
-  outcome now flip to `validating` directly. **Issue #269 landed the
-  resolving_conflict half**: every pushed conflict-resolution path
-  (drift resolve, recovered push, clean rebase, agent-resolved,
-  awaiting-human resume) now hands straight back to `validating`
-  alongside the existing base-up-to-date no-op. **Issue #270 landed
-  the `_handle_documenting` cleanup**: the `_advance_after_docs_push` /
-  `_advance_after_docs_no_change` helpers now always advance to
-  `in_review` (the migration-era `docs_final_pending` discriminator +
-  `validating` fallback are gone); the documenting drift block
-  relabels straight to `validating` without spawning the docs agent,
-  since the prior approval was for stale requirements, and discards
-  any unpushed local docs commit via `git reset --hard
-  <remote>/<branch>` after a successful fetch so a future final-docs
-  hop cannot reuse it (parking with `fetch_failed` instead when the
-  fetch fails); and the user-facing docs (README, architecture,
-  workflow, state-machine, lifecycle plan) plus the lifecycle tests
-  now state the final contract: docs run once per reviewer-approval
-  handoff, between approval and `in_review`. The parent #262 target
-  is now fully reached — no pre-approval `documenting` entries remain
-  and the documenting handler's own success path is single-target.
 - **Symphony-inspired per-repo policy and hooks.** See
   [`plans/symphony-spec-review.md`](symphony-spec-review.md) for the full
   review. Two proposals survived the critical filter: a narrow
