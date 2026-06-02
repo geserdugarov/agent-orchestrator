@@ -292,7 +292,7 @@ The workflow declares `permissions: contents: read` at the top level so the `GIT
 
 ## Run modes
 
-- `./run.sh` — production. Continuous polling. `run.sh` does `git pull --ff-only origin "$ORCHESTRATOR_BASE_BRANCH"` (read from `.env`, default `main`) and re-launches the orchestrator after each clean exit, so a self-modifying merge picks up the new code automatically.
+- `./run.sh` — production. Continuous polling. `run.sh` does `git pull --ff-only origin "$ORCHESTRATOR_BASE_BRANCH"` (read from `.env`, default `main`) and re-launches the orchestrator after each clean exit, so a self-modifying merge picks up the new code automatically. If the pull fails, the wrapper prints the failing command and exits non-zero instead of relaunching stale code; resolve the checkout state, then restart `./run.sh`.
 
   Ctrl+C (or `SIGTERM`) stops the wrapper too: the orchestrator exits with `128 + signum` and `run.sh` skips the restart loop. A second Ctrl+C terminates immediately.
 - `python -m orchestrator.main --once` — single tick then exit. Useful for tests and debugging.

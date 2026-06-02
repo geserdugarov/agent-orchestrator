@@ -24,7 +24,15 @@ if [ -z "$base_branch" ] && [ -f .env ]; then
 fi
 base_branch="${base_branch:-main}"
 
-git pull --ff-only origin "$base_branch" || true
+self_update() {
+    git pull --ff-only origin "$base_branch" && return 0
+    rc=$?
+    echo "[$(date -Iseconds)] self-update failed: git pull --ff-only origin $base_branch exited with code $rc; stopping wrapper." >&2
+    echo "Resolve the checkout state, then restart ./run.sh." >&2
+    exit "$rc"
+}
+
+self_update
 while true; do
     .venv/bin/python -m orchestrator.main "$@"
     rc=$?
@@ -37,5 +45,5 @@ while true; do
     fi
     echo "[$(date -Iseconds)] orchestrator exited with code $rc; restarting in 1s..."
     sleep 1
-    git pull --ff-only origin "$base_branch" || true
+    self_update
 done
