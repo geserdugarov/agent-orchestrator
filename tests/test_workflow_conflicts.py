@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import config, git_plumbing, workflow, worktrees
+from orchestrator import config, git_plumbing, workflow, worktree_lifecycle
 from orchestrator.github import BASE_SYNC_HOLD_LABEL
 
 from tests.fakes import (
@@ -240,10 +240,10 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         wt_path = MagicMock()
         wt_path.exists.return_value = False  # worktree dir absent too
 
-        with patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_authed_target_fetch", fetch_mock), \
-             patch.object(worktrees, "_worktree_path", return_value=wt_path), \
-             patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
+        with patch.object(worktree_lifecycle, "_git", git_mock), \
+             patch.object(worktree_lifecycle, "_authed_target_fetch", fetch_mock), \
+             patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path), \
+             patch.object(worktree_lifecycle, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
 
         # Find the `worktree add` invocation and verify it anchored on
@@ -271,10 +271,10 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         wt_path = MagicMock()
         wt_path.exists.return_value = False
 
-        with patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_authed_target_fetch", fetch_mock), \
-             patch.object(worktrees, "_worktree_path", return_value=wt_path), \
-             patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
+        with patch.object(worktree_lifecycle, "_git", git_mock), \
+             patch.object(worktree_lifecycle, "_authed_target_fetch", fetch_mock), \
+             patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path), \
+             patch.object(worktree_lifecycle, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
 
         worktree_adds = [
@@ -298,10 +298,10 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         wt_path = MagicMock()
         wt_path.exists.return_value = False
 
-        with patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_authed_target_fetch", fetch_mock), \
-             patch.object(worktrees, "_worktree_path", return_value=wt_path), \
-             patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
+        with patch.object(worktree_lifecycle, "_git", git_mock), \
+             patch.object(worktree_lifecycle, "_authed_target_fetch", fetch_mock), \
+             patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path), \
+             patch.object(worktree_lifecycle, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
 
         for args, cwd in calls:
@@ -325,10 +325,10 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
         wt_path = MagicMock()
         wt_path.exists.return_value = False
 
-        with patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_authed_target_fetch", fetch_mock), \
-             patch.object(worktrees, "_worktree_path", return_value=wt_path), \
-             patch.object(worktrees, "_repo_worktrees_root", return_value=MagicMock()):
+        with patch.object(worktree_lifecycle, "_git", git_mock), \
+             patch.object(worktree_lifecycle, "_authed_target_fetch", fetch_mock), \
+             patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path), \
+             patch.object(worktree_lifecycle, "_repo_worktrees_root", return_value=MagicMock()):
             workflow._ensure_pr_worktree(_TEST_SPEC, self.ISSUE_NUMBER)
 
         # Both fetches landed on the authed helper -- base and PR branch.

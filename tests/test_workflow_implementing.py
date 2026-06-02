@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import config, workflow, worktrees
+from orchestrator import config, workflow, worktree_lifecycle, worktrees
 
 from tests.fakes import (
     FakeComment,
@@ -605,7 +605,7 @@ class HasNewCommitsRemoteNameTest(unittest.TestCase):
             base_branch="main",
             remote_name="private",
         )
-        with patch.object(worktrees, "_git", fake_git):
+        with patch.object(worktree_lifecycle, "_git", fake_git):
             workflow._has_new_commits(private_spec, Path("/tmp/wt-not-real"))
         args, _cwd = captured[0]
         self.assertIn("private/main..HEAD", args)

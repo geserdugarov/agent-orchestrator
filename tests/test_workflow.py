@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import analytics, config, workflow, worktrees
+from orchestrator import analytics, config, workflow, worktree_lifecycle, worktrees
 from orchestrator.agents import AgentResult
 from orchestrator.github import BACKLOG_LABEL, BASE_SYNC_HOLD_LABEL
 from orchestrator.workflow import _parse_documentation_verdict, _parse_review_verdict
@@ -1946,8 +1946,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         wt_path.exists.return_value = worktree_exists
         wt_path.__str__ = lambda self: f"/tmp/issue-{CleanupTerminalBranchTest.ISSUE_NUMBER}"
 
-        with patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_worktree_path", return_value=wt_path):
+        with patch.object(worktree_lifecycle, "_git", git_mock), \
+             patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path):
             workflow._cleanup_terminal_branch(gh, _TEST_SPEC, self.ISSUE_NUMBER)
         return gh, git_mock
 
@@ -2029,8 +2029,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         wt_path.exists.return_value = True
         wt_path.__str__ = lambda self: f"/tmp/issue-{CleanupTerminalBranchTest.ISSUE_NUMBER}"
 
-        with patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_worktree_path", return_value=wt_path):
+        with patch.object(worktree_lifecycle, "_git", git_mock), \
+             patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path):
             # Must NOT raise even though every sub-step failed.
             workflow._cleanup_terminal_branch(
                 gh, _TEST_SPEC, self.ISSUE_NUMBER,
@@ -2051,8 +2051,8 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         wt_path.exists.return_value = True
         wt_path.__str__ = lambda self: f"/tmp/issue-{CleanupTerminalBranchTest.ISSUE_NUMBER}"
 
-        with patch.object(worktrees, "_git", git_mock), \
-             patch.object(worktrees, "_worktree_path", return_value=wt_path):
+        with patch.object(worktree_lifecycle, "_git", git_mock), \
+             patch.object(worktree_lifecycle, "_worktree_path", return_value=wt_path):
             # Must NOT raise even though every `_git` invocation throws.
             workflow._cleanup_terminal_branch(
                 gh, _TEST_SPEC, self.ISSUE_NUMBER,
@@ -5264,12 +5264,12 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         def call_ensure(n: int) -> None:
             worktrees._ensure_worktree(spec, n)
 
-        with patch.object(worktrees, "_git", side_effect=fake_git), \
+        with patch.object(worktree_lifecycle, "_git", side_effect=fake_git), \
              patch.object(
-                 worktrees, "_authed_target_fetch",
+                 worktree_lifecycle, "_authed_target_fetch",
                  side_effect=fake_authed_fetch,
              ), \
-             patch.object(worktrees, "_has_new_commits", fake_has_new_commits), \
+             patch.object(worktree_lifecycle, "_has_new_commits", fake_has_new_commits), \
              patch.object(Path, "exists", lambda self: False), \
              patch.object(Path, "mkdir", lambda self, **_kw: None):
             threads = [
@@ -5430,12 +5430,12 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         def fake_has_new_commits(*_a, **_kw) -> bool:
             return False
 
-        with patch.object(worktrees, "_git", side_effect=fake_git), \
+        with patch.object(worktree_lifecycle, "_git", side_effect=fake_git), \
              patch.object(
-                 worktrees, "_authed_target_fetch",
+                 worktree_lifecycle, "_authed_target_fetch",
                  side_effect=fake_authed_fetch,
              ), \
-             patch.object(worktrees, "_has_new_commits", fake_has_new_commits), \
+             patch.object(worktree_lifecycle, "_has_new_commits", fake_has_new_commits), \
              patch.object(Path, "exists", lambda self: False), \
              patch.object(Path, "mkdir", lambda self, **_kw: None):
             t_a = threading.Thread(
