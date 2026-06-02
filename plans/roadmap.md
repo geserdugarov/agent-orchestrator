@@ -7,7 +7,7 @@ The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 hop) → `in_review` → `fixing` (on fresh PR feedback) or
 `resolving_conflict` (auto-merge detour) → `done` / `rejected`) is wired
 end-to-end. The single docs pass runs after the reviewer's final
-approval via `docs_final_pending`, so docs land against the
+approval via the `documenting` handoff, so docs land against the
 approved/squashed head without spending a no-op pass on each
 code-changing push. Every pre-approval code-changing route lands
 directly back on `validating`: the initial `implementing` PR open,
@@ -116,11 +116,11 @@ AUTO_MERGE remains gated. The final-docs exit additionally ratchets
 awaiting-human resume, so the next in_review tick does not replay it
 as fresh PR feedback and bounce to `fixing`. An explicit `DOCS:
 NO_CHANGE` marker on a remote-clean branch advances without pushing.
-The `docs_final_pending` marker set by `_handle_validating`'s
-approval branch is the only entry point. A user-content drift during
-the final-docs hop invalidates the prior approval: the handler
-clears `agent_approved_sha`, resets `review_round=0`, drops the
-marker and sentinel, and relabels back to `validating` without
+The `documenting` label set by `_handle_validating`'s approval
+branch is the only entry point. A user-content drift during the
+final-docs hop invalidates the prior approval: the handler clears
+`agent_approved_sha`, resets `review_round=0`, drops the sentinel,
+and relabels back to `validating` without
 spawning the docs agent so the reviewer re-evaluates the updated
 body. Before the relabel the handler fetches `<remote>/<branch>`, probes
 HEAD inline (so a probe failure is distinguishable from a real "in
@@ -137,8 +137,8 @@ final-docs hop could silently push a stale commit (especially under
 into the next reviewer round. The approval bookkeeping is cleared
 before any fallible step, so each park (`fetch_failed` on fetch
 failure, `worktree_reset_failed` on probe / reset / clean failure)
-leaves no stale approval markers an operator unpark could ride into
-a fresh final-docs handoff. The drift block also persists
+leaves no stale `final_docs_approval_seeded` sentinel an operator
+unpark could ride into a fresh final-docs handoff. The drift block also persists
 `docs_drift_unwind_pending=True` while a cleanup is in progress and
 clears it only on the success path that relabels to `validating`;
 an operator unpark or fresh human comment re-enters the drift block
@@ -153,8 +153,8 @@ docs child.
 **Validating stage.** `_handle_validating` spawns a fresh reviewer on
 `git diff origin/<base>...HEAD` and parses the last `VERDICT:` marker.
 On `APPROVED` it runs `VERIFY_COMMANDS` (default empty), snapshots
-`agent_approved_sha`, optionally squashes (`SQUASH_ON_APPROVAL`), sets
-`docs_final_pending=True`, and flips to `documenting` — the final-docs
+`agent_approved_sha`, optionally squashes (`SQUASH_ON_APPROVAL`), seeds
+`final_docs_approval_seeded`, and flips to `documenting` — the final-docs
 hop runs against the squashed head before `in_review` picks up. Verify
 failures park with a typed `park_reason`. `CHANGES_REQUESTED` resumes
 the dev; a clean pushed fix stays on `validating` (no docs hop) and
@@ -208,8 +208,8 @@ unmergeable PRs route to `resolving_conflict`.
 `_handle_resolving_conflict` fetches base and runs `git rebase` under
 the hardened envelope. Every exit — pushed resolution or
 base-up-to-date no-op — hands straight back to `validating`; the
-single docs pass runs after the reviewer's final approval via
-`docs_final_pending`. Real conflicts resume the dev with up to 20
+single docs pass runs after the reviewer's final approval via the
+`documenting` handoff. Real conflicts resume the dev with up to 20
 conflicted paths. `MAX_CONFLICT_ROUNDS` (default 3) caps attempts;
 every pushed rebase drops `agent_approved_sha`.
 

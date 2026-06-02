@@ -6,7 +6,7 @@ The dev/review/decompose roles are picked independently via `DEV_AGENT` / `REVIE
 
 New unlabeled issues route through a `decomposing` stage that asks the decomposer agent for a structured manifest: `decision=single` flips the issue to `ready` and the implementer takes over; `decision=split` creates child issues, persists the dep graph, and parks the parent on `blocked` (or `umbrella` when the manifest's `umbrella` flag is true — a parent with no implementation of its own that `_handle_umbrella` closes to `done` once every child resolves) until the matching handler walks the children. Decomposition can be disabled with `DECOMPOSE=off`, which reverts to the legacy direct-to-`implementing` pickup.
 
-Once the reviewer approves and the PR is mergeable with green CI, the orchestrator can merge it itself (gated by `AUTO_MERGE`, default off) and close the issue with `done`; an approved-but-unmergeable PR detours through a `resolving_conflict` stage that rebases onto `origin/<base>` (capped by `MAX_CONFLICT_ROUNDS`). Every exit path — pushed (clean rebase, recovered push, agent-resolved conflicts, human-reply resume, user-content drift pushed fixes) or the base-up-to-date no-op — hands straight back to `validating`; the single docs pass runs after the reviewer's final approval (via the `docs_final_pending` handoff in `_handle_validating`). PRs closed without merge land on `rejected`.
+Once the reviewer approves and the PR is mergeable with green CI, the orchestrator can merge it itself (gated by `AUTO_MERGE`, default off) and close the issue with `done`; an approved-but-unmergeable PR detours through a `resolving_conflict` stage that rebases onto `origin/<base>` (capped by `MAX_CONFLICT_ROUNDS`). Every exit path — pushed (clean rebase, recovered push, agent-resolved conflicts, human-reply resume, user-content drift pushed fixes) or the base-up-to-date no-op — hands straight back to `validating`; the single docs pass runs after the reviewer's final approval (via the `documenting` handoff in `_handle_validating`). PRs closed without merge land on `rejected`.
 
 ## Design constraints
 
@@ -122,8 +122,8 @@ orchestrator/
                            resumes the dev session on the existing PR
                            worktree between reviewer approval and
                            `in_review`. Reached only via the **final-docs
-                           handoff** (marker `docs_final_pending=True` set
-                           by `_handle_validating`'s approval branch); every
+                           handoff** (the `documenting` label set by
+                           `_handle_validating`'s approval branch); every
                            pre-approval push (`implementing` PR open,
                            `validating` / `fixing` pushed fixes,
                            `in_review` drift pushes, `resolving_conflict`
@@ -196,8 +196,9 @@ orchestrator/
                            `park_reason="worktree_reset_failed"`. The
                            approval bookkeeping is cleared before any
                            fallible step, so each park leaves no stale
-                           markers an operator unpark could ride into
-                           a new final-docs handoff. The drift block
+                           `final_docs_approval_seeded` sentinel an
+                           operator unpark could ride into a new
+                           final-docs handoff. The drift block
                            also persists `docs_drift_unwind_pending=
                            True` while a cleanup is in progress and
                            clears it only on the success path that
@@ -228,15 +229,15 @@ orchestrator/
                            (`_park_verify_failure`), and the watermark
                            seeding for the validating→`documenting` (final-
                            docs) →`in_review` handoff. On approval (verify +
-                           squash succeeded) the handler sets
-                           `docs_final_pending=True` and relabels to
+                           squash succeeded) the handler seeds
+                           `final_docs_approval_seeded` alongside
+                           `agent_approved_sha` and relabels to
                            `documenting` (NOT directly to `in_review`).
                            `_handle_documenting`'s success exits advance to
-                           `in_review` unconditionally; the marker is just
-                           the "approval handoff in flight" flag, cleared
-                           on every documenting success exit and by the
-                           validating top-of-tick wipe so an aborted
-                           handoff cannot ride into a later cycle.
+                           `in_review` unconditionally; the sentinel gates
+                           docs-push promotion of `agent_approved_sha` so a
+                           snapshot failure inside validating cannot let
+                           stale state ride into AUTO_MERGE.
                            Pushed dev fixes
                            (CHANGES_REQUESTED, awaiting-human resume, drift
                            pushed, transient-park recovery push) stay on
@@ -244,14 +245,14 @@ orchestrator/
                            `agent_approved_sha` so AUTO_MERGE cannot land
                            the freshly-pushed head against a stale prior
                            approval; the reviewer re-evaluates on the next
-                           tick without a pre-review docs hop. Stale
-                           `docs_final_pending` / `final_docs_approval_seeded`
-                           markers are still cleared at the top of every
-                           validating tick so an aborted prior approval
-                           cycle (operator relabel back from documenting,
-                           drift unwind, PR-worktree refresh detour) cannot
-                           let a later operator relabel to `documenting`
-                           mis-route a fix as a final-docs handoff.
+                           tick without a pre-review docs hop. A stale
+                           `final_docs_approval_seeded` sentinel is
+                           cleared at the top of every validating tick so
+                           an aborted prior approval cycle (operator
+                           relabel back from documenting, drift unwind,
+                           PR-worktree refresh detour) cannot let a later
+                           operator relabel to `documenting` ride a stale
+                           snapshot into the docs-push SHA promotion.
     in_review.py        — `_handle_in_review` plus PR-side primitives:
                            transient park-reason set, the quiet auto-merge
                            gate re-check, legacy watermark migration, and the
@@ -499,7 +500,7 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | **worktrees.py** | git/branch/worktree plumbing, hardened fetch/push, squash-on-approval, per-tick base refresh, terminal cleanup |
 | **stages/decomposition.py** | `_handle_decomposing` / `_handle_ready` / `_handle_blocked` / `_handle_umbrella` |
 | **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle (relabels straight to `validating` after PR opens — docs run once after reviewer approval, not here) |
-| **stages/documenting.py** | `_handle_documenting` — the single docs pass on the existing PR worktree, run only as the **final-docs handoff** between reviewer approval and `in_review` (marker `docs_final_pending=True` set by `_handle_validating`'s approval branch). Success exits always advance to `in_review`; a pushed docs commit also updates `agent_approved_sha` to the new head (only when validating seeded a fresh approval this round, signalled by `final_docs_approval_seeded`) and ratchets `pr_last_comment_id` past any consumed awaiting-human reply. A user-content drift mid-hop relabels back to `validating` for re-review without spawning the docs agent and, before the relabel, fetches `<remote>/<branch>`, probes HEAD inline, and runs `git reset --hard` + `git clean -fd` when the local branch is ahead of remote, behind remote, OR has uncommitted/untracked edits -- so the next reviewer round runs against the actual remote PR head and no docs work authored against the old body survives; parks with `fetch_failed` on fetch failure and `worktree_reset_failed` on probe / reset / clean failure. |
+| **stages/documenting.py** | `_handle_documenting` — the single docs pass on the existing PR worktree, run only as the **final-docs handoff** between reviewer approval and `in_review` (the `documenting` label is set by `_handle_validating`'s approval branch). Success exits always advance to `in_review`; a pushed docs commit also updates `agent_approved_sha` to the new head (only when validating seeded a fresh approval this round, signalled by `final_docs_approval_seeded`) and ratchets `pr_last_comment_id` past any consumed awaiting-human reply. A user-content drift mid-hop relabels back to `validating` for re-review without spawning the docs agent and, before the relabel, fetches `<remote>/<branch>`, probes HEAD inline, and runs `git reset --hard` + `git clean -fd` when the local branch is ahead of remote, behind remote, OR has uncommitted/untracked edits -- so the next reviewer round runs against the actual remote PR head and no docs work authored against the old body survives; parks with `fetch_failed` on fetch failure and `worktree_reset_failed` on probe / reset / clean failure. |
 | **stages/validating.py** | `_handle_validating` + reviewer-session lifecycle |
 | **stages/in_review.py** | `_handle_in_review` + PR-watermark / auto-merge primitives; routes fresh PR feedback to `fixing` |
 | **stages/fixing.py** | `_handle_fixing` — PR-feedback quiet window, dev resume via `_resume_dev_with_text`, watermark advance, and a direct flip back to `validating` on both the pushed-fix and the no-new-feedback bounce exits (docs do not run here -- the single docs pass is deferred to the final-docs handoff after reviewer approval) |

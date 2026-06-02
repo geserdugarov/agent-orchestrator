@@ -82,8 +82,8 @@ def _handle_resolving_conflict(
     on the locked backend with a conflict-resolution prompt, push the
     resolved commit, and likewise flip to `validating`. Docs do not run
     here: the single docs pass runs after the reviewer's final
-    `VERDICT: APPROVED` (driven by `docs_final_pending` in
-    `_handle_validating`), so every pushed conflict-resolution path
+    `VERDICT: APPROVED` handoff to `documenting` in
+    `_handle_validating`, so every pushed conflict-resolution path
     targets `validating` directly. Cap loops via `MAX_CONFLICT_ROUNDS`
     (parks awaiting human on exhaustion). On agent timeout / dirty
     tree / push failure, park awaiting human and let the operator
@@ -524,8 +524,8 @@ def _post_conflict_resolution_result(
     consumes a slot, but a timeout/dirty/push-failure on the same
     counter does not. A successful push hands straight back to
     `validating` so the reviewer re-runs against the resolved branch;
-    the single docs pass is deferred to the post-approval hop driven
-    by `docs_final_pending` in `_handle_validating`.
+    the single docs pass is deferred to the post-approval handoff to
+    `documenting` in `_handle_validating`.
     """
     from .. import workflow as _wf
 
