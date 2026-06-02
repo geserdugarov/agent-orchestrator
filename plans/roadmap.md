@@ -181,7 +181,13 @@ runs right after at the same three entries: closed `implementing` /
 `documenting` / `validating` issues yielded by the now-expanded
 closed-issue sweep flip to `rejected` instead of spawning the dev /
 docs / reviewer agent, with branch cleanup only when the linked PR
-is also closed.
+is also closed. The three review-side stages (`_handle_in_review`,
+`_handle_fixing`, `_handle_resolving_conflict`) share a single
+finalize path via `_drain_review_pr_terminals` in `workflow.py` for
+their merged / closed-unmerged / open-PR-with-closed-issue arcs --
+counterpart to `_finalize_if_pr_merged` on the in-flight side -- so
+the cleanup behavior, event shape, and open-PR salvage semantics
+cannot drift between the three handlers.
 
 **Fixing stage.** `fixing` sits between `in_review` and `validating`
 in the PR-feedback fix loop. `_handle_fixing` rescans unread feedback
