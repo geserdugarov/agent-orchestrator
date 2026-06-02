@@ -356,10 +356,11 @@ The docs pass is deliberately a thin dev-session rerun on the existing PR worktr
   Mixing any two namespaces under one watermark would silently drop or replay one side.
 - **Internal flow**:
   1. If `pr_number` is missing (manual relabel suspected), park awaiting human and return; subsequent ticks no-op until the human relabels.
-  2. Read the PR via `gh.get_pr`. Branch on `gh.pr_state(pr)`:
+  2. Read the PR via `gh.get_pr` and delegate the terminal arcs to the shared `_drain_review_pr_terminals` helper (also called by `_handle_fixing` and `_handle_resolving_conflict` so the three review-side stages share one finalize path). Branch on `gh.pr_state(pr)`:
      - `merged` → set label `done`, stamp `merged_at`, write pinned state, then `issue.edit(state="closed")`. (Pinned-state write before close so PyGithub caching cannot serve a stale issue body to the writer.) Cleanup follows via `_cleanup_terminal_branch`.
      - `closed` (without merge) → set label `rejected`, stamp `closed_without_merge_at`, write state, close, then call `_cleanup_terminal_branch`. The branch name is derived from the issue number (`orchestrator/issue-<n>`) so cleanup cannot touch an arbitrary branch.
-     - `open` → fall through.
+     - `open` BUT the issue itself was closed manually → set label `rejected`, stamp `closed_without_merge_at`, write state, WITHOUT branch cleanup so the operator can salvage the still-open PR (no `pr_closed_without_merge` emit either — that event is reserved for the actual closed-PR arc).
+     - `open` with an open issue → fall through.
   3. **Fresh PR feedback (including any human CI-fix request) → route to `fixing`.** A human CI-fix request — a "please fix CI" / "tests are red, fix" comment on any of the four surfaces below — is just one shape of fresh PR feedback as far as this handler is concerned: the route triggers on the *presence* of an unread human comment past the watermark, not on its content. Read four sources independently, one per id namespace:
      - `gh.comments_after(issue, pr_last_comment_id)` (issue thread).
      - `gh.pr_conversation_comments_after(pr, pr_last_comment_id)` (PR conversation; shares id space with the issue thread, so one watermark suffices).
@@ -401,10 +402,12 @@ The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage
 - **Trigger**: each tick while label is `fixing` (set by `_handle_in_review` when fresh PR feedback arrives on any of the four comment surfaces — including a human CI-fix request, i.e. a "please fix CI" / "tests are red, fix" comment, which is handled identically to any other unread human comment). The label therefore means an unread human comment OR a human CI-fix request is queued during the quiet window or actively being addressed by the dev fix-loop. Also runs on closed-`fixing` issues yielded by the closed-issue sweep so an externally-merged PR can be finalized to `done`.
 - **Input**: pinned `pr_number`, `branch`, `dev_agent`/`dev_session_id`, plus the `pending_fix_at` ISO timestamp and per-namespace `pending_fix_*_max_id` bookmarks recorded by the in_review route. Reads the three in_review watermarks (`pr_last_comment_id`, `pr_last_review_comment_id`, `pr_last_review_summary_id`) which the route deliberately left behind so the rescan can re-discover the triggering feedback. `IN_REVIEW_DEBOUNCE_SECONDS` controls the quiet window.
 - **Internal flow**:
-  1. PR-state terminals mirror `_handle_in_review` so the handler does not strand closed-`fixing` issues:
+  1. PR-state terminals mirror `_handle_in_review` (both stages delegate to the shared `_drain_review_pr_terminals` helper in `workflow.py` for these arcs) so the handler does not strand closed-`fixing` issues:
      - `pr_state == "merged"` → label `done`, stamp `merged_at`, write pinned state, close the issue, emit `pr_merged` (`stage="fixing"`, `merge_method="external"`), and call `_cleanup_terminal_branch`.
      - `pr_state == "closed"` (without merge) → label `rejected`, stamp `closed_without_merge_at`, write pinned state, close the issue, emit `pr_closed_without_merge`, and call `_cleanup_terminal_branch`.
      - PR is open BUT the issue was closed manually (sweep yielded it) → flip to `rejected` without branch cleanup so the operator can salvage the still-open PR.
+
+     The fixing handler catches `gh.get_pr` exceptions itself and hands `pr=None` to the helper, which is a no-op; the rest of the fixing body then short-circuits via its own `if pr is None: return` guard. The other two callers (`_handle_in_review`, `_handle_resolving_conflict`) let the fetch raise through to `_process_issue`'s catch.
   2. Closed issue with no resolvable PR (manual relabel, no `pr_number`) → no-op; the operator must relabel manually to finalize.
   3. Open issue with no `pr_number` (manual relabel from outside the in_review route) → park awaiting human with `park_reason="missing_pr_number"`. The dev-resume path needs the PR to push a fix, so we cannot proceed without it.
   4. Rescan unread feedback from the three watermarks across all four surfaces (issue thread + PR conversation share the IssueComment id space; inline-review and review-summary live in their own id spaces). Orchestrator-authored comments are filtered by recorded id AND by the hidden `<!--orchestrator-comment-->` body marker. The route from `_handle_in_review` deliberately leaves the watermarks behind, so the initial fixing tick re-discovers the triggering comments; later ticks pick up additional comments that landed while the label was already `fixing` (which is what naturally extends the debounce window).
@@ -421,13 +424,13 @@ The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage
 - **Input**: pinned `pr_number`, `branch`, `dev_agent`/`dev_session_id` (or legacy `codex_session_id`), `conflict_round`. `MAX_CONFLICT_ROUNDS` from config.
 - **Internal flow**:
   1. If `pr_number` is missing (manual relabel suspected), park awaiting human and return.
-  2. Read the PR via `gh.get_pr`. Branch on `gh.pr_state(pr)`:
+  2. Read the PR via `gh.get_pr` and hand it to the shared `_drain_review_pr_terminals` helper (the same helper `_handle_in_review` and `_handle_fixing` call). Branch on `gh.pr_state(pr)`:
      - `merged` → `done` (close issue, stamp `merged_at`, call `_cleanup_terminal_branch`).
      - `closed` (without merge) → `rejected` (close issue, stamp `closed_without_merge_at`, call `_cleanup_terminal_branch`).
      - `open` → fall through.
 
      Mirrors the in_review terminal arcs for the case where a human resolves manually mid-stage. Cleanup runs whenever the PR itself is gone so a declined PR doesn't leave its `orchestrator/issue-<n>` branch behind either.
-  3. If the issue itself was closed manually while the PR is still open, treat as a hard human stop: flip to `rejected` rather than continuing to spawn the dev agent. Deliberately do NOT clean up the branch here — the PR is still open and may be useful for inspection or salvage.
+  3. If the issue itself was closed manually while the PR is still open, the helper from step 2 treats it as a hard human stop: flip to `rejected` rather than continuing to spawn the dev agent. Deliberately do NOT clean up the branch here — the PR is still open and may be useful for inspection or salvage.
 
      Same caveat as the in_review counterpart: once the label flips to `rejected` the closed-issue sweep no longer surfaces this issue, so a subsequent PR close is not observed and the operator must clean up the worktree, local branch, and remote branch by hand. Cleanup fires automatically only when the PR is closed *before* the orchestrator flips the label to `rejected`.
   4. **Awaiting-human resume path**: when parked from a previous round and a new human comment has arrived since `last_action_comment_id`, resume the dev session on the in-progress rebase worktree with the human's text (mirrors `_handle_implementing`'s awaiting-human branch — the park messages explicitly invite that flow). The post-agent step uses the same `_post_conflict_resolution_result` helper as the fresh-rebase path.

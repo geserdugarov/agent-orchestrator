@@ -253,86 +253,25 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         return
 
     pr = gh.get_pr(int(pr_number))
-    pr_status = gh.pr_state(pr)
 
-    if pr_status == "merged":
-        state.set("merged_at", _wf._now_iso())
-        gh.set_workflow_label(issue, "done")
-        gh.write_pinned_state(issue, state)
-        gh.emit_event(
-            "pr_merged",
-            issue_number=issue.number,
-            stage="in_review",
-            pr_number=int(pr_number),
-            sha=getattr(pr.head, "sha", None) or None,
-            merge_method="external",
-            review_round=int(state.get("review_round") or 0),
-            conflict_round=state.get("conflict_round"),
-            retry_count=state.get("retry_count"),
-        )
-        try:
-            issue.edit(state="closed")
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not close after merge", issue.number,
-            )
-        _wf._cleanup_terminal_branch(gh, spec, issue.number)
-        return
-
-    if pr_status == "closed":  # closed without merge
-        state.set("closed_without_merge_at", _wf._now_iso())
-        gh.set_workflow_label(issue, "rejected")
-        gh.write_pinned_state(issue, state)
-        gh.emit_event(
-            "pr_closed_without_merge",
-            issue_number=issue.number,
-            stage="in_review",
-            pr_number=int(pr_number),
-            sha=getattr(pr.head, "sha", None) or None,
-            review_round=int(state.get("review_round") or 0),
-            conflict_round=state.get("conflict_round"),
-            retry_count=state.get("retry_count"),
-        )
-        try:
-            issue.edit(state="closed")
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not close after reject", issue.number,
-            )
-        # The PR is gone, so the orchestrator-owned branch and worktree
-        # are dead weight. Mirrors the merged-PR cleanup order: finalize
-        # GitHub state first, then tidy local + remote refs best-effort.
-        _wf._cleanup_terminal_branch(gh, spec, issue.number)
-        return
-
-    # PR is open BUT the issue was closed manually (the closed-in_review sweep
-    # in `list_pollable_issues` yielded it). Closing the issue while its PR
-    # is still open is a human stop signal -- without this branch, AUTO_MERGE
-    # could otherwise land the PR and flip the issue to `done` over the
-    # human's rejection. The closed-with-merged-PR path (Resolves #N
-    # auto-close) is already handled by the `pr_status == "merged"` branch
-    # above, so by the time we reach here a closed issue means the human
-    # closed it directly.
+    # Drain the shared PR/issue terminal arcs (merged PR -> `done`,
+    # closed PR -> `rejected`, open PR + manually-closed issue ->
+    # `rejected` without branch cleanup). The closed-with-merged-PR
+    # path (Resolves #N auto-close) is handled by the merged branch
+    # inside the helper, so the open-PR + closed-issue arc only fires
+    # for issues a human closed directly.
     #
-    # Deliberately NOT cleaning the branch here: the PR is still open and
-    # the operator may want to inspect, salvage commits, transfer, or
-    # reopen it. Deleting the branch would make the PR harder to review.
-    #
-    # Automatic cleanup-on-PR-close only happens if the PR is closed
-    # BEFORE this handler flips the issue to `rejected`. Once the label
-    # is `rejected` the dispatcher (workflow.py terminal-label branch)
-    # is a no-op AND `list_pollable_issues` only sweeps closed issues
-    # still labeled `in_review` / `resolving_conflict`, so a later PR
-    # close is never observed by the orchestrator. The operator must
-    # clean up the worktree, local branch, and remote branch manually
-    # for the "close issue first, then close PR" ordering.
-    if getattr(issue, "state", "open") == "closed":
-        state.set("closed_without_merge_at", _wf._now_iso())
-        gh.set_workflow_label(issue, "rejected")
-        gh.write_pinned_state(issue, state)
-        # Deliberately no `pr_closed_without_merge` emit here: the PR is
-        # still open and may be reopened / salvaged. That event is reserved
-        # for the actual closed-PR rejection arc above.
+    # Caveat carried over from the inline version: once the helper
+    # flips a manually-closed (but PR-still-open) issue to `rejected`,
+    # the dispatcher's terminal-label branch is a no-op AND
+    # `list_pollable_issues` only sweeps closed issues still labeled
+    # `in_review` / `resolving_conflict`. A later PR close is never
+    # observed by the orchestrator, so the operator must clean up the
+    # worktree, local branch, and remote branch manually for the
+    # "close issue first, then close PR" ordering.
+    if _wf._drain_review_pr_terminals(
+        gh, spec, issue, state, pr, stage="in_review",
+    ):
         return
 
     # Fresh PR feedback scan runs FIRST -- BEFORE the user-content drift
