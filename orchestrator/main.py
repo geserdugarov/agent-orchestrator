@@ -27,6 +27,7 @@ log = logging.getLogger("orchestrator")
 
 _running = True
 _received_signal: Optional[int] = None
+_scheduler: Optional[IssueScheduler] = None
 
 
 def _shutdown(signum, _frame) -> None:
@@ -35,6 +36,19 @@ def _shutdown(signum, _frame) -> None:
     lets `main()` return `128 + signum`, which `run.sh` keys on to skip the
     restart loop -- otherwise a graceful SIGINT exit (code 0) is
     indistinguishable from a self-modifying-merge restart.
+
+    Also calls `scheduler.shutdown(wait=False)` so the scheduler's submit
+    path is closed BEFORE the in-progress tick returns. `_running=False`
+    alone only stops the next tick boundary -- an iterating
+    `workflow.tick` would otherwise keep calling `scheduler.submit` for
+    the remainder of its dispatch loop after the signal already fired,
+    enqueueing per-issue handlers we are about to wait on in the
+    finally block. With the early shutdown those submits flip to
+    `reason=closed` and the tick drains what it has instead of growing
+    the in-flight set after the user already asked to stop. The
+    follow-up `scheduler.shutdown(wait=True)` in `main`'s finally still
+    blocks on the executor + runs the trailing reap, so failures from
+    the workers that DID start are still logged.
     """
     global _running, _received_signal
     if _received_signal is not None:
@@ -42,6 +56,19 @@ def _shutdown(signum, _frame) -> None:
     _received_signal = signum
     log.info("signal %s received; will stop after this tick", signum)
     _running = False
+    sched = _scheduler
+    if sched is not None:
+        try:
+            sched.shutdown(wait=False)
+        except Exception:
+            # Signal handlers must not raise -- a failure here would
+            # leave the process in a partially-shutdown state with the
+            # default handler already re-armed (see below). Surface the
+            # reason and continue; the finally-block `shutdown(wait=True)`
+            # in `main` will retry the close + drain.
+            log.exception(
+                "signal handler scheduler.shutdown(wait=False) failed",
+            )
     try:
         signal.signal(signum, signal.SIG_DFL)
     except (OSError, ValueError):
@@ -147,6 +174,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         per_repo_cap=config.MAX_PARALLEL_ISSUES_PER_REPO,
         thread_name_prefix="orch-issue",
     )
+    # Publish the scheduler to `_shutdown` BEFORE the first tick runs so
+    # a signal that arrives during tick 1 can close the submit path
+    # immediately instead of waiting for `_run_tick` to return. The
+    # signal handlers themselves were registered earlier; until this
+    # assignment lands an early signal still sets `_received_signal` and
+    # `_running=False` but cannot close the scheduler -- that window is
+    # the brief gap between scheduler construction and this line and is
+    # acceptable because no tick has dispatched anything yet.
+    global _scheduler
+    _scheduler = scheduler
 
     try:
         if args.once:
@@ -170,8 +207,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         # process returns. Without this, `--once` could exit while
         # workers were still executing and the executor's daemon threads
         # would be torn down mid-handler; the polling loop case is the
-        # same property under SIGTERM/SIGINT shutdown.
+        # same property under SIGTERM/SIGINT shutdown. Safe to call even
+        # when `_shutdown` already ran a `wait=False` shutdown -- the
+        # scheduler's `shutdown` is documented as repeatable, the second
+        # call still waits for in-flight workers to exit, and the
+        # trailing reap drains any completion that landed in between.
         scheduler.shutdown(wait=True)
+        _scheduler = None
 
     if _received_signal is not None:
         return 128 + _received_signal
@@ -212,6 +254,15 @@ def _run_tick(
             workflow.tick(gh, spec, scheduler=scheduler)
         except Exception:
             log.exception("tick failed for repo=%s; continuing", spec.slug)
+        # Reap any worker completions that landed since the last poll.
+        # `workflow.tick` itself returns as soon as it has submitted the
+        # eligible-issue callables, so the loop below would otherwise see
+        # worker failures only on the polling pass that happens to share
+        # a tick with the worker exit. Draining once per polling pass
+        # makes "submitted on tick N, failed before tick N+1" surface on
+        # tick N+1 deterministically, alongside the analytics retention
+        # pass below.
+        scheduler.reap()
         analytics.prune_with_retention_logging()
         return
 
@@ -252,6 +303,12 @@ def _run_tick(
                     "repo=%s tick worker raised unexpectedly",
                     futures[fut],
                 )
+    # Reap any worker completions that landed since the last poll.
+    # `_dispatch_via_scheduler` deliberately does NOT reap, so this is
+    # the single per-polling-pass drain point: one reap per tick
+    # regardless of repo count, paired with the analytics retention
+    # call below for the same cadence.
+    scheduler.reap()
     analytics.prune_with_retention_logging()
 
 

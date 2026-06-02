@@ -644,10 +644,15 @@ def _dispatch_via_scheduler(
     Each per-issue callable mirrors the legacy parallel path: mint a
     fresh ``GitHubClient`` via ``gh._for_worker_thread()`` and refetch
     the Issue against that client so the worker drives its own
-    Requester chain (PyGithub is not documented thread-safe). A
-    ``scheduler.reap()`` at the end drains any completions that landed
-    during enumeration so worker failures surface on the tick they
-    fired, not the next one.
+    Requester chain (PyGithub is not documented thread-safe).
+
+    Completion reaping is the polling loop's job, not this function's.
+    ``main._run_tick`` calls ``scheduler.reap()`` exactly once after
+    every configured repo's tick returns, so the contract surfaced to
+    operators and documented in ``docs/observability.md`` ("one reap
+    per polling pass") holds in multi-repo mode too. An earlier draft
+    reaped here as well; that produced N+1 reaps per polling pass
+    under ``REPOS`` and contradicted the documented cadence.
 
     ``spec.parallel_limit`` is forwarded as the scheduler's per-call cap
     override so a per-repo configuration tighter than the scheduler
@@ -744,9 +749,6 @@ def _dispatch_via_scheduler(
             family=False,
             per_repo_cap=per_repo_cap,
         )
-    # Drain any completions that landed during enumeration so worker
-    # failures are logged on the tick that produced them, not the next.
-    scheduler.reap()
 
 
 def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
