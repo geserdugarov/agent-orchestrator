@@ -811,6 +811,112 @@ def _finalize_if_pr_merged(
     return True
 
 
+def _drain_review_pr_terminals(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+    pr,
+    *,
+    stage: str,
+) -> bool:
+    """Drain the three PR/issue terminal arcs shared by `_handle_in_review`,
+    `_handle_fixing`, and `_handle_resolving_conflict`.
+
+    Caller passes the already-fetched PR and its own `stage` label. Each
+    stage owns its fetch-failure semantics: `in_review` and
+    `resolving_conflict` let `gh.get_pr` exceptions propagate to
+    `_process_issue`'s catch; `fixing` catches and bails with `pr=None`
+    so the rest of its handler can short-circuit. Passing `pr=None` here
+    is a no-op (returns False) so fixing's deferral arrives unchanged.
+
+    Three arcs (mirrors the original inline code in each stage):
+
+      1. `pr_state == "merged"`: stamp `merged_at`, flip to `done`,
+         write state, emit `pr_merged` (`merge_method="external"`),
+         close the issue if still open, and clean up the branch.
+      2. `pr_state == "closed"` (unmerged): stamp
+         `closed_without_merge_at`, flip to `rejected`, write state,
+         emit `pr_closed_without_merge`, close the issue if still open,
+         and clean up the branch.
+      3. Issue is closed but PR is still open (the closed-issue sweep
+         surfaced a human stop signal): stamp `closed_without_merge_at`,
+         flip to `rejected`, write state. Deliberately no event emit
+         (the PR is still open and may be reopened/salvaged) and no
+         branch cleanup (the operator may want the open PR's history).
+
+    Returns True when an arc fired (caller must return immediately).
+    Returns False when none fired (caller continues with the same `pr`).
+    """
+    if pr is None:
+        return False
+    pr_number = int(state.get("pr_number"))
+    pr_status = gh.pr_state(pr)
+    # `resolving_conflict` terminal events historically coerced
+    # `conflict_round` via `int(state.get("conflict_round") or 0)` so a
+    # legacy / manually-relabelled state without the counter still landed
+    # `0` in the audit record. `build_event_record` drops None-valued
+    # kwargs, so without this coercion those legacy states would lose the
+    # field entirely. The other two stages have always emitted the raw
+    # `state.get("conflict_round")` (so a missing counter stays missing),
+    # so the stage-conditional coercion preserves both pre-refactor
+    # behaviours exactly.
+    conflict_round_field = state.get("conflict_round")
+    if stage == "resolving_conflict":
+        conflict_round_field = int(conflict_round_field or 0)
+    if pr_status == "merged":
+        state.set("merged_at", _now_iso())
+        gh.set_workflow_label(issue, "done")
+        gh.write_pinned_state(issue, state)
+        gh.emit_event(
+            "pr_merged",
+            issue_number=issue.number,
+            stage=stage,
+            pr_number=pr_number,
+            sha=getattr(pr.head, "sha", None) or None,
+            merge_method="external",
+            review_round=int(state.get("review_round") or 0),
+            conflict_round=conflict_round_field,
+            retry_count=state.get("retry_count"),
+        )
+        try:
+            issue.edit(state="closed")
+        except Exception:
+            log.exception(
+                "issue=#%s could not close after merge", issue.number,
+            )
+        _cleanup_terminal_branch(gh, spec, issue.number)
+        return True
+    if pr_status == "closed":
+        state.set("closed_without_merge_at", _now_iso())
+        gh.set_workflow_label(issue, "rejected")
+        gh.write_pinned_state(issue, state)
+        gh.emit_event(
+            "pr_closed_without_merge",
+            issue_number=issue.number,
+            stage=stage,
+            pr_number=pr_number,
+            sha=getattr(pr.head, "sha", None) or None,
+            review_round=int(state.get("review_round") or 0),
+            conflict_round=conflict_round_field,
+            retry_count=state.get("retry_count"),
+        )
+        try:
+            issue.edit(state="closed")
+        except Exception:
+            log.exception(
+                "issue=#%s could not close after reject", issue.number,
+            )
+        _cleanup_terminal_branch(gh, spec, issue.number)
+        return True
+    if getattr(issue, "state", "open") == "closed":
+        state.set("closed_without_merge_at", _now_iso())
+        gh.set_workflow_label(issue, "rejected")
+        gh.write_pinned_state(issue, state)
+        return True
+    return False
+
+
 def _finalize_if_issue_closed(
     gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:

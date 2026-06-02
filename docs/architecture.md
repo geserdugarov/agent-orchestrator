@@ -47,7 +47,19 @@ orchestrator/
                            NOT continue dev / docs / reviewer work on a
                            closed issue, and the next tick re-attempts
                            `_finalize_if_pr_merged` against a fresh PR
-                           state),
+                           state), `_drain_review_pr_terminals`
+                           (the review-side counterpart used by
+                           `_handle_in_review` / `_handle_fixing` /
+                           `_handle_resolving_conflict` to drain the
+                           shared PR/issue terminal arcs: merged PR ->
+                           `done` with cleanup, closed PR -> `rejected`
+                           with cleanup, open PR + manually closed
+                           issue -> `rejected` WITHOUT cleanup so the
+                           operator can salvage the still-open PR. The
+                           caller is responsible for the PR fetch and
+                           its own fetch-failure semantics; passing
+                           `pr=None` is a no-op so fixing's catch-and-
+                           defer pattern arrives unchanged),
                            `_run_agent_tracked`. Re-exports the
                            cross-module helpers and the stage entry handlers
                            from the modules below under their original names
