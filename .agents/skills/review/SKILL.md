@@ -23,13 +23,13 @@ For any refactor:
 
 - Workflow labels, pinned-state JSON keys, comment marker text, watermark fields, and event-emission shape must match `main` exactly. Issues already in flight depend on these — a rename is a migration, not a refactor.
 - Spot-check that moved code still routes through the same auth / fetch / push / retry helpers. A refactor is not allowed to silently change side effects.
-- Squash-on-approval, auto-merge gates, retry budgets, and stale-session detection are easy to break by accident during a move; verify their call paths survive intact.
+- Squash-on-approval, the in_review HITL ready-ping gates (mergeable + approved + no standing CHANGES_REQUESTED), retry budgets, and stale-session detection are easy to break by accident during a move; verify their call paths survive intact.
 
 ## Facade and module boundaries
 
 The compatibility surface on `orchestrator/workflow.py` is load-bearing. Confirm:
 
-- New stage helpers that another stage module reaches for are re-exported from `workflow.py`, each aliased `... as <name>`. Stage-private helpers (only used inside one stage module — `_bump_in_review_watermarks`, `_auto_merge_gates_pass`, `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`, etc.) should **not** be re-exported.
+- New stage helpers that another stage module reaches for are re-exported from `workflow.py`, each aliased `... as <name>`. Stage-private helpers (only used inside one stage module — `_bump_in_review_watermarks`, `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`, etc.) should **not** be re-exported.
 - Stage modules access cross-module helpers via `from .. import workflow as _wf` **at call time**, not via top-level `from ..workflow import _foo` and not via direct imports from `workflow_drift` / `workflow_messages` / `worktrees`. The late-binding pattern preserves `patch.object(workflow, ...)` semantics in tests.
 - Test patches target the new module boundary after a move (or the facade alias, consistently). Flag tests that still patch the old location.
 

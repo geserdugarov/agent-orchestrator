@@ -463,10 +463,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # handler's rescan but BEFORE the post-push watermark advance.
         # The pushed-fix bump MUST NOT leap past the unseen comment;
         # otherwise the next in_review tick (after validating completes)
-        # would skip the feedback and AUTO_MERGE could land the PR over
-        # it. The legacy in_review pushed-fix path had the same
-        # constraint and advanced only to comments actually fed to the
-        # dev.
+        # would skip the feedback and the in_review HITL ready-ping
+        # could advertise the PR as ready for human merge over it. The
+        # legacy in_review pushed-fix path had the same constraint and
+        # advanced only to comments actually fed to the dev.
         from unittest.mock import patch as _patch_mock
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         triggering = FakeComment(

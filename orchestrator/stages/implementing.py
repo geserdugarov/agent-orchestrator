@@ -804,8 +804,8 @@ def _on_question(
         )
         state.set("awaiting_human", True)
         # Real question parks are not transient: they need a human reply
-        # before the auto-merge gates should run again. Clear any stale
-        # `park_reason` left behind by a prior AUTO_MERGE failed_checks /
+        # before the in_review ready-ping gates should run again. Clear
+        # any stale `park_reason` left behind by a prior in_review
         # unmergeable park, and reset the silent-park streak.
         state.set("park_reason", None)
         state.set("silent_park_count", 0)
@@ -885,7 +885,7 @@ def _on_dirty_worktree(
     )
     state.set("awaiting_human", True)
     # Mirror `_on_question`: not transient, clear any stale `park_reason`
-    # so a prior AUTO_MERGE transient park does not auto-recover over the
+    # so a prior transient in_review park does not auto-recover over the
     # standing dirty-worktree question. Clear the silent-park streak too:
     # the agent produced output, so the session is not poisoned.
     state.set("park_reason", None)

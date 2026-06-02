@@ -1048,9 +1048,10 @@ class HandleResolvingConflictTest(
         # push. The handler must still increment `conflict_round` so the
         # cap eventually fires -- otherwise the in_review <-> resolving
         # cycle would loop forever. The label hands back to `validating`
-        # so AUTO_MERGE can re-evaluate; every other resolving_conflict
-        # exit also targets `validating` now, so there's no `documenting`
-        # detour to skip relative to the pushed paths.
+        # so the next reviewer round / in_review tick can re-evaluate;
+        # every other resolving_conflict exit also targets `validating`
+        # now, so there's no `documenting` detour to skip relative to
+        # the pushed paths.
         gh, issue, pr = self._seed()
         mocks, merge_mock, git_mock = self._run_with_merge(
             gh, issue,

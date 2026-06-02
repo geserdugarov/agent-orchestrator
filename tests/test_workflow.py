@@ -1580,9 +1580,11 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
     """`pr_opened`, `merge_attempt`, `conflict_round`, `pr_merged`, and
     `pr_closed_without_merge` are emitted from the in_review and
     resolving_conflict handlers so an operator tailing the JSONL sink sees
-    the PR-side of each issue's lifecycle (open / auto-merge attempt /
-    conflict round / terminal merge / terminal reject) without scraping the
-    orchestrator log.
+    the PR-side of each issue's lifecycle (open / conflict round /
+    terminal external merge / terminal reject) without scraping the
+    orchestrator log. `merge_attempt` is only emitted by
+    `_handle_resolving_conflict` for the base rebase; the in_review
+    handler is permanently manual-merge-only and never emits it.
     """
 
     BRANCH = "orchestrator/issue-50"
@@ -1702,7 +1704,8 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # that produced them, not just the issue number.
         self.assertEqual(merged[0]["review_round"], 1)
         self.assertEqual(merged[0]["conflict_round"], 2)
-        # The auto-merge surface never ran, so there is no `merge_attempt`.
+        # The orchestrator is permanently manual-merge-only and never
+        # emits `merge_attempt` from in_review.
         self.assertEqual(self._events_of(gh, "merge_attempt"), [])
 
     def test_pr_closed_without_merge_event_on_terminal(self) -> None:
@@ -1719,7 +1722,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_in_review_unmergeable_does_not_emit_conflict_round(self) -> None:
         # The orchestrator no longer routes from in_review to
-        # `resolving_conflict` via the auto-merge gate. An unmergeable PR
+        # `resolving_conflict` on an unmergeable gate. An unmergeable PR
         # parks awaiting human, so no `conflict_round` event is emitted
         # from this stage.
         pr = self._open_pr(approved=True, mergeable=False, check_state="success")
@@ -2516,7 +2519,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # comments. Bumping `pr_last_comment_id` past `latest_comment_id`
         # would silently mark unread human "do not merge" / fix-request
         # comments as consumed; the next `_handle_in_review` scan would
-        # then skip them and AUTO_MERGE could land the PR over the human
+        # then skip them and the in_review HITL ready-ping could
+        # advertise the PR as ready for human merge over the human
         # signal. The watermark must be left alone here -- the next
         # in_review scan will pick the human comments up correctly, and
         # the orchestrator's own PR notice is filtered via
@@ -2546,10 +2550,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
     def test_pr_route_skips_when_awaiting_human(self) -> None:
         # Regression: a parked PR (`awaiting_human=True`) must not be
         # detoured. `_handle_resolving_conflict`'s awaiting-human branch
-        # returns early without merging unless a new human comment arrives,
+        # returns early without rebasing unless a new human comment arrives,
         # so relabeling here would silently hide the existing park behind a
         # `resolving_conflict` label without making any progress -- including
-        # the documented `AUTO_MERGE=off` unmergeable park path. Leaving the
+        # the documented `in_review` unmergeable park path. Leaving the
         # park intact preserves its visibility and the human-driven recovery
         # path the park already invited.
         from unittest.mock import MagicMock
@@ -5367,13 +5371,14 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(numbers, {710, 711})
 
     def test_auto_merge_does_not_fire_while_label_is_fixing(self) -> None:
-        # Headline merge-safeguard contract: an approved + mergeable +
-        # green PR whose linked issue is labeled `fixing` MUST NOT
-        # be merged. The dispatcher routes `fixing` to `_handle_fixing`
-        # (which has no merge path), so `_handle_in_review` -- the only
-        # handler that calls `merge_pr` -- never runs. A regression
-        # that routes a `fixing` issue back into the in_review branch
-        # would immediately try to merge and break the assertion.
+        # Headline merge-safeguard contract: an approved + mergeable PR
+        # whose linked issue is labeled `fixing` MUST NOT produce any
+        # `gh.merge_pr` call. The orchestrator is permanently manual-
+        # merge-only -- no handler calls `merge_pr` today -- but the
+        # dispatcher also routes `fixing` to `_handle_fixing` (not
+        # `_handle_in_review`), so a regression that smuggled a merge
+        # call back into in_review would still not fire here. The
+        # `merge_calls == []` assertion below catches either drift.
         gh = FakeGitHubClient()
         issue = make_issue(720, label="fixing")
         gh.add_issue(issue)
@@ -5443,7 +5448,8 @@ class FixingConflictDetourTest(unittest.TestCase):
         # fixing route: when the resolving_conflict handler eventually
         # pushes the rebase and the validating -> in_review handoff
         # runs, the rescan would skip the (now-watermarked-past) human
-        # comment and AUTO_MERGE could land the PR over it.
+        # comment and the in_review HITL ready-ping could advertise
+        # the PR as ready for human merge over it.
         self.gh.add_issue(make_issue(7, label="fixing"))
         pr = FakePR(
             number=42, head_branch="orchestrator/issue-7",
@@ -6210,7 +6216,8 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self,
     ) -> None:
         # Open PR + manually closed issue is a human stop signal: flip
-        # to `rejected` so AUTO_MERGE cannot land the PR over the human
+        # to `rejected` so the in_review HITL ready-ping cannot
+        # advertise the PR as ready for human merge over the human
         # rejection, but deliberately leave the branch alone so the
         # operator can salvage / reopen the still-open PR. No event
         # emit either -- `pr_closed_without_merge` is reserved for the

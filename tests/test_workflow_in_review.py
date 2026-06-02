@@ -31,8 +31,8 @@ from tests.workflow_helpers import (
 
 class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
     """Drive the in_review handler through merged / closed-not-merged /
-    open-PR (auto-merge gates and PR-comment debounce) branches against a
-    seeded FakePR.
+    open-PR (HITL ready-ping gates and PR-comment debounce) branches
+    against a seeded FakePR.
     """
 
     PR_NUMBER = 77

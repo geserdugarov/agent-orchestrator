@@ -351,9 +351,9 @@ The docs pass is deliberately a thin dev-session rerun on the existing PR worktr
   Mixing any two namespaces under one watermark would silently drop or replay one side.
 - **Internal flow**:
   1. If `pr_number` is missing (manual relabel suspected), park awaiting human and return; subsequent ticks no-op until the human relabels.
-  2. Read the PR via `gh.get_pr` and delegate the terminal arcs to the shared `_drain_review_pr_terminals` helper (also called by `_handle_fixing` and `_handle_resolving_conflict` so the three review-side stages share one finalize path). Branch on `gh.pr_state(pr)`:
-     - `merged` → set label `done`, stamp `merged_at`, write pinned state, then `issue.edit(state="closed")`. (Pinned-state write before close so PyGithub caching cannot serve a stale issue body to the writer.) Cleanup follows via `_cleanup_terminal_branch`.
-     - `closed` (without merge) → set label `rejected`, stamp `closed_without_merge_at`, write state, close, then call `_cleanup_terminal_branch`. The branch name is derived from the issue number (`orchestrator/issue-<n>`) so cleanup cannot touch an arbitrary branch.
+  2. Read the PR via `gh.get_pr` and delegate the terminal arcs to the shared `_drain_review_pr_terminals` helper (also called by `_handle_fixing` and `_handle_resolving_conflict` so the three review-side stages share one finalize path). The orchestrator is permanently manual-merge-only and never calls `gh.merge_pr` from here, so any `merged` state observed below was produced by a human or bot landing the PR externally. Branch on `gh.pr_state(pr)`:
+     - `merged` (external manual merge) → stamp `merged_at`, set label `done`, write pinned state, emit `pr_merged` (`stage="in_review"`, `merge_method="external"`), then `issue.edit(state="closed")`. (Pinned-state write before close so PyGithub caching cannot serve a stale issue body to the writer; the event is emitted before close so an `issue.edit` failure does not also drop the audit record.) Cleanup follows via `_cleanup_terminal_branch`.
+     - `closed` (without merge) → stamp `closed_without_merge_at`, set label `rejected`, write state, emit `pr_closed_without_merge`, then close, then call `_cleanup_terminal_branch`. The branch name is derived from the issue number (`orchestrator/issue-<n>`) so cleanup cannot touch an arbitrary branch.
      - `open` BUT the issue itself was closed manually → set label `rejected`, stamp `closed_without_merge_at`, write state, WITHOUT branch cleanup so the operator can salvage the still-open PR (no `pr_closed_without_merge` emit either — that event is reserved for the actual closed-PR arc).
      - `open` with an open issue → fall through.
   3. **Fresh PR feedback (including any human CI-fix request) → route to `fixing`.** A human CI-fix request — a "please fix CI" / "tests are red, fix" comment on any of the four surfaces below — is just one shape of fresh PR feedback as far as this handler is concerned: the route triggers on the *presence* of an unread human comment past the watermark, not on its content. Read four sources independently, one per id namespace:
@@ -405,9 +405,9 @@ The "route to `fixing` on a new PR comment" arc is intentional: the fixing stage
 - **Input**: pinned `pr_number`, `branch`, `dev_agent`/`dev_session_id` (or legacy `codex_session_id`), `conflict_round`. `MAX_CONFLICT_ROUNDS` from config.
 - **Internal flow**:
   1. If `pr_number` is missing (manual relabel suspected), park awaiting human and return.
-  2. Read the PR via `gh.get_pr` and hand it to the shared `_drain_review_pr_terminals` helper (the same helper `_handle_in_review` and `_handle_fixing` call). Branch on `gh.pr_state(pr)`:
-     - `merged` → `done` (close issue, stamp `merged_at`, call `_cleanup_terminal_branch`).
-     - `closed` (without merge) → `rejected` (close issue, stamp `closed_without_merge_at`, call `_cleanup_terminal_branch`).
+  2. Read the PR via `gh.get_pr` and hand it to the shared `_drain_review_pr_terminals` helper (the same helper `_handle_in_review` and `_handle_fixing` call). `resolving_conflict` rebases the PR branch onto `origin/<base>`; it never merges the PR, so any `merged` state observed below was produced by a human or bot landing the PR externally. Branch on `gh.pr_state(pr)`:
+     - `merged` (external manual merge) → `done` (close issue, stamp `merged_at`, emit `pr_merged` with `merge_method="external"`, call `_cleanup_terminal_branch`).
+     - `closed` (without merge) → `rejected` (close issue, stamp `closed_without_merge_at`, emit `pr_closed_without_merge`, call `_cleanup_terminal_branch`).
      - `open` → fall through.
 
      Mirrors the in_review terminal arcs for the case where a human resolves manually mid-stage. Cleanup runs whenever the PR itself is gone so a declined PR doesn't leave its `orchestrator/issue-<n>` branch behind either.
@@ -494,8 +494,10 @@ The Q&A flow deliberately keeps state minimal: no PR is ever opened, no branch i
      (MAX_REVIEW_ROUNDS exhausted ─► park HITL;
       squash failure ─► park HITL on validating, no relabel emitted)
 
-   In_review terminals and fix bounce:
-     in_review --(PR merged)─────────────► done
+   In_review terminals and fix bounce
+   (the orchestrator never merges from in_review -- humans drive the
+    merge; the merged arc below always reflects an external merge):
+     in_review --(PR merged externally)──► done
      in_review --(PR closed unmerged)────► rejected
      in_review --(fresh PR feedback)─────► fixing
        fixing --(quiet window expires, dev fix pushed)──► validating
@@ -560,9 +562,10 @@ The Q&A flow deliberately keeps state minimal: no PR is ever opened, no branch i
      PR-state terminals mirror the in_review arcs so a closed-`fixing`
      issue with a merged PR finalizes to `done` and a closed PR
      finalizes to `rejected` (otherwise the issue would sit closed +
-     `fixing` forever):
-       pr merged    ─► done + merged_at + close + cleanup
-       pr closed    ─► rejected + closed_without_merge_at + cleanup
+     `fixing` forever). The merged arc always reflects an external
+     merge -- `fixing` never calls `gh.merge_pr`:
+       pr merged (external) ─► done + merged_at + close + cleanup
+       pr closed unmerged   ─► rejected + closed_without_merge_at + cleanup
      Otherwise: rescan unread feedback from the three in_review
      watermarks across all four surfaces (filter orchestrator comments
      by id + hidden body marker); if `awaiting_human` is set with no
@@ -602,7 +605,12 @@ The Q&A flow deliberately keeps state minimal: no PR is ever opened, no branch i
      awaiting-human resume push / drift push ─►
        label=validating (++conflict_round)
      conflict_round >= MAX_CONFLICT_ROUNDS ─► park awaiting human
-     pr merged/closed mid-stage ─► done / rejected (terminal)
+     pr merged externally / closed unmerged mid-stage
+                                ─► done / rejected (terminal;
+                                   `resolving_conflict` rebases but
+                                   never merges, so any merged PR
+                                   observed here was landed by a
+                                   human or bot externally)
      (docs do not run here -- the single docs pass runs after the
       reviewer's final approval via the `documenting` handoff)
 

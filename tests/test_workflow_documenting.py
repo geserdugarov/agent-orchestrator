@@ -603,7 +603,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
         # The handler MUST push the pre-existing local commit before
         # advancing: a NO_CHANGE verdict only certifies the local
         # tree, not the remote PR head. Without the push the issue
-        # would advance with the docs commit invisible to AUTO_MERGE.
+        # would advance with the docs commit invisible to the human
+        # who eventually clicks Merge on the PR (the commit would
+        # still be sitting locally, unpushed).
         gh = FakeGitHubClient()
         issue = make_issue(404, label="documenting")
         issue.comments.append(

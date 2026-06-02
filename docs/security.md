@@ -43,7 +43,7 @@ These are repo-level settings on a public repo; on an org-owned repo they can al
 
 Add a branch-protection rule for `main` (and any release branch) at `Settings → Branches`:
 
-- **Require a pull request before merging** — the orchestrator only ever merges via PR (see [`architecture.md`](architecture.md)), so this matches the actual flow.
+- **Require a pull request before merging** — the orchestrator only ever opens PRs (humans click Merge; the orchestrator is permanently manual-merge-only and never calls `gh.merge_pr` — see [`architecture.md`](architecture.md)), so this matches the actual flow.
 - **Require status checks to pass before merging** — list the checks named in [Required checks](#required-checks).
 - **Require branches to be up to date before merging** — keeps the [`resolving_conflict`](state-machine.md#_handle_resolving_conflict-label-resolving_conflict) detour honest.
 - **Do not allow force pushes.** The orchestrator's own push path forbids force-pushes to `main` for safety; this is the GitHub-side enforcement that catches a human bypass too.
