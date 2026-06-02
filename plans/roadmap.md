@@ -277,25 +277,23 @@ post-signal.
 tick loop, label dispatcher, unlabeled-pickup handler,
 `_park_awaiting_human`, and `_run_agent_tracked`. Stage handler bodies
 live under `orchestrator/stages/`; shared helpers live in
-`workflow_drift.py`, `workflow_messages.py`, `worktrees.py`,
-`worktree_lifecycle.py` (worktree naming / layout / creation /
-restoration / cleanup helpers extracted from `worktrees.py` and
-re-exported under their original names), `git_plumbing.py` (the
-hardened git subprocess layer extracted from `worktrees.py` and
-re-exported under its original names), `verify.py` (the
-local-verify runner and its worktree-state probes, also extracted
-from `worktrees.py` and re-exported under their original names),
+`workflow_drift.py`, `workflow_messages.py`, `worktree_lifecycle.py`
+(worktree naming / layout / creation / restoration / cleanup helpers),
+`git_plumbing.py` (the hardened git subprocess layer), `verify.py`
+(the local-verify runner and its worktree-state probes),
 `branch_publication.py` (the PR branch publication helpers --
 `_CONVENTIONAL_RE`, `_is_conventional_subject`,
 `_first_commit_subject`, `_pr_title_from_commit_or_issue`,
-`_branch_ahead_behind`, `_squash_and_force_push` -- extracted from
-`worktrees.py` and re-exported under their original names), and
-`base_sync.py` (the per-tick base refresh and rebase routing,
-also extracted from `worktrees.py` and re-exported under their
-original names). The facade re-exports cross-module helpers under
-their original names, and stage modules call back via
-`from .. import workflow as _wf` so existing
-`patch.object(workflow, ...)` tests keep working.
+`_branch_ahead_behind`, `_squash_and_force_push`), and `base_sync.py`
+(the per-tick base refresh and rebase routing). The five worktree-
+subsystem modules were carved out of the original `worktrees.py`, and
+`worktrees.py` is now a documented compatibility re-export hub that
+imports every name from them under its historical surface so existing
+call sites and `patch.object(worktrees, ...)` tests keep working. The
+`workflow.py` facade re-exports cross-module helpers under their
+original names, and stage modules call back via `from .. import
+workflow as _wf` so existing `patch.object(workflow, ...)` tests keep
+working.
 
 **Tests.** Per-stage suites under `tests/test_workflow_*.py` cover
 every handler; `tests/test_workflow.py` covers the facade. Shared

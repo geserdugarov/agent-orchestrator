@@ -1,13 +1,14 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Git, branch, and worktree plumbing shared by stage handlers.
+"""Compatibility re-export hub for the worktree subsystem.
 
-Acts as a compatibility re-export hub: every helper that used to live
-here has been extracted into a focused module, and this file imports
-each one under its original name so existing call sites (`workflow.py`
-re-exports and `patch.object(worktrees, "_foo", ...)` test patches that
-resolve the symbol against the worktrees module) keep working without
-touching the new modules.
+Every helper that used to live here has been extracted into a focused
+module, and this file imports each one under its original name so
+existing call sites (`workflow.py` re-exports and
+`patch.object(worktrees, "_foo", ...)` test patches that resolve the
+symbol against the worktrees module) keep working without touching the
+new modules. No behavior lives here -- the file is a documented facade
+whose only job is to preserve the historical `worktrees` import surface.
 
 Module map for the extractions:
 

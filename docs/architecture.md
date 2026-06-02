@@ -124,51 +124,27 @@ orchestrator/
                            from `worktrees.py` so existing imports and
                            `patch.object(worktrees, "_foo", ...)` test
                            patches keep working.
-  worktrees.py          — compatibility re-export hub: every helper
-                           that used to live here has been extracted
-                           into a focused module, and this file
-                           imports each one under its original name
-                           so existing imports and
+  worktrees.py          — compatibility re-export hub for the worktree
+                           subsystem. Every helper that used to live
+                           here has been extracted into a focused
+                           module (`git_plumbing.py`, `verify.py`,
+                           `worktree_lifecycle.py`,
+                           `branch_publication.py`, `base_sync.py`),
+                           and this file imports each one under its
+                           original name so existing imports and
                            `patch.object(worktrees, "_foo", ...)` test
-                           patches keep working. The PR branch
-                           publication helpers (`_CONVENTIONAL_RE`,
-                           `_is_conventional_subject`,
-                           `_first_commit_subject`,
-                           `_pr_title_from_commit_or_issue`,
-                           `_branch_ahead_behind`,
-                           `_squash_and_force_push`) live in
-                           `branch_publication.py`. The worktree
-                           naming / layout / creation / restoration /
-                           cleanup helpers (`_branch_name`,
-                           `_sanitize_slug`, `_repo_worktrees_root`,
-                           `_worktree_path`, `_decompose_worktree_path`,
-                           `_ensure_worktree`, `_ensure_pr_worktree`,
-                           `_ensure_decompose_worktree`,
-                           `_cleanup_decompose_worktree`,
-                           `_branch_has_unpushed_commits`,
-                           `_cleanup_question_worktree`,
-                           `_cleanup_terminal_branch`,
-                           `_has_new_commits`) live in
-                           `worktree_lifecycle.py`. The local-verify
-                           runner and its worktree-state probes
-                           (`VerifyResult`, `_run_verify_commands`,
-                           `_truncate_verify_output`, `_head_sha`,
-                           `_worktree_dirty_files`) live in `verify.py`.
-                           The hardened-git subprocess layer
-                           (`_GIT_NO_PROMPT_ENV`, `_target_root_lock`,
-                           `_git`, `_git_hardened`, `_authed_fetch`,
-                           `_authed_target_fetch`, `_push_branch`) lives
-                           in `git_plumbing.py`. The per-tick base
-                           refresh and rebase routing
-                           (`_rebase_base_into_worktree`,
-                           `_merge_base_into_worktree`,
-                           `_rebase_in_progress`,
-                           `_refresh_base_and_worktrees`,
-                           `_PR_REFRESH_DETOUR_LABELS`,
-                           `_sync_worktree_with_base`,
-                           `_route_pr_worktree_to_resolving_conflict`)
-                           lives in `base_sync.py`. All five sets of
-                           names are re-exported here.
+                           patches keep working. The per-module entries
+                           in this layout list the names each module
+                           owns; the in-file docstring lists the same
+                           map for callers who land in `worktrees.py`
+                           directly. Test patches that need to
+                           intercept a call from inside
+                           `_refresh_base_and_worktrees` /
+                           `_sync_worktree_with_base` /
+                           `_squash_and_force_push` /
+                           `_first_commit_subject` must target
+                           `base_sync` / `branch_publication` directly
+                           because the call graph lives there.
   branch_publication.py — PR branch publication helpers extracted from
                            `worktrees.py`: `_CONVENTIONAL_RE`,
                            `_is_conventional_subject`,
