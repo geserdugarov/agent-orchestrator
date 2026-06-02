@@ -22,7 +22,7 @@ were collapsed to always advance to `in_review` (the legacy
 the migration is gone), with the documenting drift unwind now
 relabeling directly to `validating` without spawning the docs agent
 (issue #270). The single docs pass runs after the reviewer's final
-approval via `docs_final_pending`, so docs land against the
+approval via the `documenting` handoff, so docs land against the
 approved/squashed head without spending a no-op pass on each
 code-changing push. `_handle_fixing` owns the PR-feedback quiet window
 and the dev-resume / push / hand-back-to-`validating` cycle, with
@@ -105,28 +105,27 @@ open, every pushed fix in `validating` / `fixing`, every `in_review`
 drift push, and every `resolving_conflict` pushed exit hands straight
 back to `validating`. The handler's own success exits always advance
 to `in_review` — `_advance_after_docs_push` / `_advance_after_docs_no_change`
-no longer carry the migration-era `docs_final_pending` discriminator
-that picked between `in_review` and `validating` (#270 collapsed
-that fallback). A `docs:` commit lands → push + advance to
-`in_review`. The push also updates `agent_approved_sha` to the new
-head so AUTO_MERGE survives, gated on the companion sentinel
-`final_docs_approval_seeded` that validating sets only when it
-actually persisted a non-empty `agent_approved_sha` this round (both
-`gh.get_pr()` succeeded AND `_head_sha()` returned a non-empty local
-SHA). When either fails the sentinel is absent and any stale
-`agent_approved_sha` left over from a prior round stays untouched so
-AUTO_MERGE remains gated. The final-docs exit additionally ratchets
-`pr_last_comment_id` past any issue-thread reply consumed by the
-awaiting-human resume, so the next in_review tick does not replay it
-as fresh PR feedback and bounce to `fixing`. An explicit `DOCS:
-NO_CHANGE` marker on a remote-clean branch advances without pushing.
-The `docs_final_pending` marker set by `_handle_validating`'s
-approval branch is the only entry point. A user-content drift during
-the final-docs hop invalidates the prior approval: the handler
-clears `agent_approved_sha`, resets `review_round=0`, drops the
-marker and sentinel, and relabels back to `validating` without
-spawning the docs agent so the reviewer re-evaluates the updated
-body. Before the relabel the handler fetches `<remote>/<branch>`, probes
+no longer carry the migration-era discriminator that picked between
+`in_review` and `validating` (#270 collapsed that fallback). A
+`docs:` commit lands → push + advance to `in_review`. The push also
+updates `agent_approved_sha` to the new head so AUTO_MERGE survives,
+gated on the sentinel `final_docs_approval_seeded` that validating
+sets only when it actually persisted a non-empty `agent_approved_sha`
+this round (both `gh.get_pr()` succeeded AND `_head_sha()` returned
+a non-empty local SHA). When either fails the sentinel is absent and
+any stale `agent_approved_sha` left over from a prior round stays
+untouched so AUTO_MERGE remains gated. The final-docs exit
+additionally ratchets `pr_last_comment_id` past any issue-thread
+reply consumed by the awaiting-human resume, so the next in_review
+tick does not replay it as fresh PR feedback and bounce to `fixing`.
+An explicit `DOCS: NO_CHANGE` marker on a remote-clean branch
+advances without pushing. The `documenting` label set by
+`_handle_validating`'s approval branch is the only entry point. A
+user-content drift during the final-docs hop invalidates the prior
+approval: the handler clears `agent_approved_sha`, resets
+`review_round=0`, drops the sentinel, and relabels back to
+`validating` without spawning the docs agent so the reviewer
+re-evaluates the updated body. Before the relabel the handler fetches `<remote>/<branch>`, probes
 HEAD inline (so a probe failure is distinguishable from a real "in
 sync" result), and -- when the local branch is ahead of remote,
 behind remote (the remote PR head moved past local while
@@ -157,8 +156,8 @@ docs child.
 **Validating stage.** `_handle_validating` spawns a fresh reviewer on
 `git diff origin/<base>...HEAD` and parses the last `VERDICT:` marker.
 On `APPROVED` it runs `VERIFY_COMMANDS` (default empty), snapshots
-`agent_approved_sha`, optionally squashes (`SQUASH_ON_APPROVAL`), sets
-`docs_final_pending=True`, and flips to `documenting` — the final-docs
+`agent_approved_sha`, optionally squashes (`SQUASH_ON_APPROVAL`), seeds
+`final_docs_approval_seeded`, and flips to `documenting` — the final-docs
 hop runs against the squashed head before `in_review` picks up. Verify
 failures park with a typed `park_reason`. `CHANGES_REQUESTED` resumes
 the dev; a clean pushed fix stays on `validating` (no docs hop) and
@@ -206,8 +205,8 @@ unmergeable PRs route to `resolving_conflict`.
 `_handle_resolving_conflict` fetches base and runs `git rebase` under
 the hardened envelope. Every exit — pushed resolution or
 base-up-to-date no-op — hands straight back to `validating`; the
-single docs pass runs after the reviewer's final approval via
-`docs_final_pending`. Real conflicts resume the dev with up to 20
+single docs pass runs after the reviewer's final approval via the
+`documenting` handoff. Real conflicts resume the dev with up to 20
 conflicted paths. `MAX_CONFLICT_ROUNDS` (default 3) caps attempts;
 every pushed rebase drops `agent_approved_sha`.
 
@@ -430,12 +429,12 @@ swallowed.
   [`plans/review-stages-lifecycle.md`](review-stages-lifecycle.md) for
   the full transition map (every `set_workflow_label` call site grouped
   by stage and the target shape). **Issue #266 landed the final-docs
-  handoff half**: on `VERDICT: APPROVED` `_handle_validating` now sets
-  `docs_final_pending=True` and flips to `documenting`, and
-  `_handle_documenting` advances to `in_review` on its success exits
-  (updating `agent_approved_sha` when a docs commit lands AND the
-  companion sentinel `final_docs_approval_seeded` confirms validating
-  actually persisted a non-empty approval SHA this round — both
+  handoff half**: on `VERDICT: APPROVED` `_handle_validating` now seeds
+  `final_docs_approval_seeded` alongside `agent_approved_sha` and flips
+  to `documenting`, and `_handle_documenting` advances to `in_review`
+  on its success exits (updating `agent_approved_sha` when a docs
+  commit lands AND the sentinel `final_docs_approval_seeded` confirms
+  validating actually persisted a non-empty approval SHA this round — both
   `gh.get_pr()` succeeded AND `_head_sha()` returned a non-empty local
   SHA — so AUTO_MERGE survives; when either fails and the sentinel is
   absent, the docs push leaves any stale `agent_approved_sha` untouched
@@ -455,8 +454,8 @@ swallowed.
   alongside the existing base-up-to-date no-op. **Issue #270 landed
   the `_handle_documenting` cleanup**: the `_advance_after_docs_push` /
   `_advance_after_docs_no_change` helpers now always advance to
-  `in_review` (the migration-era `docs_final_pending` discriminator +
-  `validating` fallback are gone); the documenting drift block
+  `in_review` (the migration-era discriminator + `validating` fallback
+  are gone); the documenting drift block
   relabels straight to `validating` without spawning the docs agent,
   since the prior approval was for stale requirements, and discards
   any unpushed local docs commit via `git reset --hard
