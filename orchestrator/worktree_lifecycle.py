@@ -11,10 +11,13 @@ unpushed work.
 Imports the hardened git subprocess layer from `git_plumbing.py` and
 reuses its per-target_root lock so concurrent workers cannot race the
 parent clone's `.git/config.lock`. The workflow-aware helpers
-(`_run_verify_commands`, `_squash_and_force_push`,
-`_refresh_base_and_worktrees`, `_sync_worktree_with_base`) stay in
-`worktrees.py`; that module re-exports every name below under its
-original name so existing imports and
+(`_squash_and_force_push`, `_refresh_base_and_worktrees`,
+`_sync_worktree_with_base`) stay in `worktrees.py`; the local-verify
+runner and its worktree-state probes (`VerifyResult`,
+`_run_verify_commands`, `_truncate_verify_output`, `_head_sha`,
+`_worktree_dirty_files`) live in `verify.py` and are re-exported from
+`worktrees.py`. `worktrees.py` also re-exports every name below under
+its original name so existing imports and
 `patch.object(worktrees, "_foo", ...)` test patches keep working.
 
 Each helper preserves the existing security hardening and crash-recovery

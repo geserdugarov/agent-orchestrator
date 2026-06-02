@@ -24,13 +24,17 @@ through:
   via askpass and pre-flights against worktree-local url-rewrite
   rules.
 
-The worktree layout helpers, the verify runner, the squash helper, and
-the per-tick base refresh stay in `worktrees.py`; that module
-re-exports every name above under its original name so existing
-imports and `patch.object(worktrees, "_foo", ...)` test patches keep
-working. The leading underscore convention is preserved because these
-helpers remain module-internal contracts -- the public surface is the
-stage handlers in `orchestrator/stages/` driven by `workflow.py`.
+The worktree layout helpers, the squash helper, and the per-tick base
+refresh stay in `worktrees.py`; the local-verify runner and its
+worktree-state probes (`VerifyResult`, `_run_verify_commands`,
+`_truncate_verify_output`, `_head_sha`, `_worktree_dirty_files`) live
+in `verify.py`. Both modules' names -- the ones defined above and the
+verify-module set -- are re-exported from `worktrees.py` under their
+original names so existing imports and `patch.object(worktrees,
+"_foo", ...)` test patches keep working. The leading underscore
+convention is preserved because these helpers remain module-internal
+contracts -- the public surface is the stage handlers in
+`orchestrator/stages/` driven by `workflow.py`.
 """
 from __future__ import annotations
 
