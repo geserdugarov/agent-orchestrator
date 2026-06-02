@@ -124,13 +124,20 @@ orchestrator/
                            from `worktrees.py` so existing imports and
                            `patch.object(worktrees, "_foo", ...)` test
                            patches keep working.
-  worktrees.py          — git, branch, and worktree plumbing: the
-                           workflow-aware helper `_squash_and_force_push`
-                           plus the conventional-commit / branch-state
-                           probes (`_first_commit_subject`,
+  worktrees.py          — compatibility re-export hub: every helper
+                           that used to live here has been extracted
+                           into a focused module, and this file
+                           imports each one under its original name
+                           so existing imports and
+                           `patch.object(worktrees, "_foo", ...)` test
+                           patches keep working. The PR branch
+                           publication helpers (`_CONVENTIONAL_RE`,
                            `_is_conventional_subject`,
+                           `_first_commit_subject`,
                            `_pr_title_from_commit_or_issue`,
-                           `_branch_ahead_behind`). The worktree
+                           `_branch_ahead_behind`,
+                           `_squash_and_force_push`) live in
+                           `branch_publication.py`. The worktree
                            naming / layout / creation / restoration /
                            cleanup helpers (`_branch_name`,
                            `_sanitize_slug`, `_repo_worktrees_root`,
@@ -160,8 +167,21 @@ orchestrator/
                            `_PR_REFRESH_DETOUR_LABELS`,
                            `_sync_worktree_with_base`,
                            `_route_pr_worktree_to_resolving_conflict`)
-                           lives in `base_sync.py`. All four sets of
+                           lives in `base_sync.py`. All five sets of
                            names are re-exported here.
+  branch_publication.py — PR branch publication helpers extracted from
+                           `worktrees.py`: `_CONVENTIONAL_RE`,
+                           `_is_conventional_subject`,
+                           `_first_commit_subject`,
+                           `_pr_title_from_commit_or_issue`,
+                           `_branch_ahead_behind`,
+                           `_squash_and_force_push`. Imports the
+                           hardened git plumbing from
+                           `git_plumbing.py` and the worktree-state
+                           probes from `verify.py`; every name here
+                           is re-exported from `worktrees.py` so
+                           existing imports and `patch.object(worktrees,
+                           "_foo", ...)` test patches keep working.
   worktree_lifecycle.py — worktree naming, layout, creation,
                            restoration, and cleanup helpers extracted
                            from `worktrees.py`: `_branch_name`,
@@ -594,8 +614,9 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | **git_plumbing.py** | hardened git subprocess layer: `_GIT_NO_PROMPT_ENV`, per-target_root locks, `_git` / `_git_hardened`, `_authed_fetch` / `_authed_target_fetch`, `_push_branch` (all re-exported from `worktrees.py`) |
 | **verify.py** | local-verify runner and worktree-state probes: `VerifyResult`, `_run_verify_commands`, `_truncate_verify_output`, `_head_sha`, `_worktree_dirty_files` (all re-exported from `worktrees.py`) |
 | **worktree_lifecycle.py** | worktree naming, layout, creation, restoration, and cleanup helpers (`_branch_name`, `_sanitize_slug`, `_repo_worktrees_root`, `_worktree_path`, `_decompose_worktree_path`, `_ensure_worktree`, `_ensure_pr_worktree`, `_ensure_decompose_worktree`, `_cleanup_decompose_worktree`, `_branch_has_unpushed_commits`, `_cleanup_question_worktree`, `_cleanup_terminal_branch`, `_has_new_commits`); all re-exported from `worktrees.py` |
+| **branch_publication.py** | PR branch publication helpers (`_CONVENTIONAL_RE`, `_is_conventional_subject`, `_first_commit_subject`, `_pr_title_from_commit_or_issue`, `_branch_ahead_behind`, `_squash_and_force_push`); all re-exported from `worktrees.py` |
 | **base_sync.py** | per-tick base refresh and rebase routing (`_rebase_base_into_worktree`, `_merge_base_into_worktree`, `_rebase_in_progress`, `_refresh_base_and_worktrees`, `_PR_REFRESH_DETOUR_LABELS`, `_sync_worktree_with_base`, `_route_pr_worktree_to_resolving_conflict`); all re-exported from `worktrees.py` |
-| **worktrees.py** | git/branch/worktree plumbing, squash-on-approval, conventional-commit / branch-state probes; re-exports the `git_plumbing.py`, `verify.py`, `worktree_lifecycle.py`, and `base_sync.py` helpers above |
+| **worktrees.py** | compatibility re-export hub for `git_plumbing.py`, `verify.py`, `worktree_lifecycle.py`, `branch_publication.py`, and `base_sync.py` |
 | **stages/decomposition.py** | `_handle_decomposing` / `_handle_ready` / `_handle_blocked` / `_handle_umbrella` |
 | **stages/implementing.py** | `_handle_implementing` + developer-session lifecycle (relabels straight to `validating` after PR opens — docs run once after reviewer approval, not here) |
 | **stages/documenting.py** | `_handle_documenting` — the single docs pass on the existing PR worktree, run only as the **final-docs handoff** between reviewer approval and `in_review` (the `documenting` label is set by `_handle_validating`'s approval branch). Success exits always advance to `in_review` and ratchet `pr_last_comment_id` past any consumed awaiting-human reply. A user-content drift mid-hop relabels back to `validating` for re-review without spawning the docs agent and, before the relabel, fetches `<remote>/<branch>`, probes HEAD inline, and runs `git reset --hard` + `git clean -fd` when the local branch is ahead of remote, behind remote, OR has uncommitted/untracked edits -- so the next reviewer round runs against the actual remote PR head and no docs work authored against the old body survives; parks with `fetch_failed` on fetch failure and `worktree_reset_failed` on probe / reset / clean failure. |

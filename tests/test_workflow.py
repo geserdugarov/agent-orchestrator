@@ -21,6 +21,7 @@ from orchestrator import (
     analytics,
     base_sync,
     config,
+    git_plumbing,
     workflow,
     worktree_lifecycle,
     worktrees,
@@ -5527,7 +5528,7 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # does not short-circuit before the lock.
         with patch.object(
             config, "_resolve_github_token", return_value="ghp-test",
-        ), patch.object(worktrees.subprocess, "run", side_effect=fake_subprocess_run):
+        ), patch.object(git_plumbing.subprocess, "run", side_effect=fake_subprocess_run):
             threads = [
                 threading.Thread(
                     target=lambda i=i: worktrees._authed_fetch(

@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import config, workflow, worktree_lifecycle, worktrees
+from orchestrator import branch_publication, config, workflow, worktree_lifecycle
 
 from tests.fakes import (
     FakeComment,
@@ -540,7 +540,7 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
             base_branch="master",
         )
         fake_git, captured = self._capture_git("feat: hello\n")
-        with patch.object(worktrees, "_git", fake_git):
+        with patch.object(branch_publication, "_git", fake_git):
             subj = workflow._first_commit_subject(
                 master_spec, Path("/tmp/wt-not-real")
             )
@@ -556,7 +556,7 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
         # Sanity check: legacy single-repo deployments keep using `main`
         # because `_TEST_SPEC.base_branch` is `main`.
         fake_git, captured = self._capture_git("")
-        with patch.object(worktrees, "_git", fake_git):
+        with patch.object(branch_publication, "_git", fake_git):
             workflow._first_commit_subject(_TEST_SPEC, Path("/tmp/wt-not-real"))
         args, _cwd = captured[0]
         self.assertIn("origin/main..HEAD", args)
@@ -571,7 +571,7 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
             remote_name="private",
         )
         fake_git, captured = self._capture_git("feat: hi\n")
-        with patch.object(worktrees, "_git", fake_git):
+        with patch.object(branch_publication, "_git", fake_git):
             workflow._first_commit_subject(
                 private_spec, Path("/tmp/wt-not-real")
             )

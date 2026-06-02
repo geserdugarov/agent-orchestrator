@@ -270,7 +270,12 @@ hardened git subprocess layer extracted from `worktrees.py` and
 re-exported under its original names), `verify.py` (the
 local-verify runner and its worktree-state probes, also extracted
 from `worktrees.py` and re-exported under their original names),
-and `base_sync.py` (the per-tick base refresh and rebase routing,
+`branch_publication.py` (the PR branch publication helpers --
+`_CONVENTIONAL_RE`, `_is_conventional_subject`,
+`_first_commit_subject`, `_pr_title_from_commit_or_issue`,
+`_branch_ahead_behind`, `_squash_and_force_push` -- extracted from
+`worktrees.py` and re-exported under their original names), and
+`base_sync.py` (the per-tick base refresh and rebase routing,
 also extracted from `worktrees.py` and re-exported under their
 original names). The facade re-exports cross-module helpers under
 their original names, and stage modules call back via

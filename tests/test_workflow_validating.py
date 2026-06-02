@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import config, workflow, worktrees
+from orchestrator import branch_publication, config, workflow
 
 from tests.fakes import (
     FakeComment,
@@ -1550,7 +1550,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # so the squash subject reuses it; body lists all three.
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(worktrees, "_push_branch", return_value=True):
+             patch.object(branch_publication, "_push_branch", return_value=True):
             success, new_sha, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
@@ -1592,7 +1592,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
 
         issue = self._make_issue(title="rename frobnicator")
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(worktrees, "_push_branch", return_value=True):
+             patch.object(branch_publication, "_push_branch", return_value=True):
             success, _, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
@@ -1620,7 +1620,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         ).strip()
 
         issue = self._make_issue()
-        push_mock = patch.object(worktrees, "_push_branch", return_value=True)
+        push_mock = patch.object(branch_publication, "_push_branch", return_value=True)
         with patch.object(config, "BASE_BRANCH", "main"), push_mock as pm:
             success, sha, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
@@ -1649,7 +1649,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
 
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(worktrees, "_push_branch", return_value=False):
+             patch.object(branch_publication, "_push_branch", return_value=False):
             success, sha, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
@@ -1677,7 +1677,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # matches the agent-spawn `_agent_env` behavior.
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(worktrees, "_push_branch", return_value=True), \
+             patch.object(branch_publication, "_push_branch", return_value=True), \
              patch.object(config, "AGENT_GIT_NAME", "orch-bot"), \
              patch.object(
                  config, "AGENT_GIT_EMAIL", "orch-bot@example.com"
@@ -1709,7 +1709,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
 
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(worktrees, "_push_branch", return_value=True) as pm:
+             patch.object(branch_publication, "_push_branch", return_value=True) as pm:
             success, _, _, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
@@ -1747,7 +1747,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
 
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
-             patch.object(worktrees, "_push_branch", return_value=True) as pm:
+             patch.object(branch_publication, "_push_branch", return_value=True) as pm:
             success, sha, count, err = workflow._squash_and_force_push(
                 _TEST_SPEC, self.work, self.branch, issue,
             )
