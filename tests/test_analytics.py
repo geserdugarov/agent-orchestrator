@@ -370,6 +370,102 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             # No raise: the wrapper logs and swallows.
             analytics.prune_with_retention_logging()
 
+    def test_concurrent_append_during_prune_is_not_lost(self) -> None:
+        # Regression: under the scheduler-driven dispatch in
+        # `main._run_tick`, `workflow.tick` returns as soon as the
+        # per-issue callables have been submitted to the scheduler,
+        # so `analytics.prune_with_retention_logging()` can run while
+        # scheduler workers are still calling `append_record()`.
+        # Without a shared lock, an append that landed between
+        # `prune_old_records`'s read and its `os.replace` would be
+        # written to the soon-unlinked inode and silently lost.
+        # The fix takes `_FILE_LOCK` around both operations.
+        #
+        # This test forces the race by patching the file ops inside
+        # `prune_old_records` so the read happens, then the appender
+        # thread fires, then the rewrite (`os.replace`) finishes --
+        # exactly the window the lock has to close. With the lock in
+        # place, the appender blocks until the prune releases it, so
+        # its line is preserved.
+        import threading
+        with tempfile.TemporaryDirectory(prefix="analytics-race-") as td:
+            path = Path(td) / "analytics.jsonl"
+            now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+            old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+            new_ts = (now - timedelta(days=1)).isoformat(timespec="seconds")
+            # One old record (will be pruned) plus one recent record
+            # (the prune rewrite must keep it). After the rewrite, an
+            # appender adds a fresh record concurrently; the prune
+            # must NOT drop it.
+            path.write_text(
+                json.dumps({
+                    "ts": old_ts, "repo": "o/r", "issue": 1,
+                    "event": "stage_enter",
+                }) + "\n"
+                + json.dumps({
+                    "ts": new_ts, "repo": "o/r", "issue": 2,
+                    "event": "stage_enter",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            _, analytics = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_RETENTION_DAYS": "90",
+            })
+
+            after_read = threading.Event()
+            appender_done = threading.Event()
+            real_replace = os.replace
+
+            def gated_replace(src, dst):
+                # The prune's `os.replace` runs after the kept-records
+                # rewrite. By the time we get here, the prune has read
+                # the original file and built the kept list. Signal
+                # the appender to fire BEFORE the replace lands so
+                # the appender's `open("a")` would race the rewrite
+                # without the lock. The fix is that the appender's
+                # `_FILE_LOCK.acquire()` blocks on the prune's still-
+                # held lock, so this call returns before the appender
+                # actually opens the file.
+                after_read.set()
+                # Wait for the appender to attempt its acquire. The
+                # lock blocks the appender; this event just confirms
+                # the appender has reached the try-acquire point.
+                appender_done.wait(timeout=0.5)
+                return real_replace(src, dst)
+
+            def appender() -> None:
+                # Wait for the prune to finish its read so the race
+                # window is real (without the lock the appender's
+                # write would land on the soon-unlinked inode).
+                after_read.wait(timeout=5.0)
+                analytics.append_record({
+                    "ts": new_ts, "repo": "o/r", "issue": 99,
+                    "event": "stage_enter",
+                })
+                appender_done.set()
+
+            t = threading.Thread(target=appender)
+            t.start()
+            try:
+                with patch.object(analytics.os, "replace", gated_replace):
+                    removed = analytics.prune_old_records(now=now)
+            finally:
+                # Make sure the appender is unblocked even if the
+                # prune raised; the wait above is bounded.
+                after_read.set()
+                t.join(timeout=5.0)
+
+            self.assertEqual(removed, 1)
+            remaining = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            issues = sorted(r["issue"] for r in remaining)
+            # The old record (issue=1) is gone. Both the kept record
+            # (issue=2) and the concurrent append (issue=99) survive.
+            self.assertEqual(issues, [2, 99])
+
     def test_helper_rewrites_file_without_github_writes(self) -> None:
         # "Analytics is not authoritative workflow state" enforced at
         # the boundary: the prune helper takes no GitHub client and the

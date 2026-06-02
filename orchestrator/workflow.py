@@ -48,6 +48,7 @@ from .github import (
     PinnedState,
     issue_has_label,
 )
+from .scheduler import IssueScheduler
 
 # Compatibility facade: `workflow.py` keeps the dispatcher, the tick loop,
 # the unlabeled-pickup handler, and `_park_awaiting_human` / `_run_agent_tracked`.
@@ -371,6 +372,7 @@ def tick(
     spec: RepoSpec,
     *,
     global_semaphore: Optional[threading.BoundedSemaphore] = None,
+    scheduler: Optional[IssueScheduler] = None,
 ) -> None:
     """Drive a single tick for one repo.
 
@@ -381,13 +383,38 @@ def tick(
     no-op context manager so direct test invocations of `tick(gh, spec)`
     keep working unchanged; production code threads the shared semaphore
     in from `main._run_tick` so the cap is actually enforced.
+
+    `scheduler`, when supplied, takes over per-issue dispatch entirely.
+    The polling pass still refreshes base/worktrees and enumerates
+    pollable issues, but instead of running the handlers in-tick (legacy
+    in-thread loop or per-tick ThreadPoolExecutor) each accepted
+    per-issue callable is submitted to the scheduler and the tick
+    returns without waiting for completion. The scheduler owns the
+    cross-repo in-flight cap, the per-repo cap (`spec.parallel_limit`
+    is threaded in as the per-call override), the "duplicate active
+    issue" skip, and the family-aware mutex. `global_semaphore` is
+    ignored on this path -- the scheduler's `global_cap` is the
+    authoritative cross-repo bound. None preserves the legacy in-tick
+    behavior so existing direct invocations are unchanged.
     """
     try:
-        _refresh_base_and_worktrees(gh, spec)
+        # Threading the scheduler in here is what keeps an "active
+        # issue" actually inert across the whole tick. The dispatch
+        # path skips a duplicate submit at `scheduler.submit`, but the
+        # base refresh would otherwise rebase the pre-PR worktree
+        # under a still-running agent or relabel/state-mutate a
+        # PR-having worktree while its handler is mid-write. The
+        # refresh helper consults `scheduler.is_active` per worktree
+        # so an in-flight issue's worktree and pinned state are left
+        # alone until the worker exits.
+        _refresh_base_and_worktrees(gh, spec, scheduler=scheduler)
     except Exception:
         log.exception(
             "repo=%s pre-tick base refresh failed; continuing", spec.slug,
         )
+    if scheduler is not None:
+        _dispatch_via_scheduler(gh, spec, scheduler)
+        return
     # parallel_limit==1 (the legacy default) keeps the sequential iteration
     # in-thread AND keeps streaming directly over `gh.list_pollable_issues()`
     # rather than materializing the list first. Materializing here would
@@ -571,6 +598,65 @@ def tick(
                         "repo=%s issue=#%s processing failed",
                         spec.slug, tag,
                     )
+
+
+def _dispatch_via_scheduler(
+    gh: GitHubClient, spec: RepoSpec, scheduler: IssueScheduler,
+) -> None:
+    """Enumerate pollable issues this tick and hand each one to the scheduler.
+
+    Classifies family-aware work (unlabeled pickup + decomposing /
+    blocked / umbrella -- the cross-issue writers) versus per-issue
+    fan-out work, then submits an accepted per-issue callable for each
+    one. The submit path is nonblocking: a duplicate (already in-flight)
+    issue, a global / per-repo cap hit, or a family slot already held
+    by another worker is simply skipped this tick; the next polling
+    pass re-enumerates and retries against the live scheduler state.
+
+    The per-issue callable mirrors the legacy parallel path: it mints a
+    fresh `GitHubClient` via `gh._for_worker_thread()` and refetches the
+    Issue with that client so the worker drives its own Requester chain
+    (PyGithub is not documented thread-safe). A scheduler.reap() at the
+    end of the dispatch loop drains any completions that landed during
+    enumeration so worker failures surface in the log on the tick that
+    they fired, not the next one.
+
+    `spec.parallel_limit` is forwarded as the scheduler's per-call
+    cap override so a per-repo configuration tighter than the
+    scheduler default still binds. Label-read failures route the
+    offending issue into the family bucket so `_process_issue`'s
+    own exception isolation can pick up any sustained failure -- the
+    same recovery the legacy parallel path uses.
+    """
+    per_repo_cap = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
+    for issue in gh.list_pollable_issues():
+        try:
+            label = gh.workflow_label(issue)
+        except Exception:
+            log.exception(
+                "repo=%s issue=#%s workflow_label read failed; routing to "
+                "family bucket so per-issue exception isolation can pick "
+                "up any sustained failure", spec.slug, issue.number,
+            )
+            label = None
+        family = label is None or label in _FAMILY_AWARE_LABELS
+        issue_number = int(issue.number)
+
+        def _run(number: int = issue_number) -> None:
+            worker_gh = gh._for_worker_thread()
+            worker_issue = worker_gh.get_issue(number)
+            _process_issue(worker_gh, spec, worker_issue)
+
+        scheduler.submit(
+            spec.slug,
+            issue_number,
+            _run,
+            family=family,
+            per_repo_cap=per_repo_cap,
+        )
+    # Drain any completions that landed during enumeration so worker
+    # failures are logged on the tick that produced them, not the next.
+    scheduler.reap()
 
 
 def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:

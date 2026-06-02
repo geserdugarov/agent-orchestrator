@@ -233,11 +233,21 @@ independently configurable.
 
 **Parallel issue processing.** `MAX_PARALLEL_ISSUES_PER_REPO` (default
 1, per-`REPOS`-override) and `MAX_PARALLEL_ISSUES_GLOBAL` (default 3)
-bound concurrent handlers. Within a tick, family-aware stages
-(`decomposing`, `blocked`, `umbrella`, unlabeled pickup) drain
-sequentially to avoid parent/child races; the remaining stages fan
-out across the bounded executor. Each worker thread mints a fresh
-`GitHubClient` so PyGithub `Requester`s aren't shared.
+bound concurrent handlers. A single long-lived `IssueScheduler`
+(`orchestrator/scheduler.py`) is built at startup with those caps and
+threaded through every `workflow.tick(gh, spec, scheduler=...)` call:
+the tick enumerates pollable issues, classifies them as family-aware
+or fan-out, and submits one nonblocking callable per issue. The
+scheduler enforces the in-flight set, per-repo counter, family mutex
+(`decomposing`, `blocked`, `umbrella`, and unlabeled pickup never run
+two at a time on the same repo), and rejects duplicate active issues;
+rejected work re-tries on the next polling pass. The pre-tick base
+refresh consults `scheduler.is_active` per worktree so a base advance
+cannot rebase a pre-PR worktree under a running agent or relabel a
+PR-having worktree mid-handler. Each worker thread mints a fresh
+`GitHubClient` so PyGithub `Requester`s aren't shared; `main` shuts
+the scheduler down (`wait=True`) on process exit so in-flight workers
+complete cleanly.
 
 **Workflow module split.** `workflow.py` is a slim facade owning the
 tick loop, label dispatcher, unlabeled-pickup handler,

@@ -59,6 +59,7 @@ from .github import (
     PinnedState,
     issue_has_label,
 )
+from .scheduler import IssueScheduler
 from .workflow_messages import _post_pr_comment, _redact_secrets
 
 log = logging.getLogger(__name__)
@@ -1121,7 +1122,12 @@ def _rebase_in_progress(worktree: Path) -> bool:
     return False
 
 
-def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
+def _refresh_base_and_worktrees(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    *,
+    scheduler: Optional[IssueScheduler] = None,
+) -> None:
     """Fetch `origin/<base>` once for the spec and bring every existing
     per-issue worktree up to date.
 
@@ -1167,6 +1173,19 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
     (mirrors `_on_dirty_worktree`'s rule). All failures are logged at
     info/warning and swallowed: keeping every issue moving matters more
     than perfect base sync.
+
+    `scheduler`, when supplied, is consulted before each per-issue
+    worktree sync: an issue whose handler is currently in flight in
+    that scheduler is skipped this tick. Without this gate, a polling
+    pass can rebase a pre-PR worktree under a still-running agent or
+    relabel/state-mutate a PR worktree while its handler is still
+    running, racing the base refresh against the live worker. The
+    scheduler's `submit` path also rejects a duplicate active issue,
+    so the workflow handler itself does not run for the in-flight
+    issue this tick -- the refresh skip keeps the worktree contract
+    matching that "active issues are skipped until completion"
+    guarantee. `None` preserves the legacy behavior so direct test
+    invocations that supply no scheduler still refresh every worktree.
     """
     fetch_r = _authed_target_fetch(spec, spec.base_branch)
     if fetch_r.returncode != 0:
@@ -1187,6 +1206,20 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
         try:
             issue_number = int(wt.name[len("issue-"):])
         except ValueError:
+            continue
+        if scheduler is not None and scheduler.is_active(
+            spec.slug, issue_number,
+        ):
+            # The handler for this issue is still running on a
+            # scheduler worker thread. Rebasing the pre-PR worktree
+            # would race the agent's working copy; the PR-having
+            # detour would relabel / write pinned state while the
+            # handler is mid-write. Skip the sync this tick -- the
+            # next polling pass picks it up once the worker exits.
+            log.debug(
+                "repo=%s issue=#%d active in scheduler; skipping base "
+                "sync until the worker completes", spec.slug, issue_number,
+            )
             continue
         try:
             _sync_worktree_with_base(gh, spec, wt, issue_number)

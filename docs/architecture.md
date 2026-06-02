@@ -309,7 +309,7 @@ The coding agent runs as a **transient child subprocess**, not a daemon — spaw
 
 ## Per-tick flow (`workflow.tick`)
 
-Each tick the polling loop fans `workflow.tick(gh, spec)` out across **every configured repo** via `main._run_tick`: single-repo deployments stay in-thread (legacy), multi-repo deployments use a `ThreadPoolExecutor` sized to the repo count. A single `BoundedSemaphore(MAX_PARALLEL_ISSUES_GLOBAL)` is shared across all `tick` calls so total in-flight per-issue handlers across all repos never exceeds that cap. Within a single repo, `spec.parallel_limit` partitions eligible issues into a family-aware drain bucket (`decomposing` / `blocked` / `umbrella` / unlabeled) and a fan-out bucket (everything else) so parent ↔ child writes cannot race a sibling thread.
+Each tick the polling loop fans `workflow.tick(gh, spec, scheduler=...)` out across **every configured repo** via `main._run_tick`: single-repo deployments stay in-thread (legacy), multi-repo deployments use a `ThreadPoolExecutor` sized to the repo count. A single long-lived `IssueScheduler` (global cap `MAX_PARALLEL_ISSUES_GLOBAL`, per-repo cap `MAX_PARALLEL_ISSUES_PER_REPO`) is shared across all `tick` calls; the tick itself enumerates pollable issues and submits one callable per issue to the scheduler without waiting for handler completion. Each submit classifies the issue as family-aware (`decomposing` / `blocked` / `umbrella` / unlabeled — parent ↔ child writes) or fan-out (everything else); the scheduler enforces one family worker per repo and rejects duplicate active issues, global cap hits, and per-repo cap hits, leaving any rejected work for the next polling pass.
 
 Per-issue durable state lives in a single **pinned comment** on the issue (`<!--orchestrator-state {...json...}-->`). The orchestrator process is stateless; the label and the pinned JSON are the entire dispatch input.
 
@@ -395,7 +395,7 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | `main` polling loop | long-lived Python process | manual start (or wrapper) | every `POLL_INTERVAL`s |
 | `workflow.tick(gh, spec)` | function call | each loop iteration | once per tick **per configured `RepoSpec`**, fanned out across a `ThreadPoolExecutor` (one worker thread per repo) when N>1; single-repo legacy mode collapses to N=1 and stays in-thread |
 | `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo: one `git fetch <spec.remote_name> <spec.base_branch>` (remote defaults to `origin`, overridable per `REPOS` entry), then per-worktree dispatch (pre-PR worktrees rebase directly; PR-having worktrees behind base detour to `resolving_conflict`). See [Per-tick flow](state-machine.md#per-tick-flow-workflowtick) for the full open-PR / `awaiting_human` / watermark / conflict / dirty-tree rules. |
-| `_handle_*` per issue | function call | issue's workflow label | once per tick per open issue (within its repo's `tick`); concurrent up to `spec.parallel_limit` per repo and `MAX_PARALLEL_ISSUES_GLOBAL` across all repos (single shared `BoundedSemaphore`) |
+| `_handle_*` per issue | function call | issue's workflow label | once per tick per open issue (within its repo's `tick`); concurrent up to `spec.parallel_limit` per repo and `MAX_PARALLEL_ISSUES_GLOBAL` across all repos (single shared `IssueScheduler`) |
 | decomposer agent (`DECOMPOSE_AGENT`) | subprocess (fresh or resumed, locked spec (backend + args)) | `_handle_decomposing` (retry budget OK) or HITL resume | one shot per tick when needed |
 | implementer agent (`DEV_AGENT`) | subprocess | `_handle_implementing` (no commits yet, retry budget OK) or HITL resume | one shot per tick when needed |
 | reviewer agent (`REVIEW_AGENT`) | subprocess (fresh session) | `_handle_validating`, round < max | one shot per tick |
@@ -426,33 +426,40 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
    │     startup: build [(spec, GitHubClient(repo_spec=spec)), ...] from  │
    │              config.default_repo_specs() and ensure_workflow_labels  │
    │              once per spec; build one shared                         │
-   │              global_semaphore = BoundedSemaphore(                    │
-   │                  MAX_PARALLEL_ISSUES_GLOBAL)                         │
+   │              scheduler = IssueScheduler(                             │
+   │                  global_cap=MAX_PARALLEL_ISSUES_GLOBAL,              │
+   │                  per_repo_cap=MAX_PARALLEL_ISSUES_PER_REPO)          │
    │     loop every POLL_INTERVAL s:                                      │
    │       1. self-restart check                                          │
    │          (origin/<ORCHESTRATOR_BASE_BRANCH> moved & touches orch/?)   │
-   │       2. _run_tick(clients, global_semaphore):                       │
+   │       2. _run_tick(clients, scheduler):                              │
    │            len(clients) == 1 → in-thread workflow.tick(              │
-   │                                  gh, spec,                           │
-   │                                  global_semaphore=global_semaphore)  │
+   │                                  gh, spec, scheduler=scheduler)      │
    │            len(clients)  > 1 → ThreadPoolExecutor                    │
    │                                  (max_workers=len(clients)) fans     │
    │                                  workflow.tick(gh, spec,             │
-   │                                  global_semaphore=global_semaphore)  │
+   │                                  scheduler=scheduler)                │
    │                                  across one worker thread per repo   │
    │          (per-repo exception logged + skipped, never aborts the tick)│
+   │     shutdown: scheduler.shutdown(wait=True) so in-flight workers     │
+   │               complete cleanly on exit (signal / --once / restart)  │
    │                    │                                                 │
    │                    ▼                                                 │
-   │   workflow.tick(gh, spec, global_semaphore=...) →                    │
-   │     partition pollable issues by label:                              │
-   │       family-aware (decomposing/blocked/umbrella/unlabeled) → drain  │
-   │         sequentially on one worker (no parent↔child races)           │
-   │       fan-out (ready/implementing/documenting/validating/in_review/ │
-   │                fixing/resolving_conflict) → up to spec.parallel_limit│
-   │         worker threads, each with its own gh._for_worker_thread()    │
-   │     every _process_issue call acquires global_semaphore, so total    │
-   │     in-flight handlers across all repos ≤ MAX_PARALLEL_ISSUES_GLOBAL │
-   │   → for each issue → dispatch by label:                              │
+   │   workflow.tick(gh, spec, scheduler=...) →                           │
+   │     _refresh_base_and_worktrees(gh, spec, scheduler=...): skip       │
+   │       worktrees whose handler is still in flight in scheduler        │
+   │     classify each pollable issue by label and submit to scheduler:   │
+   │       family-aware (decomposing/blocked/umbrella/unlabeled) →        │
+   │         submit(..., family=True) — one family worker per repo at a   │
+   │         time (parent↔child writes never overlap)                     │
+   │       fan-out (ready/implementing/documenting/validating/in_review/  │
+   │                fixing/resolving_conflict) → submit(..., family=False)│
+   │         — concurrent up to per-repo and global caps                  │
+   │     scheduler rejects duplicate active issue / cap hit / family slot │
+   │       held → skipped this tick, next polling pass retries            │
+   │     accepted workers each call gh._for_worker_thread() + refetch     │
+   │       the Issue against that client, then run _process_issue         │
+   │   → for each accepted submit → dispatch by label:                    │
    │     (per-label handler tree, dispositions, and parking flow live in │
    │      docs/state-machine.md#stage-handlers; the compact label-       │
    │      lifecycle reference is at                                       │

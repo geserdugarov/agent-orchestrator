@@ -65,7 +65,7 @@ class PollingLoopFanOutTest(unittest.TestCase):
             tick_calls: list[tuple[str, str]] = []
             calls_lock = threading.Lock()
 
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 # Record the spec slug + whichever client main.py paired it
                 # with, so a regression that crossed wires (spec for alpha
                 # paired with beta's gh) would surface here. Calls happen
@@ -113,7 +113,7 @@ class PollingLoopFanOutTest(unittest.TestCase):
             ticked: list[str] = []
             ticked_lock = threading.Lock()
 
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 with ticked_lock:
                     ticked.append(spec.slug)
                 if spec.slug == "alpha/one":
@@ -150,7 +150,7 @@ class PollingLoopFanOutTest(unittest.TestCase):
             tick_calls: list[str] = []
             tick_threads: list[int] = []
 
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 tick_calls.append(spec.slug)
                 tick_threads.append(threading.get_ident())
 
@@ -186,7 +186,7 @@ class PollingLoopFanOutTest(unittest.TestCase):
             completed: list[str] = []
             completed_lock = threading.Lock()
 
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 # If ticks ran sequentially, the first arrival would wait
                 # forever for the second / third and the barrier would
                 # time out (BrokenBarrierError surfaces as test failure).
@@ -238,33 +238,40 @@ class PollingLoopFanOutTest(unittest.TestCase):
                 client.ensure_workflow_labels.assert_called_once()
 
 
-class GlobalIssueCapTest(unittest.TestCase):
-    """`MAX_PARALLEL_ISSUES_GLOBAL` is the host-wide ceiling on concurrent
-    per-issue handlers across every configured repo. The polling loop
-    builds one `BoundedSemaphore` from that env var at startup and
-    threads it through `workflow.tick(gh, spec, global_semaphore=...)`
-    so workers from different repo ticks contend on the same semaphore.
+class SchedulerWiringTest(unittest.TestCase):
+    """`MAX_PARALLEL_ISSUES_GLOBAL` and `MAX_PARALLEL_ISSUES_PER_REPO` are
+    the host-wide and per-repo ceilings on concurrent per-issue handlers.
+    The polling loop builds ONE `IssueScheduler` at startup from those
+    env vars and threads the SAME instance through every `workflow.tick`
+    call so cross-repo workers actually contend on the same caps. The
+    scheduler is shut down on exit so in-flight workers complete cleanly
+    regardless of how the loop terminates (`--once` finishing, signal,
+    self-modifying-merge restart).
     """
 
-    def test_main_passes_bounded_semaphore_sized_to_global_cap(self) -> None:
-        # The polling loop must build one BoundedSemaphore sized to
-        # `MAX_PARALLEL_ISSUES_GLOBAL` and pass the SAME instance to every
-        # `workflow.tick` call so cross-repo workers actually contend on
-        # the same cap. Building a fresh semaphore per repo would isolate
-        # each repo to its own cap and defeat the global ceiling.
+    def test_main_builds_one_scheduler_and_passes_it_to_every_tick(
+        self,
+    ) -> None:
+        # The polling loop must build one IssueScheduler at startup
+        # sized to (MAX_PARALLEL_ISSUES_GLOBAL, MAX_PARALLEL_ISSUES_PER_REPO)
+        # and pass the SAME instance to every `workflow.tick` call so
+        # cross-repo workers actually contend on the same caps.
+        # Building a fresh scheduler per repo would isolate each repo
+        # to its own caps and defeat the global ceiling.
         with tempfile.TemporaryDirectory() as td, _reload_main({
             "REPOS": (
                 f"alpha/one|{td}|main\n"
                 f"beta/two|{td}|develop"
             ),
             "MAX_PARALLEL_ISSUES_GLOBAL": "4",
+            "MAX_PARALLEL_ISSUES_PER_REPO": "3",
         }) as main_mod:
             received: list[object] = []
             received_lock = threading.Lock()
 
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 with received_lock:
-                    received.append(global_semaphore)
+                    received.append(scheduler)
 
             def fake_client(*, repo_spec):
                 m = MagicMock()
@@ -278,26 +285,134 @@ class GlobalIssueCapTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(len(received), 2)
             self.assertIsNotNone(received[0])
-            # Same instance for every spec -- a per-repo semaphore would
-            # let every repo independently saturate the cap.
+            # Same instance for every spec -- a per-repo scheduler would
+            # let every repo independently saturate the global cap.
             self.assertIs(received[0], received[1])
-            # BoundedSemaphore: a double-release raises ValueError. We use
-            # that to assert the size without relying on internal state:
-            # acquire 4 times non-blocking, then the 5th must fail.
-            sem = received[0]
-            for _ in range(4):
-                self.assertTrue(sem.acquire(blocking=False))
-            self.assertFalse(sem.acquire(blocking=False))
+            # Caps derived from the env vars.
+            sched = received[0]
+            self.assertEqual(sched.global_cap, 4)
+            self.assertEqual(sched.per_repo_cap, 3)
 
-    def test_global_semaphore_bounds_concurrent_issue_processing_across_repos(
+    def test_main_uses_same_scheduler_across_legacy_single_repo_path(
         self,
     ) -> None:
-        # Concurrent ticks across repos must NOT exceed
-        # `MAX_PARALLEL_ISSUES_GLOBAL` in-flight `_process_issue` calls
-        # combined. Each repo's tick acquires the shared semaphore
-        # around its per-issue work; with the cap set to 2 and three
-        # repos all trying to process simultaneously, the third must
-        # wait for one to release before it can proceed.
+        # The legacy single-repo path must also receive a real scheduler
+        # (not None) -- production "normal `python -m orchestrator.main`"
+        # invocations would otherwise fall back to the in-tick dispatch
+        # and wait for handler completion on the caller thread.
+        with _reload_main({
+            "REPO": "owner/legacy",
+            "TARGET_REPO_ROOT": "/tmp",
+            "BASE_BRANCH": "trunk",
+        }) as main_mod:
+            received: list[object] = []
+
+            def fake_tick(gh, spec, *, scheduler=None):
+                received.append(scheduler)
+
+            def fake_client(*, repo_spec):
+                m = MagicMock()
+                m.slug = repo_spec.slug
+                return m
+
+            with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
+                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+                rc = main_mod.main(["--once"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(received), 1)
+            self.assertIsNotNone(received[0])
+            self.assertIsInstance(received[0], main_mod.IssueScheduler)
+
+    def test_main_shuts_down_scheduler_on_normal_exit(self) -> None:
+        # The scheduler must be shut down before main() returns so any
+        # in-flight workers (e.g. handlers a `--once` invocation just
+        # submitted) complete cleanly. Without shutdown the daemon
+        # executor threads could be torn down mid-handler at process
+        # exit.
+        with _reload_main({
+            "REPO": "owner/legacy",
+            "TARGET_REPO_ROOT": "/tmp",
+            "BASE_BRANCH": "trunk",
+        }) as main_mod:
+            captured: list[object] = []
+
+            def fake_tick(gh, spec, *, scheduler=None):
+                captured.append(scheduler)
+
+            def fake_client(*, repo_spec):
+                m = MagicMock()
+                m.slug = repo_spec.slug
+                return m
+
+            real_scheduler_init = main_mod.IssueScheduler.__init__
+            built: list[object] = []
+
+            def tracking_init(self, *args, **kwargs):
+                real_scheduler_init(self, *args, **kwargs)
+                built.append(self)
+
+            with patch.object(main_mod.IssueScheduler, "__init__", tracking_init), \
+                 patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
+                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+                rc = main_mod.main(["--once"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(built), 1)
+            sched = built[0]
+            self.assertIs(captured[0], sched)
+            # After main() returns, a follow-up submit must be rejected
+            # because the scheduler has been closed.
+            self.assertFalse(
+                sched.submit("owner/legacy", 999, lambda: None),
+                "scheduler was not shut down before main() returned",
+            )
+
+    def test_main_shuts_down_scheduler_on_signal_exit(self) -> None:
+        # SIGINT/SIGTERM during a tick must still drain the scheduler
+        # before main() returns -- otherwise a signal-induced exit
+        # would strand in-flight workers and any late failures.
+        with _reload_main({
+            "REPO": "owner/legacy",
+            "TARGET_REPO_ROOT": "/tmp",
+            "BASE_BRANCH": "trunk",
+        }) as main_mod:
+            built: list[object] = []
+            real_scheduler_init = main_mod.IssueScheduler.__init__
+
+            def tracking_init(self, *args, **kwargs):
+                real_scheduler_init(self, *args, **kwargs)
+                built.append(self)
+
+            def fake_tick(gh, spec, *, scheduler=None):
+                main_mod._shutdown(signal.SIGINT, None)
+
+            def fake_client(*, repo_spec):
+                m = MagicMock()
+                m.slug = repo_spec.slug
+                return m
+
+            with patch.object(main_mod.IssueScheduler, "__init__", tracking_init), \
+                 patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
+                 patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
+                rc = main_mod.main(["--once"])
+
+            self.assertEqual(rc, 128 + signal.SIGINT)
+            self.assertEqual(len(built), 1)
+            self.assertFalse(
+                built[0].submit("owner/legacy", 999, lambda: None),
+                "scheduler not shut down on signal-induced exit",
+            )
+
+    def test_scheduler_global_cap_bounds_concurrent_workers_across_repos(
+        self,
+    ) -> None:
+        # End-to-end coverage that the scheduler main built actually
+        # bounds concurrent per-issue workers across repos. Three
+        # tick threads (one per repo) each submit a worker to the
+        # SAME scheduler with `parallel_limit=1` (per-repo cap is
+        # always >= 1) and global_cap=2; only two of the three workers
+        # may run in parallel -- the third must be skipped this tick.
         with tempfile.TemporaryDirectory() as td, _reload_main({
             "REPOS": (
                 f"alpha/one|{td}|main\n"
@@ -306,37 +421,38 @@ class GlobalIssueCapTest(unittest.TestCase):
             ),
             "MAX_PARALLEL_ISSUES_GLOBAL": "2",
         }) as main_mod:
+            received: list[object] = []
+            received_lock = threading.Lock()
             in_flight = 0
             max_in_flight = 0
-            lock = threading.Lock()
+            counter_lock = threading.Lock()
             admitted = threading.Semaphore(0)
             release = threading.Event()
 
-            def fake_tick(gh, spec, *, global_semaphore=None):
-                # Stand in for `workflow.tick`'s per-issue handler: each
-                # repo's tick acquires the shared semaphore once around
-                # its work. With the cap set to 2 and three repos
-                # running concurrently, only two can be in-flight at any
-                # moment.
-                self.assertIsNotNone(global_semaphore)
-                with global_semaphore:
-                    nonlocal in_flight, max_in_flight
-                    with lock:
-                        in_flight += 1
-                        max_in_flight = max(max_in_flight, in_flight)
-                    admitted.release()
-                    release.wait(timeout=5.0)
-                    with lock:
-                        in_flight -= 1
+            def _worker() -> None:
+                nonlocal in_flight, max_in_flight
+                with counter_lock:
+                    in_flight += 1
+                    max_in_flight = max(max_in_flight, in_flight)
+                admitted.release()
+                release.wait(timeout=5.0)
+                with counter_lock:
+                    in_flight -= 1
+
+            def fake_tick(gh, spec, *, scheduler=None):
+                # Submit a worker to the production scheduler; the
+                # scheduler's global_cap enforces the cross-repo cap.
+                with received_lock:
+                    received.append(scheduler)
+                # Try repeatedly to land within this repo's chance
+                # (the global cap may reject the third submitter).
+                scheduler.submit(spec.slug, 1, _worker)
 
             def release_when_two_admitted() -> None:
-                # Wait until two ticks are in-flight, give the third a
-                # moment to try (and fail) to acquire, then let
-                # everyone drain.
                 for _ in range(2):
                     self.assertTrue(
                         admitted.acquire(timeout=5.0),
-                        "fewer than 2 repos admitted within timeout",
+                        "fewer than 2 workers admitted within timeout",
                     )
                 time.sleep(0.1)
                 release.set()
@@ -357,7 +473,11 @@ class GlobalIssueCapTest(unittest.TestCase):
                 releaser.join(timeout=5.0)
 
             self.assertEqual(rc, 0)
-            # Cap is 2: three repos but never more than 2 in flight.
+            # All three repos saw the SAME scheduler instance.
+            self.assertEqual(len(received), 3)
+            self.assertEqual(len({id(s) for s in received}), 1)
+            # Cap is 2: even though three repos submitted, never more
+            # than 2 workers ran concurrently.
             self.assertEqual(max_in_flight, 2)
 
 
@@ -383,7 +503,7 @@ class SignalHandlingTest(unittest.TestCase):
         }) as main_mod:
             shutdown_done = threading.Event()
 
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 # The first arrival simulates the user pressing Ctrl+C
                 # mid-tick. Subsequent arrivals are no-ops; the
                 # `_shutdown` handler is itself idempotent.
@@ -416,7 +536,7 @@ class SignalHandlingTest(unittest.TestCase):
         }) as main_mod:
             ticked: list[str] = []
 
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 ticked.append(spec.slug)
 
             def fake_client(*, repo_spec):
@@ -443,7 +563,7 @@ class SignalHandlingTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 main_mod._shutdown(signal.SIGTERM, None)
 
             def fake_client(*, repo_spec):
@@ -475,7 +595,7 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
             "TARGET_REPO_ROOT": "/tmp",
             "BASE_BRANCH": "trunk",
         }) as main_mod:
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 pass
 
             def fake_client(*, repo_spec):
@@ -504,7 +624,7 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
                 f"beta/two|{td}|develop"
             ),
         }) as main_mod:
-            def fake_tick(gh, spec, *, global_semaphore=None):
+            def fake_tick(gh, spec, *, scheduler=None):
                 pass
 
             def fake_client(*, repo_spec):

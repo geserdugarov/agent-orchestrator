@@ -132,23 +132,32 @@ When exporting in a shell instead of `.env`, prefer one command per line — the
 Each polling tick advances issues concurrently along two axes:
 
 - **Across repos.** When `REPOS` lists more than one entry, `main._run_tick` fans the per-repo `workflow.tick(gh, spec)` calls out across a `ThreadPoolExecutor` (one worker thread per configured repo) so a slow repo cannot delay the others. The legacy single-repo mode (`REPOS` unset) stays in-thread, so deployments without `REPOS` see no behavior change.
-- **Within a repo.** When `parallel_limit > 1` for a given repo, `workflow.tick` materializes its eligible-issue set and dispatches the per-issue handlers across a bounded `ThreadPoolExecutor` capped at `parallel_limit`. `parallel_limit == 1` (the default) keeps the legacy sequential, streaming loop with no executor.
+- **Within a repo.** Per-issue handlers are dispatched to a long-lived `IssueScheduler` (see below); the tick itself enumerates pollable issues, classifies them, and submits a callable per issue without waiting for completion.
 
 The two caps below are the levers:
 
 | Variable                       | Default | Purpose                                                                                              |
 | ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------- |
-| `MAX_PARALLEL_ISSUES_PER_REPO` | `1`     | per-repo cap on concurrent in-flight per-issue handlers within one repo on a single tick. Default `1` keeps the legacy one-at-a-time behavior. Each `REPOS` entry can override this via its optional fifth pipe-separated field. Must be a positive integer. |
+| `MAX_PARALLEL_ISSUES_PER_REPO` | `1`     | per-repo cap on concurrent in-flight per-issue handlers within one repo. Default `1` keeps the legacy one-at-a-time behavior. Each `REPOS` entry can override this via its optional fifth pipe-separated field. Must be a positive integer. |
 | `MAX_PARALLEL_ISSUES_GLOBAL`   | `3`     | global cap across all configured repos. Bounds the total concurrent agent fan-out regardless of any one repo's `parallel_limit`. Must be a positive integer; raise only on hosts with the CPU / memory headroom to run that many agent CLIs at once. |
 
-`MAX_PARALLEL_ISSUES_GLOBAL` is enforced by a single `threading.BoundedSemaphore` built once at startup and threaded through every `workflow.tick(gh, spec, global_semaphore=...)` call. Each tick acquires it around every `_process_issue` invocation, so workers from different repos contend on the same semaphore — total in-flight per-issue handlers across all repos never exceeds the global cap regardless of how many `parallel_limit` slots each repo declares.
+Both caps are enforced by a single `IssueScheduler` (see `orchestrator/scheduler.py`) built once at startup with `global_cap=MAX_PARALLEL_ISSUES_GLOBAL` and `per_repo_cap=MAX_PARALLEL_ISSUES_PER_REPO`, and threaded through every `workflow.tick(gh, spec, scheduler=...)` call. The scheduler owns the in-flight set, the per-repo counters, the family-aware mutex, and the executor that actually runs the handlers; the tick itself returns as soon as it has submitted work. Each per-spec `parallel_limit` is forwarded as a per-call override, so a `REPOS` entry with a tighter cap binds without changing the scheduler default.
 
-Inside a single `workflow.tick`, the parallel path partitions pollable issues by workflow label before submitting work to the executor:
+When the dispatch loop offers an issue to the scheduler, the submit is nonblocking and any one of the following reasons skips it this tick (the next polling pass re-enumerates and retries):
 
-- **Family-aware labels** (`decomposing`, `blocked`, `umbrella`, plus unlabeled issues) read and write cross-issue state (parent ↔ child) and must never run two at a time. They are folded into one drain task that processes them sequentially on a single worker thread.
-- **Fan-out labels** (`ready`, `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`) only touch their own per-issue state and worktree, so each one is submitted as its own future and runs concurrently up to `parallel_limit`.
+- the `(repo_slug, issue_number)` pair is already in flight (duplicate-active-issue gate),
+- the global cap is reached,
+- the per-repo cap is reached,
+- the issue is family-aware and another family worker on the same repo is already in flight.
 
-The drain task occupies exactly one executor slot regardless of how many family-aware issues exist, leaving the other `parallel_limit - 1` slots free for fan-out work in the same tick.
+Family-aware classification mirrors the cross-issue write surface:
+
+- **Family-aware labels** (`decomposing`, `blocked`, `umbrella`, plus unlabeled issues) read and write cross-issue state (parent ↔ child) and must never run two at a time on the same repo. The scheduler enforces a one-family-worker-per-repo mutex; a second family submit on the same repo is skipped until the first completes.
+- **Fan-out labels** (`ready`, `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`) only touch their own per-issue state and worktree, so they fan out concurrently up to the per-repo and global caps.
+
+The pre-tick base refresh (`_refresh_base_and_worktrees`) is also scheduler-aware: per-issue worktrees whose handler is currently in flight on the scheduler are skipped this tick, so a base advance cannot rebase a pre-PR worktree under a still-running agent or relabel a PR-having worktree mid-handler. The skip is conditional on active state, so once the worker exits the next tick's refresh picks the worktree back up.
+
+`shutdown(wait=True)` runs on process exit (normal `--once` return, `SIGINT`/`SIGTERM`, or self-modifying-merge restart) so any in-flight workers complete cleanly and late failures are still logged.
 
 Non-positive or non-integer values for either cap (or for a per-entry `parallel_limit`) abort startup with a clear error so a typo cannot silently disable all work.
 

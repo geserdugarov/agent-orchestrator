@@ -61,12 +61,24 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from .. import config, usage
 from ..agents import AgentResult
+
+# Serializes filesystem ops on `ANALYTICS_LOG_PATH` so a concurrent
+# `prune_old_records` (read + rewrite via `os.replace`) cannot drop an
+# `append_record` that landed between the prune's read and replace.
+# Both operations are short and IO-bound; a single process-local lock
+# is sufficient because the sink path is single-writer per orchestrator
+# process by design (operators run one orchestrator per host). The
+# scheduler workers that drove the race fan out across threads inside
+# the SAME process, so this lock closes the window without needing a
+# filesystem-level fcntl.
+_FILE_LOCK = threading.Lock()
 
 __all__ = [
     "ANALYTICS_DB_URL",
@@ -175,14 +187,24 @@ def append_record(record: dict) -> None:
     a misconfigured path (read-only mount, disk full, permission
     failure) cannot stop the per-issue tick from making progress; the
     pinned state on GitHub remains correct regardless.
+
+    Holds `_FILE_LOCK` around the actual filesystem ops so a concurrent
+    `prune_old_records` cannot rewrite the file (via `os.replace`)
+    between this append's open and write; otherwise the appended record
+    would be written to the soon-unlinked inode and silently lost.
+    Scheduler workers fan out across threads in the same process, so the
+    race is real on the multi-issue path. JSON serialization is done
+    outside the lock to keep the critical section short.
     """
     path = ANALYTICS_LOG_PATH
     if path is None:
         return
+    serialized = json.dumps(record, sort_keys=True) + "\n"
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, sort_keys=True) + "\n")
+        with _FILE_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(serialized)
     except OSError as e:
         log.warning("could not write analytics record to %s: %s", path, e)
 
@@ -345,6 +367,14 @@ def prune_old_records(*, now: Optional[datetime] = None) -> int:
     The rewrite goes through a temp file in the same directory followed
     by `os.replace` so a crash mid-prune cannot truncate the analytics
     file.
+
+    Holds `_FILE_LOCK` across the read + rewrite so a concurrent
+    `append_record` cannot land between the read and the `os.replace`
+    -- without this, an append that observed the old inode after we
+    read but before `os.replace` would write to the soon-unlinked inode
+    and be silently lost. Scheduler workers may still be running when
+    the polling loop calls this between ticks, so serializing with
+    `append_record` is what keeps that prune-window invisible.
     """
     path = ANALYTICS_LOG_PATH
     if path is None:
@@ -357,61 +387,73 @@ def prune_old_records(*, now: Optional[datetime] = None) -> int:
 
     cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=days)
 
-    kept: list[str] = []
-    removed = 0
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            for raw_line in fh:
-                if not raw_line.strip():
-                    continue
-                line = raw_line if raw_line.endswith("\n") else raw_line + "\n"
-                try:
-                    rec = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    kept.append(line)
-                    continue
-                ts_raw = rec.get("ts") if isinstance(rec, dict) else None
-                if not isinstance(ts_raw, str):
-                    kept.append(line)
-                    continue
-                try:
-                    ts = datetime.fromisoformat(ts_raw)
-                except ValueError:
-                    kept.append(line)
-                    continue
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if ts < cutoff:
-                    removed += 1
-                    continue
-                kept.append(line)
-    except OSError as e:
-        log.warning("could not read analytics file %s for prune: %s", path, e)
-        return 0
-
-    if removed == 0:
-        return 0
-
-    try:
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            dir=str(path.parent),
-            prefix=path.name + ".prune.",
-            suffix=".tmp",
-        )
+    with _FILE_LOCK:
+        # Re-check existence under the lock: a concurrent operator
+        # `rm` between the pre-lock probe above and acquiring the
+        # lock would otherwise let `path.open` raise an unhandled
+        # FileNotFoundError. The pre-lock probe stays for the fast
+        # zero-cost no-op path on a disabled sink.
+        if not path.exists():
+            return 0
+        kept: list[str] = []
+        removed = 0
         try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-                fh.writelines(kept)
-            os.replace(tmp_path, str(path))
-        except OSError:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
-    except OSError as e:
-        log.warning(
-            "could not rewrite analytics file %s after prune: %s", path, e
-        )
-        return 0
+            with path.open("r", encoding="utf-8") as fh:
+                for raw_line in fh:
+                    if not raw_line.strip():
+                        continue
+                    line = (
+                        raw_line if raw_line.endswith("\n") else raw_line + "\n"
+                    )
+                    try:
+                        rec = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        kept.append(line)
+                        continue
+                    ts_raw = rec.get("ts") if isinstance(rec, dict) else None
+                    if not isinstance(ts_raw, str):
+                        kept.append(line)
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(ts_raw)
+                    except ValueError:
+                        kept.append(line)
+                        continue
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts < cutoff:
+                        removed += 1
+                        continue
+                    kept.append(line)
+        except OSError as e:
+            log.warning(
+                "could not read analytics file %s for prune: %s", path, e
+            )
+            return 0
 
-    return removed
+        if removed == 0:
+            return 0
+
+        try:
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=str(path.parent),
+                prefix=path.name + ".prune.",
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+                    fh.writelines(kept)
+                os.replace(tmp_path, str(path))
+            except OSError:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except OSError as e:
+            log.warning(
+                "could not rewrite analytics file %s after prune: %s", path, e
+            )
+            return 0
+
+        return removed

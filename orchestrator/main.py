@@ -15,13 +15,13 @@ import logging.handlers
 import signal
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 from . import analytics, config, workflow
 from .github import GitHubClient
+from .scheduler import IssueScheduler
 
 log = logging.getLogger("orchestrator")
 
@@ -130,34 +130,48 @@ def main(argv: Optional[list[str]] = None) -> int:
         gh.ensure_workflow_labels()
         clients.append((spec, gh))
 
-    # One semaphore is built once and reused across every tick so it bounds
-    # concurrent per-issue work across ALL repos simultaneously -- the
-    # global cap that the issue tracks. Each `workflow.tick` worker thread
-    # acquires it around its `_process_issue` call; threads from different
-    # repos contend on the same semaphore so total in-flight per-issue
-    # handlers never exceed `MAX_PARALLEL_ISSUES_GLOBAL` regardless of
-    # how many `parallel_limit` slots each repo declares. BoundedSemaphore
-    # surfaces double-release bugs as ValueError instead of silently
-    # raising the effective cap.
-    global_semaphore = threading.BoundedSemaphore(
-        max(1, config.MAX_PARALLEL_ISSUES_GLOBAL)
+    # One `IssueScheduler` is built once at startup and reused across every
+    # tick: it owns the cross-repo in-flight cap
+    # (`MAX_PARALLEL_ISSUES_GLOBAL`), the default per-repo cap
+    # (`MAX_PARALLEL_ISSUES_PER_REPO`, overridable per spec via
+    # `parallel_limit`), the duplicate-active-issue skip, and the
+    # family-aware mutex. The polling tick submits per-issue work to
+    # this scheduler and returns immediately; worker threads run on the
+    # scheduler's internal executor. Replaces the older
+    # `BoundedSemaphore` cross-repo gate -- the scheduler's `global_cap`
+    # is the authoritative bound. Shut down in the `finally` below so
+    # in-flight workers complete cleanly (and any late failures are
+    # logged) regardless of how the loop exits.
+    scheduler = IssueScheduler(
+        global_cap=config.MAX_PARALLEL_ISSUES_GLOBAL,
+        per_repo_cap=config.MAX_PARALLEL_ISSUES_PER_REPO,
+        thread_name_prefix="orch-issue",
     )
 
-    if args.once:
-        _run_tick(clients, global_semaphore)
-    else:
-        own_sha = _own_head_sha()
-        log.info("own HEAD=%s", own_sha)
+    try:
+        if args.once:
+            _run_tick(clients, scheduler)
+        else:
+            own_sha = _own_head_sha()
+            log.info("own HEAD=%s", own_sha)
 
-        while _running:
-            if own_sha and _self_modifying_merge_happened(own_sha):
-                log.info("self-modifying merge detected; exiting for restart")
-                return 0
-            _run_tick(clients, global_semaphore)
-            for _ in range(config.POLL_INTERVAL):
-                if not _running:
-                    break
-                time.sleep(1)
+            while _running:
+                if own_sha and _self_modifying_merge_happened(own_sha):
+                    log.info("self-modifying merge detected; exiting for restart")
+                    return 0
+                _run_tick(clients, scheduler)
+                for _ in range(config.POLL_INTERVAL):
+                    if not _running:
+                        break
+                    time.sleep(1)
+    finally:
+        # `wait=True` so any in-flight worker (e.g. a `--once` invocation
+        # that just submitted long-running handlers) finishes before the
+        # process returns. Without this, `--once` could exit while
+        # workers were still executing and the executor's daemon threads
+        # would be torn down mid-handler; the polling loop case is the
+        # same property under SIGTERM/SIGINT shutdown.
+        scheduler.shutdown(wait=True)
 
     if _received_signal is not None:
         return 128 + _received_signal
@@ -166,23 +180,24 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 def _run_tick(
     clients: list[tuple[config.RepoSpec, GitHubClient]],
-    global_semaphore: threading.BoundedSemaphore,
+    scheduler: IssueScheduler,
 ) -> None:
     """Drive a single tick across every configured repo.
 
     With one configured repo the call stays in-thread to keep the legacy
-    single-repo deployment unchanged (no executor, no extra thread). With
-    multiple configured repos the per-repo `workflow.tick` invocations are
-    fanned out across a ThreadPoolExecutor so a slow repo does not delay
-    the others' progress -- the orchestrator's whole point is to keep
-    advancing every configured repo each tick.
+    single-repo deployment unchanged (no extra repo-fanout executor; the
+    scheduler still drives per-issue work on its own internal threads).
+    With multiple configured repos the per-repo `workflow.tick`
+    invocations are fanned out across a ThreadPoolExecutor so a slow
+    repo does not delay the others' progress -- the orchestrator's
+    whole point is to keep advancing every configured repo each tick.
 
     Per-repo exceptions are caught and logged so one failing repo cannot
-    stop the others from advancing this tick; `global_semaphore` is
-    threaded through so the cross-repo cap on in-flight per-issue
-    handlers stays enforced even as the per-repo ticks run concurrently.
-    Shared between `--once` and the polling loop so both paths fan out
-    identically.
+    stop the others from advancing this tick; `scheduler` is threaded
+    through so the cross-repo / per-repo caps, duplicate-active-issue
+    skip, and family-aware mutex stay enforced across concurrent
+    per-repo ticks. Shared between `--once` and the polling loop so
+    both paths fan out identically.
     """
     if not clients:
         return
@@ -194,7 +209,7 @@ def _run_tick(
             return
         log.info("tick: repo=%s", spec.slug)
         try:
-            workflow.tick(gh, spec, global_semaphore=global_semaphore)
+            workflow.tick(gh, spec, scheduler=scheduler)
         except Exception:
             log.exception("tick failed for repo=%s; continuing", spec.slug)
         analytics.prune_with_retention_logging()
@@ -213,7 +228,7 @@ def _run_tick(
             return
         log.info("tick: repo=%s", spec.slug)
         try:
-            workflow.tick(gh, spec, global_semaphore=global_semaphore)
+            workflow.tick(gh, spec, scheduler=scheduler)
         except Exception:
             log.exception("tick failed for repo=%s; continuing", spec.slug)
 
