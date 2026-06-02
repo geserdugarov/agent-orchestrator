@@ -5369,12 +5369,11 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_auto_merge_does_not_fire_while_label_is_fixing(self) -> None:
         # Headline merge-safeguard contract: an approved + mergeable +
         # green PR whose linked issue is labeled `fixing` MUST NOT
-        # auto-merge. The dispatcher routes `fixing` to `_handle_fixing`
+        # be merged. The dispatcher routes `fixing` to `_handle_fixing`
         # (which has no merge path), so `_handle_in_review` -- the only
-        # handler that calls `merge_pr` -- never runs. AUTO_MERGE is
-        # forced on here precisely so a regression that routes a
-        # `fixing` issue back into the in_review branch would
-        # immediately try to merge and break the assertion.
+        # handler that calls `merge_pr` -- never runs. A regression
+        # that routes a `fixing` issue back into the in_review branch
+        # would immediately try to merge and break the assertion.
         gh = FakeGitHubClient()
         issue = make_issue(720, label="fixing")
         gh.add_issue(issue)
@@ -5398,14 +5397,13 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
             pending_fix_issue_max_id=2000,
         )
 
-        with patch.object(config, "AUTO_MERGE", True):
-            self._run(
-                lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
-                run_agent=_agent(),
-            )
+        self._run(
+            lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
 
-        # No merge call, no flip to done -- AUTO_MERGE never had the
-        # chance to fire because the dispatcher routed to fixing.
+        # No merge call, no flip to done -- the dispatcher routed to
+        # fixing, so the in_review merge path never ran.
         self.assertEqual(gh.merge_calls, [])
         self.assertNotIn((720, "done"), gh.label_history)
 
@@ -5556,8 +5554,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         )
         gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -5566,8 +5563,8 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         # No dev spawn during the debounce window (or after it -- the
         # in_review handler no longer spawns the dev at all).
         mocks["run_agent"].assert_not_called()
-        # No merge attempt either: the fresh feedback short-circuits the
-        # auto-merge path.
+        # No merge attempt either: the orchestrator never merges and
+        # the fresh feedback routes to fixing.
         self.assertEqual(gh.merge_calls, [])
         # The label flipped to `fixing` this tick.
         self.assertIn((880, "fixing"), gh.label_history)
@@ -5677,8 +5674,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
             user_content_hash="stale-hash-from-before-the-human-comment",
         )
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),

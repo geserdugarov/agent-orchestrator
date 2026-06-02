@@ -390,8 +390,8 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
 
 class DecomposeKillSwitchConfigTest(unittest.TestCase):
     """The DECOMPOSE kill switch defaults on; truthy spellings keep it on,
-    explicit off / typos disable it. Mirrors AUTO_MERGE's strict parser
-    semantics so a typo doesn't silently flip the user's intent.
+    explicit off / typos disable it. Strict parser semantics so a typo
+    doesn't silently flip the user's intent.
     """
 
     def _load_config(self, env: dict[str, str] | None = None):
@@ -431,56 +431,6 @@ class DecomposeKillSwitchConfigTest(unittest.TestCase):
         # Strict parser: any unrecognized value disables decomposition.
         config = self._load_config({"DECOMPOSE": "enabled"})
         self.assertFalse(config.DECOMPOSE)
-
-
-class AutoMergeConfigTest(unittest.TestCase):
-    """Default off; only an explicit truthy spelling flips it on. A typo
-    silently defaulting to on would let the orchestrator merge against the
-    user's intent, so the parser is deliberately strict.
-    """
-
-    def _load_config(self, env: dict[str, str] | None = None):
-        full_env = {
-            "ORCHESTRATOR_SKIP_DOTENV": "1",
-            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
-        }
-        if env:
-            full_env.update(env)
-        with patch.dict(os.environ, full_env, clear=True):
-            sys.modules.pop("orchestrator.config", None)
-            import orchestrator.config as config
-
-            return config
-
-    def test_default_is_off(self) -> None:
-        config = self._load_config()
-        self.assertFalse(config.AUTO_MERGE)
-
-    def test_explicit_off(self) -> None:
-        config = self._load_config({"AUTO_MERGE": "off"})
-        self.assertFalse(config.AUTO_MERGE)
-
-    def test_truthy_spellings_enable(self) -> None:
-        for value in ("on", "ON", " on ", "1", "true", "True", "yes"):
-            with self.subTest(value=value):
-                config = self._load_config({"AUTO_MERGE": value})
-                self.assertTrue(
-                    config.AUTO_MERGE, f"{value!r} should enable AUTO_MERGE"
-                )
-
-    def test_falsy_spellings_disable(self) -> None:
-        for value in ("0", "false", "no", ""):
-            with self.subTest(value=value):
-                config = self._load_config({"AUTO_MERGE": value})
-                self.assertFalse(
-                    config.AUTO_MERGE, f"{value!r} should leave AUTO_MERGE off"
-                )
-
-    def test_typo_defaults_to_off(self) -> None:
-        # The whole point of off-by-default + strict-truthy parsing: a typo
-        # cannot silently turn on auto-merge.
-        config = self._load_config({"AUTO_MERGE": "enabled"})
-        self.assertFalse(config.AUTO_MERGE)
 
 
 class InReviewDebounceConfigTest(unittest.TestCase):

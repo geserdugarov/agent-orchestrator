@@ -449,8 +449,8 @@ class VerifyResult:
     * ``"dirty"``        -- every command exited 0 but the worktree carried
                             uncommitted changes afterwards; treated as a
                             verify failure because handing off a dirty tree
-                            to in_review would let AUTO_MERGE land state the
-                            dev never committed.
+                            to in_review would advertise the PR as ready for
+                            human merge with state the dev never committed.
     * ``"head_changed"`` -- a command moved `HEAD` (it ran `git commit` or
                             `git reset` etc.) while leaving the tree clean.
                             Treated as a verify failure because the squash-

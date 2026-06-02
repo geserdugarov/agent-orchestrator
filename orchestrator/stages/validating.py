@@ -877,8 +877,10 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # "ok" so the legacy "no verification" behaviour is unchanged. A
         # failed / timed-out command, or a dirty tree left behind, parks
         # awaiting_human in `validating` with a stable `park_reason` so the
-        # operator can fix the breakage; CI remains the later auto-merge
-        # gate but is no longer the FIRST gate after the reviewer agent.
+        # operator can fix the breakage. The verify gate is the first gate
+        # after the reviewer agent so an obviously-broken branch never
+        # reaches `in_review`; GitHub CI still runs against the PR for the
+        # human merging it.
         verify = _wf._run_verify_commands(
             wt, config.VERIFY_COMMANDS, config.VERIFY_TIMEOUT,
         )

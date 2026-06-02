@@ -1726,8 +1726,8 @@ class StaleParkReasonClearedOnFixingRouteTest(
 class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
     """A 403 from the check-runs endpoint almost always means the PAT is
     missing 'Checks: read'. Silently swallowing the exception leaves
-    `pr_combined_check_state` at 'none' for Actions-only PRs and AUTO_MERGE
-    parks forever. Promote the 403 to log.error with a specific message
+    `pr_combined_check_state` at 'none' for Actions-only PRs despite the
+    PR being green. Promote the 403 to log.error with a specific message
     naming the scope.
     """
 
@@ -1759,7 +1759,7 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
         joined = "\n".join(cm.output)
         self.assertIn("403", joined)
         self.assertIn("Checks: read", joined)
-        self.assertIn("AUTO_MERGE", joined)
+        self.assertIn("check_state", joined)
 
     def test_non_403_check_runs_failure_logs_warning_only(self) -> None:
         # 404, transient 5xx, etc. are logged at warning level and don't
@@ -1797,8 +1797,8 @@ class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):
     'success' from the other surface. Otherwise a single green
     commit-status context plus failing or pending GitHub Actions check-runs
     that the PAT cannot read (403 from a missing 'Checks: read' scope, or a
-    transient 5xx) would be reported as 'success' and AUTO_MERGE could land
-    a PR over the unread failing checks.
+    transient 5xx) would be reported as 'success' so a caller could trust
+    the head as green over the unread failing checks.
     """
 
     def _client_with(self, *, combined_state, combined_total, check_runs_exc):
@@ -1819,8 +1819,9 @@ class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):
 
     def test_combined_success_with_check_runs_403_returns_pending(self) -> None:
         # The dangerous case: legacy commit-status says 'success' but the
-        # PAT cannot read check-runs. Without the partial-read guard,
-        # AUTO_MERGE would land over failing/pending Actions runs.
+        # PAT cannot read check-runs. Without the partial-read guard, a
+        # caller would trust the head as green over failing/pending
+        # Actions runs.
         from github import GithubException
 
         client, pr = self._client_with(
@@ -1834,7 +1835,8 @@ class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):
         self.assertEqual(
             state, "pending",
             "partial read with combined='success' must downgrade to "
-            "'pending' to keep AUTO_MERGE from merging on half the picture",
+            "'pending' so callers do not trust the head as green on half "
+            "the picture",
         )
 
     def test_combined_success_with_check_runs_500_returns_pending(self) -> None:

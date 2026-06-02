@@ -57,7 +57,7 @@ CONTROL_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
     (
         BASE_SYNC_HOLD_LABEL,
         "5319e7",
-        "Pause automatic base sync, conflict resolution, and auto-merge",
+        "Pause automatic base sync, conflict resolution, and in_review merge readiness checks",
     ),
     (
         BACKLOG_LABEL,
@@ -493,8 +493,8 @@ class GitHubClient:
         Without that, a single green commit-status context plus failing or
         pending GitHub Actions check-runs that the PAT cannot read (403 on
         check-runs from a missing 'Checks: read' scope, or a transient 5xx)
-        would be reported as 'success' and AUTO_MERGE could land the PR
-        over the unread failing checks.
+        would be reported as 'success' and a caller could trust the head
+        as green over the unread failing checks.
         """
         head_sha = pr.head.sha
         states: list[str] = []
@@ -538,16 +538,16 @@ class GitHubClient:
             # 403 here almost always means the fine-grained PAT is missing
             # 'Checks: read'. For Actions-only PRs (no commit statuses,
             # only check-runs), swallowing this silently leaves
-            # `pr_combined_check_state` at 'none' and AUTO_MERGE parks
-            # forever despite the PR actually being green; surface the
-            # remediation prominently so an operator can fix the scope.
+            # `pr_combined_check_state` at 'none' despite the PR actually
+            # being green; surface the remediation prominently so an
+            # operator can fix the scope.
             if e.status == 403:
                 log.error(
                     "could not read check-runs for %s (HTTP 403). The "
                     "orchestrator PAT needs 'Checks: read' to evaluate "
-                    "GitHub Actions PRs. Without it, AUTO_MERGE may "
-                    "report check_state='none' and park indefinitely on "
-                    "Actions-only PRs. Add the permission and restart.",
+                    "GitHub Actions PRs. Without it, check_state is "
+                    "reported as 'none' on Actions-only PRs. Add the "
+                    "permission and restart.",
                     head_sha,
                 )
             else:
@@ -560,12 +560,9 @@ class GitHubClient:
         # Partial read: at least one surface returned a usable signal but
         # the other surface raised. Treat the unread side as 'pending' so
         # an unread failing/pending check on that side cannot be masked by
-        # the readable side's 'success'. AUTO_MERGE then waits (or parks
-        # via the failed_checks branch on a sustained partial read) instead
-        # of merging on half the picture. When BOTH surfaces failed the
-        # branch is skipped and we return 'none' below, which the workflow
-        # treats as ambiguous and parks awaiting_human -- visible to the
-        # operator instead of silently waiting forever.
+        # the readable side's 'success'. When BOTH surfaces failed the
+        # branch is skipped and we return 'none' below, which the caller
+        # treats as ambiguous instead of trusting the head as green.
         if states and read_failed:
             states.append("pending")
 

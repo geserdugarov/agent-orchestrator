@@ -531,12 +531,6 @@ def default_repo_specs() -> list[RepoSpec]:
 # different default branch (e.g. `master`) without breaking self-update.
 ORCHESTRATOR_BASE_BRANCH: str = os.environ.get("ORCHESTRATOR_BASE_BRANCH", "main")
 
-# When `in_review` and the reviewer (and any branch protections GitHub knows
-# about) are happy, the orchestrator can merge the PR itself. Default off so
-# the legacy "humans merge" behavior keeps working until users opt in.
-AUTO_MERGE: bool = os.environ.get("AUTO_MERGE", "off").strip().lower() in (
-    "1", "true", "on", "yes",
-)
 # Quiet window after the most recent PR/issue comment before resuming the dev
 # session in `in_review`.
 IN_REVIEW_DEBOUNCE_SECONDS: int = int(
@@ -588,8 +582,8 @@ def _parse_verify_commands(raw: str) -> tuple[str, ...]:
 # sequentially via the shell with a bounded `VERIFY_TIMEOUT`; on a
 # non-zero exit, a timeout, or a dirty worktree left behind, the issue
 # is parked in `validating` with the failing command, exit/timeout, and
-# a redacted/truncated tail of the output. CI is still the later
-# auto-merge gate.
+# a redacted/truncated tail of the output. GitHub CI still runs against
+# the PR; the human merging it reads CI's verdict.
 VERIFY_COMMANDS: tuple[str, ...] = _parse_verify_commands(
     os.environ.get("VERIFY_COMMANDS", "")
 )

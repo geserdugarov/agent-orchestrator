@@ -1847,8 +1847,7 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
 
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -2532,8 +2531,7 @@ class ValidatingHandoffSeedsAllWatermarksTest(
         # resume cycle, not the in_review handler).
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -2571,8 +2569,7 @@ class ValidatingHandoffSeedsAllWatermarksTest(
 
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
@@ -2649,8 +2646,7 @@ class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # fixing handler owns the dev resume on the next tick.
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
