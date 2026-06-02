@@ -41,7 +41,7 @@ the rest doesn't (see [Rejected](#considered-but-rejected) below).
 
 Today everything that varies between target repos goes through env vars on
 the orchestrator process: `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`,
-`MAX_RETRIES_PER_DAY`, `MAX_REVIEW_ROUNDS`, `AUTO_MERGE`, `DECOMPOSE`, the
+`MAX_RETRIES_PER_DAY`, `MAX_REVIEW_ROUNDS`, `DECOMPOSE`, the
 backend specs, and so on. The `REPOS` env line carries per-repo
 `target_root`, `base_branch`, `remote_name`, and `parallel_limit` — but
 nothing else. A polyglot orchestrator host that drives a Rust crate, a
@@ -70,8 +70,6 @@ File: `<target_root>/.agent-orchestrator/policy.toml`. Schema (initial,
 intentionally small):
 
 ```toml
-auto_merge = false           # overrides AUTO_MERGE per repo
-
 [verify]
 commands = [                 # overrides VERIFY_COMMANDS for this repo only
   "uv run pytest",
@@ -103,8 +101,8 @@ Loader behavior:
 
 Trust boundary: the file lives in the *target* repo, which an implementer
 agent can edit. Restrict the schema deliberately to values that are
-operator-visible and safe to flip from a PR (verify commands, budgets,
-auto-merge). Anything that controls agent identity, tokens, or git remotes
+operator-visible and safe to flip from a PR (verify commands, budgets).
+Anything that controls agent identity, tokens, or git remotes
 stays env-only on the orchestrator host. This matches Symphony's stance in
 §15.4 that hooks (and by extension repo-owned policy) "are fully trusted
 configuration" — but we should be narrower because GitHub PRs are the
@@ -115,9 +113,9 @@ mutation channel, not a sysadmin commit.
 - Zero new runtime dependencies: `tomllib` ships in the stdlib for the
   Python 3.12+ target. `pyproject.toml` continues to pin only `PyGithub`.
 - Existing deployments are unaffected if the file is absent.
-- A bug in policy resolution can flip auto-merge or budgets unexpectedly;
-  unit-test the resolution rule against a matrix of present/missing keys
-  and one corrupt-file case before shipping.
+- A bug in policy resolution can flip budgets or verify behavior
+  unexpectedly; unit-test the resolution rule against a matrix of
+  present/missing keys and one corrupt-file case before shipping.
 
 ## Proposal 2 — Workspace lifecycle hooks
 
