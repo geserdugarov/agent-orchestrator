@@ -111,6 +111,15 @@ from .workflow_messages import _recent_comments_text as _recent_comments_text
 from .workflow_messages import _redact_secrets as _redact_secrets
 from .workflow_messages import _stderr_log_tail as _stderr_log_tail
 from .workflow_messages import _with_orch_marker as _with_orch_marker
+from .base_sync import (
+    _refresh_base_and_worktrees as _refresh_base_and_worktrees,
+)
+from .base_sync import _rebase_base_into_worktree as _rebase_base_into_worktree
+from .base_sync import _rebase_in_progress as _rebase_in_progress
+from .base_sync import _sync_worktree_with_base as _sync_worktree_with_base
+# TODO(remove after 2026-08-24): remove this compatibility re-export with
+# base_sync._merge_base_into_worktree.
+from .base_sync import _merge_base_into_worktree as _merge_base_into_worktree
 from .worktrees import _authed_fetch as _authed_fetch
 from .worktrees import _authed_target_fetch as _authed_target_fetch
 from .worktrees import _branch_ahead_behind as _branch_ahead_behind
@@ -131,20 +140,13 @@ from .worktrees import _git_hardened as _git_hardened
 from .worktrees import _has_new_commits as _has_new_commits
 from .worktrees import _head_sha as _head_sha
 from .worktrees import _is_conventional_subject as _is_conventional_subject
-# TODO(remove after 2026-08-24): remove this compatibility re-export with
-# worktrees._merge_base_into_worktree.
-from .worktrees import _merge_base_into_worktree as _merge_base_into_worktree
-from .worktrees import _rebase_base_into_worktree as _rebase_base_into_worktree
 from .worktrees import (
     _pr_title_from_commit_or_issue as _pr_title_from_commit_or_issue,
 )
 from .worktrees import _push_branch as _push_branch
-from .worktrees import _refresh_base_and_worktrees as _refresh_base_and_worktrees
-from .worktrees import _rebase_in_progress as _rebase_in_progress
 from .worktrees import _run_verify_commands as _run_verify_commands
 from .worktrees import _sanitize_slug as _sanitize_slug
 from .worktrees import _squash_and_force_push as _squash_and_force_push
-from .worktrees import _sync_worktree_with_base as _sync_worktree_with_base
 from .worktrees import _worktree_dirty_files as _worktree_dirty_files
 from .worktrees import _worktree_path as _worktree_path
 from .stages.conflicts import (

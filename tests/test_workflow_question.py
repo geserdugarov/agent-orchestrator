@@ -738,7 +738,7 @@ class QuestionLabelBaseRefreshSkipTest(unittest.TestCase):
     """
 
     def test_question_labeled_issue_skips_base_sync(self) -> None:
-        from orchestrator import worktrees
+        from orchestrator import base_sync
 
         gh = FakeGitHubClient()
         issue = make_issue(200, label="question")
@@ -747,16 +747,16 @@ class QuestionLabelBaseRefreshSkipTest(unittest.TestCase):
         # The merge / rev-list helpers would shell out if reached;
         # patch them so a regression that lets the sync proceed
         # surfaces as a call on these mocks.
-        with patch.object(worktrees, "_git") as git_mock, \
+        with patch.object(base_sync, "_git") as git_mock, \
              patch.object(
-                 worktrees, "_worktree_dirty_files",
+                 base_sync, "_worktree_dirty_files",
                  return_value=[],
              ), \
              patch.object(
-                 worktrees, "_merge_base_into_worktree",
+                 base_sync, "_merge_base_into_worktree",
                  return_value=(True, []),
              ) as merge_mock:
-            worktrees._sync_worktree_with_base(
+            base_sync._sync_worktree_with_base(
                 gh, _TEST_SPEC, Path("/tmp/q-issue-200"), 200,
             )
 

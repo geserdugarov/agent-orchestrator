@@ -267,11 +267,13 @@ live under `orchestrator/stages/`; shared helpers live in
 restoration / cleanup helpers extracted from `worktrees.py` and
 re-exported under their original names), `git_plumbing.py` (the
 hardened git subprocess layer extracted from `worktrees.py` and
-re-exported under its original names), and `verify.py` (the
+re-exported under its original names), `verify.py` (the
 local-verify runner and its worktree-state probes, also extracted
-from `worktrees.py` and re-exported under their original names).
-The facade re-exports cross-module helpers under their original
-names, and stage modules call back via
+from `worktrees.py` and re-exported under their original names),
+and `base_sync.py` (the per-tick base refresh and rebase routing,
+also extracted from `worktrees.py` and re-exported under their
+original names). The facade re-exports cross-module helpers under
+their original names, and stage modules call back via
 `from .. import workflow as _wf` so existing
 `patch.object(workflow, ...)` tests keep working.
 
