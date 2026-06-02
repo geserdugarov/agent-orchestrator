@@ -398,11 +398,12 @@ def _handle_resolving_conflict(
         # would otherwise survive a no-op flip into validating, where
         # the reviewer agent reads the worktree directly. The reviewer
         # would then vote on a tree that does NOT match the PR head;
-        # AUTO_MERGE would later refuse the SHA mismatch but the agent
-        # approval is already sitting against an incorrect SHA. Park
-        # rather than push or flip in that state, mirroring
-        # `_on_dirty_worktree`'s "refuse to publish an incomplete
-        # branch" rule.
+        # the in_review HITL ready-ping would later advertise the PR
+        # as ready for human merge with the reviewer's approval sitting
+        # against an incorrect SHA, inviting a human merge over
+        # unreviewed content. Park rather than push or flip in that
+        # state, mirroring `_on_dirty_worktree`'s "refuse to publish an
+        # incomplete branch" rule.
         dirty = _wf._worktree_dirty_files(wt)
         if dirty:
             _wf._park_awaiting_human(
@@ -418,7 +419,8 @@ def _handle_resolving_conflict(
         after_sha = _wf._head_sha(wt)
         if not after_sha or after_sha == before_sha:
             # Already up-to-date with base. Nothing to push -- just hand
-            # back to validating and let AUTO_MERGE re-evaluate.
+            # back to validating and let the next reviewer round / in_review
+            # tick re-evaluate.
             #
             # Increment `conflict_round` even though no diff was applied:
             # if the PR is unmergeable purely due to branch protection /
@@ -442,9 +444,9 @@ def _handle_resolving_conflict(
                 sha=after_sha,
             )
             # No branch diff changed -- hand straight back to validating
-            # so AUTO_MERGE can re-evaluate. Every other resolving_conflict
-            # exit also targets validating now; the single docs pass is
-            # deferred to the post-approval hop.
+            # so the reviewer / in_review tick can re-evaluate. Every
+            # other resolving_conflict exit also targets validating now;
+            # the single docs pass is deferred to the post-approval hop.
             gh.set_workflow_label(issue, "validating")
             gh.write_pinned_state(issue, state)
             return

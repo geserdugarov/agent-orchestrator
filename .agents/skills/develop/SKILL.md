@@ -29,7 +29,7 @@ The facade pattern in `orchestrator/workflow.py` is load-bearing for tests. Get 
 
 - `workflow.py` re-exports stage handlers and cross-module helpers under their original names so `patch.object(workflow, "_foo", ...)` in tests keeps intercepting calls. **Every re-export must be aliased with `as <name>`** — bare `from .stages.implementing import _handle_implementing` will be stripped by ruff F401; `from .stages.implementing import _handle_implementing as _handle_implementing` survives.
 - Stage modules call back into the facade via `from .. import workflow as _wf` **at call time**, not at module import. Top-level `from ..workflow import _foo` defeats `patch.object(workflow, "_foo", ...)` because the stage module captures the original reference.
-- Stage-private helpers (only used inside one stage module — e.g. `_bump_in_review_watermarks`, `_auto_merge_gates_pass`, `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`) stay private to that stage module. Do **not** re-export them from `workflow.py`. Re-exports are an intentional surface, not a blanket.
+- Stage-private helpers (only used inside one stage module — e.g. `_bump_in_review_watermarks`, `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`) stay private to that stage module. Do **not** re-export them from `workflow.py`. Re-exports are an intentional surface, not a blanket.
 - Preserve the public contract verbatim across a refactor: workflow labels, pinned-state JSON keys, comment marker text, watermark fields, event-emission shape. Live issues already carry these — a "harmless rename" is a migration, not a refactor.
 
 ## Tests

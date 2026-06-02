@@ -501,9 +501,10 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # "ready for review/merge", so it must only fire when the PR is
     # actually approved AND carries no standing human veto on the
     # current head; otherwise we would be inviting a manual merge over
-    # a stale or rejected commit. Run the same gates the previous
-    # auto-merge path used (changes-requested first, then approval),
-    # but stop short of merging -- a human still clicks Merge.
+    # a stale or rejected commit. Gate the ping on the same changes-
+    # requested + approval checks any merge automation would have used,
+    # but stop short of merging -- the orchestrator is permanently
+    # manual-merge-only and a human still clicks Merge.
     head_sha = pr.head.sha
     if gh.pr_has_changes_requested(pr, head_sha=head_sha):
         return

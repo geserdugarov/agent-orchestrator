@@ -425,5 +425,5 @@ Each `--once` invocation is a fresh Python process and reads the current `.env` 
 
 | Label | Purpose |
 | ----- | ------- |
-| `hold_base_sync` | Apply to an issue to pause per-tick base merges, `in_review` HITL ping / unmergeable park, and `resolving_conflict` base merges. Remove it when prerequisite PRs have landed; the next tick performs the accumulated base sync once. |
+| `hold_base_sync` | Apply to an issue to pause per-tick base rebases (pre-PR worktrees rebase onto `origin/<base>` directly; PR-having worktrees detour to `resolving_conflict` for a rebase), the `in_review` HITL ping / unmergeable park, and `resolving_conflict` base rebases. Remove it when prerequisite PRs have landed; the next tick performs the accumulated base sync once. |
 | `backlog` | Apply to an issue (typically at creation) to keep the orchestrator from picking it up. The dispatcher skips the issue entirely while the label is present; remove the label to release the issue for processing. |

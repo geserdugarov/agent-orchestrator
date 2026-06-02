@@ -882,8 +882,9 @@ def _cleanup_terminal_branch(
     """Remove the per-issue worktree and delete the local + remote branches.
 
     Called after the PR for `issue_number` reached a terminal state -- either
-    merged (via AUTO_MERGE or an external human merge) or closed without
-    merge. Best-effort: each step swallows its own error so a leftover
+    merged externally by a human (the orchestrator is permanently manual-
+    merge-only and never calls `gh.merge_pr`) or closed without merge.
+    Best-effort: each step swallows its own error so a leftover
     worktree or branch never raises out of the terminal handler -- by the
     time we reach here the issue has already flipped to `done` or
     `rejected`, and a stale ref is tidiness, not correctness.
@@ -1649,9 +1650,10 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
 # documenting, in_review, and fixing are the PR-stage labels: validating
 # may run the reviewer again, documenting is the brief final-docs hop
 # between reviewer approval and `in_review`, in_review is parked waiting
-# for AUTO_MERGE / human merge, and fixing is between in_review and
-# validating while a PR feedback round is being addressed. Documenting
-# only checks ahead/behind vs. the PR branch (not the base) itself, so
+# for the HITL ready-ping and the human's manual merge, and fixing is
+# between in_review and validating while a PR feedback round is being
+# addressed. Documenting only checks ahead/behind vs. the PR branch
+# (not the base) itself, so
 # without this detour a sibling-PR merge during the docs pass would
 # leave the docs commit on a stale base and only the next in_review
 # tick would catch it; including the label here means only the
@@ -1804,10 +1806,9 @@ def _route_pr_worktree_to_resolving_conflict(
     final-docs handoff to `documenting` in `_handle_validating`. This is the only safe pattern for PR-having
     worktrees, since a local-only rebase would diverge local HEAD from
     `pr.head.sha` and break every downstream gate that compares the
-    two. Works under both AUTO_MERGE on (replaces the unmergeable
-    trigger) and AUTO_MERGE off (the only auto-rebase path under that
-    mode -- `_handle_in_review`'s AUTO_MERGE-off path otherwise just
-    sits in `in_review`).
+    two. This is the only auto-rebase path for PR-having worktrees --
+    `_handle_in_review` is permanently manual-merge-only and just parks
+    awaiting human attention on an unmergeable PR otherwise.
 
     Skips the detour when:
 
@@ -1821,7 +1822,7 @@ def _route_pr_worktree_to_resolving_conflict(
       branch returns early without rebasing unless a new human comment
       arrived; relabeling here would just hide the existing park behind a
       `resolving_conflict` label without making any progress, including
-      the documented `AUTO_MERGE=off` unmergeable park path. The park
+      the documented `in_review` unmergeable park path. The park
       already invites the human to comment, and once they do, the existing
       handler's resume-on-human-reply branch picks the work up. Auto-
       unparking here would also undermine `_handle_validating`'s

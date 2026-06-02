@@ -716,10 +716,10 @@ class GitHubClient:
         in_review handler tracks `pr_last_review_summary_id` separately.
 
         Without this surface, a 'Comment' review with a request in the body
-        is silently ignored and may be auto-merged over, and a
-        CHANGES_REQUESTED review with body but no inline comments only
-        blocks merge via `pr_has_changes_requested` without ever reaching
-        the dev agent.
+        is silently ignored and the PR may be pinged ready for human
+        merge over it, and a CHANGES_REQUESTED review with body but no
+        inline comments only blocks the ready-ping via
+        `pr_has_changes_requested` without ever reaching the dev agent.
         """
         out: list = []
         for review in pr.get_reviews():

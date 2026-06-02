@@ -192,9 +192,9 @@ def _post_user_content_change_result(
       Caller decides what to do with the label: validating stays put
       (the reviewer reruns on the current head); in_review bounces
       back to `validating` (the prior reviewer approval was for the
-      old requirements, so AUTO_MERGE must wait for a re-approval)
-      WITHOUT spawning `documenting` -- no commit landed for the docs
-      pass to react to.
+      old requirements, so the in_review HITL ready-ping must wait
+      for a re-approval) WITHOUT spawning `documenting` -- no commit
+      landed for the docs pass to react to.
     * ``"pushed"`` -- new commit landed and the push succeeded.
       Validating stays on `validating` (and bumps `review_round`) so
       the reviewer re-evaluates the new head; in_review also hands
@@ -336,11 +336,11 @@ def _try_recover_validating_transient_park(
             return "stuck"
         if _wf._worktree_dirty_files(wt):
             # The dev left edits that were never committed. We cannot
-            # safely push, review, or auto-merge in this state; stay
-            # parked until a human or a fresh comment-driven resume
-            # sorts it out. A reviewer that ignored the dirty index
-            # would vote on the committed head while the leftover edits
-            # are silently dropped on the next push.
+            # safely push, review, or advertise a ready-for-merge state
+            # here; stay parked until a human or a fresh comment-driven
+            # resume sorts it out. A reviewer that ignored the dirty
+            # index would vote on the committed head while the leftover
+            # edits are silently dropped on the next push.
             return "stuck"
         # The pre-agent SHA was persisted when the timeout park ran.
         # Compare against the current worktree HEAD instead of
@@ -400,14 +400,16 @@ def _seed_watermark_past_self(
     the issue thread only); a PR-conversation comment whose id happens to
     be <= a later-consumed issue-thread reply has NOT been seen by the dev
     and must surface on the next in_review tick. Folding both surfaces
-    under one `c.id <= consumed_through` check would let AUTO_MERGE land
-    the PR over unread PR-conversation feedback.
+    under one `c.id <= consumed_through` check would let the in_review
+    HITL ready-ping advertise the PR as ready for human merge over
+    unread PR-conversation feedback.
 
     Identification of orchestrator-authored content is by exact comment id
     (recorded when the orchestrator posted the comment) rather than author
     login. The login-based check would also drop comments authored by a
     human reviewer who shares the PAT's GitHub account -- a common
-    deployment shape -- causing real review feedback to be auto-merged over.
+    deployment shape -- causing real review feedback to be silently
+    dropped and the PR to be pinged ready for human merge over it.
 
     Returns None when the pickup id is unknown (legacy state from a deploy
     that pre-dates pickup-id tracking, or a manually-relabeled issue) or
@@ -494,8 +496,9 @@ def _latest_pr_comment_ids(
     # during implementing/validating). Folding both into one list and
     # applying `c.id <= consumed_through` uniformly would silently advance
     # the watermark past unread PR-conversation feedback whose id happens
-    # to be lower than a later-consumed issue-thread reply, letting
-    # AUTO_MERGE land the PR over the human's PR comment.
+    # to be lower than a later-consumed issue-thread reply, letting the
+    # in_review HITL ready-ping advertise the PR as ready for human
+    # merge over the human's PR comment.
     issue_thread = list(gh.comments_after(issue, None))
     pr_conversation = list(gh.pr_conversation_comments_after(pr, None))
     return (

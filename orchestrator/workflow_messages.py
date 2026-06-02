@@ -60,7 +60,8 @@ def _orchestrator_ids(state: PinnedState) -> set[int]:
     Used to filter the orchestrator's own messages out of "new feedback"
     scans without falling back to author-login matching -- a PAT shared
     with a human reviewer's GitHub account would otherwise have its real
-    review comments swallowed as bot noise (and auto-merged over).
+    review comments swallowed as bot noise (and the PR pinged ready for
+    human merge over them).
     """
     raw = state.get("orchestrator_comment_ids") or []
     return {int(x) for x in raw}
