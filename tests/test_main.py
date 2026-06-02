@@ -404,6 +404,124 @@ class SchedulerWiringTest(unittest.TestCase):
                 "scheduler not shut down on signal-induced exit",
             )
 
+    def test_signal_during_active_tick_closes_scheduler_submit_path(
+        self,
+    ) -> None:
+        # Regression for issue #316 review feedback: `_running=False`
+        # alone only stops the next tick boundary. A `workflow.tick`
+        # that is still iterating its eligible-issue list when SIGINT/
+        # SIGTERM fires used to keep landing fresh `scheduler.submit`
+        # calls for the remainder of the dispatch loop after the user
+        # already asked to stop -- the in-flight set kept growing
+        # post-signal and the finally-block `shutdown(wait=True)` had
+        # to wait on workers the signal handler should have refused
+        # to enqueue. The fix routes `_shutdown` through
+        # `scheduler.shutdown(wait=False)` so the submit path is
+        # closed IMMEDIATELY, mid-tick.
+        with _reload_main({
+            "REPO": "owner/legacy",
+            "TARGET_REPO_ROOT": "/tmp",
+            "BASE_BRANCH": "trunk",
+        }) as main_mod:
+            submit_results: list[bool] = []
+
+            def fake_tick(gh, spec, *, scheduler=None):
+                # Pre-signal submit lands normally.
+                submit_results.append(
+                    scheduler.submit(spec.slug, 1, lambda: None)
+                )
+                # SIGINT arrives WHILE the tick is still iterating.
+                main_mod._shutdown(signal.SIGINT, None)
+                # The next submit in the same tick MUST be rejected
+                # because the signal handler closed the scheduler's
+                # submit path. Without the fix the lambda would
+                # actually run -- the assertion below is the canary.
+                submit_results.append(
+                    scheduler.submit(
+                        spec.slug, 2,
+                        lambda: self.fail(
+                            "post-signal submit must not dispatch",
+                        ),
+                    )
+                )
+
+            def fake_client(*, repo_spec):
+                m = MagicMock()
+                m.slug = repo_spec.slug
+                return m
+
+            with patch.object(
+                main_mod, "GitHubClient", side_effect=fake_client,
+            ), patch.object(
+                main_mod.workflow, "tick", side_effect=fake_tick,
+            ):
+                rc = main_mod.main(["--once"])
+
+            # Signal exit code propagated AND the second mid-tick
+            # submit was rejected.
+            self.assertEqual(rc, 128 + signal.SIGINT)
+            self.assertEqual(submit_results, [True, False])
+
+    def test_signal_during_active_tick_closes_submit_path_multi_repo(
+        self,
+    ) -> None:
+        # Same invariant as above but where both repos are already
+        # iterating concurrently when the signal fires. The cross-repo
+        # barrier ensures alpha and beta are BOTH past their
+        # `_tick_one`-level `_running` short-circuit before the signal
+        # lands, so beta's post-signal `scheduler.submit` is the
+        # observable canary: with the fix it returns False; without the
+        # fix the scheduler still accepts work on the fan-out executor
+        # after the user asked to stop.
+        with tempfile.TemporaryDirectory() as td, _reload_main({
+            "REPOS": (
+                f"alpha/one|{td}|main\n"
+                f"beta/two|{td}|develop"
+            ),
+        }) as main_mod:
+            both_inside = threading.Barrier(2, timeout=5.0)
+            signal_fired = threading.Event()
+            beta_submit_after_signal: list[bool] = []
+            beta_lock = threading.Lock()
+
+            def fake_tick(gh, spec, *, scheduler=None):
+                # Wait until both repos are iterating concurrently so a
+                # signal arriving now cannot be deflected by the
+                # `_tick_one` "shutdown before tick start" guard for
+                # beta -- beta is already past it.
+                both_inside.wait()
+                if spec.slug == "alpha/one":
+                    main_mod._shutdown(signal.SIGINT, None)
+                    signal_fired.set()
+                    return
+                # beta waits for the signal handler to actually fire,
+                # then tries to submit; with the fix the scheduler is
+                # already closed and the submit is rejected.
+                self.assertTrue(signal_fired.wait(timeout=5.0))
+                result = scheduler.submit(
+                    spec.slug, 7,
+                    lambda: self.fail(
+                        "post-signal submit must not dispatch",
+                    ),
+                )
+                with beta_lock:
+                    beta_submit_after_signal.append(result)
+
+            def fake_client(*, repo_spec):
+                m = MagicMock()
+                m.slug = repo_spec.slug
+                return m
+
+            with patch.object(
+                main_mod, "GitHubClient", side_effect=fake_client,
+            ), patch.object(
+                main_mod.workflow, "tick", side_effect=fake_tick,
+            ):
+                rc = main_mod.main(["--once"])
+
+            self.assertEqual(rc, 128 + signal.SIGINT)
+            self.assertEqual(beta_submit_after_signal, [False])
+
     def test_scheduler_global_cap_bounds_concurrent_workers_across_repos(
         self,
     ) -> None:
@@ -641,6 +759,333 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             prune.assert_called_once_with()
+
+
+class AsyncPollingDispatchTest(unittest.TestCase):
+    """`_run_tick` hands work to the shared scheduler and returns as soon
+    as the eligible-issue callables are submitted; long-running per-issue
+    handlers run on the scheduler's executor threads, not on the tick
+    thread. The tests below drive `_run_tick(clients, scheduler)`
+    directly across multiple polling passes (the polling loop does this
+    every `POLL_INTERVAL`) so the cross-poll behaviour the issue calls
+    out is observable: a slow handler in one repo cannot block the next
+    poll from dispatching a different repo's work, the same issue is not
+    launched twice concurrently across polls (the scheduler's
+    duplicate-active gate rejects the re-submit), and worker completion
+    clears the in-flight marker so a follow-up poll can re-dispatch the
+    same key.
+    """
+
+    def _build_clients(self, main_mod, slugs):
+        # Mirror `main`'s startup: build one MagicMock GitHubClient per
+        # slug and pair it with the matching RepoSpec. The tests below
+        # never call `ensure_workflow_labels`, so the mock surface is
+        # intentionally minimal.
+        from pathlib import Path
+
+        from orchestrator.config import RepoSpec
+        clients = []
+        for slug in slugs:
+            spec = RepoSpec(
+                slug=slug,
+                target_root=Path("/tmp"),
+                base_branch="main",
+            )
+            gh = MagicMock()
+            gh.slug = slug
+            clients.append((spec, gh))
+        return clients
+
+    def test_long_running_handler_does_not_block_next_poll_for_other_repo(
+        self,
+    ) -> None:
+        # Pass 1 submits a blocking worker for repo alpha; the tick
+        # itself must return promptly because the scheduler dispatch is
+        # nonblocking. Pass 2 then submits a worker for repo beta even
+        # though alpha's worker is still in flight. Without the async
+        # dispatch the second `_run_tick` would queue behind the
+        # blocking alpha handler and the beta worker would never start
+        # before the test timeout.
+        with _reload_main({
+            "REPO": "owner/legacy",
+            "TARGET_REPO_ROOT": "/tmp",
+            "BASE_BRANCH": "trunk",
+        }) as main_mod:
+            sched = main_mod.IssueScheduler(
+                global_cap=4, per_repo_cap=4,
+            )
+            self.addCleanup(sched.shutdown)
+            clients = self._build_clients(
+                main_mod, ["alpha/one", "beta/two"],
+            )
+
+            alpha_started = threading.Event()
+            alpha_release = threading.Event()
+            beta_done = threading.Event()
+            current_pass = {"n": 0}
+
+            def slow_alpha() -> None:
+                alpha_started.set()
+                alpha_release.wait(timeout=5.0)
+
+            def quick_beta() -> None:
+                beta_done.set()
+
+            def fake_tick(gh, spec, *, scheduler=None):
+                # Pass 1: only alpha submits a worker. Pass 2: only
+                # beta submits one. The contract under test is that
+                # pass 2 runs at all while alpha's worker is blocked.
+                if current_pass["n"] == 1 and spec.slug == "alpha/one":
+                    scheduler.submit(spec.slug, 1, slow_alpha)
+                elif current_pass["n"] == 2 and spec.slug == "beta/two":
+                    scheduler.submit(spec.slug, 2, quick_beta)
+
+            try:
+                with patch.object(
+                    main_mod.workflow, "tick", side_effect=fake_tick,
+                ):
+                    current_pass["n"] = 1
+                    t0 = time.monotonic()
+                    main_mod._run_tick(clients, sched)
+                    pass1_elapsed = time.monotonic() - t0
+                    self.assertTrue(
+                        alpha_started.wait(timeout=2.0),
+                        "alpha worker should have started during pass 1",
+                    )
+                    # Pass 1 returned without waiting for alpha — the
+                    # blocking worker is still running. 2.0s is far
+                    # below the 5.0s worker hold to leave headroom for
+                    # CI noise without being so loose the regression
+                    # ("tick blocks on the handler") could sneak past.
+                    self.assertLess(
+                        pass1_elapsed, 2.0,
+                        f"pass 1 took {pass1_elapsed:.2f}s -- _run_tick "
+                        "should not wait for handler completion",
+                    )
+
+                    current_pass["n"] = 2
+                    main_mod._run_tick(clients, sched)
+                    self.assertTrue(
+                        beta_done.wait(timeout=2.0),
+                        "beta worker did not run during pass 2 while "
+                        "alpha's worker was still in flight",
+                    )
+                    # Alpha is still mid-flight; releasing now lets it
+                    # exit cleanly before the scheduler shutdown.
+                    self.assertTrue(sched.is_active("alpha/one", 1))
+            finally:
+                alpha_release.set()
+
+    def test_same_issue_not_launched_twice_concurrently_across_polls(
+        self,
+    ) -> None:
+        # Pass 1 submits a blocking worker for issue #7. Pass 2 sees the
+        # same issue still in flight and the scheduler's duplicate-active
+        # gate rejects the re-submit so the handler is not run a second
+        # time concurrently. The test asserts BOTH the call counter
+        # (only one worker started) and the explicit skip return from
+        # `scheduler.submit` (the contract the dispatch layer relies on).
+        with _reload_main({
+            "REPO": "owner/legacy",
+            "TARGET_REPO_ROOT": "/tmp",
+            "BASE_BRANCH": "trunk",
+        }) as main_mod:
+            sched = main_mod.IssueScheduler(
+                global_cap=4, per_repo_cap=4,
+            )
+            self.addCleanup(sched.shutdown)
+            clients = self._build_clients(main_mod, ["owner/repo"])
+
+            started = threading.Event()
+            release = threading.Event()
+            run_count = {"n": 0}
+            run_lock = threading.Lock()
+            submit_results: list[bool] = []
+
+            def slow_worker() -> None:
+                with run_lock:
+                    run_count["n"] += 1
+                started.set()
+                release.wait(timeout=5.0)
+
+            def fake_tick(gh, spec, *, scheduler=None):
+                submit_results.append(
+                    scheduler.submit(spec.slug, 7, slow_worker)
+                )
+
+            try:
+                with patch.object(
+                    main_mod.workflow, "tick", side_effect=fake_tick,
+                ):
+                    main_mod._run_tick(clients, sched)
+                    self.assertTrue(started.wait(timeout=2.0))
+                    main_mod._run_tick(clients, sched)
+            finally:
+                release.set()
+
+            # Pass 1 was accepted; pass 2 was rejected by the
+            # duplicate-active gate.
+            self.assertEqual(submit_results, [True, False])
+            # The handler only ran once -- no second concurrent worker
+            # was ever started while the first was still in flight.
+            with run_lock:
+                self.assertEqual(run_count["n"], 1)
+
+    def test_worker_completion_clears_in_flight_marker_for_next_poll(
+        self,
+    ) -> None:
+        # Pass 1 dispatches a worker that finishes promptly. The
+        # done-callback clears the in-flight marker, so pass 2 can
+        # re-dispatch the same (repo, issue) key. Two workers must run
+        # over the two polls -- the first synchronously inside pass 1
+        # and the second from pass 2 after the marker cleared.
+        with _reload_main({
+            "REPO": "owner/legacy",
+            "TARGET_REPO_ROOT": "/tmp",
+            "BASE_BRANCH": "trunk",
+        }) as main_mod:
+            sched = main_mod.IssueScheduler(
+                global_cap=4, per_repo_cap=4,
+            )
+            self.addCleanup(sched.shutdown)
+            clients = self._build_clients(main_mod, ["owner/repo"])
+
+            done_events: list[threading.Event] = []
+            run_count = {"n": 0}
+            run_lock = threading.Lock()
+            submit_results: list[bool] = []
+
+            def quick_worker() -> None:
+                with run_lock:
+                    run_count["n"] += 1
+                done_events[-1].set()
+
+            def fake_tick(gh, spec, *, scheduler=None):
+                done_events.append(threading.Event())
+                submit_results.append(
+                    scheduler.submit(spec.slug, 3, quick_worker)
+                )
+
+            with patch.object(
+                main_mod.workflow, "tick", side_effect=fake_tick,
+            ):
+                main_mod._run_tick(clients, sched)
+                self.assertTrue(done_events[-1].wait(timeout=2.0))
+                # Spin briefly for the done-callback to clear the
+                # marker; with the callback running on a background
+                # thread, "worker finished" and "marker cleared" are
+                # distinct events.
+                deadline = time.monotonic() + 2.0
+                while sched.is_active("owner/repo", 3):
+                    if time.monotonic() > deadline:
+                        self.fail(
+                            "in-flight marker not cleared after worker "
+                            "exit",
+                        )
+                    time.sleep(0.01)
+                self.assertFalse(sched.is_active("owner/repo", 3))
+                main_mod._run_tick(clients, sched)
+                self.assertTrue(done_events[-1].wait(timeout=2.0))
+
+            self.assertEqual(submit_results, [True, True])
+            with run_lock:
+                self.assertEqual(run_count["n"], 2)
+
+    def test_reap_called_once_per_polling_pass_in_single_repo_mode(
+        self,
+    ) -> None:
+        # Failures recorded in the scheduler's completion queue between
+        # polling passes must be drained on the next pass so they
+        # actually reach the orchestrator log. The cadence is
+        # symmetrical with the analytics retention pass: exactly one
+        # `scheduler.reap()` per `_run_tick` regardless of how many
+        # repos are configured.
+        with _reload_main({
+            "REPO": "owner/legacy",
+            "TARGET_REPO_ROOT": "/tmp",
+            "BASE_BRANCH": "trunk",
+        }) as main_mod:
+            sched = main_mod.IssueScheduler(
+                global_cap=4, per_repo_cap=4,
+            )
+            self.addCleanup(sched.shutdown)
+            clients = self._build_clients(main_mod, ["owner/legacy"])
+
+            with patch.object(
+                main_mod.workflow, "tick",
+            ) as fake_tick, patch.object(sched, "reap") as reap:
+                fake_tick.return_value = None
+                main_mod._run_tick(clients, sched)
+
+            # Exactly one reap per polling pass.
+            self.assertEqual(reap.call_count, 1)
+
+    def test_reap_called_once_per_polling_pass_in_multi_repo_mode(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td, _reload_main({
+            "REPOS": (
+                f"alpha/one|{td}|main\n"
+                f"beta/two|{td}|develop"
+            ),
+        }) as main_mod:
+            sched = main_mod.IssueScheduler(
+                global_cap=4, per_repo_cap=4,
+            )
+            self.addCleanup(sched.shutdown)
+            clients = self._build_clients(
+                main_mod, ["alpha/one", "beta/two"],
+            )
+
+            with patch.object(
+                main_mod.workflow, "tick",
+            ) as fake_tick, patch.object(sched, "reap") as reap:
+                fake_tick.return_value = None
+                main_mod._run_tick(clients, sched)
+
+            # One reap for the whole polling pass, not per repo.
+            self.assertEqual(reap.call_count, 1)
+
+    def test_reap_called_once_across_real_workflow_dispatch_multi_repo(
+        self,
+    ) -> None:
+        # Regression for the multi-repo reap-cadence violation: the
+        # tests above stub out `main_mod.workflow.tick`, so the real
+        # `_dispatch_via_scheduler` never runs and a reap call hiding
+        # inside the production workflow path would not be counted.
+        # This test exercises the real `workflow.tick` (with the
+        # pollable-issue list patched to empty and the pre-tick refresh
+        # stubbed to a no-op so no GitHub I/O fires) and asserts the
+        # total reap count is still exactly one. Before the fix, an
+        # earlier draft also reaped inside `_dispatch_via_scheduler`,
+        # which produced N+1 reaps under multi-repo `REPOS` and
+        # contradicted the documented "one reap per polling pass"
+        # contract.
+        from orchestrator import workflow as workflow_mod
+        with tempfile.TemporaryDirectory() as td, _reload_main({
+            "REPOS": (
+                f"alpha/one|{td}|main\n"
+                f"beta/two|{td}|develop"
+            ),
+        }) as main_mod:
+            sched = main_mod.IssueScheduler(
+                global_cap=4, per_repo_cap=4,
+            )
+            self.addCleanup(sched.shutdown)
+            clients = self._build_clients(
+                main_mod, ["alpha/one", "beta/two"],
+            )
+            for _spec, gh in clients:
+                gh.list_pollable_issues.return_value = iter([])
+
+            with patch.object(
+                workflow_mod, "_refresh_base_and_worktrees",
+            ), patch.object(sched, "reap") as reap:
+                main_mod._run_tick(clients, sched)
+
+            # The real `_dispatch_via_scheduler` is exercised this time;
+            # only `_run_tick`'s own reap should be counted.
+            self.assertEqual(reap.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -255,8 +255,23 @@ next polling pass. The pre-tick base refresh consults
 `scheduler.is_active` per worktree so a base advance cannot rebase a
 pre-PR worktree under a running agent or relabel a PR-having worktree
 mid-handler. Each worker thread mints a fresh `GitHubClient` so
-PyGithub `Requester`s aren't shared; `main` shuts the scheduler down
-(`wait=True`) on process exit so in-flight workers complete cleanly.
+PyGithub `Requester`s aren't shared. The polling loop in
+`main._run_tick` is nonblocking: each per-repo `workflow.tick` returns
+as soon as it has submitted the eligible-issue callables, so a
+long-running handler in one repo cannot block the next poll from
+dispatching another repo's work or the same repo's other issues.
+`_run_tick` calls `scheduler.reap()` and
+`analytics.prune_with_retention_logging()` exactly once per polling
+pass so worker failures recorded between polls surface in the
+orchestrator log and the analytics retention window is applied at the
+same cadence. `main` shuts the scheduler down (`wait=True`) on every
+exit path (normal `--once`, SIGINT/SIGTERM, self-modifying-merge
+restart) so in-flight workers complete cleanly; the SIGINT/SIGTERM
+signal handler also calls `scheduler.shutdown(wait=False)` immediately
+so an in-progress `workflow.tick` stops enqueueing new submits the
+instant the user asks to stop instead of running its dispatch loop to
+the end with `_running=False` and growing the in-flight set
+post-signal.
 
 **Workflow module split.** `workflow.py` is a slim facade owning the
 tick loop, label dispatcher, unlabeled-pickup handler,

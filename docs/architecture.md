@@ -575,6 +575,13 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
    │      docs/state-machine.md#stage-handlers; the compact label-       │
    │      lifecycle reference is at                                       │
    │      docs/state-machine.md#state-transition-label-lifecycle)         │
+   │     after every configured repo's workflow.tick returns, _run_tick   │
+   │     calls scheduler.reap() and                                       │
+   │     analytics.prune_with_retention_logging() exactly once per        │
+   │     polling pass: reap drains any worker completions that landed     │
+   │     since the last poll so failures surface in the orchestrator log  │
+   │     even when the worker exits between two polls; the prune call     │
+   │     applies the analytics retention window.                          │
    │                                                                      │
    └─────────┬───────────────────────────────────────┬────────────────────┘
              │ subprocess                            │ subprocess (hardened)
@@ -607,7 +614,7 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 
 | Component | Role |
 |---|---|
-| **main.py** | polling loop + signal handling + self-restart + per-tick `analytics.prune_with_retention_logging` retention pass |
+| **main.py** | polling loop + signal handling + self-restart + per-polling-pass `scheduler.reap()` (drains worker completions logged since the last poll) and `analytics.prune_with_retention_logging` (retention pass). One shared `IssueScheduler` instance is constructed at startup and shut down (`wait=True`) on every exit path (normal `--once`, SIGINT/SIGTERM, self-modifying-merge restart) so in-flight workers complete cleanly. The SIGINT/SIGTERM signal handler additionally calls `scheduler.shutdown(wait=False)` synchronously so the submit path is closed mid-tick -- an in-progress `workflow.tick` then sees `reason=closed` on every remaining `scheduler.submit` call and stops enqueueing new work the instant the user asks to stop, instead of waiting for `_run_tick` to return. |
 | **workflow.py** | facade: per-repo tick loop, family-aware/fan-out partitioning, `_process_issue` dispatcher, `_handle_pickup`, `_park_awaiting_human`, `_run_agent_tracked`; re-exports the cross-module helpers and stage entry handlers (`_comment_created_at` is re-exported because the `fixing` handler reuses it; other stage-private helpers stay private to their module) |
 | **workflow_drift.py** | user-content drift detection and re-route helpers |
 | **workflow_messages.py** | prompt builders, parsers, comment posting + orchestrator-comment markers, stderr redaction |
