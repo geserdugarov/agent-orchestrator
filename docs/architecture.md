@@ -184,8 +184,9 @@ orchestrator/
                            `park_reason="worktree_reset_failed"`. The
                            approval bookkeeping is cleared before any
                            fallible step, so each park leaves no stale
-                           markers an operator unpark could ride into
-                           a new final-docs handoff. The drift block
+                           `final_docs_approval_seeded` sentinel an
+                           operator unpark could ride into a new
+                           final-docs handoff. The drift block
                            also persists `docs_drift_unwind_pending=
                            True` while a cleanup is in progress and
                            clears it only on the success path that

@@ -140,8 +140,8 @@ final-docs hop could silently push a stale commit (especially under
 into the next reviewer round. The approval bookkeeping is cleared
 before any fallible step, so each park (`fetch_failed` on fetch
 failure, `worktree_reset_failed` on probe / reset / clean failure)
-leaves no stale approval markers an operator unpark could ride into
-a fresh final-docs handoff. The drift block also persists
+leaves no stale `final_docs_approval_seeded` sentinel an operator
+unpark could ride into a fresh final-docs handoff. The drift block also persists
 `docs_drift_unwind_pending=True` while a cleanup is in progress and
 clears it only on the success path that relabels to `validating`;
 an operator unpark or fresh human comment re-enters the drift block

@@ -249,8 +249,8 @@ base-up-to-date no-op.
 `_advance_after_docs_push` / `_advance_after_docs_no_change` helpers
 no longer carry a routing discriminator — both always advance to
 `in_review`. The legacy fallback to `validating` (the
-"no marker → validating" route the helpers used during the
-#267-#269 migration) is removed. The user-content drift block in
+"no fresh-approval discriminator → validating" route the helpers
+used during the #267-#269 migration) is removed. The user-content drift block in
 `_handle_documenting` now relabels back to `validating` and returns
 early without spawning the docs agent, since the prior reviewer
 approval was for stale requirements; the reviewer re-evaluates on
@@ -293,8 +293,8 @@ in-place state resets without a relabel) across all four issues:
   failure and `worktree_reset_failed` on probe / reset / clean
   failure instead of relabeling; the approval bookkeeping is cleared
   before any fallible step so the parked state carries no stale
-  markers an operator unpark could ride into a new final-docs
-  handoff (#270)
+  `final_docs_approval_seeded` sentinel an operator unpark could ride
+  into a new final-docs handoff (#270)
 
 The parent #262 target is now fully reached.
 
