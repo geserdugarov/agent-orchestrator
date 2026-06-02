@@ -11,17 +11,17 @@ after the reviewer's final approval via the `documenting` handoff, so
 docs land against the approved/squashed head without spending a no-op
 pass on each code-changing push. The orchestrator is permanently
 manual-merge-only — `_handle_in_review` pings HITL once per head SHA
-for a mergeable PR, parks awaiting human attention for an unmergeable
-PR, and never calls `gh.merge_pr`. Every pre-approval code-changing
-route lands directly back on `validating`: the initial `implementing`
-PR open, every `validating` pushed fix (CHANGES_REQUESTED,
-awaiting-human resume, user-content drift, transient-park recovery),
-the PR-feedback `fixing` pushed-fix exit, the `in_review`
-user-content drift, and every `resolving_conflict` pushed exit (clean
-rebase, recovered push, agent-resolved, awaiting-human resume,
-drift-pushed fix) all clear `agent_approved_sha` and stay on (or
-return to) `validating` so the next reviewer round re-snapshots the
-freshly-pushed head. `_handle_documenting`'s own success
+for a mergeable + approved PR, parks awaiting human attention for an
+unmergeable PR, and never calls `gh.merge_pr`. Every pre-approval
+code-changing route lands directly back on `validating`: the initial
+`implementing` PR open, every `validating` pushed fix
+(CHANGES_REQUESTED, awaiting-human resume, user-content drift,
+transient-park recovery), the PR-feedback `fixing` pushed-fix exit,
+the `in_review` user-content drift, and every `resolving_conflict`
+pushed exit (clean rebase, recovered push, agent-resolved,
+awaiting-human resume, drift-pushed fix) all stay on (or return to)
+`validating` with `review_round` reset so the next reviewer round
+re-evaluates the freshly-pushed head. `_handle_documenting`'s own success
 exits always advance to `in_review`; its drift block relabels
 directly to `validating` without spawning the docs agent when a
 body edit invalidates the prior approval mid-hop. `_handle_fixing` owns the PR-feedback quiet window
@@ -107,22 +107,15 @@ back to `validating`. The handler's own success exits always advance
 to `in_review` — `_advance_after_docs_push` / `_advance_after_docs_no_change`
 both target `in_review` unconditionally on every success exit.
 A `docs:` commit lands → push + advance to
-`in_review`. The push also updates `agent_approved_sha` to the new
-head, gated on the companion sentinel `final_docs_approval_seeded`
-that validating sets only when it actually persisted a non-empty
-`agent_approved_sha` this round (both `gh.get_pr()` succeeded AND
-`_head_sha()` returned a non-empty local SHA). When either fails the
-sentinel is absent and any stale `agent_approved_sha` left over from
-a prior round stays untouched. The final-docs exit additionally ratchets
+`in_review`. The final-docs exit additionally ratchets
 `pr_last_comment_id` past any issue-thread reply consumed by the
 awaiting-human resume, so the next in_review tick does not replay it
 as fresh PR feedback and bounce to `fixing`. An explicit `DOCS:
 NO_CHANGE` marker on a remote-clean branch advances without pushing.
 The `documenting` label set by `_handle_validating`'s approval
 branch is the only entry point. A user-content drift during the
-final-docs hop invalidates the prior approval: the handler clears
-`agent_approved_sha`, resets `review_round=0`, drops the sentinel,
-and relabels back to `validating` without
+final-docs hop invalidates the prior approval: the handler resets
+`review_round=0` and relabels back to `validating` without
 spawning the docs agent so the reviewer re-evaluates the updated
 body. Before the relabel the handler fetches `<remote>/<branch>`, probes
 HEAD inline (so a probe failure is distinguishable from a real "in
@@ -136,11 +129,11 @@ PR head and no unpushed local docs commit / uncommitted / untracked
 docs edits authored against the OLD body survive. Otherwise the recovered-commit shortcut on a future
 final-docs hop could silently push a stale commit (especially under
 `SQUASH_ON_APPROVAL=off`) and a prior dirty-park's edits could ride
-into the next reviewer round. The approval bookkeeping is cleared
-before any fallible step, so each park (`fetch_failed` on fetch
-failure, `worktree_reset_failed` on probe / reset / clean failure)
-leaves no stale `final_docs_approval_seeded` sentinel an operator
-unpark could ride into a fresh final-docs handoff. The drift block also persists
+into the next reviewer round. `review_round` is cleared before any
+fallible step, so each park (`fetch_failed` on fetch failure,
+`worktree_reset_failed` on probe / reset / clean failure) leaves no
+stale counter an operator unpark could ride into a fresh final-docs
+handoff. The drift block also persists
 `docs_drift_unwind_pending=True` while a cleanup is in progress and
 clears it only on the success path that relabels to `validating`;
 an operator unpark or fresh human comment re-enters the drift block
@@ -154,23 +147,25 @@ docs child.
 
 **Validating stage.** `_handle_validating` spawns a fresh reviewer on
 `git diff origin/<base>...HEAD` and parses the last `VERDICT:` marker.
-On `APPROVED` it runs `VERIFY_COMMANDS` (default empty), snapshots
-`agent_approved_sha`, optionally squashes (`SQUASH_ON_APPROVAL`), seeds
-`final_docs_approval_seeded`, and flips to `documenting` — the final-docs
-hop runs against the squashed head before `in_review` picks up. Verify
-failures park with a typed `park_reason`. `CHANGES_REQUESTED` resumes
-the dev; a clean pushed fix stays on `validating` (no docs hop) and
-clears `agent_approved_sha` so the next reviewer round re-snapshots
-the freshly-pushed head. `MAX_REVIEW_ROUNDS` (default 3) caps
-iterations.
+On `APPROVED` it runs `VERIFY_COMMANDS` (default empty), optionally
+squashes (`SQUASH_ON_APPROVAL`), seeds the in_review PR watermarks,
+and flips to `documenting` — the final-docs hop runs against the
+squashed head before `in_review` picks up. Verify failures park with
+a typed `park_reason`. `CHANGES_REQUESTED` resumes the dev; a clean
+pushed fix stays on `validating` (no docs hop) so the next reviewer
+round re-evaluates the freshly-pushed head. `MAX_REVIEW_ROUNDS`
+(default 3) caps iterations.
 
 **In-review terminals and HITL ping.** `_handle_in_review` covers PR
 merged → `done`; PR closed unmerged → `rejected`; fresh actionable PR
 feedback → flip to `fixing` (the fixing stage owns the resume cycle);
 user-content drift resumes the dev directly. The orchestrator is
-permanently manual-merge-only: a mergeable PR earns a one-shot HITL
-ping per head SHA so the human knows the PR is ready, and an
-unmergeable PR parks awaiting human attention. No `gh.merge_pr` call,
+permanently manual-merge-only: an approved + mergeable PR earns a
+one-shot HITL ping per head SHA so the human knows the PR is ready,
+and an unmergeable PR parks awaiting human attention. Approval here
+means a real GitHub APPROVED review on the current head (the reviewer
+agent posts an issue comment, not a PR review, so the ping waits until
+a human or bot formally approves the PR). No `gh.merge_pr` call,
 no `merge_attempt` / orchestrator-initiated `pr_merged` emission, and
 no `resolving_conflict` route from this stage.
 Three independent watermarks separate IssueComment / PullRequestComment
@@ -200,8 +195,8 @@ each tick (filtering orchestrator comments by id and hidden body
 marker), debounces against the freshest comment timestamp
 (`IN_REVIEW_DEBOUNCE_SECONDS`), then resumes the locked dev session
 with a prompt built across all unread surfaces. A pushed fix clears
-the bookmarks, resets `review_round`, drops `agent_approved_sha`, and
-flips DIRECTLY back to `validating`; the no-new-feedback bounce also
+the bookmarks, resets `review_round`, and flips DIRECTLY back to
+`validating`; the no-new-feedback bounce also
 flips to `validating`. Docs do not run on the pushed-fix exit --
 the single docs pass is deferred to the final-docs handoff after
 reviewer approval. Failed resumes park awaiting human.
@@ -217,7 +212,7 @@ straight back to `validating`; the single docs pass runs after the
 reviewer's final approval via the `documenting` handoff. Real
 conflicts resume the dev with up to 20 conflicted paths.
 `MAX_CONFLICT_ROUNDS` (default 3) caps attempts; every pushed rebase
-drops `agent_approved_sha`.
+resets `review_round`.
 
 **Question stage.** The operator-applied `question` label runs
 `_handle_question` as a read-only side-branch: no implementation, no

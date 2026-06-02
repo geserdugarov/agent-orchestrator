@@ -998,9 +998,7 @@ class HandleResolvingConflictTest(
         # rebased branch and hands straight back to `validating`. Docs
         # do not run here -- the single docs pass runs after reviewer
         # approval before `in_review` via the final-docs handoff.
-        gh, issue, pr = self._seed(
-            extra_state={"agent_approved_sha": "stale-approval"},
-        )
+        gh, issue, pr = self._seed()
         mocks, merge_mock, git_mock = self._run_with_merge(
             gh, issue,
             merge_succeeded=True,
@@ -1021,7 +1019,6 @@ class HandleResolvingConflictTest(
         self.assertNotIn((200, "documenting"), gh.label_history)
         data = gh.pinned_data(200)
         self.assertEqual(data.get("review_round"), 0)
-        self.assertIsNone(data.get("agent_approved_sha"))
         self.assertEqual(data.get("conflict_round"), 1)
         self.assertIn("last_conflict_resolved_at", data)
 
@@ -1103,9 +1100,7 @@ class HandleResolvingConflictTest(
         # hands straight back to `validating`. Docs do not run here --
         # the single docs pass runs after reviewer approval before
         # `in_review` via the final-docs handoff.
-        gh, issue, pr = self._seed(
-            extra_state={"agent_approved_sha": "stale-approval"},
-        )
+        gh, issue, pr = self._seed()
         mocks, merge_mock, git_mock = self._run_with_merge(
             gh, issue,
             merge_succeeded=False,
@@ -1132,7 +1127,6 @@ class HandleResolvingConflictTest(
         self.assertNotIn((200, "documenting"), gh.label_history)
         data = gh.pinned_data(200)
         self.assertEqual(data.get("review_round"), 0)
-        self.assertIsNone(data.get("agent_approved_sha"))
         self.assertEqual(data.get("conflict_round"), 1)
         self.assertIn("last_conflict_resolved_at", data)
 
@@ -1354,7 +1348,6 @@ class HandleResolvingConflictTest(
                 "awaiting_human": True,
                 "conflict_round": 1,
                 "last_action_comment_id": 1000,
-                "agent_approved_sha": "stale-approval",
             },
         )
         # Fresh comment above the watermark.
@@ -1390,7 +1383,6 @@ class HandleResolvingConflictTest(
         )
         data = gh.pinned_data(200)
         self.assertEqual(data.get("review_round"), 0)
-        self.assertIsNone(data.get("agent_approved_sha"))
         self.assertEqual(data.get("conflict_round"), 2)
         self.assertIn((200, "validating"), gh.label_history)
         self.assertNotIn((200, "documenting"), gh.label_history)

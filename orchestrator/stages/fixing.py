@@ -23,13 +23,12 @@ over ALL unread surfaces and resumes the locked dev session via
 On a pushed fix the handler advances `pr_last_comment_id`,
 `pr_last_review_comment_id`, and `pr_last_review_summary_id` past the
 just-consumed feedback (mirrors the legacy in_review fix path), clears
-the bookmarks, resets `review_round`, drops the stale `agent_approved_sha`
-(the SHA just moved), and flips the label DIRECTLY back to `validating`
-so the reviewer agent re-evaluates the freshened diff next tick. Docs
-do not run on the pushed-fix exit -- the single docs pass is deferred
-to the final-docs handoff after reviewer approval, so running the docs
-stage against an unapproved diff here would just push a no-op and waste
-a tick. On a failed resume (timeout, dirty worktree, push
+the bookmarks, resets `review_round`, and flips the label DIRECTLY back
+to `validating` so the reviewer agent re-evaluates the freshened diff
+next tick. Docs do not run on the pushed-fix exit -- the single docs
+pass is deferred to the final-docs handoff after reviewer approval, so
+running the docs stage against an unapproved diff here would just push
+a no-op and waste a tick. On a failed resume (timeout, dirty worktree, push
 failure, no-commit question) the disposition helpers from
 `stages.validating` (`_handle_dev_fix_result`) handle the park; the
 watermarks STILL advance past the feedback the dev did see, otherwise
@@ -305,11 +304,9 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         return
 
     # Reset the round so the reviewer starts fresh on the new diff
-    # next tick, and drop the now-stale `agent_approved_sha` (the head
-    # just moved -- the reviewer must re-approve the new commit before
-    # AUTO_MERGE can land it). The bookmarks served their purpose;
-    # clear them so a later in_review -> fixing route writes fresh
-    # values rather than mixing rounds.
+    # next tick. The bookmarks served their purpose; clear them so a
+    # later in_review -> fixing route writes fresh values rather than
+    # mixing rounds.
     #
     # Flip DIRECTLY to `validating` so the reviewer re-evaluates the
     # new head next tick. Docs do not run on this exit -- the single
@@ -318,7 +315,6 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # here would just push a no-op and waste a tick.
     _clear_pending_fix_bookmarks(state)
     state.set("review_round", 0)
-    state.set("agent_approved_sha", None)
     gh.set_workflow_label(issue, "validating")
     gh.write_pinned_state(issue, state)
 

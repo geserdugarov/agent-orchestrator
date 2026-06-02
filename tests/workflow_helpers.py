@@ -158,8 +158,7 @@ class _PatchedWorkflowMixin:
         first_subject_mock = MagicMock(return_value=first_commit_subject)
         cleanup_terminal_mock = MagicMock()
         # Squash helper would otherwise shell out to `git merge-base` etc.
-        # against `_FAKE_WT`. Default: success-no-op, so tests not exercising
-        # the squash path see no agent_approved_sha override.
+        # against `_FAKE_WT`. Default: success-no-op.
         squash_mock = MagicMock(return_value=tuple(squash_result))
         rebase_in_progress_mock = MagicMock(return_value=bool(rebase_in_progress))
         # Verify-commands runner shells out to the operator's configured

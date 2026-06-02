@@ -79,9 +79,9 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=[review, dev_fix],
             dirty_files=(),
             push_branch=True,
-            # 1: reviewed_sha snapshot before run_agent. 2: before_sha for the
-            # dev-fix run. 3: after_sha to confirm the new commit.
-            head_shas=["aaa", "aaa", "bbb"],
+            # 1: before_sha for the dev-fix run. 2: after_sha to confirm
+            # the new commit.
+            head_shas=["aaa", "bbb"],
         )
 
         self.assertEqual(mocks["run_agent"].call_count, 2)
@@ -286,14 +286,14 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
             ],
             dirty_files=(),
             push_branch=True,
-            head_shas=["aaa", "aaa"],
+            head_shas=["aaa"],
         )
 
         data = gh.pinned_data(6)
         self.assertTrue(data.get("awaiting_human"))
         self.assertEqual(data.get("park_reason"), "agent_timeout")
-        # `head_shas` are consumed in order: reviewed_sha + before_sha
-        # (both "aaa"). `before_sha` is what gets persisted.
+        # `head_shas` are consumed in order: before_sha is "aaa", which
+        # is what gets persisted.
         self.assertEqual(data.get("pre_dev_fix_sha"), "aaa")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("agent timed out", last_comment)
@@ -308,8 +308,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
             ],
             dirty_files=(),
             push_branch=True,
-            # reviewed_sha + before_sha + after_sha (all "aaa" -> no commit).
-            head_shas=["aaa", "aaa", "aaa"],
+            # before_sha + after_sha (both "aaa" -> no commit).
+            head_shas=["aaa", "aaa"],
         )
 
         mocks["_push_branch"].assert_not_called()
@@ -328,7 +328,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
             ],
             dirty_files=["leftover.py"],
             push_branch=True,
-            head_shas=["aaa", "aaa", "bbb"],
+            head_shas=["aaa", "bbb"],
         )
 
         mocks["_push_branch"].assert_not_called()
@@ -348,7 +348,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
             ],
             dirty_files=(),
             push_branch=False,
-            head_shas=["aaa", "aaa", "bbb"],
+            head_shas=["aaa", "bbb"],
         )
 
         data = gh.pinned_data(6)
@@ -470,9 +470,7 @@ class ValidatingPushedFixesStayOnValidatingTest(
     (CHANGES_REQUESTED, awaiting-human resume, user-content drift, or
     a transient-park recovery that finishes a push), the issue stays
     on `validating` -- the docs pass only runs as the final-docs
-    handoff after a reviewer approval, not as a pre-review hop --
-    and any stale `agent_approved_sha` from an earlier round is
-    cleared so AUTO_MERGE can't land the PR against the pre-fix snapshot.
+    handoff after a reviewer approval, not as a pre-review hop.
     """
 
     def _validating_issue(
@@ -514,8 +512,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
             run_agent=[review, dev_fix],
             dirty_files=(),
             push_branch=True,
-            # reviewed_sha snapshot + before_sha + after_sha (push landed).
-            head_shas=["aaa", "aaa", "bbb"],
+            # before_sha + after_sha (push landed).
+            head_shas=["aaa", "bbb"],
         )
 
         data = gh.pinned_data(301)
@@ -539,8 +537,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
             run_agent=[review, dev],
             dirty_files=(),
             push_branch=True,
-            # reviewed_sha + before_sha + after_sha all equal -> no commit.
-            head_shas=["aaa", "aaa", "aaa"],
+            # before_sha + after_sha all equal -> no commit.
+            head_shas=["aaa", "aaa"],
         )
 
         data = gh.pinned_data(302)
@@ -557,7 +555,6 @@ class ValidatingPushedFixesStayOnValidatingTest(
             awaiting_human=True,
             last_action_comment_id=900,
             review_round=1,
-            agent_approved_sha="previously-approved-sha",
             comments=[
                 FakeComment(
                     id=1000, body="please add a test",
@@ -578,9 +575,6 @@ class ValidatingPushedFixesStayOnValidatingTest(
         self.assertFalse(data.get("awaiting_human"))
         self.assertEqual(data.get("review_round"), 2)
         self.assertNotIn((303, "documenting"), gh.label_history)
-        # The pushed fix invalidates any prior approval; AUTO_MERGE
-        # must not land the new head against the stale snapshot.
-        self.assertIsNone(data.get("agent_approved_sha"))
 
     def test_drift_pushed_fix_stays_on_validating(self) -> None:
         gh, issue = self._validating_issue(
@@ -588,7 +582,6 @@ class ValidatingPushedFixesStayOnValidatingTest(
             body="updated criteria after drift",
             user_content_hash="stale-hash",
             review_round=1,
-            agent_approved_sha="previously-approved-sha",
         )
 
         self._run(
@@ -603,9 +596,6 @@ class ValidatingPushedFixesStayOnValidatingTest(
         self.assertEqual(data.get("review_round"), 2)
         self.assertNotIn((304, "documenting"), gh.label_history)
         self.assertNotIn((304, "in_review"), gh.label_history)
-        # The pushed drift fix invalidates any prior approval; the
-        # prior reviewer voted on the OLD body + diff.
-        self.assertIsNone(data.get("agent_approved_sha"))
 
     def test_drift_ack_keeps_validating_label(self) -> None:
         # A drift ACK reply (no commit, explicit `ACK:` marker) is an
@@ -707,7 +697,6 @@ class ValidatingPushedFixesStayOnValidatingTest(
             pre_dev_fix_sha="cafe1234",
             last_action_comment_id=10_000,
             review_round=1,
-            agent_approved_sha="previously-approved-sha",
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
@@ -722,39 +711,6 @@ class ValidatingPushedFixesStayOnValidatingTest(
         data = gh.pinned_data(308)
         self.assertEqual(data.get("review_round"), 2)
         self.assertNotIn((308, "documenting"), gh.label_history)
-        # The recovery push landed a new SHA; any prior approval is
-        # stale and must be cleared so AUTO_MERGE re-gates on the
-        # next reviewer round.
-        self.assertIsNone(data.get("agent_approved_sha"))
-
-    def test_pushed_fix_clears_stale_agent_approved_sha(self) -> None:
-        # A pushed dev fix during validating is an explicit signal that
-        # any prior reviewer approval is for the pre-fix head and must
-        # not gate AUTO_MERGE. The handler clears `agent_approved_sha`
-        # before the next tick so the freshly-pushed head is re-reviewed
-        # before AUTO_MERGE can fire.
-        gh, issue = self._validating_issue(
-            issue_number=309,
-            review_round=1,
-            agent_approved_sha="previously-approved-sha",
-        )
-        review = _agent(
-            session_id="rev-sess",
-            last_message="please tweak\n\nVERDICT: CHANGES_REQUESTED",
-        )
-        dev_fix = _agent(session_id="dev-sess", last_message="fixed")
-
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=[review, dev_fix],
-            dirty_files=(),
-            push_branch=True,
-            head_shas=["aaa", "aaa", "bbb"],
-        )
-
-        data = gh.pinned_data(309)
-        self.assertNotIn((309, "documenting"), gh.label_history)
-        self.assertIsNone(data.get("agent_approved_sha"))
 
 
 class HandleValidatingReviewCapAddRoundsCommandTest(
@@ -1122,19 +1078,13 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
 
 
 class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """The validating -> in_review handoff has to seed two pinned-state keys
-    so `_handle_in_review` behaves correctly on the next tick:
-
-    * `agent_approved_sha` — the head SHA the reviewer agent OK'd. Without
-      this, AUTO_MERGE never fires for the agent-driven flow because the
-      agent posts an issue comment rather than a real PR review, so
-      `pr_is_approved` returns False.
-    * `pr_last_comment_id` — high-watermark seeded past every comment that
-      already exists at handoff. Without this, the in_review handler sees
-      the orchestrator's own ":robot: picking this up", ":sparkles: PR
-      opened: #N", and ":white_check_mark: codex review approved" comments
-      as fresh PR feedback once the debounce expires and resumes the dev
-      session against them.
+    """The validating -> in_review handoff has to seed `pr_last_comment_id`
+    as a high-watermark past every comment that already exists at handoff.
+    Without this, the in_review handler sees the orchestrator's own
+    ":robot: picking this up", ":sparkles: PR opened: #N", and
+    ":white_check_mark: codex review approved" comments as fresh PR
+    feedback once the debounce expires and resumes the dev session
+    against them.
     """
 
     PR_NUMBER = 11
@@ -1173,42 +1123,16 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_approved_seeds_agent_approved_sha_and_watermark(self) -> None:
-        gh, issue, pr = self._setup()
-
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-            # Local worktree HEAD == pr.head.sha; reviewed_sha snapshot
-            # (the only _head_sha call on the approved path) returns it
-            # so agent_approved_sha is persisted.
-            head_shas=("newhead42",),
-        )
-
-        # Approval routes through `documenting` first; the next tick's
-        # `_handle_documenting` carries the approval bookkeeping
-        # forward to `in_review`.
-        self.assertIn((5, "documenting"), gh.label_history)
-        data = gh.pinned_data(5)
-        self.assertEqual(data.get("agent_approved_sha"), "newhead42")
-        # Watermark must be at least past the existing orchestrator
-        # comments AND the approval comment validating just posted (which
-        # FakeGitHubClient.pr_comment now appends to pr.issue_comments).
-        approval_ids = [c.id for c in pr.issue_comments]
-        self.assertTrue(approval_ids, "approval comment should be on PR")
-        self.assertEqual(data.get("pr_last_comment_id"), max(approval_ids))
-        self.assertGreaterEqual(data.get("pr_last_comment_id"), 901)
-
     def test_in_review_after_approval_does_not_replay_existing_comments(self) -> None:
-        # End-to-end: validating approves -> in_review tick auto-merges
+        # End-to-end: validating approves -> in_review tick pings HITL
         # without resuming the dev on the orchestrator's own automated
-        # comments. This is the concrete bug guarded by both fixes
-        # (watermark seeding + agent_approved_sha gate) acting together.
+        # comments. This is the concrete bug guarded by the watermark
+        # seeding at handoff.
         gh, issue, pr = self._setup()
 
         # Step 1: validating approves. This posts a PR comment, seeds the
-        # watermark and agent_approved_sha, and flips to `documenting`
-        # (the new final-docs hop before in_review).
+        # watermark, and flips to `documenting` (the final-docs hop
+        # before in_review).
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Backdate every existing comment so debounce would otherwise fire.
         for c in list(issue.comments) + list(pr.issue_comments):
@@ -1230,15 +1154,14 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
                 c.created_at = long_ago
 
         # Step 2: pretend approved + green checks + mergeable so the
-        # auto-merge gate is the thing under test.
-        pr.approved = False  # only agent approved; no human review
+        # ready-ping gate is the thing under test.
+        pr.approved = True
         pr.mergeable = True
         pr.check_state = "success"
         # Skip the documenting hop (no docs change) by relabeling to
         # in_review -- this is what `_handle_documenting`'s no-change
         # exit would do for a final-docs pass with nothing to commit.
-        # agent_approved_sha and the watermarks set by validating ride
-        # through untouched.
+        # Watermarks set by validating ride through untouched.
         from tests.fakes import FakeLabel
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
@@ -1325,10 +1248,9 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
 class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
     """After the reviewer agent emits VERDICT: APPROVED, the orchestrator
     squashes the dev's commits on the PR branch into one and force-pushes
-    so the resulting PR is a single conventional-commit-shaped commit. The
-    new local HEAD is recorded as `agent_approved_sha`; watermarks advance
-    past the squash notice; and the next in_review tick must merge
-    (AUTO_MERGE on) WITHOUT re-running the reviewer on the rewritten head.
+    so the resulting PR is a single conventional-commit-shaped commit.
+    Watermarks advance past the squash notice; the next in_review tick
+    pings HITL without re-running the reviewer on the rewritten head.
 
     Failures (push rejected, lease violation, dirty tree) park
     awaiting_human and leave the original commits in place; SQUASH_ON_APPROVAL
@@ -1382,7 +1304,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
     ) -> None:
         # End-to-end: validating approves, squash + force-push runs (mocked
         # to succeed), the squash PR comment is posted, the issue lands in
-        # in_review, and the next in_review tick auto-merges WITHOUT
+        # in_review, and the next in_review tick pings HITL WITHOUT
         # spawning the reviewer on the rewritten head.
         gh, issue, pr = self._setup()
 
@@ -1402,16 +1324,10 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(mocks_v["run_agent"].call_count, 1)
         # Approval hands off through `documenting` (final docs pass);
         # `_handle_documenting`'s success exits advance unconditionally to
-        # `in_review`. `agent_approved_sha` and the squash / watermark
-        # state ride through the hop untouched.
+        # `in_review`. The squash / watermark state rides through the hop
+        # untouched.
         self.assertIn((5, "documenting"), gh.label_history)
         data = gh.pinned_data(5)
-        self.assertTrue(data.get("final_docs_approval_seeded"))
-        # agent_approved_sha must be the post-squash SHA, not the SHA the
-        # reviewer ran against. Without this, AUTO_MERGE's
-        # `agent_approved_sha == head_sha` gate would reject the rewritten
-        # head and the PR would sit forever waiting for a fresh review.
-        self.assertEqual(data.get("agent_approved_sha"), self.SQUASHED_SHA)
         # The squash notice was posted to the PR conversation.
         squash_notice_posted = any(
             ":package: squashed 3 commits to 1" in body
@@ -1433,13 +1349,14 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Step 2: simulate the documenting no-change exit (final docs
         # pass found nothing to commit) and run the in_review tick.
-        # AUTO_MERGE on, all gates pass; the merge MUST NOT re-run the
-        # reviewer agent (its run_agent call would otherwise be visible
-        # in mocks_r below) and must land on the post-squash SHA.
+        # Approved + mergeable; the ping MUST fire and must NOT re-run
+        # the reviewer agent (its run_agent call would otherwise be
+        # visible in mocks_r below).
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         for c in list(issue.comments) + list(pr.issue_comments):
             if c.created_at is None:
                 c.created_at = long_ago
+        pr.approved = True
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
 
@@ -1467,9 +1384,9 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_squash_failure_parks_awaiting_human_without_relabel(self) -> None:
         # Push rejected / lease violation / dirty tree all surface as
         # `success=False`. The orchestrator parks awaiting_human, leaves
-        # the issue in `validating`, and does NOT seed agent_approved_sha
-        # or watermarks (the original commits remain on the branch and a
-        # human can decide what to do).
+        # the issue in `validating`, and does NOT seed watermarks (the
+        # original commits remain on the branch and a human can decide
+        # what to do).
         gh, issue, pr = self._setup()
 
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
@@ -1507,15 +1424,10 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
             "park must NOT relabel to documenting (the final-docs hop) "
             "on squash failure",
         )
-        # No agent_approved_sha seeded; AUTO_MERGE cannot fire on the
-        # original (now-stale) commits even if the human relabels later.
-        self.assertIsNone(data.get("agent_approved_sha"))
-        self.assertFalse(data.get("final_docs_approval_seeded"))
 
     def test_squash_off_preserves_legacy_behavior(self) -> None:
         # Kill switch: with SQUASH_ON_APPROVAL=off the squash helper must
-        # NOT be called, agent_approved_sha is the SHA the reviewer ran
-        # against (not any squashed SHA), and no squash notice is posted.
+        # NOT be called and no squash notice is posted.
         gh, issue, pr = self._setup()
         # Make pr.head.sha match REVIEWED_SHA -- legacy path: the local
         # HEAD the reviewer saw is what the remote PR points at, since no
@@ -1531,22 +1443,18 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Helper not called at all.
         mocks["_squash_and_force_push"].assert_not_called()
-        # Legacy path: agent_approved_sha == reviewed_sha.
-        data = gh.pinned_data(5)
-        self.assertEqual(data.get("agent_approved_sha"), self.REVIEWED_SHA)
         # No squash notice posted.
         for _, body in gh.posted_pr_comments:
             self.assertNotIn(":package: squashed", body)
         # And the legacy approval flow flips to `documenting` (the
         # final-docs hop) regardless of SQUASH_ON_APPROVAL.
         self.assertIn((5, "documenting"), gh.label_history)
-        self.assertTrue(data.get("final_docs_approval_seeded"))
 
     def test_squash_with_only_one_commit_does_not_post_notice(self) -> None:
         # The helper returns `squashed_count=0` when there's only one
         # commit on top of base -- nothing to squash. The orchestrator
-        # must skip the squash PR comment and leave agent_approved_sha
-        # at the reviewed SHA (the helper returns the same SHA back).
+        # must skip the squash PR comment (the helper returns the same
+        # SHA back).
         gh, issue, pr = self._setup()
         pr.head = FakePRRef(sha=self.REVIEWED_SHA)
 
@@ -1561,12 +1469,9 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         for _, body in gh.posted_pr_comments:
             self.assertNotIn(":package: squashed", body)
-        data = gh.pinned_data(5)
-        self.assertEqual(data.get("agent_approved_sha"), self.REVIEWED_SHA)
         # Approval still flips to `documenting` (the final-docs hop)
         # even when there's only one commit (so no squash notice).
         self.assertIn((5, "documenting"), gh.label_history)
-        self.assertTrue(data.get("final_docs_approval_seeded"))
 
 
 class SquashHelperRealGitTest(unittest.TestCase):
@@ -1822,8 +1727,8 @@ class SquashHelperRealGitTest(unittest.TestCase):
         # The dirty-tree refusal is a precondition for the whole helper,
         # not just the rewrite path. A one-commit branch (squash would
         # be a no-op) with an uncommitted file must still fail so the
-        # caller parks awaiting_human; otherwise AUTO_MERGE could land
-        # the head with the operator's scratch invisible on the PR.
+        # caller parks awaiting_human; otherwise the manual merge could
+        # land the head with the operator's scratch invisible on the PR.
         self._git("reset", "--hard", "origin/main", cwd=self.work)
         author_env = {
             "GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "dev@example.com",
@@ -1866,8 +1771,8 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
 ):
     """A human review comment posted while validating is still running must
     not be silently consumed when the validating handler approves and seeds
-    the in_review watermarks. Otherwise auto-merge fires without the dev
-    agent ever seeing the human's feedback.
+    the in_review watermarks. Otherwise the dev would never see the
+    human's feedback before in_review pings HITL for the manual merge.
     """
 
     PR_NUMBER = 22
@@ -1936,8 +1841,8 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
         # Step 2: in_review tick. The human comment is visible past the
         # watermark and the handler routes the issue to `fixing` (no dev
         # spawn here; the fixing handler drives the resume). Without the
-        # surfacing, the auto-merge gate would fire on the agent's
-        # approval and merge over the human's feedback.
+        # surfacing, the handler would ping HITL for the manual merge
+        # over the human's unaddressed feedback.
         from tests.fakes import FakeLabel
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
@@ -1964,7 +1869,7 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
     landed in the dev agent's spawn context) must be advanced past at
     validating -> in_review handoff. If the watermark stops at the first
     non-self comment, those same already-consumed comments replay as fresh
-    PR feedback once the in_review debounce expires -- an auto-merge
+    PR feedback once the in_review debounce expires -- a ready-for-merge
     candidate would instead bounce back through validating in a loop.
     """
 
@@ -2035,6 +1940,7 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         # watermark, so the handler reaches the mergeable / HITL-ping
         # path. Without the fix, the human comment id=850 surfaces as
         # "new" and the issue routes to `fixing`.
+        pr.approved = True
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
@@ -2090,10 +1996,7 @@ class ValidatingTransientParkRecoveryTest(
         return gh, issue
 
     def test_push_failed_park_recovers_when_push_succeeds(self) -> None:
-        gh, issue = self._parked_issue(
-            park_reason="push_failed",
-            agent_approved_sha="previously-approved-sha",
-        )
+        gh, issue = self._parked_issue(park_reason="push_failed")
 
         # Force the worktree-existence check to pass; "/tmp" always exists
         # on Linux. The recovery only retries the push when the worktree
@@ -2123,10 +2026,6 @@ class ValidatingTransientParkRecoveryTest(
         self.assertEqual(gh.label_history, [])
         self.assertNotIn((170, "documenting"), gh.label_history)
         self.assertNotIn((170, "in_review"), gh.label_history)
-        # The deferred push landed a new SHA; any prior approval is
-        # stale and must be cleared so AUTO_MERGE re-gates on the
-        # next reviewer round.
-        self.assertIsNone(data.get("agent_approved_sha"))
 
     def test_push_failed_park_stays_parked_when_push_still_fails(self) -> None:
         # Recovery must not re-post the park message when the push still
@@ -2414,15 +2313,12 @@ class ValidatingTransientParkRecoveryTest(
     def test_agent_timeout_with_unpushed_commits_pushes_and_bumps(self) -> None:
         # The dev committed the fix locally but the timeout killed it
         # before the push. Recovery must finish that push -- otherwise
-        # the next tick's reviewer would inspect (and potentially
-        # approve) a SHA that is not on the PR, seeding
-        # `agent_approved_sha` to an unpushed commit and stalling
-        # in_review. `head_shas[0] != pre_dev_fix_sha` models "agent
+        # the next tick's reviewer would inspect a SHA that is not on
+        # the PR. `head_shas[0] != pre_dev_fix_sha` models "agent
         # produced a new commit before timing out."
         gh, issue = self._parked_issue(
             park_reason="agent_timeout",
             pre_dev_fix_sha="cafe1234",
-            agent_approved_sha="previously-approved-sha",
         )
 
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
@@ -2446,10 +2342,6 @@ class ValidatingTransientParkRecoveryTest(
         # Stays on `validating` (no documenting hop) so the reviewer
         # re-evaluates the recovered head on the next tick.
         self.assertNotIn((170, "documenting"), gh.label_history)
-        # The recovery push landed a new SHA; any prior approval is
-        # stale and must be cleared so AUTO_MERGE re-gates on the
-        # next reviewer round.
-        self.assertIsNone(data.get("agent_approved_sha"))
 
     def test_agent_timeout_with_unpushed_commits_push_fails_stays_parked(
         self,
@@ -2568,8 +2460,9 @@ class ValidatingHandoffSeedsAllWatermarksTest(
     surfaces; without an explicit default seed, the in_review legacy
     migration would advance past human feedback submitted on those surfaces
     during validate (the COMMENTED PR review summary case is the worst:
-    `pr_has_changes_requested` does not veto auto-merge, so AUTO_MERGE could
-    land the PR over the human's note without surfacing it to the dev).
+    `pr_has_changes_requested` does not veto the HITL ping, so the manual
+    merge could land the PR over the human's note without surfacing it to
+    the dev).
     """
 
     PR_NUMBER = 600
@@ -2608,9 +2501,9 @@ class ValidatingHandoffSeedsAllWatermarksTest(
 
     def test_pre_handoff_review_summary_surfaces_in_in_review(self) -> None:
         # A "Comment" review without `CHANGES_REQUESTED` is the dangerous
-        # case: it doesn't trip `pr_has_changes_requested` so AUTO_MERGE
-        # would happily merge over it if the in_review tick advanced its
-        # watermark past the body.
+        # case: it doesn't trip `pr_has_changes_requested` so the HITL
+        # ping would happily advertise the PR as ready if the in_review
+        # tick advanced its watermark past the body.
         long_ago_review = datetime.now(timezone.utc) - timedelta(hours=1)
         review = FakePRReview(
             id=4242, body="please tighten the docstring",
@@ -2752,8 +2645,8 @@ class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         # Step 2: in_review tick. The human's inline comment surfaces and
-        # routes the issue to `fixing` -- not auto-merged. The fixing
-        # handler owns the dev resume on the next tick.
+        # routes the issue to `fixing` -- no ready-for-merge ping. The
+        # fixing handler owns the dev resume on the next tick.
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "AUTO_MERGE", True), \
@@ -2848,20 +2741,19 @@ class HandoffWithoutPickupIdLegacyStateTest(
             f"(got {wm})",
         )
 
-        # Step 2: in_review tick. AUTO_MERGE on, every gate passes -- the
-        # only thing standing between the PR and a merge is the human's
-        # "do not merge yet" comment. The handler must surface it as
-        # fresh feedback and route to `fixing`.
+        # Step 2: in_review tick. Every gate passes -- the only thing
+        # standing between the PR and a ready-ping is the human's "do
+        # not merge yet" comment. The handler must surface it as fresh
+        # feedback and route to `fixing`.
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
-        # Auto-merge must NOT fire.
+        # No merge call fires.
         self.assertEqual(gh.merge_calls, [])
         self.assertNotIn((500, "done"), gh.label_history)
         # The "do not merge yet" comment surfaces as fresh PR feedback
@@ -2873,115 +2765,6 @@ class HandoffWithoutPickupIdLegacyStateTest(
         # so the route bookmarks the latest visible human/issue-side id.
         self.assertGreaterEqual(
             gh.pinned_data(500).get("pending_fix_issue_max_id"), 950,
-        )
-
-
-class ReviewedShaBranchUpdateRaceTest(unittest.TestCase, _PatchedWorkflowMixin):
-    """The reviewer agent reads the LOCAL worktree; if the remote PR head
-    moves between the review and the validating handoff (force-push, an
-    out-of-band commit, a stale worktree), `pr.head.sha` no longer matches
-    the commit the agent inspected. Persisting `pr.head.sha` as
-    `agent_approved_sha` would mark an unreviewed commit as agent-approved.
-    Persist the local reviewed SHA instead; downstream consumers of
-    `agent_approved_sha` can then naturally reject the race-introduced
-    commit by SHA comparison.
-    """
-
-    PR_NUMBER = 1300
-    BRANCH = "orchestrator/issue-800"
-
-    def _setup(self):
-        gh = FakeGitHubClient()
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        issue = make_issue(800, label="validating", comments=[
-            FakeComment(
-                id=900, body=":robot: orchestrator picking this up.",
-                user=FakeUser("orchestrator"), created_at=long_ago,
-            ),
-            FakeComment(
-                id=901, body=":sparkles: PR opened: #1300",
-                user=FakeUser("orchestrator"), created_at=long_ago,
-            ),
-        ])
-        gh.add_issue(issue)
-        # The remote PR head ("forced42") differs from what the reviewer
-        # actually inspected on the local worktree ("reviewedAA"). Models
-        # an out-of-band push that landed between the review and the
-        # handoff -- the reviewer's verdict applies to "reviewedAA", not
-        # to "forced42".
-        pr = FakePR(
-            number=self.PR_NUMBER, head_branch=self.BRANCH,
-            head=FakePRRef(sha="forced42"),
-            mergeable=True, check_state="success",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            800, pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
-            review_round=0,
-            orchestrator_comment_ids=[900, 901],
-            pickup_comment_id=900,
-        )
-        return gh, issue, pr
-
-    def test_remote_head_moved_during_review_recorded_as_reviewed_sha(self) -> None:
-        gh, issue, pr = self._setup()
-
-        # Validating approves. The reviewer ran against the local
-        # worktree at "reviewedAA". The remote PR shows "forced42".
-        # `agent_approved_sha` must record what the agent actually saw.
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-            head_shas=("reviewedAA",),
-        )
-
-        data = gh.pinned_data(800)
-        self.assertEqual(
-            data.get("agent_approved_sha"), "reviewedAA",
-            "agent_approved_sha must be the local reviewed SHA, not "
-            "pr.head.sha at handoff time",
-        )
-
-    def test_remote_head_unchanged_records_matching_approved_sha(self) -> None:
-        # Same setup but the local reviewed SHA matches the remote PR
-        # head: `agent_approved_sha` is the live PR head, which is the
-        # post-rollout invariant for downstream consumers.
-        gh = FakeGitHubClient()
-        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        issue = make_issue(801, label="validating", comments=[
-            FakeComment(
-                id=900, body=":robot: orchestrator picking this up.",
-                user=FakeUser("orchestrator"), created_at=long_ago,
-            ),
-            FakeComment(
-                id=901, body=":sparkles: PR opened: #1301",
-                user=FakeUser("orchestrator"), created_at=long_ago,
-            ),
-        ])
-        gh.add_issue(issue)
-        pr = FakePR(
-            number=1301, head_branch="orchestrator/issue-801",
-            head=FakePRRef(sha="happyAA"),
-            mergeable=True, check_state="success",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(
-            801, pr_number=1301, branch="orchestrator/issue-801",
-            dev_agent="claude", dev_session_id="dev-sess",
-            review_round=0,
-            orchestrator_comment_ids=[900, 901],
-            pickup_comment_id=900,
-        )
-
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-            head_shas=("happyAA",),
-        )
-
-        self.assertEqual(
-            gh.pinned_data(801).get("agent_approved_sha"), "happyAA",
         )
 
 
@@ -3058,6 +2841,7 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Step 2: in_review tick. Comment 920 must NOT surface and the
         # handler reaches the manual-merge HITL ping path.
+        pr.approved = True
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
@@ -3117,7 +2901,7 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
     consumed via that path. The validating handoff seed must NOT apply
     `consumed_through` to the PR-conversation surface, or a human PR comment
     whose id sits below a later-consumed issue-thread reply gets silently
-    advanced past and AUTO_MERGE lands the PR over unread feedback.
+    advanced past and the HITL ping fires over unread feedback.
     """
 
     PR_NUMBER = 1600
@@ -3134,7 +2918,7 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
         # posts approval at 940. The PR-conv comment at 915 was never fed
         # to the dev (validating only watches the issue thread); without
         # the fix the seed walks past it because 915 <= consumed_through
-        # (920) and AUTO_MERGE merges over it.
+        # (920) and the next tick pings HITL over it.
         issue = make_issue(800, label="validating", comments=[
             FakeComment(
                 id=900, body=":robot: orchestrator picking this up.",
@@ -3197,18 +2981,17 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
         # pass found nothing to commit) and run the in_review tick.
         # The PR-conv comment surfaces and the handler routes the issue
         # to `fixing` (the fixing handler owns the dev resume on the
-        # next tick) instead of merging.
+        # next tick) instead of pinging HITL.
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
-        with patch.object(config, "AUTO_MERGE", True), \
-             patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
                 lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
                 run_agent=_agent(),
             )
 
         # Routed to fixing -- the unread PR-conv text is bookmarked for
-        # the fixing handler. No auto-merge over unread feedback.
+        # the fixing handler. No HITL ping fires over unread feedback.
         # `pending_fix_issue_max_id` covers BOTH the issue-thread and
         # PR-conversation surfaces (they share the IssueComment id space);
         # 915 was the unread PR-conv comment, 920 was the issue-thread
@@ -3468,7 +3251,6 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         # BEFORE the approval / squash / final-docs route is reached.
         self.assertNotIn((7, "in_review"), gh.label_history)
         self.assertNotIn((7, "documenting"), gh.label_history)
-        self.assertFalse(data.get("final_docs_approval_seeded"))
         # No approval comment (gate fires BEFORE the approval post).
         self.assertFalse(any(
             ":white_check_mark:" in body
@@ -3592,7 +3374,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
                 run_agent=[review, dev_fix],
                 dirty_files=(),
                 push_branch=True,
-                head_shas=["aaa", "aaa", "bbb"],
+                head_shas=["aaa", "bbb"],
                 verify_result=verify_fail,
             )
 
@@ -4092,14 +3874,8 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
     `_handle_validating` hands the issue off to `documenting` (not directly
     to `in_review`). `_handle_documenting`'s success exits advance to
     `in_review` unconditionally (#270 removed the `validating` fallback).
-    The `final_docs_approval_seeded` sentinel is set in the same code
-    block that persists `agent_approved_sha`, gating documenting's
-    post-push SHA promotion; validating clears the sentinel at the top
-    of every tick so a stale handoff from an aborted prior cycle cannot
-    ride into a later docs push. The approval SHA, PR watermarks,
-    approval comment, and squash comment are preserved across the hop
-    so the AUTO_MERGE invariant `agent_approved_sha == pr.head.sha`
-    survives untouched.
+    PR watermarks, approval comment, and squash comment are preserved
+    across the hop.
     """
 
     PR_NUMBER = 91
@@ -4150,15 +3926,8 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         self.assertIn((9, "documenting"), gh.label_history)
         self.assertNotIn((9, "in_review"), gh.label_history)
         data = gh.pinned_data(9)
-        # The fresh-snapshot sentinel must be set in the same code block
-        # that seeds `agent_approved_sha` -- documenting's SHA-update
-        # path gates on this so a stale `agent_approved_sha` from a
-        # prior round (where this round's `gh.get_pr()` failed) cannot
-        # be promoted to the new docs head.
-        self.assertTrue(data.get("final_docs_approval_seeded"))
-        # Approval SHA, watermark, approval and squash comments all
-        # seeded before the relabel and preserved across the hop.
-        self.assertEqual(data.get("agent_approved_sha"), self.SQUASHED_SHA)
+        # Watermark, approval and squash comments all seeded before the
+        # relabel and preserved across the hop.
         self.assertIsNotNone(data.get("pr_last_comment_id"))
         self.assertTrue(any(
             ":white_check_mark:" in body and "approved" in body
@@ -4190,7 +3959,6 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         data = gh.pinned_data(9)
         self.assertTrue(data.get("awaiting_human"))
         self.assertEqual(data.get("park_reason"), "verify_failed")
-        self.assertFalse(data.get("final_docs_approval_seeded"))
         self.assertNotIn((9, "documenting"), gh.label_history)
         self.assertNotIn((9, "in_review"), gh.label_history)
 
@@ -4216,121 +3984,5 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
             "squash-on-approval failed" in body
             for _, body in gh.posted_comments
         ))
-        self.assertFalse(data.get("final_docs_approval_seeded"))
         self.assertNotIn((9, "documenting"), gh.label_history)
         self.assertNotIn((9, "in_review"), gh.label_history)
-
-    def test_changes_requested_does_not_seed_final_approval(self) -> None:
-        # The validating CHANGES_REQUESTED fix-loop stays on `validating`
-        # (no documenting hop) -- the dev's fix has to be reviewed AGAIN
-        # before AUTO_MERGE can land. The `final_docs_approval_seeded`
-        # sentinel tracks "approval SHA was persisted this round";
-        # setting it here would let a later operator relabel to
-        # documenting ride a SHA the current round's reviewer never
-        # confirmed.
-        gh, issue, pr = self._setup(review_round=0)
-        review = _agent(
-            session_id="rev-sess",
-            last_message="please fix\n\nVERDICT: CHANGES_REQUESTED",
-        )
-        dev_fix = _agent(session_id="dev-sess", last_message="fixed")
-
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=[review, dev_fix],
-            push_branch=True,
-            head_shas=["aaa", "aaa", "bbb"],
-        )
-
-        data = gh.pinned_data(9)
-        self.assertNotIn((9, "documenting"), gh.label_history)
-        self.assertFalse(data.get("final_docs_approval_seeded"))
-
-    def test_approval_with_empty_head_sha_does_not_set_seeded_sentinel(
-        self,
-    ) -> None:
-        # Regression: when `_head_sha()` returns empty earlier in
-        # `_handle_validating` (worktree HEAD unreadable, disk transient,
-        # etc.), `new_head_sha` is falsey and `agent_approved_sha` is
-        # never actually persisted -- but the
-        # `final_docs_approval_seeded` sentinel must also stay False, or
-        # a later `_handle_documenting` push would promote the docs
-        # commit's SHA into `agent_approved_sha` (gated solely on the
-        # sentinel) and re-enable AUTO_MERGE on a SHA the reviewer never
-        # confirmed.
-        gh, issue, pr = self._setup(
-            review_round=0,
-            agent_approved_sha="staleApprovedSha",
-        )
-
-        with patch.object(config, "SQUASH_ON_APPROVAL", False):
-            self._run(
-                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-                # Empty reviewed_sha -> new_head_sha stays "" with squash
-                # off; the seeding block must refuse to set either the
-                # SHA or the sentinel.
-                head_shas=("",),
-            )
-
-        data = gh.pinned_data(9)
-        # The label still flips to documenting (the handoff is
-        # unconditional), but the sentinel must NOT be set when no
-        # fresh SHA was seeded.
-        self.assertIn((9, "documenting"), gh.label_history)
-        self.assertFalse(
-            data.get("final_docs_approval_seeded"),
-            "the seeded sentinel must NOT be set when `_head_sha()` "
-            "returned empty and `agent_approved_sha` was never "
-            "actually persisted this round; otherwise documenting "
-            "would promote the docs commit's SHA into a slot the "
-            "reviewer never confirmed",
-        )
-        # Stale slot left untouched -- the entry-clear only resets the
-        # markers, not the approval SHA, and the failed seed leaves
-        # the previous value in place.
-        self.assertEqual(
-            data.get("agent_approved_sha"), "staleApprovedSha",
-        )
-
-    def test_changes_requested_clears_stale_final_seed(self) -> None:
-        # Regression: pinned state can carry a stale
-        # `final_docs_approval_seeded` sentinel from a previous approval
-        # cycle whose handoff to `documenting` was aborted (operator
-        # relabeled back to `validating`, drift-induced unwind, PR-
-        # worktree refresh detour that landed here, etc.). Clear it at
-        # the top of `_handle_validating` so a later operator relabel to
-        # `documenting` cannot ride the stale sentinel from the prior
-        # cycle and let documenting's push promote a SHA the current
-        # round's reviewer never confirmed into `agent_approved_sha`
-        # (documenting's `_advance_after_docs_push` gates the SHA
-        # update on the sentinel). Also clear the stale
-        # `agent_approved_sha` so AUTO_MERGE cannot land the new head
-        # against a snapshot from a prior round.
-        gh, issue, pr = self._setup(
-            review_round=0,
-            final_docs_approval_seeded=True,
-            agent_approved_sha="staleApprovedSha",
-        )
-        review = _agent(
-            session_id="rev-sess",
-            last_message="please fix\n\nVERDICT: CHANGES_REQUESTED",
-        )
-        dev_fix = _agent(session_id="dev-sess", last_message="fixed")
-
-        self._run(
-            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=[review, dev_fix],
-            push_branch=True,
-            head_shas=["aaa", "aaa", "bbb"],
-        )
-
-        data = gh.pinned_data(9)
-        self.assertNotIn((9, "documenting"), gh.label_history)
-        self.assertFalse(data.get("final_docs_approval_seeded"))
-        self.assertIsNone(
-            data.get("agent_approved_sha"),
-            "a pushed CHANGES_REQUESTED fix must clear the stale "
-            "approval SHA so AUTO_MERGE cannot land the freshly-pushed "
-            "head against a prior round's snapshot",
-        )

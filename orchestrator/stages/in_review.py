@@ -197,10 +197,9 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     User-content drift (a human edited the issue title/body while the PR
     was open) takes the dev-resume path here; both a pushed fix and a
     no-commit ACK bounce DIRECTLY back to `validating` (with
-    `agent_approved_sha` cleared and `review_round` reset) so the
-    reviewer re-evaluates against the updated body. Docs do not run on
-    the drift exit: the single docs pass is deferred to the final-docs
-    handoff after reviewer approval.
+    `review_round` reset) so the reviewer re-evaluates against the
+    updated body. Docs do not run on the drift exit: the single docs
+    pass is deferred to the final-docs handoff after reviewer approval.
     """
     from .. import workflow as _wf
 
@@ -458,7 +457,6 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         if outcome in ("pushed", "ack"):
             # The drift invalidated the prior validation either way: the
             # reviewer agent approved against the OLD requirements, so
-            # its `agent_approved_sha` snapshot is stale and
             # `review_round` must reset before the issue can earn a
             # fresh approval. Both outcomes bounce DIRECTLY back to
             # `validating` so the reviewer re-evaluates against the
@@ -466,7 +464,6 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             # is deferred to the final-docs handoff after reviewer
             # approval).
             state.set("review_round", 0)
-            state.set("agent_approved_sha", None)
             gh.set_workflow_label(issue, "validating")
         gh.write_pinned_state(issue, state)
         return
@@ -481,8 +478,10 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # Manual-merge-only: humans drive the merge. An unmergeable PR parks
     # awaiting human regardless of approval state -- the orchestrator
     # never routes from here to `resolving_conflict` and never calls
-    # `gh.merge_pr`. A mergeable PR earns a one-shot HITL ping per head
-    # SHA so the human knows the PR is ready.
+    # `gh.merge_pr`. An approved + mergeable PR (real GitHub APPROVED
+    # review on the current head, no standing CHANGES_REQUESTED) earns
+    # a one-shot HITL ping per head SHA so the human knows the PR is
+    # ready.
     mergeable = gh.pr_is_mergeable(pr)
     if mergeable is None:
         return  # GitHub still computing; try next tick
@@ -508,19 +507,11 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     head_sha = pr.head.sha
     if gh.pr_has_changes_requested(pr, head_sha=head_sha):
         return
-    # Approval can come from either side: the reviewer agent persists
-    # `agent_approved_sha` for the head it OK'd (the agent posts an issue
-    # comment, not a real PR review, so pr_is_approved alone would never
-    # be True for the agent flow), OR a human/bot submitted a real
-    # APPROVED review on the *current* head SHA. Stale human approvals
-    # on older commits do NOT count -- a commit pushed after a human
-    # approval must not advertise the PR as ready unless the human
-    # re-approves.
-    approved_for_head = (
-        state.get("agent_approved_sha") == head_sha
-        or gh.pr_is_approved(pr, head_sha=head_sha)
-    )
-    if not approved_for_head:
+    # Approval gate: a real APPROVED review on the *current* head SHA.
+    # Stale human approvals on older commits do NOT count -- a commit
+    # pushed after a human approval must not advertise the PR as ready
+    # unless the human re-approves.
+    if not gh.pr_is_approved(pr, head_sha=head_sha):
         return
     # Ping HITL handles once per head SHA so the human knows the PR is
     # ready. De-duplication is keyed on `ready_ping_sha` (the head we

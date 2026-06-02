@@ -1106,8 +1106,7 @@ def _squash_and_force_push(
 
     Returns `(success, new_head_sha, squashed_count, error_message)`:
       * `(True, sha, 0, None)` — nothing to squash (zero or one commit on top
-        of base). Caller should leave state alone; agent_approved_sha keeps
-        pointing at the SHA the reviewer ran against.
+        of base). Caller should leave state alone.
       * `(True, sha, N, None)` — squashed N>1 commits into one. `sha` is the
         new local HEAD; the remote was force-pushed to match.
       * `(False, _, _, error)` — squash or push failed. Caller parks
@@ -1148,7 +1147,7 @@ def _squash_and_force_push(
     # one-commit branch whose worktree happens to carry uncommitted
     # changes (operator scratch, agent side-effect) must still surface
     # to a human -- handing off to in_review with the dirty state
-    # invisible would let AUTO_MERGE land an incomplete head.
+    # invisible would let the merge land an incomplete head.
     if _worktree_dirty_files(worktree):
         return False, None, 0, "worktree has uncommitted changes"
 
@@ -1165,8 +1164,7 @@ def _squash_and_force_push(
         line for line in (log_r.stdout or "").splitlines() if line.strip()
     ]
     if len(subjects) <= 1:
-        # Nothing to squash; the caller can still record original_head
-        # as agent_approved_sha if it wants.
+        # Nothing to squash.
         return True, original_head, 0, None
 
     if _is_conventional_subject(subjects[0]):
@@ -1575,11 +1573,10 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
     per-issue worktree up to date.
 
     Runs at the start of each tick so a base-branch update on the remote
-    propagates into in-flight issue worktrees without waiting for an
-    AUTO_MERGE mergeability check. The per-stage `_ensure_*_worktree`
-    helpers only fetch base on (re)creation, so a worktree that survives
-    across ticks would otherwise stay anchored at whatever `origin/<base>`
-    looked like when it was first added.
+    propagates into in-flight issue worktrees. The per-stage
+    `_ensure_*_worktree` helpers only fetch base on (re)creation, so a
+    worktree that survives across ticks would otherwise stay anchored at
+    whatever `origin/<base>` looked like when it was first added.
 
     Two paths depending on whether a PR already exists for the issue:
 
@@ -1591,10 +1588,9 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
       fixing): rebasing
       locally WITHOUT pushing would diverge local HEAD from `pr.head.sha` and
       break the validating reviewer (it reads local HEAD, so it would
-      snapshot `agent_approved_sha` to a SHA that isn't on the PR),
+      review a SHA that isn't on the PR) and
       `_squash_and_force_push`'s `--force-with-lease=<original_head>`
-      (the lease compares against the un-rebased remote tip), and
-      AUTO_MERGE's `agent_approved_sha == pr.head.sha` gate. So instead
+      (the lease compares against the un-rebased remote tip). So instead
       we route the issue to `resolving_conflict`: the existing handler
       does the rebase, pushes, and flips back to `validating` (the same
       target as the base-up-to-date no-op exit) so the reviewer re-runs
@@ -1602,9 +1598,7 @@ def _refresh_base_and_worktrees(gh: GitHubClient, spec: RepoSpec) -> None:
       deferred to the post-approval handoff to `documenting` in
       `_handle_validating`. Applying the `hold_base_sync` label to
       an issue pauses both the pre-PR local rebase and the PR detour
-      until the label is removed. This works under `AUTO_MERGE=off`
-      too -- `_handle_resolving_conflict` never reads AUTO_MERGE, it
-      just does the rebase+push+relabel cycle.
+      until the label is removed.
       Issues already labeled `resolving_conflict` are left alone (the
       handler runs this tick anyway); other labels are skipped (no PR
       worktree to refresh in those states).

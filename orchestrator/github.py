@@ -584,10 +584,8 @@ class GitHubClient:
         """Latest review state per reviewer, restricted to `head_sha`.
 
         Approvals on older commits are treated as stale -- a commit pushed
-        after a human approval must not auto-merge unless the human re-reviews
-        the new head. GitHub's branch protection can enforce this server-side
-        ("dismiss stale reviews") but we do not require that to be configured;
-        the orchestrator gates auto-merge conservatively on its own.
+        after a human approval must not advertise the PR as ready unless
+        the human re-reviews the new head.
         """
         if not head_sha:
             return []
@@ -612,10 +610,8 @@ class GitHubClient:
         cls, pr: PullRequest, *, head_sha: str
     ) -> bool:
         """True if any reviewer's latest review on `head_sha` is
-        CHANGES_REQUESTED. Independent of agent approval: a human veto on the
-        current head must block auto-merge even if the reviewer agent OK'd
-        the same SHA, otherwise `agent_approved_sha == head_sha` would let
-        the orchestrator merge over a human's standing objection.
+        CHANGES_REQUESTED. A human veto on the current head must block
+        the in_review ready-for-merge ping.
         """
         return any(
             s == "CHANGES_REQUESTED"

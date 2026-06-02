@@ -8,11 +8,11 @@ existing in_review watermarks each tick, debounces the quiet window
 against the newest comment timestamp, resumes the locked dev session via
 `_resume_dev_with_text` once the window expires, advances watermarks
 past the consumed feedback, and on a pushed fix flips the label
-DIRECTLY back to `validating` with `review_round=0` and a cleared
-`agent_approved_sha` so the reviewer re-evaluates the new diff next
-tick. The no-new-feedback bounce also flips directly to `validating`.
-Docs do not run on the pushed-fix exit -- the single docs pass runs
-after reviewer approval before `in_review` via the final-docs handoff.
+DIRECTLY back to `validating` with `review_round=0` so the reviewer
+re-evaluates the new diff next tick. The no-new-feedback bounce also
+flips directly to `validating`. Docs do not run on the pushed-fix exit
+-- the single docs pass runs after reviewer approval before `in_review`
+via the final-docs handoff.
 
 The PR-terminal arcs (merged / closed / open-PR-with-closed-issue),
 dispatcher routing, label-bookkeeping, and missing-`pr_number` park
@@ -75,7 +75,6 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             "dev_agent": "claude",
             "dev_session_id": "dev-sess",
             "review_round": 1,
-            "agent_approved_sha": "cafe1234",
             "pr_last_comment_id": 1999,
             "pr_last_review_comment_id": 0,
             "pr_last_review_summary_id": 0,
@@ -278,8 +277,6 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         data = gh.pinned_data(880)
         # Review round reset so validating starts fresh on the new diff.
         self.assertEqual(data.get("review_round"), 0)
-        # Stale agent approval dropped (the head just moved).
-        self.assertIsNone(data.get("agent_approved_sha"))
         # Bookmarks cleared after consumption.
         self.assertIsNone(data.get("pending_fix_at"))
         self.assertIsNone(data.get("pending_fix_issue_max_id"))

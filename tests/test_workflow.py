@@ -2283,17 +2283,12 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
     def test_pr_having_in_review_behind_routes_to_resolving_conflict(
         self,
     ) -> None:
-        # Regression for the validating/squash/AUTO_MERGE break: a local-only
-        # base update on a worktree whose branch has already been pushed
-        # diverges local HEAD from `pr.head.sha`. The reviewer would then
-        # snapshot `agent_approved_sha` to a SHA that isn't on the PR (the
-        # local updated HEAD), `_squash_and_force_push`'s
-        # `--force-with-lease=<original_head>` would reject (the remote is
-        # still at the un-merged tip), and AUTO_MERGE's
-        # `agent_approved_sha == pr.head.sha` check would never pass.
-        # The fix is to detour the issue to `resolving_conflict` so the
-        # existing handler does rebase + push + relabel-to-validating in one
-        # consistent flow.
+        # A local-only base update on a worktree whose branch has already
+        # been pushed diverges local HEAD from `pr.head.sha` and breaks
+        # `_squash_and_force_push`'s `--force-with-lease=<original_head>`
+        # check (the remote is still at the un-merged tip). The fix is to
+        # detour the issue to `resolving_conflict` so the existing handler
+        # does rebase + push + relabel-to-validating in one consistent flow.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
@@ -3692,10 +3687,9 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # Regression: once a PR exists, the per-issue branch has been pushed
         # and `pr.head.sha` equals local HEAD. A local-only base rebase would
         # diverge them and break the validating reviewer (it reads local
-        # HEAD), `_squash_and_force_push`'s lease check (it expects the
-        # remote to equal `original_head` = local HEAD), and AUTO_MERGE's
-        # `agent_approved_sha == pr.head.sha` gate. The refresh must NOT
-        # do a local rebase here; instead it routes the issue to
+        # HEAD) and `_squash_and_force_push`'s lease check (it expects the
+        # remote to equal `original_head` = local HEAD). The refresh must
+        # NOT do a local rebase here; instead it routes the issue to
         # `resolving_conflict` so the existing handler does rebase + push +
         # relabel-to-validating in one consistent flow.
         # Replace the default `implementing` issue with one in `in_review`
@@ -4016,11 +4010,8 @@ class NoCommitAckDoesNotParkTest(
         # MUST bounce DIRECTLY back to `validating` (same destination
         # as the pushed-fix exit; docs do not run on the drift exit,
         # the single docs pass runs after reviewer approval before
-        # `in_review` via the final-docs handoff). The other ACK
-        # guarantees still hold: the stale `agent_approved_sha` is
-        # cleared (the snapshot was for the old requirements, so
-        # AUTO_MERGE cannot land the PR until the reviewer
-        # re-snapshots) and `review_round` resets.
+        # `in_review` via the final-docs handoff). `review_round`
+        # resets so the validating cap counts fresh rounds.
         gh = FakeGitHubClient()
         issue = make_issue(700, label="in_review", body="clarified body")
         gh.add_issue(issue)
@@ -4032,7 +4023,6 @@ class NoCommitAckDoesNotParkTest(
             dev_agent="claude",
             dev_session_id="dev-sess",
             user_content_hash="stale-hash",
-            agent_approved_sha="stale-approval-sha",
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
@@ -4054,14 +4044,10 @@ class NoCommitAckDoesNotParkTest(
         # Must NOT park (the dev acknowledged, not asked a question).
         self.assertFalse(data.get("awaiting_human"))
         # MUST bounce directly to validating (no documenting hop) so
-        # the reviewer re-evaluates against the updated body before
-        # AUTO_MERGE can land.
+        # the reviewer re-evaluates against the updated body.
         self.assertIn((700, "validating"), gh.label_history)
         # And NOT through documenting -- no commit landed.
         self.assertNotIn((700, "documenting"), gh.label_history)
-        # Stale agent_approved_sha cleared so AUTO_MERGE cannot pass on
-        # the pre-edit snapshot before the reviewer re-runs.
-        self.assertIsNone(data.get("agent_approved_sha"))
         # review_round reset so the validating cap counts fresh rounds.
         self.assertEqual(data.get("review_round"), 0)
         # Dev's reply still posted on the issue as an FYI.
@@ -4477,7 +4463,6 @@ class DriftNonAckResponseParksTest(
             dev_agent="claude",
             dev_session_id="dev-sess",
             user_content_hash="stale-hash",
-            agent_approved_sha="prior-approval",
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
@@ -5405,7 +5390,6 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch="orchestrator/issue-720",
             dev_agent="claude",
             dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             pr_last_comment_id=1999,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
@@ -5538,7 +5522,6 @@ class InReviewRoutesFreshFeedbackToFixingTest(
             branch=self.BRANCH,
             dev_agent="claude",
             dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             pr_last_comment_id=1999,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
@@ -5685,7 +5668,6 @@ class InReviewRoutesFreshFeedbackToFixingTest(
             branch="orchestrator/issue-1660",
             dev_agent="claude",
             dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             pr_last_comment_id=6999,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,

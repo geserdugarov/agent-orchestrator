@@ -159,8 +159,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # The ping advertises the PR as ready for review/merge; firing it
         # on a mergeable-but-unapproved PR would invite a manual merge
         # over a commit no reviewer has signed off on. The gate must
-        # require approval (agent_approved_sha for the current head, OR
-        # a human APPROVED review on the current head).
+        # require a real APPROVED review on the current head.
         pr = self._open_pr(approved=False, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
 
@@ -176,41 +175,15 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNone(data.get("ready_ping_sha"))
         self.assertFalse(data.get("awaiting_human"))
 
-    def test_in_review_mergeable_stale_agent_approval_does_not_ping(self) -> None:
-        # `agent_approved_sha` snapshotted the head the reviewer agent
-        # OK'd; a later push shifts pr.head.sha and the snapshot no
-        # longer matches. The ping must wait for the next reviewer round
-        # to re-approve the new head.
-        pr = self._open_pr(
-            approved=False, mergeable=True, check_state="success",
-            head=FakePRRef(sha="newhead99"),
-        )
-        gh, issue = self._seed(
-            pr=pr, extra_state={"agent_approved_sha": "cafe1234"},
-        )
-
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(),
-        )
-
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(30)
-        self.assertIsNone(data.get("ready_ping_sha"))
-
     def test_in_review_mergeable_changes_requested_does_not_ping(self) -> None:
         # A standing human CHANGES_REQUESTED on the current head vetoes
-        # the ping even when the reviewer agent approved the same SHA;
-        # the orchestrator must not advertise the PR as ready while a
-        # human review is asking for changes.
+        # the ping; the orchestrator must not advertise the PR as ready
+        # while a human review is asking for changes.
         pr = self._open_pr(
             approved=True, mergeable=True, check_state="success",
             changes_requested=True,
         )
-        gh, issue = self._seed(
-            pr=pr, extra_state={"agent_approved_sha": "cafe1234"},
-        )
+        gh, issue = self._seed(pr=pr)
 
         self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
@@ -706,7 +679,6 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             90, pr_number=self.PR_NUMBER, branch=self.BRANCH,
             dev_agent="claude", dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             # Watermarks below the seeded review id so the body surfaces as
             # fresh feedback. An unset summary watermark would trip the
             # legacy in_review migration and mask the review.
@@ -877,7 +849,6 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch=self.BRANCH,
             dev_agent="claude",
             dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             # Watermark just past the orchestrator's earlier comments and the
             # human's id-3000 comment. Filter must drop only ids the
             # orchestrator actually recorded.
@@ -1048,7 +1019,6 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             150, pr_number=self.PR_NUMBER, branch=self.BRANCH,
             dev_agent="claude", dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
         )
         return gh, issue, pr
 
@@ -1077,10 +1047,10 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
         # block the handler from posting the HITL ping -- it only treats
         # already-visible comments as consumed.
         gh, issue, pr = self._legacy_setup()
-        # Drop the historical review-summary so the summary watermark
-        # seeds past the inline review and the handler reaches the
-        # mergeable / ping path.
+        # Drop the historical CHANGES_REQUESTED review and mark the PR
+        # as approved on the current head so the ping gate passes.
         pr.reviews = []
+        pr.approved = True
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             self._run(
@@ -1134,7 +1104,6 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             160, pr_number=400, branch="orchestrator/issue-160",
             dev_agent="claude", dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             pr_last_comment_id=4242,
             pr_last_review_comment_id=4241,
             pr_last_review_summary_id=0,
@@ -1180,7 +1149,6 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             161, pr_number=401, branch="orchestrator/issue-161",
             dev_agent="claude", dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             pr_last_comment_id=5000,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=4999,
@@ -1227,7 +1195,6 @@ class AwaitingHumanParkStaysParkedTest(
         gh.seed_state(
             170, pr_number=self.PR_NUMBER, branch=self.BRANCH,
             dev_agent="claude", dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             awaiting_human=True,
             park_reason=park_reason,
             # Watermarks past everything visible -- mirrors what
@@ -1293,7 +1260,6 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             250, pr_number=self.PR_NUMBER, branch=self.BRANCH,
             dev_agent="claude", dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             pr_last_comment_id=999,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
@@ -1484,7 +1450,6 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         gh.seed_state(
             400, pr_number=self.PR_NUMBER, branch=self.BRANCH,
             dev_agent="claude", dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
         )
 
         self._run(
@@ -1661,7 +1626,6 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
             600,
             pr_number=self.PR_NUMBER, branch=self.BRANCH,
             dev_agent="claude", dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             # Legacy default: 0 means "scan everything".
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
@@ -1725,7 +1689,6 @@ class StaleParkReasonClearedOnFixingRouteTest(
             700,
             pr_number=self.PR_NUMBER, branch=self.BRANCH,
             dev_agent="claude", dev_session_id="dev-sess",
-            agent_approved_sha="cafe1234",
             pr_last_comment_id=2999,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
@@ -1943,7 +1906,6 @@ class HandleInReviewResumeOnHashChangeTest(
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
             branch="orchestrator/issue-80",
-            agent_approved_sha="stale-approved-sha",
         )
 
         self._run(
@@ -1972,9 +1934,6 @@ class HandleInReviewResumeOnHashChangeTest(
         self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
         # review_round reset because this is a new diff.
         self.assertEqual(data.get("review_round"), 0)
-        # Stale agent approval cleared so AUTO_MERGE cannot land before
-        # the reviewer re-snapshots against the updated body.
-        self.assertIsNone(data.get("agent_approved_sha"))
 
     def test_body_drift_ack_bounces_directly_to_validating(self) -> None:
         # A drift ACK reply (no commit, explicit `ACK:` marker) is an
@@ -1982,12 +1941,8 @@ class HandleInReviewResumeOnHashChangeTest(
         # edit. The issue bounces DIRECTLY back to `validating` (same
         # destination as the pushed-fix exit; docs do not run on the
         # drift exit, the single docs pass runs after reviewer approval
-        # before `in_review` via the final-docs handoff). The other
-        # ACK guarantees still hold: `agent_approved_sha` is cleared
-        # (the snapshot was for the old requirements, so AUTO_MERGE
-        # cannot land the PR until the reviewer re-snapshots) and
-        # `review_round` is reset so the reviewer round cap counts
-        # fresh rounds.
+        # before `in_review` via the final-docs handoff). `review_round`
+        # is reset so the reviewer round cap counts fresh rounds.
         gh = FakeGitHubClient()
         issue = make_issue(81, label="in_review", body="new acceptance")
         gh.add_issue(issue)
@@ -2003,7 +1958,6 @@ class HandleInReviewResumeOnHashChangeTest(
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
             branch="orchestrator/issue-81",
-            agent_approved_sha="stale-approved-sha",
             review_round=2,
         )
 
@@ -2026,9 +1980,6 @@ class HandleInReviewResumeOnHashChangeTest(
         self.assertIn((81, "validating"), gh.label_history)
         self.assertNotIn((81, "documenting"), gh.label_history)
         data = gh.pinned_data(81)
-        # `agent_approved_sha` cleared so AUTO_MERGE cannot land before
-        # the reviewer re-snapshots against the updated body.
-        self.assertIsNone(data.get("agent_approved_sha"))
         # `review_round` reset so the reviewer round cap counts fresh.
         self.assertEqual(data.get("review_round"), 0)
         # ACK was surfaced as an FYI on the issue thread (matches the
@@ -2060,7 +2011,6 @@ class HandleInReviewResumeOnHashChangeTest(
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
             branch="orchestrator/issue-82",
-            agent_approved_sha="stale-approved-sha",
         )
 
         self._run(

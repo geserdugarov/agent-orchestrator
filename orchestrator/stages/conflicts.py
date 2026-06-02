@@ -336,7 +336,6 @@ def _handle_resolving_conflict(
             gh.write_pinned_state(issue, state)
             return
         state.set("review_round", 0)
-        state.set("agent_approved_sha", None)
         state.set("conflict_round", conflict_round + 1)
         state.set("last_conflict_resolved_at", _wf._now_iso())
         _emit_conflict_round_incremented(
@@ -463,7 +462,6 @@ def _handle_resolving_conflict(
             gh.write_pinned_state(issue, state)
             return
         state.set("review_round", 0)
-        state.set("agent_approved_sha", None)
         state.set("conflict_round", conflict_round + 1)
         state.set("last_conflict_resolved_at", _wf._now_iso())
         _emit_conflict_round_incremented(
@@ -585,7 +583,6 @@ def _post_conflict_resolution_result(
         return
 
     state.set("review_round", 0)
-    state.set("agent_approved_sha", None)
     state.set("conflict_round", conflict_round + 1)
     state.set("last_conflict_resolved_at", _wf._now_iso())
     pr_number = state.get("pr_number")
