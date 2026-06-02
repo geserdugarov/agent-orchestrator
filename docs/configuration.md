@@ -157,7 +157,9 @@ Family-aware classification mirrors the cross-issue write surface:
 
 The pre-tick base refresh (`_refresh_base_and_worktrees`) is also scheduler-aware: per-issue worktrees whose handler is currently in flight on the scheduler are skipped this tick, so a base advance cannot rebase a pre-PR worktree under a still-running agent or relabel a PR-having worktree mid-handler. The skip is conditional on active state, so once the worker exits the next tick's refresh picks the worktree back up.
 
-`shutdown(wait=True)` runs on process exit (normal `--once` return, `SIGINT`/`SIGTERM`, or self-modifying-merge restart) so any in-flight workers complete cleanly and late failures are still logged.
+`shutdown(wait=True)` runs on process exit (normal `--once` return, `SIGINT`/`SIGTERM`, or self-modifying-merge restart) so any in-flight workers complete cleanly and late failures are still logged. The `SIGINT`/`SIGTERM` signal handler also calls `scheduler.shutdown(wait=False)` synchronously the instant the signal lands, so the scheduler's submit path is closed mid-tick — an in-progress `workflow.tick` then sees `reason=closed` on every remaining `scheduler.submit` call and stops enqueueing new work the moment the user asks to stop, instead of running its dispatch loop to the end with `_running=False` and growing the in-flight set the finally-block `shutdown(wait=True)` has to wait on.
+
+`main._run_tick` calls `scheduler.reap()` exactly once per polling pass (right before `analytics.prune_with_retention_logging()`) so worker completions that landed since the last poll have their failure-completion records drained before the next polling iteration begins. The contract is one reap per polling pass regardless of how many repos are configured; `_dispatch_via_scheduler` deliberately does NOT reap.
 
 Non-positive or non-integer values for either cap (or for a per-entry `parallel_limit`) abort startup with a clear error so a typo cannot silently disable all work.
 
