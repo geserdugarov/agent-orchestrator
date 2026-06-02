@@ -26,6 +26,14 @@ orchestrator/
   config.py             — env loading, secrets handling, backend validation
   github.py             — PyGithub wrapper, label bootstrap, pinned-state comment
   agents.py             — coding-agent subprocess runner (codex/claude dispatch)
+  scheduler.py          — process-local `IssueScheduler`: cross-repo / per-repo
+                           caps, duplicate-active-issue gate, family-aware
+                           mutex, and the `ThreadPoolExecutor` that actually
+                           runs per-issue handlers. `main` builds one at
+                           startup and threads it through every
+                           `workflow.tick(gh, spec, scheduler=...)` call;
+                           shut down (`wait=True`) on process exit so
+                           in-flight workers complete cleanly.
   workflow.py           — slim facade: per-repo tick loop, `_FAMILY_AWARE_LABELS`
                            partitioning, `_process_issue` label dispatcher,
                            `_handle_pickup`, `_park_awaiting_human`,
@@ -511,6 +519,7 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | **stages/conflicts.py** | `_handle_resolving_conflict` + rebase-loop primitives |
 | **stages/question.py** | `_handle_question` + question-session lifecycle (read-only Q&A on the `question` label, no PR) |
 | **agents.py** | dispatch + spawn codex/claude subprocess, capture session id + last message |
+| **scheduler.py** | process-local `IssueScheduler`: global / per-repo caps, duplicate-active-issue gate, family-aware mutex, the `ThreadPoolExecutor` that runs per-issue handlers; `main` constructs one at startup and threads it through every `workflow.tick(gh, spec, scheduler=...)` call, then shuts it down on exit |
 | **github.py** | issues, comments, labels, pinned state, PR open/comment |
 | **config.py** | env + token loading (token kept outside REPO_ROOT), backend validation |
 | **codex / claude** | the only things that write code; run in isolated worktree |
