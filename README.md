@@ -92,10 +92,6 @@ Apply the `question` label to any open issue to get a read-only answer instead o
 
 Basic knobs live in [`.env.example`](.env.example); common advanced overrides and opt-in examples are in [`.env.example.advanced`](.env.example.advanced). The full reference — every setting, every default, required vars, target-repo config, agent role specs, cadence and budgets, parallel processing, auto-merge, observability, and run modes — is in [`docs/configuration.md`](docs/configuration.md).
 
-## Analytics dashboard (optional)
-
-An opt-in pipeline replays the orchestrator's polling-tick metrics into a local Postgres and visualizes them in a Streamlit dashboard, independently of the polling loop so deferring or disabling it never affects workflow correctness. For the end-to-end setup-and-operation walkthrough, see [`docs/configuration.md#analytics-dashboard-end-to-end`](docs/configuration.md#analytics-dashboard-end-to-end).
-
 ## Managing multiple repositories
 
 Set `REPOS` to drive several target repositories from one orchestrator process. Worktrees are namespaced under `WORKTREES_DIR/<owner>__<name>/issue-N` so two repos that share an issue number cannot collide. For the entry syntax (including the optional fifth `parallel_limit` field) and the available per-entry fields, see [`docs/configuration.md#multi-repo-repos-syntax`](docs/configuration.md#multi-repo-repos-syntax). For how multi-repo ticks fan out and the per-repo / global concurrency caps, see [`docs/configuration.md#parallel-processing`](docs/configuration.md#parallel-processing).
