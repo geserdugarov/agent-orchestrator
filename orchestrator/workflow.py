@@ -601,35 +601,62 @@ def tick(
                     )
 
 
+_FAMILY_BUCKET_ISSUE: int = 0
+"""Sentinel ``issue_number`` for the family-bucket submit.
+
+The scheduler's duplicate-active gate keys on ``(repo_slug, issue_number)``.
+The family bucket is one submit per repo that drains every family-aware
+issue sequentially, so it needs a key that cannot collide with a real
+issue. GitHub issue numbers are strictly positive, so 0 is safe.
+"""
+
+
 def _dispatch_via_scheduler(
     gh: GitHubClient, spec: RepoSpec, scheduler: IssueScheduler,
 ) -> None:
-    """Enumerate pollable issues this tick and hand each one to the scheduler.
+    """Enumerate pollable issues this tick and hand work to the scheduler.
 
-    Classifies family-aware work (unlabeled pickup + decomposing /
-    blocked / umbrella -- the cross-issue writers) versus per-issue
-    fan-out work, then submits an accepted per-issue callable for each
-    one. The submit path is nonblocking: a duplicate (already in-flight)
-    issue, a global / per-repo cap hit, or a family slot already held
-    by another worker is simply skipped this tick; the next polling
-    pass re-enumerates and retries against the live scheduler state.
+    Family-aware work (unlabeled pickup + decomposing / blocked /
+    umbrella -- the cross-issue writers) is folded into ONE bucket
+    submit per repo that drains its issues sequentially on a single
+    worker thread; non-family issues are submitted individually. This
+    mirrors the legacy parallel-tick partition in ``tick()`` (one drain
+    task for the family bucket, per-issue futures for fanout).
 
-    The per-issue callable mirrors the legacy parallel path: it mints a
-    fresh `GitHubClient` via `gh._for_worker_thread()` and refetches the
-    Issue with that client so the worker drives its own Requester chain
-    (PyGithub is not documented thread-safe). A scheduler.reap() at the
-    end of the dispatch loop drains any completions that landed during
-    enumeration so worker failures surface in the log on the tick that
-    they fired, not the next one.
+    Per-submitting family-aware issues with `family=True` (the prior
+    behavior) lets the first accepted family submit hold the family
+    slot and silently starve every subsequent family submit this tick.
+    The starvation was the issue #326 bug: a stale backlog/blocked
+    child took the slot and the parent umbrella that should have
+    relabeled it never ran. Folding family work into one bucket means
+    the umbrella always gets its turn within the same tick.
 
-    `spec.parallel_limit` is forwarded as the scheduler's per-call
-    cap override so a per-repo configuration tighter than the
-    scheduler default still binds. Label-read failures route the
-    offending issue into the family bucket so `_process_issue`'s
-    own exception isolation can pick up any sustained failure -- the
-    same recovery the legacy parallel path uses.
+    The bucket task uses ``scheduler.track_active`` around each
+    per-issue iteration so ``scheduler.is_active(repo, n)`` reports True
+    for the issue currently being processed inside the bucket -- the
+    pre-tick base refresh relies on that signal to avoid rebasing a
+    worktree under a running agent. Without per-iteration tracking,
+    only the bucket's sentinel key would appear in the in-flight set
+    and a concurrent refresh would race the agent.
+
+    Each per-issue callable mirrors the legacy parallel path: mint a
+    fresh ``GitHubClient`` via ``gh._for_worker_thread()`` and refetch
+    the Issue against that client so the worker drives its own
+    Requester chain (PyGithub is not documented thread-safe). A
+    ``scheduler.reap()`` at the end drains any completions that landed
+    during enumeration so worker failures surface on the tick they
+    fired, not the next one.
+
+    ``spec.parallel_limit`` is forwarded as the scheduler's per-call cap
+    override so a per-repo configuration tighter than the scheduler
+    default still binds. Label-read failures route the offending issue
+    into the family bucket so ``_process_issue``'s own exception
+    isolation picks up any sustained failure -- same recovery the
+    legacy parallel path uses.
     """
     per_repo_cap = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
+    family_numbers: list[int] = []
+    fanout_numbers: list[int] = []
     for issue in gh.list_pollable_issues():
         try:
             label = gh.workflow_label(issue)
@@ -640,19 +667,79 @@ def _dispatch_via_scheduler(
                 "up any sustained failure", spec.slug, issue.number,
             )
             label = None
-        family = label is None or label in _FAMILY_AWARE_LABELS
         issue_number = int(issue.number)
+        if label is None or label in _FAMILY_AWARE_LABELS:
+            family_numbers.append(issue_number)
+        else:
+            fanout_numbers.append(issue_number)
 
-        def _run(number: int = issue_number) -> None:
+    if family_numbers:
+        def _drain_family_bucket(numbers: list[int] = family_numbers) -> None:
+            """Process every family-aware issue this tick sequentially.
+
+            Per-issue exception isolation lives INSIDE this function so the
+            family bucket keeps draining if any single family handler
+            raises. ``track_active`` is per iteration so a refresh on a
+            sibling repo tick observes the in-flight family issue and
+            skips its worktree sync.
+
+            ``track_active`` yields a ``claimed`` bool: when False, the
+            issue is already in flight on another worker (e.g. a fanout
+            submit accepted on a previous tick before this issue was
+            relabeled into the family bucket). Skipping the inner
+            ``_process_issue`` call prevents two workers from running
+            the same handler concurrently; the next polling pass picks
+            it up once the other worker exits.
+            """
+            for n in numbers:
+                try:
+                    with scheduler.track_active(spec.slug, n) as claimed:
+                        if not claimed:
+                            log.info(
+                                "repo=%s issue=#%s already in flight; "
+                                "family bucket skipping this iteration",
+                                spec.slug, n,
+                            )
+                            continue
+                        worker_gh = gh._for_worker_thread()
+                        worker_issue = worker_gh.get_issue(n)
+                        _process_issue(worker_gh, spec, worker_issue)
+                except Exception:
+                    log.exception(
+                        "repo=%s issue=#%s processing failed",
+                        spec.slug, n,
+                    )
+
+        if not scheduler.submit(
+            spec.slug,
+            _FAMILY_BUCKET_ISSUE,
+            _drain_family_bucket,
+            family=True,
+            per_repo_cap=per_repo_cap,
+        ):
+            # The scheduler logs the precise skip reason (closed,
+            # family_slot_held, cap, ...) inside `submit`; this line
+            # gives the dispatch-layer context -- which issues were
+            # waiting on this bucket -- so an operator can correlate
+            # "umbrella not advancing" with a previous tick's bucket
+            # still in flight.
+            log.info(
+                "repo=%s family bucket (%d issues) not submitted this "
+                "tick; next polling pass retries",
+                spec.slug, len(family_numbers),
+            )
+
+    for n in fanout_numbers:
+        def _run(number: int = n) -> None:
             worker_gh = gh._for_worker_thread()
             worker_issue = worker_gh.get_issue(number)
             _process_issue(worker_gh, spec, worker_issue)
 
         scheduler.submit(
             spec.slug,
-            issue_number,
+            n,
             _run,
-            family=family,
+            family=False,
             per_repo_cap=per_repo_cap,
         )
     # Drain any completions that landed during enumeration so worker

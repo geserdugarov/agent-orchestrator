@@ -534,5 +534,267 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
             release.set()
 
 
+class SubmitSkipLoggingTest(unittest.TestCase):
+    """Every skip path in `submit` emits a `scheduler skip ...` log line
+    so an operator can correlate "issue not advancing" with the precise
+    reason (closed / duplicate / cap / family slot). The duplicate-active
+    case is the common one for a long-running worker and uses DEBUG to
+    avoid spamming; the rarer reasons use INFO.
+    """
+
+    def test_family_slot_skip_logs_at_info(self) -> None:
+        sched = IssueScheduler(global_cap=10, per_repo_cap=10)
+        self.addCleanup(sched.shutdown)
+        start = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 100,
+                    lambda: _worker(start, release),
+                    family=True,
+                )
+            )
+            self.assertTrue(start.wait(timeout=2.0))
+
+            with self.assertLogs(
+                "orchestrator.scheduler", level=logging.INFO,
+            ) as cm:
+                self.assertFalse(
+                    sched.submit(
+                        "owner/repo", 101,
+                        lambda: self.fail("must not run"),
+                        family=True,
+                    )
+                )
+            self.assertTrue(
+                any(
+                    "scheduler skip" in m and "family_slot_held" in m
+                    and "#101" in m
+                    for m in cm.output
+                ),
+                cm.output,
+            )
+        finally:
+            release.set()
+
+    def test_per_repo_cap_skip_logs_at_info(self) -> None:
+        sched = IssueScheduler(global_cap=10, per_repo_cap=5)
+        self.addCleanup(sched.shutdown)
+        start = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 1,
+                    lambda: _worker(start, release),
+                    per_repo_cap=1,
+                )
+            )
+            self.assertTrue(start.wait(timeout=2.0))
+
+            with self.assertLogs(
+                "orchestrator.scheduler", level=logging.INFO,
+            ) as cm:
+                self.assertFalse(
+                    sched.submit(
+                        "owner/repo", 2,
+                        lambda: self.fail("must not run"),
+                        per_repo_cap=1,
+                    )
+                )
+            self.assertTrue(
+                any(
+                    "scheduler skip" in m and "per_repo_cap" in m
+                    for m in cm.output
+                ),
+                cm.output,
+            )
+        finally:
+            release.set()
+
+    def test_duplicate_active_skip_logs_at_debug(self) -> None:
+        # The duplicate-active path is the routine case while a
+        # long-running worker straddles ticks. DEBUG-level log keeps the
+        # normal busy repo from spamming the operator log.
+        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
+        self.addCleanup(sched.shutdown)
+        start = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 1, lambda: _worker(start, release),
+                )
+            )
+            self.assertTrue(start.wait(timeout=2.0))
+
+            with self.assertLogs(
+                "orchestrator.scheduler", level=logging.DEBUG,
+            ) as cm:
+                self.assertFalse(
+                    sched.submit(
+                        "owner/repo", 1,
+                        lambda: self.fail("must not run"),
+                    )
+                )
+            self.assertTrue(
+                any(
+                    "scheduler skip" in m and "duplicate_active" in m
+                    for m in cm.output
+                ),
+                cm.output,
+            )
+        finally:
+            release.set()
+
+
+class TrackActiveContextManagerTest(unittest.TestCase):
+    """`track_active` is what the workflow's family-bucket drain uses to
+    keep `is_active(repo, n)` reporting True for the issue currently
+    being processed inside the bucket. The claim lives in a dedicated
+    set (``_tracked``) so it does NOT inflate the global-cap counter
+    or the per-repo counter -- the bucket's parent submit already
+    accounts for the one executor worker; double-counting would let a
+    single bucket starve unrelated fanout submits.
+    """
+
+    def test_marks_key_active_for_the_duration(self) -> None:
+        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
+        self.addCleanup(sched.shutdown)
+        self.assertFalse(sched.is_active("owner/repo", 7))
+        with sched.track_active("owner/repo", 7) as claimed:
+            self.assertTrue(claimed)
+            self.assertTrue(sched.is_active("owner/repo", 7))
+        self.assertFalse(sched.is_active("owner/repo", 7))
+
+    def test_does_not_bump_per_repo_counter(self) -> None:
+        # The bucket's parent submit is what counts toward per_repo
+        # budget; track_active's inner claim is purely for is_active
+        # reporting (refresh-skip).
+        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
+        self.addCleanup(sched.shutdown)
+        self.assertEqual(sched.active_count("owner/repo"), 0)
+        with sched.track_active("owner/repo", 7) as claimed:
+            self.assertTrue(claimed)
+            self.assertEqual(sched.active_count("owner/repo"), 0)
+
+    def test_does_not_count_toward_global_cap(self) -> None:
+        # With `global_cap=2`, a single family bucket worker running and
+        # tracking one inner issue must NOT exhaust the global cap: only
+        # one executor worker is actually running, so a second fanout
+        # submit on a different repo / issue must still be admitted.
+        # Regression: previously `track_active` added to `_active` and
+        # `len(self._active)` inflated past the cap.
+        sched = IssueScheduler(global_cap=2, per_repo_cap=2)
+        self.addCleanup(sched.shutdown)
+        start_bucket = threading.Event()
+        release_bucket = threading.Event()
+        bucket_inner_claimed = threading.Event()
+
+        def _bucket_worker() -> None:
+            with sched.track_active("owner/family", 100) as claimed:
+                if claimed:
+                    bucket_inner_claimed.set()
+                start_bucket.set()
+                release_bucket.wait(timeout=5.0)
+
+        try:
+            # Bucket submit (family-aware) takes one executor slot.
+            self.assertTrue(
+                sched.submit(
+                    "owner/family", 0, _bucket_worker, family=True,
+                )
+            )
+            self.assertTrue(start_bucket.wait(timeout=2.0))
+            self.assertTrue(bucket_inner_claimed.wait(timeout=2.0))
+
+            # `_active` counts ONLY the executor worker (the bucket
+            # submit's sentinel key), not the tracked inner issue.
+            self.assertEqual(sched.active_count(), 1)
+
+            # A second fanout submit on a different repo MUST be
+            # admitted -- only one executor worker is in flight.
+            start_b = threading.Event()
+            release_b = threading.Event()
+            self.assertTrue(
+                sched.submit(
+                    "owner/other", 5,
+                    lambda: _worker(start_b, release_b),
+                )
+            )
+            self.assertTrue(start_b.wait(timeout=2.0))
+            release_b.set()
+        finally:
+            release_bucket.set()
+
+    def test_duplicate_claim_returns_false_and_does_not_steal_marker(
+        self,
+    ) -> None:
+        # The drain must skip `_process_issue` when `claimed` is False;
+        # otherwise two workers could run the same handler concurrently.
+        # The cleanup hook must leave the original owner's marker alone.
+        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
+        self.addCleanup(sched.shutdown)
+        start = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 7, lambda: _worker(start, release),
+                )
+            )
+            self.assertTrue(start.wait(timeout=2.0))
+
+            with sched.track_active("owner/repo", 7) as claimed:
+                self.assertFalse(
+                    claimed,
+                    "track_active must report False when the key is "
+                    "already in flight elsewhere",
+                )
+                self.assertTrue(sched.is_active("owner/repo", 7))
+            # The original owner's marker survives the inner exit.
+            self.assertTrue(sched.is_active("owner/repo", 7))
+        finally:
+            release.set()
+
+    def test_submit_rejects_fanout_for_a_tracked_issue(self) -> None:
+        # A fanout submit for an issue currently held by track_active
+        # must be skipped via the duplicate-active gate -- otherwise a
+        # cross-tick relabel could let two workers run the same handler
+        # concurrently (one inside the family bucket, one as fanout).
+        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
+        self.addCleanup(sched.shutdown)
+        start = threading.Event()
+        release = threading.Event()
+        inner_claimed = threading.Event()
+
+        def _bucket_worker() -> None:
+            with sched.track_active("owner/repo", 42) as claimed:
+                if claimed:
+                    inner_claimed.set()
+                start.set()
+                release.wait(timeout=5.0)
+
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 0, _bucket_worker, family=True,
+                )
+            )
+            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(inner_claimed.wait(timeout=2.0))
+
+            # A fanout submit for the tracked issue must be rejected.
+            self.assertFalse(
+                sched.submit(
+                    "owner/repo", 42,
+                    lambda: self.fail("must not run"),
+                )
+            )
+        finally:
+            release.set()
+
+
 if __name__ == "__main__":
     unittest.main()

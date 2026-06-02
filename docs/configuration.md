@@ -132,7 +132,7 @@ When exporting in a shell instead of `.env`, prefer one command per line — the
 Each polling tick advances issues concurrently along two axes:
 
 - **Across repos.** When `REPOS` lists more than one entry, `main._run_tick` fans the per-repo `workflow.tick(gh, spec)` calls out across a `ThreadPoolExecutor` (one worker thread per configured repo) so a slow repo cannot delay the others. The legacy single-repo mode (`REPOS` unset) stays in-thread, so deployments without `REPOS` see no behavior change.
-- **Within a repo.** Per-issue handlers are dispatched to a long-lived `IssueScheduler` (see below); the tick itself enumerates pollable issues, classifies them, and submits a callable per issue without waiting for completion.
+- **Within a repo.** Per-issue handlers are dispatched to a long-lived `IssueScheduler` (see below); the tick itself enumerates pollable issues, classifies them, and submits work without waiting for completion. Fan-out issues (`ready` / `implementing` / `documenting` / `validating` / `in_review` / `fixing` / `resolving_conflict`) are submitted one callable per issue. Family-aware issues (`decomposing` / `blocked` / `umbrella` / unlabeled pickup) are folded into ONE bucket submit per repo that drains them sequentially on a single executor worker — per-family-issue submits would let a stale child take the family slot and starve the parent umbrella issue.
 
 The two caps below are the levers:
 

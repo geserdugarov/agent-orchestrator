@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -3783,13 +3784,16 @@ class TickViaSchedulerTest(unittest.TestCase):
         # All three issues eventually ran exactly once between the two ticks.
         self.assertEqual(sorted(seen), [10, 11, 12])
 
-    def test_family_aware_stages_do_not_overlap_across_polling_passes(self) -> None:
-        # Two family-aware issues (decomposing + blocked) on the same
-        # repo. The scheduler's family slot is one-per-repo, so the
-        # first tick admits issue #1 and skips issue #2 for this pass.
-        # After #1 completes, the next tick admits #2. At no point in
-        # the two ticks are two family-aware handlers running
-        # concurrently on the same repo.
+    def test_family_aware_drains_sequentially_within_one_bucket(self) -> None:
+        # All family-aware issues this tick are folded into ONE bucket
+        # task that drains them sequentially. The bucket holds the family
+        # slot for the whole drain so a concurrent tick mid-drain cannot
+        # squeeze a second family worker past the gate, and at no point
+        # do two family-aware handlers run concurrently. Crucially, the
+        # drain advances to the next family issue within the SAME tick's
+        # bucket task -- no extra polling pass needed -- which is the
+        # issue #326 fix: a backlog/blocked child can no longer take the
+        # family slot and starve the parent umbrella issue.
         import threading
         from orchestrator.scheduler import IssueScheduler
         sched = IssueScheduler(global_cap=8, per_repo_cap=8)
@@ -3827,69 +3831,50 @@ class TickViaSchedulerTest(unittest.TestCase):
         try:
             with patch.object(workflow, "_refresh_base_and_worktrees"), \
                  patch.object(workflow, "_process_issue", side_effect=fake_process):
-                # Tick 1: one of #1 / #2 wins the family slot.
+                # Tick 1: one bucket task submitted, drain enters its
+                # first family-aware issue.
                 workflow.tick(gh, self._spec(), scheduler=sched)
-                # Wait for the winner to enter and confirm the loser
-                # was not admitted (no second handler is in flight).
-                started_first = None
-                deadline = time.monotonic() + 2.0
-                while time.monotonic() < deadline and started_first is None:
-                    for n, ev in family_starts.items():
-                        if ev.is_set():
-                            started_first = n
-                            break
-                    time.sleep(0.01)
-                self.assertIsNotNone(
-                    started_first,
-                    "no family-aware worker entered _process_issue",
+                self.assertTrue(
+                    family_starts[1].wait(timeout=2.0),
+                    "drain did not enter the first family-aware issue",
                 )
                 time.sleep(0.1)
-                loser = 2 if started_first == 1 else 1
                 self.assertFalse(
-                    family_starts[loser].is_set(),
-                    "second family-aware issue must be skipped while the "
-                    "first one is still in flight",
+                    family_starts[2].is_set(),
+                    "drain entered second family-aware issue before "
+                    "releasing the first -- bucket must process "
+                    "sequentially",
                 )
                 with counter_lock:
                     self.assertEqual(family_in_flight, 1)
 
                 # Tick 2 BEFORE releasing the first handler: the family
-                # slot is still held, so the second issue must still be
-                # rejected. This is the "do not overlap across polling
-                # passes" property: a polling pass that observes a
-                # family worker mid-flight cannot squeeze a second one
-                # past the gate.
+                # slot is still held by the bucket task, so a second
+                # bucket submit must be skipped. This is the "do not
+                # overlap across polling passes" property: a polling
+                # pass that observes a family worker mid-flight cannot
+                # squeeze a second one past the gate.
                 workflow.tick(gh, self._spec(), scheduler=sched)
                 time.sleep(0.1)
                 self.assertFalse(
-                    family_starts[loser].is_set(),
+                    family_starts[2].is_set(),
                     "family-slot leak: second family worker started "
                     "while the first was still in flight",
                 )
                 with counter_lock:
                     self.assertEqual(family_in_flight, 1)
 
-                # Now release the first handler and wait for the slot
-                # to free up.
-                family_releases[started_first].set()
-                self._wait_idle(sched, "acme/widget")
-
-                # The handler advanced the issue (in production it
-                # would flip the label out of the family-aware set);
-                # the test stub doesn't, so close the FakeIssue
-                # directly to keep the next tick from re-admitting it
-                # under the family slot ahead of the loser.
-                gh._issues[started_first].closed = True
-
-                # Tick 3: with the family slot free the previously-
-                # skipped issue is admitted.
-                workflow.tick(gh, self._spec(), scheduler=sched)
+                # Release #1. The SAME bucket task advances to #2
+                # without needing another tick -- that's the bug-fix
+                # contract: a no-op family child cannot block the next
+                # family issue (e.g. the parent umbrella) from running.
+                family_releases[1].set()
                 self.assertTrue(
-                    family_starts[loser].wait(timeout=2.0),
-                    "skipped family issue not admitted after the first "
-                    "one completed",
+                    family_starts[2].wait(timeout=2.0),
+                    "drain did not advance to second family issue "
+                    "after first one was released",
                 )
-                family_releases[loser].set()
+                family_releases[2].set()
             self._wait_idle(sched, "acme/widget")
         finally:
             for ev in family_releases.values():
@@ -3897,15 +3882,169 @@ class TickViaSchedulerTest(unittest.TestCase):
 
         # At no point did two family-aware handlers run concurrently.
         self.assertEqual(family_max_in_flight, 1)
-        # Both issues eventually ran exactly once across the ticks.
+        # Both issues ran exactly once -- and within ticks 1's bucket.
         self.assertEqual(sorted(order), [1, 2])
+
+    def test_family_bucket_skip_is_logged(self) -> None:
+        # The dispatch layer logs a "family bucket (...) not submitted
+        # this tick" line when the previous tick's bucket is still
+        # draining, so an operator can correlate "umbrella not
+        # advancing" with the slot still being held. The underlying
+        # scheduler also logs the per-submit `reason=family_slot_held`
+        # skip; this test asserts the higher-level dispatch context
+        # makes it into the log too.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=8, per_repo_cap=8)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="decomposing"))
+        gh.add_issue(make_issue(2, label="blocked"))
+
+        start = threading.Event()
+        release = threading.Event()
+        entered: list[int] = []
+        lock = threading.Lock()
+
+        def fake_process(_gh, _spec, issue) -> None:
+            with lock:
+                entered.append(issue.number)
+            start.set()
+            release.wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(gh, self._spec(), scheduler=sched)
+                self.assertTrue(start.wait(timeout=2.0))
+
+                # The drain is parked on the first family issue; a
+                # follow-up tick must observe the bucket skip and log
+                # it with the count of pending family issues.
+                with self.assertLogs(
+                    "orchestrator.workflow", level=logging.INFO,
+                ) as cm:
+                    workflow.tick(gh, self._spec(), scheduler=sched)
+                self.assertTrue(
+                    any(
+                        "family bucket" in msg and "not submitted" in msg
+                        for msg in cm.output
+                    ),
+                    cm.output,
+                )
+        finally:
+            release.set()
+        self._wait_idle(sched, "acme/widget")
+
+    def test_family_drain_marks_in_progress_issue_as_active(self) -> None:
+        # The bucket task wraps each per-issue iteration in
+        # `scheduler.track_active` so `is_active(repo, n)` reports True
+        # for the issue currently being processed inside the bucket.
+        # Without this, the pre-tick base refresh would not skip the
+        # in-flight family issue's worktree and could race the agent.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=8, per_repo_cap=8)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(42, label="decomposing"))
+
+        start = threading.Event()
+        release = threading.Event()
+
+        def fake_process(_gh, _spec, _issue) -> None:
+            start.set()
+            release.wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(gh, self._spec(), scheduler=sched)
+                self.assertTrue(start.wait(timeout=2.0))
+                # The bucket's sentinel key (issue 0) IS active and the
+                # currently-processed family issue #42 is ALSO marked
+                # active so the refresh-skip contract holds.
+                self.assertTrue(sched.is_active("acme/widget", 42))
+        finally:
+            release.set()
+        self._wait_idle(sched, "acme/widget")
+        # After completion, #42's per-iteration claim is released.
+        self.assertFalse(sched.is_active("acme/widget", 42))
+
+    def test_family_drain_skips_issue_already_in_flight(self) -> None:
+        # Cross-tick race: tick N classifies #50 as fanout (e.g.
+        # `implementing`) and submits it. Before that worker finishes,
+        # something relabels #50 into a family-aware state and tick N+1
+        # folds it into the family bucket. The bucket's drain reaches
+        # #50, sees `track_active` cannot claim (fanout worker still
+        # holds the active marker), and must SKIP `_process_issue` for
+        # that iteration -- two workers running the same handler
+        # concurrently would race the worktree and pinned state.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=8, per_repo_cap=8)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(50, label="implementing"))
+
+        # Simulate the fanout worker holding (acme/widget, 50) via a
+        # direct scheduler.submit that parks until released.
+        fanout_start = threading.Event()
+        fanout_release = threading.Event()
+
+        def _fanout_worker() -> None:
+            fanout_start.set()
+            fanout_release.wait(timeout=5.0)
+
+        process_calls: list[int] = []
+        process_lock = threading.Lock()
+
+        def fake_process(_gh, _spec, issue) -> None:
+            with process_lock:
+                process_calls.append(issue.number)
+
+        try:
+            # Plant the fanout worker on #50.
+            self.assertTrue(
+                sched.submit("acme/widget", 50, _fanout_worker),
+            )
+            self.assertTrue(fanout_start.wait(timeout=2.0))
+
+            # Relabel #50 to a family-aware state so the next tick
+            # folds it into the family bucket.
+            gh._issues[50].labels = [FakeLabel("blocked")]
+
+            with self.assertLogs(
+                "orchestrator.workflow", level=logging.INFO,
+            ) as cm, \
+                 patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(gh, self._spec(), scheduler=sched)
+                # Wait for the bucket drain to attempt #50 and skip it.
+                deadline = time.monotonic() + 2.0
+                skipped = False
+                while time.monotonic() < deadline and not skipped:
+                    skipped = any(
+                        "already in flight" in m and "#50" in m
+                        for m in cm.output
+                    )
+                    time.sleep(0.01)
+                self.assertTrue(skipped, cm.output)
+            # The fanout worker is the ONLY one that processed #50;
+            # the drain refused to enter a second concurrent handler.
+            with process_lock:
+                self.assertNotIn(50, process_calls)
+        finally:
+            fanout_release.set()
+        self._wait_idle(sched, "acme/widget")
 
     def test_unlabeled_pickup_is_treated_as_family_aware(self) -> None:
         # An unlabeled issue routes through `_handle_pickup`, which can
         # create children and seed their pinned state -- a cross-issue
-        # write, same as decomposing/blocked/umbrella. The scheduler
-        # dispatch must therefore submit it with `family=True` so it
-        # shares the family slot with the explicit family labels.
+        # write, same as decomposing/blocked/umbrella. Dispatch must
+        # therefore fold it into the family bucket alongside the
+        # explicit family labels and process it sequentially under the
+        # one family slot, never as a fanout submit.
         import threading
         from orchestrator.scheduler import IssueScheduler
         sched = IssueScheduler(global_cap=8, per_repo_cap=8)
@@ -3914,39 +4053,74 @@ class TickViaSchedulerTest(unittest.TestCase):
         gh.add_issue(make_issue(1, label="decomposing"))
         gh.add_issue(make_issue(2, label=None))
 
+        family_in_flight = 0
+        family_max_in_flight = 0
         starts: dict[int, threading.Event] = {
             1: threading.Event(),
             2: threading.Event(),
         }
-        release = threading.Event()
+        releases: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+        }
+        order: list[int] = []
+        counter_lock = threading.Lock()
 
         def fake_process(_gh, _spec, issue) -> None:
+            nonlocal family_in_flight, family_max_in_flight
+            with counter_lock:
+                family_in_flight += 1
+                family_max_in_flight = max(
+                    family_max_in_flight, family_in_flight,
+                )
+                order.append(issue.number)
             starts[issue.number].set()
-            release.wait(timeout=5.0)
+            releases[issue.number].wait(timeout=5.0)
+            with counter_lock:
+                family_in_flight -= 1
 
         try:
             with patch.object(workflow, "_refresh_base_and_worktrees"), \
                  patch.object(workflow, "_process_issue", side_effect=fake_process):
                 workflow.tick(gh, self._spec(), scheduler=sched)
-                # Exactly one of the two family-aware issues entered;
-                # the other is held back by the family slot.
+                # Drain enters its first family-aware issue (could be
+                # either depending on enumeration order). The other
+                # must NOT be entered until the first is released --
+                # the bucket drains sequentially.
+                started_first = None
                 deadline = time.monotonic() + 2.0
-                started: list[int] = []
-                while time.monotonic() < deadline and not started:
+                while time.monotonic() < deadline and started_first is None:
                     for n, ev in starts.items():
                         if ev.is_set():
-                            started.append(n)
+                            started_first = n
                             break
                     time.sleep(0.01)
-                self.assertEqual(len(started), 1)
+                self.assertIsNotNone(started_first)
                 time.sleep(0.1)
-                self.assertEqual(
-                    sum(1 for ev in starts.values() if ev.is_set()), 1,
-                    "exactly one family-aware worker should be in flight",
+                second = 2 if started_first == 1 else 1
+                self.assertFalse(
+                    starts[second].is_set(),
+                    "second family-aware issue must wait for the first "
+                    "to release inside the drain",
                 )
+
+                # Release the first; the SAME bucket task advances to
+                # the second family-aware issue.
+                releases[started_first].set()
+                self.assertTrue(
+                    starts[second].wait(timeout=2.0),
+                    "unlabeled-pickup issue did not run inside the "
+                    "family bucket after the first family issue released",
+                )
+                releases[second].set()
         finally:
-            release.set()
+            for ev in releases.values():
+                ev.set()
         self._wait_idle(sched, "acme/widget")
+
+        # Both ran exactly once, sequentially, in the same bucket.
+        self.assertEqual(family_max_in_flight, 1)
+        self.assertEqual(sorted(order), [1, 2])
 
     def test_legacy_path_used_when_scheduler_is_none(self) -> None:
         # `scheduler=None` must keep the existing synchronous in-thread

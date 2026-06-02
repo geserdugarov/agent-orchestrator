@@ -25,6 +25,13 @@ API:
 * ``shutdown(*, wait=True)`` -- nonblocking submit path is closed first,
   then the executor is shut down and any leftover failures drained
   through ``reap``.
+* ``track_active(repo_slug, issue_number)`` -- context manager that
+  registers ``(repo, issue)`` in the in-flight set for the duration of
+  the block without bumping the per-repo counter. The family-bucket
+  drain in ``_dispatch_via_scheduler`` uses it so per-issue
+  ``is_active`` checks (notably the pre-tick base refresh's worktree
+  skip) keep working for the issue currently being processed inside
+  the bucket task.
 
 The in-flight set keys on ``(repo_slug, issue_number)``: an issue
 already running in one repo does not block the same issue number in a
@@ -36,11 +43,12 @@ still leaving non-family workers free to run.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +85,16 @@ class IssueScheduler:
         # `_on_worker_done` needs to reacquire this same lock.
         self._lock = threading.RLock()
         self._active: set[tuple[str, int]] = set()
+        # Per-key markers claimed via `track_active` -- the family-bucket
+        # drain registers the family issue currently being processed so
+        # `is_active` reports True and the pre-tick base refresh skips
+        # its worktree. Kept in a SEPARATE set from `_active` so the
+        # tracking claim does NOT inflate the global-cap counter (which
+        # uses `len(self._active)`) or the per-repo counter. The
+        # duplicate-active gate in `submit` consults BOTH sets so a
+        # fanout submit for the same issue cannot slip in concurrently
+        # with the bucket's in-flight iteration on that issue.
+        self._tracked: set[tuple[str, int]] = set()
         self._per_repo_active: dict[str, int] = defaultdict(int)
         self._family_active_repos: set[str] = set()
         # Completed futures awaiting `reap`. Done-callbacks append here
@@ -104,8 +122,9 @@ class IssueScheduler:
             return self._per_repo_active.get(repo_slug, 0)
 
     def is_active(self, repo_slug: str, issue_number: int) -> bool:
+        key = (repo_slug, int(issue_number))
         with self._lock:
-            return (repo_slug, int(issue_number)) in self._active
+            return key in self._active or key in self._tracked
 
     # -- submit/reap/shutdown ----------------------------------------
 
@@ -149,14 +168,52 @@ class IssueScheduler:
         # (very-fast worker) can reacquire it in `_on_worker_done`.
         with self._lock:
             if self._closed:
+                log.info(
+                    "scheduler skip repo=%s issue=#%s reason=closed",
+                    repo_slug, issue_number,
+                )
                 return False
-            if key in self._active:
+            if key in self._active or key in self._tracked:
+                # Common and expected when a long-running worker straddles
+                # ticks. DEBUG keeps a normal busy repo from spamming the
+                # operator log; the rarer skip reasons below stay at INFO.
+                # `_tracked` is checked alongside `_active` so a fanout
+                # submit cannot slip in for an issue the family bucket
+                # is currently processing inside `track_active`.
+                log.debug(
+                    "scheduler skip repo=%s issue=#%s reason=duplicate_active",
+                    repo_slug, issue_number,
+                )
                 return False
             if len(self._active) >= self._global_cap:
+                log.info(
+                    "scheduler skip repo=%s issue=#%s reason=global_cap "
+                    "(active=%d cap=%d)",
+                    repo_slug, issue_number,
+                    len(self._active), self._global_cap,
+                )
                 return False
             if self._per_repo_active.get(repo_slug, 0) >= cap:
+                log.info(
+                    "scheduler skip repo=%s issue=#%s reason=per_repo_cap "
+                    "(active=%d cap=%d)",
+                    repo_slug, issue_number,
+                    self._per_repo_active.get(repo_slug, 0), cap,
+                )
                 return False
             if family and repo_slug in self._family_active_repos:
+                # The family-slot skip is the regression the issue #326 fix
+                # targets: a stale child sitting at backlog/blocked used to
+                # take this slot and starve the parent umbrella. The
+                # dispatch layer now folds family work into one bucket
+                # task, but the skip is still possible across ticks while
+                # the previous tick's bucket is still draining -- worth
+                # surfacing in the log so operators can correlate
+                # "umbrella not advancing" with "family bucket still busy".
+                log.info(
+                    "scheduler skip repo=%s issue=#%s reason=family_slot_held",
+                    repo_slug, issue_number,
+                )
                 return False
             self._active.add(key)
             self._per_repo_active[repo_slug] += 1
@@ -258,3 +315,52 @@ class IssueScheduler:
         with self._lock:
             self._release_slot_locked(key, repo_slug, family=family)
             self._completed.append(future)
+
+    @contextlib.contextmanager
+    def track_active(
+        self, repo_slug: str, issue_number: int,
+    ) -> Iterator[bool]:
+        """Register ``(repo_slug, issue_number)`` as in-flight for the block.
+
+        Used by the family-bucket drain in ``_dispatch_via_scheduler``: the
+        bucket itself owns the family slot via the parent submit's
+        ``family=True``, but the parent submit is keyed on a sentinel
+        issue number, NOT on the issue currently being processed inside
+        the drain. Without per-iteration tracking, ``is_active(repo, n)``
+        would report False for the family issue actually being worked on
+        -- and ``_refresh_base_and_worktrees`` would race the agent by
+        rebasing the worktree under the live worker.
+
+        The marker lives in a SEPARATE set (``_tracked``) so it does NOT
+        count toward the global cap (``len(self._active)``) or the
+        per-repo counter. The bucket's parent submit already accounts
+        for the one executor worker; folding the inner claim into the
+        cap counters would let a single bucket starve unrelated fanout
+        submits under tight ``global_cap`` (e.g. 2) even though only
+        one worker thread is actually executing.
+
+        Yields a bool ``claimed``: True if this call reserved the marker,
+        False if the key was already in flight (active or tracked) by
+        another owner. The drain must check the yielded value and skip
+        ``_process_issue`` when ``claimed`` is False -- otherwise two
+        workers could run the same issue handler concurrently. The
+        bucket dispatch path classifies issues by a fresh label read on
+        the tick thread, so within one tick this race is impossible;
+        the guard catches the cross-tick window where tick N classified
+        ``#X`` as fanout and submitted it, tick N+1 reclassified
+        ``#X`` as family-aware (after a relabel) and folded it into the
+        bucket, and the bucket reached ``#X`` before the fanout worker
+        from tick N exited.
+        """
+        key = (repo_slug, int(issue_number))
+        claimed = False
+        with self._lock:
+            if key not in self._active and key not in self._tracked:
+                self._tracked.add(key)
+                claimed = True
+        try:
+            yield claimed
+        finally:
+            if claimed:
+                with self._lock:
+                    self._tracked.discard(key)

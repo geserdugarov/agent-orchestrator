@@ -362,7 +362,7 @@ The coding agent runs as a **transient child subprocess**, not a daemon — spaw
 
 ## Per-tick flow (`workflow.tick`)
 
-Each tick the polling loop fans `workflow.tick(gh, spec, scheduler=...)` out across **every configured repo** via `main._run_tick`: single-repo deployments stay in-thread (legacy), multi-repo deployments use a `ThreadPoolExecutor` sized to the repo count. A single long-lived `IssueScheduler` (global cap `MAX_PARALLEL_ISSUES_GLOBAL`, per-repo cap `MAX_PARALLEL_ISSUES_PER_REPO`) is shared across all `tick` calls; the tick itself enumerates pollable issues and submits one callable per issue to the scheduler without waiting for handler completion. Each submit classifies the issue as family-aware (`decomposing` / `blocked` / `umbrella` / unlabeled — parent ↔ child writes) or fan-out (everything else); the scheduler enforces one family worker per repo and rejects duplicate active issues, global cap hits, and per-repo cap hits, leaving any rejected work for the next polling pass.
+Each tick the polling loop fans `workflow.tick(gh, spec, scheduler=...)` out across **every configured repo** via `main._run_tick`: single-repo deployments stay in-thread (legacy), multi-repo deployments use a `ThreadPoolExecutor` sized to the repo count. A single long-lived `IssueScheduler` (global cap `MAX_PARALLEL_ISSUES_GLOBAL`, per-repo cap `MAX_PARALLEL_ISSUES_PER_REPO`) is shared across all `tick` calls; the tick itself enumerates pollable issues and hands work to the scheduler without waiting for handler completion. The dispatch loop classifies each issue as family-aware (`decomposing` / `blocked` / `umbrella` / unlabeled — parent ↔ child writes) or fan-out (everything else); fan-out submits go one callable per issue, while every family-aware issue this tick is folded into ONE bucket submit per repo that drains them sequentially on a single executor worker (so a stale child cannot take the family slot and starve the parent umbrella issue). The scheduler rejects duplicate active issues, global / per-repo cap hits, and family-slot conflicts; rejected work is logged with the reason and left for the next polling pass.
 
 Per-issue durable state lives in a single **pinned comment** on the issue (`<!--orchestrator-state {...json...}-->`). The orchestrator process is stateless; the label and the pinned JSON are the entire dispatch input.
 
@@ -503,13 +503,22 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
    │       worktrees whose handler is still in flight in scheduler        │
    │     classify each pollable issue by label and submit to scheduler:   │
    │       family-aware (decomposing/blocked/umbrella/unlabeled) →        │
-   │         submit(..., family=True) — one family worker per repo at a   │
-   │         time (parent↔child writes never overlap)                     │
+   │         folded into ONE bucket submit per repo (family=True) that    │
+   │         drains all family-aware issues sequentially on one worker;   │
+   │         each per-issue iteration wraps `_process_issue` in           │
+   │         `scheduler.track_active(repo, n)` so `is_active(repo, n)`    │
+   │         keeps reporting True for the in-progress family issue and    │
+   │         the refresh-skip contract holds. Per-family-issue submits    │
+   │         would let a stale child take the slot and starve the parent  │
+   │         umbrella; the bucket guarantees the umbrella gets its turn   │
+   │         within the same tick.                                        │
    │       fan-out (ready/implementing/documenting/validating/in_review/  │
    │                fixing/resolving_conflict) → submit(..., family=False)│
    │         — concurrent up to per-repo and global caps                  │
    │     scheduler rejects duplicate active issue / cap hit / family slot │
-   │       held → skipped this tick, next polling pass retries            │
+   │       held → skipped this tick AND logged with the reason            │
+   │       (duplicate_active at DEBUG, others at INFO); next polling pass │
+   │       retries against the live scheduler state                       │
    │     accepted workers each call gh._for_worker_thread() + refetch     │
    │       the Issue against that client, then run _process_issue         │
    │   → for each accepted submit → dispatch by label:                    │
