@@ -233,22 +233,31 @@ independently configurable.
 
 **Parallel issue processing.** `MAX_PARALLEL_ISSUES_PER_REPO` (default
 1, per-`REPOS`-override) and `MAX_PARALLEL_ISSUES_GLOBAL` (default 3)
-bound concurrent handlers. A single long-lived `IssueScheduler`
-(`orchestrator/scheduler.py`) is built at startup with those caps and
-threaded through every `workflow.tick(gh, spec, scheduler=...)` call:
-the tick enumerates pollable issues, classifies them as family-aware
-or fan-out, and hands work to the scheduler. Fan-out issues are
-submitted as one nonblocking callable per issue; family-aware issues
-(`decomposing`, `blocked`, `umbrella`, unlabeled pickup) are folded
-into ONE bucket submit per repo that drains them sequentially on a
-single executor worker, so a stale child cannot take the family slot
-and starve the parent umbrella. Each per-issue iteration inside the
-bucket wraps `_process_issue` in `scheduler.track_active(repo, n)`
-(claim lives in a separate set, so it does not inflate the global or
-per-repo cap counters) so the refresh-skip contract keeps holding for
-the family issue currently being processed. The scheduler enforces
-the in-flight set, per-repo counter, family mutex, and rejects
-duplicate active issues; every skip is logged with the reason
+bound concurrent cap-counted handlers. A single long-lived
+`IssueScheduler` (`orchestrator/scheduler.py`) is built at startup
+with those caps and threaded through every
+`workflow.tick(gh, spec, scheduler=...)` call: the tick enumerates
+pollable issues, classifies them as family-aware or fan-out, and
+hands work to the scheduler. Fan-out issues are submitted as one
+nonblocking callable per issue; family-aware issues (`decomposing`,
+`blocked`, `umbrella`, unlabeled pickup) are folded into ONE bucket
+submit per repo that drains them sequentially on a single executor
+worker, so a stale child cannot take the family slot and starve the
+parent umbrella. When every family-aware issue in this tick's bucket
+carries the `umbrella` label, the bucket is submitted cap-exempt and
+runs on a dedicated executor pool (`_EXEMPT_POOL_WORKERS`, sized
+independently of `global_cap`): umbrella handling is a pure
+label/dep-graph walk with no agent or worktree work, so it must
+always get its turn and must not consume a `MAX_PARALLEL_ISSUES_*`
+slot. Mixed buckets (umbrella alongside `decomposing` / `blocked` /
+unlabeled pickup) stay cap-counted because the non-umbrella entries
+do real work. Each per-issue iteration inside the bucket wraps
+`_process_issue` in `scheduler.track_active(repo, n)` (claim lives in
+a separate set, so it does not inflate the global or per-repo cap
+counters) so the refresh-skip contract keeps holding for the family
+issue currently being processed. The scheduler enforces the
+in-flight set, per-repo counter, family mutex, and rejects duplicate
+active issues; every skip is logged with the reason
 (`duplicate_active` at DEBUG, `family_slot_held` / `global_cap` /
 `per_repo_cap` / `closed` at INFO), and rejected work re-tries on the
 next polling pass. The pre-tick base refresh consults
