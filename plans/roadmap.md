@@ -476,17 +476,25 @@ holds pure Plotly figure builders (`usage_over_time` with a
 branch through a shared empty-state annotation so the "nothing
 matches" message stays consistent across charts. The plotly-free
 token module `orchestrator/dashboard_theme.py` exposes the
-redesigned palette (warm cream background, indigo accent,
-per-token-type / per-backend / per-review-round / per-stage /
-per-`cost_source` palettes), the deterministic `color_for(...)`
+redesigned palette taken straight off the standalone mock's
+`:root` block (cool gray `#f4f5f8` page, white cards, indigo
+accent, `#1c2030` ink / `#565d72` ink-2 / `#8a90a3` ink-3 muted
+tints, `--radius: 14px`, `--pad: 20px`, `--gap: 16px`, `1480px`
+content max-width, IBM Plex Sans / Mono with system fallbacks,
+plus per-token-type / per-backend / per-review-round / per-stage
+/ per-`cost_source` palettes), the deterministic `color_for(...)`
 fallback, a `base_layout(...)` dict the chart builders splat into
 every figure, the `PAGE_CSS` block the dashboard injects through
-`st.markdown`, and the `fmt_money` / `fmt_money_exact` /
-`fmt_tokens` / `fmt_num` formatters every value label runs
-through. `.streamlit/config.toml` mirrors the same palette into
-Streamlit's own `[theme]` (cream background, indigo
-`primaryColor`) and disables the `[browser] gatherUsageStats`
-POST. The redesigned `dashboard.py` consumes the chart builders
+`st.markdown` -- which also makes the topbar (sticky at `top: 0`)
+and filter bar (sticky at `top: 71px`) full-bleed via a `100vw` +
+negative-margin trick so they stay glued to the chrome as the
+operator scrolls, matching the mock -- and the `fmt_money` /
+`fmt_money_exact` / `fmt_tokens` / `fmt_num` formatters every
+value label runs through. `.streamlit/config.toml` mirrors the
+same palette into Streamlit's own `[theme]` (cool gray
+background, indigo `primaryColor`, dark blue-gray text) and
+disables the `[browser] gatherUsageStats` POST. The redesigned
+`dashboard.py` consumes the chart builders
 alongside HTML blocks for the topbar, KPI strip, insight stack,
 backend-efficiency cards, cost-source coverage bar, reliability
 tiles, and footer; the lazy import surface is asserted by
