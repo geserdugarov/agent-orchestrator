@@ -44,14 +44,21 @@ import hashlib
 import json
 import logging
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .. import analytics as _analytics
 
 log = logging.getLogger(__name__)
+
+# Cadence of progress logs during a sync. Picked so a small replay
+# emits one or two updates and a multi-thousand-record replay still
+# shows steady forward motion without flooding the log.
+_PROGRESS_INTERVAL = 500
 
 # Columns the table promotes from the JSONL record; anything else lands
 # in `extras` JSONB so a JSONL record from a newer orchestrator version
@@ -107,6 +114,10 @@ class SyncResult:
       the JSONL file itself.
     - `total_lines` -- raw line count consumed from the file
       (including blanks), so the caller can sanity-check progress.
+    - `duration_s` -- wall-clock seconds from connect entry through
+      commit / close, rounded to 3 decimals. Lets the CLI surface a
+      human-readable elapsed time without re-timing externally; the
+      no-op paths (URL unset / file absent) return 0.0.
     """
 
     inserted: int = 0
@@ -114,6 +125,7 @@ class SyncResult:
     skipped_malformed: int = 0
     total_lines: int = 0
     malformed_line_numbers: tuple[int, ...] = field(default_factory=tuple)
+    duration_s: float = 0.0
 
 
 def _canonical_json(record: dict) -> str:
@@ -235,6 +247,63 @@ def _row_values(
     return tuple(values)
 
 
+# libpq accepts credentials in the URL query string as well as the
+# netloc -- `postgresql://h/db?user=u&password=secret` is valid and
+# carries the password in the query. Redacting only the netloc would
+# leak the password into the connection / progress logs whenever an
+# operator uses the query-string form. Parameter names are
+# case-insensitive per the libpq docs, so the membership check below
+# lowercases the key before comparing.
+_REDACTED_QUERY_PARAMS = frozenset(
+    {"user", "password", "passfile", "sslpassword"}
+)
+
+
+def _redact_db_url(url: str) -> str:
+    """Strip credentials from a libpq URL before it lands in a log line.
+
+    `ANALYTICS_DB_URL` is a libpq URL that may carry credentials in
+    two distinct places: the `user:password@` netloc prefix and the
+    `?user=&password=&sslpassword=&passfile=` query string. This CLI
+    surfaces connection logs to operators and occasionally to shared
+    dashboards, so both forms collapse to `***` before printing -- a
+    remote-Postgres password never lands in stdout or in any log
+    aggregator the host forwards to.
+    """
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<db-url-unparseable>"
+    netloc = parts.netloc
+    if parts.username or parts.password:
+        host = parts.hostname or ""
+        netloc = f"{host}:{parts.port}" if parts.port else host
+        netloc = f"***@{netloc}" if netloc else "***"
+    query = parts.query
+    if query:
+        # `keep_blank_values=True` so `?password=` (operator left it
+        # empty) still surfaces as a `password=***` pair rather than
+        # silently disappearing -- the operator-visible shape of the
+        # query string should not change just because a value was
+        # blank.
+        pairs = parse_qsl(query, keep_blank_values=True)
+        redacted_pairs = [
+            (key, "***" if key.lower() in _REDACTED_QUERY_PARAMS else value)
+            for key, value in pairs
+        ]
+        if redacted_pairs != pairs:
+            # `safe="*"` keeps the redaction marker readable in the
+            # log line; without it `urlencode` percent-encodes the
+            # asterisks to `%2A` and the redacted URL turns into
+            # `password=%2A%2A%2A`, which obscures the intent.
+            query = urlencode(redacted_pairs, safe="*")
+    return urlunsplit(
+        (parts.scheme, netloc, parts.path, query, parts.fragment)
+    )
+
+
 def _default_connect(db_url: str) -> Any:
     """Lazy psycopg import so the module loads without the driver.
 
@@ -287,6 +356,14 @@ def sync_jsonl_to_postgres(
     sync; the JSONL file is treated as read-only -- this sync never
     rewrites or truncates it, even when it sees malformed lines.
 
+    Progress is reported through the module logger: a "connecting" /
+    "connection established" pair brackets the connect call, a
+    "progress" record is emitted every `_PROGRESS_INTERVAL` lines
+    consumed so an operator can watch a multi-thousand-record replay
+    advance, and a "completed in %.3fs" summary fires after commit.
+    Connection-string credentials are stripped before logging so a
+    `user:password@host` URL does not leak into the operator's stdout.
+
     `connect(db_url) -> connection` and `json_adapter(value) -> value`
     are factory hooks so tests can inject a fake without depending on
     psycopg. Production callers leave both at None to get the real
@@ -311,6 +388,7 @@ def sync_jsonl_to_postgres(
 
     insert_sql = _build_insert_sql()
     source_path_str = str(log_path)
+    redacted_url = _redact_db_url(db_url)
 
     inserted = 0
     skipped_duplicate = 0
@@ -318,64 +396,92 @@ def sync_jsonl_to_postgres(
     total_lines = 0
     malformed_lines: list[int] = []
 
+    start = time.monotonic()
+    log.info(
+        "analytics_sync: connecting to %s (source=%s)",
+        redacted_url, log_path,
+    )
     conn = connect_fn(db_url)
+    log.info(
+        "analytics_sync: connection established to %s after %.3fs",
+        redacted_url, time.monotonic() - start,
+    )
+
+    def _emit_progress() -> None:
+        log.info(
+            "analytics_sync: progress lines=%d inserted=%d duplicate=%d "
+            "malformed=%d elapsed=%.3fs",
+            total_lines, inserted, skipped_duplicate, skipped_malformed,
+            time.monotonic() - start,
+        )
+
     try:
         with conn.cursor() as cur:
             with Path(log_path).open("r", encoding="utf-8") as fh:
                 for line_number, raw_line in enumerate(fh, start=1):
                     total_lines += 1
-                    stripped = raw_line.strip()
-                    if not stripped:
-                        continue
                     try:
-                        record = json.loads(stripped)
-                    except json.JSONDecodeError:
-                        skipped_malformed += 1
-                        malformed_lines.append(line_number)
-                        log.warning(
-                            "analytics_sync: skipping line %d (not JSON) in %s",
-                            line_number, log_path,
+                        stripped = raw_line.strip()
+                        if not stripped:
+                            continue
+                        try:
+                            record = json.loads(stripped)
+                        except json.JSONDecodeError:
+                            skipped_malformed += 1
+                            malformed_lines.append(line_number)
+                            log.warning(
+                                "analytics_sync: skipping line %d (not JSON) in %s",
+                                line_number, log_path,
+                            )
+                            continue
+                        if not isinstance(record, dict):
+                            skipped_malformed += 1
+                            malformed_lines.append(line_number)
+                            log.warning(
+                                "analytics_sync: skipping line %d (JSON not an object) in %s",
+                                line_number, log_path,
+                            )
+                            continue
+                        split = _split_row(record)
+                        if split is None:
+                            skipped_malformed += 1
+                            malformed_lines.append(line_number)
+                            log.warning(
+                                "analytics_sync: skipping line %d (missing/invalid required keys) in %s",
+                                line_number, log_path,
+                            )
+                            continue
+                        columns, extras = split
+                        content_hash = _content_hash(record)
+                        values = _row_values(
+                            columns,
+                            extras,
+                            source_path_str,
+                            line_number,
+                            content_hash,
+                            json_adapter_fn,
                         )
-                        continue
-                    if not isinstance(record, dict):
-                        skipped_malformed += 1
-                        malformed_lines.append(line_number)
-                        log.warning(
-                            "analytics_sync: skipping line %d (JSON not an object) in %s",
-                            line_number, log_path,
-                        )
-                        continue
-                    split = _split_row(record)
-                    if split is None:
-                        skipped_malformed += 1
-                        malformed_lines.append(line_number)
-                        log.warning(
-                            "analytics_sync: skipping line %d (missing/invalid required keys) in %s",
-                            line_number, log_path,
-                        )
-                        continue
-                    columns, extras = split
-                    content_hash = _content_hash(record)
-                    values = _row_values(
-                        columns,
-                        extras,
-                        source_path_str,
-                        line_number,
-                        content_hash,
-                        json_adapter_fn,
-                    )
-                    cur.execute(insert_sql, values)
-                    # psycopg's rowcount is 1 on insert, 0 on conflict
-                    # skip; fall back to counting inserts as "new" so
-                    # a driver that reports -1 still produces useful
-                    # totals (the duplicate count becomes 0 in that
-                    # case, which is acceptable -- the database is the
-                    # authority).
-                    rowcount = getattr(cur, "rowcount", 1)
-                    if rowcount == 0:
-                        skipped_duplicate += 1
-                    else:
-                        inserted += 1
+                        cur.execute(insert_sql, values)
+                        # psycopg's rowcount is 1 on insert, 0 on conflict
+                        # skip; fall back to counting inserts as "new" so
+                        # a driver that reports -1 still produces useful
+                        # totals (the duplicate count becomes 0 in that
+                        # case, which is acceptable -- the database is the
+                        # authority).
+                        rowcount = getattr(cur, "rowcount", 1)
+                        if rowcount == 0:
+                            skipped_duplicate += 1
+                        else:
+                            inserted += 1
+                    finally:
+                        if total_lines % _PROGRESS_INTERVAL == 0:
+                            _emit_progress()
+        log.info(
+            "analytics_sync: committing transaction (lines=%d inserted=%d "
+            "duplicate=%d malformed=%d elapsed=%.3fs)",
+            total_lines, inserted, skipped_duplicate, skipped_malformed,
+            time.monotonic() - start,
+        )
         conn.commit()
     except Exception:
         try:
@@ -389,9 +495,12 @@ def sync_jsonl_to_postgres(
         except Exception:
             log.exception("analytics_sync: connection close failed")
 
+    duration_s = round(time.monotonic() - start, 3)
     log.info(
-        "analytics_sync: inserted=%d duplicate=%d malformed=%d total_lines=%d source=%s",
-        inserted, skipped_duplicate, skipped_malformed, total_lines, log_path,
+        "analytics_sync: completed in %.3fs (inserted=%d duplicate=%d "
+        "malformed=%d total_lines=%d source=%s)",
+        duration_s, inserted, skipped_duplicate, skipped_malformed,
+        total_lines, log_path,
     )
     return SyncResult(
         inserted=inserted,
@@ -399,14 +508,47 @@ def sync_jsonl_to_postgres(
         skipped_malformed=skipped_malformed,
         total_lines=total_lines,
         malformed_line_numbers=tuple(malformed_lines),
+        duration_s=duration_s,
     )
 
 
 def _configure_cli_logging(level: str) -> None:
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    """Install a UTC-stamped log formatter on the root logger.
+
+    The CLI also prints a UTC-stamped one-line summary to stdout at
+    the end of `main`; pinning the log timestamps to UTC -- with an
+    explicit "UTC" suffix in datefmt -- means a mixed stdout / stderr
+    stream stays a coherent time-ordered sequence regardless of the
+    host's local timezone. Without this, a TZ-skewed host (the
+    reviewer hit a TZ+7 machine) prints log lines and the summary
+    line hours apart for the same wall-clock event because
+    `logging.basicConfig` defaults to local time while
+    `datetime.now(timezone.utc)` is UTC.
+    """
+    formatter = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S UTC",
     )
+    # `gmtime` on this formatter instance only -- mutating
+    # `logging.Formatter.converter` globally would change every other
+    # formatter's timezone behavior in the same process (the unit
+    # tests pull `assertLogs` records through their own formatters,
+    # and a process-wide flip would surprise them).
+    formatter.converter = time.gmtime
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Replace prior handlers so a re-invocation in the same process
+    # (a test that calls `main()` twice, a long-lived shell running
+    # `python -m`) actually picks up the new formatter rather than
+    # silently no-op'ing the way `basicConfig` does once the root
+    # already has a handler.
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.addHandler(handler)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -442,23 +584,37 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     _configure_cli_logging(args.log_level)
 
+    cli_start = time.monotonic()
     try:
         result = sync_jsonl_to_postgres(
             log_path=args.log_path,
             db_url=args.db_url,
         )
     except Exception:
-        log.exception("analytics_sync: failed")
+        log.exception(
+            "analytics_sync: failed after %.3fs",
+            time.monotonic() - cli_start,
+        )
         return 1
 
     # CLI users want a one-line human-readable summary in addition to
     # the structured log line; print to stdout so it survives
-    # `--log-level WARNING`.
+    # `--log-level WARNING`. The leading UTC timestamp matches the
+    # `_configure_cli_logging` formatter (which is also UTC with a
+    # "UTC" suffix) so an operator piping stdout + stderr together
+    # gets a uniform time-ordered stream regardless of the host's
+    # local timezone. `duration_s` falls back to the CLI wall-clock
+    # when the sync took the no-op path and reported 0.0 -- otherwise
+    # the printed elapsed would disagree with what the operator just
+    # sat through.
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    duration_s = result.duration_s or round(time.monotonic() - cli_start, 3)
     print(
-        f"analytics_sync: inserted={result.inserted} "
+        f"{timestamp} analytics_sync: inserted={result.inserted} "
         f"duplicate={result.skipped_duplicate} "
         f"malformed={result.skipped_malformed} "
-        f"total_lines={result.total_lines}"
+        f"total_lines={result.total_lines} "
+        f"duration_s={duration_s:.3f}"
     )
     return 0
 

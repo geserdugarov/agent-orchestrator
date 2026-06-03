@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -626,6 +628,274 @@ class AnalyticsSyncCliTest(unittest.TestCase):
             with patch("sys.stdout", buf):
                 rc = analytics_sync.main([])
         self.assertEqual(rc, 1)
+
+    def test_cli_logs_and_stdout_share_utc_clock(self) -> None:
+        # Regression for the reviewer's TZ-skew finding: log lines used
+        # to print in local time while the stdout summary printed UTC,
+        # so on a TZ+7 host the two surfaces were 7 hours apart for the
+        # same event. With both pinned to UTC + an explicit "UTC"
+        # marker, mixing stdout/stderr stays a coherent time stream.
+        _, analytics_sync = _reload({
+            "ANALYTICS_LOG_PATH": "off",
+            "ANALYTICS_DB_URL": "",
+        })
+        err_buf = io.StringIO()
+        out_buf = io.StringIO()
+        # Patch BEFORE main() so the StreamHandler that
+        # `_configure_cli_logging` constructs captures the patched
+        # stderr (StreamHandler() resolves `sys.stderr` at __init__).
+        try:
+            with patch("sys.stderr", err_buf), patch("sys.stdout", out_buf):
+                rc = analytics_sync.main([])
+        finally:
+            # Restore the root logger so a UTC handler doesn't leak
+            # into other tests in the same process.
+            root = logging.getLogger()
+            for h in list(root.handlers):
+                root.removeHandler(h)
+        self.assertEqual(rc, 0)
+        out_text = out_buf.getvalue()
+        err_text = err_buf.getvalue()
+        # Both surfaces must carry the explicit "UTC" marker so a
+        # mixed-stream consumer (a piped `2>&1`) can tell the
+        # timestamps share a timezone.
+        self.assertIn(" UTC ", out_text)
+        self.assertIn(" UTC ", err_text)
+        # Extract one timestamp from each surface and confirm they
+        # match within a few seconds. If the log had defaulted to
+        # local time (the reviewer's TZ+7 bug), the delta would be
+        # measured in hours.
+        ts_re = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC")
+        out_match = ts_re.search(out_text)
+        err_match = ts_re.search(err_text)
+        self.assertIsNotNone(out_match)
+        self.assertIsNotNone(err_match)
+        out_ts = datetime.strptime(out_match.group(1), "%Y-%m-%d %H:%M:%S")
+        err_ts = datetime.strptime(err_match.group(1), "%Y-%m-%d %H:%M:%S")
+        delta = abs((out_ts - err_ts).total_seconds())
+        self.assertLess(
+            delta, 5,
+            f"stdout and stderr timestamps disagree by {delta}s: "
+            f"out={out_match.group(1)} err={err_match.group(1)}",
+        )
+        # Cross-check against `now()` to confirm the shared clock is
+        # actually UTC, not just any single tz. A local-time formatter
+        # would land outside this window on a TZ-skewed host.
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        self.assertLess(
+            abs((out_ts - now_utc).total_seconds()), 5,
+            "stdout summary timestamp is not UTC",
+        )
+        self.assertLess(
+            abs((err_ts - now_utc).total_seconds()), 5,
+            "log timestamp is not UTC",
+        )
+
+    def test_cli_stdout_carries_timestamp_and_duration(self) -> None:
+        # Operators run the sync from a terminal and expect a timestamped,
+        # one-line summary with the elapsed wall-clock so a multi-thousand
+        # record replay surfaces its cost without grepping the log lines.
+        _, analytics_sync = _reload({
+            "ANALYTICS_LOG_PATH": "off",
+            "ANALYTICS_DB_URL": "",
+        })
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = analytics_sync.main([])
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        # The leading `YYYY-MM-DD HH:MM:SS UTC` timestamp gives an
+        # operator mixing stdout + stderr the same wall-clock anchor
+        # the log formatter prepends; the explicit "UTC" marker is
+        # what makes the two streams comparable on a TZ-skewed host.
+        # A missing timestamp -- or a missing tz marker -- is a
+        # regression.
+        self.assertRegex(
+            out,
+            r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC analytics_sync:",
+        )
+        self.assertIn("duration_s=", out)
+
+
+class AnalyticsSyncConnectionLogTest(unittest.TestCase):
+    """A successful connect is logged with a redacted URL so an operator
+    sees the sync actually reached the database, and credentials never
+    land in the operator's log.
+    """
+
+    def test_connect_emits_connected_log(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _write_jsonl(path, [_sample_record()])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://u:secret@h:5432/db",
+            })
+            fake = _FakeConnection()
+            with self.assertLogs("orchestrator.analytics.sync", level="INFO") as cm:
+                analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+        joined = "\n".join(cm.output)
+        self.assertIn("connecting to", joined)
+        self.assertIn("connection established", joined)
+        # The credential half of the URL must never appear; the redacted
+        # form keeps the scheme + host + db so the operator can still
+        # confirm which endpoint they hit.
+        self.assertNotIn("secret", joined)
+        self.assertNotIn("u:secret", joined)
+        self.assertIn("***@h:5432", joined)
+
+    def test_redact_db_url_without_credentials_passes_through(self) -> None:
+        _, analytics_sync = _reload()
+        self.assertEqual(
+            analytics_sync._redact_db_url("postgresql://h:5432/db"),
+            "postgresql://h:5432/db",
+        )
+
+    def test_redact_db_url_strips_user_only(self) -> None:
+        _, analytics_sync = _reload()
+        self.assertIn(
+            "***@h",
+            analytics_sync._redact_db_url("postgresql://user@h/db"),
+        )
+
+    def test_redact_db_url_strips_query_string_password(self) -> None:
+        # libpq accepts `postgresql://h/db?user=u&password=secret` --
+        # netloc-only redaction would leak the password into the
+        # operator's stdout. Both forms must collapse to ***.
+        _, analytics_sync = _reload()
+        redacted = analytics_sync._redact_db_url(
+            "postgresql://h/db?user=u&password=secret&sslmode=require"
+        )
+        self.assertNotIn("secret", redacted)
+        self.assertNotIn("user=u", redacted)
+        # Non-credential params survive verbatim so the redacted URL
+        # still tells the operator which SSL mode was configured.
+        self.assertIn("sslmode=require", redacted)
+        self.assertIn("password=", redacted)
+        self.assertIn("***", redacted)
+
+    def test_redact_db_url_strips_query_string_sslpassword(self) -> None:
+        # `sslpassword` decrypts the SSL client key; same threat model
+        # as `password` itself.
+        _, analytics_sync = _reload()
+        redacted = analytics_sync._redact_db_url(
+            "postgresql://h/db?sslpassword=ssl-secret"
+        )
+        self.assertNotIn("ssl-secret", redacted)
+        self.assertIn("sslpassword=", redacted)
+
+    def test_redact_db_url_query_params_case_insensitive(self) -> None:
+        # libpq treats parameter names as case-insensitive; uppercase
+        # spellings must redact identically so a `?PASSWORD=secret`
+        # URL does not slip past the filter.
+        _, analytics_sync = _reload()
+        redacted = analytics_sync._redact_db_url(
+            "postgresql://h/db?PASSWORD=secret"
+        )
+        self.assertNotIn("secret", redacted)
+
+    def test_connect_log_redacts_query_string_password(self) -> None:
+        # End-to-end regression: a query-string-password URL must not
+        # leak the password into the connection log.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _write_jsonl(path, [_sample_record()])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": (
+                    "postgresql://h:5432/db?user=u&password=qs-secret"
+                ),
+            })
+            fake = _FakeConnection()
+            with self.assertLogs(
+                "orchestrator.analytics.sync", level="INFO"
+            ) as cm:
+                analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+        joined = "\n".join(cm.output)
+        self.assertNotIn("qs-secret", joined)
+        self.assertIn("connection established", joined)
+
+
+class AnalyticsSyncProgressTest(unittest.TestCase):
+    """Operator feedback for large replays: a progress record drops every
+    `_PROGRESS_INTERVAL` lines consumed (counted across inserted, skipped,
+    and blank lines so a malformed-heavy file still advances) and a final
+    "completed in %.3fs" line carries the wall-clock total.
+    """
+
+    def test_progress_logged_each_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            # Build twice the progress interval so the loop crosses the
+            # boundary at least twice; distinct `issue` values keep the
+            # content hashes (and therefore the row identities) unique
+            # so the run exercises the insert path rather than the
+            # dedup path.
+            interval = analytics_sync._PROGRESS_INTERVAL
+            records = [_sample_record(issue=i) for i in range(1, interval * 2 + 1)]
+            _write_jsonl(path, records)
+            fake = _FakeConnection()
+            with self.assertLogs("orchestrator.analytics.sync", level="INFO") as cm:
+                analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+        progress_lines = [m for m in cm.output if "progress lines=" in m]
+        # Two interval crossings -> two progress records (the final line
+        # number equals 2 * interval, which is a multiple of interval).
+        self.assertEqual(len(progress_lines), 2)
+        # The first crossing's count should be exactly the interval, not
+        # an off-by-one -- a bad % check would emit at lines=interval+1
+        # or lines=interval-1.
+        self.assertIn(f"lines={interval}", progress_lines[0])
+        self.assertIn(f"lines={interval * 2}", progress_lines[1])
+
+    def test_completed_log_carries_duration_s(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _write_jsonl(path, [_sample_record()])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            with self.assertLogs("orchestrator.analytics.sync", level="INFO") as cm:
+                result = analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+        joined = "\n".join(cm.output)
+        self.assertIn("completed in", joined)
+        # The returned SyncResult carries the same wall-clock so the CLI
+        # can print it without re-timing.
+        self.assertGreaterEqual(result.duration_s, 0.0)
+
+    def test_no_op_paths_skip_connection_log(self) -> None:
+        # `connect=lambda url: ...` must not be invoked when the sync
+        # is a no-op; mirrors the existing AnalyticsSyncDisabledTest but
+        # also confirms the new connecting/connected log lines do not
+        # land in the no-op path (they imply a real connect was attempted).
+        _, analytics_sync = _reload({
+            "ANALYTICS_LOG_PATH": "off",
+            "ANALYTICS_DB_URL": "postgresql://h/db",
+        })
+        with self.assertLogs("orchestrator.analytics.sync", level="INFO") as cm:
+            analytics_sync.sync_jsonl_to_postgres(
+                connect=lambda url: _FakeConnection(),
+            )
+        joined = "\n".join(cm.output)
+        self.assertNotIn("connecting to", joined)
+        self.assertNotIn("connection established", joined)
 
 
 class AnalyticsSyncLiveDdlTest(unittest.TestCase):
