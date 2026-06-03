@@ -359,12 +359,34 @@ JSONL records into Postgres with `INSERT ... ON CONFLICT
 (content_hash) DO NOTHING`, idempotent across repeated runs and
 across `prune_old_records` rewrites. `orchestrator/analytics/read.py`
 is the read-side counterpart: a thin data-access module exposing
-plain-Python functions (`get_filter_options`, `get_summary`,
-`get_time_series`, `get_stage_breakdown`, `get_event_breakdown`,
-`get_recent_agent_exits`, `get_issues`, `get_issue_events`) that
-`orchestrator/dashboard.py` calls into. `distinct_issues` in `get_summary`
-counts `(repo, issue)` pairs so cross-repo windows do not collapse
-same-numbered issues. Unset `ANALYTICS_DB_URL` short-circuits every read to an
+plain-Python functions that `orchestrator/dashboard.py` calls into.
+The base-table aggregates (`get_filter_options`, `get_data_extent`,
+`get_summary`, `get_time_series`, `get_stage_breakdown`,
+`get_event_breakdown`, `get_recent_agent_exits`, `get_issues`,
+`get_issue_events`, `get_repo_breakdown`, `get_hourly_heatmap`, and
+the resolved/rejected `get_throughput_breakdown` over
+`stage_enter` rows) carry the standard event / stage / date / repo /
+issue filter contract. The agent-run aggregates that read the
+`analytics_agent_runs` view (`get_review_round_breakdown`,
+`get_backend_efficiency`, `get_cost_coverage`) cannot push an
+`event IN (...)` clause down (the view has no `event` column -- it
+filters internally to `event = 'agent_exit'`); they honor the
+contract by short-circuiting to empty when the operator's events
+selection excludes `agent_exit` (or is cleared) so the dashboard's
+"show nothing for this dimension" semantics stays consistent across
+widgets. `get_summary` rolls up `total_agent_runs` /
+`failed_agent_runs` alongside the events / cost totals so the
+success-rate panel reads off one query; `get_time_series` also
+returns per-(day, event) cost / token aggregates so the
+spend-over-time and tokens-over-time charts pivot the same query.
+`get_stage_breakdown` rolls up cost / token totals per stage, and
+`get_issues` adds `max_review_round` plus `failed_agent_runs` per
+`(repo, issue)`. `get_cost_coverage` exposes the `unknown-price`
+cohort verbatim -- never collapsed into a generic "unknown" bucket
+-- so the operator can see how many runs the parser could not
+price. `distinct_issues` in `get_summary` counts `(repo, issue)`
+pairs so cross-repo windows do not collapse same-numbered issues.
+Unset `ANALYTICS_DB_URL` short-circuits every read to an
 empty / zero-valued result; connection / query failures wrap in a
 single `AnalyticsReadError`. Streamlit-free in this layer so the
 dashboard wiring can land independently. The driver is
