@@ -296,11 +296,14 @@ workflow as _wf` so existing `patch.object(workflow, ...)` tests keep
 working.
 
 **Tests.** Per-stage suites under `tests/test_workflow_*.py` cover
-every handler; `tests/test_workflow.py` covers the facade. Shared
-helpers live in `tests/workflow_helpers.py` and in-memory fakes in
-`tests/fakes.py`. Coverage spans the manifest parser, watermarks,
-debounce, manual-merge HITL ping, squash, conflicts, umbrella,
-multi-repo dispatch, and park-comment-replay prevention.
+every handler; focused `tests/test_workflow_*_routing.py` modules cover
+the dispatcher routing for each label, and the remaining facade-level
+helpers (worktree serialization, drain-terminals, finalize-if-pr-merged,
+stage analytics, fresh-feedback routing) live in their own focused
+files. Shared helpers live in `tests/workflow_helpers.py` and in-memory
+fakes in `tests/fakes.py`. Coverage spans the manifest parser,
+watermarks, debounce, manual-merge HITL ping, squash, conflicts,
+umbrella, multi-repo dispatch, and park-comment-replay prevention.
 
 **Project CI.** GitHub Actions runs `ruff` and `pytest` on PRs under a
 top-level `contents: read` token so the workflow is read-only and

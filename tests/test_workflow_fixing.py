@@ -16,7 +16,8 @@ via the final-docs handoff.
 
 The PR-terminal arcs (merged / closed / open-PR-with-closed-issue),
 dispatcher routing, label-bookkeeping, and missing-`pr_number` park
-are covered in `tests/test_workflow.py`'s `FixingLabelRoutingTest`.
+are covered in `tests/test_workflow_fixing_routing.py`'s
+`FixingLabelRoutingTest`.
 """
 from __future__ import annotations
 
