@@ -660,9 +660,20 @@ def _dispatch_via_scheduler(
     into the family bucket so ``_process_issue``'s own exception
     isolation picks up any sustained failure -- same recovery the
     legacy parallel path uses.
+
+    When every family-aware issue this tick carries the ``umbrella``
+    label, the bucket submit is marked ``cap_exempt=True`` so it does
+    not consume a ``MAX_PARALLEL_ISSUES_PER_REPO`` or
+    ``MAX_PARALLEL_ISSUES_GLOBAL`` slot. Umbrella handling is a pure
+    label/dep-graph walk -- no agent, no worktree mutation -- and must
+    always get its turn even when the cap is saturated by ordinary
+    implementation work. The family mutex still applies, so a follow-up
+    tick that finds a non-umbrella family issue still serializes
+    against this bucket.
     """
     per_repo_cap = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
     family_numbers: list[int] = []
+    family_labels: list[Optional[str]] = []
     fanout_numbers: list[int] = []
     for issue in gh.list_pollable_issues():
         try:
@@ -677,10 +688,21 @@ def _dispatch_via_scheduler(
         issue_number = int(issue.number)
         if label is None or label in _FAMILY_AWARE_LABELS:
             family_numbers.append(issue_number)
+            family_labels.append(label)
         else:
             fanout_numbers.append(issue_number)
 
     if family_numbers:
+        # ``umbrella`` is the only family-aware label whose handler does
+        # not invoke an agent or touch a worktree -- it just walks the
+        # parent/child dep-graph and relabels children. When the whole
+        # bucket this tick is umbrella-only, exempt it from the parallel
+        # caps so unrelated implementation work cannot starve the parent
+        # aggregation. Mixed buckets (umbrella alongside decomposing /
+        # blocked / unlabeled-pickup) stay cap-counted because the
+        # non-umbrella entries do real work.
+        umbrella_only = all(lbl == "umbrella" for lbl in family_labels)
+
         def _drain_family_bucket(numbers: list[int] = family_numbers) -> None:
             """Process every family-aware issue this tick sequentially.
 
@@ -722,6 +744,7 @@ def _dispatch_via_scheduler(
             _FAMILY_BUCKET_ISSUE,
             _drain_family_bucket,
             family=True,
+            cap_exempt=umbrella_only,
             per_repo_cap=per_repo_cap,
         ):
             # The scheduler logs the precise skip reason (closed,

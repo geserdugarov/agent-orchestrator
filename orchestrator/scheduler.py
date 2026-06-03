@@ -10,11 +10,16 @@ hand work to it without importing the workflow facade.
 
 API:
 
-* ``submit(repo_slug, issue_number, fn, *, family=False, per_repo_cap=None)``
+* ``submit(repo_slug, issue_number, fn, *, family=False, cap_exempt=False,
+  per_repo_cap=None)``
   -- nonblocking. Returns True when a worker thread was dispatched, False
   when the call was skipped (duplicate active issue, global cap reached,
   per-repo cap reached, family slot already taken, or the scheduler has
-  been shut down).
+  been shut down). ``cap_exempt=True`` skips the global and per-repo cap
+  checks (and does not consume a cap slot) while still honoring the
+  duplicate-active gate and the family mutex; used by the umbrella-only
+  family bucket so a pure label-walk parent never gets blocked by
+  ordinary implementation work this tick.
 * ``reap()`` -- nonblocking. Drains completed futures, logs any worker
   exception, returns the number of futures drained. Completion markers
   (in-flight set, per-repo counter, family flag) are cleared in the
@@ -53,6 +58,19 @@ from typing import Callable, Iterator, Optional
 log = logging.getLogger(__name__)
 
 
+_EXEMPT_POOL_WORKERS: int = 32
+"""Worker-thread pool size for the cap-exempt executor.
+
+Deliberately independent of ``global_cap``: cap-exempt work is by
+definition not subject to ``MAX_PARALLEL_ISSUES_GLOBAL``, so sizing
+this pool against the cap would silently re-impose it. A multi-repo
+orchestrator can have one umbrella bucket per repo in flight at once,
+and umbrella handlers are short label/dep-graph walks, so a fixed
+generous bound covers any realistic deployment without spinning up
+unbounded threads.
+"""
+
+
 class IssueScheduler:
     """Process-local scheduler/executor for per-issue handlers.
 
@@ -78,6 +96,25 @@ class IssueScheduler:
             max_workers=self._global_cap,
             thread_name_prefix=thread_name_prefix,
         )
+        # Cap-exempt submits (the umbrella-only family bucket) run on
+        # this dedicated executor so they cannot queue behind cap-counted
+        # work. If they shared the main pool, an exempt submit accepted
+        # past the cap would still wait for a cap-counted worker to exit
+        # before the executor handed it a thread, defeating the whole
+        # "umbrella always runs this tick" contract. Sized INDEPENDENTLY
+        # of ``global_cap`` so a tight cap (e.g. ``global_cap=1``) does
+        # not transitively cap umbrella throughput across repos: a
+        # deployment with N repos can have N umbrella buckets in flight
+        # at once even though only one ordinary worker may run at a
+        # time. The fixed bound is intentionally generous -- umbrella
+        # handlers are fast (label/dep-graph walk, no agent, no
+        # worktree), so a single shared pool of this size accommodates
+        # any realistic multi-repo deployment without spinning up
+        # unbounded threads.
+        self._exempt_executor = ThreadPoolExecutor(
+            max_workers=_EXEMPT_POOL_WORKERS,
+            thread_name_prefix=f"{thread_name_prefix}-exempt",
+        )
         # Reentrant because `submit` holds the lock through
         # `executor.submit` + `add_done_callback`; if the worker
         # completes between those two calls, `add_done_callback` fires
@@ -94,6 +131,14 @@ class IssueScheduler:
         # duplicate-active gate in `submit` consults BOTH sets so a
         # fanout submit for the same issue cannot slip in concurrently
         # with the bucket's in-flight iteration on that issue.
+        #
+        # ``submit(cap_exempt=True)`` also lands its sentinel here: the
+        # exempt path skips the cap counters by design, so storing the
+        # marker in ``_tracked`` keeps it visible to ``is_active`` and
+        # the duplicate-active gate without inflating ``active_count``.
+        # The two uses do not collide: the bucket sentinel always uses
+        # issue number 0 while ``track_active`` per-iteration claims use
+        # real (positive) issue numbers.
         self._tracked: set[tuple[str, int]] = set()
         self._per_repo_active: dict[str, int] = defaultdict(int)
         self._family_active_repos: set[str] = set()
@@ -135,6 +180,7 @@ class IssueScheduler:
         fn: Callable[[], None],
         *,
         family: bool = False,
+        cap_exempt: bool = False,
         per_repo_cap: Optional[int] = None,
     ) -> bool:
         """Try to dispatch ``fn`` for the given issue. Nonblocking.
@@ -143,9 +189,20 @@ class IssueScheduler:
         was skipped. Skip reasons (any one is sufficient):
         * scheduler is shut down,
         * the (repo_slug, issue_number) is already in flight,
-        * the global active-worker cap is reached,
-        * the per-repo cap (caller-provided override or default) is reached,
+        * the global active-worker cap is reached (unless ``cap_exempt``),
+        * the per-repo cap (caller-provided override or default) is
+          reached (unless ``cap_exempt``),
         * ``family=True`` and another family worker on this repo is in flight.
+
+        ``cap_exempt=True`` bypasses BOTH cap checks and does not increment
+        either cap counter -- the in-flight marker lands in ``_tracked``
+        instead of ``_active`` so it stays visible to ``is_active`` and
+        the duplicate-active gate without consuming a cap slot. The
+        family mutex still applies when ``family=True`` so the exempt
+        bucket cannot overlap with a concurrent family worker on the
+        same repo. Used by the umbrella-only family bucket: an umbrella
+        issue is a pure label aggregation that must always get its turn,
+        so ordinary implementation work this tick cannot block it.
 
         The override ``per_repo_cap`` is the per-spec ``parallel_limit``
         from ``RepoSpec`` -- the issue allows different repos to declare
@@ -185,7 +242,7 @@ class IssueScheduler:
                     repo_slug, issue_number,
                 )
                 return False
-            if len(self._active) >= self._global_cap:
+            if not cap_exempt and len(self._active) >= self._global_cap:
                 log.info(
                     "scheduler skip repo=%s issue=#%s reason=global_cap "
                     "(active=%d cap=%d)",
@@ -193,7 +250,10 @@ class IssueScheduler:
                     len(self._active), self._global_cap,
                 )
                 return False
-            if self._per_repo_active.get(repo_slug, 0) >= cap:
+            if (
+                not cap_exempt
+                and self._per_repo_active.get(repo_slug, 0) >= cap
+            ):
                 log.info(
                     "scheduler skip repo=%s issue=#%s reason=per_repo_cap "
                     "(active=%d cap=%d)",
@@ -215,23 +275,32 @@ class IssueScheduler:
                     repo_slug, issue_number,
                 )
                 return False
-            self._active.add(key)
-            self._per_repo_active[repo_slug] += 1
+            if cap_exempt:
+                self._tracked.add(key)
+            else:
+                self._active.add(key)
+                self._per_repo_active[repo_slug] += 1
             if family:
                 self._family_active_repos.add(repo_slug)
+            executor = (
+                self._exempt_executor if cap_exempt else self._executor
+            )
             try:
-                future = self._executor.submit(fn)
+                future = executor.submit(fn)
             except RuntimeError:
                 # Executor was shut down between the closed-check
                 # above and the submit call (the executor and the
                 # `_closed` flag are not the same gate). Roll back the
                 # reservation so the next tick can retry without a
                 # phantom in-flight marker.
-                self._release_slot_locked(key, repo_slug, family=family)
+                self._release_slot_locked(
+                    key, repo_slug, family=family, cap_exempt=cap_exempt,
+                )
                 return False
             future.add_done_callback(
-                lambda fut, _key=key, _slug=repo_slug, _family=family:
-                self._on_worker_done(fut, _key, _slug, _family)
+                lambda fut, _key=key, _slug=repo_slug, _family=family,
+                _exempt=cap_exempt:
+                self._on_worker_done(fut, _key, _slug, _family, _exempt)
             )
         return True
 
@@ -277,6 +346,7 @@ class IssueScheduler:
         with self._lock:
             self._closed = True
         self._executor.shutdown(wait=wait)
+        self._exempt_executor.shutdown(wait=wait)
         # Drain anything that completed during shutdown so the failure
         # log captures workers that raised on the way out.
         self.reap()
@@ -284,15 +354,29 @@ class IssueScheduler:
     # -- internals ---------------------------------------------------
 
     def _release_slot_locked(
-        self, key: tuple[str, int], repo_slug: str, *, family: bool
+        self,
+        key: tuple[str, int],
+        repo_slug: str,
+        *,
+        family: bool,
+        cap_exempt: bool = False,
     ) -> None:
-        """Drop the in-flight markers for ``key``. Caller holds ``self._lock``."""
-        self._active.discard(key)
-        count = self._per_repo_active.get(repo_slug, 0)
-        if count <= 1:
-            self._per_repo_active.pop(repo_slug, None)
+        """Drop the in-flight markers for ``key``. Caller holds ``self._lock``.
+
+        ``cap_exempt`` mirrors the value passed at submit time: an
+        exempt submit lives in ``_tracked`` instead of ``_active`` /
+        ``_per_repo_active``, so the release path symmetric to it
+        clears that single set and leaves the cap counters alone.
+        """
+        if cap_exempt:
+            self._tracked.discard(key)
         else:
-            self._per_repo_active[repo_slug] = count - 1
+            self._active.discard(key)
+            count = self._per_repo_active.get(repo_slug, 0)
+            if count <= 1:
+                self._per_repo_active.pop(repo_slug, None)
+            else:
+                self._per_repo_active[repo_slug] = count - 1
         if family:
             self._family_active_repos.discard(repo_slug)
 
@@ -302,6 +386,7 @@ class IssueScheduler:
         key: tuple[str, int],
         repo_slug: str,
         family: bool,
+        cap_exempt: bool = False,
     ) -> None:
         # Marker release and completion-queue append happen in ONE
         # critical section so the transition is atomic from `reap`'s
@@ -313,7 +398,9 @@ class IssueScheduler:
         # one lock for both steps guarantees that any reap which sees
         # the cleared marker also sees the completed future.
         with self._lock:
-            self._release_slot_locked(key, repo_slug, family=family)
+            self._release_slot_locked(
+                key, repo_slug, family=family, cap_exempt=cap_exempt,
+            )
             self._completed.append(future)
 
     @contextlib.contextmanager

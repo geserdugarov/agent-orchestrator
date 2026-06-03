@@ -796,5 +796,269 @@ class TrackActiveContextManagerTest(unittest.TestCase):
             release.set()
 
 
+class CapExemptSubmitTest(unittest.TestCase):
+    """``submit(cap_exempt=True)`` skips the global and per-repo cap
+    counters while still honoring the duplicate-active gate and the
+    family mutex. Production uses this for the umbrella-only family
+    bucket so an umbrella aggregation always gets its turn even when
+    the parallel caps are saturated by ordinary implementation work.
+    """
+
+    def test_cap_exempt_submit_bypasses_global_cap(self) -> None:
+        sched = IssueScheduler(global_cap=1, per_repo_cap=10)
+        self.addCleanup(sched.shutdown)
+        start_a = threading.Event()
+        start_b = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/a", 1, lambda: _worker(start_a, release),
+                )
+            )
+            self.assertTrue(start_a.wait(timeout=2.0))
+            self.assertEqual(sched.active_count(), 1)
+
+            # Normal submit on a different repo is rejected: global cap=1
+            # and one slot is in use.
+            self.assertFalse(
+                sched.submit(
+                    "owner/b", 2, lambda: self.fail("must not run"),
+                )
+            )
+
+            # Cap-exempt submit on the same different repo IS accepted
+            # even though the global cap is saturated.
+            self.assertTrue(
+                sched.submit(
+                    "owner/b", 3,
+                    lambda: _worker(start_b, release),
+                    cap_exempt=True,
+                )
+            )
+            self.assertTrue(start_b.wait(timeout=2.0))
+            # The exempt submit must NOT have inflated the global
+            # counter -- still one cap-counted worker in flight.
+            self.assertEqual(sched.active_count(), 1)
+            # And the exempt submit is visible via `is_active`.
+            self.assertTrue(sched.is_active("owner/b", 3))
+        finally:
+            release.set()
+
+    def test_cap_exempt_submit_bypasses_per_repo_cap(self) -> None:
+        sched = IssueScheduler(global_cap=10, per_repo_cap=1)
+        self.addCleanup(sched.shutdown)
+        start_a = threading.Event()
+        start_b = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 1, lambda: _worker(start_a, release),
+                )
+            )
+            self.assertTrue(start_a.wait(timeout=2.0))
+            self.assertEqual(sched.active_count("owner/repo"), 1)
+
+            # Normal submit on the same repo is rejected by per_repo_cap.
+            self.assertFalse(
+                sched.submit(
+                    "owner/repo", 2, lambda: self.fail("must not run"),
+                )
+            )
+
+            # Cap-exempt submit on the same repo IS accepted.
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 3,
+                    lambda: _worker(start_b, release),
+                    cap_exempt=True,
+                )
+            )
+            self.assertTrue(start_b.wait(timeout=2.0))
+            self.assertEqual(sched.active_count("owner/repo"), 1)
+
+            # A second cap-exempt submit (different key) on the same
+            # repo also bypasses the cap -- exemption is per submit,
+            # not a single-slot escape hatch.
+            start_c = threading.Event()
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 4,
+                    lambda: _worker(start_c, release),
+                    cap_exempt=True,
+                )
+            )
+            self.assertTrue(start_c.wait(timeout=2.0))
+            self.assertEqual(sched.active_count("owner/repo"), 1)
+        finally:
+            release.set()
+
+    def test_cap_exempt_submit_still_honors_family_mutex(self) -> None:
+        # The cap exemption only bypasses the cap counters; family-aware
+        # submits still serialize per repo so an exempt umbrella bucket
+        # cannot overlap with a regular (non-exempt) family worker.
+        sched = IssueScheduler(global_cap=10, per_repo_cap=10)
+        self.addCleanup(sched.shutdown)
+        start = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 100,
+                    lambda: _worker(start, release),
+                    family=True,
+                )
+            )
+            self.assertTrue(start.wait(timeout=2.0))
+
+            # Cap-exempt family submit on the same repo is rejected by
+            # the family mutex even though both caps are wide open.
+            self.assertFalse(
+                sched.submit(
+                    "owner/repo", 101,
+                    lambda: self.fail("must not run"),
+                    family=True,
+                    cap_exempt=True,
+                )
+            )
+        finally:
+            release.set()
+
+    def test_cap_exempt_submit_still_honors_duplicate_active(self) -> None:
+        # A cap-exempt submit for an already-in-flight key is rejected.
+        # `is_active` returns True for an exempt-submitted key so a
+        # follow-up fanout submit cannot slip past the duplicate gate.
+        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
+        self.addCleanup(sched.shutdown)
+        start = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 7,
+                    lambda: _worker(start, release),
+                    cap_exempt=True,
+                )
+            )
+            self.assertTrue(start.wait(timeout=2.0))
+            self.assertTrue(sched.is_active("owner/repo", 7))
+
+            # Duplicate key, cap-exempt: rejected.
+            self.assertFalse(
+                sched.submit(
+                    "owner/repo", 7,
+                    lambda: self.fail("must not run"),
+                    cap_exempt=True,
+                )
+            )
+            # Duplicate key, non-exempt: also rejected.
+            self.assertFalse(
+                sched.submit(
+                    "owner/repo", 7,
+                    lambda: self.fail("must not run"),
+                )
+            )
+        finally:
+            release.set()
+
+    def test_cap_exempt_pool_is_independent_of_global_cap(self) -> None:
+        # Regression: a prior implementation sized the cap-exempt
+        # executor at ``global_cap``. With ``global_cap=1`` and two
+        # umbrella-only buckets on different repos, the second
+        # exempt submit was accepted past the cap check but then
+        # queued at the executor until the first exited -- so
+        # umbrella throughput was still transitively capped by
+        # ``MAX_PARALLEL_ISSUES_GLOBAL``. The fix sizes the exempt
+        # pool independently of ``global_cap`` so multiple exempt
+        # buckets can run concurrently regardless of how tight the
+        # ordinary cap is.
+        sched = IssueScheduler(global_cap=1, per_repo_cap=10)
+        self.addCleanup(sched.shutdown)
+        start_a = threading.Event()
+        start_b = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/a", 0,
+                    lambda: _worker(start_a, release),
+                    family=True,
+                    cap_exempt=True,
+                )
+            )
+            self.assertTrue(start_a.wait(timeout=2.0))
+
+            # A second umbrella-only bucket on a DIFFERENT repo must
+            # start immediately even though ``global_cap=1`` and the
+            # first exempt worker is still in flight. The family
+            # mutex is per-repo, so the cross-repo claim is fine; the
+            # only thing that could keep the second submit waiting is
+            # an executor pool that re-imposes the global cap.
+            self.assertTrue(
+                sched.submit(
+                    "owner/b", 0,
+                    lambda: _worker(start_b, release),
+                    family=True,
+                    cap_exempt=True,
+                )
+            )
+            self.assertTrue(
+                start_b.wait(timeout=2.0),
+                "second umbrella bucket queued behind the first -- "
+                "exempt executor is still capped by global_cap",
+            )
+        finally:
+            release.set()
+
+    def test_cap_exempt_completion_clears_marker_and_family_slot(self) -> None:
+        # Completing an exempt family submit must release BOTH its
+        # tracked-set marker (so `is_active` flips back to False) and
+        # the family mutex (so the next family submit on this repo is
+        # accepted). Without symmetric release, the exempt path would
+        # leak markers and starve subsequent family work.
+        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
+        self.addCleanup(sched.shutdown)
+        done = threading.Event()
+        self.assertTrue(
+            sched.submit(
+                "owner/repo", 50,
+                lambda: done.set(),
+                family=True,
+                cap_exempt=True,
+            )
+        )
+        self.assertTrue(done.wait(timeout=2.0))
+
+        deadline = threading.Event()
+        timer = threading.Timer(2.0, deadline.set)
+        timer.daemon = True
+        timer.start()
+        try:
+            while sched.is_active("owner/repo", 50) and not deadline.is_set():
+                pass
+        finally:
+            timer.cancel()
+        self.assertFalse(sched.is_active("owner/repo", 50))
+        self.assertEqual(sched.active_count(), 0)
+        self.assertEqual(sched.active_count("owner/repo"), 0)
+
+        # A non-exempt family submit on the same repo must now be
+        # accepted -- the exempt completion released the family slot.
+        start = threading.Event()
+        release = threading.Event()
+        try:
+            self.assertTrue(
+                sched.submit(
+                    "owner/repo", 51,
+                    lambda: _worker(start, release),
+                    family=True,
+                )
+            )
+            self.assertTrue(start.wait(timeout=2.0))
+        finally:
+            release.set()
+
+
 if __name__ == "__main__":
     unittest.main()

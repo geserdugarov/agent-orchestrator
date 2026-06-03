@@ -812,6 +812,174 @@ class TickViaSchedulerTest(unittest.TestCase):
         self.assertEqual(seen_client_ids[0], id(cloned_clients[0]))
 
 
+class UmbrellaCapExemptionTest(unittest.TestCase):
+    """The umbrella label aggregates child PRs; its handler does not
+    spawn an agent and does not touch a worktree. To keep a parent
+    umbrella from being starved by ordinary implementation work when the
+    parallel caps are saturated, the dispatcher submits the family
+    bucket as ``cap_exempt=True`` whenever every family-aware issue this
+    tick is labeled ``umbrella``. Mixed buckets (umbrella alongside
+    decomposing / blocked / unlabeled-pickup) stay cap-counted because
+    the non-umbrella entries DO real work.
+    """
+
+    def _spec(self, parallel_limit: int = 5) -> config.RepoSpec:
+        return config.RepoSpec(
+            slug="acme/widget",
+            target_root=Path("/tmp/orchestrator-test-target-root"),
+            base_branch="main",
+            parallel_limit=parallel_limit,
+        )
+
+    def _wait_idle(self, sched, repo_slug: str, deadline_s: float = 5.0) -> None:
+        import threading as _threading
+        deadline = _threading.Event()
+        timer = _threading.Timer(deadline_s, deadline.set)
+        timer.daemon = True
+        timer.start()
+        try:
+            while sched.active_count(repo_slug) > 0 and not deadline.is_set():
+                pass
+        finally:
+            timer.cancel()
+        self.assertEqual(sched.active_count(repo_slug), 0)
+
+    def test_umbrella_only_bucket_runs_when_per_repo_cap_is_saturated(self) -> None:
+        # Per-repo cap is 1 and a fanout `implementing` issue already
+        # holds the slot. A pure umbrella bucket on the same repo must
+        # still run this tick: the dispatcher submits it cap-exempt so
+        # the parent aggregation cannot be starved by the implementer.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="implementing"))
+        gh.add_issue(make_issue(2, label="umbrella"))
+
+        starts: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+        }
+        releases: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+        }
+
+        def fake_process(_gh, _spec, issue) -> None:
+            starts[issue.number].set()
+            releases[issue.number].wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(
+                    gh, self._spec(parallel_limit=1), scheduler=sched,
+                )
+                self.assertTrue(
+                    starts[1].wait(timeout=2.0),
+                    "implementing fanout #1 did not start",
+                )
+                self.assertTrue(
+                    starts[2].wait(timeout=2.0),
+                    "umbrella #2 was blocked by the per-repo cap -- the "
+                    "exempt bucket must run alongside the fanout slot",
+                )
+        finally:
+            for ev in releases.values():
+                ev.set()
+        self._wait_idle(sched, "acme/widget")
+
+    def test_umbrella_only_bucket_does_not_inflate_cap_counters(self) -> None:
+        # While an umbrella-only bucket is in flight, the scheduler's
+        # `active_count` must report ZERO cap-counted workers: the
+        # bucket sentinel lives in the cap-exempt tracked set. Without
+        # this, a follow-up fanout submit on a tightly-capped repo
+        # would see the umbrella inflating the counter and be skipped.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="umbrella"))
+
+        start = threading.Event()
+        release = threading.Event()
+
+        def fake_process(_gh, _spec, _issue) -> None:
+            start.set()
+            release.wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(gh, self._spec(), scheduler=sched)
+                self.assertTrue(start.wait(timeout=2.0))
+                # The umbrella bucket is in flight but the cap counters
+                # are untouched -- the bucket sentinel is exempt.
+                self.assertEqual(sched.active_count(), 0)
+                self.assertEqual(sched.active_count("acme/widget"), 0)
+                # Active tracking still works: the umbrella issue
+                # currently being processed registers via `track_active`.
+                self.assertTrue(sched.is_active("acme/widget", 1))
+        finally:
+            release.set()
+        self._wait_idle(sched, "acme/widget")
+
+    def test_mixed_family_bucket_still_counts_against_caps(self) -> None:
+        # When the bucket has a non-umbrella family entry (decomposing
+        # here), the cap-exempt path must NOT engage -- the
+        # decomposing handler invokes an agent and is real work. A
+        # fanout submit beyond the per-repo cap must be skipped this
+        # tick.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="decomposing"))
+        gh.add_issue(make_issue(2, label="umbrella"))
+        gh.add_issue(make_issue(3, label="implementing"))
+
+        starts: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+            3: threading.Event(),
+        }
+        releases: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+            3: threading.Event(),
+        }
+
+        def fake_process(_gh, _spec, issue) -> None:
+            starts[issue.number].set()
+            releases[issue.number].wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(
+                    gh, self._spec(parallel_limit=1), scheduler=sched,
+                )
+                # Mixed family bucket (decomposing + umbrella) is the
+                # one allowed cap-counted slot. The implementing fanout
+                # must be skipped: per_repo_cap=1.
+                self.assertTrue(starts[1].wait(timeout=2.0))
+                time.sleep(0.1)
+                self.assertFalse(
+                    starts[3].is_set(),
+                    "implementing #3 should have been rejected by the "
+                    "per-repo cap -- the family bucket is cap-counted "
+                    "because the mix contains a non-umbrella entry",
+                )
+                # While the bucket is in flight the cap counter shows 1.
+                self.assertEqual(sched.active_count("acme/widget"), 1)
+        finally:
+            for ev in releases.values():
+                ev.set()
+        self._wait_idle(sched, "acme/widget")
+
 
 if __name__ == "__main__":
     unittest.main()

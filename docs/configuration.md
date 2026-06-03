@@ -139,7 +139,7 @@ The two caps below are the levers:
 | Variable                       | Default | Purpose                                                                                              |
 | ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------- |
 | `MAX_PARALLEL_ISSUES_PER_REPO` | `1`     | per-repo cap on concurrent in-flight per-issue handlers within one repo. Default `1` keeps the legacy one-at-a-time behavior. Each `REPOS` entry can override this via its optional fifth pipe-separated field. Must be a positive integer. |
-| `MAX_PARALLEL_ISSUES_GLOBAL`   | `3`     | global cap across all configured repos. Bounds the total concurrent agent fan-out regardless of any one repo's `parallel_limit`. Must be a positive integer; raise only on hosts with the CPU / memory headroom to run that many agent CLIs at once. |
+| `MAX_PARALLEL_ISSUES_GLOBAL`   | `3`     | global cap across all configured repos for cap-counted handlers. Bounds the total concurrent agent fan-out regardless of any one repo's `parallel_limit`. Must be a positive integer; raise only on hosts with the CPU / memory headroom to run that many agent CLIs at once. Umbrella-only family buckets are cap-exempt and run on a dedicated executor independent of this cap. |
 
 Both caps are enforced by a single `IssueScheduler` (see `orchestrator/scheduler.py`) built once at startup with `global_cap=MAX_PARALLEL_ISSUES_GLOBAL` and `per_repo_cap=MAX_PARALLEL_ISSUES_PER_REPO`, and threaded through every `workflow.tick(gh, spec, scheduler=...)` call. The scheduler owns the in-flight set, the per-repo counters, the family-aware mutex, and the executor that actually runs the handlers; the tick itself returns as soon as it has submitted work. Each per-spec `parallel_limit` is forwarded as a per-call override, so a `REPOS` entry with a tighter cap binds without changing the scheduler default.
 
@@ -149,6 +149,8 @@ When the dispatch loop offers an issue to the scheduler, the submit is nonblocki
 - the global cap is reached,
 - the per-repo cap is reached,
 - the issue is family-aware and another family worker on the same repo is already in flight.
+
+`umbrella` issues are exempt from the global and per-repo caps. When every family-aware issue in this tick's bucket carries the `umbrella` label, the dispatcher submits the bucket as cap-exempt: it does not consume a `MAX_PARALLEL_ISSUES_PER_REPO` / `MAX_PARALLEL_ISSUES_GLOBAL` slot and runs on a dedicated executor pool so it never queues behind cap-counted work. The family mutex still applies, so a follow-up tick that picks up a non-umbrella family issue still serializes against any in-flight umbrella bucket. Mixed buckets (umbrella alongside `decomposing` / `blocked` / unlabeled pickup) stay cap-counted because their non-umbrella entries do real work.
 
 Family-aware classification mirrors the cross-issue write surface:
 
