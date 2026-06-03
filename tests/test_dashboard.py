@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the non-Streamlit logic in `orchestrator.dashboard`.
 
-The Streamlit and pandas imports inside `dashboard.main` are
-deliberately lazy so the orchestrator polling tick never pulls them
-in. These tests exercise the pure helpers (date window math, the
-disabled-DB banner, the issue-number drill-down parser) and assert
-the lazy-import invariant -- the module must load even when
-`streamlit` is not on the install path. That way the suite stays
-hermetic regardless of which dependency group an operator synced.
+The Streamlit, pandas, Plotly, and chart-builder imports inside
+`dashboard.main` are deliberately lazy so the orchestrator polling
+tick never pulls them in. These tests exercise the pure helpers
+(date window math, preset window selection, KPI deltas, insight
+banners, the disabled-DB banner, the issue-number drill-down
+parser, and the cache-key shape) and assert the lazy-import
+invariant -- the module must load even when `streamlit` is not on
+the install path. That way the suite stays hermetic regardless of
+which dependency group an operator synced.
 
 The module-reload pattern mirrors `tests/test_analytics_read.py`:
 re-import under a hermetic env so the dashboard's `from orchestrator
@@ -315,6 +317,333 @@ class ResolveStageFilterTest(unittest.TestCase):
             available=("implementing", "validating"),
         )
         self.assertEqual(result, ["implementing"])
+
+
+class PresetWindowTest(unittest.TestCase):
+    """The data-extent-bounded presets anchor at the data extent's
+    max date (not today): a freshly-deployed Postgres whose latest
+    event is a few days old should still surface a useful window
+    without the operator having to flip to Custom and reach for a
+    calendar.
+    """
+
+    def _extent(self, min_d, max_d):
+        _, dashboard = _reload()
+        return dashboard.DataExtent(
+            min_ts=datetime(min_d.year, min_d.month, min_d.day,
+                            tzinfo=timezone.utc),
+            max_ts=datetime(max_d.year, max_d.month, max_d.day, 23, 59,
+                            tzinfo=timezone.utc),
+        )
+
+    def test_seven_day_preset_anchors_at_max(self) -> None:
+        _, dashboard = _reload()
+        extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
+        window = dashboard.preset_window(dashboard.PRESET_7D, extent)
+        self.assertIsNotNone(window)
+        self.assertEqual(window.start.date(), date(2026, 5, 22))
+        self.assertEqual(window.end.date(), date(2026, 5, 29))
+
+    def test_thirty_day_preset_clamps_to_min(self) -> None:
+        # Data extent is only 5 days wide -- "Last 30 days" must
+        # clamp the start at the data extent's min, not reach
+        # before it.
+        _, dashboard = _reload()
+        extent = self._extent(date(2026, 5, 24), date(2026, 5, 28))
+        window = dashboard.preset_window(dashboard.PRESET_30D, extent)
+        self.assertIsNotNone(window)
+        self.assertEqual(window.start.date(), date(2026, 5, 24))
+        self.assertEqual(window.end.date(), date(2026, 5, 29))
+
+    def test_all_preset_covers_full_extent(self) -> None:
+        _, dashboard = _reload()
+        extent = self._extent(date(2026, 1, 1), date(2026, 5, 28))
+        window = dashboard.preset_window(dashboard.PRESET_ALL, extent)
+        self.assertIsNotNone(window)
+        self.assertEqual(window.start.date(), date(2026, 1, 1))
+        self.assertEqual(window.end.date(), date(2026, 5, 29))
+
+    def test_custom_preset_returns_none(self) -> None:
+        # The caller renders a date-range picker when the preset is
+        # `Custom`; `preset_window` returns `None` so the caller can
+        # branch on a falsy value rather than special-casing the
+        # preset string in two places.
+        _, dashboard = _reload()
+        extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
+        self.assertIsNone(
+            dashboard.preset_window(dashboard.PRESET_CUSTOM, extent)
+        )
+
+    def test_empty_extent_returns_none(self) -> None:
+        _, dashboard = _reload()
+        empty = dashboard.DataExtent()
+        self.assertIsNone(
+            dashboard.preset_window(dashboard.PRESET_30D, empty)
+        )
+
+    def test_unknown_preset_returns_none(self) -> None:
+        _, dashboard = _reload()
+        extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
+        self.assertIsNone(
+            dashboard.preset_window("not-a-preset", extent)
+        )
+
+
+class PreviousWindowTest(unittest.TestCase):
+    """The previous-window helper feeds the KPI delta column. It must
+    return a window of the same length immediately before `window`
+    so the deltas compare like-for-like (e.g. last-30-days vs the
+    30 days before that).
+    """
+
+    def test_length_preserved(self) -> None:
+        _, dashboard = _reload()
+        win = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 7))
+        prev = dashboard.previous_window(win)
+        self.assertEqual(prev.end, win.start)
+        self.assertEqual(prev.end - prev.start, win.end - win.start)
+
+    def test_seven_day_window_yields_seven_day_previous(self) -> None:
+        _, dashboard = _reload()
+        win = dashboard.to_window(date(2026, 5, 22), date(2026, 5, 28))
+        prev = dashboard.previous_window(win)
+        # `to_window`'s end is exclusive (one day past `end_date`),
+        # so the seven-day window spans 7 calendar days; the previous
+        # window starts seven days before the current start.
+        self.assertEqual(prev.start.date(), date(2026, 5, 15))
+        self.assertEqual(prev.end.date(), date(2026, 5, 22))
+
+
+class KpiDeltaTest(unittest.TestCase):
+
+    def test_positive_delta(self) -> None:
+        _, dashboard = _reload()
+        self.assertAlmostEqual(dashboard.kpi_delta(125, 100), 0.25)
+
+    def test_negative_delta(self) -> None:
+        _, dashboard = _reload()
+        self.assertAlmostEqual(dashboard.kpi_delta(75, 100), -0.25)
+
+    def test_zero_previous_returns_none(self) -> None:
+        # The dashboard hides the delta indicator rather than
+        # rendering an infinity for the zero-baseline case.
+        _, dashboard = _reload()
+        self.assertIsNone(dashboard.kpi_delta(10, 0))
+
+    def test_negative_previous_returns_none(self) -> None:
+        _, dashboard = _reload()
+        self.assertIsNone(dashboard.kpi_delta(10, -5))
+
+
+class ComputeInsightsTest(unittest.TestCase):
+    """The insight banners are derived computationally from the
+    read-model rows; this test pins the threshold semantics so a
+    future tuning pass changes them deliberately.
+    """
+
+    def _summary(
+        self,
+        *,
+        events=0,
+        cost=0.0,
+        agent_runs=0,
+        failed=0,
+    ):
+        _, dashboard = _reload()
+        return dashboard.Summary(
+            total_events=events,
+            total_agent_runs=agent_runs,
+            failed_agent_runs=failed,
+            total_cost_usd=cost,
+        )
+
+    def test_no_banners_for_healthy_window(self) -> None:
+        _, dashboard = _reload()
+        summary = self._summary(events=100, agent_runs=50, failed=0, cost=10.0)
+        prev = self._summary(events=90, agent_runs=45, failed=0, cost=9.0)
+        self.assertEqual(
+            dashboard.compute_insights(summary, prev_summary=prev),
+            [],
+        )
+
+    def test_high_failure_rate_emits_error(self) -> None:
+        _, dashboard = _reload()
+        summary = self._summary(agent_runs=10, failed=3)
+        banners = dashboard.compute_insights(summary)
+        self.assertEqual(len(banners), 1)
+        self.assertEqual(banners[0].severity, "error")
+        self.assertIn("3 of 10", banners[0].message)
+
+    def test_low_failure_rate_skips_banner(self) -> None:
+        _, dashboard = _reload()
+        summary = self._summary(agent_runs=100, failed=5)
+        self.assertEqual(dashboard.compute_insights(summary), [])
+
+    def test_cost_surge_emits_warning(self) -> None:
+        _, dashboard = _reload()
+        summary = self._summary(cost=200.0)
+        prev = self._summary(cost=100.0)
+        banners = dashboard.compute_insights(summary, prev_summary=prev)
+        # Cost surge is the only banner here -- previous failures are
+        # zero so the failure-rate banner does not fire.
+        self.assertTrue(
+            any(
+                b.severity == "warning" and "up 100%" in b.message
+                for b in banners
+            )
+        )
+
+    def test_cost_drop_emits_info(self) -> None:
+        _, dashboard = _reload()
+        summary = self._summary(cost=50.0)
+        prev = self._summary(cost=100.0)
+        banners = dashboard.compute_insights(summary, prev_summary=prev)
+        self.assertTrue(
+            any(
+                b.severity == "info" and "down 50%" in b.message
+                for b in banners
+            )
+        )
+
+    def test_unpriced_coverage_emits_warning(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import CostCoverageRow
+        summary = self._summary()
+        cov = [
+            CostCoverageRow(cost_source="reported", runs=70),
+            CostCoverageRow(cost_source="unknown-price", runs=20),
+            CostCoverageRow(cost_source="unknown", runs=10),
+        ]
+        banners = dashboard.compute_insights(
+            summary, cost_coverage_rows=cov
+        )
+        # 30 / 100 = 30% unpriced -- well over the 10% threshold.
+        self.assertTrue(
+            any(
+                b.severity == "warning"
+                and "30 of 100" in b.message
+                for b in banners
+            )
+        )
+
+    def test_unpriced_below_threshold_skips(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import CostCoverageRow
+        summary = self._summary()
+        cov = [
+            CostCoverageRow(cost_source="reported", runs=99),
+            CostCoverageRow(cost_source="unknown-price", runs=1),
+        ]
+        self.assertEqual(
+            dashboard.compute_insights(summary, cost_coverage_rows=cov),
+            [],
+        )
+
+
+class TopExpensiveIssuesTest(unittest.TestCase):
+
+    def _issue(self, repo, num, cost, events=1):
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import IssueSummaryRow
+        return IssueSummaryRow(
+            repo=repo,
+            issue=num,
+            event_count=events,
+            first_seen=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            last_seen=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            latest_stage="implementing",
+            agent_exits=1,
+            total_cost_usd=cost,
+            total_input_tokens=0,
+            total_output_tokens=0,
+        )
+
+    def test_sorts_by_cost_desc(self) -> None:
+        _, dashboard = _reload()
+        rows = [
+            self._issue("acme/a", 1, 0.10),
+            self._issue("acme/b", 2, 1.00),
+            self._issue("acme/c", 3, 0.50),
+        ]
+        top = dashboard.top_expensive_issues(rows, limit=2)
+        self.assertEqual([(r.repo, r.issue) for r in top],
+                         [("acme/b", 2), ("acme/c", 3)])
+
+    def test_none_cost_sorts_last(self) -> None:
+        _, dashboard = _reload()
+        rows = [
+            self._issue("acme/a", 1, None),
+            self._issue("acme/b", 2, 0.10),
+        ]
+        top = dashboard.top_expensive_issues(rows, limit=5)
+        self.assertEqual([r.issue for r in top], [2, 1])
+
+    def test_limit_zero_returns_empty(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._issue("acme/a", 1, 0.10)]
+        self.assertEqual(dashboard.top_expensive_issues(rows, limit=0), [])
+
+    def test_ties_break_on_event_count_then_identity(self) -> None:
+        _, dashboard = _reload()
+        rows = [
+            self._issue("acme/a", 1, 1.00, events=2),
+            self._issue("acme/a", 2, 1.00, events=10),
+            self._issue("acme/b", 1, 1.00, events=2),
+        ]
+        top = dashboard.top_expensive_issues(rows)
+        # Higher event count first, then (repo, issue) ascending.
+        self.assertEqual(
+            [(r.repo, r.issue) for r in top],
+            [("acme/a", 2), ("acme/a", 1), ("acme/b", 1)],
+        )
+
+
+class CacheKeyTest(unittest.TestCase):
+    """`st.cache_data` hashes the cache key tuple; lists from
+    multiselects need to become tuples, and `None` must be preserved
+    so the tri-state filter contract (None / [] / [...]) does not
+    collapse at the cache layer.
+    """
+
+    def test_lists_become_tuples(self) -> None:
+        _, dashboard = _reload()
+        window = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 7))
+        key = dashboard.cache_key(
+            window, "acme/widgets",
+            ["agent_exit", "stage_enter"], ["implementing"], 42,
+        )
+        self.assertEqual(
+            key,
+            (
+                window.start,
+                window.end,
+                "acme/widgets",
+                ("agent_exit", "stage_enter"),
+                ("implementing",),
+                42,
+            ),
+        )
+        hash(key)  # must be hashable
+
+    def test_none_is_preserved(self) -> None:
+        _, dashboard = _reload()
+        window = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 7))
+        key = dashboard.cache_key(window, None, None, None, None)
+        self.assertEqual(
+            key, (window.start, window.end, None, None, None, None)
+        )
+
+    def test_empty_list_distinct_from_none(self) -> None:
+        # Empty events / stages mean "cleared multiselect, show
+        # nothing"; the cache key must keep the empty tuple distinct
+        # from None so the two SQL shapes do not collide in cache.
+        _, dashboard = _reload()
+        window = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 7))
+        empty = dashboard.cache_key(window, "r", [], [], None)
+        none = dashboard.cache_key(window, "r", None, None, None)
+        self.assertNotEqual(empty, none)
+        self.assertEqual(empty[3], ())
+        self.assertEqual(empty[4], ())
 
 
 if __name__ == "__main__":
