@@ -196,7 +196,7 @@ class CostByStageTest(unittest.TestCase):
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
 class CostByReviewRoundTest(unittest.TestCase):
 
-    def test_renders_bucket_labels_from_view(self) -> None:
+    def test_renders_review_round_labels_in_logical_order(self) -> None:
         rows = [
             ReviewRoundBucketRow(
                 bucket="0", runs=12, failed=0, total_cost_usd=40.0
@@ -205,7 +205,7 @@ class CostByReviewRoundTest(unittest.TestCase):
                 bucket="1", runs=4, failed=1, total_cost_usd=20.0
             ),
             ReviewRoundBucketRow(
-                bucket="3-5", runs=2, failed=2, total_cost_usd=15.0
+                bucket="3", runs=2, failed=2, total_cost_usd=15.0
             ),
         ]
         fig = dashboard_charts.cost_by_review_round(rows)
@@ -213,7 +213,7 @@ class CostByReviewRoundTest(unittest.TestCase):
         # carries the run count.
         self.assertEqual(len(fig.data[0].y), 3)
         joined = " ".join(fig.data[0].y)
-        for needle in ("Initial", "Round 1", "Rounds 3-5", "12 runs"):
+        for needle in ("Initial", "Round 1", "Round 3", "12 runs"):
             self.assertIn(needle, joined)
 
     def test_empty_renders_placeholder(self) -> None:

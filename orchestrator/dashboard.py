@@ -121,10 +121,14 @@ UNPRICED_COVERAGE_THRESHOLD = 0.10
 # "rework dominates" banner. Matches the standalone mock's `>= 30%`.
 REWORK_SHARE_BANNER_THRESHOLD = 0.30
 UNPRICED_COST_SOURCES: frozenset[str] = frozenset({"unknown-price", "unknown"})
-# Bucket strings the `analytics_agent_runs` view emits whose runs are
+# Bucket strings the review-round breakdown emits whose runs are
 # "rework" (i.e. happened after the initial pass). Used to compute the
-# rework share KPI.
-REWORK_BUCKETS: frozenset[str] = frozenset({"1", "2", "3-5", "6+"})
+# rework share KPI. `get_review_round_breakdown` keeps rounds 3, 4 and
+# 5 separate (only 6+ is grouped), so every post-initial round is
+# listed explicitly here.
+REWORK_BUCKETS: frozenset[str] = frozenset(
+    {"1", "2", "3", "4", "5", "6+"}
+)
 
 UNCONFIGURED_DB_MESSAGE = (
     "`ANALYTICS_DB_URL` is not configured. Set it in your environment "
@@ -941,31 +945,26 @@ def main() -> None:
     # query lands below.
     topbar_slot = st.empty()
 
-    # Filter bar: presets + date inputs + range meta inside the
-    # `.orch-filterbar` card the standalone mock uses. The bordered
-    # container is the same trick the rest of the card grid uses --
-    # the anchor sentinel right before it lets `PAGE_CSS` target this
-    # specific container with the filter-bar styling so it picks up
-    # the cream / border palette and inline layout. Preset state
-    # persists in session_state so a custom date pick survives reruns.
+    # Filter bar: presets + date inputs + range meta inside a bordered
+    # container styled as the "Date range" card. Preset state persists
+    # in session_state so a custom date pick survives reruns.
     if "preset" not in st.session_state:
         st.session_state.preset = DEFAULT_PRESET
     with st.container(border=True):
-        # Sentinel sits INSIDE the bordered container so the CSS
-        # rule `div[stVerticalBlockBorderWrapper]:has(.orch-filterbar-anchor)`
-        # can match the wrapper directly. An earlier draft placed the
-        # anchor BEFORE the container and used `stMarkdown +
-        # stVerticalBlockBorderWrapper`, but Streamlit wraps every
-        # element in its own `stElementContainer` -- the sibling
-        # adjacency never lands, so the filter-bar styling silently
-        # fell back to the generic card rule.
-        st.markdown(
-            '<div class="orch-filterbar-anchor"></div>'
-            '<span class="orch-filter-label">Date range</span>',
-            unsafe_allow_html=True,
-        )
+        # The `.orch-filterbar-anchor` sentinel sits INSIDE the bordered
+        # container (first child of the left column) so the CSS rule
+        # `:has(.orch-filterbar-anchor)` can target this wrapper for the
+        # filter-bar layout. Keeping the "Date range" label in the left
+        # column -- rather than on its own row above the controls -- puts
+        # the label + presets, the From / To inputs, and the range meta
+        # on a single, vertically-centered row.
         fb_left, fb_mid, fb_right = st.columns([2, 3, 3])
         with fb_left:
+            st.markdown(
+                '<div class="orch-filterbar-anchor"></div>'
+                '<span class="orch-filter-label">Date range</span>',
+                unsafe_allow_html=True,
+            )
             preset_choice = st.radio(
                 "Range preset",
                 options=(PRESET_3D, PRESET_7D, PRESET_ALL),
@@ -1350,12 +1349,18 @@ def main() -> None:
                     backend_by_day if stack_mode == "backend" else None
                 ),
                 mode=stack_mode,
+                # The card header already renders the title; suppress
+                # the in-chart title so it is not duplicated.
+                title=None,
             ),
             use_container_width=True,
             config=PLOTLY_CONFIG,
         )
 
     # ── Stage cost (7/12) + review-round cost (5/12) ─────────────
+    # Pin both bar panels to the same height (driven by whichever has
+    # more bars) so the two cards line up bottom-to-bottom.
+    bars_h = 40 * max(len(stage_rows), len(review_round_rows), 1) + 80
     col_stage, col_round = st.columns([7, 5])
     with col_stage:
         with st.container(border=True):
@@ -1367,7 +1372,7 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
             st.plotly_chart(
-                dashboard_charts.cost_by_stage(stage_rows),
+                dashboard_charts.cost_by_stage(stage_rows, height=bars_h),
                 use_container_width=True,
                 config=PLOTLY_CONFIG,
             )
@@ -1381,7 +1386,9 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
             st.plotly_chart(
-                dashboard_charts.cost_by_review_round(review_round_rows),
+                dashboard_charts.cost_by_review_round(
+                    review_round_rows, height=bars_h
+                ),
                 use_container_width=True,
                 config=PLOTLY_CONFIG,
             )

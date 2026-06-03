@@ -290,11 +290,14 @@ class IssueEventRow:
 
 @dataclass(frozen=True)
 class ReviewRoundBucketRow:
-    """Per-`review_round_bucket` count and cost of agent runs.
+    """Per-review-round count and cost of agent runs.
 
-    `bucket` is the categorical string the view emits (`0`, `1`, `2`,
-    `3-5`, `6+`); it is exposed verbatim so the dashboard chart's
-    x-axis can use the same labels. `failed` is the subset of `runs`
+    `bucket` is the categorical round string
+    (`0`/`1`/`2`/`3`/`4`/`5`/`6+`, plus `unknown` for NULL rounds);
+    `get_review_round_breakdown` derives it from the raw
+    `review_round` so rounds 3-5 stay separate and only 6+ is grouped.
+    It is exposed verbatim so the dashboard chart's labels can map
+    each bucket directly. `failed` is the subset of `runs`
     that exited non-zero so the chart can stack the failure ratio on
     top of the total. `total_cost_usd` rolls up the cost-priced
     agent-run rows in each bucket so the redesigned dashboard can
@@ -1376,16 +1379,17 @@ def get_review_round_breakdown(
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> list[ReviewRoundBucketRow]:
-    """Per-`review_round_bucket` agent-run counts.
+    """Per-review-round agent-run counts.
 
-    Reads from `analytics_agent_runs`; the view's
-    `review_round_bucket` collapses the long tail of high review
-    rounds into `0` / `1` / `2` / `3-5` / `6+` so the chart x-axis
-    stays bounded. Rows with `review_round IS NULL` (and therefore
-    a NULL bucket) surface under `"unknown"` so pre-review work
-    stays visible. The `events` filter is honored by short-circuit:
-    if the operator excluded `agent_exit` from the events
-    multiselect (or cleared it), every agent-run aggregate
+    Reads from `analytics_agent_runs` but derives the bucket from the
+    raw `review_round` column rather than the view's
+    `review_round_bucket`: rounds 0-5 are kept as individual buckets
+    (`0`/`1`/`2`/`3`/`4`/`5`) and only 6+ is grouped, so the chart can
+    show rework round-by-round instead of collapsing 3-5. Rows with
+    `review_round IS NULL` surface under `"unknown"` so pre-review
+    work stays visible. The `events` filter is honored by
+    short-circuit: if the operator excluded `agent_exit` from the
+    events multiselect (or cleared it), every agent-run aggregate
     returns empty so the dashboard's "show nothing for this
     dimension" semantics stays consistent across widgets.
     """
@@ -1401,7 +1405,16 @@ def get_review_round_breakdown(
     )
     sql = (
         "SELECT "
-        "COALESCE(review_round_bucket, 'unknown') AS bucket, "
+        # Derive the bucket from the raw `review_round` so rounds 3, 4
+        # and 5 stay separate (the view's `review_round_bucket` collapses
+        # them into a single `3-5`). 6+ is still grouped to bound the
+        # long tail, and NULL rounds surface as `unknown`.
+        "CASE "
+        "WHEN review_round IS NULL THEN 'unknown' "
+        "WHEN review_round <= 0 THEN '0' "
+        "WHEN review_round >= 6 THEN '6+' "
+        "ELSE review_round::text "
+        "END AS bucket, "
         "COUNT(*) AS runs, "
         "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs, "
         "COALESCE(SUM(cost_usd), 0) AS bucket_cost_usd "

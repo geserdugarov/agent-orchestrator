@@ -104,6 +104,9 @@ REVIEW_ROUND_COLORS: Mapping[str, str] = {
     "0": "#5b6cf0",
     "1": "#e8a13a",
     "2": "#e07a3a",
+    "3": "#dd6a3c",
+    "4": "#d9534a",
+    "5": "#c33f37",
     "3-5": "#d9534a",
     "6+": "#a8201e",
     "unknown": NEUTRAL,
@@ -288,7 +291,14 @@ PAGE_CSS = f"""
     font-family: {FONT_FAMILY};
   }}
   div[data-testid="stHeader"] {{ background: transparent; }}
-  div[data-testid="stMain"] > div.block-container {{
+  /* Main content column. Scoped by the stable `.block-container`
+     class (the sidebar uses a different wrapper) rather than a
+     `data-testid="stMain"` ancestor -- that testid is absent in some
+     Streamlit releases, which silently dropped the max-width AND the
+     white-card rules below, leaving every card on the gray page. */
+  div[data-testid="stAppViewContainer"] .block-container,
+  section.main > div.block-container,
+  div.block-container {{
     background: transparent;
     padding-top: 0; padding-bottom: 48px;
     max-width: {CONTENT_MAX_WIDTH};
@@ -340,39 +350,41 @@ PAGE_CSS = f"""
     letter-spacing: -0.01em;
     font-family: {MONO_FONT_FAMILY};
   }}
-  /* Filter bar: sticky right below the topbar so the date controls
-     stay glued to the chrome as the operator scrolls -- matches the
-     mock's `.filterbar2` (top: 71px). The bordered container the
-     date inputs live in picks up the styling because the dashboard
-     renders an `.orch-filterbar-anchor` sentinel as the FIRST child
-     inside the container; we then target the wrapper directly via
-     `:has(.orch-filterbar-anchor)`. An earlier draft relied on
-     `stMarkdown + stVerticalBlockBorderWrapper` sibling adjacency,
-     but every Streamlit element is wrapped in its own
-     `stElementContainer`, so the sibling selector never matched and
-     the filter bar fell through to the generic card rule. */
+  /* Filter bar: the "Date range" card. Rendered as a normal white
+     rounded card -- the same surface as every other card -- targeted
+     via the `.orch-filterbar-anchor` sentinel the dashboard renders as
+     the first child inside the bordered container (`:has()` matches the
+     wrapper directly, independent of the `stMain` ancestor other rules
+     relied on). The row is vertically centered, the gap under the label
+     is tightened, and the date-input bottom margin dropped so From / To
+     no longer float with dead space above and below them. */
   .orch-filterbar,
   div[data-testid="stVerticalBlockBorderWrapper"]:has(
     .orch-filterbar-anchor
   ) {{
     background: var(--orch-card) !important;
-    border: 0 !important;
-    border-bottom: 1px solid var(--orch-border) !important;
-    border-radius: 0 !important;
-    position: sticky; top: {TOPBAR_STICKY_HEIGHT}; z-index: 19;
+    border: 1px solid var(--orch-border) !important;
+    border-radius: var(--orch-radius) !important;
     margin: 0 0 var(--orch-gap) !important;
-    width: 100%;
-    padding: 11px clamp(16px, 4vw, 40px) !important;
+    padding: var(--orch-pad) !important;
     box-sizing: border-box;
     font-family: {FONT_FAMILY};
   }}
-  div[data-testid="stVerticalBlockBorderWrapper"]:has(
-    .orch-filterbar-anchor
-  )
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.orch-filterbar-anchor)
     div[data-testid="stHorizontalBlock"] {{
     align-items: center;
   }}
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.orch-filterbar-anchor)
+    div[data-testid="stVerticalBlock"] {{
+    gap: 0.6rem;
+  }}
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.orch-filterbar-anchor)
+    div[data-testid="stDateInput"] {{
+    margin-bottom: 0;
+  }}
+  .orch-filterbar-anchor {{ display: none; }}
   .orch-filter-label {{
+    display: block; margin-bottom: 2px;
     color: var(--orch-muted-soft); font-size: 11px; font-weight: 500;
     text-transform: uppercase; letter-spacing: 0.06em;
   }}
@@ -383,9 +395,10 @@ PAGE_CSS = f"""
   }}
   /* Content gutter: re-add the horizontal padding the block-
      container used to provide so the cards do not sit flush
-     against the page edge while the sticky bars still go
-     full-bleed. */
-  div[data-testid="stMain"] > div.block-container {{
+     against the page edge. */
+  div[data-testid="stAppViewContainer"] .block-container,
+  section.main > div.block-container,
+  div.block-container {{
     padding-left: clamp(16px, 3vw, 28px);
     padding-right: clamp(16px, 3vw, 28px);
   }}
@@ -468,25 +481,58 @@ PAGE_CSS = f"""
      stacking a `st.markdown(...)` opening tag, the widget, and a
      closing tag would leave each widget as a sibling in the DOM
      instead. We restyle Streamlit's bordered-container wrapper to
-     match the mock's 14px radius / 20px padding card. The selector
-     is double-scoped through `data-testid="stMain"` so the sidebar
-     bordered containers (if any) keep their default Streamlit look,
-     and excludes the filter-bar container (which carries its own
-     `.orch-filterbar-anchor` sentinel) so the generic !important
-     padding does not override the filter bar's intended 11px. */
-  div[data-testid="stMain"] div[data-testid="stVerticalBlockBorderWrapper"]:not(:has(.orch-filterbar-anchor)) {{
+     match the mock's 14px radius / 20px padding white card.
+
+     A plain attribute selector -- NOT scoped through
+     `data-testid="stMain"` (absent in some Streamlit releases) and NOT
+     using `:not(:has(...))` (the embedded browser dropped that whole
+     rule as an unsupported selector, which is why every card except
+     the filter bar stayed gray). This styles ALL bordered containers
+     white, including the filter bar, which then only needs its own
+     layout tweaks below. `print-color-adjust: exact` keeps the white
+     fill in the PDF/print export instead of being stripped. */
+  div[data-testid="stVerticalBlockBorderWrapper"] {{
     background: var(--orch-card) !important;
     border: 1px solid var(--orch-border) !important;
     border-radius: var(--orch-radius) !important;
     padding: var(--orch-pad) !important;
     margin-bottom: var(--orch-gap) !important;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
     font-family: {FONT_FAMILY};
   }}
   /* Drop the nested border that Streamlit applies when a bordered
      container is itself inside a column -- avoids a double border. */
-  div[data-testid="stMain"] div[data-testid="column"]
+  div[data-testid="column"]
     div[data-testid="stVerticalBlockBorderWrapper"] {{
     margin-bottom: 0 !important;
+  }}
+  /* Keep any sidebar bordered container on its default Streamlit
+     surface rather than the white page card. */
+  div[data-testid="stSidebar"]
+    div[data-testid="stVerticalBlockBorderWrapper"] {{
+    background: transparent !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin-bottom: 0 !important;
+  }}
+  /* Equal-height cards across a `st.columns` row: stretch each column
+     to the tallest in the row, then let its bordered card fill the
+     column height. This levels the paired panels (review-round vs
+     workflow-stage, backend-efficiency vs expensive-issues,
+     reliability vs repo-cost) even when their content differs. */
+  div[data-testid="stHorizontalBlock"] {{ align-items: stretch; }}
+  div[data-testid="stHorizontalBlock"] > div[data-testid="column"],
+  div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {{
+    display: flex; flex-direction: column;
+  }}
+  div[data-testid="column"] > div[data-testid="stVerticalBlock"],
+  div[data-testid="stColumn"] > div[data-testid="stVerticalBlock"] {{
+    flex: 1 1 auto; height: 100%;
+  }}
+  div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"],
+  div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"] {{
+    height: 100%;
   }}
   .orch-card-title {{
     color: var(--orch-ink); font-size: 15px; font-weight: 600;

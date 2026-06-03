@@ -37,6 +37,7 @@ column already exposed by ``orchestrator.analytics.read``.
 """
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 from typing import Optional, Sequence
 
@@ -94,12 +95,44 @@ def _date_axis(days: Sequence[date]) -> list:
     return list(days)
 
 
+def _nice_axis_max(value: float, steps: int) -> float:
+    """Smallest "nice" axis maximum >= `value`, divisible into `steps`
+    equal round increments.
+
+    Picks a step size off the 1 / 2 / 2.5 / 5 / 10 x 10ⁿ ladder so the
+    axis tops out just above the data while every tick stays a round
+    number. Returning ``step_size * steps`` (rather than the raw
+    maximum) lets two independent axes share the exact same fractional
+    tick positions: divide each into the same `steps` and a gridline on
+    one axis lands on the same pixel row as the matching tick on the
+    other. Non-positive input yields `max(steps, 1)` so a flat / empty
+    series still draws `steps` unit-high gridlines instead of a zero-
+    height axis.
+    """
+    if value <= 0 or steps <= 0:
+        return float(max(steps, 1))
+    rough = value / steps
+    mag = 10 ** math.floor(math.log10(rough))
+    norm = rough / mag
+    if norm <= 1:
+        nice = 1.0
+    elif norm <= 2:
+        nice = 2.0
+    elif norm <= 2.5:
+        nice = 2.5
+    elif norm <= 5:
+        nice = 5.0
+    else:
+        nice = 10.0
+    return nice * mag * steps
+
+
 def usage_over_time(
     points: Sequence[TimeSeriesPoint],
     *,
     backend_rows_by_day: Optional[dict[date, dict[str, float]]] = None,
     mode: str = "type",
-    title: str = "Spend & token usage over time",
+    title: Optional[str] = "Spend & token usage over time",
 ) -> go.Figure:
     """Hero chart: stacked daily token usage with a cost line overlay.
 
@@ -233,19 +266,52 @@ def usage_over_time(
     )
 
     layout = theme.base_layout(title=title)
+    # Align the two y-axes on a shared set of horizontal gridlines.
+    # Both axes start at zero and split into the same number of equal
+    # steps, so each tokens gridline and its USD counterpart sit on the
+    # same pixel row. Without this Plotly picks independent "nice"
+    # ranges (e.g. 6 token lines from 0 to 1B vs 5 USD lines to $1000)
+    # whose gridlines visually drift apart. Only the left (tokens) axis
+    # draws the gridlines; the right (USD) axis ticks land on them.
+    if mode == "backend" and backend_rows_by_day:
+        stack_totals = [
+            sum(backend_rows_by_day.get(d, {}).values()) for d in days
+        ]
+    else:
+        stack_totals = [
+            daily[d]["input"] + daily[d]["output"] + daily[d]["cache"]
+            for d in days
+        ]
+    token_max = max(stack_totals, default=0.0)
+    cost_max = max((daily[d]["cost"] for d in days), default=0.0)
+    grid_steps = 5
+    token_top = _nice_axis_max(token_max, grid_steps)
+    cost_top = _nice_axis_max(cost_max, grid_steps)
     layout["yaxis"] = {
         **layout.get("yaxis", {}),
         "title": {"text": "tokens"},
+        "range": [0, token_top],
+        "dtick": token_top / grid_steps,
+        "rangemode": "tozero",
+        "showgrid": True,
     }
     layout["yaxis2"] = {
         "title": {"text": "USD"},
         "overlaying": "y",
         "side": "right",
+        "range": [0, cost_top],
+        "dtick": cost_top / grid_steps,
+        "rangemode": "tozero",
         "gridcolor": theme.GRID,
         "linecolor": theme.GRID,
+        "showgrid": False,
         "tickprefix": "$",
         "tickfont": {"color": theme.MUTED_TEXT},
     }
+    # The card header already prints the chart title, so `title` is
+    # passed as None from the dashboard; keep enough top margin for the
+    # horizontal legend that floats just above the plot area.
+    layout["margin"] = {**layout.get("margin", {}), "t": 28}
     layout["hovermode"] = "x unified"
     layout["legend"] = {
         **layout.get("legend", {}),
@@ -266,6 +332,8 @@ def cost_horizontal_bars(
     *,
     title: Optional[str] = None,
     accent: Optional[str] = None,
+    preserve_order: bool = False,
+    height: Optional[int] = None,
 ) -> go.Figure:
     """Horizontal cost bars with per-row sub-label and per-bar value.
 
@@ -276,18 +344,26 @@ def cost_horizontal_bars(
     every row carries the same hue (the per-row `color` always wins
     when set).
 
-    The chart is sorted by cost descending so the largest spend sits
-    at the top. Each bar is annotated with the dollar amount at its
-    tip, matching the standalone mock's labelled bars.
+    By default the chart is sorted by cost descending so the largest
+    spend sits at the top. Pass `preserve_order=True` to keep the
+    caller's order instead (e.g. review rounds, which read best in
+    logical Initial -> 1 -> ... -> 6+ -> Unknown order rather than by
+    cost). `height` overrides the auto-computed panel height so two
+    paired panels can be pinned to the same height.
     """
     if not items:
         # Match the single-row non-empty case (`40 * 1 + 80`) so an
         # empty card sits at the same minimum height instead of
         # snapping to Plotly's 450px default.
         return _empty_figure(
-            "No data matches the current filters.", height=120,
+            "No data matches the current filters.",
+            height=height or 120,
         )
-    ordered = sorted(items, key=lambda it: -float(it[2] or 0.0))
+    ordered = (
+        list(items)
+        if preserve_order
+        else sorted(items, key=lambda it: -float(it[2] or 0.0))
+    )
     labels = [it[0] for it in ordered]
     subs = [it[1] for it in ordered]
     values = [float(it[2] or 0.0) for it in ordered]
@@ -333,9 +409,10 @@ def cost_horizontal_bars(
     # Size the panel to the bar count: ~40px per row plus a fixed
     # top / bottom margin. Plotly's 450px default makes a 3-row
     # panel float in an empty box; a 6-row panel still fits inside
-    # the same hero-chart height.
+    # the same hero-chart height. An explicit `height` (e.g. to match
+    # a paired panel) overrides the per-row computation.
     n_rows = max(len(values), 1)
-    layout["height"] = 40 * n_rows + 80
+    layout["height"] = height if height is not None else 40 * n_rows + 80
     fig.update_layout(**layout)
     fig.update_xaxes(
         title_text="USD", tickprefix="$",
@@ -345,7 +422,9 @@ def cost_horizontal_bars(
     return fig
 
 
-def cost_by_stage(rows: Sequence[StageBreakdown]) -> go.Figure:
+def cost_by_stage(
+    rows: Sequence[StageBreakdown], *, height: Optional[int] = None
+) -> go.Figure:
     """Build the per-workflow-stage cost bars.
 
     Each row carries the stage name as the bar label, the row's
@@ -357,11 +436,13 @@ def cost_by_stage(rows: Sequence[StageBreakdown]) -> go.Figure:
     stage (so it includes `stage_enter` / `stage_evaluation`
     alongside `agent_exit`), which would overstate stage activity
     against the per-run cost; `runs` narrows to the
-    `event = 'agent_exit'` subset for the same query.
+    `event = 'agent_exit'` subset for the same query. `height` is
+    forwarded so the panel can be pinned to a paired panel's height.
     """
     if not rows:
         return _empty_figure(
-            "No stage data matches the current filters.", height=120,
+            "No stage data matches the current filters.",
+            height=height or 120,
         )
     items = [
         (
@@ -372,42 +453,54 @@ def cost_by_stage(rows: Sequence[StageBreakdown]) -> go.Figure:
         )
         for r in rows
     ]
-    return cost_horizontal_bars(items)
+    return cost_horizontal_bars(items, height=height)
 
 
-def cost_by_review_round(rows: Sequence[ReviewRoundBucketRow]) -> go.Figure:
+def cost_by_review_round(
+    rows: Sequence[ReviewRoundBucketRow], *, height: Optional[int] = None
+) -> go.Figure:
     """Build the per-review-round cost bars.
 
-    `0` is the initial pass; every later bucket is rework. The bucket
-    order (`0`, `1`, `2`, `3-5`, `6+`, `unknown`) is fixed by the
-    `analytics_agent_runs` view, but Plotly draws horizontal bars
-    bottom-up, so `cost_horizontal_bars` re-sorts descending by cost
-    -- the operator reads the most expensive round at the top of the
-    panel.
+    `0` is the initial pass; every later round is rework. Buckets are
+    rendered in logical order -- Initial -> Round 1 -> ... -> Round 5
+    -> Rounds 6+ -> Unknown, top to bottom -- rather than sorted by
+    cost, so the operator reads the rework progression in sequence.
+    `get_review_round_breakdown` keeps rounds 3, 4 and 5 separate
+    (only 6+ is grouped). `height` is forwarded so the panel can be
+    pinned to the workflow-stage panel's height.
     """
     if not rows:
         return _empty_figure(
             "No `agent_exit` rows match the current filters.",
-            height=120,
+            height=height or 120,
         )
     label_map = {
         "0": "Initial",
         "1": "Round 1",
         "2": "Round 2",
-        "3-5": "Rounds 3-5",
+        "3": "Round 3",
+        "4": "Round 4",
+        "5": "Round 5",
         "6+": "Rounds 6+",
         "unknown": "Unknown",
     }
+    # Logical sequence, top (Initial) to bottom (Unknown). Plotly draws
+    # the first y-value at the bottom, and `cost_horizontal_bars`
+    # reverses the list before plotting, so passing this order with
+    # `preserve_order=True` lands Initial at the top of the panel.
+    order = ["0", "1", "2", "3", "4", "5", "6+", "unknown"]
+    by_bucket = {r.bucket: r for r in rows}
     items = [
         (
-            label_map.get(r.bucket, r.bucket),
-            f"{int(r.runs):,} runs",
-            float(r.total_cost_usd or 0.0),
-            theme.color_for(r.bucket, explicit=theme.REVIEW_ROUND_COLORS),
+            label_map.get(b, b),
+            f"{int(by_bucket[b].runs):,} runs",
+            float(by_bucket[b].total_cost_usd or 0.0),
+            theme.color_for(b, explicit=theme.REVIEW_ROUND_COLORS),
         )
-        for r in rows
+        for b in order
+        if b in by_bucket
     ]
-    return cost_horizontal_bars(items)
+    return cost_horizontal_bars(items, preserve_order=True, height=height)
 
 
 def cost_by_repo(rows: Sequence[RepoBreakdownRow]) -> go.Figure:

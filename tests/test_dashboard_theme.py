@@ -192,10 +192,15 @@ class PageCssTest(unittest.TestCase):
             'div[data-testid="stVerticalBlockBorderWrapper"]:has(',
             theme.PAGE_CSS,
         )
-        # The generic card rule excludes the filter bar so its
-        # 11px padding is not overridden by the 20px card padding
-        # `!important`.
+        # The generic card rule intentionally avoids `:not(:has(...))`
+        # because the embedded browser dropped that unsupported
+        # compound selector and left ordinary cards unstyled.
         self.assertIn(
+            'div[data-testid="stVerticalBlockBorderWrapper"] {',
+            theme.PAGE_CSS,
+        )
+        self.assertIn("print-color-adjust: exact", theme.PAGE_CSS)
+        self.assertNotIn(
             ":not(:has(.orch-filterbar-anchor))", theme.PAGE_CSS
         )
 
