@@ -929,6 +929,82 @@ class IssuesTableHtmlTest(unittest.TestCase):
         self.assertIn('class="orch-badge-warn">4', html_out)
 
 
+class DeltaPillTest(unittest.TestCase):
+    """KPI delta pills must paint cost / token increases red and
+    drops green. An earlier draft mapped `invert=True && value > 0`
+    to the `.down` class (green) for "Total spend" and "Total
+    tokens", which painted rising cost green -- backwards for a
+    cost dashboard. The fix drops `invert=True` from those KPIs so
+    the default mapping (up=red, down=green) lands.
+    """
+
+    def test_positive_default_paints_up_red_arrow(self) -> None:
+        _, dashboard = _reload()
+        out = dashboard._delta_pill(0.25)
+        self.assertIn('orch-delta up', out)
+        self.assertIn('▲', out)
+
+    def test_negative_default_paints_down_green_arrow(self) -> None:
+        _, dashboard = _reload()
+        out = dashboard._delta_pill(-0.25)
+        self.assertIn('orch-delta down', out)
+        self.assertIn('▼', out)
+
+    def test_invert_swaps_only_color_not_arrow(self) -> None:
+        # `invert=True` reserved for "up is good" KPIs (issues
+        # resolved, success rate). The arrow still follows the
+        # value's sign so the direction is unambiguous, but the
+        # color swaps so positive growth reads as green.
+        _, dashboard = _reload()
+        pos = dashboard._delta_pill(0.25, invert=True)
+        neg = dashboard._delta_pill(-0.25, invert=True)
+        self.assertIn('orch-delta down', pos)
+        self.assertIn('▲', pos)
+        self.assertIn('orch-delta up', neg)
+        self.assertIn('▼', neg)
+
+    def test_none_renders_flat_dash(self) -> None:
+        _, dashboard = _reload()
+        self.assertIn('orch-delta flat', dashboard._delta_pill(None))
+
+
+class InsightsHtmlTest(unittest.TestCase):
+    """The colored icon carries severity, so the rendered message
+    no longer leads with a redundant `Warning.` / `Info.` prefix.
+    """
+
+    def test_message_renders_without_severity_lead_in(self) -> None:
+        _, dashboard = _reload()
+        banner = dashboard.InsightBanner(
+            severity="warning",
+            message="Rework dominates spend -- rounds >= 1 account for 35%.",
+        )
+        out = dashboard._insights_html([banner])
+        # The message body lands verbatim and the severity word is
+        # NOT prefixed.
+        self.assertIn(
+            "Rework dominates spend -- rounds &gt;= 1 account for 35%.",
+            out,
+        )
+        self.assertNotIn("<strong>Warning.</strong>", out)
+        # The CSS class still carries the severity so the colored
+        # icon / banner background paints correctly.
+        self.assertIn('orch-insight warning', out)
+
+
+class PlotlyConfigTest(unittest.TestCase):
+    """`PLOTLY_CONFIG` is passed to every `st.plotly_chart` so the
+    hover modebar (camera / zoom / pan) stays off every card --
+    the standalone mock has no chart chrome.
+    """
+
+    def test_plotly_config_disables_modebar(self) -> None:
+        _, dashboard = _reload()
+        self.assertEqual(
+            dashboard.PLOTLY_CONFIG.get("displayModeBar"), False
+        )
+
+
 class CacheKeyTest(unittest.TestCase):
     """`st.cache_data` hashes the cache key tuple; lists from
     multiselects need to become tuples, and `None` must be preserved

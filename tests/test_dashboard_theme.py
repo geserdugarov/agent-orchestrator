@@ -177,16 +177,46 @@ class PageCssTest(unittest.TestCase):
         ):
             self.assertIn(needle, theme.PAGE_CSS)
 
-    def test_filterbar_styling_targets_anchor_sibling(self) -> None:
+    def test_filterbar_styling_targets_anchor_via_has(self) -> None:
         # `.orch-filterbar` must actually paint the bordered
-        # container the dashboard wraps the date controls in --
-        # otherwise the first viewport falls back to Streamlit's
-        # default chrome and never matches the mock's filter bar.
-        # The dashboard renders an `.orch-filterbar-anchor`
-        # sentinel right before the bordered container so a sibling
-        # selector applies the styling.
+        # container the dashboard wraps the date controls in. The
+        # earlier draft relied on `stMarkdown + stVerticalBlockBorderWrapper`
+        # sibling adjacency, but every Streamlit element is wrapped
+        # in its own `stElementContainer`, so that adjacency never
+        # matched. The redesigned rule targets the wrapper directly
+        # via `:has(.orch-filterbar-anchor)` and the dashboard renders
+        # the anchor as the FIRST child inside the bordered container.
         self.assertIn(".orch-filterbar", theme.PAGE_CSS)
         self.assertIn(".orch-filterbar-anchor", theme.PAGE_CSS)
+        self.assertIn(
+            'div[data-testid="stVerticalBlockBorderWrapper"]:has(',
+            theme.PAGE_CSS,
+        )
+        # The generic card rule excludes the filter bar so its
+        # 11px padding is not overridden by the 20px card padding
+        # `!important`.
+        self.assertIn(
+            ":not(:has(.orch-filterbar-anchor))", theme.PAGE_CSS
+        )
+
+    def test_segmented_control_has_visible_selected_state(self) -> None:
+        # The earlier draft just hid the radio dot, leaving the
+        # active option indistinguishable from the inactive ones.
+        # The redesigned rule wraps the radiogroup in a chip-colored
+        # pill and lights up the selected label via `:has(input:checked)`.
+        self.assertIn(
+            'div[data-testid="stRadio"] > div[role="radiogroup"]',
+            theme.PAGE_CSS,
+        )
+        self.assertIn(":has(input:checked)", theme.PAGE_CSS)
+
+    def test_chrome_does_not_full_bleed_with_100vw(self) -> None:
+        # `100vw` includes the vertical scrollbar's width but the
+        # content area does not, so a full-bleed bar overflows by
+        # ~15px on any page tall enough to scroll. Keep the topbar
+        # and filter bar inside the content column instead.
+        self.assertNotIn("width: 100vw", theme.PAGE_CSS)
+        self.assertNotIn("calc(50% - 50vw)", theme.PAGE_CSS)
 
 
 class StandaloneTokenMirrorTest(unittest.TestCase):

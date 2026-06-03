@@ -294,18 +294,21 @@ PAGE_CSS = f"""
     max-width: {CONTENT_MAX_WIDTH};
   }}
   /* Topbar ------------------------------------------------------ */
-  /* Sticky to top:0 within the block-container; the negative
-     horizontal margins + `100vw` width let it extend past the
-     content column so the cream background never leaks behind the
-     bar at large viewports. */
+  /* Sticky to top:0 within the block-container. Stays inside the
+     content column (no `100vw` full-bleed) -- a viewport-width bar
+     overflows by the vertical scrollbar's width on any page tall
+     enough to scroll, which produces a horizontal scrollbar and a
+     sliver of background past the bar's right edge. The mock's bar
+     is visually fine bounded to the 1480px content column. */
   .orch-topbar {{
     display: flex; align-items: center; justify-content: space-between;
     gap: 24px; flex-wrap: wrap;
     background: var(--orch-card);
     border-bottom: 1px solid var(--orch-border);
     position: sticky; top: 0; z-index: 20;
-    margin: 0 calc(50% - 50vw) 0; width: 100vw;
+    margin: 0 0 var(--orch-gap); width: 100%;
     padding: 18px clamp(16px, 4vw, 40px);
+    box-sizing: border-box;
     font-family: {FONT_FAMILY};
   }}
   .orch-brand {{ display: flex; align-items: center; gap: 14px; }}
@@ -340,23 +343,32 @@ PAGE_CSS = f"""
   /* Filter bar: sticky right below the topbar so the date controls
      stay glued to the chrome as the operator scrolls -- matches the
      mock's `.filterbar2` (top: 71px). The bordered container the
-     date inputs live in picks up the same full-bleed treatment via
-     the `.orch-filterbar-anchor` sibling selector. */
+     date inputs live in picks up the styling because the dashboard
+     renders an `.orch-filterbar-anchor` sentinel as the FIRST child
+     inside the container; we then target the wrapper directly via
+     `:has(.orch-filterbar-anchor)`. An earlier draft relied on
+     `stMarkdown + stVerticalBlockBorderWrapper` sibling adjacency,
+     but every Streamlit element is wrapped in its own
+     `stElementContainer`, so the sibling selector never matched and
+     the filter bar fell through to the generic card rule. */
   .orch-filterbar,
-  div[data-testid="stMarkdown"]:has(.orch-filterbar-anchor)
-    + div[data-testid="stVerticalBlockBorderWrapper"] {{
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(
+    .orch-filterbar-anchor
+  ) {{
     background: var(--orch-card) !important;
     border: 0 !important;
     border-bottom: 1px solid var(--orch-border) !important;
     border-radius: 0 !important;
     position: sticky; top: {TOPBAR_STICKY_HEIGHT}; z-index: 19;
-    margin: 0 calc(50% - 50vw) var(--orch-gap) !important;
-    width: 100vw;
+    margin: 0 0 var(--orch-gap) !important;
+    width: 100%;
     padding: 11px clamp(16px, 4vw, 40px) !important;
+    box-sizing: border-box;
     font-family: {FONT_FAMILY};
   }}
-  div[data-testid="stMarkdown"]:has(.orch-filterbar-anchor)
-    + div[data-testid="stVerticalBlockBorderWrapper"]
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(
+    .orch-filterbar-anchor
+  )
     div[data-testid="stHorizontalBlock"] {{
     align-items: center;
   }}
@@ -458,8 +470,11 @@ PAGE_CSS = f"""
      instead. We restyle Streamlit's bordered-container wrapper to
      match the mock's 14px radius / 20px padding card. The selector
      is double-scoped through `data-testid="stMain"` so the sidebar
-     bordered containers (if any) keep their default Streamlit look. */
-  div[data-testid="stMain"] div[data-testid="stVerticalBlockBorderWrapper"] {{
+     bordered containers (if any) keep their default Streamlit look,
+     and excludes the filter-bar container (which carries its own
+     `.orch-filterbar-anchor` sentinel) so the generic !important
+     padding does not override the filter bar's intended 11px. */
+  div[data-testid="stMain"] div[data-testid="stVerticalBlockBorderWrapper"]:not(:has(.orch-filterbar-anchor)) {{
     background: var(--orch-card) !important;
     border: 1px solid var(--orch-border) !important;
     border-radius: var(--orch-radius) !important;
@@ -537,9 +552,33 @@ PAGE_CSS = f"""
     color: var(--orch-muted-soft); text-align: center;
     font-family: {MONO_FONT_FAMILY};
   }}
-  /* Streamlit segmented control + date inputs ------------------ */
+  /* Streamlit segmented control --------------------------------
+     The dashboard drives two `st.radio(..., horizontal=True,
+     label_visibility="collapsed")` controls (date-range preset,
+     hero stack toggle). An earlier draft just hid the radio dot,
+     which left the active option indistinguishable from the
+     inactive ones -- bare text floating with no chrome. Style the
+     radiogroup as a real segmented pill so the selected option
+     paints a white pill with a soft shadow against the chip
+     background, matching the standalone mock. The `:has(input:checked)`
+     selector lights up the active label; modern Chromium / Safari /
+     Firefox all support it. */
+  div[data-testid="stRadio"] > div[role="radiogroup"] {{
+    display: inline-flex; gap: 2px; padding: 3px;
+    background: var(--orch-chip); border-radius: 9px;
+  }}
+  div[data-testid="stRadio"] label[data-baseweb="radio"] {{
+    margin: 0; padding: 5px 12px; border-radius: 7px; cursor: pointer;
+    font-size: 13px; color: var(--orch-muted);
+    background: transparent;
+    transition: background-color .12s, color .12s, box-shadow .12s;
+  }}
   div[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child {{
     display: none;
+  }}
+  div[data-testid="stRadio"] label[data-baseweb="radio"]:has(input:checked) {{
+    background: var(--orch-card); color: var(--orch-ink);
+    box-shadow: 0 1px 3px rgba(0,0,0,.10);
   }}
 </style>
 """

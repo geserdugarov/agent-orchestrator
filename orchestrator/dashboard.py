@@ -83,6 +83,12 @@ DEFAULT_WINDOW_DAYS = 7
 DEFAULT_RECENT_AGENT_EXITS = 100
 DEFAULT_EXPENSIVE_LIMIT = 8
 
+# Plotly config passed to every `st.plotly_chart` call. Disabling
+# the modebar keeps the hover camera/zoom/pan toolbar off the cards
+# -- the standalone mock has no chart chrome, and the toolbar pops
+# on hover for every chart on the page otherwise.
+PLOTLY_CONFIG: dict[str, Any] = {"displayModeBar": False}
+
 # Sidebar window presets. `Custom` keeps the two-date picker so the
 # operator can pin an arbitrary window inside the data extent. The
 # redesigned topbar exposes the presets inline (`3D` / `7D` / `All`)
@@ -560,9 +566,16 @@ def _sparkline_svg(
 def _delta_pill(value: Optional[float], *, invert: bool = False) -> str:
     """Render a KPI delta pill (▲/▼ NN.N%) as inline HTML.
 
-    `invert=True` flips the up / down coloring (e.g. for a "cost
-    delta" where positive growth is bad). `None` renders a flat
-    dash so the layout slot stays consistent.
+    Color convention -- ``.orch-delta.up`` is red, ``.orch-delta.down``
+    is green. With ``invert=False`` (the default) a rising value paints
+    red and a falling value paints green: this is the right convention
+    for cost / token KPIs where "up is bad". ``invert=True`` swaps the
+    coloring so positive growth paints green -- use it for KPIs where
+    "up is good" (e.g. issues resolved, success rate). The arrow always
+    follows the value's sign so the direction is unambiguous even at a
+    glance.
+
+    ``None`` renders a flat dash so the layout slot stays consistent.
     """
     if value is None:
         return '<span class="orch-delta flat">—</span>'
@@ -814,7 +827,14 @@ def _card_header_html(title: str, subtitle: str = "") -> str:
 def _insights_html(
     banners: Sequence[InsightBanner],
 ) -> str:
-    """Render the computed-insight stack."""
+    """Render the computed-insight stack.
+
+    The colored icon (red `✕` / `!` for warning + error, neutral `›`
+    / `✓` for info + success) carries the severity, so the rendered
+    message no longer leads with a redundant `Warning.` / `Info.`
+    prefix -- the standalone mock leads each banner with a short
+    descriptive title and lets the icon paint the severity.
+    """
     icon_for = {
         "error": "✕", "warning": "!", "info": "›", "success": "✓",
     }
@@ -824,8 +844,7 @@ def _insights_html(
         rows.append(
             f'<div class="orch-insight {html.escape(b.severity)}">'
             f'<span class="icon">{icon}</span>'
-            f'<span><strong>{html.escape(b.severity.title())}.</strong>'
-            f' {html.escape(b.message)}</span>'
+            f'<span>{html.escape(b.message)}</span>'
             '</div>'
         )
     return '<div class="orch-insights">' + "".join(rows) + '</div>'
@@ -931,12 +950,17 @@ def main() -> None:
     # persists in session_state so a custom date pick survives reruns.
     if "preset" not in st.session_state:
         st.session_state.preset = DEFAULT_PRESET
-    st.markdown(
-        '<div class="orch-filterbar-anchor"></div>',
-        unsafe_allow_html=True,
-    )
     with st.container(border=True):
+        # Sentinel sits INSIDE the bordered container so the CSS
+        # rule `div[stVerticalBlockBorderWrapper]:has(.orch-filterbar-anchor)`
+        # can match the wrapper directly. An earlier draft placed the
+        # anchor BEFORE the container and used `stMarkdown +
+        # stVerticalBlockBorderWrapper`, but Streamlit wraps every
+        # element in its own `stElementContainer` -- the sibling
+        # adjacency never lands, so the filter-bar styling silently
+        # fell back to the generic card rule.
         st.markdown(
+            '<div class="orch-filterbar-anchor"></div>'
             '<span class="orch-filter-label">Date range</span>',
             unsafe_allow_html=True,
         )
@@ -1243,7 +1267,6 @@ def main() -> None:
             "label": "Total spend",
             "value": theme.fmt_money_exact(total_cost),
             "delta": kpi_delta(total_cost, total_cost_prev),
-            "invert": True,
             "sub": (
                 f"{theme.fmt_money(total_cost / days_in_window)}/day"
             ),
@@ -1254,7 +1277,6 @@ def main() -> None:
             "label": "Total tokens",
             "value": theme.fmt_tokens(total_tokens),
             "delta": kpi_delta(total_tokens, total_tokens_prev),
-            "invert": True,
             "sub": f"{theme.fmt_tokens(total_tokens / days_in_window)}/day",
             "spark": daily_tokens,
             "spark_color": theme.TOKEN_TYPE_COLORS["Input"],
@@ -1330,6 +1352,7 @@ def main() -> None:
                 mode=stack_mode,
             ),
             use_container_width=True,
+            config=PLOTLY_CONFIG,
         )
 
     # ── Stage cost (7/12) + review-round cost (5/12) ─────────────
@@ -1346,6 +1369,7 @@ def main() -> None:
             st.plotly_chart(
                 dashboard_charts.cost_by_stage(stage_rows),
                 use_container_width=True,
+                config=PLOTLY_CONFIG,
             )
     with col_round:
         with st.container(border=True):
@@ -1359,6 +1383,7 @@ def main() -> None:
             st.plotly_chart(
                 dashboard_charts.cost_by_review_round(review_round_rows),
                 use_container_width=True,
+                config=PLOTLY_CONFIG,
             )
 
     # ── Top expensive issues (7/12) + backend efficiency (5/12) ──
@@ -1528,6 +1553,7 @@ def main() -> None:
             st.plotly_chart(
                 dashboard_charts.cost_by_repo(repo_rows),
                 use_container_width=True,
+                config=PLOTLY_CONFIG,
             )
     with col_rel:
         with st.container(border=True):
@@ -1570,6 +1596,7 @@ def main() -> None:
                     title=None,
                 ),
                 use_container_width=True,
+                config=PLOTLY_CONFIG,
             )
 
     # ── When agents run (heatmap) ────────────────────────────────
@@ -1584,6 +1611,7 @@ def main() -> None:
         st.plotly_chart(
             dashboard_charts.hour_weekday_heatmap(heatmap_rows),
             use_container_width=True,
+            config=PLOTLY_CONFIG,
         )
 
     # ── Recent agent runs expander ───────────────────────────────

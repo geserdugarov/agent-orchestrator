@@ -61,16 +61,20 @@ _WEEKDAY_LABELS: tuple[str, ...] = (
 )
 
 
-def _empty_figure(message: str) -> go.Figure:
+def _empty_figure(message: str, *, height: int) -> go.Figure:
     """Return a placeholder figure with a centered annotation.
 
     Plotly raises no error on an empty data series, but the default
     "blank canvas" is a confusing empty-state. Every builder routes
     its no-data branch through here so the user sees a single
-    consistent "nothing matches" label across charts.
+    consistent "nothing matches" label across charts. `height` mirrors
+    the builder's pinned non-empty height so empty cards do not snap
+    to Plotly's 450px default and dwarf surrounding cards.
     """
     fig = go.Figure()
-    fig.update_layout(**theme.base_layout())
+    layout = theme.base_layout()
+    layout["height"] = height
+    fig.update_layout(**layout)
     fig.add_annotation(
         text=message,
         x=0.5,
@@ -107,13 +111,13 @@ def usage_over_time(
 
     Two stack modes match the standalone mock's segmented control:
 
-    - ``"type"`` (default) stacks daily input / output / (cache_*)
-      token volumes. The read model's `input_tokens` and
-      `output_tokens` already roll up the per-event totals; cache
-      tokens are not exposed at the per-day granularity (only the
-      hot-path `agent_exit` rows carry them and they live in `extras`
-      on `analytics_events`), so the cache band is omitted rather
-      than zeroed in.
+    - ``"type"`` (default) stacks daily input / output / cache
+      token volumes. The read model's per-day query sums
+      `input_tokens`, `output_tokens`, `cache_read_tokens`, and
+      `cache_write_tokens` for every `agent_exit` row in the cell --
+      mirroring the headline KPI's accounting -- so the Cache band
+      reflects the same volume the "Total tokens" tile counts
+      instead of dropping cache tokens on the floor.
     - ``"backend"`` stacks per-backend daily token volumes. Caller
       passes `backend_rows_by_day` -- a `{day: {backend: tokens}}`
       mapping derived from `get_recent_agent_exits` (it carries the
@@ -127,7 +131,9 @@ def usage_over_time(
     `dashboard_theme.fmt_money`.
     """
     if not points and not backend_rows_by_day:
-        return _empty_figure("No events match the current filters.")
+        return _empty_figure(
+            "No events match the current filters.", height=330,
+        )
 
     daily: dict[date, dict[str, float]] = {}
     for p in points:
@@ -155,7 +161,9 @@ def usage_over_time(
 
     days = sorted(daily.keys())
     if not days:
-        return _empty_figure("No events match the current filters.")
+        return _empty_figure(
+            "No events match the current filters.", height=330,
+        )
 
     fig = go.Figure()
     if mode == "backend" and backend_rows_by_day:
@@ -245,6 +253,10 @@ def usage_over_time(
         "yanchor": "bottom", "y": 1.02,
         "xanchor": "left", "x": 0,
     }
+    # Hero chart: ~330px matches the standalone mock. Plotly's
+    # default 450px leaves the chart looking over-tall against the
+    # surrounding KPI strip and stage-cost cards.
+    layout["height"] = 330
     fig.update_layout(**layout)
     return fig
 
@@ -269,7 +281,12 @@ def cost_horizontal_bars(
     tip, matching the standalone mock's labelled bars.
     """
     if not items:
-        return _empty_figure("No data matches the current filters.")
+        # Match the single-row non-empty case (`40 * 1 + 80`) so an
+        # empty card sits at the same minimum height instead of
+        # snapping to Plotly's 450px default.
+        return _empty_figure(
+            "No data matches the current filters.", height=120,
+        )
     ordered = sorted(items, key=lambda it: -float(it[2] or 0.0))
     labels = [it[0] for it in ordered]
     subs = [it[1] for it in ordered]
@@ -313,6 +330,12 @@ def cost_horizontal_bars(
     )
     layout = theme.base_layout(title=title)
     layout["margin"] = {"l": 160, "r": 64, "t": layout["margin"]["t"], "b": 32}
+    # Size the panel to the bar count: ~40px per row plus a fixed
+    # top / bottom margin. Plotly's 450px default makes a 3-row
+    # panel float in an empty box; a 6-row panel still fits inside
+    # the same hero-chart height.
+    n_rows = max(len(values), 1)
+    layout["height"] = 40 * n_rows + 80
     fig.update_layout(**layout)
     fig.update_xaxes(
         title_text="USD", tickprefix="$",
@@ -337,7 +360,9 @@ def cost_by_stage(rows: Sequence[StageBreakdown]) -> go.Figure:
     `event = 'agent_exit'` subset for the same query.
     """
     if not rows:
-        return _empty_figure("No stage data matches the current filters.")
+        return _empty_figure(
+            "No stage data matches the current filters.", height=120,
+        )
     items = [
         (
             r.stage,
@@ -362,7 +387,8 @@ def cost_by_review_round(rows: Sequence[ReviewRoundBucketRow]) -> go.Figure:
     """
     if not rows:
         return _empty_figure(
-            "No `agent_exit` rows match the current filters."
+            "No `agent_exit` rows match the current filters.",
+            height=120,
         )
     label_map = {
         "0": "Initial",
@@ -395,7 +421,9 @@ def cost_by_repo(rows: Sequence[RepoBreakdownRow]) -> go.Figure:
     would overstate per-repo activity against the per-run cost.
     """
     if not rows:
-        return _empty_figure("No repos match the current filters.")
+        return _empty_figure(
+            "No repos match the current filters.", height=120,
+        )
     items = []
     for r in rows:
         short = r.repo.split("/")[-1] if "/" in r.repo else r.repo
@@ -453,6 +481,10 @@ def hour_weekday_heatmap(
     )
     layout = theme.base_layout(title=title)
     layout["margin"] = {"l": 48, "r": 24, "t": layout["margin"]["t"], "b": 32}
+    # 7 rows x 24 columns: ~240px keeps the cells close to the
+    # mock's compact squares instead of stretching them into tall
+    # rectangles at the default 450px.
+    layout["height"] = 240
     fig.update_layout(**layout)
     fig.update_xaxes(title_text="hour (UTC)", type="category", showgrid=False)
     fig.update_yaxes(title_text="", autorange="reversed", showgrid=False)
@@ -498,7 +530,9 @@ def done_per_day_bars(
     else:
         days = sorted(days_index)
     if not days:
-        return _empty_figure("No resolved issues in the current window.")
+        return _empty_figure(
+            "No resolved issues in the current window.", height=150,
+        )
     resolved = [days_index.get(d, 0) for d in days]
     fig = go.Figure(
         go.Bar(
@@ -514,6 +548,10 @@ def done_per_day_bars(
         **layout.get("yaxis", {}),
         "title": {"text": "resolved"},
     }
+    # The throughput strip sits in the narrow reliability column;
+    # at the 450px Plotly default it would dwarf the tiles above.
+    # 150px matches the standalone mock's thin per-day strip.
+    layout["height"] = 150
     fig.update_layout(**layout)
     return fig
 
