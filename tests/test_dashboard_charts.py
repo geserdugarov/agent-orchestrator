@@ -100,6 +100,10 @@ class UsageOverTimeTest(unittest.TestCase):
         fig = dashboard_charts.usage_over_time([])
         self.assertEqual(len(fig.data), 0)
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
+        # Empty cards must still pin the hero-chart height; without it
+        # a "no events" state collapses back to Plotly's 450px default
+        # and dwarfs the surrounding KPI strip.
+        self.assertEqual(fig.layout.height, 330)
 
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
@@ -130,6 +134,10 @@ class CostHorizontalBarsTest(unittest.TestCase):
     def test_empty_renders_placeholder(self) -> None:
         fig = dashboard_charts.cost_horizontal_bars([])
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
+        # Empty horizontal-bar cards still pin a height matching the
+        # single-row non-empty case (40 * 1 + 80) so they do not
+        # collapse to Plotly's 450px default.
+        self.assertEqual(fig.layout.height, 120)
 
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
@@ -182,6 +190,7 @@ class CostByStageTest(unittest.TestCase):
     def test_empty_renders_placeholder(self) -> None:
         fig = dashboard_charts.cost_by_stage([])
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
+        self.assertEqual(fig.layout.height, 120)
 
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
@@ -210,6 +219,7 @@ class CostByReviewRoundTest(unittest.TestCase):
     def test_empty_renders_placeholder(self) -> None:
         fig = dashboard_charts.cost_by_review_round([])
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
+        self.assertEqual(fig.layout.height, 120)
 
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
@@ -243,6 +253,7 @@ class CostByRepoTest(unittest.TestCase):
     def test_empty_renders_placeholder(self) -> None:
         fig = dashboard_charts.cost_by_repo([])
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
+        self.assertEqual(fig.layout.height, 120)
 
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
@@ -336,6 +347,55 @@ class DonePerDayBarsTest(unittest.TestCase):
     def test_empty_renders_placeholder(self) -> None:
         fig = dashboard_charts.done_per_day_bars([])
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
+        # Empty throughput strip still pins the 150px thin-strip
+        # height instead of collapsing back to Plotly's 450px default.
+        self.assertEqual(fig.layout.height, 150)
+
+
+@unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
+class ChartHeightsTest(unittest.TestCase):
+    """Every builder pins an explicit ``layout.height`` so the cards
+    do not float at Plotly's 450px default. Each value is tuned to
+    the panel's content shape (hero / horizontal bars / heatmap /
+    throughput strip); the visual-review task #341 follow-up pinned
+    these heights as the single biggest "now it looks designed"
+    lever after the segmented control.
+    """
+
+    def test_hero_chart_height_matches_mock(self) -> None:
+        points = [
+            TimeSeriesPoint(
+                day=date(2026, 5, 1), event="agent_exit", count=1,
+                cost_usd=1.0, input_tokens=10, output_tokens=10,
+            ),
+        ]
+        fig = dashboard_charts.usage_over_time(points)
+        self.assertEqual(fig.layout.height, 330)
+
+    def test_horizontal_bars_height_scales_with_rows(self) -> None:
+        # Three bars: ~40px per row + 80 = 200.
+        items = [
+            ("alpha", "1 run", 1.0, "#111"),
+            ("beta", "2 runs", 2.0, "#222"),
+            ("gamma", "3 runs", 3.0, "#333"),
+        ]
+        fig = dashboard_charts.cost_horizontal_bars(items)
+        self.assertEqual(fig.layout.height, 40 * 3 + 80)
+
+    def test_done_per_day_strip_height(self) -> None:
+        rows = [
+            ThroughputDayRow(day=date(2026, 5, 1), resolved=1, rejected=0),
+        ]
+        fig = dashboard_charts.done_per_day_bars(rows)
+        # Throughput strip lives in the narrow reliability column;
+        # 150px keeps it from dwarfing the tiles above it.
+        self.assertEqual(fig.layout.height, 150)
+
+    def test_heatmap_height_matches_mock_squares(self) -> None:
+        # 7 rows x 24 columns: the standalone mock's compact square
+        # cells need ~240px, not Plotly's default 450.
+        fig = dashboard_charts.hour_weekday_heatmap([])
+        self.assertEqual(fig.layout.height, 240)
 
 
 if __name__ == "__main__":
