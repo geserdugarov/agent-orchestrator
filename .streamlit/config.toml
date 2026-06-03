@@ -1,0 +1,29 @@
+# Copyright 2026 Geser Dugarov
+# SPDX-License-Identifier: Apache-2.0
+#
+# Streamlit theme + server defaults for `orchestrator/dashboard.py`.
+#
+# Streamlit auto-loads `.streamlit/config.toml` from the working
+# directory when `streamlit run orchestrator/dashboard.py` is launched
+# from the repo root. The `[theme]` values mirror the tokens exposed
+# from `orchestrator/dashboard_theme.py` so Plotly figures (which
+# render through the theme module) share a palette with the surrounding
+# Streamlit chrome. Anything custom that the Plotly figures need lives
+# in `dashboard_theme.py`; this file only configures the surfaces that
+# Streamlit itself owns.
+
+[theme]
+base = "light"
+primaryColor = "#2563eb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f3f4f6"
+textColor = "#111827"
+font = "sans serif"
+
+[browser]
+# Avoid Streamlit's anonymous-usage stats POST: the dashboard is
+# local observability and the orchestrator deliberately keeps its
+# outbound surface narrow. The opt-out lives under `[browser]` --
+# `server.gatherUsageStats` is rejected as an invalid key and would
+# print a config warning on every dashboard startup.
+gatherUsageStats = false

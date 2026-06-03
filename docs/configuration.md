@@ -252,10 +252,10 @@ The sync inserts each record with `INSERT ... ON CONFLICT (content_hash) DO NOTH
 
 ### Streamlit dashboard
 
-`orchestrator/dashboard.py` is the Streamlit app that visualizes the populated `analytics_events` table. It is opt-in via a separate `dashboard` dependency group so the default `uv sync --locked` keeps installing only the polling runtime plus `pytest` / `ruff`. Streamlit (and its transitive pandas) are imported lazily inside `main()`, so importing `orchestrator.dashboard` from a test or a non-dashboard caller does not require the group to be installed.
+`orchestrator/dashboard.py` is the Streamlit app that visualizes the populated `analytics_events` table. It is opt-in via a separate `dashboard` dependency group so the default `uv sync --locked` keeps installing only the polling runtime plus `pytest` / `ruff`. Streamlit (and its transitive pandas) are imported lazily inside `main()`, so importing `orchestrator.dashboard` from a test or a non-dashboard caller does not require the group to be installed. The visual support layer for the upcoming dashboard rewrite (#317) -- pure Plotly figure builders in `orchestrator/dashboard_charts.py`, plotly-free theme tokens in `orchestrator/dashboard_theme.py`, and a `.streamlit/config.toml` carrying the dashboard theme + `[browser] gatherUsageStats = false` opt-out -- ships alongside but is not yet consumed by `dashboard.py`; the lazy-import guard in `tests/test_dashboard.py` already covers `plotly` and `orchestrator.dashboard_charts` so the rewrite cannot regress the polling tick's import surface.
 
 ```sh
-uv sync --group dashboard                                  # install streamlit alongside the runtime + dev deps
+uv sync --group dashboard                                  # install streamlit + plotly alongside the runtime + dev deps
 uv run streamlit run orchestrator/dashboard.py             # launches a local browser tab
 ```
 

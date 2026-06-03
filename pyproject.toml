@@ -11,12 +11,14 @@ dependencies = ["PyGithub>=2.1", "psycopg[binary]>=3.3.3"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.6"]
-# Streamlit and its transitive pandas are only needed by the analytics
-# dashboard (`orchestrator/dashboard.py`). They are deliberately NOT in
+# Streamlit, Plotly, and Streamlit's transitive pandas are only needed
+# by the analytics dashboard (`orchestrator/dashboard.py`, the chart
+# builders in `orchestrator/dashboard_charts.py`, and the theme tokens
+# in `orchestrator/dashboard_theme.py`). They are deliberately NOT in
 # the default `dev` group so `uv sync --locked` keeps installing the
 # orchestrator's runtime + tests minimal; install with
 # `uv sync --group dashboard` before running `streamlit run`.
-dashboard = ["streamlit>=1.30"]
+dashboard = ["streamlit>=1.30", "plotly>=5.20"]
 
 [tool.ruff.lint]
 # `l` is used pervasively as a loop variable over GitHub labels; banning it

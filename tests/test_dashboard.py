@@ -177,26 +177,31 @@ class DbUnconfiguredMessageTest(unittest.TestCase):
 
 
 class LazyImportTest(unittest.TestCase):
-    """The dashboard module must load without importing `streamlit`.
+    """The dashboard module must load without importing `streamlit`
+    or `plotly`.
 
     The polling tick loads `orchestrator.*` modules at process start;
-    if `dashboard.py` were to import Streamlit at module top, every
-    orchestrator deployment would have to install the dashboard
-    group. Lazy import inside `main()` is the boundary; this test is
-    the guardrail.
+    if `dashboard.py` were to import Streamlit (or Plotly via
+    `dashboard_charts`) at module top, every orchestrator deployment
+    would have to install the dashboard group. Lazy import inside
+    `main()` is the boundary; this test is the guardrail.
     """
 
-    def test_streamlit_absent_from_sys_modules_after_load(self) -> None:
+    def test_dashboard_only_modules_absent_after_load(self) -> None:
         with patch.dict(os.environ, _hermetic_env(), clear=True):
             sys.modules.pop("orchestrator.config", None)
             sys.modules.pop("orchestrator.analytics.read", None)
             sys.modules.pop("orchestrator.analytics", None)
             sys.modules.pop("orchestrator.dashboard", None)
+            sys.modules.pop("orchestrator.dashboard_charts", None)
             sys.modules.pop("streamlit", None)
             sys.modules.pop("pandas", None)
+            sys.modules.pop("plotly", None)
             import orchestrator.dashboard  # noqa: F401
             self.assertNotIn("streamlit", sys.modules)
             self.assertNotIn("pandas", sys.modules)
+            self.assertNotIn("plotly", sys.modules)
+            self.assertNotIn("orchestrator.dashboard_charts", sys.modules)
 
 
 class ScriptPathLaunchTest(unittest.TestCase):

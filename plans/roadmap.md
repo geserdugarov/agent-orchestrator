@@ -396,13 +396,35 @@ a DB round trip. Streamlit (and its transitive pandas) are
 imported lazily inside `main()` so the polling tick stays free of
 the dashboard's footprint, and the module loads cleanly even when
 `streamlit` is not installed (a `tests/test_dashboard.py` guard
-asserts the invariant). The dependency lives in a separate
-`dashboard` group in `pyproject.toml` so `uv sync --locked` keeps
-installing only the minimum runtime; `uv sync --group dashboard`
-then `uv run streamlit run orchestrator/dashboard.py` is the
-launch path. Missing-DB and `AnalyticsReadError` cases surface as
-in-app `st.warning` / `st.error` banners that stop further
-rendering rather than crashing the app.
+asserts the invariant for `streamlit`, `pandas`, `plotly`, and
+`orchestrator.dashboard_charts`). The dependencies live in a
+separate `dashboard` group in `pyproject.toml` (`streamlit` plus
+`plotly`) so `uv sync --locked` keeps installing only the minimum
+runtime; `uv sync --group dashboard` then
+`uv run streamlit run orchestrator/dashboard.py` is the launch path.
+Missing-DB and `AnalyticsReadError` cases surface as in-app
+`st.warning` / `st.error` banners that stop further rendering
+rather than crashing the app.
+
+**Dashboard visual support layer.** `orchestrator/dashboard_charts.py`
+holds pure Plotly figure builders (`usage_over_time`, `stage_bars`,
+`review_round_bars`, `repo_bars`, `cost_coverage`, `throughput`,
+`heatmap_7x24`) that take read-model rows (or a raw
+`Sequence[datetime]` for the 7×24 heatmap) and return a
+`plotly.graph_objects.Figure`; each builder routes its no-data
+branch through a shared empty-state annotation so the "nothing
+matches" message stays consistent across charts. The plotly-free
+token module `orchestrator/dashboard_theme.py` exposes semantic
+colors, categorical palettes for events / stages / `cost_source`,
+the deterministic `color_for(...)` fallback, and a `base_layout(...)`
+dict the chart builders splat into every figure. `.streamlit/config.toml`
+mirrors the same palette into Streamlit's own `[theme]` and disables
+the `[browser] gatherUsageStats` POST. None of this is wired into
+`dashboard.py` yet -- the rewrite that consumes the builders is
+tracked under #317; today the chart module is reachable only via
+the lazy-import surface and a pair of dedicated tests
+(`tests/test_dashboard_charts.py` skips cleanly when `plotly` is
+absent, `tests/test_dashboard_theme.py` runs unconditionally).
 
 **Agent usage / cost parser.** `orchestrator/usage.py` decodes the
 JSONL stdout carried by `AgentResult` into a `UsageMetrics` dataclass:

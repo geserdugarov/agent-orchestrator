@@ -50,7 +50,7 @@ Tests are the primary correctness gate. Add or update tests for any behavioral c
   ```
 - **Commits.** Conventional Commits: `<type>: <subject>` with types `feat`, `fix`, `chore`, `docs`, `refactor`, `test`. Subject line only — no body, no `Co-Authored-By` trailer. Imperative mood, short.
 - **Comments.** Sparse — only when the *why* is non-obvious (hidden constraint, race window, GitHub quirk).
-- **Dependencies.** `pyproject.toml` pins `PyGithub` and `psycopg[binary]` as runtime deps; `pytest` and `ruff` live in the `dev` group; the analytics dashboard's `streamlit` lives in the separate `dashboard` group so the default `uv sync --locked` stays minimal. `uv.lock` is the source of truth for exact versions and is committed — regenerate it (`uv lock`) whenever `pyproject.toml` changes. Anything else needs justification.
+- **Dependencies.** `pyproject.toml` pins `PyGithub` and `psycopg[binary]` as runtime deps; `pytest` and `ruff` live in the `dev` group; the analytics dashboard's `streamlit` and `plotly` live in the separate `dashboard` group so the default `uv sync --locked` stays minimal. `uv.lock` is the source of truth for exact versions and is committed — regenerate it (`uv lock`) whenever `pyproject.toml` changes. Anything else needs justification.
 - **Secrets.** `GITHUB_TOKEN` is deliberately *not* loaded from `.env`. Tokens live in `~/.config/<owner>/<repo>/token` or the process environment. Rationale: [`docs/configuration.md#github-pat`](docs/configuration.md#github-pat).
 
 ## Out of scope without explicit ask

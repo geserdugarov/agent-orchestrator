@@ -462,7 +462,7 @@ The orchestrator (not the agent) pushes. The push is hardened against the agent-
 
 ## Observability
 
-Three independent observability surfaces — an opt-in audit event log, a project-local analytics JSONL sink, and an operator-deployed Postgres aggregation target (with a Streamlit dashboard and the `orchestrator/usage.py` parser that feeds it). None of them feed back into dispatch: workflow correctness keys off the pinned `<!--orchestrator-state ...-->` JSON comment on the issue (and the workflow label), so every surface is observation-only and safe to truncate, rotate, or delete.
+Three independent observability surfaces — an opt-in audit event log, a project-local analytics JSONL sink, and an operator-deployed Postgres aggregation target (with a Streamlit dashboard, Plotly figure builders and theme tokens in `orchestrator/dashboard_charts.py` + `orchestrator/dashboard_theme.py`, and the `orchestrator/usage.py` parser that feeds it). None of them feed back into dispatch: workflow correctness keys off the pinned `<!--orchestrator-state ...-->` JSON comment on the issue (and the workflow label), so every surface is observation-only and safe to truncate, rotate, or delete.
 
 For the per-sink schema, event-kind tables, append / retention / rotation semantics, the analytics-DB compose layout, the sync / read-model / dashboard wiring, and the usage parser's cost-precedence rules, see [`observability.md`](observability.md).
 
