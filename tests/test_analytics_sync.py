@@ -717,6 +717,68 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
             self.assertEqual(second.skipped_duplicate, 3)
             self.assertEqual(self._row_count(), 3)
 
+    def test_analytics_agent_runs_view_derives_fields(self) -> None:
+        # Apply the DDL, insert one `agent_exit` row carrying the
+        # fields the view derives over, and assert the derivations
+        # compute as advertised. This is the live-DB counterpart to
+        # the text-based checks in `tests/test_analytics_schema.py`:
+        # a typo in the view body would compile-fail here even if the
+        # text regex still matched.
+        import psycopg
+
+        self._apply_schema()
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _write_jsonl(path, [
+                _sample_record(
+                    issue=42,
+                    event="agent_exit",
+                    stage="implementing",
+                    agent_role="developer",
+                    backend="codex",
+                    review_round=4,
+                    retry_count=1,
+                    duration_s=12.5,
+                    exit_code=0,
+                    timed_out=False,
+                    input_tokens=300,
+                    output_tokens=150,
+                    cached_tokens=50,
+                    cache_read_tokens=20,
+                    cache_write_tokens=10,
+                    models=["gpt-5-codex"],
+                    cost_usd=0.0042,
+                    cost_source="estimated",
+                ),
+            ])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": self.db_url,
+            })
+            result = analytics_sync.sync_jsonl_to_postgres()
+            self.assertEqual(result.inserted, 1)
+
+            with psycopg.connect(self.db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT model, total_tokens, total_cache_tokens, "
+                        "review_round_bucket, failed, has_cost, cost_source "
+                        "FROM analytics_agent_runs WHERE issue = 42"
+                    )
+                    row = cur.fetchone()
+        self.assertIsNotNone(row)
+        (
+            model, total_tokens, total_cache, bucket,
+            failed, has_cost, cost_source,
+        ) = row
+        self.assertEqual(model, "gpt-5-codex")
+        self.assertEqual(total_tokens, 450)
+        self.assertEqual(total_cache, 80)
+        self.assertEqual(bucket, "3-5")
+        self.assertFalse(failed)
+        self.assertTrue(has_cost)
+        self.assertEqual(cost_source, "estimated")
+
 
 if __name__ == "__main__":
     unittest.main()

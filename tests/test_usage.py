@@ -379,6 +379,346 @@ class CodexJsonTest(unittest.TestCase):
         self.assertEqual(m.cost_source, "unknown-price")
         self.assertIsNone(m.cost_usd)
 
+    def test_gpt_5_5_usage_yields_estimated_cost(self) -> None:
+        # gpt-5.5 is in the priced family table; usage that names it
+        # explicitly must produce an `estimated` cost rather than
+        # falling through to `unknown-price`. Pricing-coverage guard:
+        # if the row gets accidentally dropped from `_CODEX_RATES`
+        # the test fails loudly and the dashboard's
+        # `cost_source='unknown-price'` cohort gains a regression
+        # before any operator notices.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.5",
+                "usage": {
+                    "input_tokens": 1000,
+                    "cached_input_tokens": 200,
+                    "output_tokens": 400,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "estimated")
+        self.assertEqual(m.models, ("gpt-5.5",))
+        # gpt-5.5 rates: input=5, cached=0.50, output=30 (per 1M)
+        uncached = 1000 - 200
+        expected = (
+            uncached * 5 + 200 * 0.50 + 400 * 30
+        ) / 1_000_000
+        assert m.cost_usd is not None
+        self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_gpt_5_5_reported_cost_wins_over_estimate(self) -> None:
+        # Even when usage matches the priced gpt-5.5 family, a CLI-
+        # reported `total_cost_usd` on the terminal frame is the
+        # authoritative figure (it already accounts for any pricing
+        # nuance our table may have missed). Precedence guard so a
+        # future change to the priced-model path does not start
+        # overriding reported values.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.5",
+                "usage": {
+                    "input_tokens": 1000,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 200,
+                },
+            },
+            {"type": "task_complete", "total_cost_usd": 0.99, "num_turns": 1},
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "reported")
+        self.assertEqual(m.cost_usd, 0.99)
+
+    def test_gpt_5_5_long_context_session_uses_tiered_pricing(self) -> None:
+        # GPT-5.5 prompts whose total input token count exceeds 272K
+        # are billed across the whole session at 2x the input rate
+        # and 1.5x the output rate (per OpenAI's published long-
+        # context pricing). A no-reported-cost Codex run at 300K
+        # input must record the elevated estimate, not the flat-rate
+        # one. Pinning the threshold here means a future table edit
+        # that drops the tier silently regresses the dashboard cost
+        # column for long-context sessions before any operator
+        # notices the under-reporting.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.5",
+                "usage": {
+                    "input_tokens": 300_000,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "estimated")
+        # Long-context tier: input * 5 * 2 + output * 30 * 1.5, /1M.
+        expected = (
+            300_000 * 5 * 2.0 + 1_000 * 30 * 1.5
+        ) / 1_000_000
+        assert m.cost_usd is not None
+        self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_gpt_5_5_at_or_under_threshold_uses_flat_rate(self) -> None:
+        # The tier applies strictly when input > threshold; at or
+        # under 272K the standard flat rates apply unchanged. This
+        # is the boundary regression guard for the new long-context
+        # branch.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.5",
+                "usage": {
+                    "input_tokens": 272_000,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "estimated")
+        # Flat rate: input * 5 + output * 30, /1M (no multipliers).
+        expected = (272_000 * 5 + 1_000 * 30) / 1_000_000
+        assert m.cost_usd is not None
+        self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_gpt_5_5_pro_long_context_stays_flat_priced(self) -> None:
+        # OpenAI's official gpt-5.5-pro docs list flat $30 / $180
+        # with no >272K multiplier and no cached discount. The tier
+        # the standard gpt-5.5 and gpt-5.4-pro entries carry must
+        # therefore NOT be inherited by gpt-5.5-pro -- otherwise a
+        # no-reported-cost pro run would silently overestimate.
+        # Cached tokens stay at 0 here so the estimate path runs at
+        # all (gpt-5.5-pro's `cached=None` blocks the estimate when
+        # the run carries any cached input -- see
+        # test_cached_tokens_without_cached_rate_blocks_estimate).
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.5-pro",
+                "usage": {
+                    "input_tokens": 300_000,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "estimated")
+        # Flat pro rates: input=30, output=180; NO multipliers.
+        expected = (300_000 * 30 + 1_000 * 180) / 1_000_000
+        assert m.cost_usd is not None
+        self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_gpt_5_4_long_context_session_uses_tiered_pricing(self) -> None:
+        # gpt-5.4 carries the same >272K input long-context tier as
+        # gpt-5.5 per OpenAI's GPT-5.4 pricing docs: 2x input, 1.5x
+        # output. Same regression-guard shape as the gpt-5.5 test --
+        # a flat-rate fallback would silently undercount real runs.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.4",
+                "usage": {
+                    "input_tokens": 300_000,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "estimated")
+        # gpt-5.4 rates: input=2.50, output=15; long-context 2x / 1.5x.
+        expected = (
+            300_000 * 2.50 * 2.0 + 1_000 * 15 * 1.5
+        ) / 1_000_000
+        assert m.cost_usd is not None
+        self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_gpt_5_4_pro_long_context_session_uses_tiered_pricing(self) -> None:
+        # gpt-5.4-pro mirrors gpt-5.5-pro: same threshold + multipliers.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.4-pro",
+                "usage": {
+                    "input_tokens": 300_000,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "estimated")
+        expected = (
+            300_000 * 30 * 2.0 + 1_000 * 180 * 1.5
+        ) / 1_000_000
+        assert m.cost_usd is not None
+        self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_gpt_5_4_mini_and_nano_stay_flat_priced(self) -> None:
+        # The long-context tier is documented only for the standard
+        # and pro tiers of GPT-5.4 / GPT-5.5. Mini / nano stay on
+        # flat pricing; pin the contract so a future copy-paste edit
+        # does not over-tier them and silently overcharge.
+        for model, rates in (
+            ("gpt-5.4-mini", {"input": 0.75, "output": 4.50}),
+            ("gpt-5.4-nano", {"input": 0.20, "output": 1.25}),
+        ):
+            with self.subTest(model=model):
+                stdout = _jsonl(
+                    {
+                        "type": "turn_complete",
+                        "model": model,
+                        "usage": {
+                            "input_tokens": 300_000,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 1_000,
+                        },
+                    },
+                )
+                m = parse_codex_usage(stdout)
+                self.assertEqual(m.cost_source, "estimated")
+                expected = (
+                    300_000 * rates["input"] + 1_000 * rates["output"]
+                ) / 1_000_000
+                assert m.cost_usd is not None
+                self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_gpt_5_2_pro_uses_its_own_rate_not_base(self) -> None:
+        # `_codex_rates` is prefix-matched on insertion order, so a
+        # missing explicit `gpt-5.2-pro` entry would silently fall
+        # through to `gpt-5.2`'s $1.75 / $14 rates and undercount
+        # by an order of magnitude. Pin the pro rate so an accidental
+        # entry removal or reorder fails loudly here.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.2-pro",
+                "usage": {
+                    "input_tokens": 100_000,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "estimated")
+        # Per OpenAI's gpt-5.2-pro page: $21 / $168, no cached rate.
+        expected = (100_000 * 21 + 1_000 * 168) / 1_000_000
+        assert m.cost_usd is not None
+        self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_gpt_5_2_pro_cached_tokens_block_estimate(self) -> None:
+        # The pro tier publishes no cached-input discount; a run with
+        # cached tokens must surface as `unknown-price` rather than
+        # bill those tokens at the input rate (overcharge) or the
+        # fallthrough sibling's cached rate (undercharge).
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.2-pro",
+                "usage": {
+                    "input_tokens": 100_000,
+                    "cached_input_tokens": 50_000,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "unknown-price")
+        self.assertIsNone(m.cost_usd)
+
+    def test_gpt_5_pro_uses_its_own_rate_not_base(self) -> None:
+        # Same prefix-fallthrough guard as gpt-5.2-pro: `gpt-5-pro`
+        # would otherwise hit the `gpt-5` entry ($1.25 / $10) and
+        # undercount by an order of magnitude.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5-pro",
+                "usage": {
+                    "input_tokens": 100_000,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "estimated")
+        # Per OpenAI's gpt-5-pro page: $15 / $120, no cached rate.
+        expected = (100_000 * 15 + 1_000 * 120) / 1_000_000
+        assert m.cost_usd is not None
+        self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_gpt_5_pro_cached_tokens_block_estimate(self) -> None:
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5-pro",
+                "usage": {
+                    "input_tokens": 100_000,
+                    "cached_input_tokens": 50_000,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "unknown-price")
+        self.assertIsNone(m.cost_usd)
+
+    def test_gpt_5_5_long_context_cached_tokens_also_tier_up(self) -> None:
+        # Cached input tokens are still input billing -- the long-
+        # context multiplier must apply to them too. Otherwise a
+        # cache-heavy session over the threshold would silently
+        # under-report against OpenAI's actual bill.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "gpt-5.5",
+                "usage": {
+                    "input_tokens": 300_000,
+                    "cached_input_tokens": 100_000,
+                    "output_tokens": 1_000,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "estimated")
+        uncached = 300_000 - 100_000
+        expected = (
+            uncached * 5 * 2.0
+            + 100_000 * 0.50 * 2.0
+            + 1_000 * 30 * 1.5
+        ) / 1_000_000
+        assert m.cost_usd is not None
+        self.assertAlmostEqual(m.cost_usd, expected, places=9)
+
+    def test_truly_unknown_model_remains_unknown_price(self) -> None:
+        # The unknown-price exposure contract: a SKU with no priced
+        # family at all leaves cost_usd None and cost_source
+        # `unknown-price` so the dashboard surfaces a pricing-table
+        # gap rather than a silently-wrong zero.
+        stdout = _jsonl(
+            {
+                "type": "turn_complete",
+                "model": "third-party-unpriced-model",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 50,
+                },
+            },
+        )
+        m = parse_codex_usage(stdout)
+        self.assertEqual(m.cost_source, "unknown-price")
+        self.assertIsNone(m.cost_usd)
+        self.assertEqual(m.input_tokens, 100)
+        self.assertEqual(m.output_tokens, 50)
+
     def test_no_usage_events(self) -> None:
         stdout = _jsonl(
             {"type": "task_started"},

@@ -123,18 +123,48 @@ def _claude_rates(model: str) -> Optional[dict[str, float]]:
 # in that case we will not produce an estimated cost when the run reports any
 # cached tokens (rather than billing them at the input rate and being wrong).
 _CODEX_RATES: tuple[tuple[str, dict[str, Optional[float]]], ...] = (
+    # GPT-5.5, GPT-5.4, and GPT-5.4-pro bill the entire session at
+    # 2x the input rate and 1.5x the output rate once total input
+    # exceeds 272K tokens (per OpenAI's published long-context
+    # pricing on each model's docs page). Cached tokens move at the
+    # same multiplier as the uncached input remainder -- they are
+    # still input billing, just discounted. A session at or under
+    # the threshold uses the base rates verbatim. The reported
+    # `total_cost_usd` always wins over this estimate, so a CLI-
+    # reported value remains authoritative. The `-mini` / `-nano`
+    # family members and `gpt-5.5-pro` are NOT on long-context
+    # tiering today -- the official `gpt-5.5-pro` page lists flat
+    # `$30 / $180` with no >272K multiplier and no cached discount,
+    # so it stays flat-priced (see the negative-guard test).
     ("gpt-5.5-pro",        {"input": 30,   "cached": None,  "output": 180}),
-    ("gpt-5.5",            {"input": 5,    "cached": 0.50,  "output": 30}),
-    ("gpt-5.4-pro",        {"input": 30,   "cached": None,  "output": 180}),
+    ("gpt-5.5",            {"input": 5,    "cached": 0.50,  "output": 30,
+                            "long_context_threshold": 272_000,
+                            "long_context_input_mult": 2.0,
+                            "long_context_output_mult": 1.5}),
+    ("gpt-5.4-pro",        {"input": 30,   "cached": None,  "output": 180,
+                            "long_context_threshold": 272_000,
+                            "long_context_input_mult": 2.0,
+                            "long_context_output_mult": 1.5}),
     ("gpt-5.4-mini",       {"input": 0.75, "cached": 0.075, "output": 4.50}),
     ("gpt-5.4-nano",       {"input": 0.20, "cached": 0.02,  "output": 1.25}),
-    ("gpt-5.4",            {"input": 2.50, "cached": 0.25,  "output": 15}),
+    ("gpt-5.4",            {"input": 2.50, "cached": 0.25,  "output": 15,
+                            "long_context_threshold": 272_000,
+                            "long_context_input_mult": 2.0,
+                            "long_context_output_mult": 1.5}),
     ("gpt-5.3-codex",      {"input": 1.75, "cached": 0.175, "output": 14}),
     ("gpt-5.3",            {"input": 1.75, "cached": 0.175, "output": 14}),
+    # `*-pro` SKUs publish their own input / output rates and no
+    # cached discount; explicit entries before the base prefix keep
+    # prefix-match from falling through to the cheaper standard
+    # family (which would silently undercount) and the `cached=None`
+    # keeps cache-using pro runs at `unknown-price` rather than
+    # billing them at the standard input rate.
+    ("gpt-5.2-pro",        {"input": 21,   "cached": None,  "output": 168}),
     ("gpt-5.2",            {"input": 1.75, "cached": 0.175, "output": 14}),
     ("gpt-5.1-codex-mini", {"input": 0.25, "cached": 0.025, "output": 2}),
     ("gpt-5.1-codex",      {"input": 1.25, "cached": 0.125, "output": 10}),
     ("gpt-5.1",            {"input": 1.25, "cached": 0.125, "output": 10}),
+    ("gpt-5-pro",          {"input": 15,   "cached": None,  "output": 120}),
     ("gpt-5-mini",         {"input": 0.25, "cached": 0.025, "output": 2}),
     ("gpt-5-nano",         {"input": 0.05, "cached": 0.005, "output": 0.40}),
     ("gpt-5-codex",        {"input": 1.25, "cached": 0.125, "output": 10}),
@@ -585,14 +615,25 @@ def parse_codex_usage(
         # estimate unknown rather than overcharge.
         uncached = max(last_usage["input"] - cached, 0)
         cached_rate = rates["cached"]
+        # Long-context tier: some Codex SKUs (e.g. gpt-5.5) bill the
+        # entire session at elevated rates once total input crosses a
+        # threshold. The multipliers default to 1.0 (no change) for any
+        # rate entry without long-context keys, so flat-priced families
+        # are unaffected.
+        threshold = rates.get("long_context_threshold")
+        input_mult = 1.0
+        output_mult = 1.0
+        if threshold is not None and last_usage["input"] > threshold:
+            input_mult = rates.get("long_context_input_mult") or 1.0
+            output_mult = rates.get("long_context_output_mult") or 1.0
         if cached > 0 and cached_rate is None:
             estimated = None
         else:
             cr = cached_rate if cached_rate is not None else rates["input"]
             estimated = (
-                uncached * rates["input"]
-                + cached * cr
-                + last_usage["output"] * rates["output"]
+                uncached * rates["input"] * input_mult
+                + cached * cr * input_mult
+                + last_usage["output"] * rates["output"] * output_mult
             ) / 1_000_000
 
     if reported is not None:
