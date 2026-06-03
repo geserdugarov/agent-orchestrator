@@ -396,49 +396,64 @@ sync nor the read model is wired into the polling loop —
 orchestrator correctness must not depend on database availability.
 
 **Analytics dashboard.** `orchestrator/dashboard.py` is the
-Streamlit app over the read model. Sidebar controls cover the date
-window, repo selector, event / stage multi-selects, and a
-`#123` / `123` issue-number input; the body renders summary
-metrics (events / distinct issues / repos / cost / tokens), a daily
-time-series bar chart, side-by-side stage / event breakdowns, the
-recent `agent_exit` table with token / cost columns, the
-date-bounded issues overview, and a per-issue event drill-down.
-Every filter is threaded through the read model's SQL via
-`_build_window_where`, so every widget narrows together rather
-than diverging by surface. The event / stage selections
-distinguish three cases: ``None`` (no filter on the column), a
-non-empty sequence (parameterised ``IN (...)``), and an empty
-sequence (a tautologically-false predicate so the cleared-
-multiselect case shows nothing rather than reverting to "all").
-The event multiselect maps straight to that contract because
-`event` is `NOT NULL` in the schema; the stage multiselect routes
-through `resolve_stage_filter` so the all-selected default (and
-the no-stage-options case) collapses to ``None`` rather than
-``IN (every-non-null-stage)`` -- ``options.stages`` lists only
-non-null stages, so the latter would silently exclude legitimate
-NULL-stage rows (`stage_evaluation` records on issues with no
-workflow label).
+Streamlit app over the read model rendering an analysis-first
+layout. The sidebar carries a window preset
+(`Last 7 days` / `Last 30 days` / `All time` / `Custom range`)
+bounded by `get_data_extent`, a repo selector, event / stage
+multi-selects, and a `#123` / `123` issue-number input. Every
+read call is wrapped in `st.cache_data` keyed by
+`(start, end, repo, events, stages, issue)` so a filter change
+invalidates every cached query in lockstep. The body renders, in
+order: computed insight banners (failure rate ≥ 10 %, cost swing
+≥ 25 % vs the previous window, unpriced cost coverage ≥ 10 %),
+a KPI row whose deltas compare events / distinct issues / agent
+runs / cost / agent-success-rate against the immediately
+preceding window of the same length, the hero
+`usage_over_time` stacked-bar chart, side-by-side stage and
+review-round charts, the top-cost issues table, per-backend
+efficiency cards (runs / failure rate / avg duration / cost),
+a `cost_source` coverage bar, the per-repo activity chart, a
+reliability/throughput overlay (per-day events bars with
+resolved / rejected lines on a secondary axis from
+`get_throughput_breakdown`), the 7 × 24 weekday × hour heatmap,
+the recent agent-runs table as a collapsible expander, and the
+per-issue drill-down at the bottom. An empty-window guard (zero
+events in the filtered window) short-circuits the body to a
+single banner. Every filter is threaded through the read
+model's SQL via `_build_window_where`, so every widget narrows
+together rather than diverging by surface. The event / stage
+selections distinguish three cases: ``None`` (no filter on the
+column), a non-empty sequence (parameterised ``IN (...)``), and
+an empty sequence (a tautologically-false predicate so the
+cleared-multiselect case shows nothing rather than reverting to
+"all"). The event multiselect maps straight to that contract
+because `event` is `NOT NULL` in the schema; the stage
+multiselect routes through `resolve_stage_filter` so the
+all-selected default (and the no-stage-options case) collapses
+to ``None`` rather than ``IN (every-non-null-stage)`` --
+``options.stages`` lists only non-null stages, so the latter
+would silently exclude legitimate NULL-stage rows
+(`stage_evaluation` records on issues with no workflow label).
 The issue input acts as a SQL-level filter that narrows every
 widget when a specific repo is selected and triggers the
 drill-down section; without a repo it stays inert (GitHub issue
 numbers are not unique across repos) and the drill-down renders
-an instructive notice. `get_recent_agent_exits` accepts the same
-window / event / stage / issue shape so the recent-runs table
-moves with the date range; deselecting `agent_exit` from the
-events multiselect short-circuits that widget to empty without
-a DB round trip. Streamlit (and its transitive pandas) are
-imported lazily inside `main()` so the polling tick stays free of
-the dashboard's footprint, and the module loads cleanly even when
-`streamlit` is not installed (a `tests/test_dashboard.py` guard
-asserts the invariant for `streamlit`, `pandas`, `plotly`, and
+an instructive notice. Streamlit (and its transitive pandas),
+`plotly`, and the dashboard-only modules
+`orchestrator.dashboard_charts` / `orchestrator.dashboard_theme`
+are imported lazily inside `main()` so the polling tick stays
+free of the dashboard's footprint, and the module loads cleanly
+even when `streamlit` or `plotly` is not installed (a
+`tests/test_dashboard.py` guard asserts the invariant for
+`streamlit`, `pandas`, `plotly`, and
 `orchestrator.dashboard_charts`). The dependencies live in a
 separate `dashboard` group in `pyproject.toml` (`streamlit` plus
 `plotly`) so `uv sync --locked` keeps installing only the minimum
 runtime; `uv sync --group dashboard` then
-`uv run streamlit run orchestrator/dashboard.py` is the launch path.
-Missing-DB and `AnalyticsReadError` cases surface as in-app
-`st.warning` / `st.error` banners that stop further rendering
-rather than crashing the app.
+`uv run streamlit run orchestrator/dashboard.py` is the launch
+path. Missing-DB, empty-extent, and `AnalyticsReadError` cases
+surface as in-app `st.warning` / `st.info` / `st.error` banners
+that stop further rendering rather than crashing the app.
 
 **Dashboard visual support layer.** `orchestrator/dashboard_charts.py`
 holds pure Plotly figure builders (`usage_over_time`, `stage_bars`,
@@ -453,12 +468,16 @@ colors, categorical palettes for events / stages / `cost_source`,
 the deterministic `color_for(...)` fallback, and a `base_layout(...)`
 dict the chart builders splat into every figure. `.streamlit/config.toml`
 mirrors the same palette into Streamlit's own `[theme]` and disables
-the `[browser] gatherUsageStats` POST. None of this is wired into
-`dashboard.py` yet -- the rewrite that consumes the builders is
-tracked under #317; today the chart module is reachable only via
-the lazy-import surface and a pair of dedicated tests
-(`tests/test_dashboard_charts.py` skips cleanly when `plotly` is
-absent, `tests/test_dashboard_theme.py` runs unconditionally).
+the `[browser] gatherUsageStats` POST. The analysis-first
+`dashboard.py` consumes the builders alongside a handful of inline
+Plotly figures (the review-round chart, the cost-coverage bar, the
+per-repo chart, the reliability/throughput overlay, and the heatmap)
+that read from the new pre-aggregated read-model shapes; the lazy
+import surface is asserted by `tests/test_dashboard.py`, and the
+chart-builder regression tests
+(`tests/test_dashboard_charts.py` -- skips cleanly when `plotly` is
+absent -- and `tests/test_dashboard_theme.py`) keep the
+plotly-touching code paths covered.
 
 **Agent usage / cost parser.** `orchestrator/usage.py` decodes the
 JSONL stdout carried by `AgentResult` into a `UsageMetrics` dataclass:
