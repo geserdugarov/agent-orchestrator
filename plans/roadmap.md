@@ -339,7 +339,19 @@ shape (typed columns plus `extras` JSONB for forward-compat, plus
 `source_path` / `source_line` for forensic context and a
 `content_hash` plain unique index for dedup, kept non-partial so the
 sync's `ON CONFLICT (content_hash)` arbiter resolves without
-repeating the predicate). `ANALYTICS_DB_URL` is
+repeating the predicate). On top of the base indexes (`ts`,
+`(event, ts)`, `(repo, issue)`, partial on non-null `stage`), the
+schema carries per-event-kind partial indexes on `(repo, ts DESC)`
+for `event='agent_exit'` and `event='stage_enter'` (the two hot
+dashboard query shapes) and a composite `(event, repo, stage, ts)`
+index for the multi-filter widgets. A `CREATE OR REPLACE VIEW
+analytics_agent_runs` over `event='agent_exit'` rows promotes the
+derivations the dashboard / read model want (`model` from
+`COALESCE(models->>0, 'unknown')`, `total_tokens`,
+`total_cache_tokens`, a categorical `review_round_bucket`
+(`0`/`1`/`2`/`3-5`/`6+`), `failed = exit_code <> 0` with NULL
+preserved, `has_cost = cost_usd IS NOT NULL`) so consumers do not
+re-code them in every query. `ANALYTICS_DB_URL` is
 a single libpq URL so swapping local for remote managed Postgres is a
 one-line repoint. `orchestrator/analytics/sync.py` is the operator-
 driven CLI (`python -m orchestrator.analytics.sync`) that replays

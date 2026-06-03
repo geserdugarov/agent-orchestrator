@@ -232,7 +232,7 @@ docker compose down                   # stop the container; data on the ./data b
 docker compose down && rm -rf ./data  # stop and wipe history (the ./data bind is a host directory, not a docker volume, so `down -v` does NOT remove it)
 ```
 
-The init script at [`../analytics-db/init/01-schema.sql`](../analytics-db/init/01-schema.sql) runs once when the data volume is empty. It is idempotent (`CREATE TABLE / INDEX IF NOT EXISTS` plus trailing `ALTER TABLE ADD COLUMN IF NOT EXISTS` / `CREATE UNIQUE INDEX IF NOT EXISTS` for `content_hash`), so re-running against an existing instance via `psql -f` is safe — and an instance created before the `content_hash` column existed picks up the new dedup key without dropping the data volume.
+The init script at [`../analytics-db/init/01-schema.sql`](../analytics-db/init/01-schema.sql) runs once when the data volume is empty. It is idempotent (`CREATE TABLE / INDEX IF NOT EXISTS` plus trailing `ALTER TABLE ADD COLUMN IF NOT EXISTS` / `CREATE UNIQUE INDEX IF NOT EXISTS` for `content_hash`, plus `CREATE OR REPLACE VIEW analytics_agent_runs` for the backend view), so re-running against an existing instance via `psql -f` is safe — and an instance created before the `content_hash` column existed picks up the new dedup key without dropping the data volume.
 
 To apply or re-apply the schema against an already-running compose service:
 
