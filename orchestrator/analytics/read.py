@@ -7,8 +7,12 @@ defined in `analytics-db/init/01-schema.sql` and populated by
 `orchestrator.analytics.sync`. It exposes plain-Python functions for
 the shapes a dashboard needs (filter dropdowns, date-bounded summary
 counts, daily time-series, stage / event breakdowns, the most recent
-agent-exit rows, and per-issue event traces) without taking on the
-Streamlit / web layer itself -- that lives in a follow-up child.
+agent-exit rows, per-issue event traces, and the chart-shaped
+breakdowns the redesigned dashboard renders -- review-round buckets,
+per-backend efficiency, per-repo rollups, cost-source coverage, and
+the weekday x hour activity heatmap) without taking on the
+Streamlit / web layer itself -- that lives in
+`orchestrator/dashboard.py`.
 
 Why a separate module from `analytics/sync.py`: the sync owns the
 JSONL -> Postgres write path and its tolerance for malformed lines;
@@ -30,6 +34,16 @@ The psycopg import is deferred to call time inside `_default_connect`,
 mirroring `analytics.sync`: tests inject a fake `connect(db_url)`
 factory and never touch the real driver, and the module load path
 stays driver-free for callers that only want the dataclass shapes.
+
+`analytics_agent_runs` is a view over `event = 'agent_exit'` rows
+defined in the schema; its derivations (`review_round_bucket`,
+`failed`, `model`, `total_tokens`, `has_cost`) are what every
+agent-run aggregate below queries against. The view has no `event`
+column -- the predicate is baked in -- so functions that read from
+the view honor the event filter by short-circuiting to empty when
+the operator's events selection excludes `agent_exit` rather than
+emitting an `event IN (...)` clause that would refer to a
+non-existent column.
 """
 from __future__ import annotations
 
@@ -70,6 +84,22 @@ class FilterOptions:
 
 
 @dataclass(frozen=True)
+class DataExtent:
+    """Earliest and latest event timestamps in the table.
+
+    The dashboard uses this to default the sidebar date picker to a
+    window that actually contains data -- a freshly-deployed database
+    has no rows, so picking today's date returns nothing. Both fields
+    are `None` when the table is empty or when `ANALYTICS_DB_URL` is
+    unset; the dashboard branches on that to render a "no data yet"
+    state.
+    """
+
+    min_ts: Optional[datetime] = None
+    max_ts: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
 class Summary:
     """Aggregate counts for a date-bounded window.
 
@@ -78,7 +108,11 @@ class Summary:
     `by_event` and `by_stage` use plain dicts because Streamlit-style
     rendering iterates them; ordering follows the SQL `GROUP BY` so
     the dashboard sees stable counts even if the rows reshuffle
-    between queries.
+    between queries. `total_agent_runs` / `failed_agent_runs` count
+    `event = 'agent_exit'` rows (and the failing subset where
+    `exit_code <> 0`) inside the same filtered window so the
+    dashboard's "agent success rate" reads off the same query as the
+    rest of the overview.
     """
 
     total_events: int = 0
@@ -89,6 +123,8 @@ class Summary:
     total_cost_usd: float = 0.0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    total_agent_runs: int = 0
+    failed_agent_runs: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,15 +132,21 @@ class TimeSeriesPoint:
     """One (day, event, count) cell of the daily time-series.
 
     `day` is a `date`, not a `datetime`, because the SQL aggregates
-    over `date_trunc('day', ts)` and a date matches Streamlit's chart
-    axis directly. Callers that need an hourly axis should add a
-    sibling function rather than parameterising this one -- the
-    schema already covers it via the `ts` index.
+    over `date_trunc('day', ts)` and a date matches a Plotly chart's
+    axis directly. The cell carries the per-event cost / token
+    aggregates as well so a "spend over time" chart can pivot off the
+    same query the activity chart uses -- avoids a second round trip
+    for what is already grouped by `(day, event)`. Fields default to
+    zero so a fake-cursor fixture that returns just `(day, event,
+    count)` rows still validates the no-aggregate path.
     """
 
     day: date
     event: str
     count: int
+    cost_usd: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -114,12 +156,19 @@ class StageBreakdown:
     `avg_duration_s` is None when no row in the window had a
     non-null `duration_s` for that stage; the SQL `AVG(...)` returns
     NULL in that case rather than 0 so the dashboard can hide the
-    column instead of showing a misleading zero.
+    column instead of showing a misleading zero. `total_cost_usd` /
+    `total_input_tokens` / `total_output_tokens` roll up the cost /
+    token figures across the stage so the breakdown table can plot
+    "where the spend went". Zero-defaulted so a fake fixture without
+    the cost columns still round-trips.
     """
 
     stage: str
     count: int
     avg_duration_s: Optional[float] = None
+    total_cost_usd: float = 0.0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -166,10 +215,13 @@ class IssueSummaryRow:
     fired, when the issue was first / last touched, the most recent
     non-null `stage` (useful as a "current status" column even though
     pinned GitHub state remains authoritative), how many `agent_exit`
-    events were recorded, and the rolled-up cost / token totals.
-    Stable column order across the SELECT list, the dataclass, and
-    the positional unpack in `get_issues` keeps the schema obvious
-    when a future column is added.
+    events were recorded, the rolled-up cost / token totals, the
+    highest review round any agent run for the issue reached, and how
+    many of those runs exited non-zero so the table can surface
+    issues that needed multiple attempts. Stable column order across
+    the SELECT list, the dataclass, and the positional unpack in
+    `get_issues` keeps the schema obvious when a future column is
+    added.
     """
 
     repo: str
@@ -182,6 +234,8 @@ class IssueSummaryRow:
     total_cost_usd: Optional[float]
     total_input_tokens: int
     total_output_tokens: int
+    max_review_round: Optional[int] = None
+    failed_agent_runs: int = 0
 
 
 @dataclass(frozen=True)
@@ -203,6 +257,116 @@ class IssueEventRow:
     backend: Optional[str]
     exit_code: Optional[int]
     cost_usd: Optional[float]
+
+
+@dataclass(frozen=True)
+class ReviewRoundBucketRow:
+    """Per-`review_round_bucket` count of agent runs.
+
+    `bucket` is the categorical string the view emits (`0`, `1`, `2`,
+    `3-5`, `6+`); it is exposed verbatim so the dashboard chart's
+    x-axis can use the same labels. `failed` is the subset of `runs`
+    that exited non-zero so the chart can stack the failure ratio on
+    top of the total. Rows with `review_round IS NULL` surface under
+    the `"unknown"` bucket so they remain visible -- silently dropping
+    them would hide pre-review work the operator expects to see.
+    """
+
+    bucket: str
+    runs: int
+    failed: int = 0
+
+
+@dataclass(frozen=True)
+class BackendEfficiencyRow:
+    """Per-`backend` aggregate of agent runs.
+
+    Powers the dashboard's "backend efficiency" panel: total runs,
+    how many failed, the average wall-clock duration (None when no
+    row in the window carried a duration), and the total cost /
+    token spend. Rows whose `backend` is NULL bucket under
+    `"unknown"` so the chart still surfaces them rather than
+    silently dropping a category.
+    """
+
+    backend: str
+    runs: int
+    failed: int = 0
+    avg_duration_s: Optional[float] = None
+    total_cost_usd: float = 0.0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class RepoBreakdownRow:
+    """Per-`repo` rollup over the filter window.
+
+    The dashboard's "activity by repo" chart plots issue and event
+    counts side-by-side; `agent_exits` and `total_cost_usd` are the
+    cost-focused companions. Distinct issue counts use
+    `COUNT(DISTINCT issue)` because rows are already scoped to one
+    repo per bucket, so the `(repo, issue)` row-constructor used by
+    `get_summary` is unnecessary here.
+    """
+
+    repo: str
+    issues: int
+    events: int
+    agent_exits: int = 0
+    total_cost_usd: float = 0.0
+
+
+@dataclass(frozen=True)
+class CostCoverageRow:
+    """Per-`cost_source` count of agent runs.
+
+    Powers the dashboard's "cost source coverage" donut. The
+    `unknown-price` cohort is the maintenance signal for the
+    pricing table baked into `orchestrator.usage` -- it is NEVER
+    collapsed into a generic "unknown" bucket here so an operator
+    can see at a glance how many runs the parser could not price.
+    Rows whose `cost_source` is NULL surface under `"unknown"` so
+    they remain visible (this is distinct from the `unknown-price`
+    string the parser writes -- a NULL is "field absent", not
+    "field present with the value 'unknown-price'").
+    """
+
+    cost_source: str
+    runs: int
+
+
+@dataclass(frozen=True)
+class HourlyHeatmapPoint:
+    """One (weekday, hour, count) cell of the 7x24 activity matrix.
+
+    `weekday` follows Postgres `EXTRACT(DOW)` which is 0=Sunday;
+    the dashboard chart re-orders to a Monday-first layout if the
+    operator prefers (we expose the raw value so the chart layer
+    owns the presentation choice). `hour` is the hour of day in
+    the same timezone the database stores `ts` in (the orchestrator
+    writes UTC).
+    """
+
+    weekday: int
+    hour: int
+    count: int
+
+
+@dataclass(frozen=True)
+class ThroughputDayRow:
+    """One day's resolved / rejected throughput count.
+
+    Powers the dashboard's "issues resolved per day" chart: counts
+    `stage_enter` rows whose `stage` is `done` (resolved) or
+    `rejected` (closed without merge), grouped by day. The two
+    columns are reported side by side so the chart can stack /
+    group them without a second query.
+    """
+
+    day: date
+    resolved: int = 0
+    rejected: int = 0
 
 
 def _default_connect(db_url: str) -> Any:
@@ -391,6 +555,78 @@ def _build_window_where(
     return " WHERE " + " AND ".join(conditions), params
 
 
+def _agent_event_excluded(events: Optional[Sequence[str]]) -> bool:
+    """True when the active event filter excludes `agent_exit` rows.
+
+    Functions that query `analytics_agent_runs` cannot push an
+    `event IN (...)` clause down into the SQL (the view has no
+    `event` column -- it filters internally to `event='agent_exit'`).
+    They preserve the dashboard's event-filter contract by calling
+    this helper up front and short-circuiting to an empty result:
+
+    - ``None`` -> not excluded (no event filter at all).
+    - non-empty sequence that lacks ``"agent_exit"`` -> excluded.
+    - empty sequence (the cleared-multiselect signal) -> excluded.
+
+    Keeps the agent-run aggregates in lockstep with `get_summary`
+    et al. when the operator clears or narrows the events filter.
+    """
+    if events is None:
+        return False
+    if not events:
+        return True
+    return "agent_exit" not in events
+
+
+def _build_view_window_where(
+    *,
+    start: Optional[datetime],
+    end: Optional[datetime],
+    repo: Optional[str],
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+) -> tuple[str, list[Any]]:
+    """`_build_window_where` minus the ``events`` clause.
+
+    Use against `analytics_agent_runs` queries. Callers must have
+    already short-circuited on `_agent_event_excluded(events)` so
+    the event-filter contract is honored before the SQL is built.
+    """
+    return _build_window_where(
+        start=start, end=end, repo=repo,
+        events=None, stages=stages, issue=issue,
+    )
+
+
+def get_data_extent(
+    *,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+) -> DataExtent:
+    """Min / max `ts` across `analytics_events`.
+
+    The dashboard reads this once at boot to default the sidebar's
+    date picker to a window that actually contains data, rather
+    than to "today" against a freshly-deployed empty table. Returns
+    `DataExtent()` (both fields `None`) when the DB URL is unset or
+    the table is empty.
+    """
+    url = _resolve_db_url(db_url)
+    if not url:
+        return DataExtent()
+    connect_fn = connect or _default_connect
+    rows = _query(
+        connect_fn,
+        url,
+        "SELECT MIN(ts) AS data_min_ts, MAX(ts) AS data_max_ts "
+        "FROM analytics_events",
+    )
+    if not rows:
+        return DataExtent()
+    min_ts, max_ts = rows[0]
+    return DataExtent(min_ts=min_ts, max_ts=max_ts)
+
+
 def get_summary(
     *,
     start: Optional[datetime] = None,
@@ -431,7 +667,16 @@ def get_summary(
         "COUNT(DISTINCT repo) AS distinct_repos, "
         "COALESCE(SUM(cost_usd), 0) AS total_cost_usd, "
         "COALESCE(SUM(input_tokens), 0) AS total_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS total_output_tokens "
+        "COALESCE(SUM(output_tokens), 0) AS total_output_tokens, "
+        # Agent-run counters: scoped to `event = 'agent_exit'` rows
+        # inside the same window so the dashboard's success-rate
+        # metric reads off the same query as the rest of the
+        # overview. `exit_code <> 0` excludes NULL exit codes so an
+        # in-flight or analytics-only row never counts as failed.
+        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
+        "  AS total_agent_runs, "
+        "SUM(CASE WHEN event = 'agent_exit' AND exit_code <> 0 "
+        "         THEN 1 ELSE 0 END) AS failed_agent_runs "
         f"FROM analytics_events{where}"
     )
     totals_rows = _query(connect_fn, url, totals_sql, params)
@@ -440,14 +685,18 @@ def get_summary(
         # so a fake cursor that returns [] never raises on the
         # positional unpack below.
         return Summary()
-    (
-        total_events,
-        distinct_issues,
-        distinct_repos,
-        total_cost_usd,
-        total_input_tokens,
-        total_output_tokens,
-    ) = totals_rows[0]
+    row = totals_rows[0]
+    total_events = row[0]
+    distinct_issues = row[1]
+    distinct_repos = row[2]
+    total_cost_usd = row[3]
+    total_input_tokens = row[4]
+    total_output_tokens = row[5]
+    # Fixtures that pre-date the agent-run extension may still emit
+    # 6-tuple totals rows; default to zero so the test harness does
+    # not have to know about the new SQL columns in unrelated cases.
+    total_agent_runs = row[6] if len(row) > 6 else 0
+    failed_agent_runs = row[7] if len(row) > 7 else 0
 
     by_event_sql = (
         "SELECT event, COUNT(*) AS c FROM analytics_events"
@@ -481,6 +730,8 @@ def get_summary(
         total_cost_usd=float(total_cost_usd or 0.0),
         total_input_tokens=int(total_input_tokens or 0),
         total_output_tokens=int(total_output_tokens or 0),
+        total_agent_runs=int(total_agent_runs or 0),
+        failed_agent_runs=int(failed_agent_runs or 0),
     )
 
 
@@ -495,11 +746,14 @@ def get_time_series(
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> list[TimeSeriesPoint]:
-    """Daily counts grouped by `event`.
+    """Daily counts grouped by `event`, with rolled-up cost / tokens.
 
-    Each point is `(day, event, count)` -- the dashboard pivots this
-    into a stacked bar / line chart. Returns an empty list when the
-    DB URL is unset or no rows match.
+    Each point is `(day, event, count, cost_usd, input_tokens,
+    output_tokens)` -- the dashboard pivots the count for the
+    activity stacked-bar chart and the cost / token columns drive
+    the spend-over-time and tokens-over-time charts without a second
+    DB round trip. Returns an empty list when the DB URL is unset or
+    no rows match.
     """
     url = _resolve_db_url(db_url)
     if not url:
@@ -510,7 +764,11 @@ def get_time_series(
         events=events, stages=stages, issue=issue,
     )
     sql = (
-        "SELECT date_trunc('day', ts)::date AS day, event, COUNT(*) AS c "
+        "SELECT date_trunc('day', ts)::date AS day, event, "
+        "COUNT(*) AS c, "
+        "COALESCE(SUM(cost_usd), 0) AS day_cost_usd, "
+        "COALESCE(SUM(input_tokens), 0) AS day_input_tokens, "
+        "COALESCE(SUM(output_tokens), 0) AS day_output_tokens "
         f"FROM analytics_events{where} "
         "GROUP BY day, event "
         "ORDER BY day ASC, event ASC"
@@ -518,11 +776,23 @@ def get_time_series(
     rows = _query(connect_fn, url, sql, params)
     points: list[TimeSeriesPoint] = []
     for row in rows:
-        day_value, event, count = row
+        day_value = row[0]
+        event = row[1]
+        count = row[2]
+        cost_usd = row[3] if len(row) > 3 else 0.0
+        input_tokens = row[4] if len(row) > 4 else 0
+        output_tokens = row[5] if len(row) > 5 else 0
         if isinstance(day_value, datetime):
             day_value = day_value.date()
         points.append(
-            TimeSeriesPoint(day=day_value, event=event, count=int(count))
+            TimeSeriesPoint(
+                day=day_value,
+                event=event,
+                count=int(count),
+                cost_usd=float(cost_usd or 0.0),
+                input_tokens=int(input_tokens or 0),
+                output_tokens=int(output_tokens or 0),
+            )
         )
     return points
 
@@ -538,11 +808,13 @@ def get_stage_breakdown(
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> list[StageBreakdown]:
-    """Per-stage counts + average handler duration.
+    """Per-stage counts, average handler duration, and cost rollups.
 
     Only counts rows whose `stage` is non-null (the partial-index
     case in the schema). Returns an empty list when the DB URL is
-    unset or no row in the window carries a stage.
+    unset or no row in the window carries a stage. The cost / token
+    columns are summed across the stage so the breakdown can plot
+    "spend per stage" without a second query.
     """
     url = _resolve_db_url(db_url)
     if not url:
@@ -558,18 +830,30 @@ def get_stage_breakdown(
         else " WHERE stage IS NOT NULL"
     )
     sql = (
-        "SELECT stage, COUNT(*) AS c, AVG(duration_s) AS avg_dur "
+        "SELECT stage, COUNT(*) AS c, AVG(duration_s) AS avg_dur, "
+        "COALESCE(SUM(cost_usd), 0) AS stage_cost_usd, "
+        "COALESCE(SUM(input_tokens), 0) AS stage_input_tokens, "
+        "COALESCE(SUM(output_tokens), 0) AS stage_output_tokens "
         f"FROM analytics_events{clause} "
         "GROUP BY stage ORDER BY c DESC, stage ASC"
     )
     rows = _query(connect_fn, url, sql, params)
     out: list[StageBreakdown] = []
-    for stage, count, avg_dur in rows:
+    for row in rows:
+        stage = row[0]
+        count = row[1]
+        avg_dur = row[2]
+        cost = row[3] if len(row) > 3 else 0.0
+        in_tok = row[4] if len(row) > 4 else 0
+        out_tok = row[5] if len(row) > 5 else 0
         out.append(
             StageBreakdown(
                 stage=stage,
                 count=int(count),
                 avg_duration_s=float(avg_dur) if avg_dur is not None else None,
+                total_cost_usd=float(cost or 0.0),
+                total_input_tokens=int(in_tok or 0),
+                total_output_tokens=int(out_tok or 0),
             )
         )
     return out
@@ -743,11 +1027,13 @@ def get_issues(
     Powers the dashboard's "issues" table: each row aggregates the
     events seen for a single `(repo, issue)` pair inside the window
     (count, first / last activity ts, the most recent non-null stage
-    as a "current status" hint, agent-exit count, and rolled-up cost
-    / token totals). Sorted by `last_seen DESC` so the most recently
-    active issues surface first. `limit` caps the row count for a
-    bounded dashboard table; non-positive values short-circuit to
-    an empty list, matching `get_recent_agent_exits`.
+    as a "current status" hint, agent-exit count, rolled-up cost
+    / token totals, the highest review round any agent run for the
+    issue reached, and how many of those runs exited non-zero).
+    Sorted by `last_seen DESC` so the most recently active issues
+    surface first. `limit` caps the row count for a bounded
+    dashboard table; non-positive values short-circuit to an empty
+    list, matching `get_recent_agent_exits`.
 
     `latest_stage` is computed with
     `(array_agg(stage ORDER BY ts DESC) FILTER (WHERE stage IS NOT NULL))[1]`
@@ -777,7 +1063,12 @@ def get_issues(
         "  AS agent_exits, "
         "SUM(cost_usd) AS total_cost_usd, "
         "COALESCE(SUM(input_tokens), 0) AS total_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS total_output_tokens "
+        "COALESCE(SUM(output_tokens), 0) AS total_output_tokens, "
+        # `review_round` is only ever set on agent_exit rows so a
+        # plain MAX is correct -- the filter is implicit.
+        "MAX(review_round) AS max_review_round, "
+        "SUM(CASE WHEN event = 'agent_exit' AND exit_code <> 0 "
+        "         THEN 1 ELSE 0 END) AS failed_agent_runs "
         f"FROM analytics_events{where} "
         "GROUP BY repo, issue "
         "ORDER BY last_seen DESC, repo ASC, issue ASC "
@@ -787,18 +1078,21 @@ def get_issues(
     rows = _query(connect_fn, url, sql, bound_params)
     out: list[IssueSummaryRow] = []
     for row in rows:
-        (
-            repo_v,
-            issue_v,
-            event_count,
-            first_seen,
-            last_seen,
-            latest_stage,
-            agent_exits,
-            total_cost_usd,
-            total_input_tokens,
-            total_output_tokens,
-        ) = row
+        repo_v = row[0]
+        issue_v = row[1]
+        event_count = row[2]
+        first_seen = row[3]
+        last_seen = row[4]
+        latest_stage = row[5]
+        agent_exits = row[6]
+        total_cost_usd = row[7]
+        total_input_tokens = row[8]
+        total_output_tokens = row[9]
+        # Old fixtures may still emit 10-tuple rows; default the
+        # extensions to None / 0 so tests written against the prior
+        # shape continue to round-trip.
+        max_review_round = row[10] if len(row) > 10 else None
+        failed_agent_runs = row[11] if len(row) > 11 else 0
         out.append(
             IssueSummaryRow(
                 repo=repo_v,
@@ -815,6 +1109,12 @@ def get_issues(
                 ),
                 total_input_tokens=int(total_input_tokens or 0),
                 total_output_tokens=int(total_output_tokens or 0),
+                max_review_round=(
+                    int(max_review_round)
+                    if max_review_round is not None
+                    else None
+                ),
+                failed_agent_runs=int(failed_agent_runs or 0),
             )
         )
     return out
@@ -898,6 +1198,366 @@ def get_issue_events(
                 backend=backend,
                 exit_code=int(exit_code) if exit_code is not None else None,
                 cost_usd=float(cost_usd) if cost_usd is not None else None,
+            )
+        )
+    return out
+
+
+def get_review_round_breakdown(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+) -> list[ReviewRoundBucketRow]:
+    """Per-`review_round_bucket` agent-run counts.
+
+    Reads from `analytics_agent_runs`; the view's
+    `review_round_bucket` collapses the long tail of high review
+    rounds into `0` / `1` / `2` / `3-5` / `6+` so the chart x-axis
+    stays bounded. Rows with `review_round IS NULL` (and therefore
+    a NULL bucket) surface under `"unknown"` so pre-review work
+    stays visible. The `events` filter is honored by short-circuit:
+    if the operator excluded `agent_exit` from the events
+    multiselect (or cleared it), every agent-run aggregate
+    returns empty so the dashboard's "show nothing for this
+    dimension" semantics stays consistent across widgets.
+    """
+    url = _resolve_db_url(db_url)
+    if not url:
+        return []
+    if _agent_event_excluded(events):
+        return []
+    connect_fn = connect or _default_connect
+    where, params = _build_view_window_where(
+        start=start, end=end, repo=repo,
+        stages=stages, issue=issue,
+    )
+    sql = (
+        "SELECT "
+        "COALESCE(review_round_bucket, 'unknown') AS bucket, "
+        "COUNT(*) AS runs, "
+        "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs "
+        f"FROM analytics_agent_runs{where} "
+        "GROUP BY bucket "
+        "ORDER BY runs DESC, bucket ASC"
+    )
+    rows = _query(connect_fn, url, sql, params)
+    return [
+        ReviewRoundBucketRow(
+            bucket=str(b),
+            runs=int(r or 0),
+            failed=int(f or 0),
+        )
+        for b, r, f in rows
+    ]
+
+
+def get_backend_efficiency(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+) -> list[BackendEfficiencyRow]:
+    """Per-`backend` aggregate of agent runs.
+
+    Reads from `analytics_agent_runs`; the `failed` derivation is
+    `exit_code <> 0` with NULLs preserved (so "no data" never reads
+    as "succeeded"). Rows whose `backend` is NULL surface under
+    `"unknown"`. The `events` filter is honored by short-circuit
+    against `_agent_event_excluded` -- see
+    `get_review_round_breakdown` for the rationale.
+    """
+    url = _resolve_db_url(db_url)
+    if not url:
+        return []
+    if _agent_event_excluded(events):
+        return []
+    connect_fn = connect or _default_connect
+    where, params = _build_view_window_where(
+        start=start, end=end, repo=repo,
+        stages=stages, issue=issue,
+    )
+    sql = (
+        "SELECT "
+        "COALESCE(backend, 'unknown') AS backend_label, "
+        "COUNT(*) AS runs, "
+        "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs, "
+        "AVG(duration_s) AS avg_dur, "
+        "COALESCE(SUM(cost_usd), 0) AS backend_cost_usd, "
+        "COALESCE(SUM(input_tokens), 0) AS backend_input_tokens, "
+        "COALESCE(SUM(output_tokens), 0) AS backend_output_tokens "
+        f"FROM analytics_agent_runs{where} "
+        "GROUP BY backend_label "
+        "ORDER BY runs DESC, backend_label ASC"
+    )
+    rows = _query(connect_fn, url, sql, params)
+    out: list[BackendEfficiencyRow] = []
+    for backend, runs, failed, avg_dur, cost, in_tok, out_tok in rows:
+        out.append(
+            BackendEfficiencyRow(
+                backend=str(backend),
+                runs=int(runs or 0),
+                failed=int(failed or 0),
+                avg_duration_s=(
+                    float(avg_dur) if avg_dur is not None else None
+                ),
+                total_cost_usd=float(cost or 0.0),
+                total_input_tokens=int(in_tok or 0),
+                total_output_tokens=int(out_tok or 0),
+            )
+        )
+    return out
+
+
+def get_repo_breakdown(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+) -> list[RepoBreakdownRow]:
+    """Per-`repo` rollup of activity inside the filter window.
+
+    Reads from the base table so the standard event / stage / date /
+    repo / issue filter shape applies (no view short-circuit
+    needed). `COUNT(DISTINCT issue)` is safe inside a GROUP BY repo
+    because rows are already scoped to one repo per bucket -- the
+    `(repo, issue)` row-constructor `get_summary` uses is only
+    needed when issues are counted across repos.
+    """
+    url = _resolve_db_url(db_url)
+    if not url:
+        return []
+    connect_fn = connect or _default_connect
+    where, params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=events, stages=stages, issue=issue,
+    )
+    sql = (
+        "SELECT repo, "
+        "COUNT(DISTINCT issue) AS repo_issues, "
+        "COUNT(*) AS repo_events, "
+        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
+        "  AS repo_agent_exits, "
+        "COALESCE(SUM(cost_usd), 0) AS repo_cost_usd "
+        f"FROM analytics_events{where} "
+        "GROUP BY repo "
+        "ORDER BY repo_events DESC, repo ASC"
+    )
+    rows = _query(connect_fn, url, sql, params)
+    return [
+        RepoBreakdownRow(
+            repo=r,
+            issues=int(iss or 0),
+            events=int(ev or 0),
+            agent_exits=int(ax or 0),
+            total_cost_usd=float(cost or 0.0),
+        )
+        for r, iss, ev, ax, cost in rows
+    ]
+
+
+def get_cost_coverage(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+) -> list[CostCoverageRow]:
+    """Per-`cost_source` count of agent runs.
+
+    Reads from `analytics_agent_runs`. The `unknown-price` cohort
+    is exposed verbatim -- never collapsed into a generic "unknown"
+    bucket -- because it is the maintenance signal for the pricing
+    table in `orchestrator.usage`: a growing slice means the table
+    is missing SKUs the parser is seeing in the wild. Rows whose
+    `cost_source` is NULL bucket under `"unknown"` (distinct from
+    the `unknown-price` string the parser writes when the SKU is
+    not priced). The `events` filter is honored by short-circuit
+    against `_agent_event_excluded`.
+    """
+    url = _resolve_db_url(db_url)
+    if not url:
+        return []
+    if _agent_event_excluded(events):
+        return []
+    connect_fn = connect or _default_connect
+    where, params = _build_view_window_where(
+        start=start, end=end, repo=repo,
+        stages=stages, issue=issue,
+    )
+    sql = (
+        "SELECT "
+        "COALESCE(cost_source, 'unknown') AS source_label, "
+        "COUNT(*) AS runs "
+        f"FROM analytics_agent_runs{where} "
+        "GROUP BY source_label "
+        "ORDER BY runs DESC, source_label ASC"
+    )
+    rows = _query(connect_fn, url, sql, params)
+    return [
+        CostCoverageRow(cost_source=str(s), runs=int(r or 0))
+        for s, r in rows
+    ]
+
+
+def get_hourly_heatmap(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+) -> list[HourlyHeatmapPoint]:
+    """7x24 weekday-by-hour activity counts from the base table.
+
+    Honors the full event / stage / date / repo / issue filter
+    shape (the chart should narrow with the rest of the dashboard).
+    Cells with zero activity are elided -- the dashboard fills in
+    the rest of the 7x24 grid at render time. `weekday` is the
+    raw `EXTRACT(DOW FROM ts)` value (0 = Sunday) so the chart
+    layer owns the Monday-first re-ordering choice.
+    """
+    url = _resolve_db_url(db_url)
+    if not url:
+        return []
+    connect_fn = connect or _default_connect
+    where, params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=events, stages=stages, issue=issue,
+    )
+    sql = (
+        "SELECT "
+        "EXTRACT(DOW FROM ts)::int AS weekday, "
+        "EXTRACT(HOUR FROM ts)::int AS hour, "
+        "COUNT(*) AS c "
+        f"FROM analytics_events{where} "
+        "GROUP BY weekday, hour "
+        "ORDER BY weekday ASC, hour ASC"
+    )
+    rows = _query(connect_fn, url, sql, params)
+    return [
+        HourlyHeatmapPoint(
+            weekday=int(w),
+            hour=int(h),
+            count=int(c or 0),
+        )
+        for w, h, c in rows
+    ]
+
+
+# Stages a `stage_enter` event must carry to count as a terminal
+# resolution -- `done` means merged / closed successfully,
+# `rejected` means closed without merge. Kept private to this module
+# because the throughput helper is the only consumer; if a future
+# caller needs the same set, promote it to a documented constant.
+_THROUGHPUT_RESOLVED_STAGES: tuple[str, ...] = ("done", "rejected")
+
+
+def get_throughput_breakdown(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+) -> list[ThroughputDayRow]:
+    """Daily resolved / rejected `stage_enter` counts.
+
+    Counts `event = 'stage_enter'` rows whose `stage` is `done`
+    (resolved) or `rejected`, grouped by day. The widget answers
+    "how many issues completed per day" and is distinct from the
+    activity throughput plotted by `get_time_series` (which counts
+    every event).
+
+    Honors the operator's filters:
+
+    - `events` short-circuits to empty when the multiselect
+      excludes `stage_enter` (or is cleared), matching how
+      `get_recent_agent_exits` honors `agent_exit`.
+    - `stages` short-circuits when the multiselect excludes both
+      `done` and `rejected`, or is cleared; otherwise the
+      intersection is what narrows the SQL.
+    - `start` / `end` / `repo` / `issue` apply as in every other
+      reader.
+    """
+    url = _resolve_db_url(db_url)
+    if not url:
+        return []
+    if events is not None and "stage_enter" not in events:
+        return []
+    # Intersect the user's stage selection with the resolved /
+    # rejected pair this widget is by definition about.
+    if stages is None:
+        active_stages = list(_THROUGHPUT_RESOLVED_STAGES)
+    elif not stages:
+        return []
+    else:
+        active_stages = [s for s in stages if s in _THROUGHPUT_RESOLVED_STAGES]
+        if not active_stages:
+            return []
+    connect_fn = connect or _default_connect
+    conditions = ["event = %s"]
+    params: list[Any] = ["stage_enter"]
+    if start is not None:
+        conditions.append("ts >= %s")
+        params.append(start)
+    if end is not None:
+        conditions.append("ts < %s")
+        params.append(end)
+    if repo is not None:
+        conditions.append("repo = %s")
+        params.append(repo)
+    if issue is not None:
+        conditions.append("issue = %s")
+        params.append(int(issue))
+    placeholders = ", ".join(["%s"] * len(active_stages))
+    conditions.append(f"stage IN ({placeholders})")
+    params.extend(active_stages)
+    where = " WHERE " + " AND ".join(conditions)
+    sql = (
+        "SELECT date_trunc('day', ts)::date AS day, "
+        "SUM(CASE WHEN stage = 'done' THEN 1 ELSE 0 END) AS resolved, "
+        "SUM(CASE WHEN stage = 'rejected' THEN 1 ELSE 0 END) AS rejected "
+        f"FROM analytics_events{where} "
+        "GROUP BY day "
+        "ORDER BY day ASC"
+    )
+    rows = _query(connect_fn, url, sql, params)
+    out: list[ThroughputDayRow] = []
+    for row in rows:
+        day_value, resolved, rejected = row
+        if isinstance(day_value, datetime):
+            day_value = day_value.date()
+        out.append(
+            ThroughputDayRow(
+                day=day_value,
+                resolved=int(resolved or 0),
+                rejected=int(rejected or 0),
             )
         )
     return out
