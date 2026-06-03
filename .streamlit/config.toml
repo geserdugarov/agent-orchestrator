@@ -14,10 +14,10 @@
 
 [theme]
 base = "light"
-primaryColor = "#2563eb"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f3f4f6"
-textColor = "#111827"
+primaryColor = "#5b54e0"
+backgroundColor = "#f4f5f8"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1c2030"
 font = "sans serif"
 
 [browser]

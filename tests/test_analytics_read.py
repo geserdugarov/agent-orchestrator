@@ -839,6 +839,61 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
         result = analytics_read.get_summary(connect=_connector(conn))
         self.assertEqual(result.total_agent_runs, 0)
         self.assertEqual(result.failed_agent_runs, 0)
+        # Cache columns absent from the fixture default to zero too.
+        self.assertEqual(result.total_cache_read_tokens, 0)
+        self.assertEqual(result.total_cache_write_tokens, 0)
+
+    def test_totals_carry_cache_token_columns(self) -> None:
+        # 10-tuple: events / issues / repos / cost / in / out /
+        # total runs / failed runs / cache_read / cache_write.
+        # The cache columns feed the redesigned "Total tokens" KPI
+        # and sparkline -- matching the standalone mock's
+        # `input + output + cache_read + cache_write` accounting.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "COUNT(*) AS total_events": [
+                (50, 12, 3, 2.5, 100, 200, 15, 4, 1200, 800),
+            ],
+        }
+        result = analytics_read.get_summary(connect=_connector(conn))
+        self.assertEqual(result.total_cache_read_tokens, 1200)
+        self.assertEqual(result.total_cache_write_tokens, 800)
+        totals_sql, _ = conn.executed[0]
+        self.assertIn("SUM(cache_read_tokens)", totals_sql)
+        self.assertIn("SUM(cache_write_tokens)", totals_sql)
+
+    def test_totals_carry_timed_out_agent_runs(self) -> None:
+        # 11-tuple appends the window-wide `timed_out` count so the
+        # reliability "Timeouts" tile aggregates every timed-out run
+        # in the window -- not just the latest N from
+        # `get_recent_agent_exits`. The SQL filters on
+        # `timed_out = true` so NULL pre-flag rows never count.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "COUNT(*) AS total_events": [
+                (50, 12, 3, 2.5, 100, 200, 15, 4, 1200, 800, 7),
+            ],
+        }
+        result = analytics_read.get_summary(connect=_connector(conn))
+        self.assertEqual(result.timed_out_agent_runs, 7)
+        totals_sql, _ = conn.executed[0]
+        self.assertIn("timed_out", totals_sql)
+        self.assertIn("timed_out_agent_runs", totals_sql)
+
+    def test_legacy_10tuple_fixture_defaults_timed_out_to_zero(self) -> None:
+        # A fixture that pre-dates the timeout extension still
+        # round-trips with the new field defaulted to zero.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "COUNT(*) AS total_events": [
+                (50, 12, 3, 2.5, 100, 200, 15, 4, 1200, 800),
+            ],
+        }
+        result = analytics_read.get_summary(connect=_connector(conn))
+        self.assertEqual(result.timed_out_agent_runs, 0)
 
 
 class TimeSeriesAggregatesTest(unittest.TestCase):
@@ -847,11 +902,17 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
     charts can pivot the same query."""
 
     def test_aggregates_round_trip(self) -> None:
+        # 8-tuple: day / event / count / cost / input / output /
+        # cache_read / cache_write. The cache columns feed the
+        # redesigned hero chart's Cache band.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {
             "date_trunc('day', ts)": [
-                (date(2026, 5, 25), "agent_exit", 3, 0.42, 1000, 500),
+                (
+                    date(2026, 5, 25), "agent_exit",
+                    3, 0.42, 1000, 500, 200, 100,
+                ),
             ],
         }
         points = analytics_read.get_time_series(connect=_connector(conn))
@@ -861,32 +922,76 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
         self.assertEqual(p.cost_usd, 0.42)
         self.assertEqual(p.input_tokens, 1000)
         self.assertEqual(p.output_tokens, 500)
+        self.assertEqual(p.cache_read_tokens, 200)
+        self.assertEqual(p.cache_write_tokens, 100)
         sql, _ = conn.executed[0]
         self.assertIn("SUM(cost_usd)", sql)
         self.assertIn("SUM(input_tokens)", sql)
         self.assertIn("SUM(output_tokens)", sql)
+        self.assertIn("SUM(cache_read_tokens)", sql)
+        self.assertIn("SUM(cache_write_tokens)", sql)
 
-
-class StageBreakdownExtensionTest(unittest.TestCase):
-    """Extended `get_stage_breakdown` rolls up cost and token totals
-    per stage so the breakdown table can show "spend per stage"."""
-
-    def test_rolls_up_cost_and_tokens(self) -> None:
+    def test_legacy_six_tuple_rows_default_cache_to_zero(self) -> None:
+        # Older fixtures still emit 6-tuple `(day, event, count,
+        # cost, in, out)` rows; the reader defaults the cache fields
+        # to zero so unrelated tests round-trip.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {
+            "date_trunc('day', ts)": [
+                (date(2026, 5, 25), "agent_exit", 3, 0.42, 1000, 500),
+            ],
+        }
+        p = analytics_read.get_time_series(connect=_connector(conn))[0]
+        self.assertEqual(p.cache_read_tokens, 0)
+        self.assertEqual(p.cache_write_tokens, 0)
+
+
+class StageBreakdownExtensionTest(unittest.TestCase):
+    """Extended `get_stage_breakdown` rolls up cost / token totals
+    plus an agent-run subset count per stage so the redesigned "Cost
+    by workflow stage" panel can label its sub-line as "runs"
+    against the per-stage cost."""
+
+    def test_rolls_up_cost_tokens_and_runs(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        # 7-tuple shape: stage / events / avg_dur / cost / input /
+        # output / agent-run subset.
+        conn.rows_for = {
             "AVG(duration_s)": [
-                ("implementing", 20, 12.5, 0.50, 2000, 1500),
-                ("validating", 10, None, 0.10, 100, 200),
+                ("implementing", 20, 12.5, 0.50, 2000, 1500, 8),
+                ("validating", 10, None, 0.10, 100, 200, 3),
             ],
         }
         rows = analytics_read.get_stage_breakdown(connect=_connector(conn))
         self.assertEqual(rows[0].total_cost_usd, 0.50)
         self.assertEqual(rows[0].total_input_tokens, 2000)
         self.assertEqual(rows[0].total_output_tokens, 1500)
+        self.assertEqual(rows[0].runs, 8)
         self.assertEqual(rows[1].total_cost_usd, 0.10)
+        self.assertEqual(rows[1].runs, 3)
         sql, _ = conn.executed[0]
         self.assertIn("SUM(cost_usd)", sql)
+        # Agent-run subset uses `event = 'agent_exit'`, scoped by
+        # the same WHERE clause as the totals so the per-stage sub-
+        # line lines up with the per-stage cost.
+        self.assertIn("event = 'agent_exit'", sql)
+
+    def test_legacy_6tuple_fixture_round_trips(self) -> None:
+        # Older fixtures still emit 6-tuple `(stage, count, avg_dur,
+        # cost, in, out)` rows without the agent-run subset; the
+        # reader defaults `runs` to zero so unrelated tests round-
+        # trip.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "AVG(duration_s)": [
+                ("implementing", 20, 12.5, 0.50, 2000, 1500),
+            ],
+        }
+        rows = analytics_read.get_stage_breakdown(connect=_connector(conn))
+        self.assertEqual(rows[0].runs, 0)
 
 
 class IssuesExtensionTest(unittest.TestCase):
@@ -896,20 +1001,27 @@ class IssuesExtensionTest(unittest.TestCase):
     round-trip."""
 
     def test_extended_columns_round_trip(self) -> None:
+        # 13-tuple: repo / issue / events / first / last / latest_stage
+        # / agent_exits / cost / input / output / max_review_round /
+        # failed_agent_runs / max_retry_count. The trailing
+        # `max_retry_count` powers the redesigned "Retries" column
+        # in the "Most expensive issues" table.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         t = datetime(2026, 5, 25, 10, 0, tzinfo=timezone.utc)
         conn.rows_for = {
             "GROUP BY repo, issue": [
                 ("owner/r", 7, 8, t, t, "implementing", 5,
-                 0.55, 800, 400, 3, 2),
+                 0.55, 800, 400, 3, 2, 4),
             ],
         }
         rows = analytics_read.get_issues(connect=_connector(conn))
         self.assertEqual(rows[0].max_review_round, 3)
         self.assertEqual(rows[0].failed_agent_runs, 2)
+        self.assertEqual(rows[0].max_retry_count, 4)
         sql, _ = conn.executed[0]
         self.assertIn("MAX(review_round)", sql)
+        self.assertIn("MAX(retry_count)", sql)
         self.assertIn("failed_agent_runs", sql)
 
     def test_legacy_10tuple_fixture_still_round_trips(self) -> None:
@@ -924,6 +1036,52 @@ class IssuesExtensionTest(unittest.TestCase):
         rows = analytics_read.get_issues(connect=_connector(conn))
         self.assertIsNone(rows[0].max_review_round)
         self.assertEqual(rows[0].failed_agent_runs, 0)
+        self.assertIsNone(rows[0].max_retry_count)
+
+    def test_default_sort_by_last_seen(self) -> None:
+        # Backwards compatibility: the default `sort_by` keeps the
+        # historical `ORDER BY last_seen DESC` so callers that pre-
+        # date the redesigned cost-ordered top-issues read keep
+        # surfacing the most recently active issues first.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {"GROUP BY repo, issue": []}
+        analytics_read.get_issues(connect=_connector(conn))
+        sql, _ = conn.executed[0]
+        self.assertIn("ORDER BY last_seen DESC", sql)
+        self.assertNotIn("SUM(cost_usd) DESC", sql)
+
+    def test_sort_by_cost_orders_by_total_cost_desc(self) -> None:
+        # Cost-ordered mode powers the redesigned "Most expensive
+        # issues" table -- ordering in-Python after a `last_seen`-
+        # bounded `LIMIT 200` would silently drop older high-cost
+        # issues outside the truncated set, so the SQL must rank by
+        # `SUM(cost_usd) DESC` directly.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {"GROUP BY repo, issue": []}
+        analytics_read.get_issues(
+            sort_by=analytics_read.SORT_BY_COST,
+            connect=_connector(conn),
+        )
+        sql, _ = conn.executed[0]
+        self.assertIn("ORDER BY SUM(cost_usd) DESC NULLS LAST", sql)
+        # Secondary `last_seen DESC` keeps ties deterministic.
+        self.assertIn("last_seen DESC", sql)
+
+    def test_unknown_sort_by_raises(self) -> None:
+        # A typo never silently degrades to the default ordering --
+        # so a future caller is forced to pick a known mode.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        with self.assertRaises(ValueError):
+            analytics_read.get_issues(
+                sort_by="not-a-mode",
+                connect=_connector(conn),
+            )
+        # Argument validation runs before the DB connect, so the fake
+        # cursor never receives the SQL.
+        self.assertEqual(conn.executed, [])
 
 
 class ReviewRoundBreakdownTest(unittest.TestCase):
@@ -963,10 +1121,10 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         conn = _FakeConnection()
         conn.rows_for = {
             "analytics_agent_runs": [
-                ("0", 12, 1),
-                ("1", 8, 2),
-                ("3-5", 4, 4),
-                ("unknown", 1, 0),
+                ("0", 12, 1, 40.0),
+                ("1", 8, 2, 25.0),
+                ("3-5", 4, 4, 18.0),
+                ("unknown", 1, 0, 0.0),
             ],
         }
         rows = analytics_read.get_review_round_breakdown(
@@ -975,23 +1133,132 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         self.assertEqual([r.bucket for r in rows], ["0", "1", "3-5", "unknown"])
         self.assertEqual([r.runs for r in rows], [12, 8, 4, 1])
         self.assertEqual([r.failed for r in rows], [1, 2, 4, 0])
+        # `total_cost_usd` powers the redesigned "Cost by review round"
+        # chart in `orchestrator.dashboard_charts.cost_by_review_round`
+        # and the "Rework share" KPI tile.
+        self.assertEqual(
+            [r.total_cost_usd for r in rows],
+            [40.0, 25.0, 18.0, 0.0],
+        )
         sql, _ = conn.executed[0]
         # Reads from the view, not the base table, and the view has
         # no `event` column so no `event IN (...)` clause is emitted.
         self.assertIn("FROM analytics_agent_runs", sql)
+        self.assertIn("SUM(cost_usd)", sql)
         self.assertNotIn("event IN", sql)
+
+    def test_legacy_three_tuple_rows_default_cost_to_zero(self) -> None:
+        # Older fixtures still emit 3-tuple `(bucket, runs, failed)`
+        # rows without the cost rollup; the reader defaults the cost
+        # to `0.0` so unrelated tests keep round-tripping.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {"analytics_agent_runs": [("0", 3, 0)]}
+        rows = analytics_read.get_review_round_breakdown(
+            connect=_connector(conn),
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].total_cost_usd, 0.0)
 
     def test_explicit_agent_exit_runs_query(self) -> None:
         # An events list that includes agent_exit must NOT short-circuit
         # -- the operator still wants to see the agent runs view.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
-        conn.rows_for = {"analytics_agent_runs": [("1", 3, 0)]}
+        conn.rows_for = {"analytics_agent_runs": [("1", 3, 0, 5.0)]}
         rows = analytics_read.get_review_round_breakdown(
             events=["agent_exit", "stage_enter"],
             connect=_connector(conn),
         )
         self.assertEqual(len(rows), 1)
+
+
+class BackendDailyTokensTest(unittest.TestCase):
+    """`get_backend_daily_tokens` powers the redesigned dashboard's
+    "By backend" hero toggle. It must read from the view, honor the
+    agent-run event-filter short-circuit, and aggregate tokens across
+    every agent run in the window (not a `LIMIT`-capped subset).
+    """
+
+    def test_unset_db_url_returns_empty(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        self.assertEqual(
+            analytics_read.get_backend_daily_tokens(
+                connect=lambda url: _FakeConnection(),
+            ),
+            [],
+        )
+
+    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        rows = analytics_read.get_backend_daily_tokens(
+            events=["stage_enter"], connect=_connector(conn),
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(conn.executed, [])
+
+    def test_empty_events_short_circuits(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        rows = analytics_read.get_backend_daily_tokens(
+            events=[], connect=_connector(conn),
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(conn.executed, [])
+
+    def test_reads_view_and_aggregates_per_day_per_backend(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "analytics_agent_runs": [
+                (date(2026, 5, 1), "claude", 12_000),
+                (date(2026, 5, 1), "codex", 4_500),
+                (date(2026, 5, 2), "claude", 8_000),
+            ],
+        }
+        rows = analytics_read.get_backend_daily_tokens(
+            connect=_connector(conn),
+        )
+        self.assertEqual(
+            [(r.day, r.backend, r.total_tokens) for r in rows],
+            [
+                (date(2026, 5, 1), "claude", 12_000),
+                (date(2026, 5, 1), "codex", 4_500),
+                (date(2026, 5, 2), "claude", 8_000),
+            ],
+        )
+        sql, _ = conn.executed[0]
+        # Reads from the view -- so the agent-run filter contract
+        # (no `event IN` clause) holds -- and groups by both day and
+        # backend so the dashboard can build a per-day stack without
+        # post-processing. Token total includes the cache band so
+        # the backend stack matches the standalone mock's
+        # `input + output + cache_read + cache_write` accounting.
+        self.assertIn("FROM analytics_agent_runs", sql)
+        self.assertNotIn("event IN", sql)
+        self.assertIn("GROUP BY day, backend_label", sql)
+        for col in (
+            "input_tokens", "output_tokens",
+            "cache_read_tokens", "cache_write_tokens",
+        ):
+            self.assertIn(col, sql)
+
+    def test_null_backend_buckets_under_unknown(self) -> None:
+        # `COALESCE(backend, 'unknown')` matches how
+        # `get_backend_efficiency` surfaces NULL-backend rows.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "analytics_agent_runs": [
+                (date(2026, 5, 1), "unknown", 1_000),
+            ],
+        }
+        rows = analytics_read.get_backend_daily_tokens(
+            connect=_connector(conn),
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].backend, "unknown")
 
 
 class BackendEfficiencyTest(unittest.TestCase):
@@ -1019,11 +1286,13 @@ class BackendEfficiencyTest(unittest.TestCase):
     def test_aggregates_round_trip(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
+        # 9-tuple: backend / runs / failed / avg_dur / cost /
+        # input_tokens / output_tokens / cache_read / cache_write.
         conn.rows_for = {
             "analytics_agent_runs": [
-                ("claude", 20, 1, 35.0, 1.20, 5000, 4000),
-                ("codex", 10, 3, None, 0.40, 1000, 2000),
-                ("unknown", 1, 0, None, 0.0, 0, 0),
+                ("claude", 20, 1, 35.0, 1.20, 5000, 4000, 1500, 800),
+                ("codex", 10, 3, None, 0.40, 1000, 2000, 0, 0),
+                ("unknown", 1, 0, None, 0.0, 0, 0, 0, 0),
             ],
         }
         rows = analytics_read.get_backend_efficiency(connect=_connector(conn))
@@ -1032,12 +1301,34 @@ class BackendEfficiencyTest(unittest.TestCase):
         self.assertEqual(rows[0].failed, 1)
         self.assertEqual(rows[0].avg_duration_s, 35.0)
         self.assertEqual(rows[0].total_cost_usd, 1.20)
+        # Cache columns feed the per-backend "cost / 1M tok" tile
+        # alongside input + output so the denominator matches the
+        # standalone mock's total-token accounting.
+        self.assertEqual(rows[0].total_cache_read_tokens, 1500)
+        self.assertEqual(rows[0].total_cache_write_tokens, 800)
         # NULL avg duration preserved so the dashboard can hide the
         # column rather than show a misleading zero.
         self.assertIsNone(rows[1].avg_duration_s)
         sql, _ = conn.executed[0]
         self.assertIn("FROM analytics_agent_runs", sql)
         self.assertIn("COALESCE(backend, 'unknown')", sql)
+        self.assertIn("SUM(cache_read_tokens)", sql)
+        self.assertIn("SUM(cache_write_tokens)", sql)
+
+    def test_legacy_7tuple_fixture_defaults_cache_to_zero(self) -> None:
+        # Older 7-tuple `(backend, runs, failed, avg_dur, cost, in,
+        # out)` rows still round-trip with zero cache tokens so
+        # unrelated tests keep working.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "analytics_agent_runs": [
+                ("claude", 5, 0, 10.0, 0.20, 1000, 500),
+            ],
+        }
+        rows = analytics_read.get_backend_efficiency(connect=_connector(conn))
+        self.assertEqual(rows[0].total_cache_read_tokens, 0)
+        self.assertEqual(rows[0].total_cache_write_tokens, 0)
 
 
 class RepoBreakdownTest(unittest.TestCase):
@@ -1115,16 +1406,18 @@ class CostCoverageTest(unittest.TestCase):
     def test_unknown_price_preserved_verbatim(self) -> None:
         # The `unknown-price` slice surfaces with that exact label --
         # NEVER collapsed into "unknown" -- so the operator can see
-        # which runs the parser could not price.
+        # which runs the parser could not price. The third tuple
+        # column is the per-`cost_source` token rollup that feeds
+        # the redesigned token-share coverage bar.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {
             "analytics_agent_runs": [
-                ("reported", 20),
-                ("estimated", 5),
-                ("unknown-price", 3),
-                ("no-usage", 2),
-                ("unknown", 1),
+                ("reported", 20, 800_000),
+                ("estimated", 5, 100_000),
+                ("unknown-price", 3, 60_000),
+                ("no-usage", 2, 20_000),
+                ("unknown", 1, 5_000),
             ],
         }
         rows = analytics_read.get_cost_coverage(connect=_connector(conn))
@@ -1137,11 +1430,34 @@ class CostCoverageTest(unittest.TestCase):
         self.assertEqual(
             sum(1 for r in rows if r.cost_source == "unknown"), 1,
         )
+        # Per-source token volume rolls up alongside the run count.
+        by_source = {r.cost_source: r for r in rows}
+        self.assertEqual(by_source["reported"].total_tokens, 800_000)
+        self.assertEqual(by_source["unknown-price"].total_tokens, 60_000)
         sql, _ = conn.executed[0]
         self.assertIn("FROM analytics_agent_runs", sql)
         # NULL cost_source rows bucket under "unknown" via COALESCE,
         # but the verbatim "unknown-price" string is untouched.
         self.assertIn("COALESCE(cost_source, 'unknown')", sql)
+        # SQL totals input + output + cache_read + cache_write so the
+        # token share matches the standalone mock's accounting.
+        for col in (
+            "input_tokens", "output_tokens",
+            "cache_read_tokens", "cache_write_tokens",
+        ):
+            self.assertIn(col, sql)
+
+    def test_legacy_two_tuple_rows_default_tokens_to_zero(self) -> None:
+        # Older fixtures still emit 2-tuple `(cost_source, runs)`
+        # rows; the reader defaults `total_tokens` to zero so
+        # unrelated tests round-trip.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "analytics_agent_runs": [("reported", 3)],
+        }
+        rows = analytics_read.get_cost_coverage(connect=_connector(conn))
+        self.assertEqual(rows[0].total_tokens, 0)
 
 
 class HourlyHeatmapTest(unittest.TestCase):
@@ -1161,21 +1477,47 @@ class HourlyHeatmapTest(unittest.TestCase):
     def test_cells_round_trip(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
+        # 4-tuple: weekday / hour / event count / per-cell tokens.
+        # The token column powers the redesigned "Token volume by
+        # hour x weekday" heatmap; the event count is kept for
+        # callers that want activity rather than token volume.
         conn.rows_for = {
             "EXTRACT(DOW FROM ts)": [
-                (1, 9, 5),  # Monday 09:00 -- 5 events
-                (1, 14, 7),
-                (3, 22, 2),
+                (1, 9, 5, 25_000),
+                (1, 14, 7, 40_000),
+                (3, 22, 2, 4_500),
             ],
         }
         cells = analytics_read.get_hourly_heatmap(connect=_connector(conn))
         self.assertEqual(len(cells), 3)
-        self.assertEqual((cells[0].weekday, cells[0].hour, cells[0].count),
-                         (1, 9, 5))
+        self.assertEqual(
+            (cells[0].weekday, cells[0].hour, cells[0].count,
+             cells[0].total_tokens),
+            (1, 9, 5, 25_000),
+        )
         sql, _ = conn.executed[0]
         self.assertIn("EXTRACT(DOW FROM ts)", sql)
         self.assertIn("EXTRACT(HOUR FROM ts)", sql)
         self.assertIn("FROM analytics_events", sql)
+        # SQL totals input + output + cache_read + cache_write so
+        # the matrix renders token volume rather than event count.
+        for col in (
+            "input_tokens", "output_tokens",
+            "cache_read_tokens", "cache_write_tokens",
+        ):
+            self.assertIn(col, sql)
+
+    def test_legacy_three_tuple_rows_default_tokens_to_zero(self) -> None:
+        # Older fixtures still emit 3-tuple `(weekday, hour, count)`
+        # rows without the token column; the reader defaults the
+        # token total to zero so unrelated tests round-trip.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "EXTRACT(DOW FROM ts)": [(1, 9, 5)],
+        }
+        cells = analytics_read.get_hourly_heatmap(connect=_connector(conn))
+        self.assertEqual(cells[0].total_tokens, 0)
 
     def test_event_filter_threaded(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})

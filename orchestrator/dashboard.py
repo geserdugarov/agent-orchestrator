@@ -2,21 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """Streamlit analytics dashboard.
 
-Interactive view over the `analytics_events` Postgres table populated
-by `orchestrator.analytics.sync`. The page renders an analysis-first
-layout (#317) over the redesigned read model: a sidebar with
-data-extent-bounded `7d` / `30d` / `All` presets (plus a free date
-range), computed insight banners, a KPI row with previous-window
-deltas, the hero usage-over-time chart, the stage + review-round
-breakdowns, the most-expensive issues table, per-backend efficiency
-cards, the cost-source coverage bar, the per-repo activity chart, the
-reliability / throughput chart, the weekday x hour activity heatmap,
-an empty-window guard, the existing per-issue drill-down, and
-DB-unset / read-error states. Reads go through
-`orchestrator.analytics.read` (which already handles unset DB,
-connection errors, and lazy psycopg import) and are wrapped in
-`st.cache_data` keyed by `(start, end, repo, events, stages, issue)`
-so every widget sees the same window.
+Renders the redesigned `Orchestrator Analytics` page (#341) over the
+read model populated by `orchestrator.analytics.sync`. The layout
+mirrors the standalone HTML mock the issue ships:
+
+- A top bar with the page title, the data extent / repo / event
+  summary, and the in-range spend pill.
+- A filter bar carrying the `3D` / `7D` / `All` preset selector and
+  the two-date custom range.
+- Computed insight banners (rework dominates, spend is back-loaded,
+  unpriced cost coverage).
+- A four-tile KPI strip (total spend, total tokens, cost / resolved
+  issue, rework share) with previous-window deltas.
+- A grid of cards: hero spend / token usage stacked-area chart,
+  per-stage cost bars, per-review-round cost bars, top-cost issues
+  table, per-backend efficiency cards + cost-source coverage bar,
+  per-repo cost bars, reliability tiles + resolved-per-day chart,
+  weekday-by-hour activity heatmap.
+- Per-issue drill-down at the bottom when an issue number is
+  entered in the sidebar.
+
+Reads go through `orchestrator.analytics.read` (which already
+handles unset DB, connection errors, and lazy psycopg import) and
+are wrapped in `st.cache_data` keyed by `(start, end, repo, events,
+stages, issue)` so every widget sees the same window.
 
 Streamlit (and its transitive pandas), `plotly`, the chart builders
 in `orchestrator.dashboard_charts`, and the theme tokens in
@@ -35,6 +44,7 @@ Run:
 """
 from __future__ import annotations
 
+import html
 import logging
 import sys
 from dataclasses import dataclass
@@ -69,37 +79,46 @@ from orchestrator.analytics.read import (  # noqa: E402
 
 log = logging.getLogger(__name__)
 
-DEFAULT_WINDOW_DAYS = 30
+DEFAULT_WINDOW_DAYS = 7
 DEFAULT_RECENT_AGENT_EXITS = 100
-DEFAULT_ISSUE_ROWS = 200
-DEFAULT_EXPENSIVE_LIMIT = 10
+DEFAULT_EXPENSIVE_LIMIT = 8
 
-# Sidebar window presets. `Custom` keeps the legacy two-date picker so
-# the operator can pin an arbitrary window inside the data extent.
+# Sidebar window presets. `Custom` keeps the two-date picker so the
+# operator can pin an arbitrary window inside the data extent. The
+# redesigned topbar exposes the presets inline (`3D` / `7D` / `All`)
+# matching the standalone mock; `Custom` stays available in the
+# sidebar so the existing per-issue drill-down workflow still works.
+PRESET_3D = "3d"
 PRESET_7D = "7d"
-PRESET_30D = "30d"
 PRESET_ALL = "All"
 PRESET_CUSTOM = "Custom"
-PRESET_OPTIONS: tuple[str, ...] = (PRESET_7D, PRESET_30D, PRESET_ALL, PRESET_CUSTOM)
+PRESET_OPTIONS: tuple[str, ...] = (PRESET_3D, PRESET_7D, PRESET_ALL, PRESET_CUSTOM)
 PRESET_LABELS: dict[str, str] = {
+    PRESET_3D: "Last 3 days",
     PRESET_7D: "Last 7 days",
-    PRESET_30D: "Last 30 days",
     PRESET_ALL: "All time",
     PRESET_CUSTOM: "Custom range",
 }
-PRESET_DAYS: dict[str, int] = {PRESET_7D: 7, PRESET_30D: 30}
-DEFAULT_PRESET = PRESET_30D
+PRESET_INLINE_LABELS: dict[str, str] = {
+    PRESET_3D: "3D",
+    PRESET_7D: "7D",
+    PRESET_ALL: "All",
+}
+PRESET_DAYS: dict[str, int] = {PRESET_3D: 3, PRESET_7D: 7}
+DEFAULT_PRESET = PRESET_ALL
 
-# Insight thresholds. Centralized so a future tuning pass changes the
-# behaviour in one place rather than across the page renderer.
+# Insight thresholds.
 FAILURE_RATE_BANNER_THRESHOLD = 0.10
 COST_DELTA_BANNER_THRESHOLD = 0.25
 UNPRICED_COVERAGE_THRESHOLD = 0.10
-# `cost_source` values that mean "the parser could not produce a
-# priced number". `unknown-price` is the documented signal from
-# `orchestrator.usage`; `unknown` is what the read model substitutes
-# when the column is NULL. Keep them both visible.
+# Share of spend in review rounds >= 1 that flips the redesigned
+# "rework dominates" banner. Matches the standalone mock's `>= 30%`.
+REWORK_SHARE_BANNER_THRESHOLD = 0.30
 UNPRICED_COST_SOURCES: frozenset[str] = frozenset({"unknown-price", "unknown"})
+# Bucket strings the `analytics_agent_runs` view emits whose runs are
+# "rework" (i.e. happened after the initial pass). Used to compute the
+# rework share KPI.
+REWORK_BUCKETS: frozenset[str] = frozenset({"1", "2", "3-5", "6+"})
 
 UNCONFIGURED_DB_MESSAGE = (
     "`ANALYTICS_DB_URL` is not configured. Set it in your environment "
@@ -119,12 +138,7 @@ EMPTY_WINDOW_MESSAGE = (
 
 @dataclass(frozen=True)
 class DateWindow:
-    """Inclusive-start, exclusive-end datetime window.
-
-    Matches the convention used across `analytics_read` (`start` is
-    `ts >= %s`, `end` is `ts < %s`) so the dashboard's day-boundary
-    pickers map cleanly to the SQL.
-    """
+    """Inclusive-start, exclusive-end datetime window."""
 
     start: datetime
     end: datetime
@@ -134,11 +148,11 @@ class DateWindow:
 class InsightBanner:
     """A single banner line displayed at the top of the page.
 
-    `severity` is one of `success` / `info` / `warning` / `error`; the
-    Streamlit renderer maps each to the matching `st.<severity>` call.
-    Keeping severity a plain string (rather than an Enum) means the
-    helpers stay importable without Streamlit and the tests can
-    compare against string literals.
+    `severity` is one of `success` / `info` / `warning` / `error`;
+    the dashboard renders each through the matching coloured insight
+    block. Keeping severity a plain string (rather than an Enum)
+    means the helpers stay importable without Streamlit and the
+    tests can compare against string literals.
     """
 
     severity: str
@@ -164,15 +178,7 @@ def default_date_range(
 
 
 def to_window(start_date: date, end_date: date) -> DateWindow:
-    """Convert inclusive `[start_date, end_date]` to a `DateWindow`.
-
-    The end-of-day boundary is computed as `end_date + 1 day` at
-    midnight UTC so the read model's exclusive `ts < %s` includes
-    every event from `end_date`. A user who picks `end < start` in
-    Streamlit's two-date input gets the same window as the
-    swapped-input case rather than an empty result -- typing the
-    end date first is the common ordering mistake.
-    """
+    """Convert inclusive `[start_date, end_date]` to a `DateWindow`."""
     if end_date < start_date:
         start_date, end_date = end_date, start_date
     start_dt = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
@@ -196,12 +202,12 @@ def preset_window(
 
     The presets are anchored at the data extent's max date (not
     today) so a freshly-deployed Postgres whose latest event is days
-    old still surfaces the last week of recorded activity. Returns
+    old still surfaces the last days of recorded activity. Returns
     `None` when the extent is empty (no events yet) or `preset` is
     `Custom` (the caller renders a date-range picker instead). An
     unknown preset string also returns `None`.
 
-    For `7d` / `30d`, the start date is clamped to
+    For `3d` / `7d`, the start date is clamped to
     `max(extent.min_date, max_date - (n - 1))` so short data histories
     do not produce windows reaching before the first recorded event.
     """
@@ -219,15 +225,7 @@ def preset_window(
 
 
 def previous_window(window: DateWindow) -> DateWindow:
-    """Window of the same length ending at `window.start`.
-
-    Used to compute previous-period KPI deltas: the operator sees how
-    cost / events / agent runs trended versus the immediately
-    preceding window of the same length. No data-extent clamping --
-    callers that need it can intersect after the fact; for the KPI
-    delta path an empty previous window produces a None delta via
-    `kpi_delta`, which is the right behaviour.
-    """
+    """Window of the same length ending at `window.start`."""
     length = window.end - window.start
     return DateWindow(start=window.start - length, end=window.start)
 
@@ -250,13 +248,7 @@ def kpi_delta(
 
 
 def parse_issue_number(raw: str) -> Optional[int]:
-    """Lenient `#123` / `123` parser for the drill-down input.
-
-    Returns `None` for empty / whitespace / `#`-only input, anything
-    non-numeric, and non-positive integers. GitHub issue numbers
-    start at 1, so `0` is invalid input rather than a meaningful
-    drill-down target.
-    """
+    """Lenient `#123` / `123` parser for the drill-down input."""
     if not raw:
         return None
     s = raw.strip().lstrip("#").strip()
@@ -270,14 +262,7 @@ def parse_issue_number(raw: str) -> Optional[int]:
 
 
 def db_unconfigured_message() -> Optional[str]:
-    """Single source of truth for the "no DB configured" banner.
-
-    Returns the user-facing string when `ANALYTICS_DB_URL` is unset
-    (or set to one of the disable sentinels `off` / `disabled` /
-    `none`, which `analytics.ANALYTICS_DB_URL` already collapses to
-    `None`). Returns `None` when the URL is configured so the caller
-    can branch on the optional cleanly.
-    """
+    """Single source of truth for the "no DB configured" banner."""
     if not analytics.ANALYTICS_DB_URL:
         return UNCONFIGURED_DB_MESSAGE
     return None
@@ -289,27 +274,10 @@ def resolve_stage_filter(
 ) -> Optional[list[str]]:
     """Resolve the sidebar stage multiselect into a read-model filter.
 
-    The multiselect defaults to every entry in `options.stages`,
-    which `analytics_read.get_filter_options` populates from a
-    `SELECT DISTINCT stage ... WHERE stage IS NOT NULL` -- so the
-    "all selected" default lists every non-null stage but says
-    nothing about rows whose `stage` column is NULL. Passing the
-    full list through `_build_window_where` emits
-    `stage IN (...)`, which silently excludes those NULL-stage
-    rows -- a legitimate case (`stage_evaluation` records for
-    issues with no workflow label, see
-    `orchestrator/analytics/__init__.py`). So the dashboard maps:
-
-    - no available options at all -> `None` (no SQL stage
-      predicate; NULL-stage rows included);
-    - user's selection equals the full set -> `None` (same
-      rationale: this is the untouched default and the operator
-      should see every row in the window);
-    - an explicitly cleared multiselect (empty selection but
-      options exist) -> `[]` (the read model encodes this as
-      `FALSE` so no rows match -- the reviewer's documented
-      "show nothing for this dimension" signal);
-    - a proper subset -> that list (parameterised `IN (...)`).
+    See module docstring of `orchestrator.analytics.read` for the
+    tri-state contract (`None` = no filter, `[]` = FALSE, non-empty
+    = `IN (...)`). The default "all selected" must collapse to `None`
+    so NULL-stage rows are not silently excluded.
     """
     if not available:
         return None
@@ -325,16 +293,7 @@ def cache_key(
     stages: Optional[Sequence[str]],
     issue: Optional[int],
 ) -> tuple:
-    """Hashable cache key for the dashboard's window-scoped reads.
-
-    Streamlit's `st.cache_data` keys cached results by the function's
-    arguments, so the wrapper needs hashable values. Lists from the
-    multiselect become tuples; `None` is preserved so the read
-    model's tri-state (`None` = no filter, `[]` = empty / FALSE,
-    non-empty = `IN (...)`) survives caching. Every widget that
-    queries the read model uses this exact tuple shape so a single
-    filter change invalidates every cached query in lockstep.
-    """
+    """Hashable cache key for the dashboard's window-scoped reads."""
     events_t = tuple(events) if events is not None else None
     stages_t = tuple(stages) if stages is not None else None
     return (window.start, window.end, repo, events_t, stages_t, issue)
@@ -345,8 +304,10 @@ def compute_insights(
     *,
     prev_summary: Optional[Summary] = None,
     cost_coverage_rows: Sequence[CostCoverageRow] = (),
+    review_round_rows: Sequence[Any] = (),
+    stage_rows: Sequence[Any] = (),
 ) -> list[InsightBanner]:
-    """Banner lines surfaced at the top of the analysis-first page.
+    """Banner lines surfaced at the top of the redesigned page.
 
     Each banner is a single observation the operator should act on:
 
@@ -357,9 +318,16 @@ def compute_insights(
       even though the KPI row already shows the delta.
     - Unpriced cost coverage exceeds `UNPRICED_COVERAGE_THRESHOLD`:
       the pricing table in `orchestrator.usage` is missing SKUs the
-      parser is seeing in the wild. `unknown-price` is the
-      documented signal; `unknown` (NULL `cost_source`) is bucketed
-      alongside since both shapes lack a priced number.
+      parser is seeing in the wild.
+    - Rework share exceeds `REWORK_SHARE_BANNER_THRESHOLD`: more
+      than 30 % of spend lands in review rounds after the first.
+    - Spend is back-loaded: `validating` + `documenting` cost more
+      than `implementing` (and `implementing` is non-zero so the
+      ratio is meaningful). Reads from `stage_rows`
+      (`StageBreakdown.total_cost_usd` per stage) so the same query
+      that drives the "Cost by workflow stage" chart drives the
+      insight too. Mirrors the standalone mock's `vCost + dCost >
+      iCost` heuristic.
 
     The helper returns an empty list when nothing crosses a
     threshold, so the caller can branch on `if banners:` for the
@@ -418,7 +386,99 @@ def compute_insights(
                         ),
                     )
                 )
+    if review_round_rows:
+        total_cost = sum(
+            float(getattr(r, "total_cost_usd", 0.0) or 0.0)
+            for r in review_round_rows
+        )
+        rework_cost = sum(
+            float(getattr(r, "total_cost_usd", 0.0) or 0.0)
+            for r in review_round_rows
+            if r.bucket in REWORK_BUCKETS
+        )
+        if total_cost > 0:
+            share = rework_cost / total_cost
+            if share >= REWORK_SHARE_BANNER_THRESHOLD:
+                banners.append(
+                    InsightBanner(
+                        severity="warning",
+                        message=(
+                            f"Rework dominates spend -- review rounds "
+                            f">= 1 account for {share * 100:.0f}% "
+                            f"(${rework_cost:,.2f}) of cost in this "
+                            "window."
+                        ),
+                    )
+                )
+    # "Spend is back-loaded" -- validating + documenting cost more
+    # than implementing while implementing is non-zero. The standalone
+    # mock surfaces this so the operator can spot when the post-PR
+    # review / docs loop is dominating the implementer pass.
+    if stage_rows:
+        stage_cost = {
+            getattr(r, "stage", None): float(
+                getattr(r, "total_cost_usd", 0.0) or 0.0
+            )
+            for r in stage_rows
+        }
+        v_cost = stage_cost.get("validating", 0.0)
+        d_cost = stage_cost.get("documenting", 0.0)
+        i_cost = stage_cost.get("implementing", 0.0)
+        if i_cost > 0 and (v_cost + d_cost) > i_cost:
+            banners.append(
+                InsightBanner(
+                    severity="info",
+                    message=(
+                        f"Spend is back-loaded -- validating "
+                        f"(${v_cost:,.2f}) + documenting "
+                        f"(${d_cost:,.2f}) cost more than implementing "
+                        f"(${i_cost:,.2f})."
+                    ),
+                )
+            )
     return banners
+
+
+def reliability_tile_data(
+    summary: Summary,
+    *,
+    resolved: int = 0,
+    rejected: int = 0,
+) -> list[tuple[int, str, str]]:
+    """`(value, label, tone)` triples for the six reliability tiles.
+
+    Extracted from `main()` so the wiring stays testable without a
+    live Streamlit run: every tile sources its number from a
+    full-window aggregate on `Summary` (`total_agent_runs`,
+    `failed_agent_runs`, `timed_out_agent_runs`) so a long window
+    with more than `DEFAULT_RECENT_AGENT_EXITS` rows never silently
+    undercounts the tile -- earlier drafts read timeouts off
+    `get_recent_agent_exits` and missed any timeout outside the
+    latest 100 rows.
+
+    `resolved` / `rejected` are the per-day rollups summed by the
+    caller from `get_throughput_breakdown`; they default to zero so
+    callers that only care about the agent-run tiles can ignore the
+    throughput axis.
+
+    Tones (`"good"` / `"warn"` / `"bad"` / `""`) drive the CSS class
+    applied to the tile; the caller never has to recompute them.
+    """
+    total_runs = int(summary.total_agent_runs or 0)
+    failed = int(summary.failed_agent_runs or 0)
+    timed_out = int(summary.timed_out_agent_runs or 0)
+    success_pct = (
+        (1.0 - failed / total_runs) * 100
+        if total_runs > 0 else 0.0
+    )
+    return [
+        (total_runs, "Agent runs", ""),
+        (f"{success_pct:.0f}%", "Success rate", "good"),
+        (int(resolved), "Resolved", "good"),
+        (int(rejected), "Rejected", "warn" if rejected else ""),
+        (failed, "Failures", "warn" if failed else ""),
+        (timed_out, "Timeouts", "bad" if timed_out else ""),
+    ]
 
 
 def top_expensive_issues(
@@ -426,15 +486,7 @@ def top_expensive_issues(
     *,
     limit: int = DEFAULT_EXPENSIVE_LIMIT,
 ) -> list[IssueSummaryRow]:
-    """Issues sorted by total cost desc for the "where did spend go" table.
-
-    Ties break on event count (busier issues first) then on the
-    `(repo, issue)` pair so the order is deterministic when no cost
-    information is available. Issues whose `total_cost_usd` is
-    `None` (no agent-run rows in the window) sort to the end.
-    `limit <= 0` returns an empty list, matching the read model's
-    convention.
-    """
+    """Issues sorted by total cost desc for the "where did spend go" table."""
     if limit <= 0:
         return []
 
@@ -443,6 +495,340 @@ def top_expensive_issues(
         return (-cost, -int(r.event_count), r.repo, int(r.issue))
 
     return sorted(rows, key=_key)[:limit]
+
+
+def rework_totals(
+    rows: Sequence[Any],
+) -> tuple[float, float]:
+    """Return `(total_cost, rework_cost)` across review-round buckets.
+
+    `rework_cost` sums the cost of every row whose `bucket` is in
+    `REWORK_BUCKETS` (i.e. review round >= 1). `total_cost` sums
+    every row, including the initial pass. Cost defaults to `0.0`
+    when the row predates the `total_cost_usd` column.
+    """
+    total = sum(
+        float(getattr(r, "total_cost_usd", 0.0) or 0.0) for r in rows
+    )
+    rework = sum(
+        float(getattr(r, "total_cost_usd", 0.0) or 0.0)
+        for r in rows
+        if r.bucket in REWORK_BUCKETS
+    )
+    return total, rework
+
+
+def _sparkline_svg(
+    values: Sequence[float], *, color: str, w: int = 96, h: int = 26
+) -> str:
+    """Inline SVG sparkline for KPI cards.
+
+    Renders a filled curve under the polyline; rendering is HTML-only
+    so the dashboard can drop it inside `st.markdown(..., unsafe_allow_html=True)`
+    without a chart round-trip. Empty / flat data renders an empty SVG
+    so the layout slot stays consistent across KPIs.
+    """
+    nums = [float(v or 0) for v in values]
+    if not nums or max(nums) == min(nums) == 0:
+        return f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}"></svg>'
+    lo, hi = min(nums), max(nums)
+    span = max(hi - lo, 1e-9)
+    pad = 2
+    step = (w - pad * 2) / max(len(nums) - 1, 1)
+
+    def y(v: float) -> float:
+        return pad + (1 - (v - lo) / span) * (h - pad * 2)
+
+    points = [(pad + i * step, y(v)) for i, v in enumerate(nums)]
+    poly = " ".join(f"{x:.1f},{yv:.1f}" for x, yv in points)
+    area_path = (
+        "M" + f"{points[0][0]:.1f},{h - pad:.1f}"
+        + " L" + " L".join(f"{x:.1f},{yv:.1f}" for x, yv in points)
+        + f" L{points[-1][0]:.1f},{h - pad:.1f} Z"
+    )
+    return (
+        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
+        f'style="display:block">'
+        f'<path d="{area_path}" fill="{color}" fill-opacity="0.18" />'
+        f'<polyline points="{poly}" fill="none" stroke="{color}" '
+        f'stroke-width="1.6" stroke-linecap="round" '
+        f'stroke-linejoin="round" />'
+        "</svg>"
+    )
+
+
+def _delta_pill(value: Optional[float], *, invert: bool = False) -> str:
+    """Render a KPI delta pill (▲/▼ NN.N%) as inline HTML.
+
+    `invert=True` flips the up / down coloring (e.g. for a "cost
+    delta" where positive growth is bad). `None` renders a flat
+    dash so the layout slot stays consistent.
+    """
+    if value is None:
+        return '<span class="orch-delta flat">—</span>'
+    pct_str = f"{abs(value) * 100:.1f}%"
+    if value > 0:
+        cls = "up" if not invert else "down"
+        arrow = "▲"
+    elif value < 0:
+        cls = "down" if not invert else "up"
+        arrow = "▼"
+    else:
+        return f'<span class="orch-delta flat">— {pct_str}</span>'
+    return f'<span class="orch-delta {cls}">{arrow} {pct_str}</span>'
+
+
+def _topbar_html(
+    *,
+    extent: DataExtent,
+    distinct_repos: int,
+    total_events: int,
+    spend_in_range: float,
+    fmt_money_exact,
+    fmt_num,
+) -> str:
+    """Render the page topbar block.
+
+    Mirrors the standalone mock's brand mark + h1 + spend pill.
+    """
+    if extent.min_ts is None or extent.max_ts is None:
+        range_label = "no data recorded yet"
+    else:
+        range_label = (
+            f"{extent.min_ts.date().isoformat()} → "
+            f"{extent.max_ts.date().isoformat()} available"
+        )
+    sub = (
+        f"{html.escape(range_label)} · "
+        f"{distinct_repos} repo{'s' if distinct_repos != 1 else ''} · "
+        f"{fmt_num(total_events)} events"
+    )
+    return (
+        '<div class="orch-topbar">'
+        '<div class="orch-brand">'
+        '<span class="orch-brand-mark">OA</span>'
+        '<div>'
+        '<h1>Orchestrator Analytics</h1>'
+        f'<p class="orch-sub">{sub}</p>'
+        '</div></div>'
+        '<div class="orch-spend">'
+        '<span class="label">Spend in range</span>'
+        f'<span class="value">{html.escape(fmt_money_exact(spend_in_range))}</span>'
+        '</div></div>'
+    )
+
+
+def _filter_meta_html(
+    *,
+    from_d: date, to_d: date, days: int, runs: int, fmt_num
+) -> str:
+    return (
+        '<div class="orch-filter-meta">'
+        f'{from_d.isoformat()} → {to_d.isoformat()} · '
+        f'{days} day{"s" if days != 1 else ""} · '
+        f'{fmt_num(runs)} runs'
+        '</div>'
+    )
+
+
+def _kpi_strip_html(kpis: Sequence[dict]) -> str:
+    """Render the four-tile KPI strip.
+
+    Each KPI dict carries `label`, `value`, `delta`, `sub`,
+    optionally `spark` (list of floats) and `spark_color`.
+    """
+    cells = []
+    for k in kpis:
+        delta_html = _delta_pill(
+            k.get("delta"), invert=k.get("invert", False)
+        )
+        spark_html = ""
+        if k.get("spark") is not None:
+            spark_html = _sparkline_svg(
+                k["spark"], color=k.get("spark_color", "#5b54e0")
+            )
+        cells.append(
+            '<div class="orch-kpi">'
+            '<div class="kpi-top">'
+            f'<span class="kpi-label">{html.escape(k["label"])}</span>'
+            f'{delta_html}'
+            '</div>'
+            f'<div class="kpi-value">{html.escape(str(k["value"]))}</div>'
+            '<div class="kpi-foot">'
+            f'<span>{html.escape(str(k.get("sub", "")))}</span>'
+            f'{spark_html}'
+            '</div></div>'
+        )
+    return '<div class="orch-kpis">' + "".join(cells) + '</div>'
+
+
+def _issues_table_html(rows: Sequence[IssueSummaryRow]) -> str:
+    """Render the "Most expensive issues" table to inline HTML.
+
+    Matches the standalone mock's columns -- Issue / Cost / Runs /
+    Review rds / Retries / Status -- and adds two representational
+    details `st.dataframe` cannot express:
+
+    - **In-row cost bars.** Each Issue cell carries a thin bar
+      under the label whose width is the issue's cost relative to
+      the most expensive issue in the panel. Lets the operator
+      eyeball the spread without comparing numbers row by row.
+    - **Clean / fail status pills.** The Status cell renders as a
+      colored pill (`clean` is green, `N fail` is red) instead of
+      flat text, matching the mock's pill treatment.
+
+    Local CSS goes inline next to the table so the rules survive a
+    future tweak without having to touch `dashboard_theme.PAGE_CSS`
+    -- the issues table is the only consumer.
+    """
+    max_cost = max(
+        (float(r.total_cost_usd or 0.0) for r in rows),
+        default=0.0,
+    ) or 1.0
+    css = """
+<style>
+  .orch-issues { width: 100%; border-collapse: collapse;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12.5px; }
+  .orch-issues thead th { color: var(--orch-muted);
+    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
+    text-transform: uppercase; text-align: left;
+    padding: 4px 6px 8px; border-bottom: 1px solid var(--orch-border); }
+  .orch-issues thead th.r { text-align: right; }
+  .orch-issues tbody td { padding: 8px 6px; vertical-align: middle;
+    border-bottom: 1px solid var(--orch-grid); }
+  .orch-issues tbody tr:last-child td { border-bottom: 0; }
+  .orch-issues td.r { text-align: right; font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums; color: var(--orch-ink); }
+  .orch-issues td.strong { font-weight: 600; }
+  .orch-issue-cell { display: flex; flex-direction: column;
+    gap: 4px; }
+  .orch-issue-name { color: var(--orch-ink); font-weight: 500; }
+  .orch-issue-num { color: var(--orch-muted); font-weight: 400;
+    margin-left: 2px; }
+  .orch-issue-bar { display: block; height: 4px; border-radius: 2px;
+    background: var(--orch-grid); overflow: hidden; }
+  .orch-issue-bar > span { display: block; height: 100%;
+    background: var(--orch-accent); border-radius: 2px; }
+  .orch-pill { display: inline-block; padding: 2px 9px;
+    border-radius: 999px; font-size: 11.5px; font-weight: 500;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  .orch-pill.ok { background: rgba(26, 163, 154, 0.14);
+    color: var(--orch-success); }
+  .orch-pill.bad { background: rgba(217, 83, 74, 0.14);
+    color: var(--orch-danger); }
+  .orch-badge-warn { color: var(--orch-warn); font-weight: 600; }
+</style>
+"""
+    body: list[str] = []
+    for r in rows:
+        short = r.repo.split("/")[-1] if "/" in r.repo else r.repo
+        cost = float(r.total_cost_usd or 0.0)
+        bar_pct = (cost / max_cost * 100.0) if max_cost > 0 else 0.0
+        cost_text = (
+            f"${r.total_cost_usd:,.2f}"
+            if r.total_cost_usd is not None
+            else "—"
+        )
+        review_rounds = (
+            int(r.max_review_round)
+            if r.max_review_round is not None
+            else 0
+        )
+        retries = (
+            int(r.max_retry_count)
+            if r.max_retry_count is not None
+            else 0
+        )
+        failed = int(r.failed_agent_runs or 0)
+        if failed:
+            pill = f'<span class="orch-pill bad">{failed} fail</span>'
+        else:
+            pill = '<span class="orch-pill ok">clean</span>'
+        # High review-round counts get a warning color so the
+        # operator can spot rework-heavy issues without reading the
+        # number.
+        review_html = (
+            f'<span class="orch-badge-warn">{review_rounds}</span>'
+            if review_rounds >= 3
+            else str(review_rounds)
+        )
+        body.append(
+            "<tr>"
+            "<td>"
+            '<div class="orch-issue-cell">'
+            f'<span><span class="orch-issue-name">{html.escape(short)}</span>'
+            f' <span class="orch-issue-num">#{int(r.issue)}</span></span>'
+            f'<span class="orch-issue-bar"><span style="width:{bar_pct:.1f}%">'
+            "</span></span>"
+            "</div>"
+            "</td>"
+            f'<td class="r strong">{html.escape(cost_text)}</td>'
+            f'<td class="r">{int(r.agent_exits or 0)}</td>'
+            f'<td class="r">{review_html}</td>'
+            f'<td class="r">{retries}</td>'
+            f'<td class="r">{pill}</td>'
+            "</tr>"
+        )
+    head = (
+        "<thead><tr>"
+        "<th>Issue</th>"
+        '<th class="r">Cost</th>'
+        '<th class="r">Runs</th>'
+        '<th class="r">Review rds</th>'
+        '<th class="r">Retries</th>'
+        '<th class="r">Status</th>'
+        "</tr></thead>"
+    )
+    return (
+        css
+        + '<table class="orch-issues">'
+        + head
+        + "<tbody>" + "".join(body) + "</tbody>"
+        + "</table>"
+    )
+
+
+def _card_header_html(title: str, subtitle: str = "") -> str:
+    """Inline HTML for the title + subtitle at the top of a card.
+
+    Always rendered through `st.markdown(unsafe_allow_html=True)`
+    INSIDE a `st.container(border=True)` block -- a previous draft
+    opened a `<div class="orch-card">` in one `st.markdown` and
+    closed it in another, which leaves the chart / dataframe widget
+    as a sibling of the card in Streamlit's DOM rather than a child.
+    The card visual really has to come from a Streamlit container so
+    the inner widgets sit inside it.
+    """
+    sub_html = (
+        f'<p class="orch-card-sub">{html.escape(subtitle)}</p>'
+        if subtitle
+        else ""
+    )
+    return (
+        f'<p class="orch-card-title">{html.escape(title)}</p>{sub_html}'
+    )
+
+
+def _insights_html(
+    banners: Sequence[InsightBanner],
+) -> str:
+    """Render the computed-insight stack."""
+    icon_for = {
+        "error": "✕", "warning": "!", "info": "›", "success": "✓",
+    }
+    rows = []
+    for b in banners:
+        icon = icon_for.get(b.severity, "›")
+        rows.append(
+            f'<div class="orch-insight {html.escape(b.severity)}">'
+            f'<span class="icon">{icon}</span>'
+            f'<span><strong>{html.escape(b.severity.title())}.</strong>'
+            f' {html.escape(b.message)}</span>'
+            '</div>'
+        )
+    return '<div class="orch-insights">' + "".join(rows) + '</div>'
 
 
 def main() -> None:
@@ -455,16 +841,15 @@ def main() -> None:
     falls through to the sentinel at the bottom of this file.
     """
     import pandas as pd
-    import plotly.graph_objects as go
     import streamlit as st
 
     from orchestrator import dashboard_charts, dashboard_theme as theme
 
     st.set_page_config(
-        page_title="Orchestrator analytics",
+        page_title="Orchestrator Analytics",
         layout="wide",
     )
-    st.title("Orchestrator analytics")
+    st.markdown(theme.PAGE_CSS, unsafe_allow_html=True)
 
     unset = db_unconfigured_message()
     if unset:
@@ -483,6 +868,17 @@ def main() -> None:
         st.stop()
 
     if extent.min_ts is None or extent.max_ts is None:
+        st.markdown(
+            _topbar_html(
+                extent=extent,
+                distinct_repos=0,
+                total_events=0,
+                spend_in_range=0.0,
+                fmt_money_exact=theme.fmt_money_exact,
+                fmt_num=theme.fmt_num,
+            ),
+            unsafe_allow_html=True,
+        )
         st.info(NO_DATA_MESSAGE)
         st.stop()
 
@@ -491,42 +887,6 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Filters")
-        preset = st.radio(
-            "Window",
-            options=PRESET_OPTIONS,
-            index=PRESET_OPTIONS.index(DEFAULT_PRESET),
-            format_func=lambda p: PRESET_LABELS[p],
-        )
-        if preset == PRESET_CUSTOM:
-            default_window = (
-                preset_window(PRESET_30D, extent)
-                or to_window(extent_min_d, extent_max_d)
-            )
-            start_date = st.date_input(
-                "Start date",
-                value=default_window.start.date(),
-                min_value=extent_min_d,
-                max_value=extent_max_d,
-            )
-            end_date_default = (
-                default_window.end - timedelta(days=1)
-            ).date()
-            end_date = st.date_input(
-                "End date",
-                value=end_date_default,
-                min_value=extent_min_d,
-                max_value=extent_max_d,
-            )
-            window = to_window(start_date, end_date)
-        else:
-            preset_w = preset_window(preset, extent)
-            assert preset_w is not None  # extent already validated
-            window = preset_w
-            st.caption(
-                f"{window.start.date().isoformat()} → "
-                f"{(window.end - timedelta(days=1)).date().isoformat()}"
-            )
-
         repo_options = ("All", *options.repos) if options.repos else ("All",)
         repo_choice = st.selectbox("Repo", repo_options, index=0)
         event_choice = st.multiselect(
@@ -534,9 +894,8 @@ def main() -> None:
             list(options.events),
             default=list(options.events),
             help=(
-                "Narrows every widget below. An empty selection means "
-                "'show nothing for these events' -- clear the multiselect "
-                "to confirm a dimension is empty."
+                "Narrows every widget. An empty selection means "
+                "'show nothing for these events'."
             ),
         )
         stage_choice = st.multiselect(
@@ -544,7 +903,7 @@ def main() -> None:
             list(options.stages),
             default=list(options.stages),
             help=(
-                "Narrows every widget below. An empty selection means "
+                "Narrows every widget. An empty selection means "
                 "'show nothing for these stages'."
             ),
         )
@@ -554,17 +913,77 @@ def main() -> None:
             help=(
                 "Enter `123` or `#123` to narrow every widget to one "
                 "issue AND render the per-issue event trace at the "
-                "bottom. Requires a specific repo above -- GitHub "
-                "issue numbers repeat across repos."
+                "bottom. Requires a specific repo above."
             ),
         )
 
+    # Topbar: title + spend pill. We render a placeholder spend now
+    # so it occupies the right slot; we replace it after the summary
+    # query lands below.
+    topbar_slot = st.empty()
+
+    # Filter bar: presets + date inputs + range meta inside the
+    # `.orch-filterbar` card the standalone mock uses. The bordered
+    # container is the same trick the rest of the card grid uses --
+    # the anchor sentinel right before it lets `PAGE_CSS` target this
+    # specific container with the filter-bar styling so it picks up
+    # the cream / border palette and inline layout. Preset state
+    # persists in session_state so a custom date pick survives reruns.
+    if "preset" not in st.session_state:
+        st.session_state.preset = DEFAULT_PRESET
+    st.markdown(
+        '<div class="orch-filterbar-anchor"></div>',
+        unsafe_allow_html=True,
+    )
+    with st.container(border=True):
+        st.markdown(
+            '<span class="orch-filter-label">Date range</span>',
+            unsafe_allow_html=True,
+        )
+        fb_left, fb_mid, fb_right = st.columns([2, 3, 3])
+        with fb_left:
+            preset_choice = st.radio(
+                "Range preset",
+                options=(PRESET_3D, PRESET_7D, PRESET_ALL),
+                format_func=lambda p: PRESET_INLINE_LABELS[p],
+                index=(
+                    (PRESET_3D, PRESET_7D, PRESET_ALL).index(
+                        st.session_state.preset
+                    )
+                    if st.session_state.preset
+                    in (PRESET_3D, PRESET_7D, PRESET_ALL)
+                    else 2
+                ),
+                horizontal=True,
+                label_visibility="collapsed",
+                key="_preset_radio",
+            )
+        initial_window = (
+            preset_window(preset_choice, extent)
+            or to_window(extent_min_d, extent_max_d)
+        )
+        with fb_mid:
+            c1, c2 = st.columns(2)
+            with c1:
+                start_date = st.date_input(
+                    "From",
+                    value=initial_window.start.date(),
+                    min_value=extent_min_d,
+                    max_value=extent_max_d,
+                )
+            with c2:
+                end_default = (initial_window.end - timedelta(days=1)).date()
+                end_date = st.date_input(
+                    "To",
+                    value=end_default,
+                    min_value=extent_min_d,
+                    max_value=extent_max_d,
+                )
+    window = to_window(start_date, end_date)
+    st.session_state.preset = preset_choice
+
     repo_filter = None if repo_choice == "All" else repo_choice
     issue_input_parsed = parse_issue_number(issue_input)
-    # The issue input is a real filter only when a single repo is
-    # selected (because issue numbers are not globally unique).
-    # Without a repo selection it stays inert at the SQL layer, and
-    # the drill-down section renders an instructive notice.
     issue_filter = (
         issue_input_parsed if repo_filter is not None else None
     )
@@ -619,9 +1038,15 @@ def main() -> None:
         )
 
     @st.cache_data(show_spinner=False, ttl=60)
-    def _read_issues(start, end, repo, events_t, stages_t, issue):
+    def _read_top_cost_issues(start, end, repo, events_t, stages_t, issue):
+        # Ask the database for the top-cost issues directly. Reading
+        # the latest N issues by `last_seen` and re-sorting in Python
+        # silently drops older high-cost issues that fall outside the
+        # truncated set, so the redesigned "Most expensive issues"
+        # panel must be cost-ordered at the SQL layer.
         return analytics_read.get_issues(
-            limit=DEFAULT_ISSUE_ROWS,
+            limit=DEFAULT_EXPENSIVE_LIMIT,
+            sort_by=analytics_read.SORT_BY_COST,
             start=start, end=end, repo=repo,
             events=list(events_t) if events_t is not None else None,
             stages=list(stages_t) if stages_t is not None else None,
@@ -684,19 +1109,31 @@ def main() -> None:
             issue=issue,
         )
 
+    @st.cache_data(show_spinner=False, ttl=60)
+    def _read_backend_daily_tokens(
+        start, end, repo, events_t, stages_t, issue
+    ):
+        return analytics_read.get_backend_daily_tokens(
+            start=start, end=end, repo=repo,
+            events=list(events_t) if events_t is not None else None,
+            stages=list(stages_t) if stages_t is not None else None,
+            issue=issue,
+        )
+
     try:
         summary = _read_summary(*key)
         prev_summary = _read_summary(*prev_key)
         ts_points = _read_time_series(*key)
         stage_rows = _read_stage_breakdown(*key)
         agent_exits = _read_recent_agent_exits(*key)
-        issues_rows = _read_issues(*key)
+        issues_rows = _read_top_cost_issues(*key)
         review_round_rows = _read_review_round(*key)
         backend_rows = _read_backend_efficiency(*key)
         repo_rows = _read_repo_breakdown(*key)
         cost_coverage_rows = _read_cost_coverage(*key)
         heatmap_rows = _read_hourly_heatmap(*key)
         throughput_rows = _read_throughput(*key)
+        backend_daily_rows = _read_backend_daily_tokens(*key)
     except analytics_read.AnalyticsReadError as e:
         st.error(
             f"Analytics query failed: {e}. The dashboard cannot render "
@@ -705,10 +1142,34 @@ def main() -> None:
         )
         st.stop()
 
-    # Empty-window guard: when nothing in the window matches the
-    # filters, render the helper banner and skip the rest. The
-    # drill-down still renders below so the operator can confirm the
-    # issue number they typed is just out of range.
+    # Now we can render the topbar with the real spend value.
+    topbar_slot.markdown(
+        _topbar_html(
+            extent=extent,
+            distinct_repos=summary.distinct_repos,
+            total_events=summary.total_events,
+            spend_in_range=summary.total_cost_usd,
+            fmt_money_exact=theme.fmt_money_exact,
+            fmt_num=theme.fmt_num,
+        ),
+        unsafe_allow_html=True,
+    )
+
+    days_in_window = max(
+        (window.end - window.start).days, 1
+    )
+    with fb_right:
+        st.markdown(
+            _filter_meta_html(
+                from_d=window.start.date(),
+                to_d=(window.end - timedelta(days=1)).date(),
+                days=days_in_window,
+                runs=summary.total_agent_runs,
+                fmt_num=theme.fmt_num,
+            ),
+            unsafe_allow_html=True,
+        )
+
     if summary.total_events == 0:
         st.info(EMPTY_WINDOW_MESSAGE)
         _render_drilldown(
@@ -726,173 +1187,406 @@ def main() -> None:
         summary,
         prev_summary=prev_summary,
         cost_coverage_rows=cost_coverage_rows,
+        review_round_rows=review_round_rows,
+        stage_rows=stage_rows,
     )
     if banners:
-        st.subheader("Insights")
-        for banner in banners:
-            _emit_banner(st, banner)
+        st.markdown(_insights_html(banners), unsafe_allow_html=True)
 
-    st.subheader("Overview")
-    success_rate = (
-        1.0
-        - (summary.failed_agent_runs / summary.total_agent_runs)
-        if summary.total_agent_runs > 0
-        else None
+    # KPI strip --------------------------------------------------
+    # Token totals include cache_read + cache_write so the headline
+    # figure matches the standalone mock's
+    # `input + output + cache_read + cache_write` accounting; the
+    # `cached_tokens` cumulative column is deliberately excluded so
+    # the cache band is not double-counted.
+    total_cost = float(summary.total_cost_usd or 0.0)
+    total_tokens = int(
+        (summary.total_input_tokens or 0)
+        + (summary.total_output_tokens or 0)
+        + (summary.total_cache_read_tokens or 0)
+        + (summary.total_cache_write_tokens or 0)
     )
-    prev_success_rate = (
-        1.0
-        - (prev_summary.failed_agent_runs / prev_summary.total_agent_runs)
-        if prev_summary.total_agent_runs > 0
-        else None
+    total_cost_prev = float(prev_summary.total_cost_usd or 0.0)
+    total_tokens_prev = int(
+        (prev_summary.total_input_tokens or 0)
+        + (prev_summary.total_output_tokens or 0)
+        + (prev_summary.total_cache_read_tokens or 0)
+        + (prev_summary.total_cache_write_tokens or 0)
+    )
+    resolved = sum(int(r.resolved or 0) for r in throughput_rows)
+    rejected = sum(int(r.rejected or 0) for r in throughput_rows)
+    rr_total_cost, rr_rework_cost = rework_totals(review_round_rows)
+    rework_share = (
+        (rr_rework_cost / rr_total_cost) if rr_total_cost > 0 else 0.0
     )
 
-    cols = st.columns(5)
-    _metric_with_delta(
-        cols[0], "Events", summary.total_events, prev_summary.total_events
-    )
-    _metric_with_delta(
-        cols[1], "Issues", summary.distinct_issues, prev_summary.distinct_issues
-    )
-    _metric_with_delta(
-        cols[2],
-        "Agent runs",
-        summary.total_agent_runs,
-        prev_summary.total_agent_runs,
-    )
-    _metric_with_delta(
-        cols[3],
-        "Cost (USD)",
-        summary.total_cost_usd,
-        prev_summary.total_cost_usd,
-        value_fmt=lambda v: f"${v:,.2f}",
-    )
-    if success_rate is None:
-        cols[4].metric("Agent success rate", "—")
-    else:
-        delta_str = None
-        if prev_success_rate is not None:
-            delta_pct = (success_rate - prev_success_rate) * 100
-            delta_str = f"{delta_pct:+.1f} pp"
-        cols[4].metric(
-            "Agent success rate",
-            f"{success_rate * 100:.1f}%",
-            delta=delta_str,
+    # Sparkline series, one entry per day in the window. Daily
+    # tokens mirror the KPI accounting and include the cache band.
+    days = sorted({p.day for p in ts_points})
+    days_index = {d: i for i, d in enumerate(days)}
+    daily_cost = [0.0] * len(days)
+    daily_tokens = [0.0] * len(days)
+    for p in ts_points:
+        i = days_index[p.day]
+        daily_cost[i] += float(p.cost_usd or 0.0)
+        daily_tokens[i] += float(
+            (p.input_tokens or 0)
+            + (p.output_tokens or 0)
+            + (p.cache_read_tokens or 0)
+            + (p.cache_write_tokens or 0)
         )
+    done_index = {r.day: int(r.resolved or 0) for r in throughput_rows}
+    daily_done = [done_index.get(d, 0) for d in days]
 
-    st.subheader("Activity")
-    st.plotly_chart(
-        dashboard_charts.usage_over_time(ts_points),
-        use_container_width=True,
-    )
+    kpis = [
+        {
+            "label": "Total spend",
+            "value": theme.fmt_money_exact(total_cost),
+            "delta": kpi_delta(total_cost, total_cost_prev),
+            "invert": True,
+            "sub": (
+                f"{theme.fmt_money(total_cost / days_in_window)}/day"
+            ),
+            "spark": daily_cost,
+            "spark_color": theme.ACCENT,
+        },
+        {
+            "label": "Total tokens",
+            "value": theme.fmt_tokens(total_tokens),
+            "delta": kpi_delta(total_tokens, total_tokens_prev),
+            "invert": True,
+            "sub": f"{theme.fmt_tokens(total_tokens / days_in_window)}/day",
+            "spark": daily_tokens,
+            "spark_color": theme.TOKEN_TYPE_COLORS["Input"],
+        },
+        {
+            "label": "Cost / resolved issue",
+            "value": (
+                f"${total_cost / resolved:,.2f}"
+                if resolved > 0 else "—"
+            ),
+            "delta": None,
+            "sub": f"{resolved} resolved · {rejected} rejected",
+            "spark": daily_done,
+            "spark_color": theme.TOKEN_TYPE_COLORS["Cache"],
+        },
+        {
+            "label": "Rework share",
+            "value": f"{rework_share * 100:.0f}%",
+            "delta": None,
+            "sub": (
+                f"{theme.fmt_money_exact(rr_rework_cost)} in review "
+                "rounds >= 1"
+            ),
+            "spark": None,
+        },
+    ]
+    st.markdown(_kpi_strip_html(kpis), unsafe_allow_html=True)
 
-    col_stage, col_round = st.columns(2)
-    with col_stage:
-        st.plotly_chart(
-            dashboard_charts.stage_bars(stage_rows),
-            use_container_width=True,
+    # ── Hero: Spend & token usage over time ──────────────────────
+    with st.container(border=True):
+        st.markdown(
+            _card_header_html(
+                "Spend & token usage over time",
+                "Daily token consumption with cost trend overlaid",
+            ),
+            unsafe_allow_html=True,
         )
-    with col_round:
+        if "stack_mode" not in st.session_state:
+            st.session_state.stack_mode = "type"
+        stack_mode = st.radio(
+            "Stack mode",
+            options=("type", "backend"),
+            format_func=lambda m: (
+                "By token type" if m == "type" else "By backend"
+            ),
+            index=0 if st.session_state.stack_mode == "type" else 1,
+            horizontal=True,
+            label_visibility="collapsed",
+            key="_stack_mode_radio",
+        )
+        st.session_state.stack_mode = stack_mode
+
+        # Build the per-day per-backend token map off
+        # `get_backend_daily_tokens`, not the LIMIT-capped recent-runs
+        # table -- in busy windows the cap would silently undercount
+        # the "By backend" stack while the cost line and KPI tiles
+        # still report the full window.
+        backend_by_day: dict[date, dict[str, float]] = {}
+        if stack_mode == "backend":
+            for row in backend_daily_rows:
+                backend_by_day.setdefault(row.day, {})
+                backend_by_day[row.day][row.backend] = (
+                    backend_by_day[row.day].get(row.backend, 0)
+                    + int(row.total_tokens or 0)
+                )
+
         st.plotly_chart(
-            _review_round_bars_from_rows(
-                go=go, theme=theme, rows=review_round_rows
+            dashboard_charts.usage_over_time(
+                ts_points,
+                backend_rows_by_day=(
+                    backend_by_day if stack_mode == "backend" else None
+                ),
+                mode=stack_mode,
             ),
             use_container_width=True,
         )
 
-    st.subheader("Top issues by cost")
-    expensive = top_expensive_issues(issues_rows)
-    if expensive:
-        df_expensive = pd.DataFrame([
-            {
-                "repo": r.repo,
-                "issue": r.issue,
-                "cost (USD)": r.total_cost_usd,
-                "events": r.event_count,
-                "agent exits": r.agent_exits,
-                "failed runs": r.failed_agent_runs,
-                "max review round": r.max_review_round,
-                "input tokens": r.total_input_tokens,
-                "output tokens": r.total_output_tokens,
-                "latest stage": r.latest_stage,
-                "last seen": r.last_seen,
-            }
-            for r in expensive
-        ])
-        st.dataframe(df_expensive, use_container_width=True)
-    else:
-        st.info("No agent runs with recorded cost in this window.")
-
-    st.subheader("Backend efficiency")
-    if backend_rows:
-        backend_cols = st.columns(min(len(backend_rows), 4) or 1)
-        for idx, row in enumerate(backend_rows):
-            col = backend_cols[idx % len(backend_cols)]
-            fail_pct = (
-                (row.failed / row.runs) * 100 if row.runs > 0 else 0.0
-            )
-            duration_txt = (
-                f"{row.avg_duration_s:.1f}s"
-                if row.avg_duration_s is not None
-                else "—"
-            )
-            col.metric(
-                row.backend,
-                f"{row.runs} runs",
-                delta=(
-                    f"{fail_pct:.0f}% failed"
-                    if row.runs > 0
-                    else None
+    # ── Stage cost (7/12) + review-round cost (5/12) ─────────────
+    col_stage, col_round = st.columns([7, 5])
+    with col_stage:
+        with st.container(border=True):
+            st.markdown(
+                _card_header_html(
+                    "Cost by workflow stage",
+                    "Where spend lands across the issue lifecycle",
                 ),
-                delta_color="inverse",
+                unsafe_allow_html=True,
             )
-            col.caption(
-                f"avg {duration_txt} · "
-                f"${row.total_cost_usd:,.2f}"
-            )
-    else:
-        st.info("No `agent_exit` rows match the current filters.")
-
-    cov_col, repo_col = st.columns(2)
-    with cov_col:
-        st.subheader("Cost source coverage")
-        if cost_coverage_rows:
             st.plotly_chart(
-                _cost_coverage_bar(
-                    go=go, theme=theme, rows=cost_coverage_rows
+                dashboard_charts.cost_by_stage(stage_rows),
+                use_container_width=True,
+            )
+    with col_round:
+        with st.container(border=True):
+            st.markdown(
+                _card_header_html(
+                    "Cost by review round",
+                    "Rework is every round after the first",
+                ),
+                unsafe_allow_html=True,
+            )
+            st.plotly_chart(
+                dashboard_charts.cost_by_review_round(review_round_rows),
+                use_container_width=True,
+            )
+
+    # ── Top expensive issues (7/12) + backend efficiency (5/12) ──
+    col_issues, col_backend = st.columns([7, 5])
+    with col_issues:
+        with st.container(border=True):
+            st.markdown(
+                _card_header_html(
+                    "Most expensive issues",
+                    "Cost, run count, review rounds, and failure count",
+                ),
+                unsafe_allow_html=True,
+            )
+            # `issues_rows` is already cost-ordered from the SQL
+            # (`sort_by="cost"`); pipe through `top_expensive_issues`
+            # so the in-memory cost / event-count tie-breakers stay
+            # the source of truth and the rendered set never exceeds
+            # `DEFAULT_EXPENSIVE_LIMIT`.
+            expensive = top_expensive_issues(issues_rows)
+            if expensive:
+                st.markdown(
+                    _issues_table_html(expensive),
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.info("No agent runs with recorded cost in this window.")
+
+    with col_backend:
+        with st.container(border=True):
+            st.markdown(
+                _card_header_html(
+                    "Backend efficiency",
+                    "Cost density, cache leverage, $/run",
+                ),
+                unsafe_allow_html=True,
+            )
+            if backend_rows:
+                for row in backend_rows:
+                    # Per-backend token total mirrors the headline KPI:
+                    # input + output + cache_read + cache_write so the
+                    # "cost / 1M tok" tile divides by the same volume
+                    # the rest of the redesigned page reports.
+                    tokens = int(
+                        (row.total_input_tokens or 0)
+                        + (row.total_output_tokens or 0)
+                        + (row.total_cache_read_tokens or 0)
+                        + (row.total_cache_write_tokens or 0)
+                    )
+                    cost_per_m = (
+                        (row.total_cost_usd / (tokens / 1_000_000))
+                        if tokens > 0 else 0.0
+                    )
+                    cost_per_run = (
+                        (row.total_cost_usd / row.runs)
+                        if row.runs > 0 else 0.0
+                    )
+                    # Cache leverage: share of "billable input" served
+                    # from cache. Matches the standalone mock's
+                    # `cacheRead / (cacheRead + input)` accounting --
+                    # high cache hit means a smaller fraction of input
+                    # tokens hit the model's input rate, which is the
+                    # cost lever the operator is reading off the card.
+                    cache_read = int(row.total_cache_read_tokens or 0)
+                    input_tok = int(row.total_input_tokens or 0)
+                    cache_hit_pct = (
+                        (cache_read / (cache_read + input_tok) * 100)
+                        if (cache_read + input_tok) > 0 else 0.0
+                    )
+                    color = theme.color_for(
+                        row.backend, explicit=theme.BACKEND_COLORS
+                    )
+                    st.markdown(
+                        f'<div style="border:1px solid {theme.BORDER};'
+                        f'border-radius:8px;padding:10px 12px;'
+                        f'margin-bottom:8px">'
+                        f'<div style="display:flex;align-items:center;'
+                        f'gap:8px;margin-bottom:4px">'
+                        f'<span style="display:inline-block;width:10px;'
+                        f'height:10px;border-radius:50%;background:{color}">'
+                        f'</span>'
+                        f'<b style="color:{theme.TEXT}">'
+                        f'{html.escape(row.backend)}</b>'
+                        f'<span style="color:{theme.MUTED_TEXT};'
+                        f'font-size:12px;margin-left:auto">'
+                        f'{row.runs} runs · {theme.fmt_tokens(tokens)} tok'
+                        '</span>'
+                        '</div>'
+                        f'<div style="color:{theme.TEXT};font-size:20px;'
+                        f'font-weight:600;'
+                        f'font-family:{theme.MONO_FONT_FAMILY};'
+                        f'margin-bottom:6px">'
+                        f'{html.escape(theme.fmt_money_exact(row.total_cost_usd))}'
+                        f'<span style="color:{theme.MUTED_TEXT};'
+                        f'font-size:11px;margin-left:8px;'
+                        f'font-family:{theme.FONT_FAMILY}">'
+                        f'spend</span></div>'
+                        f'<div style="display:flex;gap:14px;font-size:12px;'
+                        f'color:{theme.MUTED_TEXT}">'
+                        f'<span>${cost_per_m:.2f} / 1M tok</span>'
+                        f'<span>{cache_hit_pct:.0f}% cache hit</span>'
+                        f'<span>${cost_per_run:.2f} / run</span>'
+                        '</div></div>',
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.info("No `agent_exit` rows match the current filters.")
+            if cost_coverage_rows:
+                # Token share, not run share -- a few high-token runs
+                # can dominate cost while looking like a thin slice of
+                # the run count, so the standalone mock sizes the bar
+                # by `tok` and we follow suit. Falls back to the run
+                # share when the window carries no token volume yet
+                # (a brand-new database with `agent_exit` rows that
+                # never reported usage).
+                total_tokens = sum(
+                    int(r.total_tokens or 0) for r in cost_coverage_rows
+                )
+                if total_tokens > 0:
+                    weights = [
+                        int(r.total_tokens or 0) for r in cost_coverage_rows
+                    ]
+                    total = total_tokens
+                else:
+                    weights = [int(r.runs or 0) for r in cost_coverage_rows]
+                    total = sum(weights) or 1
+                segs = []
+                legend = []
+                for r, w in zip(cost_coverage_rows, weights):
+                    pct = w / total * 100
+                    color = theme.color_for(
+                        r.cost_source,
+                        [r.cost_source for r in cost_coverage_rows],
+                        explicit=theme.COST_SOURCE_COLORS,
+                    )
+                    segs.append(
+                        f'<span style="width:{pct:.1f}%;background:{color}" '
+                        f'title="{html.escape(r.cost_source)}"></span>'
+                    )
+                    legend.append(
+                        f'<span><span class="dot" '
+                        f'style="background:{color}"></span>'
+                        f'{html.escape(r.cost_source)} '
+                        f'<b style="color:{theme.TEXT};'
+                        f'font-family:{theme.MONO_FONT_FAMILY}">'
+                        f'{pct:.1f}%</b>'
+                        '</span>'
+                    )
+                st.markdown(
+                    '<div class="orch-cov-title">'
+                    'Cost attribution coverage</div>'
+                    f'<div class="orch-cov-bar">{"".join(segs)}</div>'
+                    f'<div class="orch-cov-legend">{"".join(legend)}</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ── Repo cost (7/12) + reliability tiles (5/12) ─────────────
+    col_repo, col_rel = st.columns([7, 5])
+    with col_repo:
+        with st.container(border=True):
+            st.markdown(
+                _card_header_html(
+                    "Cost by repository",
+                    "Spend across managed repos",
+                ),
+                unsafe_allow_html=True,
+            )
+            st.plotly_chart(
+                dashboard_charts.cost_by_repo(repo_rows),
+                use_container_width=True,
+            )
+    with col_rel:
+        with st.container(border=True):
+            st.markdown(
+                _card_header_html(
+                    "Reliability & throughput",
+                    "Run health and issues resolved per day",
+                ),
+                unsafe_allow_html=True,
+            )
+            # Pull every reliability tile off the same full-window
+            # `Summary` aggregate so e.g. the timeout count sees every
+            # timed-out run in the window, not just the latest 100
+            # rows surfaced by `get_recent_agent_exits`.
+            raw_tiles = reliability_tile_data(
+                summary, resolved=resolved, rejected=rejected,
+            )
+            tiles_html = "".join(
+                f'<div class="orch-rel-tile {tone}">'
+                f'<div class="orch-rel-value">'
+                f'{html.escape(v if isinstance(v, str) else theme.fmt_num(v))}'
+                f'</div>'
+                f'<div class="orch-rel-label">{html.escape(lbl)}</div>'
+                '</div>'
+                for v, lbl, tone in raw_tiles
+            )
+            st.markdown(
+                f'<div class="orch-rel-tiles">{tiles_html}</div>',
+                unsafe_allow_html=True,
+            )
+            # Pass the window so every day -- including zero-
+            # resolution ones the SQL elides -- renders an
+            # explicit bar. Without the window the chart would
+            # appear "gappy" against a calendar baseline.
+            st.plotly_chart(
+                dashboard_charts.done_per_day_bars(
+                    throughput_rows,
+                    window_start=window.start.date(),
+                    window_end=(window.end - timedelta(days=1)).date(),
+                    title=None,
                 ),
                 use_container_width=True,
             )
-        else:
-            st.info("No `agent_exit` rows match the current filters.")
-    with repo_col:
-        st.subheader("Activity by repo")
-        if repo_rows:
-            st.plotly_chart(
-                _repo_chart_from_rows(
-                    go=go, theme=theme, rows=repo_rows
-                ),
-                use_container_width=True,
-            )
-        else:
-            st.info("No repos match the current filters.")
 
-    st.subheader("Reliability / throughput")
-    st.plotly_chart(
-        _reliability_chart(
-            go=go,
-            theme=theme,
-            ts_points=ts_points,
-            throughput_rows=throughput_rows,
-        ),
-        use_container_width=True,
-    )
+    # ── When agents run (heatmap) ────────────────────────────────
+    with st.container(border=True):
+        st.markdown(
+            _card_header_html(
+                "When agents run",
+                "Token volume by hour (UTC) × weekday",
+            ),
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(
+            dashboard_charts.hour_weekday_heatmap(heatmap_rows),
+            use_container_width=True,
+        )
 
-    st.subheader("Activity by weekday × hour")
-    st.plotly_chart(
-        _heatmap_from_rows(go=go, theme=theme, rows=heatmap_rows),
-        use_container_width=True,
-    )
-
+    # ── Recent agent runs expander ───────────────────────────────
     with st.expander("Recent agent runs", expanded=False):
         if agent_exits:
             df_exits = pd.DataFrame([
@@ -929,313 +1623,14 @@ def main() -> None:
         stage_filter=stage_filter,
     )
 
-
-def _emit_banner(st: Any, banner: InsightBanner) -> None:
-    """Render `banner` through the matching `st.<severity>` call."""
-    fn = {
-        "success": st.success,
-        "info": st.info,
-        "warning": st.warning,
-        "error": st.error,
-    }.get(banner.severity, st.info)
-    fn(banner.message)
-
-
-def _metric_with_delta(
-    col: Any,
-    label: str,
-    current: float,
-    previous: float,
-    *,
-    value_fmt=lambda v: f"{int(v):,}",
-) -> None:
-    """`st.metric` with a previous-window delta shown as a percentage.
-
-    The delta is rendered as `"+12.3%"` / `"-4.0%"` rather than the
-    absolute difference so the row reads uniformly across mixed
-    columns (events vs cost vs token counts). When the previous
-    window is zero (or negative) the delta is hidden -- a divide by
-    zero would otherwise read as infinity.
-    """
-    delta = kpi_delta(float(current), float(previous))
-    delta_str = None if delta is None else f"{delta * 100:+.1f}%"
-    col.metric(label, value_fmt(current), delta=delta_str)
-
-
-def _review_round_bars_from_rows(
-    *, go: Any, theme: Any, rows: Sequence[Any]
-) -> Any:
-    """Bar chart from `ReviewRoundBucketRow` (totals + failed stacked).
-
-    `dashboard_charts.review_round_bars` takes raw `AgentExitRow`s
-    and counts by `review_round`; here we already have the
-    aggregated bucket rows from the read model, so a parallel
-    builder keeps both code paths first-class. The bucket label
-    order is bounded (`0` / `1` / `2` / `3-5` / `6+` / `unknown`)
-    so a deterministic ordering helps the chart stay readable.
-    """
-    if not rows:
-        return _empty_plotly_figure(
-            go=go, theme=theme,
-            message="No `agent_exit` rows match the current filters.",
-        )
-    order = ("0", "1", "2", "3-5", "6+", "unknown")
-    sorted_rows = sorted(
-        rows,
-        key=lambda r: (
-            order.index(r.bucket) if r.bucket in order else len(order)
-        ),
+    st.markdown(
+        '<div class="orch-foot">'
+        f'Real data · window {window.start.date().isoformat()} → '
+        f'{(window.end - timedelta(days=1)).date().isoformat()} · '
+        f'{theme.fmt_num(summary.total_agent_runs)} agent runs'
+        '</div>',
+        unsafe_allow_html=True,
     )
-    buckets = [r.bucket for r in sorted_rows]
-    succeeded = [int(r.runs) - int(r.failed) for r in sorted_rows]
-    failed = [int(r.failed) for r in sorted_rows]
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=buckets,
-            y=succeeded,
-            name="succeeded",
-            marker_color=theme.SUCCESS,
-            hovertemplate="round %{x}: %{y} succeeded<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=buckets,
-            y=failed,
-            name="failed",
-            marker_color=theme.DANGER,
-            hovertemplate="round %{x}: %{y} failed<extra></extra>",
-        )
-    )
-    fig.update_layout(
-        barmode="stack",
-        **theme.base_layout(title="Agent runs by review round"),
-    )
-    fig.update_xaxes(title_text="review round", type="category")
-    fig.update_yaxes(title_text="agent runs")
-    return fig
-
-
-def _cost_coverage_bar(
-    *, go: Any, theme: Any, rows: Sequence[CostCoverageRow]
-) -> Any:
-    """Horizontal bar of `cost_source` counts.
-
-    The chart builder module exposes a donut variant; the analysis-
-    first layout asked for a bar so the absolute counts read off the
-    axis directly. Bars are sorted by count descending so the
-    largest cohort sits at the top, and `unknown-price` / `unknown`
-    are colored through the explicit `COST_SOURCE_COLORS` map.
-    """
-    ordered = sorted(
-        rows, key=lambda r: (-int(r.runs), r.cost_source)
-    )
-    labels = [r.cost_source for r in ordered]
-    fig = go.Figure(
-        go.Bar(
-            x=[int(r.runs) for r in ordered],
-            # Plotly draws the first y-value at the bottom; reverse
-            # so the largest cohort surfaces at the top of the chart.
-            y=labels,
-            orientation="h",
-            marker_color=[
-                theme.color_for(
-                    lbl, labels, explicit=theme.COST_SOURCE_COLORS
-                )
-                for lbl in labels
-            ],
-            hovertemplate="%{y}: %{x} runs<extra></extra>",
-        )
-    )
-    fig.update_layout(**theme.base_layout(title="Cost source coverage"))
-    fig.update_xaxes(title_text="agent runs")
-    fig.update_yaxes(autorange="reversed")
-    return fig
-
-
-def _repo_chart_from_rows(
-    *, go: Any, theme: Any, rows: Sequence[Any]
-) -> Any:
-    """Grouped bar of (issues, events, agent_exits) per repo.
-
-    `dashboard_charts.repo_bars` aggregates from `IssueSummaryRow`s;
-    the read model now exposes `get_repo_breakdown` directly, so
-    rendering off the pre-aggregated rows avoids re-summing N issue
-    rows on the dashboard side. Sorted by event count desc so the
-    busiest repo is leftmost.
-    """
-    if not rows:
-        return _empty_plotly_figure(
-            go=go, theme=theme,
-            message="No repos match the current filters.",
-        )
-    ordered = sorted(rows, key=lambda r: (-int(r.events), r.repo))
-    repos = [r.repo for r in ordered]
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=repos,
-            y=[int(r.issues) for r in ordered],
-            name="issues",
-            marker_color=theme.PRIMARY,
-            hovertemplate="%{x}: %{y} issues<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=repos,
-            y=[int(r.events) for r in ordered],
-            name="events",
-            marker_color=theme.SECONDARY,
-            hovertemplate="%{x}: %{y} events<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=repos,
-            y=[int(r.agent_exits) for r in ordered],
-            name="agent runs",
-            marker_color=theme.SUCCESS,
-            hovertemplate="%{x}: %{y} agent runs<extra></extra>",
-        )
-    )
-    fig.update_layout(
-        barmode="group", **theme.base_layout(title="Activity by repo")
-    )
-    fig.update_yaxes(title_text="count")
-    return fig
-
-
-def _reliability_chart(
-    *,
-    go: Any,
-    theme: Any,
-    ts_points: Sequence[Any],
-    throughput_rows: Sequence[Any],
-) -> Any:
-    """Daily activity bars overlaid with resolved / rejected throughput.
-
-    The bars (left axis) are the per-day total event count -- the
-    same shape `dashboard_charts.throughput` plots in isolation --
-    and the two scatter traces (right axis) carry the resolved /
-    rejected daily counts from `get_throughput_breakdown` so the
-    operator can read "did volume actually translate into closed
-    issues" off a single chart.
-    """
-    if not ts_points and not throughput_rows:
-        return _empty_plotly_figure(
-            go=go, theme=theme,
-            message="No events match the current filters.",
-        )
-    daily_events: dict = {}
-    for p in ts_points:
-        daily_events[p.day] = daily_events.get(p.day, 0) + int(p.count)
-    days = sorted(set(daily_events) | {r.day for r in throughput_rows})
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=days,
-            y=[daily_events.get(d, 0) for d in days],
-            name="events",
-            marker_color=theme.PRIMARY,
-            opacity=0.7,
-            hovertemplate="%{x}: %{y} events<extra></extra>",
-        )
-    )
-    resolved_by_day = {r.day: int(r.resolved) for r in throughput_rows}
-    rejected_by_day = {r.day: int(r.rejected) for r in throughput_rows}
-    fig.add_trace(
-        go.Scatter(
-            x=days,
-            y=[resolved_by_day.get(d, 0) for d in days],
-            name="resolved",
-            mode="lines+markers",
-            line={"color": theme.SUCCESS},
-            yaxis="y2",
-            hovertemplate="%{x}: %{y} resolved<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=days,
-            y=[rejected_by_day.get(d, 0) for d in days],
-            name="rejected",
-            mode="lines+markers",
-            line={"color": theme.DANGER},
-            yaxis="y2",
-            hovertemplate="%{x}: %{y} rejected<extra></extra>",
-        )
-    )
-    layout = theme.base_layout(title="Reliability / throughput")
-    layout["yaxis"] = {**layout.get("yaxis", {}), "title": {"text": "events"}}
-    layout["yaxis2"] = {
-        "title": {"text": "resolved / rejected"},
-        "overlaying": "y",
-        "side": "right",
-        "gridcolor": theme.GRID,
-        "linecolor": theme.GRID,
-    }
-    fig.update_layout(**layout)
-    return fig
-
-
-# Postgres `EXTRACT(DOW FROM ts)` is 0 = Sunday; Python's
-# `datetime.weekday()` (and the rest of the orchestrator's analytics
-# code) is 0 = Monday. Convert at the chart layer so the y-axis
-# labels stay Monday-first.
-_WEEKDAY_LABELS: tuple[str, ...] = (
-    "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun",
-)
-
-
-def _heatmap_from_rows(
-    *, go: Any, theme: Any, rows: Sequence[Any]
-) -> Any:
-    """7x24 heatmap built from `HourlyHeatmapPoint` rows."""
-    matrix = [[0] * 24 for _ in range(7)]
-    for p in rows:
-        # PG DOW: 0=Sun..6=Sat; Python weekday: 0=Mon..6=Sun.
-        py_weekday = (int(p.weekday) + 6) % 7
-        hour = int(p.hour)
-        if 0 <= py_weekday < 7 and 0 <= hour < 24:
-            matrix[py_weekday][hour] = int(p.count)
-    fig = go.Figure(
-        go.Heatmap(
-            z=matrix,
-            x=[f"{h:02d}" for h in range(24)],
-            y=list(_WEEKDAY_LABELS),
-            colorscale="Blues",
-            hovertemplate="%{y} %{x}:00 -- %{z} events<extra></extra>",
-        )
-    )
-    fig.update_layout(**theme.base_layout(title="Activity by weekday × hour"))
-    fig.update_xaxes(title_text="hour (UTC)", type="category")
-    fig.update_yaxes(title_text="weekday", autorange="reversed")
-    if not rows:
-        fig.add_annotation(
-            text="No events match the current filters.",
-            x=0.5, y=0.5,
-            xref="paper", yref="paper",
-            showarrow=False,
-            font={"color": theme.MUTED_TEXT, "size": theme.FONT_SIZE},
-        )
-    return fig
-
-
-def _empty_plotly_figure(*, go: Any, theme: Any, message: str) -> Any:
-    """Centered empty-state annotation on a blank Plotly figure."""
-    fig = go.Figure()
-    fig.update_layout(**theme.base_layout())
-    fig.add_annotation(
-        text=message, x=0.5, y=0.5,
-        xref="paper", yref="paper",
-        showarrow=False,
-        font={"color": theme.MUTED_TEXT, "size": theme.FONT_SIZE},
-    )
-    fig.update_xaxes(visible=False)
-    fig.update_yaxes(visible=False)
-    return fig
 
 
 def _render_drilldown(

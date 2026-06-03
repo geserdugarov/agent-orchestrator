@@ -112,7 +112,11 @@ class Summary:
     `event = 'agent_exit'` rows (and the failing subset where
     `exit_code <> 0`) inside the same filtered window so the
     dashboard's "agent success rate" reads off the same query as the
-    rest of the overview.
+    rest of the overview. `total_cache_read_tokens` /
+    `total_cache_write_tokens` carry the cache-band tokens the
+    redesigned dashboard's "Total tokens" KPI and sparkline include
+    in the headline figure (the standalone mock's total is
+    ``input + output + cache_read + cache_write``).
     """
 
     total_events: int = 0
@@ -125,6 +129,13 @@ class Summary:
     total_output_tokens: int = 0
     total_agent_runs: int = 0
     failed_agent_runs: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
+    # Window-wide timeout count -- agent_exit rows whose `timed_out`
+    # flag is true. Sourced from the totals query so the redesigned
+    # reliability "Timeouts" tile sees every timed-out run in the
+    # window, not just the latest N from `get_recent_agent_exits`.
+    timed_out_agent_runs: int = 0
 
 
 @dataclass(frozen=True)
@@ -136,7 +147,10 @@ class TimeSeriesPoint:
     axis directly. The cell carries the per-event cost / token
     aggregates as well so a "spend over time" chart can pivot off the
     same query the activity chart uses -- avoids a second round trip
-    for what is already grouped by `(day, event)`. Fields default to
+    for what is already grouped by `(day, event)`. Cache-band tokens
+    surface alongside input / output so the redesigned hero chart's
+    `mode="type"` stack can render an Input / Output / Cache stack
+    instead of dropping cache tokens on the floor. Fields default to
     zero so a fake-cursor fixture that returns just `(day, event,
     count)` rows still validates the no-aggregate path.
     """
@@ -147,11 +161,21 @@ class TimeSeriesPoint:
     cost_usd: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
 class StageBreakdown:
     """Per-`stage` aggregate row for the stage breakdown table.
+
+    `count` is `COUNT(*)` over every `analytics_events` row that
+    carries the stage (so it includes `stage_enter` and
+    `stage_evaluation` rows alongside `agent_exit`); `runs` narrows
+    to the `event = 'agent_exit'` subset so the redesigned
+    dashboard's "Cost by workflow stage" panel can label its
+    sub-line as "runs" -- the standalone mock aggregates from
+    per-agent-run records, not per-event rows.
 
     `avg_duration_s` is None when no row in the window had a
     non-null `duration_s` for that stage; the SQL `AVG(...)` returns
@@ -160,7 +184,7 @@ class StageBreakdown:
     `total_input_tokens` / `total_output_tokens` roll up the cost /
     token figures across the stage so the breakdown table can plot
     "where the spend went". Zero-defaulted so a fake fixture without
-    the cost columns still round-trips.
+    the run / cost / token columns still round-trips.
     """
 
     stage: str
@@ -169,6 +193,7 @@ class StageBreakdown:
     total_cost_usd: float = 0.0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    runs: int = 0
 
 
 @dataclass(frozen=True)
@@ -216,9 +241,12 @@ class IssueSummaryRow:
     non-null `stage` (useful as a "current status" column even though
     pinned GitHub state remains authoritative), how many `agent_exit`
     events were recorded, the rolled-up cost / token totals, the
-    highest review round any agent run for the issue reached, and how
+    highest review round any agent run for the issue reached, how
     many of those runs exited non-zero so the table can surface
-    issues that needed multiple attempts. Stable column order across
+    issues that needed multiple attempts, and the highest
+    `retry_count` any agent run for the issue reached so the
+    redesigned "Most expensive issues" table can carry a "Retries"
+    column matching the standalone mock. Stable column order across
     the SELECT list, the dataclass, and the positional unpack in
     `get_issues` keeps the schema obvious when a future column is
     added.
@@ -236,6 +264,7 @@ class IssueSummaryRow:
     total_output_tokens: int
     max_review_round: Optional[int] = None
     failed_agent_runs: int = 0
+    max_retry_count: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -261,20 +290,26 @@ class IssueEventRow:
 
 @dataclass(frozen=True)
 class ReviewRoundBucketRow:
-    """Per-`review_round_bucket` count of agent runs.
+    """Per-`review_round_bucket` count and cost of agent runs.
 
     `bucket` is the categorical string the view emits (`0`, `1`, `2`,
     `3-5`, `6+`); it is exposed verbatim so the dashboard chart's
     x-axis can use the same labels. `failed` is the subset of `runs`
     that exited non-zero so the chart can stack the failure ratio on
-    top of the total. Rows with `review_round IS NULL` surface under
-    the `"unknown"` bucket so they remain visible -- silently dropping
-    them would hide pre-review work the operator expects to see.
+    top of the total. `total_cost_usd` rolls up the cost-priced
+    agent-run rows in each bucket so the redesigned dashboard can
+    plot "cost by review round" off the same query -- review rounds
+    after the first one are by definition rework, and surfacing the
+    cost of that rework is the lever the operator has. Rows with
+    `review_round IS NULL` surface under the `"unknown"` bucket so
+    they remain visible -- silently dropping them would hide
+    pre-review work the operator expects to see.
     """
 
     bucket: str
     runs: int
     failed: int = 0
+    total_cost_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -284,7 +319,11 @@ class BackendEfficiencyRow:
     Powers the dashboard's "backend efficiency" panel: total runs,
     how many failed, the average wall-clock duration (None when no
     row in the window carried a duration), and the total cost /
-    token spend. Rows whose `backend` is NULL bucket under
+    token spend. `total_cache_read_tokens` / `total_cache_write_tokens`
+    surface alongside input / output so the "cost / 1M tok" tile
+    can divide by the same `input + output + cache` total the rest
+    of the redesigned page uses (matching the standalone mock's
+    accounting). Rows whose `backend` is NULL bucket under
     `"unknown"` so the chart still surfaces them rather than
     silently dropping a category.
     """
@@ -296,6 +335,8 @@ class BackendEfficiencyRow:
     total_cost_usd: float = 0.0
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -319,13 +360,20 @@ class RepoBreakdownRow:
 
 @dataclass(frozen=True)
 class CostCoverageRow:
-    """Per-`cost_source` count of agent runs.
+    """Per-`cost_source` count and token rollup of agent runs.
 
-    Powers the dashboard's "cost source coverage" donut. The
-    `unknown-price` cohort is the maintenance signal for the
+    Powers the dashboard's "cost attribution coverage" bar.
+    `total_tokens` rolls up the per-`cost_source` token volume so
+    the redesigned bar can be sized by token share -- matching the
+    standalone mock, which treats coverage as "what fraction of
+    token volume the parser could attribute a price to" rather than
+    "what fraction of runs". A small number of high-token runs can
+    dominate the cost picture, so a run-count share would
+    misrepresent how exposed an operator is to pricing-table gaps.
+    The `unknown-price` cohort is the maintenance signal for the
     pricing table baked into `orchestrator.usage` -- it is NEVER
     collapsed into a generic "unknown" bucket here so an operator
-    can see at a glance how many runs the parser could not price.
+    can see at a glance how much volume the parser could not price.
     Rows whose `cost_source` is NULL surface under `"unknown"` so
     they remain visible (this is distinct from the `unknown-price`
     string the parser writes -- a NULL is "field absent", not
@@ -334,23 +382,50 @@ class CostCoverageRow:
 
     cost_source: str
     runs: int
+    total_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class BackendDailyTokensRow:
+    """One `(day, backend, total_tokens)` cell of the per-backend daily
+    token series.
+
+    Powers the redesigned dashboard's "By backend" toggle on the hero
+    spend & token usage chart. Reading off `analytics_agent_runs` (a
+    view over `event = 'agent_exit'` rows) means the chart never
+    silently caps at the `get_recent_agent_exits` `LIMIT` -- every
+    backend's tokens get counted across the full window, in lockstep
+    with the cost line and KPI aggregates.
+    """
+
+    day: date
+    backend: str
+    total_tokens: int
 
 
 @dataclass(frozen=True)
 class HourlyHeatmapPoint:
-    """One (weekday, hour, count) cell of the 7x24 activity matrix.
+    """One (weekday, hour, count, total_tokens) cell of the 7x24
+    activity matrix.
 
     `weekday` follows Postgres `EXTRACT(DOW)` which is 0=Sunday;
     the dashboard chart re-orders to a Monday-first layout if the
     operator prefers (we expose the raw value so the chart layer
     owns the presentation choice). `hour` is the hour of day in
     the same timezone the database stores `ts` in (the orchestrator
-    writes UTC).
+    writes UTC). `count` is the per-cell event count; `total_tokens`
+    is the matching `input + output + cache_read + cache_write`
+    token volume so the redesigned dashboard's "When agents run"
+    heatmap can render token intensity (matching the standalone
+    mock) rather than event intensity, which would over-weight the
+    cheap `stage_enter` / `stage_evaluation` cells against the
+    `agent_exit` rows that actually drive spend.
     """
 
     weekday: int
     hour: int
     count: int
+    total_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -676,7 +751,21 @@ def get_summary(
         "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
         "  AS total_agent_runs, "
         "SUM(CASE WHEN event = 'agent_exit' AND exit_code <> 0 "
-        "         THEN 1 ELSE 0 END) AS failed_agent_runs "
+        "         THEN 1 ELSE 0 END) AS failed_agent_runs, "
+        # Cache-band token rollups so the redesigned KPI strip and
+        # sparkline can include them in the "Total tokens" headline
+        # (matching the standalone mock's
+        # `input + output + cache_read + cache_write` accounting).
+        "COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, "
+        "COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, "
+        # Window-wide timeout counter so the reliability "Timeouts"
+        # tile aggregates every timed-out run, not just the latest N
+        # `get_recent_agent_exits` returns. `timed_out IS NULL` (a
+        # pre-flag row) never counts here -- only an explicit `true`
+        # is a timeout, mirroring how `failed_agent_runs` excludes
+        # NULL exit codes.
+        "SUM(CASE WHEN event = 'agent_exit' AND timed_out = true "
+        "         THEN 1 ELSE 0 END) AS timed_out_agent_runs "
         f"FROM analytics_events{where}"
     )
     totals_rows = _query(connect_fn, url, totals_sql, params)
@@ -692,11 +781,15 @@ def get_summary(
     total_cost_usd = row[3]
     total_input_tokens = row[4]
     total_output_tokens = row[5]
-    # Fixtures that pre-date the agent-run extension may still emit
-    # 6-tuple totals rows; default to zero so the test harness does
-    # not have to know about the new SQL columns in unrelated cases.
+    # Fixtures that pre-date the agent-run / cache-token extensions
+    # may still emit shorter tuples; default the missing columns to
+    # zero so the test harness does not have to know about every
+    # new SQL column in unrelated cases.
     total_agent_runs = row[6] if len(row) > 6 else 0
     failed_agent_runs = row[7] if len(row) > 7 else 0
+    total_cache_read_tokens = row[8] if len(row) > 8 else 0
+    total_cache_write_tokens = row[9] if len(row) > 9 else 0
+    timed_out_agent_runs = row[10] if len(row) > 10 else 0
 
     by_event_sql = (
         "SELECT event, COUNT(*) AS c FROM analytics_events"
@@ -732,6 +825,9 @@ def get_summary(
         total_output_tokens=int(total_output_tokens or 0),
         total_agent_runs=int(total_agent_runs or 0),
         failed_agent_runs=int(failed_agent_runs or 0),
+        total_cache_read_tokens=int(total_cache_read_tokens or 0),
+        total_cache_write_tokens=int(total_cache_write_tokens or 0),
+        timed_out_agent_runs=int(timed_out_agent_runs or 0),
     )
 
 
@@ -768,7 +864,9 @@ def get_time_series(
         "COUNT(*) AS c, "
         "COALESCE(SUM(cost_usd), 0) AS day_cost_usd, "
         "COALESCE(SUM(input_tokens), 0) AS day_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS day_output_tokens "
+        "COALESCE(SUM(output_tokens), 0) AS day_output_tokens, "
+        "COALESCE(SUM(cache_read_tokens), 0) AS day_cache_read_tokens, "
+        "COALESCE(SUM(cache_write_tokens), 0) AS day_cache_write_tokens "
         f"FROM analytics_events{where} "
         "GROUP BY day, event "
         "ORDER BY day ASC, event ASC"
@@ -782,6 +880,8 @@ def get_time_series(
         cost_usd = row[3] if len(row) > 3 else 0.0
         input_tokens = row[4] if len(row) > 4 else 0
         output_tokens = row[5] if len(row) > 5 else 0
+        cache_read_tokens = row[6] if len(row) > 6 else 0
+        cache_write_tokens = row[7] if len(row) > 7 else 0
         if isinstance(day_value, datetime):
             day_value = day_value.date()
         points.append(
@@ -792,6 +892,8 @@ def get_time_series(
                 cost_usd=float(cost_usd or 0.0),
                 input_tokens=int(input_tokens or 0),
                 output_tokens=int(output_tokens or 0),
+                cache_read_tokens=int(cache_read_tokens or 0),
+                cache_write_tokens=int(cache_write_tokens or 0),
             )
         )
     return points
@@ -833,7 +935,14 @@ def get_stage_breakdown(
         "SELECT stage, COUNT(*) AS c, AVG(duration_s) AS avg_dur, "
         "COALESCE(SUM(cost_usd), 0) AS stage_cost_usd, "
         "COALESCE(SUM(input_tokens), 0) AS stage_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS stage_output_tokens "
+        "COALESCE(SUM(output_tokens), 0) AS stage_output_tokens, "
+        # Agent-run subset of `count` so the redesigned dashboard's
+        # "Cost by workflow stage" panel can label its sub-line as
+        # "runs" -- the standalone mock aggregates per-agent-run
+        # records, not per-event rows, so counting all
+        # `analytics_events` rows would overstate stage activity.
+        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
+        "  AS stage_agent_runs "
         f"FROM analytics_events{clause} "
         "GROUP BY stage ORDER BY c DESC, stage ASC"
     )
@@ -846,6 +955,7 @@ def get_stage_breakdown(
         cost = row[3] if len(row) > 3 else 0.0
         in_tok = row[4] if len(row) > 4 else 0
         out_tok = row[5] if len(row) > 5 else 0
+        runs = row[6] if len(row) > 6 else 0
         out.append(
             StageBreakdown(
                 stage=stage,
@@ -854,6 +964,7 @@ def get_stage_breakdown(
                 total_cost_usd=float(cost or 0.0),
                 total_input_tokens=int(in_tok or 0),
                 total_output_tokens=int(out_tok or 0),
+                runs=int(runs or 0),
             )
         )
     return out
@@ -1010,6 +1121,13 @@ def get_recent_agent_exits(
     return out
 
 
+SORT_BY_LAST_SEEN = "last_seen"
+SORT_BY_COST = "cost"
+_ISSUE_SORT_BY_OPTIONS: frozenset[str] = frozenset(
+    {SORT_BY_LAST_SEEN, SORT_BY_COST}
+)
+
+
 def get_issues(
     *,
     start: Optional[datetime] = None,
@@ -1019,21 +1137,38 @@ def get_issues(
     stages: Optional[Sequence[str]] = None,
     issue: Optional[int] = None,
     limit: int = 100,
+    sort_by: str = SORT_BY_LAST_SEEN,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
 ) -> list[IssueSummaryRow]:
     """Date / repo-bounded one-row-per-`(repo, issue)` overview.
 
-    Powers the dashboard's "issues" table: each row aggregates the
+    Powers the dashboard's "issues" tables: each row aggregates the
     events seen for a single `(repo, issue)` pair inside the window
     (count, first / last activity ts, the most recent non-null stage
     as a "current status" hint, agent-exit count, rolled-up cost
     / token totals, the highest review round any agent run for the
-    issue reached, and how many of those runs exited non-zero).
-    Sorted by `last_seen DESC` so the most recently active issues
-    surface first. `limit` caps the row count for a bounded
-    dashboard table; non-positive values short-circuit to an empty
-    list, matching `get_recent_agent_exits`.
+    issue reached, how many of those runs exited non-zero, and the
+    highest `retry_count` any run rode up to).
+
+    `sort_by` controls the SQL ordering:
+
+    - `"last_seen"` (default) orders by `MAX(ts) DESC` so the most
+      recently active issues surface first -- used by callers that
+      want a "latest activity" view.
+    - `"cost"` orders by `SUM(cost_usd) DESC NULLS LAST` so the
+      highest-cost issues across the entire window surface first
+      -- this is what the redesigned "Most expensive issues" panel
+      needs. Sorting in-Python after a `last_seen`-ordered LIMIT
+      would silently drop older high-cost issues outside the
+      truncated set.
+
+    `last_seen DESC, repo ASC, issue ASC` is the deterministic
+    tie-breaker in either mode. Unknown `sort_by` raises `ValueError`
+    so a typo never silently degrades to last-seen ordering. `limit`
+    caps the row count for a bounded dashboard table; non-positive
+    values short-circuit to an empty list, matching
+    `get_recent_agent_exits`.
 
     `latest_stage` is computed with
     `(array_agg(stage ORDER BY ts DESC) FILTER (WHERE stage IS NOT NULL))[1]`
@@ -1041,6 +1176,11 @@ def get_issues(
     stays correct when the most recent event for an issue does not
     carry a stage (e.g. an `agent_exit` after a `stage_evaluation`).
     """
+    if sort_by not in _ISSUE_SORT_BY_OPTIONS:
+        raise ValueError(
+            f"unknown sort_by {sort_by!r}; expected one of "
+            f"{sorted(_ISSUE_SORT_BY_OPTIONS)}"
+        )
     url = _resolve_db_url(db_url)
     if not url:
         return []
@@ -1051,6 +1191,16 @@ def get_issues(
         start=start, end=end, repo=repo,
         events=events, stages=stages, issue=issue,
     )
+    # Order primary key matches `sort_by`; secondary keys
+    # (`last_seen DESC, repo ASC, issue ASC`) keep the ordering
+    # deterministic when the primary key ties.
+    if sort_by == SORT_BY_COST:
+        order_sql = (
+            "ORDER BY SUM(cost_usd) DESC NULLS LAST, "
+            "last_seen DESC, repo ASC, issue ASC"
+        )
+    else:
+        order_sql = "ORDER BY last_seen DESC, repo ASC, issue ASC"
     sql = (
         "SELECT "
         "repo, issue, "
@@ -1068,10 +1218,16 @@ def get_issues(
         # plain MAX is correct -- the filter is implicit.
         "MAX(review_round) AS max_review_round, "
         "SUM(CASE WHEN event = 'agent_exit' AND exit_code <> 0 "
-        "         THEN 1 ELSE 0 END) AS failed_agent_runs "
+        "         THEN 1 ELSE 0 END) AS failed_agent_runs, "
+        # `retry_count` is also only ever set on agent_exit rows,
+        # so a plain MAX picks the highest retry the implementer
+        # ever rode up to before the issue cleared. The redesigned
+        # "Most expensive issues" table renders this as the
+        # "Retries" column matching the standalone mock.
+        "MAX(retry_count) AS max_retry_count "
         f"FROM analytics_events{where} "
         "GROUP BY repo, issue "
-        "ORDER BY last_seen DESC, repo ASC, issue ASC "
+        f"{order_sql} "
         "LIMIT %s"
     )
     bound_params = list(params) + [int(limit)]
@@ -1088,11 +1244,12 @@ def get_issues(
         total_cost_usd = row[7]
         total_input_tokens = row[8]
         total_output_tokens = row[9]
-        # Old fixtures may still emit 10-tuple rows; default the
-        # extensions to None / 0 so tests written against the prior
-        # shape continue to round-trip.
+        # Old fixtures may still emit 10- or 12-tuple rows; default
+        # the extensions to None / 0 so tests written against the
+        # prior shape continue to round-trip.
         max_review_round = row[10] if len(row) > 10 else None
         failed_agent_runs = row[11] if len(row) > 11 else 0
+        max_retry_count = row[12] if len(row) > 12 else None
         out.append(
             IssueSummaryRow(
                 repo=repo_v,
@@ -1115,6 +1272,11 @@ def get_issues(
                     else None
                 ),
                 failed_agent_runs=int(failed_agent_runs or 0),
+                max_retry_count=(
+                    int(max_retry_count)
+                    if max_retry_count is not None
+                    else None
+                ),
             )
         )
     return out
@@ -1241,20 +1403,32 @@ def get_review_round_breakdown(
         "SELECT "
         "COALESCE(review_round_bucket, 'unknown') AS bucket, "
         "COUNT(*) AS runs, "
-        "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs "
+        "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs, "
+        "COALESCE(SUM(cost_usd), 0) AS bucket_cost_usd "
         f"FROM analytics_agent_runs{where} "
         "GROUP BY bucket "
         "ORDER BY runs DESC, bucket ASC"
     )
     rows = _query(connect_fn, url, sql, params)
-    return [
-        ReviewRoundBucketRow(
-            bucket=str(b),
-            runs=int(r or 0),
-            failed=int(f or 0),
+    out: list[ReviewRoundBucketRow] = []
+    for row in rows:
+        bucket = row[0]
+        runs = row[1]
+        failed = row[2]
+        # Older fixtures may still emit 3-tuple rows without the
+        # cost rollup; default the cost to 0 so the test harness
+        # does not have to know about the new SQL column in
+        # unrelated cases.
+        cost = row[3] if len(row) > 3 else 0.0
+        out.append(
+            ReviewRoundBucketRow(
+                bucket=str(bucket),
+                runs=int(runs or 0),
+                failed=int(failed or 0),
+                total_cost_usd=float(cost or 0.0),
+            )
         )
-        for b, r, f in rows
-    ]
+    return out
 
 
 def get_backend_efficiency(
@@ -1295,14 +1469,31 @@ def get_backend_efficiency(
         "AVG(duration_s) AS avg_dur, "
         "COALESCE(SUM(cost_usd), 0) AS backend_cost_usd, "
         "COALESCE(SUM(input_tokens), 0) AS backend_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS backend_output_tokens "
+        "COALESCE(SUM(output_tokens), 0) AS backend_output_tokens, "
+        "COALESCE(SUM(cache_read_tokens), 0) "
+        "  AS backend_cache_read_tokens, "
+        "COALESCE(SUM(cache_write_tokens), 0) "
+        "  AS backend_cache_write_tokens "
         f"FROM analytics_agent_runs{where} "
         "GROUP BY backend_label "
         "ORDER BY runs DESC, backend_label ASC"
     )
     rows = _query(connect_fn, url, sql, params)
     out: list[BackendEfficiencyRow] = []
-    for backend, runs, failed, avg_dur, cost, in_tok, out_tok in rows:
+    for row in rows:
+        backend = row[0]
+        runs = row[1]
+        failed = row[2]
+        avg_dur = row[3]
+        cost = row[4]
+        in_tok = row[5]
+        out_tok = row[6]
+        # Older fixtures may still emit 7-tuple rows without the
+        # cache totals; default to zero so the test harness does
+        # not have to know about the new SQL columns in unrelated
+        # cases.
+        cache_read = row[7] if len(row) > 7 else 0
+        cache_write = row[8] if len(row) > 8 else 0
         out.append(
             BackendEfficiencyRow(
                 backend=str(backend),
@@ -1314,6 +1505,8 @@ def get_backend_efficiency(
                 total_cost_usd=float(cost or 0.0),
                 total_input_tokens=int(in_tok or 0),
                 total_output_tokens=int(out_tok or 0),
+                total_cache_read_tokens=int(cache_read or 0),
+                total_cache_write_tokens=int(cache_write or 0),
             )
         )
     return out
@@ -1407,16 +1600,104 @@ def get_cost_coverage(
     sql = (
         "SELECT "
         "COALESCE(cost_source, 'unknown') AS source_label, "
-        "COUNT(*) AS runs "
+        "COUNT(*) AS runs, "
+        # Tokens-by-cost-source rollup so the dashboard can render
+        # coverage as a token share. The view exposes the cache
+        # columns; the standalone mock totals
+        # `input + output + cache_read + cache_write` per row, so
+        # we mirror that accounting here.
+        "COALESCE(SUM("
+        "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
+        "  COALESCE(cache_read_tokens, 0) + "
+        "  COALESCE(cache_write_tokens, 0)"
+        "), 0) AS source_total_tokens "
         f"FROM analytics_agent_runs{where} "
         "GROUP BY source_label "
         "ORDER BY runs DESC, source_label ASC"
     )
     rows = _query(connect_fn, url, sql, params)
-    return [
-        CostCoverageRow(cost_source=str(s), runs=int(r or 0))
-        for s, r in rows
-    ]
+    out: list[CostCoverageRow] = []
+    for row in rows:
+        source = row[0]
+        runs = row[1]
+        # Older fixtures may still emit 2-tuple rows; default the
+        # token total to 0 so the test harness does not have to
+        # know about the new SQL column in unrelated cases.
+        tokens = row[2] if len(row) > 2 else 0
+        out.append(
+            CostCoverageRow(
+                cost_source=str(source),
+                runs=int(runs or 0),
+                total_tokens=int(tokens or 0),
+            )
+        )
+    return out
+
+
+def get_backend_daily_tokens(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+) -> list[BackendDailyTokensRow]:
+    """Per-`(day, backend)` token totals from `analytics_agent_runs`.
+
+    Mirrors `get_time_series` shape-wise but split by `backend` rather
+    than `event` and reading from the agent-runs view so token counts
+    cover every agent run in the window. The redesigned dashboard
+    used to derive the "By backend" stacked area from
+    `get_recent_agent_exits`, which silently truncated at its
+    `LIMIT`; this reader removes that cap so the stack stays in
+    lockstep with the cost line and the KPI tiles. Rows whose
+    `backend` is NULL surface under `"unknown"`. The `events` filter
+    is honored by short-circuit against `_agent_event_excluded` --
+    see `get_review_round_breakdown` for the rationale.
+    """
+    url = _resolve_db_url(db_url)
+    if not url:
+        return []
+    if _agent_event_excluded(events):
+        return []
+    connect_fn = connect or _default_connect
+    where, params = _build_view_window_where(
+        start=start, end=end, repo=repo,
+        stages=stages, issue=issue,
+    )
+    sql = (
+        "SELECT "
+        "date_trunc('day', ts)::date AS day, "
+        "COALESCE(backend, 'unknown') AS backend_label, "
+        # Token total includes cache_read / cache_write so the
+        # backend stack mirrors the standalone mock's
+        # `input + output + cache_read + cache_write` accounting.
+        "COALESCE(SUM("
+        "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
+        "  COALESCE(cache_read_tokens, 0) + "
+        "  COALESCE(cache_write_tokens, 0)"
+        "), 0) AS day_backend_tokens "
+        f"FROM analytics_agent_runs{where} "
+        "GROUP BY day, backend_label "
+        "ORDER BY day ASC, backend_label ASC"
+    )
+    rows = _query(connect_fn, url, sql, params)
+    out: list[BackendDailyTokensRow] = []
+    for row in rows:
+        day_value, backend, tokens = row
+        if isinstance(day_value, datetime):
+            day_value = day_value.date()
+        out.append(
+            BackendDailyTokensRow(
+                day=day_value,
+                backend=str(backend),
+                total_tokens=int(tokens or 0),
+            )
+        )
+    return out
 
 
 def get_hourly_heatmap(
@@ -1451,20 +1732,37 @@ def get_hourly_heatmap(
         "SELECT "
         "EXTRACT(DOW FROM ts)::int AS weekday, "
         "EXTRACT(HOUR FROM ts)::int AS hour, "
-        "COUNT(*) AS c "
+        "COUNT(*) AS c, "
+        # Per-cell token volume so the dashboard heatmap can render
+        # token intensity instead of event count -- matching the
+        # standalone mock's "Token volume by hour x weekday" panel.
+        "COALESCE(SUM("
+        "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
+        "  COALESCE(cache_read_tokens, 0) + "
+        "  COALESCE(cache_write_tokens, 0)"
+        "), 0) AS cell_total_tokens "
         f"FROM analytics_events{where} "
         "GROUP BY weekday, hour "
         "ORDER BY weekday ASC, hour ASC"
     )
     rows = _query(connect_fn, url, sql, params)
-    return [
-        HourlyHeatmapPoint(
-            weekday=int(w),
-            hour=int(h),
-            count=int(c or 0),
+    out: list[HourlyHeatmapPoint] = []
+    for row in rows:
+        weekday = row[0]
+        hour = row[1]
+        count = row[2]
+        # Older 3-tuple fixtures (no token column) round-trip with
+        # zero token volume so unrelated tests keep working.
+        tokens = row[3] if len(row) > 3 else 0
+        out.append(
+            HourlyHeatmapPoint(
+                weekday=int(weekday),
+                hour=int(hour),
+                count=int(count or 0),
+                total_tokens=int(tokens or 0),
+            )
         )
-        for w, h, c in rows
-    ]
+    return out
 
 
 # Stages a `stage_enter` event must carry to count as a terminal

@@ -396,30 +396,41 @@ sync nor the read model is wired into the polling loop —
 orchestrator correctness must not depend on database availability.
 
 **Analytics dashboard.** `orchestrator/dashboard.py` is the
-Streamlit app over the read model rendering an analysis-first
-layout. The sidebar carries a window preset
-(`Last 7 days` / `Last 30 days` / `All time` / `Custom range`)
-bounded by `get_data_extent`, a repo selector, event / stage
-multi-selects, and a `#123` / `123` issue-number input. Every
-read call is wrapped in `st.cache_data` keyed by
+Streamlit app over the read model rendering the redesigned
+standalone analytics view (#341). The chrome — topbar, filter
+bar, KPI strip, insight banners, card grid — is hand-rolled
+HTML injected through `dashboard_theme.PAGE_CSS`; Streamlit
+owns only the inputs (the inline `3D` / `7D` / `All` preset
+radio, the two date pickers, the sidebar multiselects, the
+"By token type / By backend" toggle on the hero chart) and the
+Plotly figures inside each card. Preset windows resolve via
+`preset_window(...)` bounded by `get_data_extent`. The sidebar
+still carries the repo selector, event / stage multi-selects,
+and a `#123` / `123` issue-number input. Every read call is
+wrapped in `st.cache_data` keyed by
 `(start, end, repo, events, stages, issue)` so a filter change
 invalidates every cached query in lockstep. The body renders, in
 order: computed insight banners (failure rate ≥ 10 %, cost swing
-≥ 25 % vs the previous window, unpriced cost coverage ≥ 10 %),
-a KPI row whose deltas compare events / distinct issues / agent
-runs / cost / agent-success-rate against the immediately
-preceding window of the same length, the hero
-`usage_over_time` stacked-bar chart, side-by-side stage and
-review-round charts, the top-cost issues table, per-backend
-efficiency cards (runs / failure rate / avg duration / cost),
-a `cost_source` coverage bar, the per-repo activity chart, a
-reliability/throughput overlay (per-day events bars with
-resolved / rejected lines on a secondary axis from
-`get_throughput_breakdown`), the 7 × 24 weekday × hour heatmap,
-the recent agent-runs table as a collapsible expander, and the
-per-issue drill-down at the bottom. An empty-window guard (zero
-events in the filtered window) short-circuits the body to a
-single banner. Every filter is threaded through the read
+≥ 25 % vs the previous window, unpriced cost coverage ≥ 10 %,
+rework share ≥ 30 % from `get_review_round_breakdown`, and a
+"spend is back-loaded" callout when the per-stage
+`validating + documenting` cost exceeds `implementing` cost and
+the latter is non-zero), a
+four-tile KPI strip (total spend, total tokens, cost / resolved
+issue, rework share — each with an inline-SVG sparkline and a
+previous-window delta where applicable), the hero
+`usage_over_time` stacked-area + cost-line chart with a
+by-token-type / by-backend toggle, side-by-side
+`cost_by_stage` (7/12) + `cost_by_review_round` (5/12)
+horizontal-bar cards, a 7/5 split between the top-cost issues
+table and the backend-efficiency cards + cost-source coverage
+bar, another 7/5 split between the `cost_by_repo` bars and a
+six-tile reliability panel above the issues-resolved-per-day
+chart, the 7 × 24 weekday × hour activity heatmap, the recent
+agent-runs table as a collapsible expander, and the per-issue
+drill-down at the bottom. An empty-window guard (zero events
+in the filtered window) short-circuits the body to a single
+banner. Every filter is threaded through the read
 model's SQL via `_build_window_where`, so every widget narrows
 together rather than diverging by surface. The event / stage
 selections distinguish three cases: ``None`` (no filter on the
@@ -456,28 +467,33 @@ surface as in-app `st.warning` / `st.info` / `st.error` banners
 that stop further rendering rather than crashing the app.
 
 **Dashboard visual support layer.** `orchestrator/dashboard_charts.py`
-holds pure Plotly figure builders (`usage_over_time`, `stage_bars`,
-`review_round_bars`, `repo_bars`, `cost_coverage`, `throughput`,
-`heatmap_7x24`) that take read-model rows (or a raw
-`Sequence[datetime]` for the 7×24 heatmap) and return a
+holds pure Plotly figure builders (`usage_over_time` with a
+`mode="type"` / `mode="backend"` switch, the shared
+`cost_horizontal_bars` primitive plus the `cost_by_stage` /
+`cost_by_review_round` / `cost_by_repo` adapters, `hour_weekday_heatmap`,
+`done_per_day_bars`) that take read-model rows and return a
 `plotly.graph_objects.Figure`; each builder routes its no-data
 branch through a shared empty-state annotation so the "nothing
 matches" message stays consistent across charts. The plotly-free
-token module `orchestrator/dashboard_theme.py` exposes semantic
-colors, categorical palettes for events / stages / `cost_source`,
-the deterministic `color_for(...)` fallback, and a `base_layout(...)`
-dict the chart builders splat into every figure. `.streamlit/config.toml`
-mirrors the same palette into Streamlit's own `[theme]` and disables
-the `[browser] gatherUsageStats` POST. The analysis-first
-`dashboard.py` consumes the builders alongside a handful of inline
-Plotly figures (the review-round chart, the cost-coverage bar, the
-per-repo chart, the reliability/throughput overlay, and the heatmap)
-that read from the new pre-aggregated read-model shapes; the lazy
-import surface is asserted by `tests/test_dashboard.py`, and the
-chart-builder regression tests
-(`tests/test_dashboard_charts.py` -- skips cleanly when `plotly` is
-absent -- and `tests/test_dashboard_theme.py`) keep the
-plotly-touching code paths covered.
+token module `orchestrator/dashboard_theme.py` exposes the
+redesigned palette (warm cream background, indigo accent,
+per-token-type / per-backend / per-review-round / per-stage /
+per-`cost_source` palettes), the deterministic `color_for(...)`
+fallback, a `base_layout(...)` dict the chart builders splat into
+every figure, the `PAGE_CSS` block the dashboard injects through
+`st.markdown`, and the `fmt_money` / `fmt_money_exact` /
+`fmt_tokens` / `fmt_num` formatters every value label runs
+through. `.streamlit/config.toml` mirrors the same palette into
+Streamlit's own `[theme]` (cream background, indigo
+`primaryColor`) and disables the `[browser] gatherUsageStats`
+POST. The redesigned `dashboard.py` consumes the chart builders
+alongside HTML blocks for the topbar, KPI strip, insight stack,
+backend-efficiency cards, cost-source coverage bar, reliability
+tiles, and footer; the lazy import surface is asserted by
+`tests/test_dashboard.py`, and the chart-builder regression
+tests (`tests/test_dashboard_charts.py` -- skips cleanly when
+`plotly` is absent -- and `tests/test_dashboard_theme.py`) keep
+the plotly-touching code paths covered.
 
 **Agent usage / cost parser.** `orchestrator/usage.py` decodes the
 JSONL stdout carried by `AgentResult` into a `UsageMetrics` dataclass:

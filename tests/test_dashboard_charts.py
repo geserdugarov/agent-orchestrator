@@ -19,14 +19,16 @@ extras pin does not silently make the suite skip too eagerly.
 from __future__ import annotations
 
 import unittest
-from datetime import date, datetime
+from datetime import date
 
 try:
     from orchestrator import dashboard_charts
     from orchestrator.analytics.read import (
-        AgentExitRow,
-        IssueSummaryRow,
+        HourlyHeatmapPoint,
+        RepoBreakdownRow,
+        ReviewRoundBucketRow,
         StageBreakdown,
+        ThroughputDayRow,
         TimeSeriesPoint,
     )
     HAS_PLOTLY = True
@@ -38,233 +40,301 @@ except ModuleNotFoundError:
 _SKIP_REASON = "plotly not installed -- run `uv sync --group dashboard`"
 
 
-def _agent_exit(
-    *,
-    review_round=None,
-    cost_source="reported",
-) -> "AgentExitRow":
-    return AgentExitRow(
-        ts=datetime(2026, 5, 1, 12, 0),
-        repo="acme/widgets",
-        issue=1,
-        stage="implementing",
-        agent_role="dev",
-        backend="claude",
-        duration_s=12.5,
-        exit_code=0,
-        timed_out=False,
-        review_round=review_round,
-        retry_count=0,
-        input_tokens=100,
-        output_tokens=50,
-        cost_usd=0.04,
-        cost_source=cost_source,
-    )
-
-
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
 class UsageOverTimeTest(unittest.TestCase):
+    """The hero stacked-area chart pivots `TimeSeriesPoint`s into a
+    per-day `(input, output, cost)` table and stacks input + output
+    token bands with the cost line on a secondary axis.
+    """
 
-    def test_pivots_event_series(self) -> None:
-        # Two events on day A, one on day B -- expect two traces
-        # (one per event), each with two y-values aligned to the
-        # sorted-day x-axis. Days with no event for a series fall
-        # through to 0.
+    def test_stacks_input_output_cache_with_cost_overlay(self) -> None:
         points = [
-            TimeSeriesPoint(day=date(2026, 5, 1), event="agent_exit", count=2),
-            TimeSeriesPoint(day=date(2026, 5, 1), event="stage_enter", count=5),
-            TimeSeriesPoint(day=date(2026, 5, 2), event="agent_exit", count=3),
+            TimeSeriesPoint(
+                day=date(2026, 5, 1), event="agent_exit", count=2,
+                cost_usd=1.20, input_tokens=1000, output_tokens=500,
+                cache_read_tokens=400, cache_write_tokens=200,
+            ),
+            TimeSeriesPoint(
+                day=date(2026, 5, 2), event="agent_exit", count=3,
+                cost_usd=2.40, input_tokens=2000, output_tokens=800,
+                cache_read_tokens=900, cache_write_tokens=600,
+            ),
         ]
         fig = dashboard_charts.usage_over_time(points)
-        traces = list(fig.data)
-        self.assertEqual(len(traces), 2)
-        names = {t.name for t in traces}
-        self.assertEqual(names, {"agent_exit", "stage_enter"})
-        # Stacked layout is what the dashboard expects.
-        self.assertEqual(fig.layout.barmode, "stack")
+        # Three stacked area bands (Input, Output, Cache) plus the
+        # cost line; the Cache band totals cache_read + cache_write
+        # per day (the standalone mock's `r.cr + r.cw` accounting).
+        names = [t.name for t in fig.data]
+        self.assertIn("Input", names)
+        self.assertIn("Output", names)
+        self.assertIn("Cache", names)
+        self.assertIn("Cost", names)
+        cache_trace = next(t for t in fig.data if t.name == "Cache")
+        self.assertEqual(tuple(cache_trace.y), (600, 1500))
+        cost_trace = next(t for t in fig.data if t.name == "Cost")
+        # Cost rides the secondary axis so it can use $ ticks.
+        self.assertEqual(cost_trace.yaxis, "y2")
+
+    def test_backend_mode_stacks_per_backend(self) -> None:
+        points = [
+            TimeSeriesPoint(
+                day=date(2026, 5, 1), event="agent_exit", count=2,
+                cost_usd=0.50, input_tokens=500, output_tokens=200,
+            ),
+        ]
+        backend_by_day = {
+            date(2026, 5, 1): {"claude": 1200, "codex": 600},
+        }
+        fig = dashboard_charts.usage_over_time(
+            points,
+            backend_rows_by_day=backend_by_day,
+            mode="backend",
+        )
+        names = {t.name for t in fig.data}
+        # Backend bands plus the cost overlay.
+        self.assertIn("claude", names)
+        self.assertIn("codex", names)
+        self.assertIn("Cost", names)
 
     def test_empty_renders_placeholder(self) -> None:
         fig = dashboard_charts.usage_over_time([])
         self.assertEqual(len(fig.data), 0)
-        # Placeholder annotation present so the empty state reads
-        # as "no data" rather than "broken chart".
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
 
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
-class StageBarsTest(unittest.TestCase):
+class CostHorizontalBarsTest(unittest.TestCase):
 
-    def test_renders_one_bar_per_stage(self) -> None:
-        rows = [
-            StageBreakdown(stage="implementing", count=10),
-            StageBreakdown(stage="validating", count=4),
+    def test_sorts_by_cost_descending(self) -> None:
+        items = [
+            ("alpha", "1 run", 5.0, "#111"),
+            ("beta", "2 runs", 15.0, "#222"),
+            ("gamma", "3 runs", 10.0, "#333"),
         ]
-        fig = dashboard_charts.stage_bars(rows)
-        self.assertEqual(len(fig.data), 1)
-        bar = fig.data[0]
-        # Horizontal bars (long stage names need the room).
-        self.assertEqual(bar.orientation, "h")
-        # The builder reverses the input so the top of the chart
-        # carries the largest count -- visual "top of the list" matches
-        # the read model's descending sort.
-        self.assertEqual(tuple(bar.y), ("validating", "implementing"))
-        self.assertEqual(tuple(bar.x), (4, 10))
+        fig = dashboard_charts.cost_horizontal_bars(items)
+        # The builder reverses the input so the LARGEST cost sits at
+        # the top of the chart (Plotly draws the first y at the
+        # bottom). Pull the y labels back out and check the order.
+        y_labels = list(fig.data[0].y)
+        # Highest cost (beta) should be the last entry returned by
+        # Plotly's bottom-up draw, i.e. the top of the chart.
+        self.assertIn("beta", y_labels[-1])
+        self.assertIn("gamma", y_labels[-2])
+
+    def test_value_labels_render_with_money_shorthand(self) -> None:
+        items = [("repo", "10 events", 12_345.0, "#abc")]
+        fig = dashboard_charts.cost_horizontal_bars(items)
+        # `fmt_money` collapses 12_345 to `$12.3K`.
+        self.assertEqual(tuple(fig.data[0].text), ("$12.3K",))
 
     def test_empty_renders_placeholder(self) -> None:
-        fig = dashboard_charts.stage_bars([])
-        self.assertEqual(len(fig.data), 0)
+        fig = dashboard_charts.cost_horizontal_bars([])
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
 
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
-class ReviewRoundBarsTest(unittest.TestCase):
+class CostByStageTest(unittest.TestCase):
 
-    def test_groups_rows_by_review_round(self) -> None:
+    def test_passes_stage_rows_to_horizontal_bars(self) -> None:
         rows = [
-            _agent_exit(review_round=0),
-            _agent_exit(review_round=1),
-            _agent_exit(review_round=1),
-            _agent_exit(review_round=None),  # pre-review pass
-        ]
-        fig = dashboard_charts.review_round_bars(rows)
-        self.assertEqual(len(fig.data), 1)
-        bar = fig.data[0]
-        # `None` review rounds are bucketed under "0" so they still
-        # appear; sorting is numeric ascending.
-        self.assertEqual(tuple(bar.x), ("0", "1"))
-        self.assertEqual(tuple(bar.y), (2, 2))
-
-    def test_empty_renders_placeholder(self) -> None:
-        fig = dashboard_charts.review_round_bars([])
-        self.assertGreaterEqual(len(fig.layout.annotations), 1)
-
-
-@unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
-class RepoBarsTest(unittest.TestCase):
-
-    def test_aggregates_per_repo(self) -> None:
-        rows = [
-            IssueSummaryRow(
-                repo="acme/a", issue=1, event_count=10,
-                first_seen=datetime(2026, 5, 1),
-                last_seen=datetime(2026, 5, 2),
-                latest_stage="implementing", agent_exits=2,
-                total_cost_usd=0.10, total_input_tokens=10,
-                total_output_tokens=5,
+            StageBreakdown(
+                stage="implementing",
+                count=20,
+                total_cost_usd=12.0,
+                runs=8,
             ),
-            IssueSummaryRow(
-                repo="acme/a", issue=2, event_count=4,
-                first_seen=datetime(2026, 5, 3),
-                last_seen=datetime(2026, 5, 3),
-                latest_stage="validating", agent_exits=1,
-                total_cost_usd=0.02, total_input_tokens=5,
-                total_output_tokens=2,
-            ),
-            IssueSummaryRow(
-                repo="acme/b", issue=1, event_count=2,
-                first_seen=datetime(2026, 5, 4),
-                last_seen=datetime(2026, 5, 4),
-                latest_stage="ready", agent_exits=0,
-                total_cost_usd=None, total_input_tokens=0,
-                total_output_tokens=0,
+            StageBreakdown(
+                stage="validating",
+                count=5,
+                total_cost_usd=4.0,
+                runs=3,
             ),
         ]
-        fig = dashboard_charts.repo_bars(rows)
-        # Two grouped traces (issues, events).
-        self.assertEqual(len(fig.data), 2)
-        issue_trace, event_trace = fig.data
-        self.assertEqual(issue_trace.name, "issues")
-        self.assertEqual(event_trace.name, "events")
-        # Repos sorted by total events DESC (acme/a beats acme/b).
-        self.assertEqual(tuple(issue_trace.x), ("acme/a", "acme/b"))
-        self.assertEqual(tuple(issue_trace.y), (2, 1))
-        self.assertEqual(tuple(event_trace.y), (14, 2))
-        self.assertEqual(fig.layout.barmode, "group")
+        fig = dashboard_charts.cost_by_stage(rows)
+        # Two bars, with the per-stage cost labelled in money
+        # shorthand at each bar's tip.
+        self.assertEqual(len(fig.data[0].y), 2)
+        for stage in ("implementing", "validating"):
+            self.assertTrue(
+                any(stage in lbl for lbl in fig.data[0].y),
+                f"stage {stage!r} missing from y labels",
+            )
 
-    def test_empty_renders_placeholder(self) -> None:
-        fig = dashboard_charts.repo_bars([])
-        self.assertGreaterEqual(len(fig.layout.annotations), 1)
-
-
-@unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
-class CostCoverageTest(unittest.TestCase):
-
-    def test_donut_slices_by_cost_source(self) -> None:
+    def test_sub_line_labels_runs_not_events(self) -> None:
+        # The standalone mock aggregates per-agent-run records and
+        # labels the sub-line "runs"; we mirror that by reading
+        # `StageBreakdown.runs` (the agent-exit subset of `.count`)
+        # so a stage with 20 events but only 8 agent runs reports
+        # "8 runs", not "20 events".
         rows = [
-            _agent_exit(cost_source="reported"),
-            _agent_exit(cost_source="reported"),
-            _agent_exit(cost_source="estimated"),
-            _agent_exit(cost_source=None),  # legacy / unknown
+            StageBreakdown(
+                stage="implementing",
+                count=20,
+                total_cost_usd=12.0,
+                runs=8,
+            ),
         ]
-        fig = dashboard_charts.cost_coverage(rows)
-        self.assertEqual(len(fig.data), 1)
-        pie = fig.data[0]
-        # `None` rows bucketed under "unknown" so they still render.
-        self.assertEqual(
-            set(pie.labels), {"reported", "estimated", "unknown"}
-        )
-        by_label = dict(zip(pie.labels, pie.values))
-        self.assertEqual(by_label["reported"], 2)
-        self.assertEqual(by_label["estimated"], 1)
-        self.assertEqual(by_label["unknown"], 1)
+        fig = dashboard_charts.cost_by_stage(rows)
+        joined = " ".join(fig.data[0].y)
+        self.assertIn("8 runs", joined)
+        self.assertNotIn("events", joined)
 
     def test_empty_renders_placeholder(self) -> None:
-        fig = dashboard_charts.cost_coverage([])
+        fig = dashboard_charts.cost_by_stage([])
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
 
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
-class ThroughputTest(unittest.TestCase):
+class CostByReviewRoundTest(unittest.TestCase):
 
-    def test_sums_daily_counts_across_events(self) -> None:
+    def test_renders_bucket_labels_from_view(self) -> None:
+        rows = [
+            ReviewRoundBucketRow(
+                bucket="0", runs=12, failed=0, total_cost_usd=40.0
+            ),
+            ReviewRoundBucketRow(
+                bucket="1", runs=4, failed=1, total_cost_usd=20.0
+            ),
+            ReviewRoundBucketRow(
+                bucket="3-5", runs=2, failed=2, total_cost_usd=15.0
+            ),
+        ]
+        fig = dashboard_charts.cost_by_review_round(rows)
+        # The display labels read off the `label_map`; sub-line
+        # carries the run count.
+        self.assertEqual(len(fig.data[0].y), 3)
+        joined = " ".join(fig.data[0].y)
+        for needle in ("Initial", "Round 1", "Rounds 3-5", "12 runs"):
+            self.assertIn(needle, joined)
+
+    def test_empty_renders_placeholder(self) -> None:
+        fig = dashboard_charts.cost_by_review_round([])
+        self.assertGreaterEqual(len(fig.layout.annotations), 1)
+
+
+@unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
+class CostByRepoTest(unittest.TestCase):
+
+    def test_strips_owner_prefix_for_legibility(self) -> None:
+        rows = [
+            RepoBreakdownRow(
+                repo="acme/widgets", issues=2, events=10,
+                agent_exits=4, total_cost_usd=8.0,
+            ),
+            RepoBreakdownRow(
+                repo="acme/gadgets", issues=1, events=4,
+                agent_exits=2, total_cost_usd=3.0,
+            ),
+        ]
+        fig = dashboard_charts.cost_by_repo(rows)
+        joined = " ".join(fig.data[0].y)
+        # The short name is what the operator reads; the full
+        # `owner/name` slug stays in the read model but not the chart
+        # label.
+        self.assertIn("widgets", joined)
+        self.assertIn("gadgets", joined)
+        # Sub-line carries the per-repo agent-run count, matching the
+        # standalone mock's per-run aggregation; counting every event
+        # would overstate per-repo activity against the per-run cost.
+        self.assertIn("4 runs", joined)
+        self.assertIn("2 runs", joined)
+        self.assertNotIn("events", joined)
+
+    def test_empty_renders_placeholder(self) -> None:
+        fig = dashboard_charts.cost_by_repo([])
+        self.assertGreaterEqual(len(fig.layout.annotations), 1)
+
+
+@unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
+class HourWeekdayHeatmapTest(unittest.TestCase):
+
+    def test_buckets_by_weekday_and_hour_token_volume(self) -> None:
+        # The redesigned heatmap renders token volume per cell, not
+        # event count -- matching the standalone mock's "Token volume
+        # by hour x weekday" framing. Two cells: Sunday 09:00 with
+        # 1.5K tokens and Wednesday 14:00 with 12K tokens (event
+        # counts of 1 / 5 are deliberately at a different scale).
         points = [
-            TimeSeriesPoint(day=date(2026, 5, 1), event="agent_exit", count=2),
-            TimeSeriesPoint(day=date(2026, 5, 1), event="stage_enter", count=3),
-            TimeSeriesPoint(day=date(2026, 5, 2), event="agent_exit", count=4),
+            HourlyHeatmapPoint(
+                weekday=0, hour=9, count=1, total_tokens=1_500,
+            ),
+            HourlyHeatmapPoint(
+                weekday=3, hour=14, count=5, total_tokens=12_000,
+            ),
         ]
-        fig = dashboard_charts.throughput(points)
-        self.assertEqual(len(fig.data), 1)
-        bar = fig.data[0]
-        self.assertEqual(tuple(bar.x), (date(2026, 5, 1), date(2026, 5, 2)))
-        self.assertEqual(tuple(bar.y), (5, 4))
-
-    def test_empty_renders_placeholder(self) -> None:
-        fig = dashboard_charts.throughput([])
-        self.assertGreaterEqual(len(fig.layout.annotations), 1)
-
-
-@unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
-class Heatmap7x24Test(unittest.TestCase):
-
-    def test_buckets_by_weekday_and_hour(self) -> None:
-        # 2026-05-04 is a Monday (weekday()=0); 2026-05-06 is a
-        # Wednesday (weekday()=2). The matrix should carry one event
-        # at Mon 09 and two at Wed 14.
-        timestamps = [
-            datetime(2026, 5, 4, 9, 0),
-            datetime(2026, 5, 6, 14, 0),
-            datetime(2026, 5, 6, 14, 30),
-        ]
-        fig = dashboard_charts.heatmap_7x24(timestamps)
-        self.assertEqual(len(fig.data), 1)
-        hm = fig.data[0]
-        z = [list(row) for row in hm.z]
+        fig = dashboard_charts.hour_weekday_heatmap(points)
+        z = [list(row) for row in fig.data[0].z]
         self.assertEqual(len(z), 7)
         self.assertEqual(len(z[0]), 24)
-        self.assertEqual(z[0][9], 1)
-        self.assertEqual(z[2][14], 2)
-        # All other Wed cells stay zero.
-        self.assertEqual(z[2][13], 0)
-        self.assertEqual(z[2][15], 0)
+        self.assertEqual(z[0][9], 1_500)
+        self.assertEqual(z[3][14], 12_000)
 
     def test_empty_input_still_renders_grid_with_annotation(self) -> None:
-        # A populated empty grid (all zeros) plus an explicit
-        # placeholder annotation lets the operator distinguish "no
-        # rows" from "chart never rendered".
-        fig = dashboard_charts.heatmap_7x24([])
-        self.assertEqual(len(fig.data), 1)
+        fig = dashboard_charts.hour_weekday_heatmap([])
         z = [list(row) for row in fig.data[0].z]
         self.assertTrue(all(cell == 0 for row in z for cell in row))
+        self.assertGreaterEqual(len(fig.layout.annotations), 1)
+
+
+@unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
+class DonePerDayBarsTest(unittest.TestCase):
+
+    def test_reads_resolved_column(self) -> None:
+        rows = [
+            ThroughputDayRow(day=date(2026, 5, 1), resolved=2, rejected=0),
+            ThroughputDayRow(day=date(2026, 5, 2), resolved=4, rejected=1),
+        ]
+        fig = dashboard_charts.done_per_day_bars(rows)
+        bar = fig.data[0]
+        self.assertEqual(tuple(bar.x), (date(2026, 5, 1), date(2026, 5, 2)))
+        self.assertEqual(tuple(bar.y), (2, 4))
+
+    def test_window_backfills_zero_resolved_days(self) -> None:
+        # SQL only returns days with `done` / `rejected` rows, so
+        # zero-resolved days in the middle of the selected window
+        # would otherwise be silently absent. With an explicit window
+        # we render every day -- including the empty ones -- so the
+        # operator sees a continuous calendar baseline.
+        rows = [
+            ThroughputDayRow(day=date(2026, 5, 1), resolved=2, rejected=0),
+            ThroughputDayRow(day=date(2026, 5, 4), resolved=3, rejected=1),
+        ]
+        fig = dashboard_charts.done_per_day_bars(
+            rows,
+            window_start=date(2026, 5, 1),
+            window_end=date(2026, 5, 5),
+        )
+        bar = fig.data[0]
+        self.assertEqual(
+            tuple(bar.x),
+            (
+                date(2026, 5, 1), date(2026, 5, 2), date(2026, 5, 3),
+                date(2026, 5, 4), date(2026, 5, 5),
+            ),
+        )
+        # Zero-resolved days surface as explicit zero bars rather
+        # than being elided from the x-axis.
+        self.assertEqual(tuple(bar.y), (2, 0, 0, 3, 0))
+
+    def test_window_with_no_rows_still_renders_zero_baseline(self) -> None:
+        # A window with no resolved issues at all renders an all-zero
+        # baseline rather than the placeholder annotation, so the
+        # operator can still see the calendar drawn out for the
+        # selected range.
+        fig = dashboard_charts.done_per_day_bars(
+            [],
+            window_start=date(2026, 5, 1),
+            window_end=date(2026, 5, 3),
+        )
+        bar = fig.data[0]
+        self.assertEqual(
+            tuple(bar.x),
+            (date(2026, 5, 1), date(2026, 5, 2), date(2026, 5, 3)),
+        )
+        self.assertEqual(tuple(bar.y), (0, 0, 0))
+
+    def test_empty_renders_placeholder(self) -> None:
+        fig = dashboard_charts.done_per_day_bars([])
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
 
 

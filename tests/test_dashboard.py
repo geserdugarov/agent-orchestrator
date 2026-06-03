@@ -324,7 +324,8 @@ class PresetWindowTest(unittest.TestCase):
     max date (not today): a freshly-deployed Postgres whose latest
     event is a few days old should still surface a useful window
     without the operator having to flip to Custom and reach for a
-    calendar.
+    calendar. The redesigned page exposes `3D` / `7D` / `All` inline
+    in the topbar; `Custom` stays available as the sidebar fallback.
     """
 
     def _extent(self, min_d, max_d):
@@ -336,6 +337,16 @@ class PresetWindowTest(unittest.TestCase):
                             tzinfo=timezone.utc),
         )
 
+    def test_three_day_preset_anchors_at_max(self) -> None:
+        _, dashboard = _reload()
+        extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
+        window = dashboard.preset_window(dashboard.PRESET_3D, extent)
+        self.assertIsNotNone(window)
+        # Three-day preset spans the max date and the two days before
+        # it, exclusive end at midnight the day after the max.
+        self.assertEqual(window.start.date(), date(2026, 5, 26))
+        self.assertEqual(window.end.date(), date(2026, 5, 29))
+
     def test_seven_day_preset_anchors_at_max(self) -> None:
         _, dashboard = _reload()
         extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
@@ -344,15 +355,15 @@ class PresetWindowTest(unittest.TestCase):
         self.assertEqual(window.start.date(), date(2026, 5, 22))
         self.assertEqual(window.end.date(), date(2026, 5, 29))
 
-    def test_thirty_day_preset_clamps_to_min(self) -> None:
-        # Data extent is only 5 days wide -- "Last 30 days" must
+    def test_seven_day_preset_clamps_to_min(self) -> None:
+        # Data extent is only 3 days wide -- "Last 7 days" must
         # clamp the start at the data extent's min, not reach
         # before it.
         _, dashboard = _reload()
-        extent = self._extent(date(2026, 5, 24), date(2026, 5, 28))
-        window = dashboard.preset_window(dashboard.PRESET_30D, extent)
+        extent = self._extent(date(2026, 5, 26), date(2026, 5, 28))
+        window = dashboard.preset_window(dashboard.PRESET_7D, extent)
         self.assertIsNotNone(window)
-        self.assertEqual(window.start.date(), date(2026, 5, 24))
+        self.assertEqual(window.start.date(), date(2026, 5, 26))
         self.assertEqual(window.end.date(), date(2026, 5, 29))
 
     def test_all_preset_covers_full_extent(self) -> None:
@@ -378,7 +389,7 @@ class PresetWindowTest(unittest.TestCase):
         _, dashboard = _reload()
         empty = dashboard.DataExtent()
         self.assertIsNone(
-            dashboard.preset_window(dashboard.PRESET_30D, empty)
+            dashboard.preset_window(dashboard.PRESET_7D, empty)
         )
 
     def test_unknown_preset_returns_none(self) -> None:
@@ -386,6 +397,23 @@ class PresetWindowTest(unittest.TestCase):
         extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
         self.assertIsNone(
             dashboard.preset_window("not-a-preset", extent)
+        )
+
+    def test_preset_options_match_redesign(self) -> None:
+        # Pin the inline labels the topbar exposes (3D / 7D / All)
+        # and the full option tuple including the Custom fallback so
+        # a future refactor cannot silently re-introduce the old
+        # `30d` preset.
+        _, dashboard = _reload()
+        self.assertEqual(
+            dashboard.PRESET_OPTIONS,
+            (dashboard.PRESET_3D, dashboard.PRESET_7D,
+             dashboard.PRESET_ALL, dashboard.PRESET_CUSTOM),
+        )
+        self.assertEqual(
+            set(dashboard.PRESET_INLINE_LABELS),
+            {dashboard.PRESET_3D, dashboard.PRESET_7D,
+             dashboard.PRESET_ALL},
         )
 
 
@@ -539,6 +567,236 @@ class ComputeInsightsTest(unittest.TestCase):
             [],
         )
 
+    def test_rework_share_above_threshold_emits_warning(self) -> None:
+        # Spend in review rounds >= 1 exceeds 30 % -- surface the
+        # "rework dominates" insight from the standalone mock.
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import ReviewRoundBucketRow
+        summary = self._summary()
+        rounds = [
+            ReviewRoundBucketRow(
+                bucket="0", runs=10, failed=0, total_cost_usd=40.0
+            ),
+            ReviewRoundBucketRow(
+                bucket="1", runs=5, failed=0, total_cost_usd=30.0
+            ),
+            ReviewRoundBucketRow(
+                bucket="3-5", runs=2, failed=1, total_cost_usd=30.0
+            ),
+        ]
+        banners = dashboard.compute_insights(
+            summary, review_round_rows=rounds
+        )
+        self.assertTrue(
+            any(
+                b.severity == "warning"
+                and "Rework dominates spend" in b.message
+                for b in banners
+            )
+        )
+
+    def test_rework_share_below_threshold_skips(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import ReviewRoundBucketRow
+        summary = self._summary()
+        rounds = [
+            ReviewRoundBucketRow(
+                bucket="0", runs=10, failed=0, total_cost_usd=80.0
+            ),
+            ReviewRoundBucketRow(
+                bucket="1", runs=1, failed=0, total_cost_usd=10.0
+            ),
+        ]
+        self.assertEqual(
+            dashboard.compute_insights(summary, review_round_rows=rounds),
+            [],
+        )
+
+    def test_back_loaded_spend_emits_info(self) -> None:
+        # validating + documenting > implementing while implementing
+        # is non-zero -- surface the standalone mock's "Spend is
+        # back-loaded" insight.
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import StageBreakdown
+        summary = self._summary()
+        stages = [
+            StageBreakdown(
+                stage="implementing", count=10, total_cost_usd=20.0,
+                runs=5,
+            ),
+            StageBreakdown(
+                stage="validating", count=4, total_cost_usd=15.0,
+                runs=4,
+            ),
+            StageBreakdown(
+                stage="documenting", count=3, total_cost_usd=10.0,
+                runs=3,
+            ),
+        ]
+        banners = dashboard.compute_insights(
+            summary, stage_rows=stages
+        )
+        self.assertTrue(
+            any(
+                b.severity == "info"
+                and "Spend is back-loaded" in b.message
+                and "implementing ($20.00)" in b.message
+                for b in banners
+            )
+        )
+
+    def test_back_loaded_skipped_when_implementing_dominates(self) -> None:
+        # validating + documenting <= implementing -- no banner.
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import StageBreakdown
+        summary = self._summary()
+        stages = [
+            StageBreakdown(
+                stage="implementing", count=20, total_cost_usd=80.0,
+                runs=10,
+            ),
+            StageBreakdown(
+                stage="validating", count=2, total_cost_usd=8.0,
+                runs=2,
+            ),
+            StageBreakdown(
+                stage="documenting", count=1, total_cost_usd=4.0,
+                runs=1,
+            ),
+        ]
+        self.assertEqual(
+            dashboard.compute_insights(summary, stage_rows=stages),
+            [],
+        )
+
+    def test_back_loaded_skipped_when_implementing_zero(self) -> None:
+        # When implementing cost is zero the ratio is meaningless;
+        # the standalone mock guards on `iCost > 0` and we mirror
+        # that.
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import StageBreakdown
+        summary = self._summary()
+        stages = [
+            StageBreakdown(
+                stage="validating", count=2, total_cost_usd=8.0,
+                runs=2,
+            ),
+        ]
+        self.assertEqual(
+            dashboard.compute_insights(summary, stage_rows=stages),
+            [],
+        )
+
+
+class ReliabilityTileDataTest(unittest.TestCase):
+    """The redesigned reliability panel sources every tile from
+    `Summary`'s window-wide aggregates so a long window with more
+    than `DEFAULT_RECENT_AGENT_EXITS` (100) rows still sees every
+    timeout / failure -- the earlier draft computed these off the
+    LIMIT-capped recent-runs read and silently undercounted."""
+
+    def _summary(self, **kw):
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import Summary
+        return Summary(**kw)
+
+    def test_timeouts_sourced_from_summary_full_window(self) -> None:
+        _, dashboard = _reload()
+        # Window holds 250 agent runs (far more than the 100-row
+        # recent-runs cap) with 17 timeouts and 4 failures.
+        summary = self._summary(
+            total_agent_runs=250,
+            failed_agent_runs=4,
+            timed_out_agent_runs=17,
+        )
+        tiles = dashboard.reliability_tile_data(
+            summary, resolved=12, rejected=2,
+        )
+        by_label = {lbl: (val, tone) for val, lbl, tone in tiles}
+        # Headline tiles all pulled off Summary directly:
+        self.assertEqual(by_label["Agent runs"][0], 250)
+        self.assertEqual(by_label["Failures"][0], 4)
+        self.assertEqual(by_label["Timeouts"][0], 17)
+        # Tone flips when the count crosses zero so the CSS class
+        # paints the tile.
+        self.assertEqual(by_label["Timeouts"][1], "bad")
+        self.assertEqual(by_label["Failures"][1], "warn")
+
+    def test_zero_runs_does_not_divide_by_zero(self) -> None:
+        # Empty window: success rate collapses to 0% (no runs, no
+        # successes) instead of raising a ZeroDivisionError. The
+        # redesigned page renders the tile anyway so the operator
+        # can confirm the window really is empty.
+        _, dashboard = _reload()
+        summary = self._summary(
+            total_agent_runs=0,
+            failed_agent_runs=0,
+            timed_out_agent_runs=0,
+        )
+        tiles = dashboard.reliability_tile_data(summary)
+        by_label = {lbl: val for val, lbl, _ in tiles}
+        self.assertEqual(by_label["Agent runs"], 0)
+        self.assertEqual(by_label["Success rate"], "0%")
+        self.assertEqual(by_label["Timeouts"], 0)
+
+    def test_clean_window_has_neutral_tones(self) -> None:
+        # No failures, no timeouts: the warn / bad tones drop off
+        # so the panel reads as healthy at a glance.
+        _, dashboard = _reload()
+        summary = self._summary(
+            total_agent_runs=20,
+            failed_agent_runs=0,
+            timed_out_agent_runs=0,
+        )
+        tiles = dashboard.reliability_tile_data(summary)
+        by_label = {lbl: tone for _, lbl, tone in tiles}
+        self.assertEqual(by_label["Failures"], "")
+        self.assertEqual(by_label["Timeouts"], "")
+
+
+class ReworkTotalsTest(unittest.TestCase):
+    """The rework KPI tile and the "rework dominates" insight both
+    read off `rework_totals`. Pin the shape so a future tweak does
+    not silently shift which buckets count as rework.
+    """
+
+    def test_initial_bucket_excluded(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import ReviewRoundBucketRow
+        rows = [
+            ReviewRoundBucketRow(
+                bucket="0", runs=5, failed=0, total_cost_usd=50.0
+            ),
+            ReviewRoundBucketRow(
+                bucket="1", runs=2, failed=1, total_cost_usd=20.0
+            ),
+        ]
+        total, rework = dashboard.rework_totals(rows)
+        self.assertAlmostEqual(total, 70.0)
+        self.assertAlmostEqual(rework, 20.0)
+
+    def test_unknown_bucket_excluded(self) -> None:
+        # `unknown` is pre-review work surfaced for visibility, NOT
+        # rework -- exclude it from the rework cost.
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import ReviewRoundBucketRow
+        rows = [
+            ReviewRoundBucketRow(
+                bucket="unknown", runs=3, failed=0, total_cost_usd=10.0
+            ),
+            ReviewRoundBucketRow(
+                bucket="2", runs=1, failed=0, total_cost_usd=5.0
+            ),
+        ]
+        total, rework = dashboard.rework_totals(rows)
+        self.assertAlmostEqual(total, 15.0)
+        self.assertAlmostEqual(rework, 5.0)
+
+    def test_empty_rows_returns_zero(self) -> None:
+        _, dashboard = _reload()
+        total, rework = dashboard.rework_totals([])
+        self.assertEqual((total, rework), (0.0, 0.0))
+
 
 class TopExpensiveIssuesTest(unittest.TestCase):
 
@@ -596,6 +854,79 @@ class TopExpensiveIssuesTest(unittest.TestCase):
             [(r.repo, r.issue) for r in top],
             [("acme/a", 2), ("acme/a", 1), ("acme/b", 1)],
         )
+
+
+class IssuesTableHtmlTest(unittest.TestCase):
+    """The "Most expensive issues" panel is hand-rolled HTML (rather
+    than `st.dataframe`) so it can carry the standalone mock's
+    in-row cost bars and clean / fail status pills.
+    """
+
+    def _row(self, repo, issue, cost, *, failed=0, max_round=None,
+             max_retry=None):
+        _, dashboard = _reload()
+        from datetime import datetime, timezone
+        from orchestrator.analytics.read import IssueSummaryRow
+        return IssueSummaryRow(
+            repo=repo,
+            issue=issue,
+            event_count=10,
+            first_seen=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            last_seen=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            latest_stage="implementing",
+            agent_exits=4,
+            total_cost_usd=cost,
+            total_input_tokens=0,
+            total_output_tokens=0,
+            max_review_round=max_round,
+            failed_agent_runs=failed,
+            max_retry_count=max_retry,
+        )
+
+    def test_columns_match_standalone_mock(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("acme/a", 1, 12.0)]
+        html_out = dashboard._issues_table_html(rows)
+        for header in ("Issue", "Cost", "Runs", "Review rds",
+                       "Retries", "Status"):
+            self.assertIn(f">{header}<", html_out)
+
+    def test_status_pill_renders_clean_when_no_failures(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("acme/a", 1, 4.0, failed=0)]
+        html_out = dashboard._issues_table_html(rows)
+        self.assertIn('class="orch-pill ok"', html_out)
+        self.assertIn(">clean<", html_out)
+        self.assertNotIn('class="orch-pill bad"', html_out)
+
+    def test_status_pill_renders_fail_when_failures_present(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("acme/a", 1, 4.0, failed=3)]
+        html_out = dashboard._issues_table_html(rows)
+        self.assertIn('class="orch-pill bad"', html_out)
+        self.assertIn(">3 fail<", html_out)
+
+    def test_in_row_cost_bar_relative_to_max(self) -> None:
+        # Cheapest issue's bar is a fraction of the most expensive
+        # issue's full-width bar.
+        _, dashboard = _reload()
+        rows = [
+            self._row("acme/a", 1, 10.0),
+            self._row("acme/b", 2, 5.0),
+        ]
+        html_out = dashboard._issues_table_html(rows)
+        # Full-width bar on the most expensive issue and a half-
+        # width bar on the cheaper one.
+        self.assertIn("width:100.0%", html_out)
+        self.assertIn("width:50.0%", html_out)
+
+    def test_review_rounds_three_or_more_warn_tone(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("acme/a", 1, 4.0, max_round=4)]
+        html_out = dashboard._issues_table_html(rows)
+        # High-review-round cells get the warn class so the operator
+        # can spot rework-heavy issues at a glance.
+        self.assertIn('class="orch-badge-warn">4', html_out)
 
 
 class CacheKeyTest(unittest.TestCase):

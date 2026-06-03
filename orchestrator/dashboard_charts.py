@@ -1,9 +1,9 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Plotly figure builders for the analytics dashboard.
+"""Plotly figure builders for the redesigned analytics dashboard.
 
 Pure functions: each builder takes already-fetched read-model rows
-(or raw timestamps for the 7x24 heatmap) and returns a
+(or a raw matrix for the 7x24 heatmap) and returns a
 ``plotly.graph_objects.Figure``. The dashboard layer is responsible
 for the query + sidebar filters and for handing the resulting
 ``Figure`` to ``st.plotly_chart``; this module does no IO and no
@@ -16,45 +16,48 @@ orchestrator polling tick must not import this module, and
 ``orchestrator/dashboard.py`` must not import it at module load --
 both invariants are enforced by tests.
 
-The shared theme tokens (colors, font, layout defaults) live in
-``orchestrator.dashboard_theme``; that module is deliberately
-plotly-free so the dashboard chrome can pull semantic colors without
-forcing the optional ``dashboard`` dependency group onto every caller.
+The chart shapes mirror the redesigned standalone mock (issue #341):
 
-The chart shapes mirror what the parent dashboard rewrite (#317)
-needs:
+- ``usage_over_time`` -- stacked-area daily token consumption with a
+  cost line overlaid on a secondary axis, segmented by either token
+  type (Input / Output / Cache) or backend (Claude / Codex).
+- ``cost_horizontal_bars`` -- horizontal cost bars used by the
+  per-stage, per-review-round, and per-repo panels. Each row carries a
+  label, an optional sub-line (e.g. run count), and a single cost
+  value rendered at the bar's tip.
+- ``hour_weekday_heatmap`` -- weekday-by-hour activity heatmap
+  matching the mock's faint-to-saturated accent gradient.
+- ``done_per_day_bars`` -- thin per-day bars for the reliability /
+  throughput panel.
 
-- ``usage_over_time`` -- stacked-bar of events per day.
-- ``stage_bars`` -- count per workflow stage.
-- ``review_round_bars`` -- count of ``agent_exit`` rows per
-  ``review_round`` value.
-- ``repo_bars`` -- per-repo issue / cost totals from the issues
-  overview rows.
-- ``cost_coverage`` -- donut of ``cost_source`` distribution across
-  ``agent_exit`` rows.
-- ``throughput`` -- daily total of all events.
-- ``heatmap_7x24`` -- weekday-by-hour heat map of activity counts.
+Reflecting "the same amount of data is enough" from issue #341, no new
+read-model dimensions were introduced; ``cost_horizontal_bars`` can
+plot per-review-round cost off the ``ReviewRoundBucketRow.total_cost_usd``
+column already exposed by ``orchestrator.analytics.read``.
 """
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from datetime import datetime
-from typing import Sequence
+from datetime import date, timedelta
+from typing import Optional, Sequence
 
 import plotly.graph_objects as go
 
 from . import dashboard_theme as theme
 from .analytics.read import (
-    AgentExitRow,
-    IssueSummaryRow,
+    BackendEfficiencyRow,
+    HourlyHeatmapPoint,
+    RepoBreakdownRow,
+    ReviewRoundBucketRow,
     StageBreakdown,
+    ThroughputDayRow,
     TimeSeriesPoint,
 )
 
-# Monday-first ordering matches Python's `datetime.weekday()` and is
-# what the rest of the orchestrator's analytics queries assume.
+# Postgres `EXTRACT(DOW FROM ts)` is 0 = Sunday; the standalone mock's
+# heatmap renders Sunday-first, so we keep that ordering here too --
+# the chart label row drives what the operator reads off the y-axis.
 _WEEKDAY_LABELS: tuple[str, ...] = (
-    "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun",
+    "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat",
 )
 
 
@@ -82,289 +85,449 @@ def _empty_figure(message: str) -> go.Figure:
     return fig
 
 
+def _date_axis(days: Sequence[date]) -> list:
+    """Return `days` as date objects; Plotly handles ISO formatting."""
+    return list(days)
+
+
 def usage_over_time(
     points: Sequence[TimeSeriesPoint],
     *,
-    title: str = "Events over time",
+    backend_rows_by_day: Optional[dict[date, dict[str, float]]] = None,
+    mode: str = "type",
+    title: str = "Spend & token usage over time",
 ) -> go.Figure:
-    """Daily stacked-bar chart of events.
+    """Hero chart: stacked daily token usage with a cost line overlay.
 
-    `points` is the read-model `(day, event, count)` shape; this
-    builder pivots it into one bar trace per event so the legend
-    drives event-level visibility. Days with zero events stay
-    invisible -- the SQL aggregate elides them, so a sparse window
-    renders as separated bars rather than gap-padded zeros.
+    `points` is the time-series read-model shape (one row per
+    `(day, event, count, cost_usd, input_tokens, output_tokens)`). The
+    builder rolls up per-day totals across every event in the window
+    so the chart still aggregates correctly when the operator narrows
+    the event multiselect to a subset.
+
+    Two stack modes match the standalone mock's segmented control:
+
+    - ``"type"`` (default) stacks daily input / output / (cache_*)
+      token volumes. The read model's `input_tokens` and
+      `output_tokens` already roll up the per-event totals; cache
+      tokens are not exposed at the per-day granularity (only the
+      hot-path `agent_exit` rows carry them and they live in `extras`
+      on `analytics_events`), so the cache band is omitted rather
+      than zeroed in.
+    - ``"backend"`` stacks per-backend daily token volumes. Caller
+      passes `backend_rows_by_day` -- a `{day: {backend: tokens}}`
+      mapping derived from `get_recent_agent_exits` (it carries the
+      per-row `backend` and token counts together) or any equivalent
+      aggregate. Without that mapping the builder falls back to the
+      token-type stack.
+
+    The dashed black line overlay carries daily cost on a secondary
+    y-axis so the operator can read spend and usage off the same
+    chart. Cost ticks render in `$1.2K` shorthand via
+    `dashboard_theme.fmt_money`.
     """
-    if not points:
+    if not points and not backend_rows_by_day:
         return _empty_figure("No events match the current filters.")
-    # Pivot to {event: {day: count}}; preserves day ordering by
-    # consuming the read-model's `ORDER BY day ASC, event ASC` output.
-    by_event: dict[str, dict] = defaultdict(dict)
-    days: list = []
-    seen_days: set = set()
+
+    daily: dict[date, dict[str, float]] = {}
     for p in points:
-        if p.day not in seen_days:
-            seen_days.add(p.day)
-            days.append(p.day)
-        by_event[p.event][p.day] = p.count
-    fig = go.Figure()
-    event_order = sorted(by_event.keys())
-    for event in event_order:
-        fig.add_trace(
-            go.Bar(
-                x=days,
-                y=[by_event[event].get(d, 0) for d in days],
-                name=event,
-                marker_color=theme.color_for(
-                    event, event_order, explicit=theme.EVENT_COLORS
-                ),
-                hovertemplate="%{x}<br>%{y} %{fullData.name}<extra></extra>",
-            )
+        bucket = daily.setdefault(
+            p.day,
+            {"input": 0.0, "output": 0.0, "cache": 0.0, "cost": 0.0},
         )
-    fig.update_layout(barmode="stack", **theme.base_layout(title=title))
-    fig.update_yaxes(title_text="events")
+        bucket["input"] += float(p.input_tokens or 0)
+        bucket["output"] += float(p.output_tokens or 0)
+        # Total cache band: cache_read + cache_write -- matching the
+        # standalone mock's `r.cr + r.cw` accounting. `cached_tokens`
+        # (the cumulative cached count) is deliberately excluded so
+        # we do not double-count the same prompt slices.
+        bucket["cache"] += float(
+            (p.cache_read_tokens or 0) + (p.cache_write_tokens or 0)
+        )
+        bucket["cost"] += float(p.cost_usd or 0.0)
+
+    if mode == "backend" and backend_rows_by_day:
+        for day, by_backend in backend_rows_by_day.items():
+            daily.setdefault(
+                day,
+                {"input": 0.0, "output": 0.0, "cache": 0.0, "cost": 0.0},
+            )
+
+    days = sorted(daily.keys())
+    if not days:
+        return _empty_figure("No events match the current filters.")
+
+    fig = go.Figure()
+    if mode == "backend" and backend_rows_by_day:
+        backends = sorted({
+            b
+            for by_backend in backend_rows_by_day.values()
+            for b in by_backend
+        })
+        # Reverse the legend order so the first backend renders at
+        # the bottom of the stack (matching how token type is drawn).
+        for backend in backends:
+            color = theme.color_for(
+                backend, backends, explicit=theme.BACKEND_COLORS
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=_date_axis(days),
+                    y=[
+                        backend_rows_by_day.get(d, {}).get(backend, 0)
+                        for d in days
+                    ],
+                    name=backend,
+                    mode="lines",
+                    stackgroup="tokens",
+                    line={"width": 0.5, "color": color},
+                    fillcolor=color,
+                    hovertemplate=(
+                        "%{x}<br>" + backend +
+                        ": %{y:,} tokens<extra></extra>"
+                    ),
+                )
+            )
+    else:
+        for band, label in (
+            ("input", "Input"),
+            ("output", "Output"),
+            ("cache", "Cache"),
+        ):
+            color = theme.TOKEN_TYPE_COLORS[label]
+            fig.add_trace(
+                go.Scatter(
+                    x=_date_axis(days),
+                    y=[daily[d][band] for d in days],
+                    name=label,
+                    mode="lines",
+                    stackgroup="tokens",
+                    line={"width": 0.5, "color": color},
+                    fillcolor=color,
+                    hovertemplate=(
+                        "%{x}<br>" + label +
+                        ": %{y:,} tokens<extra></extra>"
+                    ),
+                )
+            )
+
+    fig.add_trace(
+        go.Scatter(
+            x=_date_axis(days),
+            y=[daily[d]["cost"] for d in days],
+            name="Cost",
+            mode="lines+markers",
+            line={"color": theme.INK, "width": 2},
+            marker={"size": 5, "color": theme.INK},
+            yaxis="y2",
+            hovertemplate="%{x}<br>Cost: $%{y:.2f}<extra></extra>",
+        )
+    )
+
+    layout = theme.base_layout(title=title)
+    layout["yaxis"] = {
+        **layout.get("yaxis", {}),
+        "title": {"text": "tokens"},
+    }
+    layout["yaxis2"] = {
+        "title": {"text": "USD"},
+        "overlaying": "y",
+        "side": "right",
+        "gridcolor": theme.GRID,
+        "linecolor": theme.GRID,
+        "tickprefix": "$",
+        "tickfont": {"color": theme.MUTED_TEXT},
+    }
+    layout["hovermode"] = "x unified"
+    layout["legend"] = {
+        **layout.get("legend", {}),
+        "orientation": "h",
+        "yanchor": "bottom", "y": 1.02,
+        "xanchor": "left", "x": 0,
+    }
+    fig.update_layout(**layout)
     return fig
 
 
-def stage_bars(
-    rows: Sequence[StageBreakdown],
+def cost_horizontal_bars(
+    items: Sequence[tuple[str, str, float, str]],
     *,
-    title: str = "Events by stage",
+    title: Optional[str] = None,
+    accent: Optional[str] = None,
 ) -> go.Figure:
-    """Horizontal bar chart of event counts per stage.
+    """Horizontal cost bars with per-row sub-label and per-bar value.
 
-    Horizontal because stage names are long and rotating x-axis
-    labels makes them harder to scan. Bars are sorted descending so
-    the busiest stage is at the top -- matches the read model's
-    `ORDER BY count DESC, stage ASC` shape; passing pre-sorted rows
-    through keeps that ordering on the chart.
+    `items` is `(label, sub, cost_usd, color)` per row. `label` is the
+    top line (e.g. stage name), `sub` is a small grey line below it
+    (e.g. ``"32 runs"``), `cost_usd` is the bar length, and `color`
+    is the bar hue. `accent` overrides the default trace color when
+    every row carries the same hue (the per-row `color` always wins
+    when set).
+
+    The chart is sorted by cost descending so the largest spend sits
+    at the top. Each bar is annotated with the dollar amount at its
+    tip, matching the standalone mock's labelled bars.
+    """
+    if not items:
+        return _empty_figure("No data matches the current filters.")
+    ordered = sorted(items, key=lambda it: -float(it[2] or 0.0))
+    labels = [it[0] for it in ordered]
+    subs = [it[1] for it in ordered]
+    values = [float(it[2] or 0.0) for it in ordered]
+    colors = [
+        (it[3] if (len(it) > 3 and it[3]) else (accent or theme.ACCENT))
+        for it in ordered
+    ]
+    # Plotly draws the first y-value at the bottom of a horizontal
+    # bar chart; reverse so the largest cost sits at the top.
+    labels.reverse()
+    subs.reverse()
+    values.reverse()
+    colors.reverse()
+    text = [theme.fmt_money(v) for v in values]
+    # Compose a Plotly-flavored two-line y-tick where the sub-label
+    # renders in muted gray underneath the bold label.
+    y_ticks = [
+        (
+            f"<b>{lbl}</b><br>"
+            f"<span style='color:{theme.MUTED_TEXT};font-size:11px'>"
+            f"{sub}</span>"
+        )
+        if sub
+        else f"<b>{lbl}</b>"
+        for lbl, sub in zip(labels, subs)
+    ]
+    fig = go.Figure(
+        go.Bar(
+            x=values,
+            y=y_ticks,
+            orientation="h",
+            marker_color=colors,
+            text=text,
+            textposition="outside",
+            textfont={"color": theme.TEXT, "size": 12,
+                      "family": theme.MONO_FONT_FAMILY},
+            cliponaxis=False,
+            hovertemplate="%{y}: $%{x:,.2f}<extra></extra>",
+        )
+    )
+    layout = theme.base_layout(title=title)
+    layout["margin"] = {"l": 160, "r": 64, "t": layout["margin"]["t"], "b": 32}
+    fig.update_layout(**layout)
+    fig.update_xaxes(
+        title_text="USD", tickprefix="$",
+        showline=False, zeroline=False,
+    )
+    fig.update_yaxes(automargin=True, showline=False, ticks="")
+    return fig
+
+
+def cost_by_stage(rows: Sequence[StageBreakdown]) -> go.Figure:
+    """Build the per-workflow-stage cost bars.
+
+    Each row carries the stage name as the bar label, the row's
+    agent-run count (`StageBreakdown.runs`) as the sub-line, and the
+    total cost as the bar length. The sub-line label is "runs" --
+    matching the standalone mock, which aggregates per-agent-run
+    records, not per-event rows. `StageBreakdown.count` is
+    `COUNT(*)` over every `analytics_events` row that carries the
+    stage (so it includes `stage_enter` / `stage_evaluation`
+    alongside `agent_exit`), which would overstate stage activity
+    against the per-run cost; `runs` narrows to the
+    `event = 'agent_exit'` subset for the same query.
     """
     if not rows:
         return _empty_figure("No stage data matches the current filters.")
-    # Plotly draws the first y-value at the bottom; reverse so the
-    # largest count surfaces at the top of the chart.
-    ordered = list(rows)[::-1]
-    fig = go.Figure(
-        go.Bar(
-            x=[r.count for r in ordered],
-            y=[r.stage for r in ordered],
-            orientation="h",
-            marker_color=[
-                theme.color_for(
-                    r.stage,
-                    [r.stage for r in ordered],
-                    explicit=theme.STAGE_COLORS,
-                )
-                for r in ordered
-            ],
-            hovertemplate="%{y}: %{x} events<extra></extra>",
+    items = [
+        (
+            r.stage,
+            f"{int(r.runs):,} runs",
+            float(r.total_cost_usd or 0.0),
+            theme.color_for(r.stage, explicit=theme.STAGE_COLORS),
         )
-    )
-    fig.update_layout(**theme.base_layout(title=title))
-    fig.update_xaxes(title_text="events")
-    return fig
+        for r in rows
+    ]
+    return cost_horizontal_bars(items)
 
 
-def review_round_bars(
-    rows: Sequence[AgentExitRow],
-    *,
-    title: str = "Agent runs by review round",
-) -> go.Figure:
-    """Bar chart of agent runs grouped by `review_round`.
+def cost_by_review_round(rows: Sequence[ReviewRoundBucketRow]) -> go.Figure:
+    """Build the per-review-round cost bars.
 
-    Rows with `review_round is None` (pre-review work, like the
-    initial implementer pass before any reviewer round has run)
-    surface as a labeled `0` bucket so the chart still shows them --
-    silently dropping them would hide a category that the operator
-    expects to see.
+    `0` is the initial pass; every later bucket is rework. The bucket
+    order (`0`, `1`, `2`, `3-5`, `6+`, `unknown`) is fixed by the
+    `analytics_agent_runs` view, but Plotly draws horizontal bars
+    bottom-up, so `cost_horizontal_bars` re-sorts descending by cost
+    -- the operator reads the most expensive round at the top of the
+    panel.
     """
     if not rows:
         return _empty_figure(
             "No `agent_exit` rows match the current filters."
         )
-    counts: Counter[int] = Counter()
-    for r in rows:
-        counts[int(r.review_round) if r.review_round is not None else 0] += 1
-    ordered_rounds = sorted(counts.keys())
-    fig = go.Figure(
-        go.Bar(
-            x=[str(r) for r in ordered_rounds],
-            y=[counts[r] for r in ordered_rounds],
-            marker_color=theme.PRIMARY,
-            hovertemplate="round %{x}: %{y} runs<extra></extra>",
+    label_map = {
+        "0": "Initial",
+        "1": "Round 1",
+        "2": "Round 2",
+        "3-5": "Rounds 3-5",
+        "6+": "Rounds 6+",
+        "unknown": "Unknown",
+    }
+    items = [
+        (
+            label_map.get(r.bucket, r.bucket),
+            f"{int(r.runs):,} runs",
+            float(r.total_cost_usd or 0.0),
+            theme.color_for(r.bucket, explicit=theme.REVIEW_ROUND_COLORS),
         )
-    )
-    fig.update_layout(**theme.base_layout(title=title))
-    fig.update_xaxes(title_text="review round", type="category")
-    fig.update_yaxes(title_text="agent runs")
-    return fig
+        for r in rows
+    ]
+    return cost_horizontal_bars(items)
 
 
-def repo_bars(
-    rows: Sequence[IssueSummaryRow],
-    *,
-    title: str = "Activity by repo",
-) -> go.Figure:
-    """Per-repo grouped bars for issue count and total event count.
+def cost_by_repo(rows: Sequence[RepoBreakdownRow]) -> go.Figure:
+    """Build the per-repo cost bars.
 
-    `rows` is the issues overview shape -- one entry per
-    `(repo, issue)` pair. We aggregate up to per-repo: how many
-    distinct issues touched the orchestrator inside the window, and
-    how many total events fired for that repo. Both bars share the
-    same y-axis (counts), which matches the read-model semantics
-    (`event_count` is already an int).
+    Repositories are addressed by their full `owner/name` slug; the
+    bar label trims to the short name for legibility while the
+    sub-line carries the per-repo agent-run count -- matching the
+    standalone mock, which aggregates per-agent-run records, not
+    per-event rows. `RepoBreakdownRow.events` (the all-event count)
+    would overstate per-repo activity against the per-run cost.
     """
     if not rows:
-        return _empty_figure("No issues match the current filters.")
-    issues_per_repo: Counter[str] = Counter()
-    events_per_repo: Counter[str] = Counter()
+        return _empty_figure("No repos match the current filters.")
+    items = []
     for r in rows:
-        issues_per_repo[r.repo] += 1
-        events_per_repo[r.repo] += int(r.event_count)
-    repos = sorted(
-        issues_per_repo.keys(),
-        key=lambda repo: (-events_per_repo[repo], repo),
-    )
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=repos,
-            y=[issues_per_repo[r] for r in repos],
-            name="issues",
-            marker_color=theme.PRIMARY,
-            hovertemplate="%{x}: %{y} issues<extra></extra>",
+        short = r.repo.split("/")[-1] if "/" in r.repo else r.repo
+        items.append(
+            (
+                short,
+                f"{int(r.agent_exits):,} runs",
+                float(r.total_cost_usd or 0.0),
+                theme.ACCENT,
+            )
         )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=repos,
-            y=[events_per_repo[r] for r in repos],
-            name="events",
-            marker_color=theme.SECONDARY,
-            hovertemplate="%{x}: %{y} events<extra></extra>",
-        )
-    )
-    fig.update_layout(barmode="group", **theme.base_layout(title=title))
-    fig.update_yaxes(title_text="count")
-    return fig
+    return cost_horizontal_bars(items)
 
 
-def cost_coverage(
-    rows: Sequence[AgentExitRow],
+def hour_weekday_heatmap(
+    points: Sequence[HourlyHeatmapPoint],
     *,
-    title: str = "Cost source coverage",
+    title: Optional[str] = None,
 ) -> go.Figure:
-    """Donut chart of `cost_source` distribution.
+    """7x24 weekday-by-hour token-volume heatmap.
 
-    Categories with zero rows are elided (Plotly handles that
-    automatically). The legend uses the raw `cost_source` strings
-    written by `orchestrator.usage` so the labels match what other
-    surfaces (logs, JSONL) show. Rows whose `cost_source` is None
-    are bucketed under `"unknown"` -- this can happen when an old
-    record predates the field; surfacing it as a labeled slice is
-    more useful than dropping it.
-    """
-    if not rows:
-        return _empty_figure(
-            "No `agent_exit` rows match the current filters."
-        )
-    counts: Counter[str] = Counter()
-    for r in rows:
-        counts[r.cost_source or "unknown"] += 1
-    labels = list(counts.keys())
-    fig = go.Figure(
-        go.Pie(
-            labels=labels,
-            values=[counts[k] for k in labels],
-            hole=0.45,
-            marker={
-                "colors": [
-                    theme.color_for(
-                        k, labels, explicit=theme.COST_SOURCE_COLORS
-                    )
-                    for k in labels
-                ]
-            },
-            hovertemplate="%{label}: %{value} (%{percent})<extra></extra>",
-        )
-    )
-    fig.update_layout(**theme.base_layout(title=title))
-    return fig
-
-
-def throughput(
-    points: Sequence[TimeSeriesPoint],
-    *,
-    title: str = "Throughput (events/day)",
-) -> go.Figure:
-    """Daily totals across all events.
-
-    Sums each day's per-event counts into a single bar so the
-    operator sees the orchestrator's per-day activity at a glance
-    without the visual noise of stacking. Use ``usage_over_time``
-    for the event-by-event view.
-    """
-    if not points:
-        return _empty_figure("No events match the current filters.")
-    daily: Counter = Counter()
-    for p in points:
-        daily[p.day] += int(p.count)
-    days = sorted(daily.keys())
-    fig = go.Figure(
-        go.Bar(
-            x=days,
-            y=[daily[d] for d in days],
-            marker_color=theme.PRIMARY,
-            hovertemplate="%{x}: %{y} events<extra></extra>",
-        )
-    )
-    fig.update_layout(**theme.base_layout(title=title))
-    fig.update_yaxes(title_text="events")
-    return fig
-
-
-def heatmap_7x24(
-    timestamps: Sequence[datetime],
-    *,
-    title: str = "Activity by weekday × hour",
-) -> go.Figure:
-    """7×24 heatmap of activity bucketed by weekday and hour.
-
-    `timestamps` is a raw sequence of `datetime`s -- one per event.
-    The chart aggregates them locally into a 7-row (Monday-first)
-    by 24-column matrix. Naive timestamps are accepted as-is; if
-    the caller wants a specific timezone projection (e.g. operator
-    local time vs UTC) they should convert before calling.
-
-    An empty input still renders the empty grid (all zeros) so the
-    operator can tell "the chart is wired" apart from "no rows"; an
-    explicit empty-state annotation labels the situation.
+    Postgres `EXTRACT(DOW FROM ts)` is 0 = Sunday, which is also the
+    standalone mock's row ordering, so we render the matrix Sunday-
+    first without re-mapping the weekday axis. Cell values are
+    total token volume (`input + output + cache_read + cache_write`)
+    in that (weekday, hour) cell -- matching the standalone mock's
+    "Token volume by hour x weekday" framing rather than raw event
+    counts, which would over-weight the cheap `stage_enter` /
+    `stage_evaluation` cells against the agent-exit rows that
+    actually drive spend. `HourlyHeatmapPoint.count` stays available
+    for callers that want the event count, but the heatmap renders
+    `total_tokens`.
     """
     matrix = [[0] * 24 for _ in range(7)]
-    for ts in timestamps:
-        matrix[ts.weekday()][ts.hour] += 1
+    for p in points:
+        if 0 <= int(p.weekday) < 7 and 0 <= int(p.hour) < 24:
+            matrix[int(p.weekday)][int(p.hour)] = int(
+                getattr(p, "total_tokens", 0) or 0
+            )
     fig = go.Figure(
         go.Heatmap(
             z=matrix,
             x=[f"{h:02d}" for h in range(24)],
             y=list(_WEEKDAY_LABELS),
-            colorscale="Blues",
-            hovertemplate=(
-                "%{y} %{x}:00 -- %{z} events<extra></extra>"
-            ),
+            colorscale=[
+                [0.0, theme.CARD_BG],
+                [0.05, "#eae8fb"],
+                [1.0, theme.ACCENT],
+            ],
+            showscale=False,
+            xgap=2,
+            ygap=2,
+            hovertemplate="%{y} %{x}:00 -- %{z:,} tokens<extra></extra>",
         )
     )
-    fig.update_layout(**theme.base_layout(title=title))
-    fig.update_xaxes(title_text="hour (local)", type="category")
-    fig.update_yaxes(title_text="weekday", autorange="reversed")
-    if not timestamps:
+    layout = theme.base_layout(title=title)
+    layout["margin"] = {"l": 48, "r": 24, "t": layout["margin"]["t"], "b": 32}
+    fig.update_layout(**layout)
+    fig.update_xaxes(title_text="hour (UTC)", type="category", showgrid=False)
+    fig.update_yaxes(title_text="", autorange="reversed", showgrid=False)
+    if not points:
         fig.add_annotation(
             text="No events match the current filters.",
-            x=0.5,
-            y=0.5,
-            xref="paper",
-            yref="paper",
-            showarrow=False,
+            x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False,
             font={"color": theme.MUTED_TEXT, "size": theme.FONT_SIZE},
         )
     return fig
+
+
+def done_per_day_bars(
+    rows: Sequence[ThroughputDayRow],
+    *,
+    window_start: Optional[date] = None,
+    window_end: Optional[date] = None,
+    title: Optional[str] = None,
+) -> go.Figure:
+    """Issues-resolved-per-day bars for the reliability panel.
+
+    Reads `ThroughputDayRow.resolved` per day. The SQL only returns
+    days that actually carried a `done` / `rejected` `stage_enter`
+    row, so a zero-resolved Tuesday in the middle of an otherwise-
+    active week is silently absent from the data set. When callers
+    pass `window_start` / `window_end` (both inclusive `date`s),
+    every day in the window renders as an explicit zero bar -- the
+    standalone mock draws the whole window so the operator can see
+    the continuous baseline rather than a "gappy" set of mystery
+    high-resolution days. Without the window the function falls
+    back to the legacy behavior (one bar per SQL row only) so
+    existing callers / tests keep working.
+    """
+    days_index = {r.day: int(r.resolved or 0) for r in rows}
+    if window_start is not None and window_end is not None:
+        days: list[date] = []
+        d = window_start
+        # Walk inclusive end day by day; using `timedelta` keeps the
+        # rollover safe across month / year boundaries.
+        while d <= window_end:
+            days.append(d)
+            d = d + timedelta(days=1)
+    else:
+        days = sorted(days_index)
+    if not days:
+        return _empty_figure("No resolved issues in the current window.")
+    resolved = [days_index.get(d, 0) for d in days]
+    fig = go.Figure(
+        go.Bar(
+            x=days,
+            y=resolved,
+            marker_color=theme.SUCCESS,
+            hovertemplate="%{x}: %{y} resolved<extra></extra>",
+        )
+    )
+    layout = theme.base_layout(title=title)
+    layout["margin"] = {"l": 40, "r": 16, "t": layout["margin"]["t"], "b": 32}
+    layout["yaxis"] = {
+        **layout.get("yaxis", {}),
+        "title": {"text": "resolved"},
+    }
+    fig.update_layout(**layout)
+    return fig
+
+
+def backend_per_day(
+    rows: Sequence[BackendEfficiencyRow],
+) -> dict[str, dict[str, float]]:
+    """Stub helper kept for the API: the dashboard caller assembles
+    the per-day backend token table from `get_recent_agent_exits` so
+    `usage_over_time` can stack the right column. Returns an empty
+    mapping; the dashboard uses the more granular agent-exit rows.
+
+    Kept exported so future code can hook the per-backend stack to
+    a future read-model aggregate without re-plumbing the chart.
+    """
+    _ = rows
+    return {}
