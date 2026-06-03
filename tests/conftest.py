@@ -17,11 +17,25 @@ the duration of its context, then unwinds back to `None`.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+import os
 
-import pytest
+# `orchestrator.config` reads `DEV_AGENT` / `REVIEW_AGENT` /
+# `DECOMPOSE_AGENT` from the ambient env at import time and exposes both
+# the raw spec (`*_SPEC`) and the parsed name (`config.REVIEW_AGENT`).
+# Tests patch `config.REVIEW_AGENT` to a bare agent name, but stage
+# handlers actually pin `config.REVIEW_AGENT_SPEC`, so an operator's
+# `REVIEW_AGENT="codex -m ..."` shell export leaks into pinned-state
+# assertions and trips `uv run pytest`. Clearing these BEFORE the first
+# `orchestrator.config` import below makes the suite hermetic regardless
+# of the shell environment.
+for _agent_var in ("DEV_AGENT", "REVIEW_AGENT", "DECOMPOSE_AGENT"):
+    os.environ.pop(_agent_var, None)
 
-from orchestrator import analytics
+from unittest.mock import patch  # noqa: E402
+
+import pytest  # noqa: E402
+
+from orchestrator import analytics  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

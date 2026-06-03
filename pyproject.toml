@@ -24,6 +24,3 @@ dashboard = ["streamlit>=1.30", "plotly>=5.20"]
 # `l` is used pervasively as a loop variable over GitHub labels; banning it
 # would force noise-only renames across the codebase.
 ignore = ["E741"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/test_workflow.py" = ["F401", "F541", "F821", "F841"]
