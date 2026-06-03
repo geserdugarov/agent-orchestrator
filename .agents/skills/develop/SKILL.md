@@ -35,7 +35,7 @@ The facade pattern in `orchestrator/workflow.py` is load-bearing for tests. Get 
 ## Tests
 
 - When you move a helper to a new module, either update the test's patch target to the new module boundary, or keep the compatibility alias on `workflow.py` and patch through the facade. Pick one approach per PR and be consistent.
-- Stage-handler tests live in `tests/test_workflow_<stage>.py` (`_decomposition`, `_implementing`, `_validating`, `_in_review`, `_conflicts`). Facade-level dispatcher / tick / pickup tests stay in `tests/test_workflow.py`. Shared fixtures go in `tests/workflow_helpers.py`.
+- Stage-handler tests live in `tests/test_workflow_<stage>.py` (`_decomposition`, `_implementing`, `_in_review`, `_conflicts`); the validating stage is split into focused `tests/test_workflow_validating_*.py` files (review loops + retry caps, handoff, squash, watermarks, drift, verify, terminal). Facade-level dispatcher / tick / pickup tests stay in `tests/test_workflow.py`. Shared fixtures go in `tests/workflow_helpers.py`.
 - Prefer extending the in-memory fakes in `tests/fakes.py` over mocking PyGithub directly. New behavior should land with tests in the matching stage file.
 
 ## Documentation drift
