@@ -824,6 +824,7 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # left as `blocked` (network blip, label-flip failure, etc.).
     dep_graph = state.get("dep_graph") or {}
     relabeled = False
+    held: list[tuple[int, list[int]]] = []
     for idx, child_number in enumerate(children):
         cn = int(child_number)
         if child_labels.get(cn) != "blocked":
@@ -832,11 +833,32 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         dep_numbers = [
             int(children[int(d)]) for d in deps if int(d) < len(children)
         ]
-        if all(child_labels.get(dn) == "done" for dn in dep_numbers):
+        pending = [dn for dn in dep_numbers if child_labels.get(dn) != "done"]
+        if not pending:
             gh.set_workflow_label(child_issues[cn], WorkflowLabel.READY)
             relabeled = True
+        else:
+            held.append((cn, pending))
     if relabeled:
         gh.write_pinned_state(issue, state)
+
+    # Visibility: surface which children are still held under this blocked
+    # parent and the exact unfinished dependencies gating each, so an
+    # operator can see at a glance why a decomposed parent is not advancing.
+    # Children whose deps are satisfied are intentionally NOT held -- they
+    # run concurrently while the parent waits, which is what drives the tree
+    # to completion. Logged only when something is held to keep a healthy
+    # parent from spamming the tick log.
+    if held:
+        done_count = sum(1 for lbl in child_labels.values() if lbl == "done")
+        summary = "; ".join(
+            f"#{cn} waits on {', '.join(f'#{d}' for d in pending)}"
+            for cn, pending in held
+        )
+        _wf.log.info(
+            "issue=#%s blocked parent: %d/%d children done, %d held: %s",
+            issue.number, done_count, len(children), len(held), summary,
+        )
 
 
 def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
@@ -973,6 +995,7 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # rescued here.
     dep_graph = state.get("dep_graph") or {}
     relabeled = False
+    held: list[tuple[int, list[int]]] = []
     for idx, child_number in enumerate(children):
         cn = int(child_number)
         if child_labels.get(cn) != "blocked":
@@ -981,8 +1004,26 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         dep_numbers = [
             int(children[int(d)]) for d in deps if int(d) < len(children)
         ]
-        if all(child_labels.get(dn) == "done" for dn in dep_numbers):
+        pending = [dn for dn in dep_numbers if child_labels.get(dn) != "done"]
+        if not pending:
             gh.set_workflow_label(child_issues[cn], WorkflowLabel.READY)
             relabeled = True
+        else:
+            held.append((cn, pending))
     if relabeled:
         gh.write_pinned_state(issue, state)
+
+    # Visibility: surface which children are still held under this umbrella
+    # parent and the exact unfinished dependencies gating each, so an
+    # operator can see at a glance why the umbrella is not yet closing.
+    # Mirrors `_handle_blocked`; logged only when something is held.
+    if held:
+        done_count = sum(1 for lbl in child_labels.values() if lbl == "done")
+        summary = "; ".join(
+            f"#{cn} waits on {', '.join(f'#{d}' for d in pending)}"
+            for cn, pending in held
+        )
+        _wf.log.info(
+            "issue=#%s umbrella parent: %d/%d children done, %d held: %s",
+            issue.number, done_count, len(children), len(held), summary,
+        )

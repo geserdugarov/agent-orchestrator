@@ -167,6 +167,52 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((65, "done"), gh.label_history)
         self.assertFalse(parent.closed)
 
+    def test_held_children_are_logged_with_pending_deps(self) -> None:
+        # Visibility feature mirrored from `_handle_blocked`: a child still
+        # `blocked` on an unfinished sibling is "held". `_handle_umbrella`
+        # must surface it -- and the exact dependency gating it -- on the
+        # tick log so an operator can see why the umbrella is not yet
+        # closing. children[0] is in-flight (not done), so children[1]
+        # (depends on [0]) stays held.
+        gh, parent, children = self._seed_umbrella_with_children(
+            parent_number=66,
+            child_labels=["implementing", "blocked"],
+            dep_graph={"1": [0]},
+        )
+
+        with self.assertLogs("orchestrator.workflow", level="INFO") as cm:
+            self._run(
+                lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
+                run_agent=_agent(),
+            )
+
+        self.assertTrue(
+            any(
+                "umbrella parent" in m
+                and "1 held" in m
+                and f"#{children[1].number} waits on #{children[0].number}" in m
+                for m in cm.output
+            ),
+            cm.output,
+        )
+        self.assertNotIn((children[1].number, "ready"), gh.label_history)
+        self.assertFalse(parent.closed)
+
+    def test_no_held_children_emits_no_log(self) -> None:
+        # When every child is either done or already running (none still
+        # `blocked` on a sibling), nothing is held and the visibility log
+        # stays silent -- a healthy umbrella must not spam the tick log.
+        gh, parent, _children = self._seed_umbrella_with_children(
+            parent_number=67,
+            child_labels=["done", "implementing"],
+        )
+
+        with self.assertNoLogs("orchestrator.workflow", level="INFO"):
+            self._run(
+                lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
+                run_agent=_agent(),
+            )
+
     def test_umbrella_with_no_recorded_children_parks(self) -> None:
         gh = FakeGitHubClient()
         parent = make_issue(66, label="umbrella")
