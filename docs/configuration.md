@@ -148,7 +148,7 @@ The two caps below are the levers:
 | Variable                       | Default | Purpose                                                                                              |
 | ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------- |
 | `MAX_PARALLEL_ISSUES_PER_REPO` | `1`     | per-repo cap on concurrent in-flight per-issue handlers. Each `REPOS` entry can override via its fifth pipe-separated field. Must be a positive integer. |
-| `MAX_PARALLEL_ISSUES_GLOBAL`   | `3`     | global cap across all configured repos. Must be a positive integer; raise only with the CPU / memory headroom to run that many agent CLIs at once. Umbrella-only family buckets are cap-exempt and run on a dedicated executor. |
+| `MAX_PARALLEL_ISSUES_GLOBAL`   | `3`     | global cap across all configured repos. Must be a positive integer; raise only with the CPU / memory headroom to run that many agent CLIs at once. No-agent family buckets (`blocked` / `umbrella`) are cap-exempt and run on a dedicated executor. |
 | `WORKFLOW_TRANSITION_GUARD`    | `warn`  | governs the workflow-label transition-legality check in `set_workflow_label` against the declared `ALLOWED_TRANSITIONS` table (see [`state-machine.md`](state-machine.md#typed-states-and-the-transition-guard)). `warn` logs an illegal transition and proceeds; `enforce` raises; `off` disables it. The label *typo* guard is always strict regardless of this setting. Invalid values abort at startup. |
 
 Both caps are enforced by a single `IssueScheduler` (`orchestrator/scheduler.py`) built once at startup and threaded through every `workflow.tick` call. A submit is skipped this tick (and retried next pass) when:
@@ -157,7 +157,7 @@ Both caps are enforced by a single `IssueScheduler` (`orchestrator/scheduler.py`
 - the global or per-repo cap is reached,
 - another family worker on the same repo is already in flight (family mutex).
 
-**Umbrella exemption.** When every family-aware issue in this tick's bucket carries the `umbrella` label, the dispatcher submits the bucket as cap-exempt: it does not consume cap slots and runs on a dedicated executor pool. The family mutex still applies. Mixed buckets (umbrella alongside `decomposing` / `blocked` / unlabeled pickup) stay cap-counted.
+**No-agent bucket exemption.** When every family-aware issue in this tick's bucket runs a no-agent handler — `blocked` or `umbrella`, both pure label / dep-graph walks — the dispatcher submits the bucket as cap-exempt: it does not consume cap slots and runs on a dedicated executor pool. This keeps a cheap-polling parent from being starved by ordinary implementation work; in particular a `blocked` parent waiting on its own children would otherwise deadlock those children for the only per-repo slot under the default `parallel_limit=1`. The family mutex still applies. A bucket containing `decomposing` (spawns the decomposer agent) or an unlabeled-pickup issue stays cap-counted.
 
 **Family vs fan-out labels:**
 

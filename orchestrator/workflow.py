@@ -254,6 +254,21 @@ _FAMILY_AWARE_LABELS = frozenset({
     WorkflowLabel.DECOMPOSING, WorkflowLabel.BLOCKED, WorkflowLabel.UMBRELLA,
 })
 
+# Family-aware labels whose stage handler is a pure GitHub label / dep-graph
+# walk -- no agent spawn, no worktree mutation (`_handle_blocked`,
+# `_handle_umbrella`). A family bucket made up SOLELY of these is submitted
+# cap-exempt: it must never consume an agent-sized cap slot, because a
+# cheap-polling parent (a `blocked` parent waiting on its own children, or an
+# `umbrella` aggregating them) would otherwise be starved of the only
+# per-repo slot under the default `parallel_limit=1` -- and a `blocked`
+# parent waiting on its own children would deadlock the very children it
+# blocks. `decomposing` is excluded (it spawns the decomposer agent), as is
+# the unlabeled-pickup case (`None`, routed through `_handle_pickup`, which
+# can spawn an agent too): a bucket containing either stays cap-counted.
+_CAP_EXEMPT_FAMILY_LABELS = frozenset({
+    "blocked", "umbrella",
+})
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -744,15 +759,19 @@ def _dispatch_via_scheduler(
     isolation picks up any sustained failure -- same recovery the
     legacy parallel path uses.
 
-    When every family-aware issue this tick carries the ``umbrella``
-    label, the bucket submit is marked ``cap_exempt=True`` so it does
-    not consume a ``MAX_PARALLEL_ISSUES_PER_REPO`` or
-    ``MAX_PARALLEL_ISSUES_GLOBAL`` slot. Umbrella handling is a pure
-    label/dep-graph walk -- no agent, no worktree mutation -- and must
-    always get its turn even when the cap is saturated by ordinary
-    implementation work. The family mutex still applies, so a follow-up
-    tick that finds a non-umbrella family issue still serializes
-    against this bucket.
+    When every family-aware issue this tick runs a no-agent handler
+    (label in ``_CAP_EXEMPT_FAMILY_LABELS`` -- ``blocked`` or
+    ``umbrella``, both pure label/dep-graph walks), the bucket submit is
+    marked ``cap_exempt=True`` so it does not consume a
+    ``MAX_PARALLEL_ISSUES_PER_REPO`` or ``MAX_PARALLEL_ISSUES_GLOBAL``
+    slot. Such a bucket must always get its turn even when the caps are
+    saturated by ordinary implementation work -- otherwise a ``blocked``
+    parent polling its own children would be starved of the only
+    per-repo slot (under the default ``parallel_limit=1``) and deadlock
+    the very children it waits on. A bucket containing ``decomposing``
+    (spawns the decomposer agent) or an unlabeled-pickup ``None`` stays
+    cap-counted. The family mutex still applies, so a follow-up tick that
+    finds another family issue still serializes against this bucket.
     """
     per_repo_cap = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
     family_numbers: list[int] = []
@@ -776,15 +795,22 @@ def _dispatch_via_scheduler(
             fanout_numbers.append(issue_number)
 
     if family_numbers:
-        # ``umbrella`` is the only family-aware label whose handler does
-        # not invoke an agent or touch a worktree -- it just walks the
-        # parent/child dep-graph and relabels children. When the whole
-        # bucket this tick is umbrella-only, exempt it from the parallel
-        # caps so unrelated implementation work cannot starve the parent
-        # aggregation. Mixed buckets (umbrella alongside decomposing /
-        # blocked / unlabeled-pickup) stay cap-counted because the
-        # non-umbrella entries do real work.
-        umbrella_only = all(lbl == "umbrella" for lbl in family_labels)
+        # A family bucket is cap-exempt only when EVERY issue in it this
+        # tick runs a no-agent / no-worktree handler -- i.e. all labels are
+        # in `_CAP_EXEMPT_FAMILY_LABELS` (`blocked` / `umbrella`, pure
+        # dep-graph walks). Such a bucket must always get its turn even when
+        # the parallel caps are saturated by real implementation work: a
+        # `blocked` parent polling its children, or an `umbrella`
+        # aggregating them, would otherwise be starved of the only per-repo
+        # slot under the default `parallel_limit=1` -- and a `blocked`
+        # parent waiting on its own children would deadlock them. A bucket
+        # containing `decomposing` (spawns the decomposer agent) or an
+        # unlabeled-pickup `None` (routes through `_handle_pickup`, may spawn
+        # an agent) stays cap-counted because those entries do real,
+        # slot-worthy work.
+        bucket_cap_exempt = all(
+            lbl in _CAP_EXEMPT_FAMILY_LABELS for lbl in family_labels
+        )
 
         def _drain_family_bucket(numbers: list[int] = family_numbers) -> None:
             """Process every family-aware issue this tick sequentially.
@@ -827,7 +853,7 @@ def _dispatch_via_scheduler(
             _FAMILY_BUCKET_ISSUE,
             _drain_family_bucket,
             family=True,
-            cap_exempt=umbrella_only,
+            cap_exempt=bucket_cap_exempt,
             per_repo_cap=per_repo_cap,
         ):
             # The scheduler logs the precise skip reason (closed,

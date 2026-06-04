@@ -813,14 +813,17 @@ class TickViaSchedulerTest(unittest.TestCase):
 
 
 class UmbrellaCapExemptionTest(unittest.TestCase):
-    """The umbrella label aggregates child PRs; its handler does not
-    spawn an agent and does not touch a worktree. To keep a parent
-    umbrella from being starved by ordinary implementation work when the
-    parallel caps are saturated, the dispatcher submits the family
-    bucket as ``cap_exempt=True`` whenever every family-aware issue this
-    tick is labeled ``umbrella``. Mixed buckets (umbrella alongside
-    decomposing / blocked / unlabeled-pickup) stay cap-counted because
-    the non-umbrella entries DO real work.
+    """A family bucket is cap-exempt when every issue in it this tick
+    runs a no-agent / no-worktree handler -- i.e. every label is in
+    ``workflow._CAP_EXEMPT_FAMILY_LABELS`` (``blocked`` or ``umbrella``,
+    both pure label / dep-graph walks). Such a bucket is submitted
+    ``cap_exempt=True`` so a cheap-polling parent cannot be starved by
+    ordinary implementation work when the parallel caps are saturated --
+    notably a ``blocked`` parent waiting on its own children, which would
+    otherwise deadlock the children it blocks under the default
+    ``parallel_limit=1``. Buckets containing ``decomposing`` (spawns the
+    decomposer agent) or an unlabeled-pickup ``None`` stay cap-counted
+    because those entries DO real, slot-worthy work.
     """
 
     def _spec(self, parallel_limit: int = 5) -> config.RepoSpec:
@@ -974,6 +977,146 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
                     "because the mix contains a non-umbrella entry",
                 )
                 # While the bucket is in flight the cap counter shows 1.
+                self.assertEqual(sched.active_count("acme/widget"), 1)
+        finally:
+            for ev in releases.values():
+                ev.set()
+        self._wait_idle(sched, "acme/widget")
+
+    def test_blocked_only_bucket_runs_when_per_repo_cap_is_saturated(self) -> None:
+        # Regression for the blocked-parent deadlock: `_handle_blocked` is
+        # a pure child-poll / dep-graph walk -- no agent, no worktree --
+        # exactly like umbrella. With per-repo cap 1 and a fanout child
+        # already holding the slot, the `blocked` parent bucket must STILL
+        # run this tick. Before the fix the bucket was cap-counted, so the
+        # parent (dispatched first) grabbed the only slot every tick and
+        # starved the very child it was blocked on -- deadlocking the pair.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="implementing"))
+        gh.add_issue(make_issue(2, label="blocked"))
+
+        starts: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+        }
+        releases: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+        }
+
+        def fake_process(_gh, _spec, issue) -> None:
+            starts[issue.number].set()
+            releases[issue.number].wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(
+                    gh, self._spec(parallel_limit=1), scheduler=sched,
+                )
+                self.assertTrue(
+                    starts[1].wait(timeout=2.0),
+                    "implementing fanout #1 did not start",
+                )
+                self.assertTrue(
+                    starts[2].wait(timeout=2.0),
+                    "blocked #2 was starved by the per-repo cap -- the "
+                    "no-agent family bucket must run cap-exempt alongside "
+                    "the fanout slot",
+                )
+        finally:
+            for ev in releases.values():
+                ev.set()
+        self._wait_idle(sched, "acme/widget")
+
+    def test_blocked_only_bucket_does_not_inflate_cap_counters(self) -> None:
+        # A `blocked`-only bucket is in flight but the scheduler's
+        # cap counters must read ZERO: the bucket sentinel lives in the
+        # cap-exempt tracked set, so a follow-up fanout submit on a
+        # tightly-capped repo is not blocked by the parent's poll.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=4, per_repo_cap=4)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="blocked"))
+
+        start = threading.Event()
+        release = threading.Event()
+
+        def fake_process(_gh, _spec, _issue) -> None:
+            start.set()
+            release.wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(gh, self._spec(), scheduler=sched)
+                self.assertTrue(start.wait(timeout=2.0))
+                self.assertEqual(sched.active_count(), 0)
+                self.assertEqual(sched.active_count("acme/widget"), 0)
+                # Active tracking still works: the blocked issue currently
+                # being processed registers via `track_active`.
+                self.assertTrue(sched.is_active("acme/widget", 1))
+        finally:
+            release.set()
+        self._wait_idle(sched, "acme/widget")
+
+    def test_blocked_with_decomposing_bucket_still_counts(self) -> None:
+        # The cap-exemption requires EVERY family entry to be a no-agent
+        # handler. A bucket mixing `blocked` (no agent) with `decomposing`
+        # (spawns the decomposer agent) must stay cap-counted -- `blocked`
+        # in the mix does not rescue the exemption. A fanout submit beyond
+        # the per-repo cap is therefore skipped this tick.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="blocked"))
+        gh.add_issue(make_issue(2, label="decomposing"))
+        gh.add_issue(make_issue(3, label="implementing"))
+
+        starts: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+            3: threading.Event(),
+        }
+        releases: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+            3: threading.Event(),
+        }
+
+        def fake_process(_gh, _spec, issue) -> None:
+            starts[issue.number].set()
+            releases[issue.number].wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(
+                    gh, self._spec(parallel_limit=1), scheduler=sched,
+                )
+                # The family bucket (blocked + decomposing) takes the one
+                # cap-counted slot; the drain enters its first family issue.
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and not (
+                    starts[1].is_set() or starts[2].is_set()
+                ):
+                    time.sleep(0.01)
+                self.assertTrue(starts[1].is_set() or starts[2].is_set())
+                time.sleep(0.1)
+                self.assertFalse(
+                    starts[3].is_set(),
+                    "implementing #3 should be rejected by the per-repo cap "
+                    "-- a bucket containing decomposing stays cap-counted "
+                    "even with a blocked sibling",
+                )
                 self.assertEqual(sched.active_count("acme/widget"), 1)
         finally:
             for ev in releases.values():
