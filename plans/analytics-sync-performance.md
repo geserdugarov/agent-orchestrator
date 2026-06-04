@@ -1,5 +1,11 @@
 # Analytics sync — performance design
 
+## Status
+
+Phase 1 (batched `executemany` flush) shipped via #369. Phase 2
+(server-side dedup pre-check) and Phase 3 (`COPY ... FROM STDIN`)
+remain gated on re-measurement against the same remote Postgres.
+
 ## Context
 
 Issue #366: `python -m orchestrator.analytics.sync` against the remote

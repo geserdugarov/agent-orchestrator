@@ -367,16 +367,22 @@ re-code them in every query. `ANALYTICS_DB_URL` is
 a single libpq URL so swapping local for remote managed Postgres is a
 one-line repoint. `orchestrator/analytics/sync.py` is the operator-
 driven CLI (`python -m orchestrator.analytics.sync`) that replays
-JSONL records into Postgres with `INSERT ... ON CONFLICT
-(content_hash) DO NOTHING`, idempotent across repeated runs and
-across `prune_old_records` rewrites. The CLI surfaces operator
-feedback through the module logger and stdout summary: a UTC-stamped
-`connecting` / `connection established` pair brackets the connect
-call (with credentials stripped from both the netloc and libpq
-query-string forms of the URL), a per-`_PROGRESS_INTERVAL`-lines
+JSONL records into Postgres by accumulating validated row tuples
+into a `_BATCH_SIZE`-sized buffer (default 500, sized to match
+`_PROGRESS_INTERVAL`) and flushing each batch via
+`cur.executemany("INSERT ... ON CONFLICT (content_hash) DO
+NOTHING", batch)`, idempotent across repeated runs and across
+`prune_old_records` rewrites; a final partial batch flushes at EOF
+so the tail still lands and per-batch `cursor.rowcount` drives the
+cumulative `inserted` / `skipped_duplicate` totals. The CLI
+surfaces operator feedback through the module logger and stdout
+summary: a UTC-stamped `connecting` / `connection established`
+pair brackets the connect call (with credentials stripped from both
+the netloc and libpq query-string forms of the URL), a
 `progress lines=N inserted=… duplicate=… malformed=… elapsed=…s`
-record advances on every chunk, and a final `completed in %.3fs (…)`
-log plus a UTC-stamped stdout `duration_s=` summary close the run. `orchestrator/analytics/read.py`
+record drops after each batch flush (full or final partial), and
+a final `completed in %.3fs (…)` log plus a UTC-stamped stdout
+`duration_s=` summary close the run. `orchestrator/analytics/read.py`
 is the read-side counterpart: a thin data-access module exposing
 plain-Python functions that `orchestrator/dashboard.py` calls into.
 The base-table aggregates (`get_filter_options`, `get_data_extent`,
@@ -601,20 +607,19 @@ swallowed.
   pool, in-worker continuation loop, per-state caps, event-stream stall
   detection, `linear_graphql` tool, strict template engine, full
   `WORKFLOW.md` adoption) as deliberately not adopted.
-- **Batched analytics sync against remote Postgres.** See
+- **Server-side dedup pre-check for analytics sync (Phase 2).** See
   [`plans/analytics-sync-performance.md`](analytics-sync-performance.md)
-  for the full design. `orchestrator/analytics/sync.py` today calls
-  `cur.execute(insert_sql, values)` once per record, paying a full
-  network round-trip per row; against a remote host (observed
-  ~210 ms/row, projecting ~5 h for 81k records) this is too slow to be
-  operationally useful. Phase 1 swaps the per-row `execute` for
-  `cur.executemany(insert_sql, batch)` with a `_BATCH_SIZE` constant,
-  keeping `ON CONFLICT (content_hash) DO NOTHING` as the dedup backstop
-  and preserving the per-progress-tick observability shape. Phase 2,
-  added only if Phase 1 measurements still feel slow, fetches the
-  existing `content_hash` set into a Python set at startup and skips
+  for the full design. Phase 1 has landed: `orchestrator/analytics/sync.py`
+  now accumulates validated row tuples into a `_BATCH_SIZE`-sized buffer
+  and flushes each batch via `cur.executemany(insert_sql, batch)` with
+  `ON CONFLICT (content_hash) DO NOTHING` retained as the dedup
+  backstop, taking the projected 5-hour wall-clock against a remote
+  Postgres into the minutes range without changing the operator-visible
+  progress shape. Phase 2 is gated on re-measurement: if a 100%-duplicate
+  steady-state re-sync still feels slow, fetch the existing
+  `content_hash` set into a Python set at startup and skip
   already-present records before they enter the batch. Phase 3 (a
-  `COPY ... FROM STDIN` path with staging table) is deferred.
+  `COPY ... FROM STDIN` path with staging table) stays deferred.
 
 ## Risks
 
