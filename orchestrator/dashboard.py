@@ -589,19 +589,20 @@ def _delta_pill(value: Optional[float], *, invert: bool = False) -> str:
     follows the value's sign so the direction is unambiguous even at a
     glance.
 
-    ``None`` renders a flat dash so the layout slot stays consistent.
+    ``None`` (no prior window to compare against) and an exactly-zero
+    delta render nothing: a grey placeholder pill in the card corner
+    reads like a (non-functional) minimize control, so the KPI top row
+    simply drops the indicator when there is no movement to show.
     """
-    if value is None:
-        return '<span class="orch-delta flat">—</span>'
+    if value is None or value == 0:
+        return ""
     pct_str = f"{abs(value) * 100:.1f}%"
     if value > 0:
         cls = "up" if not invert else "down"
         arrow = "▲"
-    elif value < 0:
+    else:
         cls = "down" if not invert else "up"
         arrow = "▼"
-    else:
-        return f'<span class="orch-delta flat">— {pct_str}</span>'
     return f'<span class="orch-delta {cls}">{arrow} {pct_str}</span>'
 
 
@@ -977,7 +978,7 @@ def main() -> None:
         st.markdown(
             '<div class="orch-cardmark"></div>', unsafe_allow_html=True
         )
-        fb_left, fb_mid, fb_right = st.columns([2, 3, 3])
+        fb_left, fb_mid, _fb_spacer = st.columns([2, 3, 3])
         with fb_left:
             st.markdown(
                 '<div class="orch-filterbar-anchor"></div>'
@@ -1021,6 +1022,11 @@ def main() -> None:
                     min_value=extent_min_d,
                     max_value=extent_max_d,
                 )
+        # Range meta ("… → … · N days · N runs") sits on its own
+        # full-width row pinned to the bottom-right of the card.
+        # Rendered after the summary query lands below (the run count
+        # is not known yet), so capture the slot now.
+        meta_slot = st.empty()
     window = to_window(start_date, end_date)
     st.session_state.preset = preset_choice
 
@@ -1286,17 +1292,16 @@ def main() -> None:
     days_in_window = max(
         (window.end - window.start).days, 1
     )
-    with fb_right:
-        st.markdown(
-            _filter_meta_html(
-                from_d=window.start.date(),
-                to_d=(window.end - timedelta(days=1)).date(),
-                days=days_in_window,
-                runs=summary.total_agent_runs,
-                fmt_num=theme.fmt_num,
-            ),
-            unsafe_allow_html=True,
-        )
+    meta_slot.markdown(
+        _filter_meta_html(
+            from_d=window.start.date(),
+            to_d=(window.end - timedelta(days=1)).date(),
+            days=days_in_window,
+            runs=summary.total_agent_runs,
+            fmt_num=theme.fmt_num,
+        ),
+        unsafe_allow_html=True,
+    )
 
     if summary.total_events == 0:
         st.info(EMPTY_WINDOW_MESSAGE)

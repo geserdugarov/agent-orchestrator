@@ -578,6 +578,12 @@ def hour_weekday_heatmap(
     # mock's compact squares instead of stretching them into tall
     # rectangles at the default 450px.
     layout["height"] = 240
+    # Paint the plot background the border colour so the `xgap`/`ygap`
+    # between cells reads as a weekday x hour grid. Zero-volume cells
+    # are white (colorscale[0] == CARD_BG), so without a contrasting
+    # backdrop the gaps vanish and the sparse right-hand hours look
+    # like missing data rather than empty cells.
+    layout["plot_bgcolor"] = theme.BORDER
     fig.update_layout(**layout)
     fig.update_xaxes(title_text="hour (UTC)", type="category", showgrid=False)
     fig.update_yaxes(title_text="", autorange="reversed", showgrid=False)

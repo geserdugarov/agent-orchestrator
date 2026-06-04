@@ -23,6 +23,7 @@ from datetime import date
 
 try:
     from orchestrator import dashboard_charts
+    from orchestrator import dashboard_theme as theme
     from orchestrator.analytics.read import (
         HourlyHeatmapPoint,
         RepoBreakdownRow,
@@ -285,6 +286,16 @@ class HourWeekdayHeatmapTest(unittest.TestCase):
         z = [list(row) for row in fig.data[0].z]
         self.assertTrue(all(cell == 0 for row in z for cell in row))
         self.assertGreaterEqual(len(fig.layout.annotations), 1)
+
+    def test_plot_background_paints_the_cell_grid(self) -> None:
+        # The inter-cell gaps show the plot background, so painting it
+        # the border colour turns them into a visible weekday x hour
+        # grid -- otherwise zero-volume (white) cells vanish against a
+        # white backdrop and the sparse hours read as missing data.
+        fig = dashboard_charts.hour_weekday_heatmap([])
+        self.assertEqual(fig.layout.plot_bgcolor, theme.BORDER)
+        self.assertGreater(fig.data[0].xgap, 0)
+        self.assertGreater(fig.data[0].ygap, 0)
 
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)

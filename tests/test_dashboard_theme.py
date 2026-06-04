@@ -208,6 +208,19 @@ class PageCssTest(unittest.TestCase):
         # (the embedded browser dropped that compound selector).
         self.assertNotIn(":not(:has(", theme.PAGE_CSS)
 
+    def test_top_toolbar_made_transparent_and_click_through(self) -> None:
+        # Streamlit's top toolbar is a `<header>`, so the historical
+        # `div`-scoped rule never matched and the bar stayed opaque,
+        # clipping the top of the topbar card. The rule must target the
+        # element tag-agnostically and make it click-through so it stops
+        # hiding/intercepting the upper block. (A `div[...]` form may
+        # still appear in a prose comment for context.)
+        self.assertIn('[data-testid="stHeader"]', theme.PAGE_CSS)
+        self.assertIn("pointer-events: none", theme.PAGE_CSS)
+        # Deploy button + overflow menu chrome are dropped.
+        self.assertIn('[data-testid="stAppDeployButton"]', theme.PAGE_CSS)
+        self.assertIn('[data-testid="stMainMenu"]', theme.PAGE_CSS)
+
     def test_equal_height_rows_scoped_to_card_rows(self) -> None:
         # Paired panels (expensive-issues vs backend-efficiency,
         # repo-cost vs reliability) line up bottom-to-bottom by stretching

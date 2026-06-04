@@ -290,7 +290,21 @@ PAGE_CSS = f"""
     color: var(--orch-ink);
     font-family: {FONT_FAMILY};
   }}
-  div[data-testid="stHeader"] {{ background: transparent; }}
+  /* Streamlit's fixed top toolbar renders OPAQUE with the page
+     background and clips the top ~60px of the topbar card. The element
+     is a `<header>`, so the historical `div[data-testid="stHeader"]`
+     rule never matched and the background never went transparent.
+     Target it tag-agnostically, make it click-through (so it stops
+     intercepting the topbar beneath it) while keeping its own controls
+     clickable, and drop the Deploy button + overflow menu -- chrome a
+     local analytics dashboard does not use -- so nothing floats over
+     the upper block. The sidebar expand/collapse control stays. */
+  [data-testid="stHeader"] {{
+    background: transparent; pointer-events: none;
+  }}
+  [data-testid="stHeader"] * {{ pointer-events: auto; }}
+  [data-testid="stAppDeployButton"],
+  [data-testid="stMainMenu"] {{ display: none; }}
   /* Main content column. Scoped by the stable `.block-container`
      class (the sidebar uses a different wrapper) rather than a
      `data-testid="stMain"` ancestor -- that testid is absent in some
@@ -374,7 +388,8 @@ PAGE_CSS = f"""
     text-transform: uppercase; letter-spacing: 0.06em;
   }}
   .orch-filter-meta {{
-    margin-left: auto; color: var(--orch-muted-soft);
+    display: block; text-align: right; margin-top: 14px;
+    color: var(--orch-muted-soft);
     font-size: 11.5px;
     font-family: {MONO_FONT_FAMILY};
   }}
@@ -425,8 +440,6 @@ PAGE_CSS = f"""
     color: var(--orch-danger); }}
   .orch-delta.down {{ background: rgba(47,158,107,.12);
     color: var(--orch-success); }}
-  .orch-delta.flat {{ background: var(--orch-chip);
-    color: var(--orch-muted-soft); }}
   /* Insights banner: two-column grid (matches the mock) collapsing
      to one column under 1080px. */
   .orch-insights {{

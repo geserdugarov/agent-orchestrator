@@ -843,9 +843,16 @@ class DeltaPillTest(unittest.TestCase):
         self.assertIn('orch-delta up', neg)
         self.assertIn('▼', neg)
 
-    def test_none_renders_flat_dash(self) -> None:
+    def test_none_renders_nothing(self) -> None:
+        # No prior window to compare against: the grey placeholder pill
+        # read like a (non-functional) minimize control, so the slot is
+        # dropped entirely rather than rendering a flat dash.
         _, dashboard = _reload()
-        self.assertIn('orch-delta flat', dashboard._delta_pill(None))
+        self.assertEqual(dashboard._delta_pill(None), "")
+
+    def test_zero_delta_renders_nothing(self) -> None:
+        _, dashboard = _reload()
+        self.assertEqual(dashboard._delta_pill(0.0), "")
 
 
 class InsightsHtmlTest(unittest.TestCase):
