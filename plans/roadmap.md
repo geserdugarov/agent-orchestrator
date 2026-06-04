@@ -466,8 +466,8 @@ and a `#123` / `123` issue-number input. Every read call is
 wrapped in `st.cache_data` keyed by
 `(start, end, repo, events, stages, issue)` so a filter change
 invalidates every cached query in lockstep. The body renders, in
-order: computed insight banners (failure rate ≥ 10 %, cost swing
-≥ 25 % vs the previous window, unpriced cost coverage ≥ 10 %), a
+order: computed insight banners (failure rate ≥ 10 %, unpriced
+cost coverage ≥ 10 %), a
 four-tile KPI strip (total spend, total tokens, cost / resolved
 issue, rework share — each with an inline-SVG sparkline and a
 previous-window delta where applicable), the hero
