@@ -33,13 +33,36 @@ surfaces as the same `st.error` the sequential path emits.
 `dashboard.load: total=X.Xs reads=13 parallel=true|false` at INFO so
 the two paths can be A/B'd from the Streamlit log.
 
+Layer 3 (collapsed multi-query readers) shipped via #394.
+`get_filter_options` now issues one `UNION`'d query that pulls
+distinct values for all five filter columns in a single round-trip
+and buckets the rows in Python (per-bucket lists are sorted in
+Python so the planner is free to pick an unordered union plan --
+the lists are tiny, a few hundred values at most). `get_summary`
+collapses its three former queries (totals + `by_event` + `by_stage`)
+into one round-trip via a `WITH win AS (...)` CTE that materialises
+the filtered window and three `UNION ALL` branches tagged by a
+`kind` discriminator (`t` / `e` / `s`) the reader routes in Python;
+the `c DESC, label ASC` ordering the standalone queries enforced in
+SQL is reasserted in Python after the fetch so the dashboard's
+iteration order is independent of the UNION plan. A new lightweight
+`get_kpi_prev(start, end, ...)` reader returns only the cost / token
+/ agent-run scalars the dashboard reads off `prev_summary` (KPI
+delta pills + `compute_insights`'s cost-trend banner), skipping the
+`COUNT(DISTINCT)`s and `GROUP BY` follow-ups `get_summary` runs;
+its return type is still `Summary` so existing `prev_summary`
+consumers (`compute_insights`, the KPI strip) keep their shape with
+the unread fields at their dataclass defaults. The dashboard's
+`prev_summary` fan-out entry now dispatches through a `_read_prev_kpi`
+cached wrapper backed by `get_kpi_prev` instead of reusing
+`_read_summary`.
+
 Layer 4 schema + sync half (the `analytics_daily_rollup` materialized
 view, its supporting indexes, and the post-commit refresh hook in
 `orchestrator/analytics/sync.py`) shipped via #382. The Layer 4
 dashboard cutover that points the rollup-eligible widgets at the new
-view, plus Layers 3, 5, and 6 (collapsed multi-query readers, UX
-polish, predicate-shape audit) remain to be designed against
-measurements taken after Layers 1+2.
+view, plus Layers 5 and 6 (UX polish, predicate-shape audit) remain
+to be designed against measurements taken after Layers 1+2+3.
 
 ## Symptom
 

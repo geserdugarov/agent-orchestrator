@@ -406,12 +406,23 @@ durability is the contract the CLI honors. `orchestrator/analytics/read.py`
 is the read-side counterpart: a thin data-access module exposing
 plain-Python functions that `orchestrator/dashboard.py` calls into.
 The base-table aggregates (`get_filter_options`, `get_data_extent`,
-`get_summary`, `get_time_series`, `get_stage_breakdown`,
-`get_event_breakdown`, `get_recent_agent_exits`, `get_issues`,
-`get_issue_events`, `get_repo_breakdown`, `get_hourly_heatmap`, and
-the resolved/rejected `get_throughput_breakdown` over
-`stage_enter` rows) carry the standard event / stage / date / repo /
-issue filter contract. The agent-run aggregates that read the
+`get_summary`, `get_kpi_prev`, `get_time_series`,
+`get_stage_breakdown`, `get_event_breakdown`,
+`get_recent_agent_exits`, `get_issues`, `get_issue_events`,
+`get_repo_breakdown`, `get_hourly_heatmap`, and the
+resolved/rejected `get_throughput_breakdown` over `stage_enter`
+rows) carry the standard event / stage / date / repo / issue filter
+contract. `get_filter_options` issues one `UNION`'d query that
+pulls distinct values for all five filter columns in a single
+round-trip and buckets the rows in Python, and `get_summary` lands
+totals + `by_event` + `by_stage` in one round-trip via a `WITH win
+AS (...)` CTE plus three `UNION ALL` branches tagged by a `kind`
+discriminator. `get_kpi_prev` is the trimmed companion `get_summary`
+the dashboard reads for the previous-window KPI delta pills and
+the cost-trend banner -- it returns only the cost / token /
+agent-run scalars those widgets consume, skipping the
+`COUNT(DISTINCT)`s and `GROUP BY` follow-ups, and returns a
+`Summary` so existing `prev_summary` consumers keep their shape. The agent-run aggregates that read the
 `analytics_agent_runs` view (`get_review_round_breakdown`,
 `get_backend_efficiency`, `get_cost_coverage`) cannot push an
 `event IN (...)` clause down (the view has no `event` column -- it
