@@ -1065,6 +1065,25 @@ def main() -> None:
             )
 
     @st.cache_data(show_spinner=False, ttl=60)
+    def _read_prev_kpi(start, end, repo, events_t, stages_t, issue):
+        # Previous-window read for the KPI delta pills and
+        # cost-trend banner only. The full `get_summary` shape (per-
+        # event / per-stage breakdowns, distinct-issue / distinct-
+        # repo counts, failure / timeout counters) is never read off
+        # `prev_summary`, so a thinner reader saves a `GROUP BY`
+        # follow-up plus a couple of `COUNT(DISTINCT)`s on every
+        # cold load while leaving the cached wrapper shape (and
+        # cache key) identical to `_read_summary`.
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_kpi_prev(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
+
+    @st.cache_data(show_spinner=False, ttl=60)
     def _read_time_series(start, end, repo, events_t, stages_t, issue):
         with analytics_read.analytics_connection() as conn:
             return analytics_read.get_time_series(
@@ -1207,7 +1226,7 @@ def main() -> None:
     # to thread filter tuples through the futures.
     readers: list[tuple[str, Callable[[], Any]]] = [
         ("summary", lambda: _read_summary(*key)),
-        ("prev_summary", lambda: _read_summary(*prev_key)),
+        ("prev_summary", lambda: _read_prev_kpi(*prev_key)),
         ("ts_points", lambda: _read_time_series(*key)),
         ("stage_rows", lambda: _read_stage_breakdown(*key)),
         ("agent_exits", lambda: _read_recent_agent_exits(*key)),

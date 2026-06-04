@@ -974,6 +974,7 @@ class CachedReadConnectionScopingTest(unittest.TestCase):
         src = self._main_source()
         wrapper_names = [
             "_read_summary",
+            "_read_prev_kpi",
             "_read_time_series",
             "_read_stage_breakdown",
             "_read_recent_agent_exits",
@@ -1012,18 +1013,45 @@ class CachedReadConnectionScopingTest(unittest.TestCase):
         # helper -- otherwise we open a new socket per call (the very
         # thing the refactor is supposed to eliminate).
         main_src = self._main_source()
-        # 12 cached wrappers + the extent / options reads at the top
-        # of main() = 14 forwards inside main(). The per-issue
-        # drill-down lives in `_render_drilldown` and is checked
-        # separately so this assertion can stay tight.
+        # 13 cached wrappers (including Layer 3's `_read_prev_kpi`)
+        # + the extent / options reads at the top of main() = 15
+        # forwards inside main(). The per-issue drill-down lives in
+        # `_render_drilldown` and is checked separately.
         self.assertGreaterEqual(
-            main_src.count("conn=conn"), 14,
+            main_src.count("conn=conn"), 15,
             "every read inside main() should forward the scoped "
             "connection from `analytics_connection`",
         )
         drilldown_src = self._drilldown_source()
         self.assertIn("analytics_read.analytics_connection()", drilldown_src)
         self.assertIn("conn=conn", drilldown_src)
+
+    def test_prev_summary_reader_uses_lightweight_kpi_path(self) -> None:
+        # Layer 3 split the previous-window read off `get_summary`
+        # so the dashboard only pays for the scalars it actually
+        # reads off `prev_summary` (cost / token totals + agent-run
+        # count for KPI delta pills and the cost-trend banner). The
+        # `_read_prev_kpi` wrapper must therefore call
+        # `analytics_read.get_kpi_prev` rather than reusing the
+        # full `get_summary` shape -- if it falls back to the heavy
+        # path, the cold-load wins from Layer 3 evaporate.
+        src = self._main_source()
+        marker = "def _read_prev_kpi("
+        self.assertIn(marker, src)
+        head = src.index(marker)
+        # The wrapper body is short; walk to the next `def` (which
+        # bounds the cached wrapper region) so the substring search
+        # below cannot accidentally catch a later wrapper.
+        body = src[head:src.index("\n    def ", head + 1)]
+        self.assertIn("analytics_read.get_kpi_prev(", body)
+        self.assertNotIn("analytics_read.get_summary(", body)
+        # And the `prev_summary` entry in the reader fan-out must
+        # dispatch through `_read_prev_kpi` so the lightweight path
+        # is the one that actually fires when the dashboard renders.
+        self.assertIn(
+            '("prev_summary", lambda: _read_prev_kpi(*prev_key))',
+            src,
+        )
 
 
 class AnalyticsConnectionExposureTest(unittest.TestCase):

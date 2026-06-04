@@ -689,27 +689,9 @@ def _query(
     return list(rows or [])
 
 
-def _distinct_strings(
-    connect_fn: Callable[[str], Any],
-    db_url: Optional[str],
-    column: str,
-    *,
-    conn: Any = None,
-) -> tuple[str, ...]:
-    """Return the distinct non-null values of `column`, sorted ASC.
-
-    `column` is an unquoted identifier baked into the SQL by callers
-    that pass a literal (never user input), mirroring how
-    `analytics.sync._build_insert_sql` interpolates known column
-    names.
-    """
-    sql = (
-        f"SELECT DISTINCT {column} FROM analytics_events "
-        f"WHERE {column} IS NOT NULL "
-        f"ORDER BY {column} ASC"
-    )
-    rows = _query(connect_fn, db_url, sql, conn=conn)
-    return tuple(r[0] for r in rows if r and r[0] is not None)
+_FILTER_OPTION_COLUMNS: tuple[str, ...] = (
+    "repo", "event", "stage", "backend", "agent_role",
+)
 
 
 def get_filter_options(
@@ -725,19 +707,42 @@ def get_filter_options(
     dropdowns rather than crashing. Failure to reach the configured
     database raises `AnalyticsReadError`. Pass `conn=` (typically
     from an `analytics_connection` scope) to reuse a connection
-    across the 5 distinct-column queries instead of opening 5
-    sockets.
+    across reads instead of opening a fresh socket.
+
+    The five filter columns are read with one unioned query so the
+    dashboard pays a single round-trip instead of five. Each leg is a
+    partial scan on its own column; the planner is free to pick an
+    unordered union plan because the per-bucket lists get sorted in
+    Python after the fetch (the lists are tiny -- at most a few
+    hundred values per column).
     """
     url = _resolve_db_url(db_url)
     if conn is None and not url:
         return FilterOptions()
     connect_fn = connect or _default_connect
+    sql = " UNION ".join(
+        f"SELECT '{col}' AS dim, {col} AS value "
+        f"FROM analytics_events WHERE {col} IS NOT NULL"
+        for col in _FILTER_OPTION_COLUMNS
+    )
+    rows = _query(connect_fn, url, sql, conn=conn)
+    buckets: dict[str, list[str]] = {
+        col: [] for col in _FILTER_OPTION_COLUMNS
+    }
+    for row in rows:
+        if not row or row[1] is None:
+            continue
+        dim = row[0]
+        if dim in buckets:
+            buckets[dim].append(row[1])
+    for values in buckets.values():
+        values.sort()
     return FilterOptions(
-        repos=_distinct_strings(connect_fn, url, "repo", conn=conn),
-        events=_distinct_strings(connect_fn, url, "event", conn=conn),
-        stages=_distinct_strings(connect_fn, url, "stage", conn=conn),
-        backends=_distinct_strings(connect_fn, url, "backend", conn=conn),
-        agent_roles=_distinct_strings(connect_fn, url, "agent_role", conn=conn),
+        repos=tuple(buckets["repo"]),
+        events=tuple(buckets["event"]),
+        stages=tuple(buckets["stage"]),
+        backends=tuple(buckets["backend"]),
+        agent_roles=tuple(buckets["agent_role"]),
     )
 
 
@@ -916,9 +921,28 @@ def get_summary(
         events=events, stages=stages, issue=issue,
     )
 
-    totals_sql = (
-        "SELECT "
-        "COUNT(*) AS total_events, "
+    # One round-trip with the filtered window materialised as a CTE
+    # and the three result sets (totals, by_event, by_stage) unioned
+    # under a `kind` discriminator. The previous shape fired three
+    # sequential queries that each re-scanned the table; collapsing
+    # them saves two RTTs per `get_summary` call (×2 for the
+    # dashboard's current + previous-window reads). The totals row
+    # carries every aggregate column; the by_event / by_stage rows
+    # only populate `kind`, `label`, and `count_val` -- the trailing
+    # NULLs keep the UNION-ALL column shape uniform. Per-bucket
+    # ordering (`COUNT DESC, label ASC`, matching the previous
+    # standalone queries) is reasserted in Python so the planner is
+    # free to pick a hash-aggregate / merge plan rather than being
+    # forced into a sort.
+    sql = (
+        "WITH win AS ("
+        "SELECT event, stage, exit_code, timed_out, "
+        "cost_usd, input_tokens, output_tokens, "
+        "cache_read_tokens, cache_write_tokens, repo, issue "
+        f"FROM analytics_events{where}"
+        ") "
+        "SELECT 't' AS kind, NULL::text AS label, "
+        "COUNT(*) AS count_val, "
         # `(repo, issue)` row-constructor: GitHub issue numbers are
         # only unique within a repo, so a multi-repo window would
         # otherwise collapse `owner/a#1` and `owner/b#1` into one.
@@ -950,55 +974,71 @@ def get_summary(
         # NULL exit codes.
         "SUM(CASE WHEN event = 'agent_exit' AND timed_out = true "
         "         THEN 1 ELSE 0 END) AS timed_out_agent_runs "
-        f"FROM analytics_events{where}"
+        "FROM win "
+        "UNION ALL "
+        "SELECT 'e', event, COUNT(*), "
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL "
+        "FROM win GROUP BY event "
+        "UNION ALL "
+        "SELECT 's', stage, COUNT(*), "
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL "
+        "FROM win WHERE stage IS NOT NULL GROUP BY stage"
     )
-    totals_rows = _query(connect_fn, url, totals_sql, params, conn=conn)
-    if not totals_rows:
-        # Aggregates always return one row, but guard the empty case
-        # so a fake cursor that returns [] never raises on the
-        # positional unpack below.
+    rows = _query(connect_fn, url, sql, params, conn=conn)
+    if not rows:
+        # Empty fake cursor; the real query always returns the
+        # totals row even when the window is empty (aggregate over
+        # zero rows yields zeros), but guard so a fixture that omits
+        # everything never raises on the unpack below.
         return Summary()
-    row = totals_rows[0]
-    total_events = row[0]
-    distinct_issues = row[1]
-    distinct_repos = row[2]
-    total_cost_usd = row[3]
-    total_input_tokens = row[4]
-    total_output_tokens = row[5]
-    # Fixtures that pre-date the agent-run / cache-token extensions
-    # may still emit shorter tuples; default the missing columns to
-    # zero so the test harness does not have to know about every
-    # new SQL column in unrelated cases.
-    total_agent_runs = row[6] if len(row) > 6 else 0
-    failed_agent_runs = row[7] if len(row) > 7 else 0
-    total_cache_read_tokens = row[8] if len(row) > 8 else 0
-    total_cache_write_tokens = row[9] if len(row) > 9 else 0
-    timed_out_agent_runs = row[10] if len(row) > 10 else 0
 
-    by_event_sql = (
-        "SELECT event, COUNT(*) AS c FROM analytics_events"
-        f"{where} GROUP BY event ORDER BY c DESC, event ASC"
-    )
-    by_event_rows = _query(connect_fn, url, by_event_sql, params, conn=conn)
-    by_event = {row[0]: int(row[1]) for row in by_event_rows}
+    totals_row: Optional[tuple] = None
+    by_event_pairs: list[tuple[str, int]] = []
+    by_stage_pairs: list[tuple[str, int]] = []
+    for row in rows:
+        if not row:
+            continue
+        kind = row[0]
+        if kind == "t":
+            totals_row = row
+        elif kind == "e" and row[1] is not None:
+            by_event_pairs.append((row[1], int(row[2] or 0)))
+        elif kind == "s" and row[1] is not None:
+            by_stage_pairs.append((row[1], int(row[2] or 0)))
 
-    stage_where, stage_params = _build_window_where(
-        start=start, end=end, repo=repo,
-        events=events, stages=stages, issue=issue,
-    )
-    stage_clause = (
-        f"{stage_where} AND stage IS NOT NULL"
-        if stage_where
-        else " WHERE stage IS NOT NULL"
-    )
-    by_stage_sql = (
-        "SELECT stage, COUNT(*) AS c FROM analytics_events"
-        f"{stage_clause} GROUP BY stage ORDER BY c DESC, stage ASC"
-    )
-    by_stage_rows = _query(
-        connect_fn, url, by_stage_sql, stage_params, conn=conn,
-    )
-    by_stage = {row[0]: int(row[1]) for row in by_stage_rows}
+    # Reassert the `c DESC, label ASC` ordering the standalone
+    # queries used to enforce in SQL so the dashboard sees the same
+    # iteration order regardless of which UNION-ALL plan Postgres
+    # picks.
+    by_event_pairs.sort(key=lambda kv: (-kv[1], kv[0]))
+    by_stage_pairs.sort(key=lambda kv: (-kv[1], kv[0]))
+    by_event = {label: c for label, c in by_event_pairs}
+    by_stage = {label: c for label, c in by_stage_pairs}
+
+    if totals_row is None:
+        return Summary(by_event=by_event, by_stage=by_stage)
+
+    # The combined SQL guarantees a 13-column totals row, but
+    # fixtures that pre-date the agent-run / cache-token / timeout
+    # extensions may still emit shorter tuples; default the missing
+    # columns to zero so the test harness does not have to know
+    # about every new SQL column in unrelated cases. Column layout:
+    # 0=kind, 1=label, 2=total_events, 3=distinct_issues,
+    # 4=distinct_repos, 5=total_cost_usd, 6=total_input_tokens,
+    # 7=total_output_tokens, 8=total_agent_runs,
+    # 9=failed_agent_runs, 10=total_cache_read_tokens,
+    # 11=total_cache_write_tokens, 12=timed_out_agent_runs.
+    total_events = totals_row[2]
+    distinct_issues = totals_row[3]
+    distinct_repos = totals_row[4]
+    total_cost_usd = totals_row[5]
+    total_input_tokens = totals_row[6]
+    total_output_tokens = totals_row[7]
+    total_agent_runs = totals_row[8] if len(totals_row) > 8 else 0
+    failed_agent_runs = totals_row[9] if len(totals_row) > 9 else 0
+    total_cache_read_tokens = totals_row[10] if len(totals_row) > 10 else 0
+    total_cache_write_tokens = totals_row[11] if len(totals_row) > 11 else 0
+    timed_out_agent_runs = totals_row[12] if len(totals_row) > 12 else 0
 
     return Summary(
         total_events=int(total_events or 0),
@@ -1014,6 +1054,72 @@ def get_summary(
         total_cache_read_tokens=int(total_cache_read_tokens or 0),
         total_cache_write_tokens=int(total_cache_write_tokens or 0),
         timed_out_agent_runs=int(timed_out_agent_runs or 0),
+    )
+
+
+def get_kpi_prev(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
+) -> Summary:
+    """Previous-window scalars for the dashboard's KPI delta pills.
+
+    A trimmed `get_summary` that only computes the cost / token /
+    agent-run totals the dashboard reads off `prev_summary` -- the
+    KPI strip's delta indicators (`total_cost_usd`, the
+    `input + output + cache_read + cache_write` token sum,
+    `total_agent_runs`) and `compute_insights`'s cost-trend banner
+    (`total_cost_usd`). The full `Summary` shape's per-event /
+    per-stage breakdowns, distinct-issue / distinct-repo counts, and
+    failure / timeout counters are not consumed in the
+    previous-window path, so this reader skips the
+    `COUNT(DISTINCT)`s and the `GROUP BY` follow-ups entirely. The
+    return value is still a `Summary` so existing call sites
+    (`compute_insights(..., prev_summary=...)`) keep their shape;
+    the unread fields stay at their dataclass defaults.
+
+    Returns `Summary()` when `ANALYTICS_DB_URL` is unset (mirroring
+    `get_summary`). Filter semantics for `start` / `end` / `repo` /
+    `events` / `stages` / `issue` are identical to `get_summary` --
+    they share `_build_window_where`.
+    """
+    url = _resolve_db_url(db_url)
+    if conn is None and not url:
+        return Summary()
+    connect_fn = connect or _default_connect
+    where, params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=events, stages=stages, issue=issue,
+    )
+    sql = (
+        "SELECT "
+        "COALESCE(SUM(cost_usd), 0) AS total_cost_usd, "
+        "COALESCE(SUM(input_tokens), 0) AS total_input_tokens, "
+        "COALESCE(SUM(output_tokens), 0) AS total_output_tokens, "
+        "COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, "
+        "COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, "
+        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
+        "  AS total_agent_runs "
+        f"FROM analytics_events{where}"
+    )
+    rows = _query(connect_fn, url, sql, params, conn=conn)
+    if not rows:
+        return Summary()
+    row = rows[0]
+    return Summary(
+        total_cost_usd=float(row[0] or 0.0),
+        total_input_tokens=int(row[1] or 0),
+        total_output_tokens=int(row[2] or 0),
+        total_cache_read_tokens=int(row[3] or 0),
+        total_cache_write_tokens=int(row[4] or 0),
+        total_agent_runs=int(row[5] or 0) if len(row) > 5 else 0,
     )
 
 
