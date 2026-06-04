@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 from datetime import date, datetime, timezone
+from typing import Any
 from unittest.mock import patch
 
 
@@ -1631,6 +1632,389 @@ class ThroughputBreakdownTest(unittest.TestCase):
         self.assertIn("done", params)
         self.assertNotIn("rejected", params)
         self.assertNotIn("implementing", params)
+
+
+class AnalyticsConnectionScopeTest(unittest.TestCase):
+    """`analytics_connection` is a context manager that:
+
+    - yields `None` when ``ANALYTICS_DB_URL`` is unset (so the
+      dashboard's "no data" path still works);
+    - opens the connection lazily via the injected factory and reuses
+      the same connection across subsequent `with` blocks on the
+      same thread (the whole point of the rewrite -- the previous
+      `_query` opened/closed per call);
+    - closes-and-replaces the cached connection when an
+      `OperationalError` / `InterfaceError` (wrapped or raw) escapes
+      the `with` block, so the next caller opens a fresh socket;
+    - exposes `close_thread_local_connection()` for explicit
+      teardown.
+    """
+
+    def setUp(self) -> None:
+        # Each test reloads the module under a hermetic env -- that
+        # gives a fresh `_thread_local` -- but explicitly drop any
+        # stale entry first so a prior test's failure cannot bleed
+        # into this one.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read.close_thread_local_connection()
+        self.analytics_read = analytics_read
+
+    def test_yields_none_when_db_url_unset(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        with analytics_read.analytics_connection() as conn:
+            self.assertIsNone(conn)
+
+    def test_reuses_connection_across_scopes_on_same_thread(self) -> None:
+        analytics_read = self.analytics_read
+        opens: list[str] = []
+        conn_obj = _FakeConnection()
+
+        def _factory(url: str) -> _FakeConnection:
+            opens.append(url)
+            return conn_obj
+
+        with analytics_read.analytics_connection(connect=_factory) as c1:
+            self.assertIs(c1, conn_obj)
+        with analytics_read.analytics_connection(connect=_factory) as c2:
+            self.assertIs(c2, conn_obj)
+        self.assertEqual(len(opens), 1)
+        # Persistent connection: the CM must NOT close on normal exit.
+        self.assertEqual(conn_obj.close_called, 0)
+
+    def test_close_thread_local_closes_cached_connection(self) -> None:
+        analytics_read = self.analytics_read
+        conn_obj = _FakeConnection()
+        with analytics_read.analytics_connection(
+            connect=_connector(conn_obj)
+        ):
+            pass
+        analytics_read.close_thread_local_connection()
+        self.assertEqual(conn_obj.close_called, 1)
+        # Idempotent: a second teardown does not raise or re-close.
+        analytics_read.close_thread_local_connection()
+        self.assertEqual(conn_obj.close_called, 1)
+
+    def test_broken_connection_invalidates_thread_local(self) -> None:
+        analytics_read = self.analytics_read
+
+        # Stand-in for psycopg.OperationalError -- the class-name
+        # match in `_is_broken_connection_exc` lets the test simulate
+        # the broken-socket path without psycopg installed. The
+        # `__name__` must match verbatim (no leading underscore).
+        class OperationalError(Exception):
+            pass
+
+        first = _FakeConnection()
+        second = _FakeConnection()
+        sequence = iter([first, second])
+
+        def _factory(_url: str) -> _FakeConnection:
+            return next(sequence)
+
+        # First scope opens `first`, raises a broken-connection error
+        # mid-scope; the CM must close-and-discard `first` so the
+        # next scope opens `second`.
+        with self.assertRaises(OperationalError):
+            with analytics_read.analytics_connection(connect=_factory):
+                raise OperationalError("server closed the connection")
+        self.assertEqual(first.close_called, 1)
+
+        with analytics_read.analytics_connection(connect=_factory) as c2:
+            self.assertIs(c2, second)
+        # `second` is not closed on normal exit (persistent).
+        self.assertEqual(second.close_called, 0)
+
+    def test_unrelated_error_does_not_invalidate(self) -> None:
+        # A SQL syntax error or programmer mistake is NOT a torn-down
+        # socket; the cached connection must survive so subsequent
+        # reads on the same thread reuse it.
+        analytics_read = self.analytics_read
+        conn_obj = _FakeConnection()
+
+        def _factory(_url: str) -> _FakeConnection:
+            return conn_obj
+
+        with self.assertRaises(ValueError):
+            with analytics_read.analytics_connection(connect=_factory):
+                raise ValueError("not a broken socket")
+        self.assertEqual(conn_obj.close_called, 0)
+        with analytics_read.analytics_connection(connect=_factory) as c2:
+            self.assertIs(c2, conn_obj)
+
+    def test_switching_db_url_replaces_cached_connection(self) -> None:
+        # The thread-local must be keyed on the resolved URL: if a
+        # later `with` block on the same thread asks for a different
+        # `db_url=`, the stale socket has to close before a fresh
+        # one opens. Otherwise a thread that first read from DB A
+        # would silently keep reading from A even after the caller
+        # switched to DB B.
+        analytics_read = self.analytics_read
+        seen: list[str] = []
+        first = _FakeConnection()
+        second = _FakeConnection()
+        sequence = iter([first, second])
+
+        def _factory(url: str) -> _FakeConnection:
+            seen.append(url)
+            return next(sequence)
+
+        with analytics_read.analytics_connection(
+            db_url="postgresql://A/db", connect=_factory,
+        ) as c1:
+            self.assertIs(c1, first)
+        with analytics_read.analytics_connection(
+            db_url="postgresql://B/db", connect=_factory,
+        ) as c2:
+            self.assertIs(c2, second)
+        self.assertEqual(seen, ["postgresql://A/db", "postgresql://B/db"])
+        # `first` (opened for DB A) was closed when the URL changed.
+        self.assertEqual(first.close_called, 1)
+        # `second` persists for further reads on DB B.
+        self.assertEqual(second.close_called, 0)
+
+    def test_same_url_does_not_reopen(self) -> None:
+        # Sanity: re-entering with the same explicit URL on the same
+        # thread reuses the cached connection -- the URL-change
+        # invalidation must not over-trigger.
+        analytics_read = self.analytics_read
+        opens: list[str] = []
+        cached = _FakeConnection()
+
+        def _factory(url: str) -> _FakeConnection:
+            opens.append(url)
+            return cached
+
+        with analytics_read.analytics_connection(
+            db_url="postgresql://h/db", connect=_factory,
+        ):
+            pass
+        with analytics_read.analytics_connection(
+            db_url="postgresql://h/db", connect=_factory,
+        ) as c2:
+            self.assertIs(c2, cached)
+        self.assertEqual(opens, ["postgresql://h/db"])
+
+    def test_persistent_factory_sets_autocommit(self) -> None:
+        # The default factory wraps `psycopg.connect(db_url,
+        # autocommit=True)` so a long-lived thread-local socket does
+        # not leave the session idle in transaction after every
+        # SELECT. We stub `psycopg.connect` to capture the kwargs;
+        # the real driver does not need to be installed for this
+        # test to validate the contract.
+        analytics_read = self.analytics_read
+        captured: dict[str, Any] = {}
+
+        class _FakePsycopg:
+            class OperationalError(Exception):
+                pass
+
+            class InterfaceError(Exception):
+                pass
+
+            @staticmethod
+            def connect(url: str, **kwargs: Any) -> _FakeConnection:
+                captured["url"] = url
+                captured["kwargs"] = kwargs
+                return _FakeConnection()
+
+        with patch.dict(sys.modules, {"psycopg": _FakePsycopg}):
+            conn = analytics_read._default_persistent_connect(
+                "postgresql://h/db"
+            )
+        self.assertEqual(captured["url"], "postgresql://h/db")
+        self.assertEqual(captured["kwargs"].get("autocommit"), True)
+        self.assertIsNotNone(conn)
+
+
+class ConnReusePathTest(unittest.TestCase):
+    """The `conn=` kwarg on every public read helper lets a caller
+    (typically the dashboard inside an `analytics_connection` scope)
+    reuse a single connection across many reads instead of paying
+    the per-call handshake. When `conn=` is provided the helper
+    runs the query directly on that connection without ever calling
+    the `connect=` factory or closing the connection.
+    """
+
+    def test_get_summary_reuses_passed_conn_without_calling_factory(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        # Totals must return one row so `get_summary` does not
+        # short-circuit before running the by-event / by-stage
+        # follow-ups; the values themselves are irrelevant here.
+        conn.rows_for = {
+            "AS total_events": [(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)],
+        }
+        opens: list[str] = []
+
+        def _factory(url: str) -> _FakeConnection:
+            opens.append(url)
+            return _FakeConnection()
+
+        analytics_read.get_summary(connect=_factory, conn=conn)
+        self.assertEqual(opens, [])  # factory never called
+        # The 3 summary queries (totals + by_event + by_stage) all
+        # ran on the provided connection.
+        self.assertEqual(len(conn.executed), 3)
+        # The reuse path never closes the caller's connection.
+        self.assertEqual(conn.close_called, 0)
+
+    def test_get_filter_options_runs_5_queries_on_one_conn(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_filter_options(
+            connect=lambda url: _FakeConnection(),  # must not be used
+            conn=conn,
+        )
+        self.assertEqual(len(conn.executed), 5)
+        self.assertEqual(conn.close_called, 0)
+
+    def test_get_data_extent_reuses_passed_conn(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "data_min_ts": [
+                (
+                    datetime(2026, 5, 1, tzinfo=timezone.utc),
+                    datetime(2026, 5, 28, tzinfo=timezone.utc),
+                )
+            ]
+        }
+        extent = analytics_read.get_data_extent(
+            connect=lambda url: _FakeConnection(), conn=conn,
+        )
+        self.assertIsNotNone(extent.min_ts)
+        self.assertIsNotNone(extent.max_ts)
+        self.assertEqual(conn.close_called, 0)
+
+    def test_conn_runs_query_even_when_global_db_url_unset(self) -> None:
+        # The `conn=` path is a complete escape hatch: a caller that
+        # already holds a connection (e.g. opened with an explicit
+        # `analytics_connection(db_url=...)`) must be able to run
+        # every helper without the global `ANALYTICS_DB_URL` being
+        # set. Without this, `with analytics_connection(db_url=X) as c:
+        # get_data_extent(conn=c)` would silently return
+        # `DataExtent()` unless the caller also repeated `db_url=X`
+        # on every helper.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        # `_never_called` proves the connect-factory path is not
+        # exercised: the only way it would land is if a helper
+        # short-circuited on the unset URL and then tried to open
+        # its own socket, which is the bug we are guarding against.
+        def _never_called(_url: str) -> _FakeConnection:
+            raise AssertionError(
+                "connect= must not be called when conn= is supplied"
+            )
+
+        # `get_data_extent` -- single query, easy to assert.
+        extent_conn = _FakeConnection()
+        extent_conn.rows_for = {
+            "data_min_ts": [
+                (
+                    datetime(2026, 5, 1, tzinfo=timezone.utc),
+                    datetime(2026, 5, 28, tzinfo=timezone.utc),
+                )
+            ],
+        }
+        extent = analytics_read.get_data_extent(
+            conn=extent_conn, connect=_never_called,
+        )
+        self.assertEqual(len(extent_conn.executed), 1)
+        self.assertEqual(extent_conn.close_called, 0)
+        self.assertIsNotNone(extent.min_ts)
+
+        # `get_filter_options` -- 5 distinct queries on the same
+        # connection. A fresh fake avoids needle collisions with
+        # other helpers.
+        opts_conn = _FakeConnection()
+        opts_conn.rows_for = {"SELECT DISTINCT ": [("owner/a",)]}
+        opts = analytics_read.get_filter_options(
+            conn=opts_conn, connect=_never_called,
+        )
+        self.assertEqual(len(opts_conn.executed), 5)
+        self.assertEqual(opts.repos, ("owner/a",))
+
+        # `get_summary` -- totals + by_event + by_stage on one conn.
+        summary_conn = _FakeConnection()
+        # Match the totals SELECT distinctively (the alias
+        # `AS total_events` only appears in the totals query) and
+        # return an 11-tuple matching the SELECT list.
+        summary_conn.rows_for = {
+            "AS total_events": [(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)],
+        }
+        analytics_read.get_summary(conn=summary_conn, connect=_never_called)
+        self.assertEqual(len(summary_conn.executed), 3)
+        self.assertEqual(summary_conn.close_called, 0)
+
+        # `get_time_series` -- single query, exercises a view-free
+        # base-table helper to round out the coverage.
+        ts_conn = _FakeConnection()
+        analytics_read.get_time_series(
+            conn=ts_conn, connect=_never_called,
+        )
+        self.assertEqual(len(ts_conn.executed), 1)
+        self.assertEqual(ts_conn.close_called, 0)
+
+    def test_conn_none_preserves_legacy_open_close_path(self) -> None:
+        # Backwards-compat: callers that do not pass `conn=` still
+        # see the existing one-connection-per-call shape so the
+        # original tests (and any other consumers) keep working.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "AS total_events": [(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)],
+        }
+        analytics_read.get_summary(connect=_connector(conn))
+        # 3 queries -> 3 opens -> 3 closes.
+        self.assertEqual(len(conn.executed), 3)
+        self.assertEqual(conn.close_called, 3)
+
+
+class IsBrokenConnectionExcTest(unittest.TestCase):
+    """The broken-connection detector unwraps `AnalyticsReadError`
+    (every driver-level failure goes through `_query` which wraps)
+    and matches by class name so a fake without psycopg installed
+    can drive the close-and-replace path.
+    """
+
+    def test_matches_by_class_name(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+
+        class OperationalError(Exception):
+            pass
+
+        class InterfaceError(Exception):
+            pass
+
+        self.assertTrue(
+            analytics_read._is_broken_connection_exc(
+                OperationalError("dead")
+            )
+        )
+        self.assertTrue(
+            analytics_read._is_broken_connection_exc(
+                InterfaceError("dead")
+            )
+        )
+
+    def test_unwraps_analytics_read_error(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+
+        class OperationalError(Exception):
+            pass
+
+        wrapper = analytics_read.AnalyticsReadError("wrap")
+        wrapper.__cause__ = OperationalError("dead")
+        self.assertTrue(
+            analytics_read._is_broken_connection_exc(wrapper)
+        )
+
+    def test_unrelated_error_is_not_broken(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        self.assertFalse(
+            analytics_read._is_broken_connection_exc(
+                ValueError("not a broken socket")
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -2,11 +2,26 @@
 
 ## Status
 
+Layer 1 (per-thread persistent connection + opt-in `conn=` on every
+reader) shipped via #383. `orchestrator/analytics/read.py` now exposes
+`analytics_connection()` -- a context manager backed by a URL-keyed
+thread-local that opens real psycopg connections with
+`autocommit=True`, closes-and-replaces on `OperationalError` /
+`InterfaceError`, and is torn down explicitly through
+`close_thread_local_connection()`; every `get_*` helper accepts an
+optional `conn=` and bypasses the unset-`ANALYTICS_DB_URL`
+short-circuit when one is supplied. The dashboard's `@st.cache_data`
+wrappers in `orchestrator/dashboard.py` now check out the
+thread-local inside their function bodies so the connection stays
+out of the cache key.
+
 Layer 4 schema + sync half (the `analytics_daily_rollup` materialized
 view, its supporting indexes, and the post-commit refresh hook in
-`orchestrator/analytics/sync.py`) shipped via #382. Layers 1-3 and 5,
-plus the Layer 4 dashboard cutover that points the rollup-eligible
-widgets at the new view, remain open.
+`orchestrator/analytics/sync.py`) shipped via #382. The Layer 4
+dashboard cutover that points the rollup-eligible widgets at the new
+view, plus Layers 2, 3, 5, and 6 (parallel fan-out, collapsed
+multi-query readers, UX polish, predicate-shape audit) remain to be
+designed against measurements taken after Layer 1.
 
 ## Symptom
 

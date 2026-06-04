@@ -933,5 +933,123 @@ class CacheKeyTest(unittest.TestCase):
         self.assertEqual(empty[4], ())
 
 
+class CachedReadConnectionScopingTest(unittest.TestCase):
+    """The redesigned read path reuses a thread-local analytics
+    connection across the dashboard's 14 reads instead of opening a
+    socket per call (issue #376). The Streamlit cache keys must
+    therefore stay connection-free -- a raw `psycopg.Connection` is
+    not a hashable cache key and every reload would otherwise look
+    like a cache miss.
+
+    These tests inspect the source of `dashboard.main` rather than
+    driving it under Streamlit so the suite stays hermetic against
+    the dashboard dependency group (Streamlit + Plotly are opt-in).
+    """
+
+    def _main_source(self) -> str:
+        import inspect
+        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        return inspect.getsource(dashboard.main)
+
+    def _drilldown_source(self) -> str:
+        import inspect
+        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        return inspect.getsource(dashboard._render_drilldown)
+
+    def test_main_uses_analytics_connection_scope(self) -> None:
+        src = self._main_source()
+        self.assertIn(
+            "analytics_read.analytics_connection()", src,
+            "dashboard.main must scope reads through "
+            "`analytics_connection` so the per-thread persistent "
+            "socket is reused across widgets",
+        )
+
+    def test_cached_wrappers_do_not_accept_conn_arg(self) -> None:
+        # Each `_read_*` wrapper's positional parameter list is the
+        # cache key. `conn` must NOT appear there -- it would force
+        # st.cache_data to hash a connection object, which crashes
+        # on the unhashable psycopg.Connection and (with a stringy
+        # fallback) treats every refreshed conn as a cache miss.
+        src = self._main_source()
+        wrapper_names = [
+            "_read_summary",
+            "_read_time_series",
+            "_read_stage_breakdown",
+            "_read_recent_agent_exits",
+            "_read_top_cost_issues",
+            "_read_review_round",
+            "_read_backend_efficiency",
+            "_read_repo_breakdown",
+            "_read_cost_coverage",
+            "_read_hourly_heatmap",
+            "_read_throughput",
+            "_read_backend_daily_tokens",
+        ]
+        for name in wrapper_names:
+            with self.subTest(name=name):
+                # Each wrapper's signature line lives inside main()'s
+                # source; check that none mention `conn` as a
+                # parameter (which would land in the cache key).
+                marker = f"def {name}("
+                self.assertIn(marker, src)
+                # Pull the def line(s) up to the closing paren so we
+                # can assert `conn` is not in the parameter list. The
+                # def signatures are short (one or two lines), so a
+                # narrow window around the marker is enough.
+                head = src.index(marker)
+                tail = src.index("):", head)
+                signature = src[head:tail]
+                self.assertNotIn(
+                    " conn", signature,
+                    f"{name} must not accept a `conn` argument "
+                    "(it would become part of the cache key)",
+                )
+
+    def test_wrappers_pass_conn_kwarg_to_read_helpers(self) -> None:
+        # Inside each wrapper's body, the conn from
+        # `analytics_connection()` must be forwarded to the read
+        # helper -- otherwise we open a new socket per call (the very
+        # thing the refactor is supposed to eliminate).
+        main_src = self._main_source()
+        # 12 cached wrappers + the extent / options reads at the top
+        # of main() = 14 forwards inside main(). The per-issue
+        # drill-down lives in `_render_drilldown` and is checked
+        # separately so this assertion can stay tight.
+        self.assertGreaterEqual(
+            main_src.count("conn=conn"), 14,
+            "every read inside main() should forward the scoped "
+            "connection from `analytics_connection`",
+        )
+        drilldown_src = self._drilldown_source()
+        self.assertIn("analytics_read.analytics_connection()", drilldown_src)
+        self.assertIn("conn=conn", drilldown_src)
+
+
+class AnalyticsConnectionExposureTest(unittest.TestCase):
+    """`analytics_connection` and `close_thread_local_connection` are
+    the new public surface from `analytics_read`. The dashboard
+    imports the module wholesale (`from orchestrator.analytics import
+    read as analytics_read`), so the symbols must be reachable as
+    attributes for both `with analytics_read.analytics_connection()`
+    and any shutdown hook that wants to drain the thread-local.
+    """
+
+    def test_analytics_connection_is_a_context_manager(self) -> None:
+        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        self.assertTrue(
+            hasattr(dashboard.analytics_read, "analytics_connection")
+        )
+        self.assertTrue(
+            hasattr(
+                dashboard.analytics_read, "close_thread_local_connection"
+            )
+        )
+        # Quick smoke: the unset-URL branch yields None without
+        # touching any connect factory.
+        with dashboard.analytics_read.analytics_connection() as conn:
+            self.assertIsNone(conn)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -821,8 +821,9 @@ def main() -> None:
         st.stop()
 
     try:
-        extent = analytics_read.get_data_extent()
-        options = analytics_read.get_filter_options()
+        with analytics_read.analytics_connection() as conn:
+            extent = analytics_read.get_data_extent(conn=conn)
+            options = analytics_read.get_filter_options(conn=conn)
     except analytics_read.AnalyticsReadError as e:
         st.error(
             "Could not load analytics filter options: "
@@ -965,44 +966,65 @@ def main() -> None:
         prev_w, repo_filter, event_filter, stage_filter, issue_filter
     )
 
+    # Connection scoping: each cached wrapper checks out a thread-local
+    # analytics connection inside its body via `analytics_connection()`
+    # rather than threading a connection through the cache key (a raw
+    # psycopg.Connection is not hashable and would crash the wrapper,
+    # and every reload would otherwise look like a cache miss). The
+    # thread-local persists across wrappers in the same render pass,
+    # so the first cache-miss pays the ~1 s psycopg handshake and the
+    # remaining 13 reads reuse the open socket. On a broken-connection
+    # error inside a `with` block the CM closes the cached socket so
+    # the next wrapper opens a fresh one. The cache key stays
+    # `(start, end, repo, events_t, stages_t, issue)` -- exactly the
+    # filter tuple, which is what we want anyway.
+
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_summary(start, end, repo, events_t, stages_t, issue):
-        return analytics_read.get_summary(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_summary(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_time_series(start, end, repo, events_t, stages_t, issue):
-        return analytics_read.get_time_series(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_time_series(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_stage_breakdown(start, end, repo, events_t, stages_t, issue):
-        return analytics_read.get_stage_breakdown(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_stage_breakdown(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_recent_agent_exits(
         start, end, repo, events_t, stages_t, issue
     ):
-        return analytics_read.get_recent_agent_exits(
-            limit=DEFAULT_RECENT_AGENT_EXITS,
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_recent_agent_exits(
+                limit=DEFAULT_RECENT_AGENT_EXITS,
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_top_cost_issues(start, end, repo, events_t, stages_t, issue):
@@ -1011,81 +1033,97 @@ def main() -> None:
         # silently drops older high-cost issues that fall outside the
         # truncated set, so the redesigned "Most expensive issues"
         # panel must be cost-ordered at the SQL layer.
-        return analytics_read.get_issues(
-            limit=DEFAULT_EXPENSIVE_LIMIT,
-            sort_by=analytics_read.SORT_BY_COST,
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_issues(
+                limit=DEFAULT_EXPENSIVE_LIMIT,
+                sort_by=analytics_read.SORT_BY_COST,
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_review_round(start, end, repo, events_t, stages_t, issue):
-        return analytics_read.get_review_round_breakdown(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_review_round_breakdown(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_backend_efficiency(
         start, end, repo, events_t, stages_t, issue
     ):
-        return analytics_read.get_backend_efficiency(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_backend_efficiency(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_repo_breakdown(start, end, repo, events_t, stages_t, issue):
-        return analytics_read.get_repo_breakdown(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_repo_breakdown(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_cost_coverage(start, end, repo, events_t, stages_t, issue):
-        return analytics_read.get_cost_coverage(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_cost_coverage(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_hourly_heatmap(start, end, repo, events_t, stages_t, issue):
-        return analytics_read.get_hourly_heatmap(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_hourly_heatmap(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_throughput(start, end, repo, events_t, stages_t, issue):
-        return analytics_read.get_throughput_breakdown(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_throughput_breakdown(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_backend_daily_tokens(
         start, end, repo, events_t, stages_t, issue
     ):
-        return analytics_read.get_backend_daily_tokens(
-            start=start, end=end, repo=repo,
-            events=list(events_t) if events_t is not None else None,
-            stages=list(stages_t) if stages_t is not None else None,
-            issue=issue,
-        )
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_backend_daily_tokens(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
 
     try:
         summary = _read_summary(*key)
@@ -1639,14 +1677,16 @@ def _render_drilldown(
         )
         return
     try:
-        trace = analytics_read.get_issue_events(
-            repo=repo_filter,
-            issue=issue_input_parsed,
-            start=window.start,
-            end=window.end,
-            events=list(event_filter) if event_filter is not None else None,
-            stages=list(stage_filter) if stage_filter is not None else None,
-        )
+        with analytics_read.analytics_connection() as conn:
+            trace = analytics_read.get_issue_events(
+                repo=repo_filter,
+                issue=issue_input_parsed,
+                start=window.start,
+                end=window.end,
+                events=list(event_filter) if event_filter is not None else None,
+                stages=list(stage_filter) if stage_filter is not None else None,
+                conn=conn,
+            )
     except analytics_read.AnalyticsReadError as e:
         st.error(f"Issue drill-down failed: {e}")
         return
