@@ -10,8 +10,8 @@ mirrors the standalone HTML mock the issue ships:
   summary, and the in-range spend pill.
 - A filter bar carrying the `3D` / `7D` / `All` preset selector and
   the two-date custom range.
-- Computed insight banners (rework dominates, spend is back-loaded,
-  unpriced cost coverage).
+- Computed insight banners (failure rate, cost trend, unpriced cost
+  coverage).
 - A four-tile KPI strip (total spend, total tokens, cost / resolved
   issue, rework share) with previous-window deltas.
 - A grid of cards: hero spend / token usage stacked-area chart,
@@ -117,9 +117,6 @@ DEFAULT_PRESET = PRESET_ALL
 FAILURE_RATE_BANNER_THRESHOLD = 0.10
 COST_DELTA_BANNER_THRESHOLD = 0.25
 UNPRICED_COVERAGE_THRESHOLD = 0.10
-# Share of spend in review rounds >= 1 that flips the redesigned
-# "rework dominates" banner. Matches the standalone mock's `>= 30%`.
-REWORK_SHARE_BANNER_THRESHOLD = 0.30
 UNPRICED_COST_SOURCES: frozenset[str] = frozenset({"unknown-price", "unknown"})
 # Bucket strings the review-round breakdown emits whose runs are
 # "rework" (i.e. happened after the initial pass). Used to compute the
@@ -314,8 +311,6 @@ def compute_insights(
     *,
     prev_summary: Optional[Summary] = None,
     cost_coverage_rows: Sequence[CostCoverageRow] = (),
-    review_round_rows: Sequence[Any] = (),
-    stage_rows: Sequence[Any] = (),
 ) -> list[InsightBanner]:
     """Banner lines surfaced at the top of the redesigned page.
 
@@ -329,15 +324,6 @@ def compute_insights(
     - Unpriced cost coverage exceeds `UNPRICED_COVERAGE_THRESHOLD`:
       the pricing table in `orchestrator.usage` is missing SKUs the
       parser is seeing in the wild.
-    - Rework share exceeds `REWORK_SHARE_BANNER_THRESHOLD`: more
-      than 30 % of spend lands in review rounds after the first.
-    - Spend is back-loaded: `validating` + `documenting` cost more
-      than `implementing` (and `implementing` is non-zero so the
-      ratio is meaningful). Reads from `stage_rows`
-      (`StageBreakdown.total_cost_usd` per stage) so the same query
-      that drives the "Cost by workflow stage" chart drives the
-      insight too. Mirrors the standalone mock's `vCost + dCost >
-      iCost` heuristic.
 
     The helper returns an empty list when nothing crosses a
     threshold, so the caller can branch on `if banners:` for the
@@ -396,56 +382,6 @@ def compute_insights(
                         ),
                     )
                 )
-    if review_round_rows:
-        total_cost = sum(
-            float(getattr(r, "total_cost_usd", 0.0) or 0.0)
-            for r in review_round_rows
-        )
-        rework_cost = sum(
-            float(getattr(r, "total_cost_usd", 0.0) or 0.0)
-            for r in review_round_rows
-            if r.bucket in REWORK_BUCKETS
-        )
-        if total_cost > 0:
-            share = rework_cost / total_cost
-            if share >= REWORK_SHARE_BANNER_THRESHOLD:
-                banners.append(
-                    InsightBanner(
-                        severity="warning",
-                        message=(
-                            f"Rework dominates spend -- review rounds "
-                            f">= 1 account for {share * 100:.0f}% "
-                            f"(${rework_cost:,.2f}) of cost in this "
-                            "window."
-                        ),
-                    )
-                )
-    # "Spend is back-loaded" -- validating + documenting cost more
-    # than implementing while implementing is non-zero. The standalone
-    # mock surfaces this so the operator can spot when the post-PR
-    # review / docs loop is dominating the implementer pass.
-    if stage_rows:
-        stage_cost = {
-            getattr(r, "stage", None): float(
-                getattr(r, "total_cost_usd", 0.0) or 0.0
-            )
-            for r in stage_rows
-        }
-        v_cost = stage_cost.get("validating", 0.0)
-        d_cost = stage_cost.get("documenting", 0.0)
-        i_cost = stage_cost.get("implementing", 0.0)
-        if i_cost > 0 and (v_cost + d_cost) > i_cost:
-            banners.append(
-                InsightBanner(
-                    severity="info",
-                    message=(
-                        f"Spend is back-loaded -- validating "
-                        f"(${v_cost:,.2f}) + documenting "
-                        f"(${d_cost:,.2f}) cost more than implementing "
-                        f"(${i_cost:,.2f})."
-                    ),
-                )
-            )
     return banners
 
 
@@ -1218,8 +1154,6 @@ def main() -> None:
         summary,
         prev_summary=prev_summary,
         cost_coverage_rows=cost_coverage_rows,
-        review_round_rows=review_round_rows,
-        stage_rows=stage_rows,
     )
     if banners:
         st.markdown(_insights_html(banners), unsafe_allow_html=True)

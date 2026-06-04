@@ -456,11 +456,7 @@ wrapped in `st.cache_data` keyed by
 `(start, end, repo, events, stages, issue)` so a filter change
 invalidates every cached query in lockstep. The body renders, in
 order: computed insight banners (failure rate ≥ 10 %, cost swing
-≥ 25 % vs the previous window, unpriced cost coverage ≥ 10 %,
-rework share ≥ 30 % from `get_review_round_breakdown`, and a
-"spend is back-loaded" callout when the per-stage
-`validating + documenting` cost exceeds `implementing` cost and
-the latter is non-zero), a
+≥ 25 % vs the previous window, unpriced cost coverage ≥ 10 %), a
 four-tile KPI strip (total spend, total tokens, cost / resolved
 issue, rework share — each with an inline-SVG sparkline and a
 previous-window delta where applicable), the hero

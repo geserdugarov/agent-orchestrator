@@ -567,126 +567,6 @@ class ComputeInsightsTest(unittest.TestCase):
             [],
         )
 
-    def test_rework_share_above_threshold_emits_warning(self) -> None:
-        # Spend in review rounds >= 1 exceeds 30 % -- surface the
-        # "rework dominates" insight from the standalone mock.
-        _, dashboard = _reload()
-        from orchestrator.analytics.read import ReviewRoundBucketRow
-        summary = self._summary()
-        rounds = [
-            ReviewRoundBucketRow(
-                bucket="0", runs=10, failed=0, total_cost_usd=40.0
-            ),
-            ReviewRoundBucketRow(
-                bucket="1", runs=5, failed=0, total_cost_usd=30.0
-            ),
-            ReviewRoundBucketRow(
-                bucket="3-5", runs=2, failed=1, total_cost_usd=30.0
-            ),
-        ]
-        banners = dashboard.compute_insights(
-            summary, review_round_rows=rounds
-        )
-        self.assertTrue(
-            any(
-                b.severity == "warning"
-                and "Rework dominates spend" in b.message
-                for b in banners
-            )
-        )
-
-    def test_rework_share_below_threshold_skips(self) -> None:
-        _, dashboard = _reload()
-        from orchestrator.analytics.read import ReviewRoundBucketRow
-        summary = self._summary()
-        rounds = [
-            ReviewRoundBucketRow(
-                bucket="0", runs=10, failed=0, total_cost_usd=80.0
-            ),
-            ReviewRoundBucketRow(
-                bucket="1", runs=1, failed=0, total_cost_usd=10.0
-            ),
-        ]
-        self.assertEqual(
-            dashboard.compute_insights(summary, review_round_rows=rounds),
-            [],
-        )
-
-    def test_back_loaded_spend_emits_info(self) -> None:
-        # validating + documenting > implementing while implementing
-        # is non-zero -- surface the standalone mock's "Spend is
-        # back-loaded" insight.
-        _, dashboard = _reload()
-        from orchestrator.analytics.read import StageBreakdown
-        summary = self._summary()
-        stages = [
-            StageBreakdown(
-                stage="implementing", count=10, total_cost_usd=20.0,
-                runs=5,
-            ),
-            StageBreakdown(
-                stage="validating", count=4, total_cost_usd=15.0,
-                runs=4,
-            ),
-            StageBreakdown(
-                stage="documenting", count=3, total_cost_usd=10.0,
-                runs=3,
-            ),
-        ]
-        banners = dashboard.compute_insights(
-            summary, stage_rows=stages
-        )
-        self.assertTrue(
-            any(
-                b.severity == "info"
-                and "Spend is back-loaded" in b.message
-                and "implementing ($20.00)" in b.message
-                for b in banners
-            )
-        )
-
-    def test_back_loaded_skipped_when_implementing_dominates(self) -> None:
-        # validating + documenting <= implementing -- no banner.
-        _, dashboard = _reload()
-        from orchestrator.analytics.read import StageBreakdown
-        summary = self._summary()
-        stages = [
-            StageBreakdown(
-                stage="implementing", count=20, total_cost_usd=80.0,
-                runs=10,
-            ),
-            StageBreakdown(
-                stage="validating", count=2, total_cost_usd=8.0,
-                runs=2,
-            ),
-            StageBreakdown(
-                stage="documenting", count=1, total_cost_usd=4.0,
-                runs=1,
-            ),
-        ]
-        self.assertEqual(
-            dashboard.compute_insights(summary, stage_rows=stages),
-            [],
-        )
-
-    def test_back_loaded_skipped_when_implementing_zero(self) -> None:
-        # When implementing cost is zero the ratio is meaningless;
-        # the standalone mock guards on `iCost > 0` and we mirror
-        # that.
-        _, dashboard = _reload()
-        from orchestrator.analytics.read import StageBreakdown
-        summary = self._summary()
-        stages = [
-            StageBreakdown(
-                stage="validating", count=2, total_cost_usd=8.0,
-                runs=2,
-            ),
-        ]
-        self.assertEqual(
-            dashboard.compute_insights(summary, stage_rows=stages),
-            [],
-        )
-
 
 class ReliabilityTileDataTest(unittest.TestCase):
     """The redesigned reliability panel sources every tile from
@@ -755,9 +635,9 @@ class ReliabilityTileDataTest(unittest.TestCase):
 
 
 class ReworkTotalsTest(unittest.TestCase):
-    """The rework KPI tile and the "rework dominates" insight both
-    read off `rework_totals`. Pin the shape so a future tweak does
-    not silently shift which buckets count as rework.
+    """The rework KPI tile reads off `rework_totals`. Pin the shape so
+    a future tweak does not silently shift which buckets count as
+    rework.
     """
 
     def test_initial_bucket_excluded(self) -> None:
@@ -977,13 +857,13 @@ class InsightsHtmlTest(unittest.TestCase):
         _, dashboard = _reload()
         banner = dashboard.InsightBanner(
             severity="warning",
-            message="Rework dominates spend -- rounds >= 1 account for 35%.",
+            message="Agent failure rate >= 10% in this window.",
         )
         out = dashboard._insights_html([banner])
-        # The message body lands verbatim and the severity word is
-        # NOT prefixed.
+        # The message body lands verbatim (with HTML-escaping) and the
+        # severity word is NOT prefixed.
         self.assertIn(
-            "Rework dominates spend -- rounds &gt;= 1 account for 35%.",
+            "Agent failure rate &gt;= 10% in this window.",
             out,
         )
         self.assertNotIn("<strong>Warning.</strong>", out)
