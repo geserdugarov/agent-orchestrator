@@ -60,6 +60,15 @@ log = logging.getLogger(__name__)
 # shows steady forward motion without flooding the log.
 _PROGRESS_INTERVAL = 500
 
+# Number of validated row tuples accumulated before a `cur.executemany`
+# flush. Sized to match `_PROGRESS_INTERVAL` so each flush also drops
+# one progress line and a multi-thousand-record replay pays one
+# Postgres round-trip per batch instead of one per row. Lives next to
+# `_PROGRESS_INTERVAL` as an implementation-only knob; tuning it
+# requires no CLI flag, env var, or schema change. See
+# `plans/analytics-sync-performance.md` for the measurement gate.
+_BATCH_SIZE = 500
+
 # Columns the table promotes from the JSONL record; anything else lands
 # in `extras` JSONB so a JSONL record from a newer orchestrator version
 # never loses fields. Kept here (not in `orchestrator/analytics/`) because
@@ -417,65 +426,78 @@ def sync_jsonl_to_postgres(
 
     try:
         with conn.cursor() as cur:
+            batch: list[tuple] = []
+
+            def _flush_batch() -> None:
+                # Single `executemany` per batch collapses N protocol
+                # round-trips into one pipeline; `ON CONFLICT
+                # (content_hash) DO NOTHING` is still the server-side
+                # dedup backstop. psycopg's rowcount on `executemany`
+                # is the total rows inserted across the batch, so the
+                # duplicate count is `len(batch) - rowcount`. A driver
+                # that reports -1 falls back to counting the whole
+                # batch as inserted -- the database is the authority
+                # and `inserted` stays a lower bound only if a driver
+                # bug strips the count entirely.
+                nonlocal inserted, skipped_duplicate
+                if not batch:
+                    return
+                cur.executemany(insert_sql, batch)
+                rowcount = getattr(cur, "rowcount", len(batch))
+                if rowcount < 0:
+                    rowcount = len(batch)
+                inserted += rowcount
+                skipped_duplicate += len(batch) - rowcount
+                batch.clear()
+                _emit_progress()
+
             with Path(log_path).open("r", encoding="utf-8") as fh:
                 for line_number, raw_line in enumerate(fh, start=1):
                     total_lines += 1
+                    stripped = raw_line.strip()
+                    if not stripped:
+                        continue
                     try:
-                        stripped = raw_line.strip()
-                        if not stripped:
-                            continue
-                        try:
-                            record = json.loads(stripped)
-                        except json.JSONDecodeError:
-                            skipped_malformed += 1
-                            malformed_lines.append(line_number)
-                            log.warning(
-                                "analytics_sync: skipping line %d (not JSON) in %s",
-                                line_number, log_path,
-                            )
-                            continue
-                        if not isinstance(record, dict):
-                            skipped_malformed += 1
-                            malformed_lines.append(line_number)
-                            log.warning(
-                                "analytics_sync: skipping line %d (JSON not an object) in %s",
-                                line_number, log_path,
-                            )
-                            continue
-                        split = _split_row(record)
-                        if split is None:
-                            skipped_malformed += 1
-                            malformed_lines.append(line_number)
-                            log.warning(
-                                "analytics_sync: skipping line %d (missing/invalid required keys) in %s",
-                                line_number, log_path,
-                            )
-                            continue
-                        columns, extras = split
-                        content_hash = _content_hash(record)
-                        values = _row_values(
-                            columns,
-                            extras,
-                            source_path_str,
-                            line_number,
-                            content_hash,
-                            json_adapter_fn,
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        skipped_malformed += 1
+                        malformed_lines.append(line_number)
+                        log.warning(
+                            "analytics_sync: skipping line %d (not JSON) in %s",
+                            line_number, log_path,
                         )
-                        cur.execute(insert_sql, values)
-                        # psycopg's rowcount is 1 on insert, 0 on conflict
-                        # skip; fall back to counting inserts as "new" so
-                        # a driver that reports -1 still produces useful
-                        # totals (the duplicate count becomes 0 in that
-                        # case, which is acceptable -- the database is the
-                        # authority).
-                        rowcount = getattr(cur, "rowcount", 1)
-                        if rowcount == 0:
-                            skipped_duplicate += 1
-                        else:
-                            inserted += 1
-                    finally:
-                        if total_lines % _PROGRESS_INTERVAL == 0:
-                            _emit_progress()
+                        continue
+                    if not isinstance(record, dict):
+                        skipped_malformed += 1
+                        malformed_lines.append(line_number)
+                        log.warning(
+                            "analytics_sync: skipping line %d (JSON not an object) in %s",
+                            line_number, log_path,
+                        )
+                        continue
+                    split = _split_row(record)
+                    if split is None:
+                        skipped_malformed += 1
+                        malformed_lines.append(line_number)
+                        log.warning(
+                            "analytics_sync: skipping line %d (missing/invalid required keys) in %s",
+                            line_number, log_path,
+                        )
+                        continue
+                    columns, extras = split
+                    content_hash = _content_hash(record)
+                    values = _row_values(
+                        columns,
+                        extras,
+                        source_path_str,
+                        line_number,
+                        content_hash,
+                        json_adapter_fn,
+                    )
+                    batch.append(values)
+                    if len(batch) >= _BATCH_SIZE:
+                        _flush_batch()
+            _flush_batch()
         log.info(
             "analytics_sync: committing transaction (lines=%d inserted=%d "
             "duplicate=%d malformed=%d elapsed=%.3fs)",

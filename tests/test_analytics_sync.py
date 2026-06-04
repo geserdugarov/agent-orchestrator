@@ -45,12 +45,17 @@ def _reload(env: dict[str, str] | None = None):
 
 
 class _FakeCursor:
-    """Records every (sql, params) executed and emulates ON CONFLICT.
+    """Records every `executemany` batch and emulates ON CONFLICT.
 
     Implemented as a context manager so the production `with
-    conn.cursor() as cur:` block works unchanged. `rowcount` mirrors
-    psycopg's "1 on insert, 0 on conflict" convention; tests assert
-    against the recorded inserts.
+    conn.cursor() as cur:` block works unchanged. The production sync
+    accumulates validated row tuples and flushes them per batch via
+    `cur.executemany`; this fake fans the params_seq out into the
+    flattened `inserts` / `duplicate_calls` recorders so per-row
+    assertions keep working, and records the raw (sql, params_list)
+    pair in `batches` so tests can assert on batch shape. `rowcount`
+    mirrors psycopg's per-`executemany` total: the count of rows
+    that actually landed (a conflict skip contributes 0).
     """
 
     def __init__(self, store: "_FakeConnection") -> None:
@@ -63,47 +68,54 @@ class _FakeCursor:
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
 
-    def execute(self, sql: str, params: tuple) -> None:
-        # Hash is the last param; relies on the column order baked
-        # into `_build_insert_sql`. If the schema's column order ever
-        # changes the test will fail loudly here -- which is fine,
-        # the test would be wrong in lock-step with the production
-        # code.
-        content_hash = params[-1]
-        if content_hash in self._store.seen_hashes:
-            self.rowcount = 0
-            self._store.duplicate_calls.append((sql, params))
-        else:
-            self._store.seen_hashes.add(content_hash)
-            self._store.inserts.append((sql, params))
-            self.rowcount = 1
+    def executemany(self, sql: str, params_seq) -> None:
+        # Materialize once so a generator caller can't double-spend
+        # the iterator between the recorder and the rowcount math.
+        params_list = list(params_seq)
+        self._store.batches.append((sql, params_list))
+        inserted_in_batch = 0
+        for params in params_list:
+            # Hash is the last param; relies on the column order
+            # baked into `_build_insert_sql`. If the schema's column
+            # order ever changes the test will fail loudly here --
+            # which is fine, the test would be wrong in lock-step
+            # with the production code.
+            content_hash = params[-1]
+            if content_hash in self._store.seen_hashes:
+                self._store.duplicate_calls.append((sql, params))
+            else:
+                self._store.seen_hashes.add(content_hash)
+                self._store.inserts.append((sql, params))
+                inserted_in_batch += 1
+        self.rowcount = inserted_in_batch
 
 
 class _FakeConnection:
     """In-memory stand-in for a psycopg connection.
 
-    Captures inserts and conflict-skips, plus commit / rollback /
-    close calls so tests can assert that the sync commits on success
-    and rolls back on error.
+    Captures inserts and conflict-skips, the per-batch `executemany`
+    calls, plus commit / rollback / close so tests can assert that
+    the sync commits on success and rolls back on error.
     """
 
     def __init__(self) -> None:
         self.inserts: list[tuple[str, tuple]] = []
         self.duplicate_calls: list[tuple[str, tuple]] = []
+        self.batches: list[tuple[str, list[tuple]]] = []
         self.seen_hashes: set[str] = set()
         self.commit_called = 0
         self.rollback_called = 0
         self.close_called = 0
-        self.raise_on_execute: Exception | None = None
+        self.raise_on_executemany: Exception | None = None
 
     def cursor(self) -> _FakeCursor:
-        if self.raise_on_execute is not None:
+        if self.raise_on_executemany is not None:
             cur = _FakeCursor(self)
 
-            def _raise(sql: str, params: tuple) -> None:
-                raise self.raise_on_execute  # type: ignore[misc]
+            def _raise(sql: str, params_seq) -> None:
+                raise self.raise_on_executemany  # type: ignore[misc]
 
-            cur.execute = _raise  # type: ignore[method-assign]
+            cur.executemany = _raise  # type: ignore[method-assign]
             return cur
         return _FakeCursor(self)
 
@@ -557,7 +569,9 @@ class AnalyticsSyncTransactionTest(unittest.TestCase):
                 "ANALYTICS_DB_URL": "postgresql://h/db",
             })
             fake = _FakeConnection()
-            fake.raise_on_execute = RuntimeError("simulated driver failure")
+            fake.raise_on_executemany = RuntimeError(
+                "simulated driver failure"
+            )
             with self.assertRaises(RuntimeError):
                 analytics_sync.sync_jsonl_to_postgres(
                     connect=lambda url: fake,
@@ -822,27 +836,203 @@ class AnalyticsSyncConnectionLogTest(unittest.TestCase):
         self.assertIn("connection established", joined)
 
 
-class AnalyticsSyncProgressTest(unittest.TestCase):
-    """Operator feedback for large replays: a progress record drops every
-    `_PROGRESS_INTERVAL` lines consumed (counted across inserted, skipped,
-    and blank lines so a malformed-heavy file still advances) and a final
-    "completed in %.3fs" line carries the wall-clock total.
+class AnalyticsSyncBatchTest(unittest.TestCase):
+    """Batched flush semantics: validated rows accumulate into a
+    `_BATCH_SIZE`-sized buffer, every full batch is flushed via
+    `cur.executemany`, a final partial batch at EOF still flushes,
+    and malformed lines are filtered before they enter the buffer
+    so a bad row can never poison the surrounding pipelined INSERT.
     """
 
-    def test_progress_logged_each_interval(self) -> None:
+    def test_full_batch_flushes_in_single_executemany(self) -> None:
+        # Exactly `_BATCH_SIZE` records produce exactly one
+        # `executemany` call carrying all the rows -- one Postgres
+        # round-trip instead of one per row is the whole point.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
             })
-            # Build twice the progress interval so the loop crosses the
-            # boundary at least twice; distinct `issue` values keep the
-            # content hashes (and therefore the row identities) unique
-            # so the run exercises the insert path rather than the
-            # dedup path.
+            with patch.object(analytics_sync, "_BATCH_SIZE", 3):
+                records = [_sample_record(issue=i) for i in range(1, 4)]
+                _write_jsonl(path, records)
+                fake = _FakeConnection()
+                result = analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+            self.assertEqual(result.inserted, 3)
+            self.assertEqual(result.skipped_duplicate, 0)
+            self.assertEqual(len(fake.batches), 1)
+            sql, params_list = fake.batches[0]
+            self.assertEqual(len(params_list), 3)
+            self.assertIn(
+                "ON CONFLICT (content_hash) DO NOTHING", sql,
+            )
+
+    def test_mixed_inserted_and_duplicate_in_batch(self) -> None:
+        # Pre-seed the fake's seen-hashes set so half the batch lands
+        # as duplicates -- per-batch rowcount tells the sync exactly
+        # how many were inserted vs. skipped, even though the
+        # `executemany` is one protocol call.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            records = [_sample_record(issue=i) for i in range(1, 5)]
+            _write_jsonl(path, records)
+            fake = _FakeConnection()
+            for rec in records[:2]:
+                fake.seen_hashes.add(analytics_sync._content_hash(rec))
+            with patch.object(analytics_sync, "_BATCH_SIZE", 4):
+                result = analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+            self.assertEqual(result.inserted, 2)
+            self.assertEqual(result.skipped_duplicate, 2)
+            self.assertEqual(len(fake.batches), 1)
+            self.assertEqual(len(fake.batches[0][1]), 4)
+
+    def test_final_partial_batch_flushed_at_eof(self) -> None:
+        # 5 records with `_BATCH_SIZE=3` yields one full batch of 3
+        # plus a trailing partial batch of 2 at EOF; both must
+        # reach Postgres or a multi-thousand-record replay would
+        # silently drop its tail.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            records = [_sample_record(issue=i) for i in range(1, 6)]
+            _write_jsonl(path, records)
+            fake = _FakeConnection()
+            with patch.object(analytics_sync, "_BATCH_SIZE", 3):
+                result = analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+            self.assertEqual(result.inserted, 5)
+            self.assertEqual(result.skipped_duplicate, 0)
+            self.assertEqual(len(fake.batches), 2)
+            self.assertEqual(len(fake.batches[0][1]), 3)
+            self.assertEqual(len(fake.batches[1][1]), 2)
+            self.assertEqual(fake.commit_called, 1)
+
+    def test_smaller_than_batch_size_still_flushes(self) -> None:
+        # Fewer records than `_BATCH_SIZE` still emit one partial
+        # flush at EOF -- the no-rows-ever-reach-the-DB regression
+        # is what makes this worth its own test even though
+        # `test_final_partial_batch_flushed_at_eof` overlaps.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            _write_jsonl(path, [_sample_record()])
+            fake = _FakeConnection()
+            with patch.object(analytics_sync, "_BATCH_SIZE", 500):
+                result = analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+            self.assertEqual(result.inserted, 1)
+            self.assertEqual(len(fake.batches), 1)
+            self.assertEqual(len(fake.batches[0][1]), 1)
+
+    def test_malformed_lines_never_enter_batch(self) -> None:
+        # Blank / non-JSON / missing-key lines are filtered in Python
+        # before they reach the batch buffer; the `executemany` call
+        # therefore carries only validated rows so a single bad line
+        # cannot abort the surrounding batched INSERT.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(_sample_record(issue=1), sort_keys=True) + "\n"
+                )
+                fh.write("\n")
+                fh.write("not json\n")
+                fh.write(
+                    '{"ts": "2026-05-25T12:00:00+00:00", "repo": "o/r"}\n'
+                )
+                fh.write(
+                    json.dumps(_sample_record(issue=2), sort_keys=True) + "\n"
+                )
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            result = analytics_sync.sync_jsonl_to_postgres(
+                connect=lambda url: fake,
+                json_adapter=lambda v: v,
+            )
+            self.assertEqual(result.inserted, 2)
+            self.assertEqual(result.skipped_malformed, 2)
+            self.assertEqual(result.total_lines, 5)
+            self.assertEqual(len(fake.batches), 1)
+            self.assertEqual(len(fake.batches[0][1]), 2)
+
+    def test_no_records_skips_executemany(self) -> None:
+        # A file with only blanks / malformed lines never builds a
+        # batch and therefore never issues an `executemany` call --
+        # the protocol stays quiet but the transaction still commits.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as fh:
+                fh.write("\n")
+                fh.write("not json\n")
+                fh.write("null\n")
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            result = analytics_sync.sync_jsonl_to_postgres(
+                connect=lambda url: fake,
+                json_adapter=lambda v: v,
+            )
+            self.assertEqual(result.inserted, 0)
+            self.assertEqual(result.skipped_malformed, 2)
+            self.assertEqual(len(fake.batches), 0)
+            self.assertEqual(fake.commit_called, 1)
+
+
+class AnalyticsSyncProgressTest(unittest.TestCase):
+    """Operator feedback for large replays: a progress record drops
+    after every batched `executemany` flush (full or final partial)
+    and a final "completed in %.3fs" line carries the wall-clock
+    total. The defaults align `_BATCH_SIZE` with `_PROGRESS_INTERVAL`
+    so each flush also drops one progress line on the existing
+    cadence.
+    """
+
+    def test_progress_logged_per_batch_flush(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            # Twice the configured batch size so the loop fills the
+            # buffer twice with no partial-batch tail; distinct
+            # `issue` values keep the content hashes unique so the
+            # run exercises the insert path rather than the dedup
+            # path.
             interval = analytics_sync._PROGRESS_INTERVAL
-            records = [_sample_record(issue=i) for i in range(1, interval * 2 + 1)]
+            self.assertEqual(analytics_sync._BATCH_SIZE, interval)
+            records = [
+                _sample_record(issue=i)
+                for i in range(1, interval * 2 + 1)
+            ]
             _write_jsonl(path, records)
             fake = _FakeConnection()
             with self.assertLogs("orchestrator.analytics.sync", level="INFO") as cm:
@@ -851,14 +1041,47 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
                     json_adapter=lambda v: v,
                 )
         progress_lines = [m for m in cm.output if "progress lines=" in m]
-        # Two interval crossings -> two progress records (the final line
-        # number equals 2 * interval, which is a multiple of interval).
+        # Two full-batch flushes -> two progress records (no partial
+        # batch at EOF because the count divides the batch size).
         self.assertEqual(len(progress_lines), 2)
-        # The first crossing's count should be exactly the interval, not
-        # an off-by-one -- a bad % check would emit at lines=interval+1
-        # or lines=interval-1.
+        # Per-batch flush fires AFTER the flush, so the line count at
+        # each emission is the cumulative `total_lines` consumed up
+        # to that flush.
         self.assertIn(f"lines={interval}", progress_lines[0])
         self.assertIn(f"lines={interval * 2}", progress_lines[1])
+        # The two batches together reach Postgres; the fake records
+        # each `executemany` invocation in lockstep with the
+        # progress lines.
+        self.assertEqual(len(fake.batches), 2)
+
+    def test_progress_fires_for_partial_final_batch(self) -> None:
+        # A file whose row count does not divide `_BATCH_SIZE` still
+        # emits a progress line for the partial flush at EOF -- an
+        # operator's "did the tail land?" answer must not depend on a
+        # round-number record count.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            records = [_sample_record(issue=i) for i in range(1, 6)]
+            _write_jsonl(path, records)
+            fake = _FakeConnection()
+            with patch.object(analytics_sync, "_BATCH_SIZE", 3):
+                with self.assertLogs(
+                    "orchestrator.analytics.sync", level="INFO"
+                ) as cm:
+                    analytics_sync.sync_jsonl_to_postgres(
+                        connect=lambda url: fake,
+                        json_adapter=lambda v: v,
+                    )
+        progress_lines = [m for m in cm.output if "progress lines=" in m]
+        self.assertEqual(len(progress_lines), 2)
+        self.assertIn("lines=3", progress_lines[0])
+        self.assertIn("inserted=3", progress_lines[0])
+        self.assertIn("lines=5", progress_lines[1])
+        self.assertIn("inserted=5", progress_lines[1])
 
     def test_completed_log_carries_duration_s(self) -> None:
         with tempfile.TemporaryDirectory() as td:
