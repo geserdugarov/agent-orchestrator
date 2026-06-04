@@ -179,9 +179,9 @@ class AnalyticsAgentRunsViewTest(unittest.TestCase):
 
 
 class AnalyticsDailyRollupViewTest(unittest.TestCase):
-    """The `analytics_daily_rollup` materialized view is the Layer 4
-    aggregation target from `plans/dashboard-load-optimization.md`.
-    These tests pin the create statement's idempotency, the key
+    """The `analytics_daily_rollup` materialized view is the pre-aggregated
+    target the dashboard reads from instead of scanning the raw run
+    tables. These tests pin the create statement's idempotency, the key
     columns, and the aggregate columns so a refactor that drops the
     timeout/failure counts or token sums (which the dashboard's
     reliability tiles and KPI strip read from) fails in the hermetic

@@ -65,8 +65,7 @@ _PROGRESS_INTERVAL = 500
 # one progress line and a multi-thousand-record replay pays one
 # Postgres round-trip per batch instead of one per row. Lives next to
 # `_PROGRESS_INTERVAL` as an implementation-only knob; tuning it
-# requires no CLI flag, env var, or schema change. See
-# `plans/analytics-sync-performance.md` for the measurement gate.
+# requires no CLI flag, env var, or schema change.
 _BATCH_SIZE = 500
 
 # Columns the table promotes from the JSONL record; anything else lands
