@@ -6,8 +6,11 @@ The documenting stage runs exactly once per reviewer-approval handoff,
 between reviewer approval and `in_review`: after the reviewer agent
 emits `VERDICT: APPROVED` and `_handle_validating` finishes the
 local-verify + squash + watermark seed, it relabels to `documenting`.
-The docs pass commits any README / docs / plans edits, pushes them,
-and advances to `in_review`. A PR can therefore visit `documenting`
+The docs pass commits any README / docs edits, pushes them, and
+advances to `in_review`. The `plans/` tree and roadmap entries are
+deliberately out of scope: those are working notes owned by humans, so
+the docs prompt instructs the agent to compare only against `README.md`
+and the `docs/` tree. A PR can therefore visit `documenting`
 more than once over its life: if PR feedback later bounces the issue
 to `fixing` and the dev pushes a fix, the next reviewer approval
 triggers another final-docs pass before the next `in_review` handoff.

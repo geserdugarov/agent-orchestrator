@@ -167,7 +167,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
             run_agent=_agent(
                 session_id="dev-sess",
-                last_message="should I touch plans/roadmap.md too?",
+                last_message="should I touch docs/architecture.md too?",
             ),
             push_branch=True,
             head_shas=["aaa", "aaa"],
@@ -183,7 +183,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn("docs_verdict", data)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("agent needs your input", last_comment)
-        self.assertIn("plans/roadmap.md", last_comment)
+        self.assertIn("docs/architecture.md", last_comment)
 
     def test_silent_run_parks_as_agent_silent(self) -> None:
         # No commits, no message -- treat as a poisoned-session silent
@@ -287,7 +287,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
             run_agent=_agent(
                 session_id="dev-sess",
-                last_message="What about plans/roadmap.md?",
+                last_message="What about docs/state-machine.md?",
             ),
             push_branch=True,
             dirty_files=["docs/architecture.md"],

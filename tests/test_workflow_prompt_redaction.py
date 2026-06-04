@@ -22,9 +22,11 @@ from tests.workflow_helpers import _TEST_SPEC
 class BuildDocumentationPromptTest(unittest.TestCase):
     """The documentation prompt is what teaches the agent the contract
     the parser relies on. Verify the contract is actually communicated:
-    diff vs README/docs/plans, `docs:` commit subject for the update
-    branch, explicit `DOCS: NO_CHANGE` marker for the no-update branch,
-    and a refusal to accept ambiguous phrasing.
+    diff vs stable docs (README and `docs/` only -- the `plans/` tree
+    and roadmap entries are working notes owned by humans and the
+    prompt must steer the agent away from them), `docs:` commit subject
+    for the update branch, explicit `DOCS: NO_CHANGE` marker for the
+    no-update branch, and a refusal to accept ambiguous phrasing.
     """
 
     def _build(self) -> str:
@@ -34,13 +36,22 @@ class BuildDocumentationPromptTest(unittest.TestCase):
             comments_text="",
         )
 
-    def test_instructs_diff_against_readme_docs_plans(self) -> None:
+    def test_instructs_diff_against_readme_and_docs(self) -> None:
         prompt = self._build()
         self.assertIn("README.md", prompt)
         self.assertIn("docs/", prompt)
-        self.assertIn("plans/", prompt)
         base_ref = f"{_TEST_SPEC.remote_name}/{_TEST_SPEC.base_branch}"
         self.assertIn(f"git diff {base_ref}...HEAD", prompt)
+
+    def test_steers_agent_away_from_plans_and_roadmap(self) -> None:
+        # `plans/` and roadmap entries are working notes owned by
+        # humans -- the final-docs pass must not target them. The prompt
+        # has to call that out explicitly so the agent does not infer
+        # `plans/` from convention.
+        prompt = self._build()
+        self.assertIn("plans/", prompt)
+        self.assertIn("roadmap", prompt)
+        self.assertIn("out of scope", prompt)
 
     def test_instructs_docs_commit_subject_for_updated_case(self) -> None:
         prompt = self._build()
