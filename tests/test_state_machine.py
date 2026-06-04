@@ -197,12 +197,56 @@ class IsAllowedTransitionTest(unittest.TestCase):
         ]:
             self.assertFalse(is_allowed_transition(cur, nxt), (cur, nxt))
 
-    def test_done_and_rejected_universal_from_non_terminal(self) -> None:
+    def test_done_allowed_only_from_its_exact_sources(self) -> None:
+        # External-merge / drain sources, plus umbrella/question whose own
+        # forward completion is `-> done`. NOT the pre-PR states.
+        sources = {
+            WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
+            WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW,
+            WorkflowLabel.FIXING, WorkflowLabel.RESOLVING_CONFLICT,
+            WorkflowLabel.UMBRELLA, WorkflowLabel.QUESTION,
+        }
         for state in WorkflowLabel:
             if state in (WorkflowLabel.DONE, WorkflowLabel.REJECTED):
                 continue
-            self.assertTrue(is_allowed_transition(state, WorkflowLabel.DONE), state)
-            self.assertTrue(
+            self.assertEqual(
+                is_allowed_transition(state, WorkflowLabel.DONE),
+                state in sources, state,
+            )
+
+    def test_rejected_allowed_only_from_its_exact_sources(self) -> None:
+        sources = {
+            WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
+            WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW,
+            WorkflowLabel.FIXING, WorkflowLabel.RESOLVING_CONFLICT,
+        }
+        for state in WorkflowLabel:
+            if state in (WorkflowLabel.DONE, WorkflowLabel.REJECTED):
+                continue
+            self.assertEqual(
+                is_allowed_transition(state, WorkflowLabel.REJECTED),
+                state in sources, state,
+            )
+
+    def test_question_finalizes_to_done_but_never_rejected(self) -> None:
+        # Maximal-exactness: `question` only finalizes to `done`; nothing
+        # writes `question -> rejected`, so it must be illegal.
+        self.assertTrue(
+            is_allowed_transition(WorkflowLabel.QUESTION, WorkflowLabel.DONE)
+        )
+        self.assertFalse(
+            is_allowed_transition(WorkflowLabel.QUESTION, WorkflowLabel.REJECTED)
+        )
+
+    def test_pre_pr_states_are_not_terminalizable(self) -> None:
+        # decomposing / ready / blocked have no PR and no terminal writer.
+        for state in (
+            WorkflowLabel.DECOMPOSING, WorkflowLabel.READY, WorkflowLabel.BLOCKED,
+        ):
+            self.assertFalse(
+                is_allowed_transition(state, WorkflowLabel.DONE), state,
+            )
+            self.assertFalse(
                 is_allowed_transition(state, WorkflowLabel.REJECTED), state,
             )
 

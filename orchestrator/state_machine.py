@@ -87,10 +87,6 @@ class IllegalTransition(Exception):
 
 
 # Terminal states have no outgoing edges.
-_TERMINAL: frozenset[WorkflowLabel] = frozenset(
-    {WorkflowLabel.DONE, WorkflowLabel.REJECTED}
-)
-
 # The per-tick base-sync detour relabels a behind-base PR-having issue to
 # `resolving_conflict`. These are the ONLY states it fires from. Enumerated
 # explicitly here (rather than imported from `base_sync`) so the table is
@@ -104,10 +100,11 @@ _DETOUR_TO_RESOLVING: frozenset[WorkflowLabel] = frozenset(
 )
 
 # Forward ("spine") + drift edges, keyed by source. ``None`` is the entry
-# (unlabeled-pickup) pseudo-state. The universal interrupt edges
-# (`-> done`, `-> rejected`) and the `resolving_conflict` detour are folded
-# in below by `_build_allowed`, so this map holds only the deterministic
-# forward flow.
+# (unlabeled-pickup) pseudo-state. The interrupt / detour edges
+# (`-> done`, `-> rejected`, `-> resolving_conflict`) are folded in below by
+# `_build_allowed` from `_INTERRUPT_SOURCES`, so this map holds only the
+# deterministic forward flow (plus `umbrella`/`question` -> `done`, which is
+# those states' own forward completion rather than an external interrupt).
 _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
     # Entry: an unlabeled issue decomposes, or (DECOMPOSE=off) goes straight
     # to implementing. It never enters `question` (operator-applied only) and
@@ -147,27 +144,56 @@ _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
 }
 
 
+# Interrupt / detour edges, keyed by TARGET -> the EXACT set of source states
+# whose handlers (or the helpers they call) actually emit that target. Modeled
+# per-target rather than "any non-terminal" so the guard is maximally exact: a
+# pre-PR state (`decomposing` / `ready` / `blocked`) is never terminalized,
+# and `question` only finalizes to `done`, never `rejected`.
+#
+#  * -> done     : external merge mid-stage (`_finalize_if_pr_merged`, called
+#                  from implementing / validating / documenting entry checks
+#                  and from blocked/umbrella merged-child recovery -- the child
+#                  always carries a PR-having stage label) and the review-side
+#                  terminal drain (`_drain_review_pr_terminals`). `umbrella` /
+#                  `question` reach `done` via their own forward edge, above.
+#  * -> rejected : PR / issue closed without merge
+#                  (`_finalize_if_issue_closed`, `_drain_review_pr_terminals`).
+#  * -> resolving_conflict : the per-tick base-sync detour.
+_INTERRUPT_SOURCES: dict[WorkflowLabel, frozenset[WorkflowLabel]] = {
+    WorkflowLabel.DONE: frozenset(
+        {
+            WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
+            WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW,
+            WorkflowLabel.FIXING, WorkflowLabel.RESOLVING_CONFLICT,
+        }
+    ),
+    WorkflowLabel.REJECTED: frozenset(
+        {
+            WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
+            WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW,
+            WorkflowLabel.FIXING, WorkflowLabel.RESOLVING_CONFLICT,
+        }
+    ),
+    WorkflowLabel.RESOLVING_CONFLICT: _DETOUR_TO_RESOLVING,
+}
+
+
 def _build_allowed() -> dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]]:
-    """Fold the universal interrupt edges into every non-terminal source.
+    """Compose the forward spine with the per-target interrupt sources.
 
-    * ``-> done`` / ``-> rejected``: external merge or close can terminalize
-      from any active state -- including any-label child recovery via
-      ``_finalize_if_pr_merged`` on a closed child of a blocked/umbrella
-      parent. So both are allowed from every non-terminal workflow label.
-    * ``-> resolving_conflict``: only from the explicit detour sources.
-
-    The entry pseudo-state (``None``) is deliberately NOT given the
-    interrupt edges -- an unlabeled issue is never terminalized directly.
+    `_FORWARD` supplies the deterministic forward edges; each
+    `_INTERRUPT_SOURCES[target]` then adds `target` to exactly the sources
+    that emit it. Terminal states appear only as targets (never as keys with
+    outgoing edges), and the entry pseudo-state (`None`) gets no interrupt
+    edge -- an unlabeled issue is never terminalized directly.
     """
-    allowed: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {}
-    for src, forward in _FORWARD.items():
-        edges = set(forward)
-        if src is not None and src not in _TERMINAL:
-            edges |= {WorkflowLabel.DONE, WorkflowLabel.REJECTED}
-            if src in _DETOUR_TO_RESOLVING:
-                edges.add(WorkflowLabel.RESOLVING_CONFLICT)
-        allowed[src] = frozenset(edges)
-    return allowed
+    allowed: dict[Optional[WorkflowLabel], set[WorkflowLabel]] = {
+        src: set(forward) for src, forward in _FORWARD.items()
+    }
+    for target, sources in _INTERRUPT_SOURCES.items():
+        for src in sources:
+            allowed[src].add(target)
+    return {src: frozenset(edges) for src, edges in allowed.items()}
 
 
 ALLOWED_TRANSITIONS: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = (
