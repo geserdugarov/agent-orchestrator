@@ -41,7 +41,6 @@ After any handler or helper move, grep the PR for stale pointers and request fix
 - `docs/architecture.md`
 - `docs/state-machine.md`
 - `docs/workflow.md`
-- `plans/roadmap.md`
 - module docstrings at the top of `workflow.py`, `workflow_drift.py`, `workflow_messages.py`, `worktrees.py`, `orchestrator/stages/*.py`
 
 Treat blanket statements like "every helper is re-exported" with suspicion — verify literally against the code.
@@ -73,4 +72,4 @@ CI / lint gates to require for Rust PRs:
 
 - New dependencies (`pyproject.toml` should still pin only PyGithub).
 - Reformatting of files outside the change's blast radius.
-- Abstractions or generality added for hypothetical future features. The roadmap is the source of truth.
+- Abstractions or generality added for hypothetical future features. The issue's stated scope is the source of truth.
