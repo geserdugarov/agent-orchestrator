@@ -95,7 +95,7 @@ The coding agent runs as a **transient child subprocess**, not a daemon — spaw
 
 Each tick the polling loop fans `workflow.tick(gh, spec, scheduler=...)` out across **every configured repo** via `main._run_tick`: single-repo deployments stay in-thread, multi-repo deployments use a `ThreadPoolExecutor` sized to the repo count. A single long-lived `IssueScheduler` (global cap `MAX_PARALLEL_ISSUES_GLOBAL`, per-repo cap `MAX_PARALLEL_ISSUES_PER_REPO`) is shared across all `tick` calls.
 
-The dispatch loop classifies each issue as family-aware (`decomposing` / `blocked` / `umbrella` / unlabeled — parent ↔ child writes) or fan-out (everything else). Fan-out submits go one callable per issue. Every family-aware issue this tick is folded into ONE bucket submit per repo that drains them sequentially on a single executor worker so a stale child cannot starve the parent umbrella issue. When every family-aware issue this tick carries `umbrella`, the bucket is cap-exempt and runs on a dedicated executor pool so a pure label-walk parent is never blocked by ordinary implementation work.
+The dispatch loop classifies each issue as family-aware (`decomposing` / `blocked` / `umbrella` / unlabeled — parent ↔ child writes) or fan-out (everything else). Fan-out submits go one callable per issue. Every family-aware issue this tick is folded into ONE bucket submit per repo that drains them sequentially on a single executor worker so a stale child cannot starve the parent umbrella issue. When every family-aware issue in the bucket runs a no-agent handler (`blocked` or `umbrella`), the bucket is cap-exempt and runs on a dedicated executor pool so a pure label / dep-graph walk cannot be blocked by ordinary implementation work. A bucket containing `decomposing` or unlabeled pickup stays cap-counted.
 
 Per-issue durable state lives in a single **pinned comment** on the issue (`<!--orchestrator-state {...json...}-->`). The orchestrator process is stateless; the label and the pinned JSON are the entire dispatch input.
 
@@ -154,7 +154,7 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | `main` polling loop | long-lived Python process | manual start (or wrapper) | every `POLL_INTERVAL`s |
 | `workflow.tick(gh, spec)` | function call | each loop iteration | once per tick per configured `RepoSpec`; multi-repo fans out across a `ThreadPoolExecutor`, single-repo stays in-thread |
 | `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo: one `git fetch <spec.remote_name> <spec.base_branch>`, then per-worktree dispatch (pre-PR worktrees rebase directly; PR-having worktrees behind base are rebased + pushed in the refresh itself via `_sync_pr_worktree_to_base` and routed to `validating` on success, with `resolving_conflict` reserved for actual rebase conflicts) |
-| `_handle_*` per issue | function call | issue's workflow label | once per tick per open issue; concurrent up to `spec.parallel_limit` per repo and `MAX_PARALLEL_ISSUES_GLOBAL` across all repos. Umbrella-only family buckets are cap-exempt |
+| `_handle_*` per issue | function call | issue's workflow label | once per tick per open issue; concurrent up to `spec.parallel_limit` per repo and `MAX_PARALLEL_ISSUES_GLOBAL` across all repos. No-agent family buckets (`blocked` / `umbrella`) are cap-exempt |
 | decomposer agent (`DECOMPOSE_AGENT`) | subprocess (fresh or resumed) | `_handle_decomposing` (retry budget OK) or HITL resume | one shot per tick when needed |
 | implementer agent (`DEV_AGENT`) | subprocess | `_handle_implementing` (no commits yet, retry budget OK) or HITL resume | one shot per tick when needed |
 | reviewer agent (`REVIEW_AGENT`) | subprocess (fresh session) | `_handle_validating`, round < max | one shot per tick |
@@ -203,7 +203,8 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
    │     classify each pollable issue and submit to scheduler:            │
    │       family-aware (decomposing/blocked/umbrella/unlabeled) →        │
    │         ONE bucket submit per repo that drains sequentially          │
-   │         (cap-exempt when every family issue is `umbrella`)           │
+   │         (cap-exempt when every family issue is `blocked` or          │
+   │         `umbrella`)                                                  │
    │       fan-out (everything else) →                                    │
    │         one submit per issue, concurrent up to per-repo / global     │
    │         caps                                                         │
