@@ -48,9 +48,11 @@ non-existent column.
 from __future__ import annotations
 
 import logging
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 from .. import analytics as _analytics
 
@@ -471,6 +473,163 @@ def _default_connect(db_url: str) -> Any:
         ) from e
 
 
+def _default_persistent_connect(db_url: str) -> Any:
+    """`_default_connect` variant that opens with `autocommit=True`.
+
+    `analytics_connection` keeps a single connection alive across
+    many sequential reads on the same thread; psycopg's default
+    "implicit transaction on first statement" behavior would leave
+    the session idle in transaction after every SELECT (holding
+    xmin, blocking vacuum) and, on a query error, in `aborted`
+    state -- every subsequent read on the same thread-local would
+    raise `InFailedSqlTransaction` until something rolled it back.
+    Autocommit avoids both. This path is read-only by design; any
+    future caller that needs an explicit transaction should open
+    one inline with `with conn.transaction():` rather than
+    disabling autocommit globally.
+    """
+    try:
+        import psycopg
+    except ImportError as e:
+        raise AnalyticsReadError(
+            "psycopg is required for analytics.read; "
+            "run `uv sync --locked` to install it"
+        ) from e
+    try:
+        return psycopg.connect(db_url, autocommit=True)
+    except Exception as e:
+        raise AnalyticsReadError(
+            f"could not connect to analytics database: {e}"
+        ) from e
+
+
+_thread_local = threading.local()
+
+
+def _is_broken_connection_exc(exc: BaseException) -> bool:
+    """True when `exc` looks like a torn-down psycopg socket.
+
+    The check unwraps an `AnalyticsReadError` to inspect its
+    `__cause__` (every driver-level error wraps through `_query`).
+    Class-name matching covers the common test case where a fake
+    cursor raises a shim `OperationalError` / `InterfaceError`
+    without psycopg installed; falls back to an `isinstance` check
+    against the real psycopg classes when the driver is present.
+    """
+    cause: Optional[BaseException]
+    if isinstance(exc, AnalyticsReadError):
+        cause = exc.__cause__
+    else:
+        cause = exc
+    if cause is None:
+        return False
+    name = type(cause).__name__
+    if name in ("OperationalError", "InterfaceError"):
+        return True
+    try:
+        import psycopg
+    except ImportError:
+        return False
+    return isinstance(
+        cause, (psycopg.OperationalError, psycopg.InterfaceError)
+    )
+
+
+def _close_quietly(conn: Any) -> None:
+    try:
+        conn.close()
+    except Exception:
+        log.exception("analytics.read: connection close failed")
+
+
+@contextmanager
+def analytics_connection(
+    *,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+) -> Iterator[Any]:
+    """Yield a persistent thread-local analytics connection.
+
+    Yields ``None`` when `ANALYTICS_DB_URL` is unset (every public
+    read helper short-circuits on `conn=None`, so the caller still
+    renders a "no data" page rather than crashing). Otherwise a
+    single connection is cached per-thread and reused across
+    subsequent `with analytics_connection()` blocks on the same
+    thread -- the first call pays the ~1 s psycopg handshake, every
+    later call reuses the open socket. Real psycopg connections open
+    with `autocommit=True`; see `_default_persistent_connect`.
+
+    The cache is keyed on the resolved URL: if a later `with` block
+    on the same thread asks for a different `db_url=` than the one
+    the cached connection was opened against, the stale socket is
+    closed and a fresh one is opened. Without this guard a thread
+    that first read from DB A would silently keep reading from A
+    even after the caller switched to DB B, which would violate the
+    `db_url=` contract.
+
+    If a broken-connection error (`OperationalError` /
+    `InterfaceError`, wrapped or raw) escapes the `with` block, the
+    cached connection is closed-and-replaced before the exception
+    re-raises so the next caller on the same thread opens a fresh
+    socket. The connection is NOT closed on normal scope exit (it
+    survives to be reused); call `close_thread_local_connection()`
+    explicitly at shutdown or between tests.
+
+    Tests inject a fake `connect(db_url) -> conn` factory the same
+    shape as every public helper accepts.
+    """
+    url = _resolve_db_url(db_url)
+    if not url:
+        yield None
+        return
+    connect_fn = connect or _default_persistent_connect
+    entry = getattr(_thread_local, "entry", None)
+    if entry is not None:
+        cached_url, cached_conn = entry
+        if cached_url != url:
+            # URL switched on this thread -- close the stale socket
+            # before reopening so a later read on the new URL does
+            # not silently land on the old one.
+            _thread_local.entry = None
+            _close_quietly(cached_conn)
+            entry = None
+    if entry is None:
+        try:
+            conn = connect_fn(url)
+        except AnalyticsReadError:
+            raise
+        except Exception as e:
+            raise AnalyticsReadError(
+                f"could not connect to analytics database: {e}"
+            ) from e
+        _thread_local.entry = (url, conn)
+    else:
+        _, conn = entry
+    try:
+        yield conn
+    except BaseException as exc:
+        if _is_broken_connection_exc(exc):
+            cached = getattr(_thread_local, "entry", None)
+            if cached is not None:
+                _thread_local.entry = None
+                _close_quietly(cached[1])
+        raise
+
+
+def close_thread_local_connection() -> None:
+    """Tear down any thread-local analytics connection on this thread.
+
+    No-op when no connection is open. Intended for shutdown hooks
+    and test teardown so a stale connection from one test does not
+    bleed into the next.
+    """
+    entry = getattr(_thread_local, "entry", None)
+    if entry is None:
+        return
+    _thread_local.entry = None
+    _close_quietly(entry[1])
+
+
 def _resolve_db_url(db_url: Optional[str]) -> Optional[str]:
     if db_url is None:
         return _analytics.ANALYTICS_DB_URL
@@ -479,28 +638,26 @@ def _resolve_db_url(db_url: Optional[str]) -> Optional[str]:
 
 def _query(
     connect_fn: Callable[[str], Any],
-    db_url: str,
+    db_url: Optional[str],
     sql: str,
     params: Sequence[Any] = (),
+    *,
+    conn: Any = None,
 ) -> list[tuple]:
     """Run a single SELECT and return all rows as tuples.
 
-    Read-only path -- no commit, no rollback. The connection is
-    always closed in a `finally` so a query that raises mid-stream
-    does not leak the descriptor. Any driver-level exception is
+    When `conn` is provided, reuse it -- the caller owns the
+    connection's lifetime (typically an `analytics_connection`
+    scope) and the query path neither opens nor closes a descriptor.
+    Otherwise open a fresh connection via `connect_fn(db_url)`, run
+    the SELECT, and close it in a `finally` so a query that raises
+    mid-stream does not leak the descriptor. Read-only path either
+    way -- no commit, no rollback. Any driver-level exception is
     wrapped in `AnalyticsReadError` so callers have one type to catch
     regardless of whether the failure was the connect, the execute,
     or the fetch.
     """
-    try:
-        conn = connect_fn(db_url)
-    except AnalyticsReadError:
-        raise
-    except Exception as e:
-        raise AnalyticsReadError(
-            f"could not connect to analytics database: {e}"
-        ) from e
-    try:
+    if conn is not None:
         try:
             with conn.cursor() as cur:
                 cur.execute(sql, tuple(params))
@@ -509,18 +666,35 @@ def _query(
             raise AnalyticsReadError(
                 f"analytics query failed: {e}"
             ) from e
-    finally:
+        return list(rows or [])
+    try:
+        opened = connect_fn(db_url)
+    except AnalyticsReadError:
+        raise
+    except Exception as e:
+        raise AnalyticsReadError(
+            f"could not connect to analytics database: {e}"
+        ) from e
+    try:
         try:
-            conn.close()
-        except Exception:
-            log.exception("analytics.read: connection close failed")
+            with opened.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+        except Exception as e:
+            raise AnalyticsReadError(
+                f"analytics query failed: {e}"
+            ) from e
+    finally:
+        _close_quietly(opened)
     return list(rows or [])
 
 
 def _distinct_strings(
     connect_fn: Callable[[str], Any],
-    db_url: str,
+    db_url: Optional[str],
     column: str,
+    *,
+    conn: Any = None,
 ) -> tuple[str, ...]:
     """Return the distinct non-null values of `column`, sorted ASC.
 
@@ -534,7 +708,7 @@ def _distinct_strings(
         f"WHERE {column} IS NOT NULL "
         f"ORDER BY {column} ASC"
     )
-    rows = _query(connect_fn, db_url, sql)
+    rows = _query(connect_fn, db_url, sql, conn=conn)
     return tuple(r[0] for r in rows if r and r[0] is not None)
 
 
@@ -542,24 +716,28 @@ def get_filter_options(
     *,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> FilterOptions:
     """Distinct values populating the dashboard filter dropdowns.
 
     Returns an empty `FilterOptions` when `ANALYTICS_DB_URL` is unset
     or when the table is empty -- the dashboard renders disabled
     dropdowns rather than crashing. Failure to reach the configured
-    database raises `AnalyticsReadError`.
+    database raises `AnalyticsReadError`. Pass `conn=` (typically
+    from an `analytics_connection` scope) to reuse a connection
+    across the 5 distinct-column queries instead of opening 5
+    sockets.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return FilterOptions()
     connect_fn = connect or _default_connect
     return FilterOptions(
-        repos=_distinct_strings(connect_fn, url, "repo"),
-        events=_distinct_strings(connect_fn, url, "event"),
-        stages=_distinct_strings(connect_fn, url, "stage"),
-        backends=_distinct_strings(connect_fn, url, "backend"),
-        agent_roles=_distinct_strings(connect_fn, url, "agent_role"),
+        repos=_distinct_strings(connect_fn, url, "repo", conn=conn),
+        events=_distinct_strings(connect_fn, url, "event", conn=conn),
+        stages=_distinct_strings(connect_fn, url, "stage", conn=conn),
+        backends=_distinct_strings(connect_fn, url, "backend", conn=conn),
+        agent_roles=_distinct_strings(connect_fn, url, "agent_role", conn=conn),
     )
 
 
@@ -680,6 +858,7 @@ def get_data_extent(
     *,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> DataExtent:
     """Min / max `ts` across `analytics_events`.
 
@@ -690,7 +869,7 @@ def get_data_extent(
     the table is empty.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return DataExtent()
     connect_fn = connect or _default_connect
     rows = _query(
@@ -698,6 +877,7 @@ def get_data_extent(
         url,
         "SELECT MIN(ts) AS data_min_ts, MAX(ts) AS data_max_ts "
         "FROM analytics_events",
+        conn=conn,
     )
     if not rows:
         return DataExtent()
@@ -715,6 +895,7 @@ def get_summary(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> Summary:
     """Aggregate counts for a date-bounded window.
 
@@ -727,7 +908,7 @@ def get_summary(
     is unset or the (post-filter) window holds no rows.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return Summary()
     connect_fn = connect or _default_connect
     where, params = _build_window_where(
@@ -771,7 +952,7 @@ def get_summary(
         "         THEN 1 ELSE 0 END) AS timed_out_agent_runs "
         f"FROM analytics_events{where}"
     )
-    totals_rows = _query(connect_fn, url, totals_sql, params)
+    totals_rows = _query(connect_fn, url, totals_sql, params, conn=conn)
     if not totals_rows:
         # Aggregates always return one row, but guard the empty case
         # so a fake cursor that returns [] never raises on the
@@ -798,7 +979,7 @@ def get_summary(
         "SELECT event, COUNT(*) AS c FROM analytics_events"
         f"{where} GROUP BY event ORDER BY c DESC, event ASC"
     )
-    by_event_rows = _query(connect_fn, url, by_event_sql, params)
+    by_event_rows = _query(connect_fn, url, by_event_sql, params, conn=conn)
     by_event = {row[0]: int(row[1]) for row in by_event_rows}
 
     stage_where, stage_params = _build_window_where(
@@ -814,7 +995,9 @@ def get_summary(
         "SELECT stage, COUNT(*) AS c FROM analytics_events"
         f"{stage_clause} GROUP BY stage ORDER BY c DESC, stage ASC"
     )
-    by_stage_rows = _query(connect_fn, url, by_stage_sql, stage_params)
+    by_stage_rows = _query(
+        connect_fn, url, by_stage_sql, stage_params, conn=conn,
+    )
     by_stage = {row[0]: int(row[1]) for row in by_stage_rows}
 
     return Summary(
@@ -844,6 +1027,7 @@ def get_time_series(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[TimeSeriesPoint]:
     """Daily counts grouped by `event`, with rolled-up cost / tokens.
 
@@ -855,7 +1039,7 @@ def get_time_series(
     no rows match.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     connect_fn = connect or _default_connect
     where, params = _build_window_where(
@@ -874,7 +1058,7 @@ def get_time_series(
         "GROUP BY day, event "
         "ORDER BY day ASC, event ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     points: list[TimeSeriesPoint] = []
     for row in rows:
         day_value = row[0]
@@ -912,6 +1096,7 @@ def get_stage_breakdown(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[StageBreakdown]:
     """Per-stage counts, average handler duration, and cost rollups.
 
@@ -922,7 +1107,7 @@ def get_stage_breakdown(
     "spend per stage" without a second query.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     connect_fn = connect or _default_connect
     where, params = _build_window_where(
@@ -949,7 +1134,7 @@ def get_stage_breakdown(
         f"FROM analytics_events{clause} "
         "GROUP BY stage ORDER BY c DESC, stage ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[StageBreakdown] = []
     for row in rows:
         stage = row[0]
@@ -983,6 +1168,7 @@ def get_event_breakdown(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[EventBreakdown]:
     """Per-event counts within the window.
 
@@ -990,7 +1176,7 @@ def get_event_breakdown(
     the two side-by-side without divergent typing.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     connect_fn = connect or _default_connect
     where, params = _build_window_where(
@@ -1002,7 +1188,7 @@ def get_event_breakdown(
         f"FROM analytics_events{where} "
         "GROUP BY event ORDER BY c DESC, event ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     return [EventBreakdown(event=ev, count=int(c)) for ev, c in rows]
 
 
@@ -1017,6 +1203,7 @@ def get_recent_agent_exits(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[AgentExitRow]:
     """The newest agent-exit rows for an overview table.
 
@@ -1035,7 +1222,7 @@ def get_recent_agent_exits(
     rows this widget displays.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     if limit <= 0:
         return []
@@ -1074,7 +1261,7 @@ def get_recent_agent_exits(
         f"FROM analytics_events{where} "
         "ORDER BY ts DESC LIMIT %s"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[AgentExitRow] = []
     for row in rows:
         (
@@ -1143,6 +1330,7 @@ def get_issues(
     sort_by: str = SORT_BY_LAST_SEEN,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[IssueSummaryRow]:
     """Date / repo-bounded one-row-per-`(repo, issue)` overview.
 
@@ -1185,7 +1373,7 @@ def get_issues(
             f"{sorted(_ISSUE_SORT_BY_OPTIONS)}"
         )
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     if limit <= 0:
         return []
@@ -1234,7 +1422,7 @@ def get_issues(
         "LIMIT %s"
     )
     bound_params = list(params) + [int(limit)]
-    rows = _query(connect_fn, url, sql, bound_params)
+    rows = _query(connect_fn, url, sql, bound_params, conn=conn)
     out: list[IssueSummaryRow] = []
     for row in rows:
         repo_v = row[0]
@@ -1295,6 +1483,7 @@ def get_issue_events(
     stages: Optional[Sequence[str]] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[IssueEventRow]:
     """Every event for a single `(repo, issue)`, oldest first.
 
@@ -1308,7 +1497,7 @@ def get_issue_events(
     empty = no rows match, non-empty = ``IN (...)``.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     if events is not None and not events:
         return []
@@ -1338,7 +1527,7 @@ def get_issue_events(
         f"WHERE {' AND '.join(conditions)} "
         "ORDER BY ts ASC, id ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[IssueEventRow] = []
     for row in rows:
         (
@@ -1378,6 +1567,7 @@ def get_review_round_breakdown(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[ReviewRoundBucketRow]:
     """Per-review-round agent-run counts.
 
@@ -1394,7 +1584,7 @@ def get_review_round_breakdown(
     dimension" semantics stays consistent across widgets.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     if _agent_event_excluded(events):
         return []
@@ -1422,7 +1612,7 @@ def get_review_round_breakdown(
         "GROUP BY bucket "
         "ORDER BY runs DESC, bucket ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[ReviewRoundBucketRow] = []
     for row in rows:
         bucket = row[0]
@@ -1454,6 +1644,7 @@ def get_backend_efficiency(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[BackendEfficiencyRow]:
     """Per-`backend` aggregate of agent runs.
 
@@ -1465,7 +1656,7 @@ def get_backend_efficiency(
     `get_review_round_breakdown` for the rationale.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     if _agent_event_excluded(events):
         return []
@@ -1491,7 +1682,7 @@ def get_backend_efficiency(
         "GROUP BY backend_label "
         "ORDER BY runs DESC, backend_label ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[BackendEfficiencyRow] = []
     for row in rows:
         backend = row[0]
@@ -1535,6 +1726,7 @@ def get_repo_breakdown(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[RepoBreakdownRow]:
     """Per-`repo` rollup of activity inside the filter window.
 
@@ -1546,7 +1738,7 @@ def get_repo_breakdown(
     needed when issues are counted across repos.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     connect_fn = connect or _default_connect
     where, params = _build_window_where(
@@ -1564,7 +1756,7 @@ def get_repo_breakdown(
         "GROUP BY repo "
         "ORDER BY repo_events DESC, repo ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     return [
         RepoBreakdownRow(
             repo=r,
@@ -1587,6 +1779,7 @@ def get_cost_coverage(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[CostCoverageRow]:
     """Per-`cost_source` count of agent runs.
 
@@ -1601,7 +1794,7 @@ def get_cost_coverage(
     against `_agent_event_excluded`.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     if _agent_event_excluded(events):
         return []
@@ -1628,7 +1821,7 @@ def get_cost_coverage(
         "GROUP BY source_label "
         "ORDER BY runs DESC, source_label ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[CostCoverageRow] = []
     for row in rows:
         source = row[0]
@@ -1657,6 +1850,7 @@ def get_backend_daily_tokens(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[BackendDailyTokensRow]:
     """Per-`(day, backend)` token totals from `analytics_agent_runs`.
 
@@ -1672,7 +1866,7 @@ def get_backend_daily_tokens(
     see `get_review_round_breakdown` for the rationale.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     if _agent_event_excluded(events):
         return []
@@ -1697,7 +1891,7 @@ def get_backend_daily_tokens(
         "GROUP BY day, backend_label "
         "ORDER BY day ASC, backend_label ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[BackendDailyTokensRow] = []
     for row in rows:
         day_value, backend, tokens = row
@@ -1723,6 +1917,7 @@ def get_hourly_heatmap(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[HourlyHeatmapPoint]:
     """7x24 weekday-by-hour activity counts from the base table.
 
@@ -1734,7 +1929,7 @@ def get_hourly_heatmap(
     layer owns the Monday-first re-ordering choice.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     connect_fn = connect or _default_connect
     where, params = _build_window_where(
@@ -1758,7 +1953,7 @@ def get_hourly_heatmap(
         "GROUP BY weekday, hour "
         "ORDER BY weekday ASC, hour ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[HourlyHeatmapPoint] = []
     for row in rows:
         weekday = row[0]
@@ -1796,6 +1991,7 @@ def get_throughput_breakdown(
     issue: Optional[int] = None,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
 ) -> list[ThroughputDayRow]:
     """Daily resolved / rejected `stage_enter` counts.
 
@@ -1817,7 +2013,7 @@ def get_throughput_breakdown(
       reader.
     """
     url = _resolve_db_url(db_url)
-    if not url:
+    if conn is None and not url:
         return []
     if events is not None and "stage_enter" not in events:
         return []
@@ -1858,7 +2054,7 @@ def get_throughput_breakdown(
         "GROUP BY day "
         "ORDER BY day ASC"
     )
-    rows = _query(connect_fn, url, sql, params)
+    rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[ThroughputDayRow] = []
     for row in rows:
         day_value, resolved, rejected = row
