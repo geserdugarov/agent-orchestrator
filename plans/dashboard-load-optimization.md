@@ -61,8 +61,40 @@ Layer 4 schema + sync half (the `analytics_daily_rollup` materialized
 view, its supporting indexes, and the post-commit refresh hook in
 `orchestrator/analytics/sync.py`) shipped via #382. The Layer 4
 dashboard cutover that points the rollup-eligible widgets at the new
-view, plus Layers 5 and 6 (UX polish, predicate-shape audit) remain
-to be designed against measurements taken after Layers 1+2+3.
+view remains.
+
+Layer 5 (UX polish) shipped via #396. `orchestrator/dashboard.py`
+now wraps `get_data_extent` and `get_filter_options` in
+argument-less `@st.cache_data(show_spinner=False,
+ttl=STATIC_METADATA_TTL_SECONDS)` wrappers
+(`STATIC_METADATA_TTL_SECONDS = 300`) so the sidebar / topbar reads
+only re-hit Postgres every five minutes instead of on every
+Streamlit rerun. The cache key stays empty (no filter inputs), so
+the values only refresh once `analytics.sync` ingests new events;
+the per-filter 60 s TTL on the 13 window-scoped wrappers is
+unchanged. The widget fan-out is split into two staged waves:
+`first_wave_readers` carries the six reads the topbar / filter
+meta / insight banners / KPI strip consume (`summary`,
+`prev_summary`, `ts_points`, `review_round_rows`,
+`throughput_rows`, `cost_coverage_rows`) and `second_wave_readers`
+carries the seven remaining widget reads (`stage_rows`,
+`agent_exits`, `issues_rows`, `backend_rows`, `repo_rows`,
+`heatmap_rows`, `backend_daily_rows`). `main()` renders the topbar
+/ filter meta / insight banners / KPI strip on the main thread
+*between* the two waves so the above-the-fold content paints as
+soon as its inputs are available; worker threads only return data
+back through the futures, so every `st.*` / `topbar_slot.markdown(...)`
+write happens on the main render thread. An empty-window
+short-circuit skips the second wave entirely when
+`summary.total_events == 0`. A single
+`with st.spinner(LOADING_INDICATOR_MESSAGE):` ("Loading
+analytics…") brackets both waves so the cold load shows immediate
+feedback and clears once every widget has its data. Read errors
+from either wave surface as one `st.error` + `st.stop`. The
+`dashboard.load: total=X.Xs reads=N parallel=…` INFO line now
+reports `N = 13` on a full render and `N = 6` on the empty-window
+short-circuit so the A/B comparison stays grep-able. Layer 6
+(predicate-shape audit) and the Layer 4 dashboard cutover remain.
 
 ## Symptom
 
@@ -429,8 +461,10 @@ planner skip the event filter at scan time.
 3. **PR 3** — Layer 3: collapsed `get_summary` + unioned
    `get_filter_options`. Touches read-model SQL but the public
    signatures stay.
-4. **PR 4** — Layer 5 UX polish (incremental render + spinner) so the
-   user perceives the page as fast even before Layer 4 lands.
+4. **PR 4** — Layer 5 (shipped, #396): UX polish (5-min TTL on the
+   data-extent / filter-options reads, staged topbar / KPI render,
+   single inline "Loading analytics…" spinner) so the user
+   perceives the page as fast even before Layer 4 lands.
 5. **PR 5** — Layer 4: daily-rollup materialized view + cutover for the
    widgets that don't need raw rows. Schema migration + sync-job hook
    for refresh.
