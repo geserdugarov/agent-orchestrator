@@ -3,12 +3,24 @@
 """Fixing stage handler.
 
 `_handle_fixing` owns the PR-feedback quiet window and the dev-resume /
-push / hand-back-to-`validating` cycle. `_handle_in_review` flips the
-label to `fixing` the moment fresh PR feedback (issue-thread,
-PR-conversation, inline-review, or review-summary) is detected; the
-in_review handler deliberately leaves the in_review watermarks behind
-so this handler can read the triggering comments for its dev-resume
-prompt.
+push / hand-back-to-`validating` cycle. Two routes set the `fixing`
+label:
+
+  * `_handle_in_review` flips it the moment fresh PR feedback
+    (issue-thread, PR-conversation, inline-review, or review-summary)
+    is detected; the in_review handler deliberately leaves the in_review
+    watermarks behind so this handler can read the triggering comments
+    for its dev-resume prompt. This route records `pending_fix_at` +
+    per-namespace `pending_fix_*_max_id` bookmarks.
+  * `_handle_validating` flips it BEFORE spawning the dev on a
+    `CHANGES_REQUESTED` verdict so the dev-fix subphase is observably
+    labeled `fixing` (the active job is "fixing reviewer-requested
+    changes", not "validating"). This route does NOT set
+    `pending_fix_at`; the dev runs inline in the same tick and the
+    validating handler flips back to `validating` itself on a pushed
+    fix with `review_round` bumped. Only the parked outcomes (timeout
+    / no-commit / dirty / push-fail) leave the fixing handler to own
+    the awaiting-human cycle here.
 
 Each tick the handler rescans unread feedback from the existing watermarks
 (NOT the `pending_fix_*_max_id` bookmarks recorded by the route -- those
@@ -23,8 +35,12 @@ over ALL unread surfaces and resumes the locked dev session via
 On a pushed fix the handler advances `pr_last_comment_id`,
 `pr_last_review_comment_id`, and `pr_last_review_summary_id` past the
 just-consumed feedback (mirrors the legacy in_review fix path), clears
-the bookmarks, resets `review_round`, and flips the label DIRECTLY back
-to `validating` so the reviewer agent re-evaluates the freshened diff
+the bookmarks, updates `review_round` based on the route discriminator
+`pending_fix_at` (set → reset to 0 for the in_review route whose
+previous reviewer round was APPROVED; unset → bump by 1 for the
+validating route whose previous round was CHANGES_REQUESTED so the
+review cycle continues), and flips the label DIRECTLY back to
+`validating` so the reviewer agent re-evaluates the freshened diff
 next tick. Docs do not run on the pushed-fix exit -- the single docs
 pass is deferred to the final-docs handoff after reviewer approval, so
 running the docs stage against an unapproved diff here would just push
@@ -154,6 +170,19 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # `pr_conversation_comments_after` would be called with `after_id=None`
     # and re-feed every historical issue / PR-conversation comment into
     # the dev's `_build_pr_comment_followup` prompt as fresh feedback.
+    # Capture `pending_fix_at` BEFORE the bookmark-clear branches below.
+    # It distinguishes the in_review->fixing route (set by the in_review
+    # handler when fresh PR feedback lands) from the validating->fixing
+    # route (set when a CHANGES_REQUESTED dev fix parks). The pushed-fix
+    # branch resets `review_round` to 0 only for the in_review route --
+    # there, the previous reviewer round was APPROVED so the next round
+    # starts fresh. For validating->fixing, the previous round was
+    # CHANGES_REQUESTED and we're still inside the same review cycle, so
+    # the round must be bumped, not reset (otherwise MAX_REVIEW_ROUNDS
+    # accounting silently restarts when a parked CHANGES_REQUESTED fix
+    # is finished off via a human reply).
+    pending_fix_at_was_set = state.get("pending_fix_at") is not None
+
     issue_wm = state.get("pr_last_comment_id")
     if issue_wm is None:
         issue_wm = state.get("last_action_comment_id")
@@ -194,7 +223,68 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # inline review, a follow-up summary). Without this guard a single
     # poisoned tick would loop on every poll until human intervention,
     # spamming the same dev-resume prompt at the agent.
+    #
+    # Exception: when the park reason can resolve without a human comment
+    # AND the issue arrived here via the validating route (CHANGES_
+    # REQUESTED dev fix), attempt silent recovery first. The
+    # `_handle_validating` CHANGES_REQUESTED branch flips to `fixing`
+    # BEFORE spawning the dev, so a transient park (`push_failed` /
+    # `agent_timeout`) lands under `fixing` instead of `validating`;
+    # without this recovery branch the issue would sit forever in
+    # `fixing` awaiting a human comment the underlying condition does
+    # not produce. The shared `_try_recover_validating_transient_park`
+    # helper (re-exported from `workflow`) implements the dev-side
+    # reconcile and round bookkeeping.
+    #
+    # The route discriminator is `pending_fix_at`: the in_review route
+    # sets it when fresh human PR feedback drives the relabel, while the
+    # validating route leaves it unset. Recovery must NOT run on the
+    # in_review route because:
+    #
+    #   * `_handle_fixing` advances the PR-feedback watermarks past the
+    #     human comment even on a timed-out dev resume (so the dev does
+    #     not replay it). A subsequent silent recovery that clears
+    #     `agent_timeout` and bounces back to `validating` would consume
+    #     the human's PR feedback without ever applying a fix.
+    #   * The shared helper bumps `review_round` on its `pushed` outcome.
+    #     The in_review route resets `review_round` to 0 on a pushed fix
+    #     (the previous reviewer round was APPROVED, so a new cycle
+    #     starts fresh), so the shared helper would mis-account the
+    #     round when a deferred push lands on this route.
+    #
+    # On the in_review route a transient park therefore stays parked
+    # until a human comment arrives, matching the original behavior
+    # (this code path had no transient recovery before -- the validating
+    # handler held that responsibility for parks under `validating`).
     if state.get("awaiting_human"):
+        park_reason = state.get("park_reason")
+        validating_routed = state.get("pending_fix_at") is None
+        if (
+            not new_feedback
+            and park_reason in _wf._VALIDATING_TRANSIENT_PARK_REASONS
+            and validating_routed
+        ):
+            recovery = _wf._try_recover_validating_transient_park(
+                spec, issue, state,
+            )
+            if recovery == "stuck":
+                return  # still stuck; do not re-post the park comment
+            # Conditions resolved (either no fix landed or a deferred
+            # push finished). Clear the park flags and flip back to
+            # `validating` so the reviewer re-evaluates the current head
+            # next tick. The helper has already bumped `review_round`
+            # when a fix landed (push_failed, or agent_timeout that
+            # finished its push). Clear the pending_fix_* bookmarks
+            # defensively: this branch ONLY fires when `pending_fix_at`
+            # was already None, so the clear is a no-op in normal flow,
+            # but a stale bookmark from an earlier route would otherwise
+            # mis-flag the next reviewer round.
+            state.set("awaiting_human", False)
+            state.set("park_reason", None)
+            _clear_pending_fix_bookmarks(state)
+            gh.set_workflow_label(issue, "validating")
+            gh.write_pinned_state(issue, state)
+            return
         if not new_feedback:
             return
         state.set("awaiting_human", False)
@@ -303,10 +393,22 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         gh.write_pinned_state(issue, state)
         return
 
-    # Reset the round so the reviewer starts fresh on the new diff
-    # next tick. The bookmarks served their purpose; clear them so a
-    # later in_review -> fixing route writes fresh values rather than
-    # mixing rounds.
+    # Bookmarks served their purpose; clear them so a later
+    # in_review->fixing route writes fresh values rather than mixing
+    # rounds. The round update depends on which route brought us here
+    # (see `pending_fix_at_was_set` above):
+    #
+    #   * in_review->fixing: reset to 0. The previous reviewer round
+    #     was APPROVED (the in_review HITL ping is gated on approval);
+    #     the new fix starts a fresh round-count so MAX_REVIEW_ROUNDS
+    #     does not trip prematurely on issues that pass back through
+    #     review after a human PR comment.
+    #
+    #   * validating->fixing (CHANGES_REQUESTED dev fix that parked and
+    #     was finished via a human reply): bump. The previous round
+    #     was CHANGES_REQUESTED, not APPROVED, so we are still in the
+    #     same review cycle and the round counter must advance to keep
+    #     MAX_REVIEW_ROUNDS accounting honest.
     #
     # Flip DIRECTLY to `validating` so the reviewer re-evaluates the
     # new head next tick. Docs do not run on this exit -- the single
@@ -314,7 +416,11 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # approval, so running the docs stage against an unapproved diff
     # here would just push a no-op and waste a tick.
     _clear_pending_fix_bookmarks(state)
-    state.set("review_round", 0)
+    if pending_fix_at_was_set:
+        state.set("review_round", 0)
+    else:
+        round_n = int(state.get("review_round") or 0)
+        state.set("review_round", round_n + 1)
     gh.set_workflow_label(issue, "validating")
     gh.write_pinned_state(issue, state)
 

@@ -1062,6 +1062,17 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         return
 
     # CHANGES_REQUESTED -- post the feedback on the PR, then resume the dev.
+    # The dev-fix subphase runs under the `fixing` label so the active job
+    # is observably "fixing reviewer-requested changes" rather than
+    # "validating" (which would now read as reviewer/verify work only). On
+    # a successful pushed fix we relabel back to `validating` so the
+    # reviewer re-evaluates the new head next tick; on any park the issue
+    # stays on `fixing` and the fixing handler owns the awaiting-human
+    # rescan + dev resume cycle (`fixing` already extends to "automated
+    # reviewer feedback" by virtue of this route, in addition to its
+    # original in_review human-feedback duty). `review_round` accounting,
+    # `MAX_REVIEW_ROUNDS`, dev-session pinning, and the final-docs handoff
+    # are unchanged -- only the visible label moves with the active work.
     feedback = body.strip() or (review.last_message or "").strip()
     if pr_number is not None:
         try:
@@ -1076,13 +1087,25 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 issue.number, pr_number,
             )
 
+    # Flip to `fixing` BEFORE spawning the dev so the GitHub label reflects
+    # the active job for the duration of the dev subprocess (and for any
+    # subsequent ticks if the run parks). The label set is independent of
+    # the pinned-state write below; doing it first means a crash inside the
+    # dev spawn still leaves the issue on `fixing` with stale awaiting_human
+    # =False, which the next tick's fixing handler treats as no-feedback
+    # and bounces back to `validating` so the reviewer reruns. Without the
+    # pre-spawn flip, a crash would leave a stale `validating` label over
+    # work the reviewer never produced a verdict for.
+    gh.set_workflow_label(issue, "fixing")
+    gh.write_pinned_state(issue, state)
+
     fix_prompt = _wf._build_fix_prompt(feedback)
     before_sha = _wf._head_sha(wt)
     dev_spec, dev_backend, dev_args, dev_sid = _wf._read_dev_session(state)
     dev_result = _wf._run_agent_tracked(
         gh, issue.number,
         agent_role="developer",
-        stage="validating",
+        stage="fixing",
         backend=dev_backend,
         prompt=fix_prompt,
         cwd=wt,
@@ -1097,8 +1120,17 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     if not _handle_dev_fix_result(
         gh, spec, issue, state, wt, dev_result, before_sha
     ):
+        # Park (timeout / no-commit / dirty / push-fail): the issue stays
+        # on `fixing` so the next tick's `_handle_fixing` owns the
+        # awaiting-human rescan. The fixing handler's filter drops the
+        # orchestrator's own reviewer-feedback PR comment and park
+        # comment, so an awaiting_human=True tick with no new human reply
+        # returns silently rather than bouncing back to `validating`.
         gh.write_pinned_state(issue, state)
         return
 
+    # Pushed fix: bump the round and hand back to `validating` so the
+    # reviewer re-evaluates the new head next tick.
     state.set("review_round", round_n + 1)
+    gh.set_workflow_label(issue, "validating")
     gh.write_pinned_state(issue, state)

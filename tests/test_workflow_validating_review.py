@@ -84,9 +84,22 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         ))
         mocks["_push_branch"].assert_called_once()
         self.assertEqual(gh.pinned_data(5).get("review_round"), 1)
-        # Pushed dev fix stays on `validating` (no documenting hop) so
-        # the reviewer re-evaluates the new head on the next tick. The
-        # docs pass only runs as the final-docs handoff after approval.
+        # The dev-fix subphase runs under the `fixing` label so the active
+        # job is observably "fixing reviewer-requested changes" rather
+        # than "validating". On a successful pushed fix the handler flips
+        # back to `validating` so the reviewer re-evaluates the new head
+        # on the next tick. No documenting hop -- the docs pass only runs
+        # as the final-docs handoff after approval.
+        self.assertIn((5, "fixing"), gh.label_history)
+        # The trailing label entry must be `validating` so the next tick
+        # picks up via `_handle_validating`.
+        self.assertEqual(gh.label_history[-1], (5, "validating"))
+        # The `fixing` flip happens BEFORE the `validating` flip so an
+        # external observer sees the active work labeled `fixing` for the
+        # duration of the dev subprocess.
+        fixing_idx = gh.label_history.index((5, "fixing"))
+        validating_idx = gh.label_history.index((5, "validating"))
+        self.assertLess(fixing_idx, validating_idx)
         self.assertNotIn((5, "documenting"), gh.label_history)
         self.assertNotIn((5, "in_review"), gh.label_history)
 
@@ -286,6 +299,12 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertEqual(data.get("pre_dev_fix_sha"), "aaa")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("agent timed out", last_comment)
+        # CHANGES_REQUESTED flips the label to `fixing` BEFORE the dev
+        # spawn so a parked subprocess leaves the active job labeled
+        # `fixing` (the fixing handler then owns the awaiting-human
+        # rescan + dev resume cycle on subsequent ticks).
+        self.assertIn((6, "fixing"), gh.label_history)
+        self.assertNotIn((6, "validating"), gh.label_history)
 
     def test_dev_fix_no_new_commit_parks_round_unchanged(self) -> None:
         gh, issue = self._seeded()
@@ -306,6 +325,11 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertTrue(gh.pinned_data(6).get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("agent needs your input", last_comment)
+        # The pre-spawn label flip is observed even on the no-commit park
+        # path (the fixing handler then handles the awaiting-human rescan
+        # on the next tick).
+        self.assertIn((6, "fixing"), gh.label_history)
+        self.assertNotIn((6, "validating"), gh.label_history)
 
     def test_dev_fix_dirty_parks_round_unchanged(self) -> None:
         gh, issue = self._seeded()
@@ -326,6 +350,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted change", last_comment)
         self.assertIn("leftover.py", last_comment)
+        self.assertIn((6, "fixing"), gh.label_history)
+        self.assertNotIn((6, "validating"), gh.label_history)
 
     def test_dev_fix_push_fail_parks_round_unchanged(self) -> None:
         gh, issue = self._seeded()
@@ -349,6 +375,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertEqual(data.get("park_reason"), "push_failed")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("git push failed", last_comment)
+        self.assertIn((6, "fixing"), gh.label_history)
+        self.assertNotIn((6, "validating"), gh.label_history)
 
     def test_review_round_at_cap_parks_without_spawning_reviewer(self) -> None:
         gh, issue = self._seeded(review_round=config.MAX_REVIEW_ROUNDS)
@@ -361,6 +389,44 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertTrue(gh.pinned_data(6).get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("review still has comments", last_comment)
+
+    def test_changes_requested_flips_to_fixing_before_dev_spawn(self) -> None:
+        # The dev-fix subphase must run under the `fixing` label so the
+        # active job is observably "fixing reviewer-requested changes"
+        # rather than "validating". The label flip lands BEFORE the dev
+        # subprocess so an external observer never sees the dev work
+        # labeled only `validating`; the `fixing` entry must therefore
+        # appear in the label history strictly before any later flip
+        # back to `validating`.
+        gh, issue = self._seeded()
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=[
+                self._changes_requested_review(),
+                _agent(session_id="dev-sess", last_message="fixed"),
+            ],
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["aaa", "bbb"],
+        )
+
+        # Both flips landed in order: first `fixing` (pre-spawn), then
+        # `validating` (post-push) so the reviewer reruns on the next tick.
+        self.assertIn((6, "fixing"), gh.label_history)
+        self.assertIn((6, "validating"), gh.label_history)
+        fixing_idx = gh.label_history.index((6, "fixing"))
+        validating_idx = gh.label_history.index((6, "validating"))
+        self.assertLess(fixing_idx, validating_idx)
+        # The dev work is tagged with `stage="fixing"` for analytics so
+        # spend on a CHANGES_REQUESTED fix is not double-counted against
+        # the validating bucket alongside the reviewer/verify spend.
+        dev_spawns = [
+            e for e in gh.recorded_events
+            if e["event"] == "agent_spawn"
+            and e.get("agent_role") == "developer"
+        ]
+        self.assertEqual(len(dev_spawns), 1)
+        self.assertEqual(dev_spawns[0]["stage"], "fixing")
 
 
 class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflowMixin):

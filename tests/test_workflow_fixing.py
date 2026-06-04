@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
@@ -654,6 +655,394 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNone(data.get("park_reason"))
         self.assertIn((880, "validating"), gh.label_history)
         self.assertNotIn((880, "documenting"), gh.label_history)
+
+    def test_validating_routed_fix_bumps_round_instead_of_reset(self) -> None:
+        # A parked CHANGES_REQUESTED dev fix (label flipped to `fixing`
+        # by `_handle_validating`) is finished off via a human reply.
+        # The pushed fix must BUMP `review_round`, not reset it: we are
+        # still inside the same review cycle (the previous reviewer
+        # round was CHANGES_REQUESTED, not APPROVED) and resetting would
+        # silently restart MAX_REVIEW_ROUNDS accounting.
+        # `pending_fix_at` is the discriminator: in_review->fixing sets
+        # it (and resets the round on push); validating->fixing does NOT
+        # set it (and bumps the round on push).
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        reply = FakeComment(
+            id=2600, body="here's a clarification: use option B",
+            user=FakeUser("alice"), created_at=long_ago,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr, issue_comments=[reply],
+            extra_state={
+                "awaiting_human": True,
+                "park_reason": "agent_timeout",
+                "pr_last_comment_id": 2500,
+                # validating->fixing route did NOT set pending_fix_at;
+                # only the in_review route sets it. Override the seed's
+                # default to model the validating-route shape.
+                "pending_fix_at": None,
+                "pending_fix_issue_max_id": None,
+                "review_round": 2,
+            },
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    last_message="pushed",
+                ),
+                head_shas=("sha-before", "sha-after"),
+            )
+
+        data = gh.pinned_data(880)
+        # `review_round` bumped from 2 to 3 -- the review cycle continues
+        # under MAX_REVIEW_ROUNDS rather than starting over at 0.
+        self.assertEqual(data.get("review_round"), 3)
+        # Flipped back to validating so the reviewer re-evaluates next tick.
+        self.assertIn((880, "validating"), gh.label_history)
+
+    def test_push_failed_park_silently_recovers_when_push_lands(
+        self,
+    ) -> None:
+        # A `_handle_validating` CHANGES_REQUESTED dev fix can park
+        # under `fixing` with `park_reason="push_failed"` after a
+        # racing non-fast-forward push. Without the recovery branch
+        # the issue would sit in `fixing` forever because
+        # `_resume_developer_on_human_reply` only fires on a new human
+        # comment AND the deferred --force-with-lease push that
+        # eventually lands does not produce one. The recovery branch
+        # silently retries the push and, on success, clears the park
+        # flags, bumps `review_round`, and flips back to `validating`
+        # so the reviewer re-evaluates the now-landed head.
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "awaiting_human": True,
+                "park_reason": "push_failed",
+                "pr_last_comment_id": 5000,
+                # Validating route did not set pending_fix_at.
+                "pending_fix_at": None,
+                "pending_fix_issue_max_id": None,
+                "review_round": 1,
+            },
+        )
+
+        # `_worktree_path` is not mocked by the standard mixin (only
+        # `_ensure_worktree` is). The recovery helper checks
+        # `wt.exists()` before retrying the push, so route it to an
+        # existing path. `/tmp` exists; the actual filesystem state
+        # does not matter because `_push_branch` is mocked.
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600), \
+             patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+                push_branch=True,
+            )
+
+        # Recovery ran -- not a human-comment driven resume.
+        mocks["run_agent"].assert_not_called()
+        mocks["_push_branch"].assert_called_once()
+        data = gh.pinned_data(880)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertIsNone(data.get("park_reason"))
+        # Round bumped because a fix landed (the recovery helper bumps
+        # on its `pushed` outcome).
+        self.assertEqual(data.get("review_round"), 2)
+        # Flipped back to validating so the reviewer reruns next tick.
+        self.assertIn((880, "validating"), gh.label_history)
+
+    def test_push_failed_park_stays_stuck_when_push_still_fails(
+        self,
+    ) -> None:
+        # The remote is still rejecting the push. The recovery branch
+        # must leave the park in place (no flag clear, no relabel) and
+        # NOT re-post the park comment -- the next tick retries.
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "awaiting_human": True,
+                "park_reason": "push_failed",
+                "pr_last_comment_id": 5000,
+                "pending_fix_at": None,
+                "pending_fix_issue_max_id": None,
+                "review_round": 1,
+            },
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600), \
+             patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+                push_branch=False,
+            )
+
+        mocks["run_agent"].assert_not_called()
+        data = gh.pinned_data(880)
+        # Park flags unchanged.
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "push_failed")
+        # Still on `fixing` (no relabel emitted this tick).
+        self.assertNotIn((880, "validating"), gh.label_history)
+        # Did NOT re-post the park comment (would be repetitive churn).
+        self.assertEqual(gh.posted_comments, [])
+
+    def test_agent_timeout_park_clears_when_no_commit_landed(self) -> None:
+        # An `agent_timeout` park with `pre_dev_fix_sha == head_sha` means
+        # the timeout produced no new commit. The recovery branch clears
+        # the park flags WITHOUT bumping the round (nothing landed) and
+        # flips back to `validating` so the reviewer reruns. The dev
+        # session is not respawned in fixing -- the next validating tick
+        # re-runs the reviewer which decides whether the same
+        # CHANGES_REQUESTED fix is still needed.
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "awaiting_human": True,
+                "park_reason": "agent_timeout",
+                "pr_last_comment_id": 5000,
+                "pending_fix_at": None,
+                "pending_fix_issue_max_id": None,
+                "review_round": 1,
+                # before-SHA equals current HEAD -- timeout did not
+                # commit. The mixin's `head_shas` controls `_head_sha`.
+                "pre_dev_fix_sha": "aaa",
+            },
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600), \
+             patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+                head_shas=("aaa",),
+            )
+
+        mocks["run_agent"].assert_not_called()
+        data = gh.pinned_data(880)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertIsNone(data.get("park_reason"))
+        # No round bump -- the timeout produced no fix.
+        self.assertEqual(data.get("review_round"), 1)
+        self.assertIn((880, "validating"), gh.label_history)
+        # `pre_dev_fix_sha` watermark cleared by the recovery helper so
+        # a future park does not re-use a stale value.
+        self.assertIsNone(data.get("pre_dev_fix_sha"))
+
+    def test_agent_timeout_park_finishes_push_when_dev_committed(
+        self,
+    ) -> None:
+        # The dev committed before the timeout killed it; recovery
+        # pushes the new SHA and bumps `review_round`. Mirrors the
+        # validating-side `pushed` branch.
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "awaiting_human": True,
+                "park_reason": "agent_timeout",
+                "pr_last_comment_id": 5000,
+                "pending_fix_at": None,
+                "pending_fix_issue_max_id": None,
+                "review_round": 1,
+                "pre_dev_fix_sha": "aaa",
+            },
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600), \
+             patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+                # HEAD moved past pre-agent SHA -- the dev had committed.
+                head_shas=("bbb",),
+                push_branch=True,
+                dirty_files=(),
+            )
+
+        mocks["_push_branch"].assert_called_once()
+        data = gh.pinned_data(880)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertEqual(data.get("review_round"), 2)
+        self.assertIn((880, "validating"), gh.label_history)
+
+    def test_in_review_routed_agent_timeout_park_does_not_silently_recover(
+        self,
+    ) -> None:
+        # Regression: the transient recovery branch must NOT fire on
+        # the in_review->fixing route (discriminator: `pending_fix_at`
+        # is set). `_handle_fixing` advances the PR-feedback watermarks
+        # past the human's comment on a timed-out resume so the dev
+        # does not replay it; silently clearing `agent_timeout` here
+        # would consume that human PR feedback without applying a fix
+        # and bounce the issue back to `validating`, where the reviewer
+        # would re-approve over unread human feedback.
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "awaiting_human": True,
+                "park_reason": "agent_timeout",
+                "pr_last_comment_id": 5000,
+                # in_review route DID set this -- we are mid-fix on a
+                # human PR comment.
+                "pending_fix_at": "2026-05-24T00:00:00+00:00",
+                "pending_fix_issue_max_id": 2000,
+                "review_round": 0,
+                # before-SHA equals current HEAD -- the timed-out dev
+                # produced no commit. The shared helper would otherwise
+                # report "cleared" and the handler would relabel back
+                # to validating.
+                "pre_dev_fix_sha": "aaa",
+            },
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600), \
+             patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+                head_shas=("aaa",),
+                push_branch=True,
+            )
+
+        # No recovery attempt: the dev was not respawned and no push
+        # was attempted on the gated path.
+        mocks["run_agent"].assert_not_called()
+        mocks["_push_branch"].assert_not_called()
+        data = gh.pinned_data(880)
+        # Park flags preserved -- the route waits for a human comment.
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "agent_timeout")
+        # Stayed on `fixing`; did NOT relabel.
+        self.assertNotIn((880, "validating"), gh.label_history)
+        # Bookmark untouched so the in_review semantics survive into
+        # the next tick after the human replies.
+        self.assertEqual(
+            data.get("pending_fix_at"), "2026-05-24T00:00:00+00:00",
+        )
+
+    def test_in_review_routed_push_failed_park_does_not_silently_recover(
+        self,
+    ) -> None:
+        # Same gate, push_failed flavor: on the in_review route a
+        # deferred --force-with-lease push must NOT be retried here
+        # because the shared helper's `pushed` branch bumps
+        # `review_round`, while the in_review route resets it to 0 on
+        # the eventual push success (the previous reviewer round was
+        # APPROVED). Letting the helper run would mis-account the
+        # round under MAX_REVIEW_ROUNDS.
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "awaiting_human": True,
+                "park_reason": "push_failed",
+                "pr_last_comment_id": 5000,
+                "pending_fix_at": "2026-05-24T00:00:00+00:00",
+                "pending_fix_issue_max_id": 2000,
+                "review_round": 0,
+            },
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600), \
+             patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+                push_branch=True,
+            )
+
+        mocks["_push_branch"].assert_not_called()
+        data = gh.pinned_data(880)
+        # Park preserved; waits for human input.
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "push_failed")
+        self.assertNotIn((880, "validating"), gh.label_history)
+        # Bookmark and round unchanged.
+        self.assertEqual(
+            data.get("pending_fix_at"), "2026-05-24T00:00:00+00:00",
+        )
+        self.assertEqual(data.get("review_round"), 0)
+
+    def test_non_transient_park_stays_silent_without_recovery(self) -> None:
+        # Park reasons that REQUIRE a human comment to unstick (an
+        # agent question, a dirty worktree) must not be silently
+        # recovered. The handler returns early as before.
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr,
+            extra_state={
+                "awaiting_human": True,
+                # Not a transient reason; the dev raised a question and
+                # the human needs to answer.
+                "park_reason": "agent_question",
+                "pr_last_comment_id": 5000,
+                "pending_fix_at": None,
+                "pending_fix_issue_max_id": None,
+                "review_round": 1,
+            },
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600), \
+             patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+                push_branch=True,
+            )
+
+        mocks["run_agent"].assert_not_called()
+        mocks["_push_branch"].assert_not_called()
+        data = gh.pinned_data(880)
+        # Unchanged park.
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "agent_question")
+        self.assertEqual(data.get("review_round"), 1)
+        self.assertNotIn((880, "validating"), gh.label_history)
+
+    def test_in_review_routed_fix_resets_round_to_zero(self) -> None:
+        # Companion to the test above: the in_review->fixing route
+        # (which sets `pending_fix_at` when fresh PR feedback lands after
+        # reviewer approval) MUST reset `review_round` to 0 on a pushed
+        # fix. The previous reviewer round was APPROVED so the new fix
+        # starts a fresh round-count.
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please address the typo",
+            user=FakeUser("alice"), created_at=long_ago,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(
+            pr=pr, issue_comments=[comment],
+            extra_state={"review_round": 2},
+        )
+        # `_seed` already sets `pending_fix_at` (modeling the in_review
+        # route); confirm before asserting the reset.
+        self.assertIsNotNone(gh.pinned_data(880).get("pending_fix_at"))
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    last_message="fixed",
+                ),
+                head_shas=("sha-before", "sha-after"),
+                push_branch=True,
+            )
+
+        data = gh.pinned_data(880)
+        # Reset to 0 since the previous round was APPROVED.
+        self.assertEqual(data.get("review_round"), 0)
+        self.assertIsNone(data.get("pending_fix_at"))
 
     # --- no unread feedback at all --------------------------------------
 

@@ -7,14 +7,18 @@
 After the implementer commits and the PR opens, `_on_commits` relabels
 straight to `validating` -- the docs pass only runs as the final-docs
 handoff after the reviewer approves, not as a pre-review hop. Validating
-then runs a fresh reviewer session; on changes-requested the dev session
-is resumed, the fix pushed, and the reviewer reruns until APPROVED or
-MAX_REVIEW_ROUNDS is hit (the issue stays on `validating` throughout
-these fix rounds -- the single docs pass is deferred to the final-docs
-handoff after reviewer approval). After approval (+ verify + squash)
-the handler relabels to `documenting` for the **final-docs** pass on
-the squashed head before in_review picks up; `_handle_documenting`
-advances straight to `in_review`.
+then runs a fresh reviewer session; on CHANGES_REQUESTED the handler
+relabels to `fixing` BEFORE spawning the dev so the dev-fix subphase
+is observably labeled `fixing` rather than `validating`. After the
+fix pushes the label flips back to `validating` (with `review_round`
+bumped) and the reviewer reruns until APPROVED or MAX_REVIEW_ROUNDS
+is hit -- the single docs pass is deferred to the final-docs handoff
+after reviewer approval. On a parked dev fix the issue stays on
+`fixing` and `_handle_fixing` owns the awaiting-human cycle from
+there. After approval (+ verify + squash) the validating handler
+relabels to `documenting` for the **final-docs** pass on the squashed
+head before in_review picks up; `_handle_documenting` advances
+straight to `in_review`.
 In_review reacts to PR state (merged/closed) and hands fresh PR
 feedback (any of the four comment surfaces) off to the `fixing` stage
 by recording pending-fix metadata in pinned state and flipping the
@@ -179,11 +183,17 @@ from .stages.implementing import (
 from .stages.in_review import _comment_created_at as _comment_created_at
 from .stages.in_review import _handle_in_review as _handle_in_review
 from .stages.question import _handle_question as _handle_question
+from .stages.validating import (
+    _VALIDATING_TRANSIENT_PARK_REASONS as _VALIDATING_TRANSIENT_PARK_REASONS,
+)
 from .stages.validating import _handle_dev_fix_result as _handle_dev_fix_result
 from .stages.validating import _handle_validating as _handle_validating
 from .stages.validating import _latest_pr_comment_ids as _latest_pr_comment_ids
 from .stages.validating import (
     _post_user_content_change_result as _post_user_content_change_result,
+)
+from .stages.validating import (
+    _try_recover_validating_transient_park as _try_recover_validating_transient_park,
 )
 
 log = logging.getLogger(__name__)

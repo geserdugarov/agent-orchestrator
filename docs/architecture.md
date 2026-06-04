@@ -312,12 +312,18 @@ orchestrator/
                            squash succeeded) the handler relabels to
                            `documenting` (NOT directly to `in_review`).
                            `_handle_documenting`'s success exits advance to
-                           `in_review` unconditionally. Pushed dev fixes
-                           (CHANGES_REQUESTED, awaiting-human resume, drift
-                           pushed, transient-park recovery push) stay on
-                           `validating` (no relabel emitted) so the
-                           reviewer re-evaluates on the next tick without
-                           a pre-review docs hop.
+                           `in_review` unconditionally. CHANGES_REQUESTED
+                           flips the label to `fixing` BEFORE the dev spawn
+                           so the dev-fix subphase is observably under
+                           `fixing` rather than `validating`; on a pushed
+                           fix the handler flips back to `validating` itself
+                           (bumping `review_round`) and on a park the issue
+                           stays on `fixing` for `_handle_fixing` to own
+                           the awaiting-human cycle. Other pushed dev fixes
+                           (awaiting-human resume, drift pushed, transient-
+                           park recovery push) stay on `validating` (no
+                           relabel emitted) so the reviewer re-evaluates on
+                           the next tick without a pre-review docs hop.
     in_review.py        — `_handle_in_review` plus PR-side primitives:
                            legacy watermark migration and the
                            cross-namespace watermark ratchet
