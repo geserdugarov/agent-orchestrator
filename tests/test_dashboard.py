@@ -1315,10 +1315,359 @@ class MainParallelFanOutWiringTest(unittest.TestCase):
     def test_main_catches_analytics_read_error_around_fan_out(self) -> None:
         # The fan-out is wrapped in the same `try/except
         # AnalyticsReadError` the sequential path used, so a worker
-        # exception still surfaces as one `st.error`.
+        # exception still surfaces as one `st.error`. The staged
+        # split (issue #379) calls `_fan_out_reads` twice -- once
+        # for the topbar / KPI inputs and once for the rest of the
+        # widgets -- so the wiring assertion is that the fan-out
+        # helper is the only dispatch surface and that the read
+        # error type is caught around it.
         src = self._main_source()
-        self.assertIn("_fan_out_reads(readers", src)
-        self.assertIn("analytics_read.AnalyticsReadError", src)
+        self.assertIn(
+            "_fan_out_reads(\n                first_wave_readers", src
+        )
+        self.assertIn(
+            "_fan_out_reads(\n                    second_wave_readers", src
+        )
+        # Two `try/except AnalyticsReadError` blocks -- one per wave
+        # -- so a worker exception in either wave surfaces as one
+        # `st.error` and stops the render.
+        self.assertGreaterEqual(
+            src.count("analytics_read.AnalyticsReadError"), 2,
+        )
+
+
+class StaticMetadataCacheTest(unittest.TestCase):
+    """`get_data_extent` and `get_filter_options` (issue #379) carry
+    no filter inputs and only change as `analytics.sync` ingests new
+    events, so the dashboard wraps them in `@st.cache_data` under the
+    longer `STATIC_METADATA_TTL_SECONDS` (5 min) instead of the
+    per-filter 60 s TTL. Together these collapse the topbar / sidebar
+    round-trip on every Streamlit rerun.
+    """
+
+    def _main_source(self) -> str:
+        import inspect
+        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        return inspect.getsource(dashboard.main)
+
+    def test_ttl_is_five_minutes(self) -> None:
+        # Pin the constant so a future tweak changes it deliberately.
+        # A 5-minute TTL is long enough to absorb the typical rerun
+        # cadence (Streamlit rerenders on every widget interaction)
+        # but short enough that a freshly-synced repo / event value
+        # surfaces within one `analytics.sync` cycle.
+        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        self.assertEqual(dashboard.STATIC_METADATA_TTL_SECONDS, 300)
+
+    def test_extent_reader_decorated_with_longer_ttl(self) -> None:
+        src = self._main_source()
+        marker = "def _read_data_extent("
+        self.assertIn(marker, src)
+        # The cached wrapper must sit directly under
+        # `@st.cache_data(... ttl=STATIC_METADATA_TTL_SECONDS)` --
+        # not the 60 s TTL the per-filter wrappers use.
+        head = src.index(marker)
+        # Look back to the decorator just above the def.
+        decorator_window = src[max(0, head - 200):head]
+        self.assertIn("@st.cache_data(", decorator_window)
+        self.assertIn(
+            "ttl=STATIC_METADATA_TTL_SECONDS", decorator_window
+        )
+        self.assertIn("show_spinner=False", decorator_window)
+
+    def test_filter_options_reader_decorated_with_longer_ttl(self) -> None:
+        src = self._main_source()
+        marker = "def _read_filter_options("
+        self.assertIn(marker, src)
+        head = src.index(marker)
+        decorator_window = src[max(0, head - 200):head]
+        self.assertIn("@st.cache_data(", decorator_window)
+        self.assertIn(
+            "ttl=STATIC_METADATA_TTL_SECONDS", decorator_window
+        )
+        self.assertIn("show_spinner=False", decorator_window)
+
+    def test_extent_and_options_readers_take_no_args(self) -> None:
+        # The static-metadata readers carry no filter inputs, so the
+        # cache key is empty -- they tolerate the longer TTL because
+        # the values only change as `analytics.sync` ingests new
+        # events, not when the operator adjusts the filter bar. Pin
+        # the empty signature so a future refactor cannot silently
+        # re-introduce a parameter (e.g. a connection) that would
+        # turn into part of the cache key.
+        src = self._main_source()
+        for marker in ("def _read_data_extent(", "def _read_filter_options("):
+            with self.subTest(marker=marker):
+                head = src.index(marker)
+                tail = src.index("):", head)
+                self.assertEqual(src[head:tail + 1], marker + ")")
+
+    def test_main_dispatches_through_cached_readers(self) -> None:
+        # The bare `get_data_extent(conn=conn)` / `get_filter_options
+        # (conn=conn)` calls the old code paid on every rerun must be
+        # gone -- the only call sites for those reads now live inside
+        # the cached wrappers' bodies (where they are intentionally
+        # routed through the thread-local connection).
+        src = self._main_source()
+        # `main` itself calls the cached wrappers, not the raw reads.
+        self.assertIn("extent = _read_data_extent()", src)
+        self.assertIn("options = _read_filter_options()", src)
+
+
+class StagedRenderTest(unittest.TestCase):
+    """Issue #379 splits the read fan-out into two staged waves so
+    the topbar / filter meta / insight banners / KPI strip paint as
+    soon as their inputs are available, rather than blocking on every
+    widget. The first wave covers the six reads those above-the-fold
+    widgets consume; the second wave covers the seven remaining
+    widget reads. Worker threads only return data; every `st.*` /
+    placeholder write happens on the main render thread between the
+    two waves.
+    """
+
+    def _main_source(self) -> str:
+        import inspect
+        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        return inspect.getsource(dashboard.main)
+
+    def _wave_block(self, src: str, name: str) -> str:
+        # The reader lists are short, indented at the function-body
+        # level (4 spaces), and bracketed by `[` ... `\n    ]`. The
+        # type annotation `list[tuple[str, Callable[[], Any]]]` sits
+        # on the assignment line, so we walk past the `= [` opening
+        # and stop at the first dedented `]` (preceded by the body
+        # indent) to extract just the list literal.
+        marker = f"{name}: list"
+        self.assertIn(marker, src, f"{name} declaration missing")
+        head = src.index("= [", src.index(marker)) + len("= [")
+        tail = src.index("\n    ]", head)
+        return src[head:tail]
+
+    def test_first_wave_carries_only_kpi_topbar_inputs(self) -> None:
+        # The six reads in the first wave are exactly the inputs the
+        # topbar / filter meta / insight banners / KPI strip consume.
+        # Pin the set so a future refactor that adds (or drops) a
+        # reader has to update the staging explicitly.
+        src = self._main_source()
+        wave = self._wave_block(src, "first_wave_readers")
+        for name in (
+            "summary", "prev_summary", "ts_points",
+            "review_round_rows", "throughput_rows",
+            "cost_coverage_rows",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(f'"{name}"', wave)
+        # The remaining seven reads are NOT in the first wave -- they
+        # would force the spinner to wait for the slowest widget read
+        # before the KPI strip can paint.
+        for name in (
+            "stage_rows", "agent_exits", "issues_rows",
+            "backend_rows", "repo_rows", "heatmap_rows",
+            "backend_daily_rows",
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn(f'"{name}"', wave)
+
+    def test_second_wave_carries_the_remaining_widget_reads(self) -> None:
+        src = self._main_source()
+        wave = self._wave_block(src, "second_wave_readers")
+        for name in (
+            "stage_rows", "agent_exits", "issues_rows",
+            "backend_rows", "repo_rows", "heatmap_rows",
+            "backend_daily_rows",
+        ):
+            with self.subTest(name=name):
+                self.assertIn(f'"{name}"', wave)
+        # And the topbar / KPI-strip inputs are NOT in the second
+        # wave -- they belong to the first wave so the strip can
+        # paint before the slow widget reads finish.
+        for name in (
+            "summary", "prev_summary", "ts_points",
+            "review_round_rows", "throughput_rows",
+            "cost_coverage_rows",
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn(f'"{name}"', wave)
+
+    def test_topbar_and_meta_render_between_waves(self) -> None:
+        # `topbar_slot.markdown` and `meta_slot.markdown` (which fill
+        # the above-the-fold content) must happen AFTER the first
+        # wave dispatch and BEFORE the second wave dispatch.
+        # Otherwise the staged-render gain evaporates.
+        src = self._main_source()
+        first = src.index("_fan_out_reads(\n                first_wave_readers")
+        second = src.index("_fan_out_reads(\n                    second_wave_readers")
+        topbar_render = src.index("topbar_slot.markdown(")
+        meta_render = src.index("meta_slot.markdown(")
+        kpi_render = src.index("_kpi_strip_html(kpis)")
+        self.assertLess(first, topbar_render)
+        self.assertLess(topbar_render, second)
+        self.assertLess(first, meta_render)
+        self.assertLess(meta_render, second)
+        self.assertLess(first, kpi_render)
+        self.assertLess(kpi_render, second)
+
+    def test_inline_loading_spinner_wraps_fan_out(self) -> None:
+        # A single in-line "Loading analytics…" spinner spans both
+        # waves so the user gets immediate feedback on a cold load
+        # instead of staring at a blank page. Pin the constant +
+        # `st.spinner` call so a future refactor cannot silently drop
+        # the feedback surface.
+        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        self.assertEqual(
+            dashboard.LOADING_INDICATOR_MESSAGE, "Loading analytics…"
+        )
+        src = self._main_source()
+        self.assertIn(
+            "with st.spinner(LOADING_INDICATOR_MESSAGE):", src,
+        )
+        # And the spinner brackets BOTH fan-out calls -- a spinner
+        # that only covered the first wave would clear before the
+        # second wave painted its widgets.
+        spinner_head = src.index(
+            "with st.spinner(LOADING_INDICATOR_MESSAGE):"
+        )
+        first = src.index(
+            "_fan_out_reads(\n                first_wave_readers"
+        )
+        second = src.index(
+            "_fan_out_reads(\n                    second_wave_readers"
+        )
+        self.assertLess(spinner_head, first)
+        self.assertLess(spinner_head, second)
+
+    def test_widget_rendering_runs_on_main_thread_not_workers(self) -> None:
+        # Worker threads in `_fan_out_reads` only return data -- the
+        # `st.*` / `topbar_slot.markdown(...)` calls all live in
+        # `main()` itself, on the main render thread. We assert this
+        # by checking the reader entries are pure data callables
+        # (`lambda: _read_*(...)`) with no Streamlit writes inside.
+        src = self._main_source()
+        # The first/second wave list comprehensions are pure data
+        # closures -- `st.` (i.e. Streamlit attribute access) only
+        # appears outside those list entries.
+        for marker, end in (
+            ("first_wave_readers: list", "second_wave_readers"),
+            ("second_wave_readers: list", "total_reads"),
+        ):
+            with self.subTest(marker=marker):
+                head = src.index(marker)
+                tail = src.index(end, head)
+                wave_block = src[head:tail]
+                self.assertNotIn(" st.", wave_block)
+                self.assertNotIn("slot.markdown", wave_block)
+
+    def test_empty_window_short_circuits_second_wave(self) -> None:
+        # When the first wave's summary returns no events, the
+        # second wave never fires -- the seven remaining widget
+        # reads would just paint empty cards. Pin the short-circuit
+        # so a future refactor cannot silently re-introduce the
+        # wasted reads on an empty window.
+        src = self._main_source()
+        # The `summary.total_events == 0` check sits between the
+        # first-wave dispatch and the second-wave dispatch.
+        first = src.index(
+            "_fan_out_reads(\n                first_wave_readers"
+        )
+        second = src.index(
+            "_fan_out_reads(\n                    second_wave_readers"
+        )
+        empty_check = src.index("summary.total_events == 0")
+        self.assertLess(first, empty_check)
+        self.assertLess(empty_check, second)
+        # And the empty branch returns early so the second wave
+        # never executes on an empty window.
+        empty_block = src[empty_check:second]
+        self.assertIn("return", empty_block)
+
+
+class StagedRenderErrorTest(unittest.TestCase):
+    """A read error in EITHER wave must surface as one `st.error` +
+    `st.stop` -- the second-wave error path is what stops a half-
+    rendered dashboard (topbar / KPI strip already painted) from
+    silently continuing into broken widget code.
+    """
+
+    def _main_source(self) -> str:
+        import inspect
+        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        return inspect.getsource(dashboard.main)
+
+    def test_both_waves_catch_analytics_read_error(self) -> None:
+        src = self._main_source()
+        # Each fan-out call must be inside a `try/except
+        # analytics_read.AnalyticsReadError` so a worker exception in
+        # either wave surfaces as one user-friendly error rather than
+        # a stack trace.
+        first = src.index(
+            "_fan_out_reads(\n                first_wave_readers"
+        )
+        second = src.index(
+            "_fan_out_reads(\n                    second_wave_readers"
+        )
+        # Walk back from each fan-out call to find the surrounding
+        # `try:` -- it must be within a small window (just opens
+        # the block) and the matching `except` must catch the read
+        # error and stop the dashboard.
+        for label, head in (("first", first), ("second", second)):
+            with self.subTest(wave=label):
+                tail = src.index("st.stop()", head)
+                except_idx = src.rindex("except", head, tail)
+                handler = src[except_idx:tail + len("st.stop()")]
+                self.assertIn(
+                    "analytics_read.AnalyticsReadError", handler
+                )
+                self.assertIn("st.error(", handler)
+                self.assertIn("st.stop()", handler)
+
+    def test_second_wave_error_after_topbar_paints(self) -> None:
+        # The second-wave error path runs AFTER the topbar / KPI
+        # strip have already painted -- so the user sees real
+        # content (the topbar + KPI strip) and then a single
+        # `st.error` instead of a half-rendered dashboard.
+        src = self._main_source()
+        topbar_render = src.index("topbar_slot.markdown(")
+        second_try = src.index(
+            "_fan_out_reads(\n                    second_wave_readers"
+        )
+        self.assertLess(topbar_render, second_try)
+
+
+class FanOutReadsErrorPropagationTest(unittest.TestCase):
+    """The first-wave error path must NOT swallow the worker's
+    `AnalyticsReadError` -- the existing fan-out helper already
+    propagates the exception, but the staged-render refactor adds a
+    second call site, so re-pin the propagation shape for both
+    branches of `_fan_out_reads`.
+    """
+
+    def test_sequential_propagates_in_staged_call(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import AnalyticsReadError
+
+        def _boom():
+            raise AnalyticsReadError("first wave dead")
+
+        with self.assertRaises(AnalyticsReadError) as cm:
+            dashboard._fan_out_reads(
+                [("summary", _boom)], parallel=False
+            )
+        self.assertIn("first wave dead", str(cm.exception))
+
+    def test_parallel_propagates_in_staged_call(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import AnalyticsReadError
+
+        def _boom():
+            raise AnalyticsReadError("second wave dead")
+
+        with self.assertRaises(AnalyticsReadError) as cm:
+            dashboard._fan_out_reads(
+                [("repo_rows", _boom)],
+                parallel=True,
+                max_workers=2,
+            )
+        self.assertIn("second wave dead", str(cm.exception))
 
 
 if __name__ == "__main__":

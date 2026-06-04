@@ -24,7 +24,20 @@ mirrors the standalone HTML mock the issue ships:
 Reads go through `orchestrator.analytics.read` (which already
 handles unset DB, connection errors, and lazy psycopg import) and
 are wrapped in `st.cache_data` keyed by `(start, end, repo, events,
-stages, issue)` so every widget sees the same window.
+stages, issue)` so every widget sees the same window. The data-
+extent and filter-option reads have no filter inputs and are cached
+under a longer 5-minute TTL (`STATIC_METADATA_TTL_SECONDS`) so the
+sidebar / topbar do not re-pay a fresh round-trip on every rerun.
+
+The widget reads are dispatched in two staged waves so the topbar
+and KPI strip paint as soon as their inputs are available instead
+of blocking on every widget: the first wave covers `summary`,
+`prev_summary`, `ts_points`, `throughput_rows`, `review_round_rows`,
+and `cost_coverage_rows` (the only reads the topbar / filter meta
+/ insight banners / KPI strip consume), and the second wave covers
+the eight remaining widget reads. Worker threads only return data
+back to the main render thread; every `st` / placeholder write
+runs on the main thread.
 
 Streamlit (and its transitive pandas), `plotly`, the chart builders
 in `orchestrator.dashboard_charts`, and the theme tokens in
@@ -83,6 +96,17 @@ log = logging.getLogger(__name__)
 DEFAULT_WINDOW_DAYS = 7
 DEFAULT_RECENT_AGENT_EXITS = 100
 DEFAULT_EXPENSIVE_LIMIT = 8
+
+# TTL for the data-extent / filter-option reads (`get_data_extent`,
+# `get_filter_options`). These reads carry no filter inputs and
+# change only as `analytics.sync` ingests fresh events, so they
+# tolerate a longer TTL than the 60 s window the per-filter cached
+# wrappers use. Five minutes keeps a freshly-synced repo / event
+# value reachable within one sync cycle while collapsing the
+# topbar / sidebar round-trip on every rerun.
+STATIC_METADATA_TTL_SECONDS = 300
+
+LOADING_INDICATOR_MESSAGE = "Loading analytics…"
 
 # Plotly config passed to every `st.plotly_chart` call. Disabling
 # the modebar keeps the hover camera/zoom/pan toolbar off the cards
@@ -871,10 +895,29 @@ def main() -> None:
         st.warning(unset)
         st.stop()
 
-    try:
+    # `get_data_extent` and `get_filter_options` carry no filter
+    # inputs (the cache key is empty), so they tolerate a longer TTL
+    # than the per-filter window reads -- the values only change as
+    # `analytics.sync` ingests new events. Cache them under
+    # `STATIC_METADATA_TTL_SECONDS` (5 min) so the sidebar / topbar
+    # do not re-pay a round-trip on every Streamlit rerun.
+    @st.cache_data(
+        show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS
+    )
+    def _read_data_extent():
         with analytics_read.analytics_connection() as conn:
-            extent = analytics_read.get_data_extent(conn=conn)
-            options = analytics_read.get_filter_options(conn=conn)
+            return analytics_read.get_data_extent(conn=conn)
+
+    @st.cache_data(
+        show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS
+    )
+    def _read_filter_options():
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_filter_options(conn=conn)
+
+    try:
+        extent = _read_data_extent()
+        options = _read_filter_options()
     except analytics_read.AnalyticsReadError as e:
         st.error(
             "Could not load analytics filter options: "
@@ -1217,186 +1260,231 @@ def main() -> None:
     # this thread under the existing thread-local `analytics_connection`.
     # Lambdas close over `key` / `prev_key` so the executor never has
     # to thread filter tuples through the futures.
-    readers: list[tuple[str, Callable[[], Any]]] = [
+    #
+    # Split into two staged waves so the topbar / filter meta /
+    # insight banners / KPI strip paint as soon as their inputs are
+    # available instead of blocking on every widget. The first wave
+    # carries the six reads those above-the-fold widgets consume
+    # (`summary`, `prev_summary`, `ts_points`, `review_round_rows`,
+    # `throughput_rows`, `cost_coverage_rows`); the second wave runs
+    # the seven remaining widget reads. Worker threads only return
+    # data back to this render thread -- every `st.*` / placeholder
+    # write happens on the main thread between waves.
+    first_wave_readers: list[tuple[str, Callable[[], Any]]] = [
         ("summary", lambda: _read_summary(*key)),
         ("prev_summary", lambda: _read_prev_kpi(*prev_key)),
         ("ts_points", lambda: _read_time_series(*key)),
+        ("review_round_rows", lambda: _read_review_round(*key)),
+        ("throughput_rows", lambda: _read_throughput(*key)),
+        ("cost_coverage_rows", lambda: _read_cost_coverage(*key)),
+    ]
+    second_wave_readers: list[tuple[str, Callable[[], Any]]] = [
         ("stage_rows", lambda: _read_stage_breakdown(*key)),
         ("agent_exits", lambda: _read_recent_agent_exits(*key)),
         ("issues_rows", lambda: _read_top_cost_issues(*key)),
-        ("review_round_rows", lambda: _read_review_round(*key)),
         ("backend_rows", lambda: _read_backend_efficiency(*key)),
         ("repo_rows", lambda: _read_repo_breakdown(*key)),
-        ("cost_coverage_rows", lambda: _read_cost_coverage(*key)),
         ("heatmap_rows", lambda: _read_hourly_heatmap(*key)),
-        ("throughput_rows", lambda: _read_throughput(*key)),
         ("backend_daily_rows", lambda: _read_backend_daily_tokens(*key)),
     ]
+    total_reads = len(first_wave_readers) + len(second_wave_readers)
     parallel = dashboard_parallel_reads_enabled()
     load_start = perf_counter()
-    try:
-        results = _fan_out_reads(readers, parallel=parallel)
-    except analytics_read.AnalyticsReadError as e:
-        st.error(
-            f"Analytics query failed: {e}. The dashboard cannot render "
-            "without database access; check Postgres connectivity and "
-            "reload."
+    # Single inline spinner spans both waves -- the topbar / KPI
+    # strip rendered between waves provides progressive feedback
+    # while the second wave finishes, and the spinner clears once
+    # every widget has its data. UI writes always run on this main
+    # thread (the worker threads `_fan_out_reads` spawns only return
+    # data back through the futures), so the staged renders below
+    # never reach Streamlit from a worker.
+    with st.spinner(LOADING_INDICATOR_MESSAGE):
+        try:
+            results = _fan_out_reads(
+                first_wave_readers, parallel=parallel
+            )
+        except analytics_read.AnalyticsReadError as e:
+            st.error(
+                f"Analytics query failed: {e}. The dashboard cannot render "
+                "without database access; check Postgres connectivity and "
+                "reload."
+            )
+            st.stop()
+        summary = results["summary"]
+        prev_summary = results["prev_summary"]
+        ts_points = results["ts_points"]
+        review_round_rows = results["review_round_rows"]
+        throughput_rows = results["throughput_rows"]
+        cost_coverage_rows = results["cost_coverage_rows"]
+
+        # Topbar / filter meta paint on the first-wave results so the
+        # user sees real content before the second wave fires.
+        topbar_slot.markdown(
+            _topbar_html(
+                extent=extent,
+                distinct_repos=summary.distinct_repos,
+                total_events=summary.total_events,
+                spend_in_range=summary.total_cost_usd,
+                fmt_money_exact=theme.fmt_money_exact,
+                fmt_num=theme.fmt_num,
+            ),
+            unsafe_allow_html=True,
         )
-        st.stop()
+        days_in_window = max((window.end - window.start).days, 1)
+        meta_slot.markdown(
+            _filter_meta_html(
+                from_d=window.start.date(),
+                to_d=(window.end - timedelta(days=1)).date(),
+                days=days_in_window,
+                runs=summary.total_agent_runs,
+                fmt_num=theme.fmt_num,
+            ),
+            unsafe_allow_html=True,
+        )
+
+        if summary.total_events == 0:
+            # Empty window -- skip the second wave entirely. Log the
+            # short-circuit so the A/B comparison still has a line.
+            log.info(
+                "dashboard.load: total=%.1fs reads=%d parallel=%s",
+                perf_counter() - load_start,
+                len(first_wave_readers),
+                "true" if parallel else "false",
+            )
+            st.info(EMPTY_WINDOW_MESSAGE)
+            _render_drilldown(
+                st=st,
+                pd=pd,
+                window=window,
+                repo_filter=repo_filter,
+                issue_input_parsed=issue_input_parsed,
+                event_filter=event_filter,
+                stage_filter=stage_filter,
+            )
+            return
+
+        # Insights + KPI strip ---------------------------------------
+        # Token totals include cache_read + cache_write so the
+        # headline figure matches the standalone mock's
+        # `input + output + cache_read + cache_write` accounting; the
+        # `cached_tokens` cumulative column is deliberately excluded
+        # so the cache band is not double-counted.
+        banners = compute_insights(
+            summary,
+            cost_coverage_rows=cost_coverage_rows,
+        )
+        if banners:
+            st.markdown(_insights_html(banners), unsafe_allow_html=True)
+        total_cost = float(summary.total_cost_usd or 0.0)
+        total_tokens = int(
+            (summary.total_input_tokens or 0)
+            + (summary.total_output_tokens or 0)
+            + (summary.total_cache_read_tokens or 0)
+            + (summary.total_cache_write_tokens or 0)
+        )
+        total_cost_prev = float(prev_summary.total_cost_usd or 0.0)
+        total_tokens_prev = int(
+            (prev_summary.total_input_tokens or 0)
+            + (prev_summary.total_output_tokens or 0)
+            + (prev_summary.total_cache_read_tokens or 0)
+            + (prev_summary.total_cache_write_tokens or 0)
+        )
+        resolved = sum(int(r.resolved or 0) for r in throughput_rows)
+        rejected = sum(int(r.rejected or 0) for r in throughput_rows)
+        rr_total_cost, rr_rework_cost = rework_totals(review_round_rows)
+        rework_share = (
+            (rr_rework_cost / rr_total_cost) if rr_total_cost > 0 else 0.0
+        )
+
+        # Sparkline series, one entry per day in the window. Daily
+        # tokens mirror the KPI accounting and include the cache band.
+        days = sorted({p.day for p in ts_points})
+        days_index = {d: i for i, d in enumerate(days)}
+        daily_cost = [0.0] * len(days)
+        daily_tokens = [0.0] * len(days)
+        for p in ts_points:
+            i = days_index[p.day]
+            daily_cost[i] += float(p.cost_usd or 0.0)
+            daily_tokens[i] += float(
+                (p.input_tokens or 0)
+                + (p.output_tokens or 0)
+                + (p.cache_read_tokens or 0)
+                + (p.cache_write_tokens or 0)
+            )
+        done_index = {r.day: int(r.resolved or 0) for r in throughput_rows}
+        daily_done = [done_index.get(d, 0) for d in days]
+
+        kpis = [
+            {
+                "label": "Total spend",
+                "value": theme.fmt_money_exact(total_cost),
+                "delta": kpi_delta(total_cost, total_cost_prev),
+                "sub": (
+                    f"{theme.fmt_money(total_cost / days_in_window)}/day"
+                ),
+                "spark": daily_cost,
+                "spark_color": theme.ACCENT,
+            },
+            {
+                "label": "Total tokens",
+                "value": theme.fmt_tokens(total_tokens),
+                "delta": kpi_delta(total_tokens, total_tokens_prev),
+                "sub": f"{theme.fmt_tokens(total_tokens / days_in_window)}/day",
+                "spark": daily_tokens,
+                "spark_color": theme.TOKEN_TYPE_COLORS["Input"],
+            },
+            {
+                "label": "Cost / resolved issue",
+                "value": (
+                    f"${total_cost / resolved:,.2f}"
+                    if resolved > 0 else "—"
+                ),
+                "delta": None,
+                "sub": f"{resolved} resolved · {rejected} rejected",
+                "spark": daily_done,
+                "spark_color": theme.TOKEN_TYPE_COLORS["Cache"],
+            },
+            {
+                "label": "Rework share",
+                "value": f"{rework_share * 100:.0f}%",
+                "delta": None,
+                "sub": (
+                    f"{theme.fmt_money_exact(rr_rework_cost)} in review "
+                    "rounds >= 1"
+                ),
+                "spark": None,
+            },
+        ]
+        st.markdown(_kpi_strip_html(kpis), unsafe_allow_html=True)
+
+        # Second wave -- the remaining widget reads. The KPI strip
+        # already painted above, so the user has real content on
+        # screen while the second wave finishes.
+        try:
+            results.update(
+                _fan_out_reads(
+                    second_wave_readers, parallel=parallel
+                )
+            )
+        except analytics_read.AnalyticsReadError as e:
+            st.error(
+                f"Analytics query failed: {e}. The dashboard cannot render "
+                "without database access; check Postgres connectivity and "
+                "reload."
+            )
+            st.stop()
     log.info(
         "dashboard.load: total=%.1fs reads=%d parallel=%s",
         perf_counter() - load_start,
-        len(readers),
+        total_reads,
         "true" if parallel else "false",
     )
-    summary = results["summary"]
-    prev_summary = results["prev_summary"]
-    ts_points = results["ts_points"]
     stage_rows = results["stage_rows"]
     agent_exits = results["agent_exits"]
     issues_rows = results["issues_rows"]
-    review_round_rows = results["review_round_rows"]
     backend_rows = results["backend_rows"]
     repo_rows = results["repo_rows"]
-    cost_coverage_rows = results["cost_coverage_rows"]
     heatmap_rows = results["heatmap_rows"]
-    throughput_rows = results["throughput_rows"]
     backend_daily_rows = results["backend_daily_rows"]
-
-    # Now we can render the topbar with the real spend value.
-    topbar_slot.markdown(
-        _topbar_html(
-            extent=extent,
-            distinct_repos=summary.distinct_repos,
-            total_events=summary.total_events,
-            spend_in_range=summary.total_cost_usd,
-            fmt_money_exact=theme.fmt_money_exact,
-            fmt_num=theme.fmt_num,
-        ),
-        unsafe_allow_html=True,
-    )
-
-    days_in_window = max(
-        (window.end - window.start).days, 1
-    )
-    meta_slot.markdown(
-        _filter_meta_html(
-            from_d=window.start.date(),
-            to_d=(window.end - timedelta(days=1)).date(),
-            days=days_in_window,
-            runs=summary.total_agent_runs,
-            fmt_num=theme.fmt_num,
-        ),
-        unsafe_allow_html=True,
-    )
-
-    if summary.total_events == 0:
-        st.info(EMPTY_WINDOW_MESSAGE)
-        _render_drilldown(
-            st=st,
-            pd=pd,
-            window=window,
-            repo_filter=repo_filter,
-            issue_input_parsed=issue_input_parsed,
-            event_filter=event_filter,
-            stage_filter=stage_filter,
-        )
-        return
-
-    banners = compute_insights(
-        summary,
-        cost_coverage_rows=cost_coverage_rows,
-    )
-    if banners:
-        st.markdown(_insights_html(banners), unsafe_allow_html=True)
-
-    # KPI strip --------------------------------------------------
-    # Token totals include cache_read + cache_write so the headline
-    # figure matches the standalone mock's
-    # `input + output + cache_read + cache_write` accounting; the
-    # `cached_tokens` cumulative column is deliberately excluded so
-    # the cache band is not double-counted.
-    total_cost = float(summary.total_cost_usd or 0.0)
-    total_tokens = int(
-        (summary.total_input_tokens or 0)
-        + (summary.total_output_tokens or 0)
-        + (summary.total_cache_read_tokens or 0)
-        + (summary.total_cache_write_tokens or 0)
-    )
-    total_cost_prev = float(prev_summary.total_cost_usd or 0.0)
-    total_tokens_prev = int(
-        (prev_summary.total_input_tokens or 0)
-        + (prev_summary.total_output_tokens or 0)
-        + (prev_summary.total_cache_read_tokens or 0)
-        + (prev_summary.total_cache_write_tokens or 0)
-    )
-    resolved = sum(int(r.resolved or 0) for r in throughput_rows)
-    rejected = sum(int(r.rejected or 0) for r in throughput_rows)
-    rr_total_cost, rr_rework_cost = rework_totals(review_round_rows)
-    rework_share = (
-        (rr_rework_cost / rr_total_cost) if rr_total_cost > 0 else 0.0
-    )
-
-    # Sparkline series, one entry per day in the window. Daily
-    # tokens mirror the KPI accounting and include the cache band.
-    days = sorted({p.day for p in ts_points})
-    days_index = {d: i for i, d in enumerate(days)}
-    daily_cost = [0.0] * len(days)
-    daily_tokens = [0.0] * len(days)
-    for p in ts_points:
-        i = days_index[p.day]
-        daily_cost[i] += float(p.cost_usd or 0.0)
-        daily_tokens[i] += float(
-            (p.input_tokens or 0)
-            + (p.output_tokens or 0)
-            + (p.cache_read_tokens or 0)
-            + (p.cache_write_tokens or 0)
-        )
-    done_index = {r.day: int(r.resolved or 0) for r in throughput_rows}
-    daily_done = [done_index.get(d, 0) for d in days]
-
-    kpis = [
-        {
-            "label": "Total spend",
-            "value": theme.fmt_money_exact(total_cost),
-            "delta": kpi_delta(total_cost, total_cost_prev),
-            "sub": (
-                f"{theme.fmt_money(total_cost / days_in_window)}/day"
-            ),
-            "spark": daily_cost,
-            "spark_color": theme.ACCENT,
-        },
-        {
-            "label": "Total tokens",
-            "value": theme.fmt_tokens(total_tokens),
-            "delta": kpi_delta(total_tokens, total_tokens_prev),
-            "sub": f"{theme.fmt_tokens(total_tokens / days_in_window)}/day",
-            "spark": daily_tokens,
-            "spark_color": theme.TOKEN_TYPE_COLORS["Input"],
-        },
-        {
-            "label": "Cost / resolved issue",
-            "value": (
-                f"${total_cost / resolved:,.2f}"
-                if resolved > 0 else "—"
-            ),
-            "delta": None,
-            "sub": f"{resolved} resolved · {rejected} rejected",
-            "spark": daily_done,
-            "spark_color": theme.TOKEN_TYPE_COLORS["Cache"],
-        },
-        {
-            "label": "Rework share",
-            "value": f"{rework_share * 100:.0f}%",
-            "delta": None,
-            "sub": (
-                f"{theme.fmt_money_exact(rr_rework_cost)} in review "
-                "rounds >= 1"
-            ),
-            "spark": None,
-        },
-    ]
-    st.markdown(_kpi_strip_html(kpis), unsafe_allow_html=True)
 
     # ── Hero: Spend & token usage over time ──────────────────────
     with st.container(border=True):
