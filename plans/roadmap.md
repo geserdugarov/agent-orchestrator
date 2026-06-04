@@ -363,7 +363,19 @@ derivations the dashboard / read model want (`model` from
 `total_cache_tokens`, a categorical `review_round_bucket`
 (`0`/`1`/`2`/`3-5`/`6+`), `failed = exit_code <> 0` with NULL
 preserved, `has_cost = cost_usd IS NOT NULL`) so consumers do not
-re-code them in every query. `ANALYTICS_DB_URL` is
+re-code them in every query. A `CREATE MATERIALIZED VIEW IF NOT
+EXISTS analytics_daily_rollup` keyed on `(day, repo, issue, event,
+stage, backend, cost_source)` carries the per-day token sums,
+`total_cost_usd`, `duration_s_sum` + `duration_s_count` (so
+`AVG(duration_s)` is recoverable as `sum/count`), `failed_count`,
+`timed_out_count`, and `event_count` so the dashboard's
+window-bounded widgets can read from the rollup once the cutover
+half of Layer 4 lands; a unique index on the key (`NULLS NOT
+DISTINCT`, Postgres 15+) plus a `(day, repo)` supporting index
+back it. Postgres populates the MV at create time (no `WITH NO
+DATA`), so a `psql -f` migration against an already-populated
+events table seeds the rollup once and `IF NOT EXISTS` keeps
+subsequent reapplies a no-op. `ANALYTICS_DB_URL` is
 a single libpq URL so swapping local for remote managed Postgres is a
 one-line repoint. `orchestrator/analytics/sync.py` is the operator-
 driven CLI (`python -m orchestrator.analytics.sync`) that replays
@@ -382,7 +394,15 @@ the netloc and libpq query-string forms of the URL), a
 `progress lines=N inserted=… duplicate=… malformed=… elapsed=…s`
 record drops after each batch flush (full or final partial), and
 a final `completed in %.3fs (…)` log plus a UTC-stamped stdout
-`duration_s=` summary close the run. `orchestrator/analytics/read.py`
+`duration_s=` summary close the run. After the insert transaction
+commits the sync issues `REFRESH MATERIALIZED VIEW
+analytics_daily_rollup` (non-concurrent) and commits again so the
+rollup catches up to the new events in the same operator-driven
+cycle; the refresh fires unconditionally on every successful commit
+(including all-duplicate / all-malformed runs) so rerunning the
+sync is the documented recovery path for a stale rollup, and a
+refresh exception is logged-and-swallowed so the events insert's
+durability is the contract the CLI honors. `orchestrator/analytics/read.py`
 is the read-side counterpart: a thin data-access module exposing
 plain-Python functions that `orchestrator/dashboard.py` calls into.
 The base-table aggregates (`get_filter_options`, `get_data_extent`,

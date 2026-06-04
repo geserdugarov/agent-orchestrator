@@ -1,5 +1,13 @@
 # Dashboard load-time optimization
 
+## Status
+
+Layer 4 schema + sync half (the `analytics_daily_rollup` materialized
+view, its supporting indexes, and the post-commit refresh hook in
+`orchestrator/analytics/sync.py`) shipped via #382. Layers 1-3 and 5,
+plus the Layer 4 dashboard cutover that points the rollup-eligible
+widgets at the new view, remain open.
+
 ## Symptom
 
 A cold visit to `http://localhost:8501/` (Streamlit dashboard,
