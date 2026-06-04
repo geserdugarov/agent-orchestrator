@@ -15,13 +15,17 @@ for a mergeable + approved PR, parks awaiting human attention for an
 unmergeable PR, and never calls `gh.merge_pr`. Every pre-approval
 code-changing route lands directly back on `validating`: the initial
 `implementing` PR open, every `validating` pushed fix
-(CHANGES_REQUESTED, awaiting-human resume, user-content drift,
-transient-park recovery), the PR-feedback `fixing` pushed-fix exit,
-the `in_review` user-content drift, and every `resolving_conflict`
-pushed exit (clean rebase, recovered push, agent-resolved,
-awaiting-human resume, drift-pushed fix) all stay on (or return to)
-`validating` with `review_round` reset so the next reviewer round
-re-evaluates the freshly-pushed head. `_handle_documenting`'s own success
+(awaiting-human resume, user-content drift, transient-park recovery
+from the validating-route), the `fixing` pushed-fix exit (both the
+in_review-routed PR-feedback fix and the validating-routed
+CHANGES_REQUESTED fix dispatch through this stage), the `in_review`
+user-content drift, and every `resolving_conflict` pushed exit (clean
+rebase, recovered push, agent-resolved, awaiting-human resume, drift-
+pushed fix) all stay on (or return to) `validating` with `review_round`
+adjusted (reset to 0 on the in_review→fixing route after an APPROVED
+round, bumped on the validating→fixing CHANGES_REQUESTED route still
+inside the same review cycle) so the next reviewer round re-evaluates
+the freshly-pushed head. `_handle_documenting`'s own success
 exits always advance to `in_review`; its drift block relabels
 directly to `validating` without spawning the docs agent when a
 body edit invalidates the prior approval mid-hop. `_handle_fixing` owns the PR-feedback quiet window
@@ -151,10 +155,13 @@ On `APPROVED` it runs `VERIFY_COMMANDS` (default empty), optionally
 squashes (`SQUASH_ON_APPROVAL`), seeds the in_review PR watermarks,
 and flips to `documenting` — the final-docs hop runs against the
 squashed head before `in_review` picks up. Verify failures park with
-a typed `park_reason`. `CHANGES_REQUESTED` resumes the dev; a clean
-pushed fix stays on `validating` (no docs hop) so the next reviewer
-round re-evaluates the freshly-pushed head. `MAX_REVIEW_ROUNDS`
-(default 3) caps iterations.
+a typed `park_reason`. `CHANGES_REQUESTED` flips the label to `fixing`
+BEFORE spawning the dev so the dev-fix subphase is observably labeled
+`fixing` rather than `validating`; on a clean pushed fix the handler
+flips back to `validating` itself with `review_round` bumped, and on
+any park (timeout / no-commit / dirty / push-fail) the issue stays on
+`fixing` for `_handle_fixing` to own the awaiting-human cycle.
+`MAX_REVIEW_ROUNDS` (default 3) caps iterations.
 
 **In-review terminals and HITL ping.** `_handle_in_review` covers PR
 merged → `done`; PR closed unmerged → `rejected`; fresh actionable PR
@@ -189,19 +196,31 @@ counterpart to `_finalize_if_pr_merged` on the in-flight side -- so
 the cleanup behavior, event shape, and open-PR salvage semantics
 cannot drift between the three handlers.
 
-**Fixing stage.** `fixing` sits between `in_review` and `validating`
-in the PR-feedback fix loop. `_handle_fixing` rescans unread feedback
-each tick (filtering orchestrator comments by id and hidden body
-marker), debounces against the freshest comment timestamp
+**Fixing stage.** `fixing` covers two routes back to `validating`: the
+in_review→fixing PR-feedback fix loop AND the validating→fixing
+CHANGES_REQUESTED dev fix that parked. `_handle_fixing` rescans unread
+feedback each tick (filtering orchestrator comments by id and hidden
+body marker), debounces against the freshest comment timestamp
 (`IN_REVIEW_DEBOUNCE_SECONDS`), then resumes the locked dev session
 with a prompt built across all unread surfaces. A pushed fix clears
-the bookmarks, resets `review_round`, and flips DIRECTLY back to
-`validating`; the no-new-feedback bounce also
+the bookmarks, updates `review_round` based on the route discriminator
+`pending_fix_at` (set → reset to 0 for the in_review route whose
+previous reviewer round was APPROVED; unset → bump by 1 for the
+validating route still inside the same CHANGES_REQUESTED cycle), and
+flips DIRECTLY back to `validating`; the no-new-feedback bounce also
 flips to `validating`. Docs do not run on the pushed-fix exit --
 the single docs pass is deferred to the final-docs handoff after
-reviewer approval. Failed resumes park awaiting human.
-PR-state terminals and the closed-issue sweep mirror
-`_handle_in_review`.
+reviewer approval. Failed resumes park awaiting human; on the
+validating route a transient park (`push_failed` / `agent_timeout`)
+also gets a silent recovery branch via the shared
+`_try_recover_validating_transient_park` helper so the issue does
+not sit forever in `fixing` waiting on a human comment that the
+underlying condition does not produce — the in_review route
+deliberately omits this recovery (its PR-feedback watermark advance
+would silently consume human feedback on a clear, and the helper's
+push branch bumps the round in a way that contradicts the
+in_review-route reset-to-0 semantics). PR-state terminals and the
+closed-issue sweep mirror `_handle_in_review`.
 
 **Conflict resolution stage.** `_handle_resolving_conflict` is reached
 via an operator relabel or the per-tick base-sync detour (a PR-having
