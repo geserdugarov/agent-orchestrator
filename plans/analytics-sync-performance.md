@@ -3,8 +3,15 @@
 ## Status
 
 Phase 1 (batched `executemany` flush) shipped via #369. Phase 2
-(server-side dedup pre-check) and Phase 3 (`COPY ... FROM STDIN`)
-remain gated on re-measurement against the same remote Postgres.
+(startup `content_hash` pre-check + in-Python intra-file dedup) has
+also shipped: `sync_jsonl_to_postgres` now issues one
+`SELECT content_hash FROM analytics_events WHERE content_hash IS NOT
+NULL` before opening the JSONL file, snapshots the result into an
+in-process set, and skips already-present records (and intra-file
+duplicates) before they enter the batch buffer, with
+`ON CONFLICT (content_hash) DO NOTHING` retained as the race-safe
+backstop. Phase 3 (`COPY ... FROM STDIN`) remains gated on
+re-measurement against the same remote Postgres.
 
 ## Context
 
