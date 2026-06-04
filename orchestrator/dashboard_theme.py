@@ -350,39 +350,24 @@ PAGE_CSS = f"""
     letter-spacing: -0.01em;
     font-family: {MONO_FONT_FAMILY};
   }}
-  /* Filter bar: the "Date range" card. Rendered as a normal white
-     rounded card -- the same surface as every other card -- targeted
-     via the `.orch-filterbar-anchor` sentinel the dashboard renders as
-     the first child inside the bordered container (`:has()` matches the
-     wrapper directly, independent of the `stMain` ancestor other rules
-     relied on). The row is vertically centered, the gap under the label
-     is tightened, and the date-input bottom margin dropped so From / To
-     no longer float with dead space above and below them. */
-  .orch-filterbar,
-  div[data-testid="stVerticalBlockBorderWrapper"]:has(
-    .orch-filterbar-anchor
-  ) {{
-    background: var(--orch-card) !important;
-    border: 1px solid var(--orch-border) !important;
-    border-radius: var(--orch-radius) !important;
-    margin: 0 0 var(--orch-gap) !important;
-    padding: var(--orch-pad) !important;
-    box-sizing: border-box;
-    font-family: {FONT_FAMILY};
-  }}
-  div[data-testid="stVerticalBlockBorderWrapper"]:has(.orch-filterbar-anchor)
-    div[data-testid="stHorizontalBlock"] {{
-    align-items: center;
-  }}
-  div[data-testid="stVerticalBlockBorderWrapper"]:has(.orch-filterbar-anchor)
-    div[data-testid="stVerticalBlock"] {{
-    gap: 0.6rem;
-  }}
-  div[data-testid="stVerticalBlockBorderWrapper"]:has(.orch-filterbar-anchor)
-    div[data-testid="stDateInput"] {{
-    margin-bottom: 0;
-  }}
+  /* Filter bar ("Date range" card): the white fill / border / radius
+     now come from the shared `.orch-cardmark` card rule below -- the
+     dashboard renders a hidden `.orch-cardmark` as this container's
+     first child so it is painted like every other card. The previous
+     filter-bar-specific layout tweaks keyed off the removed
+     `stVerticalBlockBorderWrapper` testid and had silently become
+     no-ops; the bar lays out cleanly without them on Streamlit 1.58. */
   .orch-filterbar-anchor {{ display: none; }}
+  /* The hidden `.orch-cardmark` is a standalone first child here (not
+     folded into a header like the chart cards), so it adds one extra
+     flex child to the filter bar's vertical block. Zero that block's
+     gap so the date controls keep their 20px top inset instead of
+     inheriting the vertical-block gap above them. */
+  div[data-testid="stVerticalBlock"]:has(
+    > div[data-testid="stElementContainer"] .orch-cardmark
+  ):has(.orch-filterbar-anchor) {{
+    gap: 0;
+  }}
   .orch-filter-label {{
     display: block; margin-bottom: 2px;
     color: var(--orch-muted-soft); font-size: 11px; font-weight: 500;
@@ -476,63 +461,59 @@ PAGE_CSS = f"""
     .orch-kpis {{ grid-template-columns: repeat(2, 1fr); }}
   }}
   /* Card surround for charts ------------------------------------
-     The dashboard wraps each card in `st.container(border=True)` so
-     the chart / dataframe widgets really do sit inside the card --
-     stacking a `st.markdown(...)` opening tag, the widget, and a
-     closing tag would leave each widget as a sibling in the DOM
-     instead. We restyle Streamlit's bordered-container wrapper to
-     match the mock's 14px radius / 20px padding white card.
-
-     A plain attribute selector -- NOT scoped through
-     `data-testid="stMain"` (absent in some Streamlit releases) and NOT
-     using `:not(:has(...))` (the embedded browser dropped that whole
-     rule as an unsupported selector, which is why every card except
-     the filter bar stayed gray). This styles ALL bordered containers
-     white, including the filter bar, which then only needs its own
-     layout tweaks below. `print-color-adjust: exact` keeps the white
-     fill in the PDF/print export instead of being stripped. */
-  div[data-testid="stVerticalBlockBorderWrapper"] {{
+     Streamlit 1.58 renders `st.container(border=True)` as a
+     `div[data-testid="stVerticalBlock"]` carrying an unstable emotion
+     class; the `stVerticalBlockBorderWrapper` testid the old rule keyed
+     off no longer exists, so that rule matched nothing and every card
+     sat transparent on the gray page -- the plot inside was white but
+     the padding around it showed the page through. The dashboard now
+     renders a hidden `.orch-cardmark` as each card's first element and
+     we match the bordered container via
+     `:has(> stElementContainer .orch-cardmark)`. The direct-child
+     combinator pins the match to the bordered level only (a bare
+     `:has(.orch-cardmark)` would also match every ancestor block) and
+     keys off a class we own rather than a version-specific testid, so
+     it survives Streamlit upgrades. `print-color-adjust: exact` keeps
+     the white fill in the PDF/print export instead of being stripped. */
+  div[data-testid="stVerticalBlock"]:has(
+    > div[data-testid="stElementContainer"] .orch-cardmark
+  ) {{
     background: var(--orch-card) !important;
     border: 1px solid var(--orch-border) !important;
     border-radius: var(--orch-radius) !important;
     padding: var(--orch-pad) !important;
-    margin-bottom: var(--orch-gap) !important;
     -webkit-print-color-adjust: exact; print-color-adjust: exact;
     font-family: {FONT_FAMILY};
   }}
-  /* Drop the nested border that Streamlit applies when a bordered
-     container is itself inside a column -- avoids a double border. */
-  div[data-testid="column"]
-    div[data-testid="stVerticalBlockBorderWrapper"] {{
-    margin-bottom: 0 !important;
-  }}
-  /* Keep any sidebar bordered container on its default Streamlit
-     surface rather than the white page card. */
-  div[data-testid="stSidebar"]
-    div[data-testid="stVerticalBlockBorderWrapper"] {{
-    background: transparent !important;
-    border: 0 !important;
-    border-radius: 0 !important;
-    padding: 0 !important;
-    margin-bottom: 0 !important;
-  }}
+  .orch-cardmark {{ display: none; }}
   /* Equal-height cards across a `st.columns` row: stretch each column
-     to the tallest in the row, then let its bordered card fill the
-     column height. This levels the paired panels (review-round vs
-     workflow-stage, backend-efficiency vs expensive-issues,
-     reliability vs repo-cost) even when their content differs. */
-  div[data-testid="stHorizontalBlock"] {{ align-items: stretch; }}
-  div[data-testid="stHorizontalBlock"] > div[data-testid="column"],
-  div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {{
+     to the tallest in the row, then let every wrapper down to the
+     bordered card fill that height so the paired panels line up
+     bottom-to-bottom (workflow-stage vs review-round, expensive-issues
+     vs backend-efficiency, repo-cost vs reliability). Scoped to rows
+     that actually carry cards (`:has(.orch-cardmark)`) so the filter
+     bar's own inner columns are left untouched. The wrappers are flex
+     columns so the `flex: 1 1 auto` chain carries the stretched height
+     down through Streamlit 1.58's `stLayoutWrapper` / `stVerticalBlock`
+     nesting to the card. */
+  div[data-testid="stHorizontalBlock"]:has(.orch-cardmark) {{
+    align-items: stretch;
+  }}
+  div[data-testid="stHorizontalBlock"]:has(.orch-cardmark)
+    > div[data-testid="stColumn"] {{
     display: flex; flex-direction: column;
   }}
-  div[data-testid="column"] > div[data-testid="stVerticalBlock"],
-  div[data-testid="stColumn"] > div[data-testid="stVerticalBlock"] {{
-    flex: 1 1 auto; height: 100%;
+  div[data-testid="stHorizontalBlock"]:has(.orch-cardmark)
+    > div[data-testid="stColumn"] div[data-testid="stLayoutWrapper"],
+  div[data-testid="stHorizontalBlock"]:has(.orch-cardmark)
+    > div[data-testid="stColumn"] > div[data-testid="stVerticalBlock"] {{
+    flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
   }}
-  div[data-testid="column"] div[data-testid="stVerticalBlockBorderWrapper"],
-  div[data-testid="stColumn"] div[data-testid="stVerticalBlockBorderWrapper"] {{
-    height: 100%;
+  div[data-testid="stHorizontalBlock"]:has(.orch-cardmark)
+    div[data-testid="stVerticalBlock"]:has(
+      > div[data-testid="stElementContainer"] .orch-cardmark
+    ) {{
+    flex: 1 1 auto;
   }}
   .orch-card-title {{
     color: var(--orch-ink); font-size: 15px; font-weight: 600;

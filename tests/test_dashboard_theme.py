@@ -177,32 +177,48 @@ class PageCssTest(unittest.TestCase):
         ):
             self.assertIn(needle, theme.PAGE_CSS)
 
-    def test_filterbar_styling_targets_anchor_via_has(self) -> None:
-        # `.orch-filterbar` must actually paint the bordered
-        # container the dashboard wraps the date controls in. The
-        # earlier draft relied on `stMarkdown + stVerticalBlockBorderWrapper`
-        # sibling adjacency, but every Streamlit element is wrapped
-        # in its own `stElementContainer`, so that adjacency never
-        # matched. The redesigned rule targets the wrapper directly
-        # via `:has(.orch-filterbar-anchor)` and the dashboard renders
-        # the anchor as the FIRST child inside the bordered container.
-        self.assertIn(".orch-filterbar", theme.PAGE_CSS)
+    def test_cards_painted_white_via_cardmark_has(self) -> None:
+        # Streamlit 1.58 renders `st.container(border=True)` as a
+        # `stVerticalBlock` with an unstable emotion class -- the
+        # `stVerticalBlockBorderWrapper` testid the old rule keyed off
+        # is gone, so that selector matched nothing and every chart card
+        # sat transparent on the gray page (its plot was white, the
+        # padding around it was not). Cards and the filter bar now carry
+        # a hidden `.orch-cardmark` first child and the rule paints the
+        # bordered container via `:has(> stElementContainer .orch-cardmark)`.
+        self.assertIn(".orch-cardmark", theme.PAGE_CSS)
         self.assertIn(".orch-filterbar-anchor", theme.PAGE_CSS)
         self.assertIn(
-            'div[data-testid="stVerticalBlockBorderWrapper"]:has(',
+            'div[data-testid="stVerticalBlock"]:has(',
             theme.PAGE_CSS,
         )
-        # The generic card rule intentionally avoids `:not(:has(...))`
-        # because the embedded browser dropped that unsupported
-        # compound selector and left ordinary cards unstyled.
         self.assertIn(
-            'div[data-testid="stVerticalBlockBorderWrapper"] {',
+            '> div[data-testid="stElementContainer"] .orch-cardmark',
             theme.PAGE_CSS,
         )
         self.assertIn("print-color-adjust: exact", theme.PAGE_CSS)
+        # The dead testid SELECTOR the old white-fill AND equal-height
+        # rules relied on must not return -- its absence is exactly what
+        # left the cards gray and the paired panels mismatched in height.
+        # (Prose comments may still reference the name for context.)
         self.assertNotIn(
-            ":not(:has(.orch-filterbar-anchor))", theme.PAGE_CSS
+            'data-testid="stVerticalBlockBorderWrapper"', theme.PAGE_CSS
         )
+        # The rule keys off the class we own, never `:not(:has(...))`
+        # (the embedded browser dropped that compound selector).
+        self.assertNotIn(":not(:has(", theme.PAGE_CSS)
+
+    def test_equal_height_rows_scoped_to_card_rows(self) -> None:
+        # Paired panels (expensive-issues vs backend-efficiency,
+        # repo-cost vs reliability) line up bottom-to-bottom by stretching
+        # each column to the tallest in its row. The rules are scoped to
+        # rows that actually carry cards (`:has(.orch-cardmark)`) so the
+        # filter bar's own inner columns keep their natural layout.
+        self.assertIn(
+            'div[data-testid="stHorizontalBlock"]:has(.orch-cardmark)',
+            theme.PAGE_CSS,
+        )
+        self.assertIn("align-items: stretch", theme.PAGE_CSS)
 
     def test_segmented_control_has_visible_selected_state(self) -> None:
         # The earlier draft just hid the radio dot, leaving the

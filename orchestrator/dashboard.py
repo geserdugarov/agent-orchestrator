@@ -823,7 +823,12 @@ def _card_header_html(title: str, subtitle: str = "") -> str:
         if subtitle
         else ""
     )
+    # The hidden `.orch-cardmark` is the per-card sentinel the white-fill
+    # / equal-height rules in `dashboard_theme.PAGE_CSS` key off via
+    # `:has(> stElementContainer .orch-cardmark)`. Rendering it inside the
+    # header markdown keeps it the bordered container's first element.
     return (
+        '<span class="orch-cardmark"></span>'
         f'<p class="orch-card-title">{html.escape(title)}</p>{sub_html}'
     )
 
@@ -951,13 +956,16 @@ def main() -> None:
     if "preset" not in st.session_state:
         st.session_state.preset = DEFAULT_PRESET
     with st.container(border=True):
-        # The `.orch-filterbar-anchor` sentinel sits INSIDE the bordered
-        # container (first child of the left column) so the CSS rule
-        # `:has(.orch-filterbar-anchor)` can target this wrapper for the
-        # filter-bar layout. Keeping the "Date range" label in the left
-        # column -- rather than on its own row above the controls -- puts
-        # the label + presets, the From / To inputs, and the range meta
-        # on a single, vertically-centered row.
+        # A hidden `.orch-cardmark` as the bordered container's first
+        # child lets the shared white-card rule in
+        # `dashboard_theme.PAGE_CSS` (`:has(> stElementContainer
+        # .orch-cardmark)`) paint this filter bar like every other card --
+        # Streamlit 1.58 dropped the stable border-wrapper testid the old
+        # per-card selector relied on. The `.orch-filterbar-anchor` below
+        # stays in the left column purely as the hidden label sentinel.
+        st.markdown(
+            '<div class="orch-cardmark"></div>', unsafe_allow_html=True
+        )
         fb_left, fb_mid, fb_right = st.columns([2, 3, 3])
         with fb_left:
             st.markdown(
