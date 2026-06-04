@@ -38,7 +38,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dashboard = [
     { name = "plotly", specifier = ">=5.20" },
-    { name = "streamlit", specifier = ">=1.30" },
+    { name = "streamlit", specifier = ">=1.36" },
 ]
 dev = [
     { name = "pytest", specifier = ">=8" },

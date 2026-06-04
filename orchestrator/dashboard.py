@@ -954,13 +954,26 @@ def main() -> None:
         st.markdown(
             '<div class="orch-cardmark"></div>', unsafe_allow_html=True
         )
-        fb_left, fb_mid, _fb_spacer = st.columns([2, 3, 3])
-        with fb_left:
+        # Single-line filter bar: label · preset switch · From · To ·
+        # range meta, all bottom-aligned so the short controls (label,
+        # radio, meta) sit on the same baseline as the taller date
+        # inputs.
+        (
+            fb_label,
+            fb_preset,
+            fb_from,
+            fb_to,
+            fb_meta,
+        ) = st.columns(
+            [1.0, 1.7, 1.4, 1.4, 3.0], vertical_alignment="bottom"
+        )
+        with fb_label:
             st.markdown(
                 '<div class="orch-filterbar-anchor"></div>'
                 '<span class="orch-filter-label">Date range</span>',
                 unsafe_allow_html=True,
             )
+        with fb_preset:
             preset_choice = st.radio(
                 "Range preset",
                 options=(PRESET_3D, PRESET_7D, PRESET_ALL),
@@ -981,28 +994,26 @@ def main() -> None:
             preset_window(preset_choice, extent)
             or to_window(extent_min_d, extent_max_d)
         )
-        with fb_mid:
-            c1, c2 = st.columns(2)
-            with c1:
-                start_date = st.date_input(
-                    "From",
-                    value=initial_window.start.date(),
-                    min_value=extent_min_d,
-                    max_value=extent_max_d,
-                )
-            with c2:
-                end_default = (initial_window.end - timedelta(days=1)).date()
-                end_date = st.date_input(
-                    "To",
-                    value=end_default,
-                    min_value=extent_min_d,
-                    max_value=extent_max_d,
-                )
-        # Range meta ("… → … · N days · N runs") sits on its own
-        # full-width row pinned to the bottom-right of the card.
-        # Rendered after the summary query lands below (the run count
-        # is not known yet), so capture the slot now.
-        meta_slot = st.empty()
+        with fb_from:
+            start_date = st.date_input(
+                "From",
+                value=initial_window.start.date(),
+                min_value=extent_min_d,
+                max_value=extent_max_d,
+            )
+        with fb_to:
+            end_default = (initial_window.end - timedelta(days=1)).date()
+            end_date = st.date_input(
+                "To",
+                value=end_default,
+                min_value=extent_min_d,
+                max_value=extent_max_d,
+            )
+        # Range meta ("… → … · N days · N runs") sits in the last column
+        # of the same row. Rendered after the summary query lands below
+        # (the run count is not known yet), so capture the slot now.
+        with fb_meta:
+            meta_slot = st.empty()
     window = to_window(start_date, end_date)
     st.session_state.preset = preset_choice
 

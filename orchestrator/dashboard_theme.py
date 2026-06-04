@@ -382,16 +382,36 @@ PAGE_CSS = f"""
   ):has(.orch-filterbar-anchor) {{
     gap: 0;
   }}
+  /* On the single-line filter bar the label and the range meta are
+     bottom-aligned with the date inputs and preset switch. Those Streamlit
+     widgets carry ~25px of internal bottom margin, so we give the plain
+     text the same bottom margin to land its baseline on the date-field /
+     radio baseline instead of ~15px below it. `white-space: nowrap` keeps
+     the meta on one line. */
   .orch-filter-label {{
-    display: block; margin-bottom: 2px;
+    display: block; margin-bottom: 25px;
     color: var(--orch-muted-soft); font-size: 11px; font-weight: 500;
     text-transform: uppercase; letter-spacing: 0.06em;
   }}
   .orch-filter-meta {{
-    display: block; text-align: right; margin-top: 14px;
+    display: block; text-align: right; margin-bottom: 22px;
+    white-space: nowrap;
     color: var(--orch-muted-soft);
-    font-size: 11.5px;
+    font-size: 11px;
     font-family: {MONO_FONT_FAMILY};
+  }}
+  /* Frame the From/To date fields. Streamlit already wraps each date
+     input in a baseweb box with an 8px radius, but paints its 1px border
+     white on the white card -- so the field reads as borderless floating
+     text. Recolor that border to the card border tone (and highlight it
+     in the accent on focus) so each date placeholder sits in a visible
+     frame. The From/To pickers are the only date inputs on the page, so
+     the testid selector targets exactly them. */
+  div[data-testid="stDateInput"] div[data-baseweb="input"] {{
+    border-color: var(--orch-border);
+  }}
+  div[data-testid="stDateInput"] div[data-baseweb="input"]:focus-within {{
+    border-color: var(--orch-accent);
   }}
   /* Content gutter: re-add the horizontal padding the block-
      container used to provide so the cards do not sit flush
