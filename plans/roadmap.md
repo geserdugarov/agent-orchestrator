@@ -607,19 +607,24 @@ swallowed.
   pool, in-worker continuation loop, per-state caps, event-stream stall
   detection, `linear_graphql` tool, strict template engine, full
   `WORKFLOW.md` adoption) as deliberately not adopted.
-- **Server-side dedup pre-check for analytics sync (Phase 2).** See
-  [`plans/analytics-sync-performance.md`](analytics-sync-performance.md)
-  for the full design. Phase 1 has landed: `orchestrator/analytics/sync.py`
-  now accumulates validated row tuples into a `_BATCH_SIZE`-sized buffer
-  and flushes each batch via `cur.executemany(insert_sql, batch)` with
-  `ON CONFLICT (content_hash) DO NOTHING` retained as the dedup
-  backstop, taking the projected 5-hour wall-clock against a remote
-  Postgres into the minutes range without changing the operator-visible
-  progress shape. Phase 2 is gated on re-measurement: if a 100%-duplicate
-  steady-state re-sync still feels slow, fetch the existing
-  `content_hash` set into a Python set at startup and skip
-  already-present records before they enter the batch. Phase 3 (a
-  `COPY ... FROM STDIN` path with staging table) stays deferred.
+- **Server-side dedup pre-check for analytics sync (Phase 2 — shipped).**
+  See [`plans/analytics-sync-performance.md`](analytics-sync-performance.md)
+  for the full design. Phase 1 landed first:
+  `orchestrator/analytics/sync.py` accumulates validated row tuples
+  into a `_BATCH_SIZE`-sized buffer and flushes each batch via
+  `cur.executemany(insert_sql, batch)` with `ON CONFLICT (content_hash)
+  DO NOTHING` retained as the dedup backstop, taking the projected
+  5-hour wall-clock against a remote Postgres into the minutes range
+  without changing the operator-visible progress shape. Phase 2 is now
+  shipped on top: the sync issues a single
+  `SELECT content_hash FROM analytics_events WHERE content_hash IS NOT
+  NULL` before opening the JSONL file, snapshots the result into an
+  in-process set, and skips already-present hashes (and intra-file
+  duplicates) before they enter the batch buffer — so a 100 %-duplicate
+  re-sync now pays one SELECT and zero `executemany` calls while the
+  `ON CONFLICT` arbiter stays the correctness backstop for the rare
+  concurrent-writer race. Phase 3 (a `COPY ... FROM STDIN` path with
+  staging table) stays deferred.
 
 ## Risks
 

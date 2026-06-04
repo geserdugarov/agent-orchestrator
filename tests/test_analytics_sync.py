@@ -49,8 +49,15 @@ class _FakeCursor:
 
     Implemented as a context manager so the production `with
     conn.cursor() as cur:` block works unchanged. The production sync
-    accumulates validated row tuples and flushes them per batch via
-    `cur.executemany`; this fake fans the params_seq out into the
+    issues one `cur.execute("SELECT content_hash ...")` at startup
+    (the dedup pre-check) and then accumulates validated row tuples
+    flushed per batch via `cur.executemany`. For the SELECT shape the
+    fake snapshots the connection's `pre_check_hashes` (falling back
+    to `seen_hashes` when the test has not overridden it, so the
+    common "DB state == executemany ON CONFLICT view" case keeps
+    working) into a per-execute result list and exposes the rows
+    through `__iter__`, matching psycopg3's tuple-per-row iteration.
+    For the executemany shape the fake fans params_seq out into the
     flattened `inserts` / `duplicate_calls` recorders so per-row
     assertions keep working, and records the raw (sql, params_list)
     pair in `batches` so tests can assert on batch shape. `rowcount`
@@ -61,12 +68,29 @@ class _FakeCursor:
     def __init__(self, store: "_FakeConnection") -> None:
         self._store = store
         self.rowcount = 0
+        self._select_rows: list[tuple] = []
 
     def __enter__(self) -> "_FakeCursor":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
+
+    def execute(self, sql: str, params=None) -> None:
+        self._store.select_calls.append((sql, params))
+        if sql.lstrip().upper().startswith("SELECT"):
+            source = (
+                self._store.pre_check_hashes
+                if self._store.pre_check_hashes is not None
+                else self._store.seen_hashes
+            )
+            self._select_rows = [(h,) for h in sorted(source)]
+        else:
+            self._select_rows = []
+        self.rowcount = len(self._select_rows)
+
+    def __iter__(self):
+        return iter(self._select_rows)
 
     def executemany(self, sql: str, params_seq) -> None:
         # Materialize once so a generator caller can't double-spend
@@ -95,14 +119,22 @@ class _FakeConnection:
 
     Captures inserts and conflict-skips, the per-batch `executemany`
     calls, plus commit / rollback / close so tests can assert that
-    the sync commits on success and rolls back on error.
+    the sync commits on success and rolls back on error. The
+    `seen_hashes` set models the database's ON CONFLICT view (what
+    executemany treats as already-present), and `pre_check_hashes`
+    overrides what the startup SELECT returns -- defaulting to `None`
+    so the SELECT snapshots `seen_hashes` and mirrors reality, but
+    lettable to a separate set in race-safe-backstop tests where the
+    pre-check stale view must diverge from the DB.
     """
 
     def __init__(self) -> None:
         self.inserts: list[tuple[str, tuple]] = []
         self.duplicate_calls: list[tuple[str, tuple]] = []
         self.batches: list[tuple[str, list[tuple]]] = []
+        self.select_calls: list[tuple[str, object]] = []
         self.seen_hashes: set[str] = set()
+        self.pre_check_hashes: set[str] | None = None
         self.commit_called = 0
         self.rollback_called = 0
         self.close_called = 0
@@ -871,11 +903,16 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
                 "ON CONFLICT (content_hash) DO NOTHING", sql,
             )
 
-    def test_mixed_inserted_and_duplicate_in_batch(self) -> None:
-        # Pre-seed the fake's seen-hashes set so half the batch lands
-        # as duplicates -- per-batch rowcount tells the sync exactly
-        # how many were inserted vs. skipped, even though the
-        # `executemany` is one protocol call.
+    def test_race_backstop_rowcount_distinguishes_inserted_and_duplicate(self) -> None:
+        # Race-safe backstop: model a concurrent writer that landed
+        # rows AFTER the startup pre-check completed but BEFORE the
+        # batched flush, by holding the pre-check view empty while
+        # seeding the DB-side `seen_hashes` set with the racing rows.
+        # Every row reaches `executemany`; per-batch `cur.rowcount`
+        # still tells the sync exactly how many were inserted vs.
+        # ON-CONFLICT-skipped, so the `len(batch) - rowcount`
+        # duplicate-math stays correct even when the pre-check missed
+        # what the database already had.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
             _, analytics_sync = _reload({
@@ -885,6 +922,7 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
             records = [_sample_record(issue=i) for i in range(1, 5)]
             _write_jsonl(path, records)
             fake = _FakeConnection()
+            fake.pre_check_hashes = set()
             for rec in records[:2]:
                 fake.seen_hashes.add(analytics_sync._content_hash(rec))
             with patch.object(analytics_sync, "_BATCH_SIZE", 4):
@@ -1004,6 +1042,125 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
             self.assertEqual(result.skipped_malformed, 2)
             self.assertEqual(len(fake.batches), 0)
             self.assertEqual(fake.commit_called, 1)
+
+
+class AnalyticsSyncPreCheckTest(unittest.TestCase):
+    """Startup `content_hash` pre-check: a single
+    `SELECT content_hash FROM analytics_events WHERE content_hash IS
+    NOT NULL` runs before the input file is opened so already-present
+    rows are filtered in Python before they enter the batch buffer,
+    intra-file duplicates are filtered against the same set so one
+    JSONL with two identical records pays one round-trip not two, and
+    pre-skipped rows never reach `executemany`. The batched INSERT ...
+    ON CONFLICT (content_hash) DO NOTHING path stays the correctness
+    backstop for the rare concurrent-writer race.
+    """
+
+    def test_pre_check_select_issued_once_before_input_read(self) -> None:
+        # A single SELECT against the unique content_hash index is the
+        # whole startup tax; fan-out per row would defeat the point.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _write_jsonl(path, [_sample_record(issue=i) for i in range(1, 4)])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            analytics_sync.sync_jsonl_to_postgres(
+                connect=lambda url: fake,
+                json_adapter=lambda v: v,
+            )
+        self.assertEqual(len(fake.select_calls), 1)
+        sql, _ = fake.select_calls[0]
+        self.assertIn("SELECT content_hash", sql)
+        self.assertIn("analytics_events", sql)
+        self.assertIn("content_hash IS NOT NULL", sql)
+
+    def test_startup_pre_check_skips_already_present_hashes(self) -> None:
+        # Seed the fake's database-state set with two of the three
+        # records' hashes; the pre-check SELECT picks them up and the
+        # in-Python filter skips them before the batch accumulator
+        # sees them. Only the third record reaches the wire, and the
+        # duplicates are counted via `skipped_duplicate` without any
+        # per-row round-trip.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            records = [_sample_record(issue=i) for i in range(1, 4)]
+            _write_jsonl(path, records)
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            for rec in records[:2]:
+                fake.seen_hashes.add(analytics_sync._content_hash(rec))
+            result = analytics_sync.sync_jsonl_to_postgres(
+                connect=lambda url: fake,
+                json_adapter=lambda v: v,
+            )
+        self.assertEqual(result.inserted, 1)
+        self.assertEqual(result.skipped_duplicate, 2)
+        self.assertEqual(result.total_lines, 3)
+        # The batched `executemany` only carries the new third record;
+        # the two pre-skipped rows never enter the batch buffer.
+        self.assertEqual(len(fake.batches), 1)
+        self.assertEqual(len(fake.batches[0][1]), 1)
+        third_hash = analytics_sync._content_hash(records[2])
+        batched_hashes = {params[-1] for params in fake.batches[0][1]}
+        self.assertEqual(batched_hashes, {third_hash})
+
+    def test_intra_file_duplicates_filtered_before_executemany(self) -> None:
+        # Two identical records back-to-back in the same JSONL file
+        # share a content_hash. The first occurrence is queued and
+        # adds its hash to the in-Python skip set; the second hits the
+        # set and is counted as `skipped_duplicate` without entering
+        # the batch. The wire only sees one copy.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            duplicate = _sample_record(issue=1, event="stage_enter")
+            other = _sample_record(issue=2, event="agent_exit")
+            _write_jsonl(path, [duplicate, duplicate, other])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            result = analytics_sync.sync_jsonl_to_postgres(
+                connect=lambda url: fake,
+                json_adapter=lambda v: v,
+            )
+        self.assertEqual(result.inserted, 2)
+        self.assertEqual(result.skipped_duplicate, 1)
+        self.assertEqual(result.total_lines, 3)
+        self.assertEqual(len(fake.batches), 1)
+        self.assertEqual(len(fake.batches[0][1]), 2)
+        # Each batched row carries a unique hash; the duplicate of
+        # `duplicate` never made it past the in-Python filter.
+        batched_hashes = [params[-1] for params in fake.batches[0][1]]
+        self.assertEqual(len(set(batched_hashes)), len(batched_hashes))
+
+    def test_pre_check_runs_against_empty_database(self) -> None:
+        # The pre-check is unconditional but harmless when the
+        # database is empty: every JSONL record still lands and the
+        # SELECT just returns no rows.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _write_jsonl(path, [_sample_record(issue=i) for i in range(1, 4)])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            result = analytics_sync.sync_jsonl_to_postgres(
+                connect=lambda url: fake,
+                json_adapter=lambda v: v,
+            )
+        self.assertEqual(len(fake.select_calls), 1)
+        self.assertEqual(result.inserted, 3)
+        self.assertEqual(result.skipped_duplicate, 0)
+        self.assertEqual(len(fake.batches), 1)
+        self.assertEqual(len(fake.batches[0][1]), 3)
 
 
 class AnalyticsSyncProgressTest(unittest.TestCase):

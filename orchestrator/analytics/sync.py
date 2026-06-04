@@ -426,6 +426,25 @@ def sync_jsonl_to_postgres(
 
     try:
         with conn.cursor() as cur:
+            # Startup pre-check: pull every persisted `content_hash`
+            # into a Python set so already-present records are skipped
+            # before they ever reach the wire. One server-side scan
+            # over the unique `analytics_events_content_hash_idx`
+            # replaces what would otherwise be one per-row round-trip
+            # per duplicate. The `WHERE content_hash IS NOT NULL`
+            # predicate filters legacy pre-`content_hash` rows so they
+            # do not pollute the set. `ON CONFLICT (content_hash) DO
+            # NOTHING` in `_flush_batch` stays the authoritative dedup
+            # backstop, so any racing concurrent writer still hits the
+            # server-side arbiter.
+            cur.execute(
+                "SELECT content_hash FROM analytics_events "
+                "WHERE content_hash IS NOT NULL"
+            )
+            existing_hashes: set[str] = {
+                row[0] for row in cur if row[0] is not None
+            }
+
             batch: list[tuple] = []
 
             def _flush_batch() -> None:
@@ -486,6 +505,17 @@ def sync_jsonl_to_postgres(
                         continue
                     columns, extras = split
                     content_hash = _content_hash(record)
+                    # In-Python skip: a hash already known to be in
+                    # the database (from the startup pre-check) or
+                    # already queued earlier in the same input file
+                    # never enters the batch buffer, so the wire only
+                    # carries genuinely-new rows. Intra-file duplicates
+                    # are filtered against the same set so two
+                    # identical records in one JSONL file do not cost
+                    # two round-trips.
+                    if content_hash in existing_hashes:
+                        skipped_duplicate += 1
+                        continue
                     values = _row_values(
                         columns,
                         extras,
@@ -495,6 +525,7 @@ def sync_jsonl_to_postgres(
                         json_adapter_fn,
                     )
                     batch.append(values)
+                    existing_hashes.add(content_hash)
                     if len(batch) >= _BATCH_SIZE:
                         _flush_batch()
             _flush_batch()
