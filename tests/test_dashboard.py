@@ -488,11 +488,7 @@ class ComputeInsightsTest(unittest.TestCase):
     def test_no_banners_for_healthy_window(self) -> None:
         _, dashboard = _reload()
         summary = self._summary(events=100, agent_runs=50, failed=0, cost=10.0)
-        prev = self._summary(events=90, agent_runs=45, failed=0, cost=9.0)
-        self.assertEqual(
-            dashboard.compute_insights(summary, prev_summary=prev),
-            [],
-        )
+        self.assertEqual(dashboard.compute_insights(summary), [])
 
     def test_high_failure_rate_emits_error(self) -> None:
         _, dashboard = _reload()
@@ -506,32 +502,6 @@ class ComputeInsightsTest(unittest.TestCase):
         _, dashboard = _reload()
         summary = self._summary(agent_runs=100, failed=5)
         self.assertEqual(dashboard.compute_insights(summary), [])
-
-    def test_cost_surge_emits_warning(self) -> None:
-        _, dashboard = _reload()
-        summary = self._summary(cost=200.0)
-        prev = self._summary(cost=100.0)
-        banners = dashboard.compute_insights(summary, prev_summary=prev)
-        # Cost surge is the only banner here -- previous failures are
-        # zero so the failure-rate banner does not fire.
-        self.assertTrue(
-            any(
-                b.severity == "warning" and "up 100%" in b.message
-                for b in banners
-            )
-        )
-
-    def test_cost_drop_emits_info(self) -> None:
-        _, dashboard = _reload()
-        summary = self._summary(cost=50.0)
-        prev = self._summary(cost=100.0)
-        banners = dashboard.compute_insights(summary, prev_summary=prev)
-        self.assertTrue(
-            any(
-                b.severity == "info" and "down 50%" in b.message
-                for b in banners
-            )
-        )
 
     def test_unpriced_coverage_emits_warning(self) -> None:
         _, dashboard = _reload()

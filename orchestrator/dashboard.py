@@ -10,8 +10,7 @@ mirrors the standalone HTML mock the issue ships:
   summary, and the in-range spend pill.
 - A filter bar carrying the `3D` / `7D` / `All` preset selector and
   the two-date custom range.
-- Computed insight banners (failure rate, cost trend, unpriced cost
-  coverage).
+- Computed insight banners (failure rate, unpriced cost coverage).
 - A four-tile KPI strip (total spend, total tokens, cost / resolved
   issue, rework share) with previous-window deltas.
 - A grid of cards: hero spend / token usage stacked-area chart,
@@ -117,7 +116,6 @@ DEFAULT_PRESET = PRESET_ALL
 
 # Insight thresholds.
 FAILURE_RATE_BANNER_THRESHOLD = 0.10
-COST_DELTA_BANNER_THRESHOLD = 0.25
 UNPRICED_COVERAGE_THRESHOLD = 0.10
 UNPRICED_COST_SOURCES: frozenset[str] = frozenset({"unknown-price", "unknown"})
 # Bucket strings the review-round breakdown emits whose runs are
@@ -383,7 +381,6 @@ def cache_key(
 def compute_insights(
     summary: Summary,
     *,
-    prev_summary: Optional[Summary] = None,
     cost_coverage_rows: Sequence[CostCoverageRow] = (),
 ) -> list[InsightBanner]:
     """Banner lines surfaced at the top of the redesigned page.
@@ -392,9 +389,6 @@ def compute_insights(
 
     - Failure rate exceeds `FAILURE_RATE_BANNER_THRESHOLD`: agent
       runs are exiting non-zero more than 10 % of the time.
-    - Cost trend exceeds `COST_DELTA_BANNER_THRESHOLD` versus the
-      previous window: a sustained 25 % swing is worth surfacing
-      even though the KPI row already shows the delta.
     - Unpriced cost coverage exceeds `UNPRICED_COVERAGE_THRESHOLD`:
       the pricing table in `orchestrator.usage` is missing SKUs the
       parser is seeing in the wild.
@@ -414,24 +408,6 @@ def compute_insights(
                         f"{summary.failed_agent_runs} of "
                         f"{summary.total_agent_runs} agent runs failed "
                         f"({rate * 100:.0f}%)."
-                    ),
-                )
-            )
-    if prev_summary is not None:
-        delta = kpi_delta(
-            summary.total_cost_usd, prev_summary.total_cost_usd
-        )
-        if delta is not None and abs(delta) >= COST_DELTA_BANNER_THRESHOLD:
-            direction = "up" if delta > 0 else "down"
-            severity = "warning" if delta > 0 else "info"
-            banners.append(
-                InsightBanner(
-                    severity=severity,
-                    message=(
-                        f"Total cost is {direction} "
-                        f"{abs(delta) * 100:.0f}% vs the previous window "
-                        f"(${summary.total_cost_usd:,.2f} vs "
-                        f"${prev_summary.total_cost_usd:,.2f})."
                     ),
                 )
             )
@@ -1318,7 +1294,6 @@ def main() -> None:
 
     banners = compute_insights(
         summary,
-        prev_summary=prev_summary,
         cost_coverage_rows=cost_coverage_rows,
     )
     if banners:
