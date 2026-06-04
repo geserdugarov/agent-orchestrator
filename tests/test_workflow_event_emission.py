@@ -84,16 +84,19 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
                 gh = FakeGitHubClient()
                 issue = make_issue(7)
                 gh.add_issue(issue)
+                # A legal forward path (implementing -> validating ->
+                # documenting) so the sequence emits three stage_enter events
+                # without tripping the transition guard under `enforce`.
                 gh.set_workflow_label(issue, "implementing")
                 gh.set_workflow_label(issue, "validating")
-                gh.set_workflow_label(issue, "in_review")
+                gh.set_workflow_label(issue, "documenting")
             # File closed on context exit -- read it back, parse line by line.
             lines = path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 3)
             records = [json.loads(line) for line in lines]
             self.assertEqual(
                 [r["stage"] for r in records],
-                ["implementing", "validating", "in_review"],
+                ["implementing", "validating", "documenting"],
             )
             for r in records:
                 self.assertEqual(r["event"], "stage_enter")
