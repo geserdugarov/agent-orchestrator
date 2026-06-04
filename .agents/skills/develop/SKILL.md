@@ -1,6 +1,6 @@
 ---
 name: develop
-description: Project conventions and recurring gotchas for implementer agents working on agent-orchestrator, plus Rust-specific LLM gotchas. Use before opening a PR for any change in orchestrator/, tests/, docs/, or plans/, and for any change in a Rust codebase.
+description: Project conventions and recurring gotchas for implementer agents working on agent-orchestrator, plus Rust-specific LLM gotchas. Use before opening a PR for any change in orchestrator/, tests/, or docs/, and for any change in a Rust codebase.
 ---
 
 # Developer skill — agent-orchestrator
@@ -46,7 +46,6 @@ When you move a handler, helper, or constant, grep for the symbol across these f
 - `docs/architecture.md`
 - `docs/state-machine.md`
 - `docs/workflow.md`
-- `plans/roadmap.md`
 - the module docstrings at the top of `orchestrator/workflow.py`, `workflow_drift.py`, `workflow_messages.py`, `worktrees.py`, and `orchestrator/stages/*.py`
 
 Be precise about what is and isn't re-exported — overstated claims like "every helper is re-exported" get flagged.
