@@ -1051,5 +1051,270 @@ class AnalyticsConnectionExposureTest(unittest.TestCase):
             self.assertIsNone(conn)
 
 
+class DashboardParallelReadsEnabledTest(unittest.TestCase):
+    """`DASHBOARD_PARALLEL_READS` is the A/B knob for the parallel
+    read fan-out. Default off so the sequential behavior holds until
+    an operator opts in; truthy spellings follow the same vocabulary
+    as the rest of the codebase (`DECOMPOSE=on` etc.).
+    """
+
+    def test_unset_defaults_to_false(self) -> None:
+        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        self.assertFalse(dashboard.dashboard_parallel_reads_enabled())
+
+    def test_empty_string_is_false(self) -> None:
+        _, dashboard = _reload(
+            {"ANALYTICS_DB_URL": "", "DASHBOARD_PARALLEL_READS": ""}
+        )
+        self.assertFalse(dashboard.dashboard_parallel_reads_enabled())
+
+    def test_truthy_spellings_enable_parallel(self) -> None:
+        # The four documented truthy sentinels all enable the fan-out
+        # regardless of case so an operator can paste whichever spelling
+        # their team's playbook uses.
+        for sentinel in ("1", "true", "on", "yes", "ON", "Yes", "TRUE"):
+            with self.subTest(sentinel=sentinel):
+                _, dashboard = _reload(
+                    {
+                        "ANALYTICS_DB_URL": "",
+                        "DASHBOARD_PARALLEL_READS": sentinel,
+                    }
+                )
+                self.assertTrue(
+                    dashboard.dashboard_parallel_reads_enabled()
+                )
+
+    def test_falsy_spellings_keep_sequential(self) -> None:
+        for sentinel in ("0", "false", "off", "no", "disabled", "none"):
+            with self.subTest(sentinel=sentinel):
+                _, dashboard = _reload(
+                    {
+                        "ANALYTICS_DB_URL": "",
+                        "DASHBOARD_PARALLEL_READS": sentinel,
+                    }
+                )
+                self.assertFalse(
+                    dashboard.dashboard_parallel_reads_enabled()
+                )
+
+    def test_whitespace_is_stripped(self) -> None:
+        # Operators paste env values from playbooks; tolerate leading /
+        # trailing whitespace so a stray newline does not silently fall
+        # back to the sequential path.
+        _, dashboard = _reload(
+            {"ANALYTICS_DB_URL": "", "DASHBOARD_PARALLEL_READS": "  on  "}
+        )
+        self.assertTrue(dashboard.dashboard_parallel_reads_enabled())
+
+
+class FanOutReadsSequentialTest(unittest.TestCase):
+    """The sequential branch of `_fan_out_reads` runs each reader in
+    submission order on the calling thread and returns results keyed
+    by reader name. The helper exists so the `main()` call site can
+    collapse 13 lines of `name = _read_name(*key)` into one dispatch
+    and so tests can inject fake readers without booting Streamlit.
+    """
+
+    def test_results_keyed_by_name_in_submission_order(self) -> None:
+        _, dashboard = _reload()
+        order: list[str] = []
+
+        def _make(name: str, value: int):
+            def fn():
+                order.append(name)
+                return value
+            return fn
+
+        readers = [
+            ("a", _make("a", 1)),
+            ("b", _make("b", 2)),
+            ("c", _make("c", 3)),
+        ]
+        results = dashboard._fan_out_reads(readers, parallel=False)
+        self.assertEqual(results, {"a": 1, "b": 2, "c": 3})
+        # Sequential path runs in submission order so a deterministic
+        # log line / error message references the right reader.
+        self.assertEqual(order, ["a", "b", "c"])
+
+    def test_first_failing_reader_propagates(self) -> None:
+        # Sequential path stops at the first error so the caller
+        # surfaces one user-friendly message instead of a stack of
+        # errors.
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import AnalyticsReadError
+        called: list[str] = []
+
+        def _ok():
+            called.append("ok")
+            return 1
+
+        def _boom():
+            called.append("boom")
+            raise AnalyticsReadError("connection refused")
+
+        def _never():
+            called.append("never")
+            return 2
+
+        readers = [("a", _ok), ("b", _boom), ("c", _never)]
+        with self.assertRaises(AnalyticsReadError):
+            dashboard._fan_out_reads(readers, parallel=False)
+        self.assertEqual(called, ["ok", "boom"])
+
+    def test_each_reader_runs_exactly_once(self) -> None:
+        _, dashboard = _reload()
+        counts = {"a": 0, "b": 0}
+
+        def _mk(name):
+            def fn():
+                counts[name] += 1
+                return name
+            return fn
+
+        readers = [("a", _mk("a")), ("b", _mk("b"))]
+        dashboard._fan_out_reads(readers, parallel=False)
+        self.assertEqual(counts, {"a": 1, "b": 1})
+
+
+class FanOutReadsParallelTest(unittest.TestCase):
+    """The parallel branch dispatches readers across a
+    `ThreadPoolExecutor`. Each worker thread is responsible for its
+    own analytics connection (the thread-local cache from #383); the
+    helper itself only owns dispatch + result collection.
+    """
+
+    def test_all_results_returned_keyed_by_name(self) -> None:
+        _, dashboard = _reload()
+
+        def _mk(value):
+            def fn():
+                return value
+            return fn
+
+        readers = [(f"r{i}", _mk(i)) for i in range(5)]
+        results = dashboard._fan_out_reads(
+            readers, parallel=True, max_workers=4
+        )
+        self.assertEqual(
+            results, {f"r{i}": i for i in range(5)}
+        )
+
+    def test_each_reader_runs_exactly_once_on_a_worker(self) -> None:
+        # Re-entrant workers must not re-submit a reader (and
+        # the dispatch logic must not double-collect). The set of
+        # observed thread ids should be > 1 to confirm actual
+        # parallelism, but the exact count depends on scheduling so
+        # we only assert it ran on a non-main thread when more than
+        # one reader was submitted.
+        import threading
+        _, dashboard = _reload()
+        calls: dict[str, int] = {}
+        threads: set[int] = set()
+        lock = threading.Lock()
+
+        def _mk(name):
+            def fn():
+                with lock:
+                    calls[name] = calls.get(name, 0) + 1
+                    threads.add(threading.get_ident())
+                return name
+            return fn
+
+        readers = [(f"r{i}", _mk(f"r{i}")) for i in range(8)]
+        dashboard._fan_out_reads(
+            readers, parallel=True, max_workers=4
+        )
+        self.assertEqual(set(calls.values()), {1})
+        self.assertEqual(set(calls), {f"r{i}" for i in range(8)})
+        self.assertNotIn(threading.get_ident(), threads)
+
+    def test_parallel_wall_clock_beats_sequential_sum(self) -> None:
+        # Smoke: with 4 workers and 4 readers each sleeping ~80 ms, the
+        # wall-clock should be much closer to one reader's runtime than
+        # to the sum. Pin a loose ceiling so the test is not flaky on a
+        # busy CI host but still fails if the executor degenerates to
+        # the sequential path.
+        import time
+        _, dashboard = _reload()
+        delay = 0.08
+
+        def _slow():
+            time.sleep(delay)
+            return "ok"
+
+        readers = [(f"r{i}", _slow) for i in range(4)]
+        t0 = time.perf_counter()
+        results = dashboard._fan_out_reads(
+            readers, parallel=True, max_workers=4
+        )
+        elapsed = time.perf_counter() - t0
+        self.assertEqual(len(results), 4)
+        # Sequential sum would be 4 * delay = 320 ms; one wave on
+        # four workers should land well under 2 * delay.
+        self.assertLess(elapsed, delay * 2.5)
+
+    def test_reader_exception_propagates(self) -> None:
+        # `AnalyticsReadError` raised in a worker must surface from
+        # the helper so the caller's `try/except AnalyticsReadError`
+        # in `main()` can render a single `st.error` and stop.
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import AnalyticsReadError
+
+        def _boom():
+            raise AnalyticsReadError("query failed")
+
+        def _ok():
+            return 1
+
+        readers = [("ok", _ok), ("boom", _boom)]
+        with self.assertRaises(AnalyticsReadError) as cm:
+            dashboard._fan_out_reads(
+                readers, parallel=True, max_workers=2
+            )
+        self.assertIn("query failed", str(cm.exception))
+
+
+class MainParallelFanOutWiringTest(unittest.TestCase):
+    """`main()` must dispatch the 13 widget reads through
+    `_fan_out_reads`, drive the parallel switch off the env-backed
+    helper, and emit a single `dashboard.load:` INFO line so the A/B
+    rollout has a measurement surface. Streamlit is not installed for
+    the default `uv sync --locked`, so these tests inspect the
+    `main()` source rather than driving it under Streamlit.
+    """
+
+    def _main_source(self) -> str:
+        import inspect
+        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        return inspect.getsource(dashboard.main)
+
+    def test_main_uses_fan_out_helper(self) -> None:
+        src = self._main_source()
+        self.assertIn("_fan_out_reads(", src)
+
+    def test_main_drives_parallel_off_env_helper(self) -> None:
+        src = self._main_source()
+        # The env-backed helper is the single source of truth for the
+        # flag so a test or shutdown hook can flip it without
+        # rewriting `main()`.
+        self.assertIn("dashboard_parallel_reads_enabled()", src)
+
+    def test_main_emits_load_timing_log(self) -> None:
+        src = self._main_source()
+        # The instrumentation line carries total wall-clock, reader
+        # count, and the parallel flag so the operator can A/B with a
+        # single grep.
+        self.assertIn("dashboard.load:", src)
+        self.assertIn("perf_counter()", src)
+
+    def test_main_catches_analytics_read_error_around_fan_out(self) -> None:
+        # The fan-out is wrapped in the same `try/except
+        # AnalyticsReadError` the sequential path used, so a worker
+        # exception still surfaces as one `st.error`.
+        src = self._main_source()
+        self.assertIn("_fan_out_reads(readers", src)
+        self.assertIn("analytics_read.AnalyticsReadError", src)
+
+
 if __name__ == "__main__":
     unittest.main()

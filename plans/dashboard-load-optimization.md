@@ -15,13 +15,31 @@ wrappers in `orchestrator/dashboard.py` now check out the
 thread-local inside their function bodies so the connection stays
 out of the cache key.
 
+Layer 2 (parallel read fan-out in `dashboard.py::main()`) shipped via
+#386. `main()` now builds a `(name, callable)` list of the 13 widget
+reads and dispatches them through `_fan_out_reads`, which takes the
+sequential pre-Layer-2 path by default and switches to an
+8-worker `ThreadPoolExecutor` when `DASHBOARD_PARALLEL_READS` is set
+to a truthy sentinel (`1` / `true` / `on` / `yes`, case-insensitive,
+parsed at module import like `ANALYTICS_DB_URL`). Each worker takes
+its own thread-local `analytics_connection` -- `psycopg.Connection`
+is not thread-safe for concurrent use -- so wall-clock collapses to
+roughly the slowest reader per in-flight wave while the per-thread
+cache still amortizes the ~1 s psycopg handshake across whatever
+subset of the readers lands on that worker. An `AnalyticsReadError`
+raised by any worker propagates from the first failing future and
+surfaces as the same `st.error` the sequential path emits.
+`main()` brackets the fan-out with `perf_counter()` and logs
+`dashboard.load: total=X.Xs reads=13 parallel=true|false` at INFO so
+the two paths can be A/B'd from the Streamlit log.
+
 Layer 4 schema + sync half (the `analytics_daily_rollup` materialized
 view, its supporting indexes, and the post-commit refresh hook in
 `orchestrator/analytics/sync.py`) shipped via #382. The Layer 4
 dashboard cutover that points the rollup-eligible widgets at the new
-view, plus Layers 2, 3, 5, and 6 (parallel fan-out, collapsed
-multi-query readers, UX polish, predicate-shape audit) remain to be
-designed against measurements taken after Layer 1.
+view, plus Layers 3, 5, and 6 (collapsed multi-query readers, UX
+polish, predicate-shape audit) remain to be designed against
+measurements taken after Layers 1+2.
 
 ## Symptom
 
@@ -379,11 +397,12 @@ planner skip the event filter at scan time.
 
 ## Suggested rollout
 
-1. **PR 1** — Layer 1: connection per request + opt-in `conn=` param on
-   every reader. No behavioral change, just plumbing. Largest single
-   win, lowest risk.
-2. **PR 2** — Layer 2: parallel fan-out in `dashboard.py::main()`,
-   guarded by an env flag so we can A/B against the sequential path.
+1. **PR 1** — Layer 1 (shipped, #383): connection per request + opt-in
+   `conn=` param on every reader. No behavioral change, just plumbing.
+   Largest single win, lowest risk.
+2. **PR 2** — Layer 2 (shipped, #386): parallel fan-out in
+   `dashboard.py::main()`, guarded by `DASHBOARD_PARALLEL_READS` (off
+   by default) so the sequential path stays available for A/B.
 3. **PR 3** — Layer 3: collapsed `get_summary` + unioned
    `get_filter_options`. Touches read-model SQL but the public
    signatures stay.
@@ -395,9 +414,11 @@ planner skip the event filter at scan time.
 
 ## Measurement / acceptance
 
-Add a tiny instrumentation block in `dashboard.py::main()` that wraps
-the read fan-out with `time.perf_counter()` and logs
-`dashboard.load: total=X.Xs reads=N` at INFO. Acceptance bar:
+Layer 2 shipped the instrumentation block: `dashboard.py::main()` now
+wraps the read fan-out with `time.perf_counter()` and logs
+`dashboard.load: total=X.Xs reads=13 parallel=true|false` at INFO so
+the sequential and parallel paths can be compared by grep-ing the
+Streamlit log. Acceptance bar:
 
 - After Layer 1: cold load **< 10 s**.
 - After Layers 1+2: cold load **< 5 s**.

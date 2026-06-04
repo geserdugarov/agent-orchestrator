@@ -46,11 +46,13 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from time import perf_counter
+from typing import Any, Callable, Optional, Sequence
 
 # Streamlit's documented launch -- `streamlit run orchestrator/dashboard.py`
 # -- executes this file as a top-level script via `runpy` with no parent
@@ -126,6 +128,26 @@ UNPRICED_COST_SOURCES: frozenset[str] = frozenset({"unknown-price", "unknown"})
 REWORK_BUCKETS: frozenset[str] = frozenset(
     {"1", "2", "3", "4", "5", "6+"}
 )
+
+# Parallel read fan-out for `main()`'s 13 independent widget reads.
+# Opt-in via `DASHBOARD_PARALLEL_READS` so the new path can be A/B'd
+# against the sequential baseline. Default off: the reads keep running
+# one-at-a-time on the Streamlit render thread unless the operator
+# flips this on. Truthy spellings follow the same vocabulary as other
+# boolean knobs in the codebase (`DECOMPOSE` etc.). Parsed at module
+# import like `ANALYTICS_DB_URL`, so a Streamlit restart picks up the
+# change without per-render env reads.
+PARALLEL_READS_ENV = "DASHBOARD_PARALLEL_READS"
+PARALLEL_READS_MAX_WORKERS = 8
+_TRUTHY = frozenset({"1", "true", "on", "yes"})
+
+
+def _parse_parallel_reads_flag() -> bool:
+    raw = os.environ.get(PARALLEL_READS_ENV, "").strip().lower()
+    return raw in _TRUTHY
+
+
+DASHBOARD_PARALLEL_READS: bool = _parse_parallel_reads_flag()
 
 UNCONFIGURED_DB_MESSAGE = (
     "`ANALYTICS_DB_URL` is not configured. Set it in your environment "
@@ -273,6 +295,58 @@ def db_unconfigured_message() -> Optional[str]:
     if not analytics.ANALYTICS_DB_URL:
         return UNCONFIGURED_DB_MESSAGE
     return None
+
+
+def dashboard_parallel_reads_enabled() -> bool:
+    """True when `DASHBOARD_PARALLEL_READS` is set to a truthy sentinel.
+
+    Default OFF -- the parallel fan-out is opt-in so operators can A/B
+    against the sequential baseline before flipping it on. Truthy
+    values: `1` / `true` / `on` / `yes` (case-insensitive). Anything
+    else (including empty / unset) keeps the sequential path. Reads
+    the module-level `DASHBOARD_PARALLEL_READS` so tests can patch the
+    attribute directly (mirrors how `analytics.ANALYTICS_DB_URL` is
+    exposed).
+    """
+    return DASHBOARD_PARALLEL_READS
+
+
+def _fan_out_reads(
+    readers: Sequence[tuple[str, Callable[[], Any]]],
+    *,
+    parallel: bool,
+    max_workers: int = PARALLEL_READS_MAX_WORKERS,
+) -> dict[str, Any]:
+    """Run each `(name, callable)` reader and return `{name: result}`.
+
+    `parallel=False` runs readers one-at-a-time in submission order on
+    the calling thread -- the sequential baseline. The thread-local
+    `analytics_connection` keeps the single psycopg socket warm across
+    all 13 reads.
+
+    `parallel=True` dispatches across a `ThreadPoolExecutor` capped at
+    `max_workers`. Each worker thread opens its own thread-local
+    analytics connection on first use and reuses it across whatever
+    subset of the readers lands on it -- `psycopg.Connection` is not
+    thread-safe for concurrent use, so sharing one socket across
+    workers would corrupt the wire protocol; the per-thread cache in
+    `analytics.read.analytics_connection` keeps each worker's socket
+    isolated. The wall-clock collapses to roughly the slowest reader
+    in a wave of `max_workers` plus a small executor overhead.
+
+    Any exception raised by a reader propagates verbatim from the
+    first failing future (matching the sequential path's "stop at the
+    first error" shape) so the caller can surface a single
+    user-friendly `AnalyticsReadError` message. Results are returned
+    in `readers` submission order so the call sites can unpack them
+    without caring about completion order.
+    """
+    if not parallel:
+        return {name: fn() for name, fn in readers}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [(name, pool.submit(fn)) for name, fn in readers]
+        return {name: fut.result() for name, fut in futures}
 
 
 def resolve_stage_filter(
@@ -1125,20 +1199,31 @@ def main() -> None:
                 conn=conn,
             )
 
+    # Read fan-out. Each entry is `(name, zero-arg callable)` so
+    # `_fan_out_reads` can dispatch them across worker threads when
+    # `DASHBOARD_PARALLEL_READS` is set; the sequential path stays in
+    # this thread under the existing thread-local `analytics_connection`.
+    # Lambdas close over `key` / `prev_key` so the executor never has
+    # to thread filter tuples through the futures.
+    readers: list[tuple[str, Callable[[], Any]]] = [
+        ("summary", lambda: _read_summary(*key)),
+        ("prev_summary", lambda: _read_summary(*prev_key)),
+        ("ts_points", lambda: _read_time_series(*key)),
+        ("stage_rows", lambda: _read_stage_breakdown(*key)),
+        ("agent_exits", lambda: _read_recent_agent_exits(*key)),
+        ("issues_rows", lambda: _read_top_cost_issues(*key)),
+        ("review_round_rows", lambda: _read_review_round(*key)),
+        ("backend_rows", lambda: _read_backend_efficiency(*key)),
+        ("repo_rows", lambda: _read_repo_breakdown(*key)),
+        ("cost_coverage_rows", lambda: _read_cost_coverage(*key)),
+        ("heatmap_rows", lambda: _read_hourly_heatmap(*key)),
+        ("throughput_rows", lambda: _read_throughput(*key)),
+        ("backend_daily_rows", lambda: _read_backend_daily_tokens(*key)),
+    ]
+    parallel = dashboard_parallel_reads_enabled()
+    load_start = perf_counter()
     try:
-        summary = _read_summary(*key)
-        prev_summary = _read_summary(*prev_key)
-        ts_points = _read_time_series(*key)
-        stage_rows = _read_stage_breakdown(*key)
-        agent_exits = _read_recent_agent_exits(*key)
-        issues_rows = _read_top_cost_issues(*key)
-        review_round_rows = _read_review_round(*key)
-        backend_rows = _read_backend_efficiency(*key)
-        repo_rows = _read_repo_breakdown(*key)
-        cost_coverage_rows = _read_cost_coverage(*key)
-        heatmap_rows = _read_hourly_heatmap(*key)
-        throughput_rows = _read_throughput(*key)
-        backend_daily_rows = _read_backend_daily_tokens(*key)
+        results = _fan_out_reads(readers, parallel=parallel)
     except analytics_read.AnalyticsReadError as e:
         st.error(
             f"Analytics query failed: {e}. The dashboard cannot render "
@@ -1146,6 +1231,25 @@ def main() -> None:
             "reload."
         )
         st.stop()
+    log.info(
+        "dashboard.load: total=%.1fs reads=%d parallel=%s",
+        perf_counter() - load_start,
+        len(readers),
+        "true" if parallel else "false",
+    )
+    summary = results["summary"]
+    prev_summary = results["prev_summary"]
+    ts_points = results["ts_points"]
+    stage_rows = results["stage_rows"]
+    agent_exits = results["agent_exits"]
+    issues_rows = results["issues_rows"]
+    review_round_rows = results["review_round_rows"]
+    backend_rows = results["backend_rows"]
+    repo_rows = results["repo_rows"]
+    cost_coverage_rows = results["cost_coverage_rows"]
+    heatmap_rows = results["heatmap_rows"]
+    throughput_rows = results["throughput_rows"]
+    backend_daily_rows = results["backend_daily_rows"]
 
     # Now we can render the topbar with the real spend value.
     topbar_slot.markdown(
