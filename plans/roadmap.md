@@ -601,6 +601,20 @@ swallowed.
   pool, in-worker continuation loop, per-state caps, event-stream stall
   detection, `linear_graphql` tool, strict template engine, full
   `WORKFLOW.md` adoption) as deliberately not adopted.
+- **Batched analytics sync against remote Postgres.** See
+  [`plans/analytics-sync-performance.md`](analytics-sync-performance.md)
+  for the full design. `orchestrator/analytics/sync.py` today calls
+  `cur.execute(insert_sql, values)` once per record, paying a full
+  network round-trip per row; against a remote host (observed
+  ~210 ms/row, projecting ~5 h for 81k records) this is too slow to be
+  operationally useful. Phase 1 swaps the per-row `execute` for
+  `cur.executemany(insert_sql, batch)` with a `_BATCH_SIZE` constant,
+  keeping `ON CONFLICT (content_hash) DO NOTHING` as the dedup backstop
+  and preserving the per-progress-tick observability shape. Phase 2,
+  added only if Phase 1 measurements still feel slow, fetches the
+  existing `content_hash` set into a Python set at startup and skips
+  already-present records before they enter the batch. Phase 3 (a
+  `COPY ... FROM STDIN` path with staging table) is deferred.
 
 ## Risks
 
