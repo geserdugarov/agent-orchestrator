@@ -60,8 +60,34 @@ cached wrapper backed by `get_kpi_prev` instead of reusing
 Layer 4 schema + sync half (the `analytics_daily_rollup` materialized
 view, its supporting indexes, and the post-commit refresh hook in
 `orchestrator/analytics/sync.py`) shipped via #382. The Layer 4
-dashboard cutover that points the rollup-eligible widgets at the new
-view remains.
+dashboard read-model cutover shipped via #397.
+`orchestrator/analytics/read.py` now routes the seven rollup-eligible
+window-bounded readers -- `get_summary`, `get_kpi_prev`,
+`get_time_series`, `get_stage_breakdown`, `get_repo_breakdown`,
+`get_backend_efficiency`, and `get_throughput_breakdown` -- at
+`analytics_daily_rollup` via a new `_build_rollup_window_where`
+helper that translates the dashboard's midnight-aligned UTC
+`[start, end)` datetimes to `day >= start.date() AND day <
+end.date()` so the rollup's `(day, repo)` supporting index drives
+a date-range scan. `SUM(event_count)` recovers per-event row
+counts, `SUM(failed_count)` / `SUM(timed_out_count)` recover the
+pre-scoped failure / timeout subcounts (the rollup definition
+already constrains `failed_count` to non-NULL non-zero `exit_code`
+and `timed_out_count` to `event = 'agent_exit' AND timed_out =
+TRUE`), and `AVG(duration_s)` is reconstructed as
+`SUM(duration_s_sum) / NULLIF(SUM(duration_s_count), 0)` so
+averaging averages across days never blurs the row-weighted mean.
+The remaining per-row readers (`get_recent_agent_exits`,
+`get_issues`, `get_issue_events`, `get_hourly_heatmap`,
+`get_event_breakdown`, `get_filter_options`, `get_data_extent`) keep
+reading from `analytics_events` and the view-backed readers
+(`get_review_round_breakdown`, `get_backend_daily_tokens`,
+`get_cost_coverage`) keep reading `analytics_agent_runs` because
+the rollup either drops the precision they need (`ts`, hour-of-day,
+`latest_stage`, `max_review_round`, `max_retry_count`) or the issue
+called them out for conservative treatment. Tests in
+`tests/test_analytics_read.py::RollupReadCutoverTest` /
+`RawReaderRollupKeepsTest` act as regression guards for the split.
 
 Layer 5 (UX polish) shipped via #396. `orchestrator/dashboard.py`
 now wraps `get_data_extent` and `get_filter_options` in
@@ -94,7 +120,7 @@ from either wave surface as one `st.error` + `st.stop`. The
 `dashboard.load: total=X.Xs reads=N parallel=…` INFO line now
 reports `N = 13` on a full render and `N = 6` on the empty-window
 short-circuit so the A/B comparison stays grep-able. Layer 6
-(predicate-shape audit) and the Layer 4 dashboard cutover remain.
+(predicate-shape audit) remains.
 
 ## Symptom
 
