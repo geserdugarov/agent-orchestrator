@@ -226,3 +226,104 @@ SELECT
     cost_source
 FROM analytics_events
 WHERE event = 'agent_exit';
+
+-- Daily rollup of `analytics_events` keyed on
+-- (day, repo, issue, event, stage, backend, cost_source). Dashboard
+-- widgets that need only date-bucketed totals (KPI strip, time
+-- series, cost-by-stage / cost-by-repo, backend efficiency,
+-- throughput, reliability tiles) can read this view instead of the
+-- raw events table so per-window aggregates stay bounded as the
+-- events table grows past ~1M rows. The widgets that genuinely need
+-- per-row resolution (hourly heatmap, recent agent exits, top-cost
+-- issue drill-down, review-round breakdown) keep hitting the raw
+-- table.
+--
+-- `day` is the UTC date of the event -- `ts` is TIMESTAMPTZ, so the
+-- cast to `date AT TIME ZONE 'UTC'` normalises to UTC regardless of
+-- the row's source timezone. `issue` is in the key because every
+-- dashboard read accepts an `issue_filter`; without it an
+-- issue-scoped read would double-count. `cost_source` is in the key
+-- so the cost-coverage panel can read from the rollup without
+-- decomposing `unknown-price` / `no-usage` / `reported` /
+-- `estimated` cohorts after the fact.
+--
+-- Aggregates carry every column a downstream consumer needs to
+-- recover row-weighted means without averaging averages: token sums
+-- per band, `duration_s_sum` + `duration_s_count` so `AVG` is
+-- `sum / count`, `failed_count` for the reliability "Failures" tile,
+-- `timed_out_count` for the reliability "Timeouts" tile, and
+-- `total_cost_usd` for every spend tile. `event_count` is the raw
+-- row count per group.
+--
+-- `IF NOT EXISTS` makes the create idempotent for the
+-- operator-driven `psql -f` reapply path. Postgres CREATE
+-- MATERIALIZED VIEW does not support OR REPLACE, so changing the
+-- column list / aggregates requires
+-- `DROP MATERIALIZED VIEW analytics_daily_rollup` followed by a
+-- reapply; the sync's refresh hook does NOT recover from a column
+-- mismatch.
+--
+-- Postgres populates the view at create time: the
+-- `CREATE MATERIALIZED VIEW ... AS SELECT` form omits `WITH NO
+-- DATA`, so the create runs the select and seeds the view in the
+-- same statement. On a fresh deploy the events table is empty so
+-- the seed scan is free; on a `psql -f` migration against an
+-- already-populated instance the create scans the events table
+-- once to build the initial snapshot. The `IF NOT EXISTS` guard
+-- keeps subsequent reapplies a no-op, so that initial scan is the
+-- only migration cost the operator pays for this view. The
+-- operator-driven sync (see `orchestrator/analytics/sync.py`)
+-- issues `REFRESH MATERIALIZED VIEW analytics_daily_rollup` after
+-- every successful commit -- rerunning the sync is therefore the
+-- documented recovery path for a stale rollup (e.g. when a
+-- previous sync's refresh failed mid-rebuild).
+CREATE MATERIALIZED VIEW IF NOT EXISTS analytics_daily_rollup AS
+SELECT
+    (ts AT TIME ZONE 'UTC')::date AS day,
+    repo,
+    issue,
+    event,
+    stage,
+    backend,
+    cost_source,
+    SUM(input_tokens)        AS total_input_tokens,
+    SUM(output_tokens)       AS total_output_tokens,
+    SUM(cached_tokens)       AS total_cached_tokens,
+    SUM(cache_read_tokens)   AS total_cache_read_tokens,
+    SUM(cache_write_tokens)  AS total_cache_write_tokens,
+    SUM(cost_usd)            AS total_cost_usd,
+    SUM(duration_s)          AS duration_s_sum,
+    SUM(CASE WHEN duration_s IS NOT NULL THEN 1 ELSE 0 END)
+        AS duration_s_count,
+    SUM(CASE WHEN exit_code IS NOT NULL AND exit_code <> 0 THEN 1 ELSE 0 END)
+        AS failed_count,
+    SUM(CASE WHEN event = 'agent_exit' AND timed_out = TRUE THEN 1 ELSE 0 END)
+        AS timed_out_count,
+    COUNT(*) AS event_count
+FROM analytics_events
+GROUP BY
+    (ts AT TIME ZONE 'UTC')::date,
+    repo, issue, event, stage, backend, cost_source;
+
+-- Unique index over the GROUP BY columns. `NULLS NOT DISTINCT`
+-- (Postgres 15+; the analytics service runs on `postgres:16` per
+-- `analytics-db/compose.yml`) collapses NULL stage / backend /
+-- cost_source values into one row -- the same way `GROUP BY`
+-- already does -- so the index is genuinely unique across the
+-- view's contents. Having a unique index is the prerequisite for
+-- `REFRESH MATERIALIZED VIEW CONCURRENTLY`; the current sync uses
+-- the non-concurrent variant for simplicity, so the index is
+-- forward-compat plumbing today and load-bearing the moment an
+-- operator wants to refresh without locking the view.
+CREATE UNIQUE INDEX IF NOT EXISTS analytics_daily_rollup_key_idx
+    ON analytics_daily_rollup
+        (day, repo, issue, event, stage, backend, cost_source)
+    NULLS NOT DISTINCT;
+
+-- Day-range scan support for the dashboard's window-bounded reads
+-- (KPI strip, time series, throughput). A `WHERE day BETWEEN x AND
+-- y` predicate hits this index as a range scan, which keeps the
+-- rollup-backed widgets in the few-millisecond range even when the
+-- view itself grows to hundreds of thousands of rows.
+CREATE INDEX IF NOT EXISTS analytics_daily_rollup_day_repo_idx
+    ON analytics_daily_rollup (day, repo);

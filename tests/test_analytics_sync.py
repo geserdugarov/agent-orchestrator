@@ -78,6 +78,15 @@ class _FakeCursor:
 
     def execute(self, sql: str, params=None) -> None:
         self._store.select_calls.append((sql, params))
+        # Refresh of `analytics_daily_rollup` rides on `cur.execute`
+        # (not `executemany`), so a separate raise flag lets tests
+        # exercise the swallow-and-log path without affecting the
+        # batched insert path that `raise_on_executemany` covers.
+        if (
+            self._store.raise_on_refresh is not None
+            and "REFRESH MATERIALIZED VIEW" in sql.upper()
+        ):
+            raise self._store.raise_on_refresh
         if sql.lstrip().upper().startswith("SELECT"):
             source = (
                 self._store.pre_check_hashes
@@ -139,6 +148,7 @@ class _FakeConnection:
         self.rollback_called = 0
         self.close_called = 0
         self.raise_on_executemany: Exception | None = None
+        self.raise_on_refresh: Exception | None = None
 
     def cursor(self) -> _FakeCursor:
         if self.raise_on_executemany is not None:
@@ -299,7 +309,9 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
             self.assertEqual(result.skipped_malformed, 0)
             self.assertEqual(result.total_lines, 2)
             self.assertEqual(len(fake.inserts), 2)
-            self.assertEqual(fake.commit_called, 1)
+            # Two commits: one for the events insert, one after the
+            # post-commit refresh of `analytics_daily_rollup`.
+            self.assertEqual(fake.commit_called, 2)
             self.assertEqual(fake.rollback_called, 0)
             self.assertEqual(fake.close_called, 1)
 
@@ -959,7 +971,9 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
             self.assertEqual(len(fake.batches), 2)
             self.assertEqual(len(fake.batches[0][1]), 3)
             self.assertEqual(len(fake.batches[1][1]), 2)
-            self.assertEqual(fake.commit_called, 1)
+            # Two commits: one for the events insert, one after the
+            # post-commit refresh of `analytics_daily_rollup`.
+            self.assertEqual(fake.commit_called, 2)
 
     def test_smaller_than_batch_size_still_flushes(self) -> None:
         # Fewer records than `_BATCH_SIZE` still emit one partial
@@ -1041,7 +1055,12 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
             self.assertEqual(result.inserted, 0)
             self.assertEqual(result.skipped_malformed, 2)
             self.assertEqual(len(fake.batches), 0)
-            self.assertEqual(fake.commit_called, 1)
+            # Two commits: events insert (no-op batch path still
+            # commits to release the implicit transaction) + the
+            # post-commit refresh hook that always fires on a
+            # successful commit so a stale rollup recovers when the
+            # operator reruns the sync.
+            self.assertEqual(fake.commit_called, 2)
 
 
 class AnalyticsSyncPreCheckTest(unittest.TestCase):
@@ -1071,8 +1090,16 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,
             )
-        self.assertEqual(len(fake.select_calls), 1)
-        sql, _ = fake.select_calls[0]
+        # `select_calls` records every `cur.execute`, including the
+        # post-commit REFRESH. Filter to the SELECT family so the
+        # pre-check assertion does not overcount once Layer 4's refresh
+        # hook starts firing.
+        select_calls = [
+            (sql, params) for sql, params in fake.select_calls
+            if sql.lstrip().upper().startswith("SELECT")
+        ]
+        self.assertEqual(len(select_calls), 1)
+        sql, _ = select_calls[0]
         self.assertIn("SELECT content_hash", sql)
         self.assertIn("analytics_events", sql)
         self.assertIn("content_hash IS NOT NULL", sql)
@@ -1156,7 +1183,14 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,
             )
-        self.assertEqual(len(fake.select_calls), 1)
+        # Filter `select_calls` to the SELECT family so the post-commit
+        # REFRESH that fires on a successful insert does not show up in
+        # the pre-check tally.
+        select_calls = [
+            (sql, params) for sql, params in fake.select_calls
+            if sql.lstrip().upper().startswith("SELECT")
+        ]
+        self.assertEqual(len(select_calls), 1)
         self.assertEqual(result.inserted, 3)
         self.assertEqual(result.skipped_duplicate, 0)
         self.assertEqual(len(fake.batches), 1)
@@ -1276,6 +1310,169 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
         joined = "\n".join(cm.output)
         self.assertNotIn("connecting to", joined)
         self.assertNotIn("connection established", joined)
+
+
+class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
+    """Every successful sync commit issues
+    `REFRESH MATERIALIZED VIEW analytics_daily_rollup` so the
+    rollup-backed dashboard widgets catch up to the new events.
+
+    Two contract points the tests pin:
+    - The refresh fires unconditionally on every successful commit
+      (including all-duplicates and all-malformed runs that inserted
+      zero new rows) so rerunning the sync is the documented recovery
+      path for a stale rollup -- gating on `inserted > 0` would mean
+      a refresh failure could only be recovered with a manual
+      `REFRESH MATERIALIZED VIEW`.
+    - A refresh exception is logged-and-swallowed so a pre-migration
+      deployment or a transient Postgres error never aborts a sync
+      whose events insert already committed.
+    """
+
+    def test_refresh_fires_after_successful_insert(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _write_jsonl(path, [_sample_record(issue=1)])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            with self.assertLogs(
+                "orchestrator.analytics.sync", level="INFO",
+            ) as cm:
+                result = analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+        self.assertEqual(result.inserted, 1)
+        refresh_sqls = [
+            sql for sql, _ in fake.select_calls
+            if "REFRESH MATERIALIZED VIEW" in sql
+        ]
+        self.assertEqual(len(refresh_sqls), 1)
+        self.assertIn("analytics_daily_rollup", refresh_sqls[0])
+        # Two commits: the events insert plus the post-refresh commit.
+        self.assertEqual(fake.commit_called, 2)
+        self.assertEqual(fake.rollback_called, 0)
+        joined = "\n".join(cm.output)
+        self.assertIn("refreshing materialized view", joined)
+        self.assertIn("refreshed analytics_daily_rollup", joined)
+
+    def test_refresh_fires_even_when_no_rows_inserted(self) -> None:
+        # All-duplicates run: the pre-check filters both records, the
+        # batch never reaches `executemany`, the events insert commit
+        # is a no-op. The refresh still fires because rerunning the
+        # sync is the documented recovery path for a stale rollup --
+        # a prior sync whose refresh failed left the rollup behind,
+        # and the operator must be able to recover by rerunning even
+        # when the new JSONL file carries only duplicates.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            records = [_sample_record(issue=i) for i in range(1, 3)]
+            _write_jsonl(path, records)
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            for rec in records:
+                fake.seen_hashes.add(analytics_sync._content_hash(rec))
+            result = analytics_sync.sync_jsonl_to_postgres(
+                connect=lambda url: fake,
+                json_adapter=lambda v: v,
+            )
+        self.assertEqual(result.inserted, 0)
+        self.assertEqual(result.skipped_duplicate, 2)
+        refresh_sqls = [
+            sql for sql, _ in fake.select_calls
+            if "REFRESH MATERIALIZED VIEW" in sql
+        ]
+        self.assertEqual(len(refresh_sqls), 1)
+        self.assertIn("analytics_daily_rollup", refresh_sqls[0])
+        # Two commits: events-insert (no-op batch path) + post-refresh.
+        self.assertEqual(fake.commit_called, 2)
+
+    def test_refresh_fires_on_malformed_only_files(self) -> None:
+        # Defensive parallel to the all-duplicates path: a file of only
+        # malformed lines also yields `inserted == 0`. The refresh
+        # still fires for the same recovery reason -- the JSONL file's
+        # contents do not determine whether the operator needs a
+        # rollup refresh.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as fh:
+                fh.write("not json\n")
+                fh.write("null\n")
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            result = analytics_sync.sync_jsonl_to_postgres(
+                connect=lambda url: fake,
+                json_adapter=lambda v: v,
+            )
+        self.assertEqual(result.inserted, 0)
+        refresh_sqls = [
+            sql for sql, _ in fake.select_calls
+            if "REFRESH MATERIALIZED VIEW" in sql
+        ]
+        self.assertEqual(len(refresh_sqls), 1)
+
+    def test_refresh_failure_does_not_abort_sync(self) -> None:
+        # A REFRESH failure -- the MV not migrated yet on a
+        # pre-migration deployment, a transient lock-wait error -- is
+        # logged and swallowed. The committed insert is durable
+        # regardless, so the sync still returns success.
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _write_jsonl(path, [_sample_record()])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": "postgresql://h/db",
+            })
+            fake = _FakeConnection()
+            fake.raise_on_refresh = RuntimeError(
+                "materialized view does not exist"
+            )
+            with self.assertLogs(
+                "orchestrator.analytics.sync", level="INFO",
+            ) as cm:
+                result = analytics_sync.sync_jsonl_to_postgres(
+                    connect=lambda url: fake,
+                    json_adapter=lambda v: v,
+                )
+        # Sync completed successfully despite the refresh raising.
+        self.assertEqual(result.inserted, 1)
+        # Only the events-insert commit landed; the post-refresh commit
+        # was never reached because execute raised first.
+        self.assertEqual(fake.commit_called, 1)
+        # Refresh-side rollback ran to clear the aborted transaction
+        # so the connection can be cleanly closed.
+        self.assertEqual(fake.rollback_called, 1)
+        self.assertEqual(fake.close_called, 1)
+        joined = "\n".join(cm.output)
+        self.assertIn("refresh of analytics_daily_rollup failed", joined)
+        # The original "completed in" summary still fires so an
+        # operator scraping log lines sees the sync as successful.
+        self.assertIn("completed in", joined)
+
+    def test_refresh_skipped_in_no_op_path(self) -> None:
+        # `connect` is not invoked when either knob disables the sync,
+        # so no SQL of any kind -- including REFRESH -- ever runs.
+        # Mirrors the existing `AnalyticsSyncDisabledTest` for the
+        # refresh surface.
+        _, analytics_sync = _reload({
+            "ANALYTICS_LOG_PATH": "off",
+            "ANALYTICS_DB_URL": "postgresql://h/db",
+        })
+        connected: list[str] = []
+        analytics_sync.sync_jsonl_to_postgres(
+            connect=lambda url: connected.append(url) or _FakeConnection(),
+        )
+        self.assertEqual(connected, [])
 
 
 class AnalyticsSyncLiveDdlTest(unittest.TestCase):
@@ -1428,6 +1625,80 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
         self.assertFalse(failed)
         self.assertTrue(has_cost)
         self.assertEqual(cost_source, "estimated")
+
+    def test_daily_rollup_aggregates_after_sync_refresh(self) -> None:
+        # End-to-end Layer 4: insert two `agent_exit` rows on the same
+        # UTC day with matching key columns, run the sync (which triggers
+        # the post-commit `REFRESH MATERIALIZED VIEW`), and assert the
+        # rollup row carries the summed token / cost / duration columns
+        # and the failure / timeout counts the dashboard's reliability
+        # tiles read off. A column typo or a wrong CASE predicate would
+        # compile-fail here even if the text regexes in
+        # `tests/test_analytics_schema.py` still matched.
+        import psycopg
+
+        self._apply_schema()
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a.jsonl"
+            _write_jsonl(path, [
+                _sample_record(
+                    issue=7, event="agent_exit", stage="implementing",
+                    backend="claude", cost_source="reported",
+                    duration_s=4.0, exit_code=0, timed_out=False,
+                    input_tokens=100, output_tokens=50,
+                    cached_tokens=5, cache_read_tokens=3,
+                    cache_write_tokens=2, cost_usd=0.10,
+                ),
+                _sample_record(
+                    issue=7, event="agent_exit", stage="implementing",
+                    backend="claude", cost_source="reported",
+                    ts="2026-05-25T13:30:00+00:00",
+                    duration_s=6.0, exit_code=1, timed_out=True,
+                    input_tokens=200, output_tokens=80,
+                    cached_tokens=10, cache_read_tokens=4,
+                    cache_write_tokens=1, cost_usd=0.20,
+                ),
+            ])
+            _, analytics_sync = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_DB_URL": self.db_url,
+            })
+            result = analytics_sync.sync_jsonl_to_postgres()
+            self.assertEqual(result.inserted, 2)
+
+            with psycopg.connect(self.db_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT total_input_tokens, total_output_tokens, "
+                        "total_cached_tokens, total_cache_read_tokens, "
+                        "total_cache_write_tokens, total_cost_usd, "
+                        "duration_s_sum, duration_s_count, "
+                        "failed_count, timed_out_count, event_count "
+                        "FROM analytics_daily_rollup "
+                        "WHERE issue = 7"
+                    )
+                    row = cur.fetchone()
+        self.assertIsNotNone(row)
+        (
+            total_in, total_out, total_cached, total_cr, total_cw,
+            total_cost, dur_sum, dur_count,
+            failed_count, timed_out_count, event_count,
+        ) = row
+        self.assertEqual(total_in, 300)
+        self.assertEqual(total_out, 130)
+        self.assertEqual(total_cached, 15)
+        self.assertEqual(total_cr, 7)
+        self.assertEqual(total_cw, 3)
+        # Numeric comparison: the schema uses NUMERIC(20, 10), so the
+        # sum may come back as a Decimal. Cast both sides to float for
+        # the comparison so an exact-decimal mismatch on the literal
+        # does not blow up the assertion.
+        self.assertAlmostEqual(float(total_cost), 0.30, places=6)
+        self.assertEqual(dur_sum, 10.0)
+        self.assertEqual(dur_count, 2)
+        self.assertEqual(failed_count, 1)
+        self.assertEqual(timed_out_count, 1)
+        self.assertEqual(event_count, 2)
 
 
 if __name__ == "__main__":

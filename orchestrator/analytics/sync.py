@@ -108,6 +108,12 @@ _JSONB_COLUMNS = ("models", "extras")
 
 _REQUIRED_KEYS = ("ts", "repo", "issue", "event")
 
+# Name of the daily-rollup materialized view defined in
+# `analytics-db/init/01-schema.sql`. Kept here as a constant so the
+# refresh hook and the schema test agree on the spelling; a rename in
+# the SQL must land in lock-step with a rename here.
+_DAILY_ROLLUP_VIEW = "analytics_daily_rollup"
+
 
 @dataclass(frozen=True)
 class SyncResult:
@@ -347,6 +353,53 @@ def _default_json_adapter(value: Any) -> Any:
     return Json(value)
 
 
+def _refresh_daily_rollup(conn: Any) -> None:
+    """Refresh the daily rollup materialized view after a successful sync.
+
+    Issues a non-concurrent `REFRESH MATERIALIZED VIEW` over the view
+    defined in `analytics-db/init/01-schema.sql`. Non-concurrent is
+    the safe default because it does not require the view to be
+    populated and does not lock the events table; it does take an
+    `ACCESS EXCLUSIVE` lock on the view itself for the duration of
+    the rebuild, which is fine for the operator-driven sync (the
+    dashboard re-reads on a 60-second cache and tolerates a brief
+    blocked read).
+
+    Exceptions are logged and swallowed so a refresh failure -- the
+    view not existing yet on a pre-migration deployment, a transient
+    Postgres error, a lock-wait timeout -- never aborts the sync.
+    The committed inserts are already durable in `analytics_events`,
+    so the caller's success contract is unaffected; the operator's
+    log makes the refresh failure visible and the next sync's
+    refresh recovers the rollup once the underlying issue is fixed.
+    """
+    sql = f"REFRESH MATERIALIZED VIEW {_DAILY_ROLLUP_VIEW}"
+    refresh_start = time.monotonic()
+    try:
+        log.info(
+            "analytics_sync: refreshing materialized view %s",
+            _DAILY_ROLLUP_VIEW,
+        )
+        with conn.cursor() as cur:
+            cur.execute(sql)
+        conn.commit()
+        log.info(
+            "analytics_sync: refreshed %s in %.3fs",
+            _DAILY_ROLLUP_VIEW, time.monotonic() - refresh_start,
+        )
+    except Exception:
+        log.exception(
+            "analytics_sync: refresh of %s failed; sync still committed",
+            _DAILY_ROLLUP_VIEW,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            log.exception(
+                "analytics_sync: rollback after refresh failure failed"
+            )
+
+
 def sync_jsonl_to_postgres(
     *,
     log_path: Optional[Path] = None,
@@ -536,6 +589,26 @@ def sync_jsonl_to_postgres(
             time.monotonic() - start,
         )
         conn.commit()
+        # Post-commit refresh of the daily rollup MV defined in
+        # `analytics-db/init/01-schema.sql`. The committed inserts
+        # are durable regardless of what happens here, so a refresh
+        # failure is logged and swallowed -- the operator-driven
+        # sync still reports success on the rows that landed in
+        # `analytics_events`. The refresh fires unconditionally on
+        # every successful commit (rather than only when
+        # `inserted > 0`) so that rerunning the sync is the
+        # documented recovery path for a stale rollup: a prior sync
+        # whose refresh failed leaves the rollup stale, and the
+        # operator's only signal that "the sync committed but the
+        # rollup is out of sync" is the swallowed refresh log line.
+        # Gating refresh on inserted>0 would mean a rerun against a
+        # duplicate-only or empty JSONL never recovers the rollup
+        # and the operator has to fall back to a manual `REFRESH
+        # MATERIALIZED VIEW` -- defeating the purpose of the hook.
+        # The wasted work on a no-insert rerun is bounded by the
+        # rollup's row count, which the dashboard's read pattern
+        # keeps small (one row per day per key tuple).
+        _refresh_daily_rollup(conn)
     except Exception:
         try:
             conn.rollback()

@@ -178,5 +178,161 @@ class AnalyticsAgentRunsViewTest(unittest.TestCase):
         )
 
 
+class AnalyticsDailyRollupViewTest(unittest.TestCase):
+    """The `analytics_daily_rollup` materialized view is the Layer 4
+    aggregation target from `plans/dashboard-load-optimization.md`.
+    These tests pin the create statement's idempotency, the key
+    columns, and the aggregate columns so a refactor that drops the
+    timeout/failure counts or token sums (which the dashboard's
+    reliability tiles and KPI strip read from) fails in the hermetic
+    suite -- before an operator sees a broken dashboard.
+    """
+
+    def _view_body(self) -> str:
+        # Materialized views terminate at the SELECT's semicolon; isolate
+        # the body so column-presence assertions cannot accidentally
+        # match text from the surrounding `analytics_agent_runs` view or
+        # the index DDL.
+        text = _normalize(_schema_text())
+        match = re.search(
+            r"CREATE MATERIALIZED VIEW IF NOT EXISTS "
+            r"analytics_daily_rollup AS\s+(.*?);",
+            text,
+        )
+        assert match is not None, "analytics_daily_rollup view missing"
+        return match.group(1)
+
+    def test_view_is_idempotent_create(self) -> None:
+        # `CREATE MATERIALIZED VIEW IF NOT EXISTS` matches the
+        # idempotency contract every other CREATE in this DDL upholds:
+        # an operator running `psql -f` against an existing instance
+        # picks up the view on first apply and no-ops on every reapply.
+        # Postgres CREATE MATERIALIZED VIEW does not support OR REPLACE,
+        # so IF NOT EXISTS is the only available guard.
+        text = _normalize(_schema_text())
+        self.assertRegex(
+            text,
+            r"CREATE MATERIALIZED VIEW IF NOT EXISTS analytics_daily_rollup",
+        )
+
+    def test_view_reads_from_analytics_events(self) -> None:
+        body = self._view_body()
+        self.assertRegex(body, r"FROM analytics_events")
+
+    def test_view_groups_by_required_key_columns(self) -> None:
+        # The key has to include `issue` because every dashboard read
+        # accepts an issue filter; without it an issue-scoped read
+        # would double-count. `cost_source` is in the key so the
+        # cost-coverage panel can read from the rollup without
+        # decomposing the `unknown-price` / `no-usage` / `reported` /
+        # `estimated` cohorts after the fact.
+        body = self._view_body()
+        for key_col in (
+            "repo", "issue", "event", "stage", "backend", "cost_source",
+        ):
+            with self.subTest(column=key_col):
+                # GROUP BY column listed verbatim; the day expression
+                # is asserted separately because it carries a cast.
+                self.assertRegex(body, rf"\b{key_col}\b")
+        # `day` is derived from `ts AT TIME ZONE 'UTC'`::date -- the
+        # cast normalises naive / non-UTC timestamps so the rollup is
+        # consistent across writers.
+        self.assertRegex(
+            body, r"\(ts AT TIME ZONE 'UTC'\)::date\s+AS\s+day",
+        )
+
+    def test_view_exposes_required_aggregate_columns(self) -> None:
+        # Every aggregate the dashboard / read model wants to read off
+        # the rollup must be present. A silently-dropped aggregate
+        # would force a fallback to the raw events table, which is
+        # what Layer 4 exists to avoid.
+        body = self._view_body()
+        for col in (
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_cached_tokens",
+            "total_cache_read_tokens",
+            "total_cache_write_tokens",
+            "total_cost_usd",
+            "duration_s_sum",
+            "duration_s_count",
+            "failed_count",
+            "timed_out_count",
+            "event_count",
+        ):
+            with self.subTest(column=col):
+                self.assertRegex(body, rf"\bAS\s+{col}\b")
+
+    def test_view_duration_count_uses_not_null_filter(self) -> None:
+        # `duration_s_count` is the row count where duration_s is
+        # populated -- not the raw row count. Without that, a consumer
+        # recovering `AVG(duration_s)` as `SUM/COUNT` would divide by
+        # the wrong denominator on rows where duration was NULL.
+        body = self._view_body()
+        self.assertRegex(
+            body,
+            r"SUM\(CASE WHEN duration_s IS NOT NULL THEN 1 ELSE 0 END\)\s+"
+            r"AS\s+duration_s_count",
+        )
+
+    def test_view_failed_count_filters_to_non_zero_exit_code(self) -> None:
+        body = self._view_body()
+        # Non-zero exit_code is the failure signal; NULL exit_code
+        # stays excluded so a `stage_enter` row never counts as a
+        # failure.
+        self.assertRegex(
+            body,
+            r"SUM\(CASE WHEN exit_code IS NOT NULL AND exit_code <> 0 "
+            r"THEN 1 ELSE 0 END\)\s+AS\s+failed_count",
+        )
+
+    def test_view_timed_out_count_filters_to_agent_exit(self) -> None:
+        body = self._view_body()
+        # The reliability "Timeouts" tile reads this aggregate; it must
+        # be scoped to `event='agent_exit'` so a `stage_enter` row with
+        # a stale `timed_out` JSONB extra (impossible today, but the
+        # filter is the defensive layer) can never inflate the count.
+        self.assertRegex(
+            body,
+            r"SUM\(CASE WHEN event = 'agent_exit' AND timed_out = TRUE "
+            r"THEN 1 ELSE 0 END\)\s+AS\s+timed_out_count",
+        )
+
+    def test_view_event_count_is_row_count(self) -> None:
+        body = self._view_body()
+        self.assertRegex(body, r"COUNT\(\*\)\s+AS\s+event_count")
+
+    def test_unique_key_index_present_with_nulls_not_distinct(self) -> None:
+        # `REFRESH MATERIALIZED VIEW CONCURRENTLY` requires a unique
+        # index. NULLS NOT DISTINCT (Postgres 15+) collapses NULL
+        # stage / backend / cost_source values into one row -- the same
+        # way GROUP BY already does -- so the index is genuinely
+        # unique across the view's contents. The current sync uses the
+        # non-concurrent variant, so the index is forward-compat
+        # plumbing rather than load-bearing today.
+        text = _normalize(_schema_text())
+        self.assertRegex(
+            text,
+            r"CREATE UNIQUE INDEX IF NOT EXISTS "
+            r"analytics_daily_rollup_key_idx\s+"
+            r"ON analytics_daily_rollup\s*"
+            r"\(\s*day,\s*repo,\s*issue,\s*event,\s*stage,\s*backend,"
+            r"\s*cost_source\s*\)\s+NULLS NOT DISTINCT",
+        )
+
+    def test_supporting_day_repo_index_present(self) -> None:
+        # Day-range scan support for the dashboard's window-bounded
+        # reads. Without this, a `WHERE day BETWEEN x AND y` predicate
+        # would fall back to a sequential scan over the rollup once it
+        # grew past a few thousand rows.
+        text = _normalize(_schema_text())
+        self.assertRegex(
+            text,
+            r"CREATE INDEX IF NOT EXISTS "
+            r"analytics_daily_rollup_day_repo_idx\s+"
+            r"ON analytics_daily_rollup\s*\(\s*day,\s*repo\s*\)",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
