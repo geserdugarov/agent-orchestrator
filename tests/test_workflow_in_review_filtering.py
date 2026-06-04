@@ -178,6 +178,76 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
 
+class OrchestratorMarkerFeedbackFilterTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """The in_review fresh-feedback scan must filter orchestrator-authored
+    issue / PR-conversation comments by hidden body marker as well as by
+    recorded id.
+
+    Live state can miss a PR-conversation id (for example, a pre-marker or
+    failed state-write window), and the bounded id list can eventually evict
+    older entries. The marker is durable on the GitHub comment, so the scan
+    must not route a marked bot comment to `fixing`.
+    """
+
+    def test_marked_pr_comment_missing_recorded_id_does_not_route_to_fixing(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(120, label="in_review")
+        gh.add_issue(issue)
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        pr = FakePR(
+            number=220,
+            head_branch="orchestrator/issue-120",
+            head=FakePRRef(sha="ready-sha"),
+            mergeable=True,
+            check_state="success",
+            issue_comments=[
+                FakeComment(
+                    id=3000,
+                    body=(
+                        ":eyes: codex review requested changes\n\n"
+                        f"{workflow._ORCH_COMMENT_MARKER}"
+                    ),
+                    user=FakeUser("orchestrator"),
+                    created_at=long_ago,
+                ),
+            ],
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            120,
+            pr_number=220,
+            branch="orchestrator/issue-120",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_last_comment_id=2999,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            # Deliberately omit id=3000 to model stale / incomplete state.
+            orchestrator_comment_ids=[900, 901],
+            docs_checked_sha="ready-sha",
+            docs_verdict="no_change",
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        mocks["run_agent"].assert_not_called()
+        self.assertNotIn((120, "fixing"), gh.label_history)
+        self.assertEqual(gh.merge_calls, [])
+        self.assertEqual(gh.pinned_data(120).get("ready_ping_sha"), "ready-sha")
+        self.assertTrue(any(
+            "ready for review/merge" in body
+            for _, body in gh.posted_comments
+        ))
+
+
 class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
     """orchestrator_comment_ids records ids from the IssueComment namespace
     only. Inline review comments and PR review summaries live in different

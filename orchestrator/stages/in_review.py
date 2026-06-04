@@ -282,13 +282,19 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     review_wm = state.get("pr_last_review_comment_id")
     review_summary_wm = state.get("pr_last_review_summary_id")
     orchestrator_ids = _wf._orchestrator_ids(state)
+    # Issue-thread and PR-conversation comments share the IssueComment id
+    # namespace. Filter orchestrator comments by recorded id AND by the
+    # hidden body marker: older state can miss an id, and the bounded id list
+    # can eventually evict it, but the marker stays on the GitHub comment.
     new_issue_side = [
         c for c in gh.comments_after(issue, issue_wm)
         if c.id not in orchestrator_ids
+        and _wf._ORCH_COMMENT_MARKER not in (c.body or "")
     ]
     new_pr_conv = [
         c for c in gh.pr_conversation_comments_after(pr, issue_wm)
         if c.id not in orchestrator_ids
+        and _wf._ORCH_COMMENT_MARKER not in (c.body or "")
     ]
     new_pr_inline = list(gh.pr_inline_comments_after(pr, review_wm))
     new_pr_reviews = list(gh.pr_reviews_after(pr, review_summary_wm))
