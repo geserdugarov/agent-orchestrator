@@ -20,6 +20,14 @@ dev = ["pytest>=8", "ruff>=0.6"]
 # `uv sync --group dashboard` before running `streamlit run`.
 dashboard = ["streamlit>=1.36", "plotly>=5.20"]
 
+[tool.pytest.ini_options]
+# Surface skip reasons in the run summary by default. The suite carries
+# two intentional skip families -- the optional Plotly dashboard chart
+# tests and the opt-in live-Postgres analytics integration class -- and
+# under the default `pytest` invocation they collapse to a bare "N skipped"
+# line that hides their `_SKIP_REASON` / `SkipTest` messages.
+addopts = ["-rs"]
+
 [tool.ruff.lint]
 # `l` is used pervasively as a loop variable over GitHub labels; banning it
 # would force noise-only renames across the codebase.
