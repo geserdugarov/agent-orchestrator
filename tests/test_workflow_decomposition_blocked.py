@@ -222,6 +222,51 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(flipped, ["ready"])
         self.assertNotIn((33, "ready"), gh.label_history)
 
+    def test_held_children_are_logged_with_pending_deps(self) -> None:
+        # Visibility feature: a child still `blocked` on an unfinished
+        # sibling is "held". `_handle_blocked` must surface it -- and the
+        # exact dependency gating it -- on the tick log so an operator can
+        # see why a decomposed parent is not advancing. children[0] is
+        # in-flight (not done), so children[1] (depends on [0]) stays held.
+        gh, parent, children = self._seed_parent_with_children(
+            parent_number=34,
+            child_labels=["implementing", "blocked"],
+            dep_graph={"1": [0]},
+        )
+
+        with self.assertLogs("orchestrator.workflow", level="INFO") as cm:
+            self._run(
+                lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
+                run_agent=_agent(),
+            )
+
+        self.assertTrue(
+            any(
+                "blocked parent" in m
+                and "1 held" in m
+                and f"#{children[1].number} waits on #{children[0].number}" in m
+                for m in cm.output
+            ),
+            cm.output,
+        )
+        # Held means genuinely still gated -- no relabel to `ready`.
+        self.assertNotIn((children[1].number, "ready"), gh.label_history)
+
+    def test_no_held_children_emits_no_log(self) -> None:
+        # When every child is either done or already running (none still
+        # `blocked` on a sibling), nothing is held and the visibility log
+        # stays silent -- a healthy parent must not spam the tick log.
+        gh, parent, _children = self._seed_parent_with_children(
+            parent_number=35,
+            child_labels=["done", "implementing"],
+        )
+
+        with self.assertNoLogs("orchestrator.workflow", level="INFO"):
+            self._run(
+                lambda: workflow._handle_blocked(gh, _TEST_SPEC, parent),
+                run_agent=_agent(),
+            )
+
     def test_blocked_with_no_recorded_children_parks(self) -> None:
         gh = FakeGitHubClient()
         parent = make_issue(34, label="blocked")
