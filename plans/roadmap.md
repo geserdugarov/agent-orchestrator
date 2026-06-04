@@ -462,12 +462,16 @@ radio, the two date pickers, the sidebar multiselects, the
 Plotly figures inside each card. Preset windows resolve via
 `preset_window(...)` bounded by `get_data_extent`. The sidebar
 still carries the repo selector, event / stage multi-selects,
-and a `#123` / `123` issue-number input. Every read call is
-wrapped in `st.cache_data` keyed by
+and a `#123` / `123` issue-number input. Every per-filter read
+is wrapped in `st.cache_data` keyed by
 `(start, end, repo, events, stages, issue)` so a filter change
-invalidates every cached query in lockstep. The body renders, in
-order: computed insight banners (failure rate ≥ 10 %, unpriced
-cost coverage ≥ 10 %), a
+invalidates every cached query in lockstep; `get_data_extent`
+and `get_filter_options` are wrapped in argument-less cached
+wrappers (`STATIC_METADATA_TTL_SECONDS = 300`, the longer 5-min
+TTL) so the sidebar / topbar only re-hit Postgres when
+`analytics.sync` ingests new events rather than on every rerun.
+The body renders, in order: computed insight banners (failure
+rate ≥ 10 %, unpriced cost coverage ≥ 10 %), a
 four-tile KPI strip (total spend, total tokens, cost / resolved
 issue, rework share — each with an inline-SVG sparkline and a
 previous-window delta where applicable), the hero
@@ -480,9 +484,15 @@ bar, another 7/5 split between the `cost_by_repo` bars and a
 six-tile reliability panel above the issues-resolved-per-day
 chart, the 7 × 24 weekday × hour activity heatmap, the recent
 agent-runs table as a collapsible expander, and the per-issue
-drill-down at the bottom. An empty-window guard (zero events
-in the filtered window) short-circuits the body to a single
-banner. Every filter is threaded through the read
+drill-down at the bottom. The widget fan-out is staged into two
+waves so the topbar / filter meta / insight banners / KPI strip
+paint between waves on the main render thread (worker threads
+only return data; every `st.*` write runs on the main thread),
+and a single inline `st.spinner("Loading analytics…")` brackets
+both waves so the cold load shows immediate feedback. An
+empty-window guard (zero events in the filtered window)
+short-circuits the body to a single banner and skips the second
+wave entirely. Every filter is threaded through the read
 model's SQL via `_build_window_where`, so every widget narrows
 together rather than diverging by surface. The event / stage
 selections distinguish three cases: ``None`` (no filter on the
