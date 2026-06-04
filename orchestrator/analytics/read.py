@@ -37,13 +37,31 @@ stays driver-free for callers that only want the dataclass shapes.
 
 `analytics_agent_runs` is a view over `event = 'agent_exit'` rows
 defined in the schema; its derivations (`review_round_bucket`,
-`failed`, `model`, `total_tokens`, `has_cost`) are what every
-agent-run aggregate below queries against. The view has no `event`
-column -- the predicate is baked in -- so functions that read from
-the view honor the event filter by short-circuiting to empty when
-the operator's events selection excludes `agent_exit` rather than
-emitting an `event IN (...)` clause that would refer to a
-non-existent column.
+`failed`, `model`, `total_tokens`, `has_cost`) are what the
+per-row agent-run aggregates below query against. The view has no
+`event` column -- the predicate is baked in -- so functions that
+read from the view honor the event filter by short-circuiting to
+empty when the operator's events selection excludes `agent_exit`
+rather than emitting an `event IN (...)` clause that would refer
+to a non-existent column.
+
+The dashboard's window-bounded aggregate widgets read from a
+separate materialised view, `analytics_daily_rollup`, which carries
+the per-`(day, repo, issue, event, stage, backend, cost_source)`
+aggregates the orchestrator's sync job refreshes after every
+successful commit. Reading from the rollup collapses the
+events-table scan to a tiny day-keyed scan once the events table
+grows. The cutover covers `get_summary`, `get_kpi_prev`,
+`get_time_series`, `get_stage_breakdown`, `get_repo_breakdown`,
+`get_backend_efficiency`, and `get_throughput_breakdown` -- every
+shape whose aggregates the rollup can reconstruct exactly. The
+per-row helpers (`get_recent_agent_exits`, `get_issues` /
+top-cost-issues, `get_issue_events`, `get_review_round_breakdown`,
+`get_hourly_heatmap`, `get_cost_coverage`, plus the still-view-backed
+`get_backend_daily_tokens` and `get_event_breakdown`) keep reading
+from `analytics_events` or `analytics_agent_runs` because they need
+row-level detail or aggregate columns the rollup does not carry
+(`ts` precision, `review_round`, `retry_count`, `hour-of-day`).
 """
 from __future__ import annotations
 
@@ -859,6 +877,69 @@ def _build_view_window_where(
     )
 
 
+_DAILY_ROLLUP_VIEW = "analytics_daily_rollup"
+
+
+def _build_rollup_window_where(
+    *,
+    start: Optional[datetime],
+    end: Optional[datetime],
+    repo: Optional[str],
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+) -> tuple[str, list[Any]]:
+    """`_build_window_where` translated to the rollup's `day` column.
+
+    The materialized view `analytics_daily_rollup` is keyed on
+    `(day, repo, issue, event, stage, backend, cost_source)` with
+    `day = (ts AT TIME ZONE 'UTC')::date`, so a `ts`-bounded window
+    becomes a `day`-bounded one. The dashboard's `to_window` produces
+    midnight-aligned `[start, end)` UTC datetimes; for those the
+    rollup is semantically equivalent to a `ts`-scoped scan because
+    every event in `[start_day, end_day)` lands on exactly one rollup
+    row. Sub-day-aligned bounds collapse to day granularity (the
+    rollup carries no finer resolution) -- the dashboard never passes
+    those, so this is documentation rather than a runtime guard.
+
+    ``events`` / ``stages`` semantics mirror `_build_window_where`:
+    ``None`` is no filter, a non-empty sequence is parameterised
+    ``IN (...)``, and an empty sequence emits a tautologically-false
+    predicate so the cleared-multiselect signal still drops to zero.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    if start is not None:
+        conditions.append("day >= %s")
+        params.append(start.date() if isinstance(start, datetime) else start)
+    if end is not None:
+        conditions.append("day < %s")
+        params.append(end.date() if isinstance(end, datetime) else end)
+    if repo is not None:
+        conditions.append("repo = %s")
+        params.append(repo)
+    if issue is not None:
+        conditions.append("issue = %s")
+        params.append(int(issue))
+    if events is not None:
+        if not events:
+            conditions.append("FALSE")
+        else:
+            placeholders = ", ".join(["%s"] * len(events))
+            conditions.append(f"event IN ({placeholders})")
+            params.extend(events)
+    if stages is not None:
+        if not stages:
+            conditions.append("FALSE")
+        else:
+            placeholders = ", ".join(["%s"] * len(stages))
+            conditions.append(f"stage IN ({placeholders})")
+            params.extend(stages)
+    if not conditions:
+        return "", params
+    return " WHERE " + " AND ".join(conditions), params
+
+
 def get_data_extent(
     *,
     db_url: Optional[str] = None,
@@ -916,71 +997,84 @@ def get_summary(
     if conn is None and not url:
         return Summary()
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(
+    where, params = _build_rollup_window_where(
         start=start, end=end, repo=repo,
         events=events, stages=stages, issue=issue,
     )
 
-    # One round-trip with the filtered window materialised as a CTE
-    # and the three result sets (totals, by_event, by_stage) unioned
-    # under a `kind` discriminator. The previous shape fired three
-    # sequential queries that each re-scanned the table; collapsing
-    # them saves two RTTs per `get_summary` call (×2 for the
-    # dashboard's current + previous-window reads). The totals row
-    # carries every aggregate column; the by_event / by_stage rows
-    # only populate `kind`, `label`, and `count_val` -- the trailing
-    # NULLs keep the UNION-ALL column shape uniform. Per-bucket
-    # ordering (`COUNT DESC, label ASC`, matching the previous
-    # standalone queries) is reasserted in Python so the planner is
-    # free to pick a hash-aggregate / merge plan rather than being
-    # forced into a sort.
+    # One round-trip against the rollup materialised view. Each
+    # rollup row already aggregates `(day, repo, issue, event,
+    # stage, backend, cost_source)`-keyed events from the base
+    # table, so `SUM(event_count)` recovers `COUNT(*)`, and the
+    # token / cost / failure / timeout column sums recover their
+    # base-table equivalents without re-scanning `analytics_events`.
+    # The CTE materialises the filtered rollup window once and the
+    # three result sets (totals, by_event, by_stage) union under a
+    # `kind` discriminator. The previous standalone shape fired
+    # three sequential queries that each re-scanned the events
+    # table; the CTE collapses them and, by reading the rollup,
+    # scans roughly orders of magnitude fewer rows once the events
+    # table grows. The totals row carries every aggregate column;
+    # the by_event / by_stage rows only populate `kind`, `label`,
+    # and `count_val` -- the trailing NULLs keep the UNION-ALL
+    # column shape uniform. Per-bucket ordering (`COUNT DESC,
+    # label ASC`, matching the previous standalone queries) is
+    # reasserted in Python so the planner is free to pick a
+    # hash-aggregate / merge plan rather than being forced into a
+    # sort.
     sql = (
         "WITH win AS ("
-        "SELECT event, stage, exit_code, timed_out, "
-        "cost_usd, input_tokens, output_tokens, "
-        "cache_read_tokens, cache_write_tokens, repo, issue "
-        f"FROM analytics_events{where}"
+        "SELECT event, stage, repo, issue, "
+        "event_count, failed_count, timed_out_count, "
+        "total_cost_usd, total_input_tokens, total_output_tokens, "
+        "total_cache_read_tokens, total_cache_write_tokens "
+        f"FROM {_DAILY_ROLLUP_VIEW}{where}"
         ") "
         "SELECT 't' AS kind, NULL::text AS label, "
-        "COUNT(*) AS count_val, "
+        "COALESCE(SUM(event_count), 0) AS count_val, "
         # `(repo, issue)` row-constructor: GitHub issue numbers are
         # only unique within a repo, so a multi-repo window would
         # otherwise collapse `owner/a#1` and `owner/b#1` into one.
+        # The rollup key carries `(repo, issue)` so distinct counts
+        # are still exact against the materialised view.
         "COUNT(DISTINCT (repo, issue)) AS distinct_issues, "
         "COUNT(DISTINCT repo) AS distinct_repos, "
-        "COALESCE(SUM(cost_usd), 0) AS total_cost_usd, "
-        "COALESCE(SUM(input_tokens), 0) AS total_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS total_output_tokens, "
+        "COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd, "
+        "COALESCE(SUM(total_input_tokens), 0) AS total_input_tokens, "
+        "COALESCE(SUM(total_output_tokens), 0) AS total_output_tokens, "
         # Agent-run counters: scoped to `event = 'agent_exit'` rows
-        # inside the same window so the dashboard's success-rate
-        # metric reads off the same query as the rest of the
-        # overview. `exit_code <> 0` excludes NULL exit codes so an
-        # in-flight or analytics-only row never counts as failed.
-        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
+        # so the dashboard's success-rate metric reads off the same
+        # query as the rest of the overview. The rollup's
+        # `failed_count` predicate (`exit_code IS NOT NULL AND
+        # exit_code <> 0`) already excludes NULL exit codes, and
+        # `event = 'agent_exit'` narrows away any non-exit row that
+        # happens to carry a non-null exit code.
+        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
+        "                  THEN event_count ELSE 0 END), 0) "
         "  AS total_agent_runs, "
-        "SUM(CASE WHEN event = 'agent_exit' AND exit_code <> 0 "
-        "         THEN 1 ELSE 0 END) AS failed_agent_runs, "
+        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
+        "                  THEN failed_count ELSE 0 END), 0) "
+        "  AS failed_agent_runs, "
         # Cache-band token rollups so the redesigned KPI strip and
         # sparkline can include them in the "Total tokens" headline
         # (matching the standalone mock's
         # `input + output + cache_read + cache_write` accounting).
-        "COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, "
-        "COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, "
-        # Window-wide timeout counter so the reliability "Timeouts"
-        # tile aggregates every timed-out run, not just the latest N
-        # `get_recent_agent_exits` returns. `timed_out IS NULL` (a
-        # pre-flag row) never counts here -- only an explicit `true`
-        # is a timeout, mirroring how `failed_agent_runs` excludes
-        # NULL exit codes.
-        "SUM(CASE WHEN event = 'agent_exit' AND timed_out = true "
-        "         THEN 1 ELSE 0 END) AS timed_out_agent_runs "
+        "COALESCE(SUM(total_cache_read_tokens), 0) "
+        "  AS total_cache_read_tokens, "
+        "COALESCE(SUM(total_cache_write_tokens), 0) "
+        "  AS total_cache_write_tokens, "
+        # Window-wide timeout counter. The rollup's `timed_out_count`
+        # predicate is already scoped to `event = 'agent_exit' AND
+        # timed_out = TRUE`, so a plain SUM recovers the previous
+        # base-table aggregate without an extra `CASE` here.
+        "COALESCE(SUM(timed_out_count), 0) AS timed_out_agent_runs "
         "FROM win "
         "UNION ALL "
-        "SELECT 'e', event, COUNT(*), "
+        "SELECT 'e', event, COALESCE(SUM(event_count), 0), "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL "
         "FROM win GROUP BY event "
         "UNION ALL "
-        "SELECT 's', stage, COUNT(*), "
+        "SELECT 's', stage, COALESCE(SUM(event_count), 0), "
         "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL "
         "FROM win WHERE stage IS NOT NULL GROUP BY stage"
     )
@@ -1094,20 +1188,23 @@ def get_kpi_prev(
     if conn is None and not url:
         return Summary()
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(
+    where, params = _build_rollup_window_where(
         start=start, end=end, repo=repo,
         events=events, stages=stages, issue=issue,
     )
     sql = (
         "SELECT "
-        "COALESCE(SUM(cost_usd), 0) AS total_cost_usd, "
-        "COALESCE(SUM(input_tokens), 0) AS total_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS total_output_tokens, "
-        "COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read_tokens, "
-        "COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write_tokens, "
-        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
+        "COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd, "
+        "COALESCE(SUM(total_input_tokens), 0) AS total_input_tokens, "
+        "COALESCE(SUM(total_output_tokens), 0) AS total_output_tokens, "
+        "COALESCE(SUM(total_cache_read_tokens), 0) "
+        "  AS total_cache_read_tokens, "
+        "COALESCE(SUM(total_cache_write_tokens), 0) "
+        "  AS total_cache_write_tokens, "
+        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
+        "                  THEN event_count ELSE 0 END), 0) "
         "  AS total_agent_runs "
-        f"FROM analytics_events{where}"
+        f"FROM {_DAILY_ROLLUP_VIEW}{where}"
     )
     rows = _query(connect_fn, url, sql, params, conn=conn)
     if not rows:
@@ -1148,19 +1245,25 @@ def get_time_series(
     if conn is None and not url:
         return []
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(
+    where, params = _build_rollup_window_where(
         start=start, end=end, repo=repo,
         events=events, stages=stages, issue=issue,
     )
+    # Reads directly from the daily rollup: `day` is the GROUP BY
+    # key the view is keyed on, so a per-day per-event aggregate
+    # collapses to a tiny scan compared with the equivalent
+    # `date_trunc('day', ts)` over the events table.
     sql = (
-        "SELECT date_trunc('day', ts)::date AS day, event, "
-        "COUNT(*) AS c, "
-        "COALESCE(SUM(cost_usd), 0) AS day_cost_usd, "
-        "COALESCE(SUM(input_tokens), 0) AS day_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS day_output_tokens, "
-        "COALESCE(SUM(cache_read_tokens), 0) AS day_cache_read_tokens, "
-        "COALESCE(SUM(cache_write_tokens), 0) AS day_cache_write_tokens "
-        f"FROM analytics_events{where} "
+        "SELECT day, event, "
+        "COALESCE(SUM(event_count), 0) AS c, "
+        "COALESCE(SUM(total_cost_usd), 0) AS day_cost_usd, "
+        "COALESCE(SUM(total_input_tokens), 0) AS day_input_tokens, "
+        "COALESCE(SUM(total_output_tokens), 0) AS day_output_tokens, "
+        "COALESCE(SUM(total_cache_read_tokens), 0) "
+        "  AS day_cache_read_tokens, "
+        "COALESCE(SUM(total_cache_write_tokens), 0) "
+        "  AS day_cache_write_tokens "
+        f"FROM {_DAILY_ROLLUP_VIEW}{where} "
         "GROUP BY day, event "
         "ORDER BY day ASC, event ASC"
     )
@@ -1216,7 +1319,7 @@ def get_stage_breakdown(
     if conn is None and not url:
         return []
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(
+    where, params = _build_rollup_window_where(
         start=start, end=end, repo=repo,
         events=events, stages=stages, issue=issue,
     )
@@ -1225,19 +1328,30 @@ def get_stage_breakdown(
         if where
         else " WHERE stage IS NOT NULL"
     )
+    # Reads from the daily rollup. `duration_s_sum` / `duration_s_count`
+    # are the prerequisites for `AVG(duration_s)` -- averaging averages
+    # across days does not preserve the row-weighted mean, so the
+    # rollup carries the sum and the non-NULL count separately and
+    # the reader recovers `AVG` as `SUM(sum) / SUM(count)` here.
+    # `NULLIF` keeps the denominator-NULL case (no row in the window
+    # carried a duration) returning NULL rather than raising.
     sql = (
-        "SELECT stage, COUNT(*) AS c, AVG(duration_s) AS avg_dur, "
-        "COALESCE(SUM(cost_usd), 0) AS stage_cost_usd, "
-        "COALESCE(SUM(input_tokens), 0) AS stage_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS stage_output_tokens, "
-        # Agent-run subset of `count` so the redesigned dashboard's
-        # "Cost by workflow stage" panel can label its sub-line as
-        # "runs" -- the standalone mock aggregates per-agent-run
-        # records, not per-event rows, so counting all
-        # `analytics_events` rows would overstate stage activity.
-        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
+        "SELECT stage, "
+        "COALESCE(SUM(event_count), 0) AS c, "
+        "SUM(duration_s_sum) / NULLIF(SUM(duration_s_count), 0) "
+        "  AS avg_dur, "
+        "COALESCE(SUM(total_cost_usd), 0) AS stage_cost_usd, "
+        "COALESCE(SUM(total_input_tokens), 0) AS stage_input_tokens, "
+        "COALESCE(SUM(total_output_tokens), 0) AS stage_output_tokens, "
+        # Agent-run subset of `count`: the rollup carries `event_count`
+        # per `(day, repo, issue, event, stage, backend, cost_source)`
+        # bucket, so summing `event_count` over the agent_exit slice
+        # recovers the per-stage run count without double-counting
+        # rows the way a `COUNT(*)` on the rollup table would.
+        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
+        "                  THEN event_count ELSE 0 END), 0) "
         "  AS stage_agent_runs "
-        f"FROM analytics_events{clause} "
+        f"FROM {_DAILY_ROLLUP_VIEW}{clause} "
         "GROUP BY stage ORDER BY c DESC, stage ASC"
     )
     rows = _query(connect_fn, url, sql, params, conn=conn)
@@ -1754,12 +1868,18 @@ def get_backend_efficiency(
 ) -> list[BackendEfficiencyRow]:
     """Per-`backend` aggregate of agent runs.
 
-    Reads from `analytics_agent_runs`; the `failed` derivation is
-    `exit_code <> 0` with NULLs preserved (so "no data" never reads
-    as "succeeded"). Rows whose `backend` is NULL surface under
-    `"unknown"`. The `events` filter is honored by short-circuit
-    against `_agent_event_excluded` -- see
-    `get_review_round_breakdown` for the rationale.
+    Reads from `analytics_daily_rollup` with `event = 'agent_exit'`
+    pinned in the WHERE clause so the aggregate matches the previous
+    `analytics_agent_runs`-backed query (the view filters internally
+    to `event = 'agent_exit'`). The rollup carries `failed_count`
+    pre-derived (`exit_code IS NOT NULL AND exit_code <> 0`) so the
+    NULL-exit-code rows that the previous SQL excluded are excluded
+    here too. Rows whose `backend` is NULL surface under `"unknown"`.
+    The `events` filter is honored by short-circuit against
+    `_agent_event_excluded` -- see `get_review_round_breakdown` for
+    the rationale. `AVG(duration_s)` is recovered from the rollup as
+    `SUM(duration_s_sum) / SUM(duration_s_count)` so averaging
+    averages across days never blurs the row-weighted mean.
     """
     url = _resolve_db_url(db_url)
     if conn is None and not url:
@@ -1767,24 +1887,30 @@ def get_backend_efficiency(
     if _agent_event_excluded(events):
         return []
     connect_fn = connect or _default_connect
-    where, params = _build_view_window_where(
+    where, params = _build_rollup_window_where(
         start=start, end=end, repo=repo,
-        stages=stages, issue=issue,
+        events=None, stages=stages, issue=issue,
+    )
+    clause = (
+        f"{where} AND event = 'agent_exit'"
+        if where
+        else " WHERE event = 'agent_exit'"
     )
     sql = (
         "SELECT "
         "COALESCE(backend, 'unknown') AS backend_label, "
-        "COUNT(*) AS runs, "
-        "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs, "
-        "AVG(duration_s) AS avg_dur, "
-        "COALESCE(SUM(cost_usd), 0) AS backend_cost_usd, "
-        "COALESCE(SUM(input_tokens), 0) AS backend_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS backend_output_tokens, "
-        "COALESCE(SUM(cache_read_tokens), 0) "
+        "COALESCE(SUM(event_count), 0) AS runs, "
+        "COALESCE(SUM(failed_count), 0) AS failed_runs, "
+        "SUM(duration_s_sum) / NULLIF(SUM(duration_s_count), 0) "
+        "  AS avg_dur, "
+        "COALESCE(SUM(total_cost_usd), 0) AS backend_cost_usd, "
+        "COALESCE(SUM(total_input_tokens), 0) AS backend_input_tokens, "
+        "COALESCE(SUM(total_output_tokens), 0) AS backend_output_tokens, "
+        "COALESCE(SUM(total_cache_read_tokens), 0) "
         "  AS backend_cache_read_tokens, "
-        "COALESCE(SUM(cache_write_tokens), 0) "
+        "COALESCE(SUM(total_cache_write_tokens), 0) "
         "  AS backend_cache_write_tokens "
-        f"FROM analytics_agent_runs{where} "
+        f"FROM {_DAILY_ROLLUP_VIEW}{clause} "
         "GROUP BY backend_label "
         "ORDER BY runs DESC, backend_label ASC"
     )
@@ -1836,29 +1962,32 @@ def get_repo_breakdown(
 ) -> list[RepoBreakdownRow]:
     """Per-`repo` rollup of activity inside the filter window.
 
-    Reads from the base table so the standard event / stage / date /
-    repo / issue filter shape applies (no view short-circuit
-    needed). `COUNT(DISTINCT issue)` is safe inside a GROUP BY repo
-    because rows are already scoped to one repo per bucket -- the
-    `(repo, issue)` row-constructor `get_summary` uses is only
-    needed when issues are counted across repos.
+    Reads from `analytics_daily_rollup` so the standard event /
+    stage / date / repo / issue filter shape still applies (the
+    rollup carries an `event` column even though the agent-run view
+    does not, so no Python-side short-circuit is needed). The
+    rollup is keyed on `(day, repo, issue, ...)`, so
+    `COUNT(DISTINCT issue)` per `GROUP BY repo` is still exact --
+    each rollup row carries one issue, so distinct counting after
+    `GROUP BY repo` does not over-count.
     """
     url = _resolve_db_url(db_url)
     if conn is None and not url:
         return []
     connect_fn = connect or _default_connect
-    where, params = _build_window_where(
+    where, params = _build_rollup_window_where(
         start=start, end=end, repo=repo,
         events=events, stages=stages, issue=issue,
     )
     sql = (
         "SELECT repo, "
         "COUNT(DISTINCT issue) AS repo_issues, "
-        "COUNT(*) AS repo_events, "
-        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
+        "COALESCE(SUM(event_count), 0) AS repo_events, "
+        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
+        "                  THEN event_count ELSE 0 END), 0) "
         "  AS repo_agent_exits, "
-        "COALESCE(SUM(cost_usd), 0) AS repo_cost_usd "
-        f"FROM analytics_events{where} "
+        "COALESCE(SUM(total_cost_usd), 0) AS repo_cost_usd "
+        f"FROM {_DAILY_ROLLUP_VIEW}{where} "
         "GROUP BY repo "
         "ORDER BY repo_events DESC, repo ASC"
     )
@@ -2137,11 +2266,11 @@ def get_throughput_breakdown(
     conditions = ["event = %s"]
     params: list[Any] = ["stage_enter"]
     if start is not None:
-        conditions.append("ts >= %s")
-        params.append(start)
+        conditions.append("day >= %s")
+        params.append(start.date() if isinstance(start, datetime) else start)
     if end is not None:
-        conditions.append("ts < %s")
-        params.append(end)
+        conditions.append("day < %s")
+        params.append(end.date() if isinstance(end, datetime) else end)
     if repo is not None:
         conditions.append("repo = %s")
         params.append(repo)
@@ -2152,11 +2281,18 @@ def get_throughput_breakdown(
     conditions.append(f"stage IN ({placeholders})")
     params.extend(active_stages)
     where = " WHERE " + " AND ".join(conditions)
+    # Reads from the daily rollup: `event_count` already collapses
+    # multiple `stage_enter` rows for the same `(day, repo, issue,
+    # stage, backend, cost_source)` bucket into one row, so summing
+    # `event_count` per day per terminal stage recovers the prior
+    # per-day `COUNT(*)` without re-scanning `analytics_events`.
     sql = (
-        "SELECT date_trunc('day', ts)::date AS day, "
-        "SUM(CASE WHEN stage = 'done' THEN 1 ELSE 0 END) AS resolved, "
-        "SUM(CASE WHEN stage = 'rejected' THEN 1 ELSE 0 END) AS rejected "
-        f"FROM analytics_events{where} "
+        "SELECT day, "
+        "COALESCE(SUM(CASE WHEN stage = 'done' "
+        "                  THEN event_count ELSE 0 END), 0) AS resolved, "
+        "COALESCE(SUM(CASE WHEN stage = 'rejected' "
+        "                  THEN event_count ELSE 0 END), 0) AS rejected "
+        f"FROM {_DAILY_ROLLUP_VIEW}{where} "
         "GROUP BY day "
         "ORDER BY day ASC"
     )

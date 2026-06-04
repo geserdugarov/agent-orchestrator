@@ -6,7 +6,7 @@ import os
 import sys
 import unittest
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from unittest.mock import patch
 
 
@@ -282,13 +282,18 @@ class SummaryTest(unittest.TestCase):
         )
         # The single combined SQL applies the filter once in the CTE
         # and the totals / breakdown branches inherit it from `win`.
+        # The Layer 4 cutover swapped the events-table scan for the
+        # daily rollup, so the window predicate is now on `day`
+        # (the rollup's UTC-bound aggregate key) and the parameters
+        # carry the `.date()` projection of the input timestamps.
         self.assertEqual(len(conn.executed), 1)
         sql, params = conn.executed[0]
         self.assertIn("WITH win AS", sql)
-        self.assertIn("ts >= %s", sql)
-        self.assertIn("ts < %s", sql)
+        self.assertIn("FROM analytics_daily_rollup", sql)
+        self.assertIn("day >= %s", sql)
+        self.assertIn("day < %s", sql)
         self.assertIn("repo = %s", sql)
-        self.assertEqual(params[:3], (start, end, "owner/r"))
+        self.assertEqual(params[:3], (start.date(), end.date(), "owner/r"))
 
     def test_distinct_issues_counts_repo_issue_pairs(self) -> None:
         # GitHub issue numbers are only unique within a repo, so a
@@ -326,8 +331,11 @@ class TimeSeriesTest(unittest.TestCase):
     def test_groups_by_day_and_event(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
+        # Reads the daily rollup -- the rollup's `day` column is
+        # the GROUP BY key, so the SQL no longer needs a
+        # `date_trunc('day', ts)` expression.
         conn.rows_for = {
-            "date_trunc('day', ts)": [
+            "FROM analytics_daily_rollup": [
                 (date(2026, 5, 25), "stage_enter", 5),
                 (date(2026, 5, 25), "agent_exit", 2),
                 (date(2026, 5, 26), "stage_enter", 7),
@@ -344,12 +352,13 @@ class TimeSeriesTest(unittest.TestCase):
         )
 
     def test_datetime_day_normalised_to_date(self) -> None:
-        # Some drivers return `date_trunc(...)` as a timestamp; the
-        # read model normalises so the dashboard sees `date`.
+        # Some drivers return the `day` column as a timestamp even
+        # when the underlying type is `date`; the read model
+        # normalises so the dashboard sees `date`.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {
-            "date_trunc('day', ts)": [
+            "FROM analytics_daily_rollup": [
                 (datetime(2026, 5, 25, 0, 0, tzinfo=timezone.utc), "x", 1),
             ],
         }
@@ -372,8 +381,12 @@ class StageEventBreakdownTest(unittest.TestCase):
     def test_stage_breakdown_handles_null_avg(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
+        # Rollup-backed: the SQL recovers `AVG(duration_s)` as
+        # `SUM(duration_s_sum) / NULLIF(SUM(duration_s_count), 0)`.
+        # The fake fixture pre-computes that ratio so the reader's
+        # NULL handling still rides through.
         conn.rows_for = {
-            "AVG(duration_s)": [
+            "FROM analytics_daily_rollup": [
                 ("implementing", 20, 12.5),
                 ("validating", 10, None),
             ],
@@ -383,8 +396,13 @@ class StageEventBreakdownTest(unittest.TestCase):
         self.assertEqual(rows[0].count, 20)
         self.assertEqual(rows[0].avg_duration_s, 12.5)
         self.assertIsNone(rows[1].avg_duration_s)
-        # `IS NOT NULL` guard on stage is present.
-        self.assertIn("stage IS NOT NULL", conn.executed[0][0])
+        sql = conn.executed[0][0]
+        # `IS NOT NULL` guard on stage is still present.
+        self.assertIn("stage IS NOT NULL", sql)
+        # Weighted-duration recovery from the rollup, not a
+        # base-table `AVG(duration_s)`.
+        self.assertIn("SUM(duration_s_sum)", sql)
+        self.assertIn("NULLIF(SUM(duration_s_count), 0)", sql)
 
     def test_event_breakdown_returns_rows(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
@@ -888,7 +906,11 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
         # Full 13-column totals row: kind / label / events / issues
         # / repos / cost / input / output / total runs / failed runs
         # / cache_read / cache_write / timed_out. Layer 3's combined
-        # SQL keeps every aggregate column on the totals row.
+        # SQL keeps every aggregate column on the totals row; Layer 4
+        # swaps the events-table scan for the daily rollup so the
+        # aggregates are recovered from the rollup's pre-derived
+        # `failed_count` (`exit_code IS NOT NULL AND exit_code <> 0`)
+        # narrowed to `event = 'agent_exit'`.
         conn.rows_for = {
             "WITH win AS": [
                 ("t", None, 50, 12, 3, 2.5, 100, 200, 15, 4, 0, 0, 0),
@@ -900,9 +922,12 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
         sql, _ = conn.executed[0]
         self.assertIn("total_agent_runs", sql)
         self.assertIn("failed_agent_runs", sql)
-        # Failure subset constrains on event='agent_exit' AND
-        # exit_code <> 0 so NULL exit codes never count as failures.
-        self.assertIn("exit_code <> 0", sql)
+        # Failure subset constrains on `event = 'agent_exit'` so a
+        # non-exit row that happened to carry a non-null exit code
+        # never counts; the NULL-exit-code guard lives in the rollup
+        # definition.
+        self.assertIn("event = 'agent_exit'", sql)
+        self.assertIn("FROM analytics_daily_rollup", sql)
 
     def test_short_totals_tuple_round_trips(self) -> None:
         # A fixture whose totals row is shorter than the full
@@ -940,8 +965,11 @@ class SummaryAgentRunsExtensionTest(unittest.TestCase):
         self.assertEqual(result.total_cache_read_tokens, 1200)
         self.assertEqual(result.total_cache_write_tokens, 800)
         sql, _ = conn.executed[0]
-        self.assertIn("SUM(cache_read_tokens)", sql)
-        self.assertIn("SUM(cache_write_tokens)", sql)
+        # The rollup carries cache-band tokens pre-summed per group
+        # under the `total_cache_*` column names, so the reader sums
+        # the rollup columns rather than the raw event columns.
+        self.assertIn("SUM(total_cache_read_tokens)", sql)
+        self.assertIn("SUM(total_cache_write_tokens)", sql)
 
     def test_totals_carry_timed_out_agent_runs(self) -> None:
         # Window-wide `timed_out` count so the reliability "Timeouts"
@@ -1025,17 +1053,19 @@ class KpiPrevTest(unittest.TestCase):
             events=["agent_exit"], stages=["implementing"],
             connect=_connector(conn),
         )
-        # One round-trip; the standard `_build_window_where` shape
-        # applies so the previous-window read narrows alongside the
+        # One round-trip; the rollup window predicate replaces the
+        # base-table `ts >= / ts <` shape with `day >= / day <`,
+        # but the previous-window read still narrows alongside the
         # current-window summary.
         self.assertEqual(len(conn.executed), 1)
         sql, params = conn.executed[0]
-        self.assertIn("ts >= %s", sql)
-        self.assertIn("ts < %s", sql)
+        self.assertIn("FROM analytics_daily_rollup", sql)
+        self.assertIn("day >= %s", sql)
+        self.assertIn("day < %s", sql)
         self.assertIn("repo = %s", sql)
         self.assertIn("event IN (%s)", sql)
         self.assertIn("stage IN (%s)", sql)
-        self.assertEqual(params[:3], (start, end, "owner/r"))
+        self.assertEqual(params[:3], (start.date(), end.date(), "owner/r"))
 
     def test_empty_events_emits_false_predicate(self) -> None:
         # Mirrors `get_summary`'s cleared-multiselect semantics: an
@@ -1084,11 +1114,13 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
     def test_aggregates_round_trip(self) -> None:
         # 8-tuple: day / event / count / cost / input / output /
         # cache_read / cache_write. The cache columns feed the
-        # redesigned hero chart's Cache band.
+        # redesigned hero chart's Cache band. After Layer 4 the
+        # reader sums the rollup's pre-derived `total_*` columns
+        # instead of the raw event-table columns.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {
-            "date_trunc('day', ts)": [
+            "FROM analytics_daily_rollup": [
                 (
                     date(2026, 5, 25), "agent_exit",
                     3, 0.42, 1000, 500, 200, 100,
@@ -1105,11 +1137,11 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
         self.assertEqual(p.cache_read_tokens, 200)
         self.assertEqual(p.cache_write_tokens, 100)
         sql, _ = conn.executed[0]
-        self.assertIn("SUM(cost_usd)", sql)
-        self.assertIn("SUM(input_tokens)", sql)
-        self.assertIn("SUM(output_tokens)", sql)
-        self.assertIn("SUM(cache_read_tokens)", sql)
-        self.assertIn("SUM(cache_write_tokens)", sql)
+        self.assertIn("SUM(total_cost_usd)", sql)
+        self.assertIn("SUM(total_input_tokens)", sql)
+        self.assertIn("SUM(total_output_tokens)", sql)
+        self.assertIn("SUM(total_cache_read_tokens)", sql)
+        self.assertIn("SUM(total_cache_write_tokens)", sql)
 
     def test_legacy_six_tuple_rows_default_cache_to_zero(self) -> None:
         # Older fixtures still emit 6-tuple `(day, event, count,
@@ -1118,7 +1150,7 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {
-            "date_trunc('day', ts)": [
+            "FROM analytics_daily_rollup": [
                 (date(2026, 5, 25), "agent_exit", 3, 0.42, 1000, 500),
             ],
         }
@@ -1137,9 +1169,11 @@ class StageBreakdownExtensionTest(unittest.TestCase):
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         # 7-tuple shape: stage / events / avg_dur / cost / input /
-        # output / agent-run subset.
+        # output / agent-run subset. The reader reads from the
+        # daily rollup so the SQL aggregates the rollup's `total_*`
+        # columns instead of the raw events table.
         conn.rows_for = {
-            "AVG(duration_s)": [
+            "FROM analytics_daily_rollup": [
                 ("implementing", 20, 12.5, 0.50, 2000, 1500, 8),
                 ("validating", 10, None, 0.10, 100, 200, 3),
             ],
@@ -1152,7 +1186,7 @@ class StageBreakdownExtensionTest(unittest.TestCase):
         self.assertEqual(rows[1].total_cost_usd, 0.10)
         self.assertEqual(rows[1].runs, 3)
         sql, _ = conn.executed[0]
-        self.assertIn("SUM(cost_usd)", sql)
+        self.assertIn("SUM(total_cost_usd)", sql)
         # Agent-run subset uses `event = 'agent_exit'`, scoped by
         # the same WHERE clause as the totals so the per-stage sub-
         # line lines up with the per-stage cost.
@@ -1166,7 +1200,7 @@ class StageBreakdownExtensionTest(unittest.TestCase):
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {
-            "AVG(duration_s)": [
+            "FROM analytics_daily_rollup": [
                 ("implementing", 20, 12.5, 0.50, 2000, 1500),
             ],
         }
@@ -1468,8 +1502,13 @@ class BackendEfficiencyTest(unittest.TestCase):
         conn = _FakeConnection()
         # 9-tuple: backend / runs / failed / avg_dur / cost /
         # input_tokens / output_tokens / cache_read / cache_write.
+        # After Layer 4 the reader reads from the daily rollup
+        # (with `event = 'agent_exit'` pinned to match the prior
+        # view's filter); the fake fixture pre-computes the
+        # weighted average so the reader's NULL handling still
+        # rides through.
         conn.rows_for = {
-            "analytics_agent_runs": [
+            "FROM analytics_daily_rollup": [
                 ("claude", 20, 1, 35.0, 1.20, 5000, 4000, 1500, 800),
                 ("codex", 10, 3, None, 0.40, 1000, 2000, 0, 0),
                 ("unknown", 1, 0, None, 0.0, 0, 0, 0, 0),
@@ -1490,10 +1529,18 @@ class BackendEfficiencyTest(unittest.TestCase):
         # column rather than show a misleading zero.
         self.assertIsNone(rows[1].avg_duration_s)
         sql, _ = conn.executed[0]
-        self.assertIn("FROM analytics_agent_runs", sql)
+        self.assertIn("FROM analytics_daily_rollup", sql)
+        # The rollup carries an `event` column, so the cutover
+        # query pins `event = 'agent_exit'` directly rather than
+        # the view's implicit filter.
+        self.assertIn("event = 'agent_exit'", sql)
         self.assertIn("COALESCE(backend, 'unknown')", sql)
-        self.assertIn("SUM(cache_read_tokens)", sql)
-        self.assertIn("SUM(cache_write_tokens)", sql)
+        self.assertIn("SUM(total_cache_read_tokens)", sql)
+        self.assertIn("SUM(total_cache_write_tokens)", sql)
+        # Weighted-duration recovery from the rollup, not
+        # `AVG(duration_s)` over the raw events table.
+        self.assertIn("SUM(duration_s_sum)", sql)
+        self.assertIn("NULLIF(SUM(duration_s_count), 0)", sql)
 
     def test_legacy_7tuple_fixture_defaults_cache_to_zero(self) -> None:
         # Older 7-tuple `(backend, runs, failed, avg_dur, cost, in,
@@ -1502,7 +1549,7 @@ class BackendEfficiencyTest(unittest.TestCase):
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {
-            "analytics_agent_runs": [
+            "FROM analytics_daily_rollup": [
                 ("claude", 5, 0, 10.0, 0.20, 1000, 500),
             ],
         }
@@ -1542,9 +1589,10 @@ class RepoBreakdownTest(unittest.TestCase):
         self.assertEqual(rows[0].total_cost_usd, 0.50)
         sql, _ = conn.executed[0]
         # GROUP BY repo with distinct issue count per row -- safe
-        # because rows are already scoped to one repo per bucket.
+        # because rollup rows are already scoped to one repo per
+        # bucket and the rollup key carries `issue`.
         self.assertIn("COUNT(DISTINCT issue)", sql)
-        self.assertIn("FROM analytics_events", sql)
+        self.assertIn("FROM analytics_daily_rollup", sql)
 
     def test_event_filter_threaded(self) -> None:
         # `get_repo_breakdown` honors the standard event filter
@@ -2222,6 +2270,376 @@ class IsBrokenConnectionExcTest(unittest.TestCase):
                 ValueError("not a broken socket")
             )
         )
+
+
+class RollupReadCutoverTest(unittest.TestCase):
+    """Layer 4 cutover: every reader the issue calls out reads from
+    `analytics_daily_rollup` instead of `analytics_events` /
+    `analytics_agent_runs`. The previous reader-shape tests above
+    already cover the column wiring; this class concentrates on the
+    semantic invariants the cutover has to preserve.
+
+    The rollup is keyed on `(day, repo, issue, event, stage,
+    backend, cost_source)` with `day = (ts AT TIME ZONE 'UTC')::date`
+    and aggregates `event_count`, `failed_count`, `timed_out_count`,
+    `total_cost_usd`, the token sums, and `duration_s_sum` /
+    `duration_s_count`. The dashboard passes midnight-aligned UTC
+    `[start, end)` windows so the rollup is semantically equivalent
+    to a `ts`-scoped scan; these tests pin that down by checking
+    parameter bindings, filter shapes, and column accounting.
+    """
+
+    def _rollup_readers(self, analytics_read) -> list[Callable[..., Any]]:
+        # The seven cutover readers in the order the issue lists
+        # them. `get_summary` and `get_kpi_prev` carry the same
+        # `_build_rollup_window_where` shape; `get_throughput_breakdown`
+        # builds its WHERE inline but still uses `day` rather than `ts`.
+        return [
+            analytics_read.get_summary,
+            analytics_read.get_kpi_prev,
+            analytics_read.get_time_series,
+            analytics_read.get_stage_breakdown,
+            analytics_read.get_repo_breakdown,
+            analytics_read.get_backend_efficiency,
+            analytics_read.get_throughput_breakdown,
+        ]
+
+    def test_every_cutover_reader_queries_the_rollup(self) -> None:
+        # No cutover reader may regress to `analytics_events` or
+        # `analytics_agent_runs` -- the whole point of the migration
+        # is the rollup-backed scan. A single check against every
+        # reader in one place keeps a future reader rewrite from
+        # silently dropping the rollup target.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        for reader in self._rollup_readers(analytics_read):
+            conn = _FakeConnection()
+            reader(connect=_connector(conn))
+            self.assertEqual(
+                len(conn.executed), 1,
+                f"{reader.__name__} must issue one round-trip",
+            )
+            sql = conn.executed[0][0]
+            self.assertIn(
+                "FROM analytics_daily_rollup", sql,
+                f"{reader.__name__} must read from the rollup, "
+                f"got SQL: {sql}",
+            )
+            self.assertNotIn(
+                "FROM analytics_events", sql,
+                f"{reader.__name__} must not regress to "
+                f"analytics_events",
+            )
+            self.assertNotIn(
+                "FROM analytics_agent_runs", sql,
+                f"{reader.__name__} must not regress to "
+                f"analytics_agent_runs",
+            )
+
+    def test_window_predicate_uses_day_with_date_params(self) -> None:
+        # The dashboard's `to_window` produces midnight-aligned UTC
+        # datetimes; the rollup is keyed by `day` (a UTC date), so
+        # the helper must project `start`/`end` to `.date()` before
+        # binding so the query plan stays a day-range scan rather
+        # than a cast at execute time.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        start = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 28, tzinfo=timezone.utc)
+        for reader in self._rollup_readers(analytics_read):
+            conn = _FakeConnection()
+            reader(start=start, end=end, connect=_connector(conn))
+            sql, params = conn.executed[0]
+            self.assertIn(
+                "day >= %s", sql,
+                f"{reader.__name__} must use day-keyed lower bound",
+            )
+            self.assertIn(
+                "day < %s", sql,
+                f"{reader.__name__} must use day-keyed upper bound",
+            )
+            self.assertIn(start.date(), params)
+            self.assertIn(end.date(), params)
+
+    def test_issue_filter_narrows_every_reader(self) -> None:
+        # The rollup key carries `issue`, so the `issue = %s`
+        # predicate still narrows the scan. The dashboard refuses
+        # to apply this filter unless `repo` is also set (issue
+        # numbers are only unique within a repo); the helper itself
+        # does not enforce that, so we mirror the dashboard's call
+        # shape (`repo=..., issue=...`).
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        for reader in self._rollup_readers(analytics_read):
+            conn = _FakeConnection()
+            reader(repo="owner/r", issue=42, connect=_connector(conn))
+            sql, params = conn.executed[0]
+            self.assertIn(
+                "issue = %s", sql,
+                f"{reader.__name__} must thread the issue filter "
+                f"into the rollup scan",
+            )
+            self.assertIn(42, params)
+
+    def test_event_filter_clears_to_empty_predicate(self) -> None:
+        # Cleared-multiselect contract: an empty list means "no
+        # rows match" rather than "no filter". `get_backend_efficiency`
+        # is excluded because it short-circuits via
+        # `_agent_event_excluded` before building SQL (cleared events
+        # selection = no agent_exit selected = return []); the other
+        # cutover readers that take an `events=` param emit the
+        # tautologically-false predicate. `get_throughput_breakdown`
+        # has its own short-circuit on the implicit `stage_enter`
+        # constraint -- so it also returns [] without SQL when
+        # events is cleared.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        emits_predicate = [
+            analytics_read.get_summary,
+            analytics_read.get_kpi_prev,
+            analytics_read.get_time_series,
+            analytics_read.get_stage_breakdown,
+            analytics_read.get_repo_breakdown,
+        ]
+        for reader in emits_predicate:
+            conn = _FakeConnection()
+            reader(events=[], connect=_connector(conn))
+            sql = conn.executed[0][0]
+            self.assertIn(
+                "FALSE", sql,
+                f"{reader.__name__} must emit a tautologically-false "
+                f"predicate when the events multiselect is cleared",
+            )
+
+    def test_stage_filter_clears_to_empty_predicate(self) -> None:
+        # Mirrors the events-filter contract: an empty stages list
+        # is the dashboard's cleared-multiselect signal. Same set
+        # of readers as `test_event_filter_clears_to_empty_predicate`
+        # because `get_backend_efficiency` does not short-circuit on
+        # stages, but the FALSE predicate is what makes its result
+        # drop to zero alongside the rest.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        emits_predicate = [
+            analytics_read.get_summary,
+            analytics_read.get_kpi_prev,
+            analytics_read.get_time_series,
+            analytics_read.get_stage_breakdown,
+            analytics_read.get_repo_breakdown,
+            analytics_read.get_backend_efficiency,
+        ]
+        for reader in emits_predicate:
+            conn = _FakeConnection()
+            reader(stages=[], connect=_connector(conn))
+            sql = conn.executed[0][0]
+            self.assertIn(
+                "FALSE", sql,
+                f"{reader.__name__} must emit a tautologically-false "
+                f"predicate when the stages multiselect is cleared",
+            )
+
+    def test_summary_recovers_token_and_timeout_aggregates(self) -> None:
+        # The dashboard's KPI strip reads `total_input_tokens`,
+        # `total_output_tokens`, `total_cache_read_tokens`,
+        # `total_cache_write_tokens`, `total_cost_usd`, and
+        # `timed_out_agent_runs` off `get_summary`. The rollup
+        # carries the per-bucket sums under `total_*` columns and
+        # `timed_out_count` is pre-scoped to `event = 'agent_exit'
+        # AND timed_out = TRUE`, so a plain SUM recovers each
+        # KPI's value verbatim. This test pins the column
+        # accounting end-to-end so a future rollup column rename
+        # cannot silently zero out a KPI.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        # 13-column totals row matching the cutover SQL's projection
+        # order: kind / label / events / issues / repos / cost /
+        # input / output / total_runs / failed_runs / cache_read /
+        # cache_write / timed_out.
+        conn.rows_for = {
+            "WITH win AS": [
+                ("t", None, 200, 24, 3,
+                 4.5, 12_000, 8_000, 35, 6, 3_000, 1_500, 11),
+            ],
+        }
+        result = analytics_read.get_summary(connect=_connector(conn))
+        self.assertEqual(result.total_input_tokens, 12_000)
+        self.assertEqual(result.total_output_tokens, 8_000)
+        self.assertEqual(result.total_cache_read_tokens, 3_000)
+        self.assertEqual(result.total_cache_write_tokens, 1_500)
+        self.assertEqual(result.total_cost_usd, 4.5)
+        self.assertEqual(result.total_agent_runs, 35)
+        self.assertEqual(result.failed_agent_runs, 6)
+        # The reliability "Timeouts" tile reads off this field --
+        # the rollup's `timed_out_count` is already
+        # `event = 'agent_exit' AND timed_out = TRUE`-scoped, so a
+        # plain SUM is correct without an extra CASE in the reader.
+        self.assertEqual(result.timed_out_agent_runs, 11)
+        sql, _ = conn.executed[0]
+        self.assertIn("SUM(timed_out_count)", sql)
+        self.assertIn("SUM(total_input_tokens)", sql)
+        self.assertIn("SUM(total_output_tokens)", sql)
+        self.assertIn("SUM(total_cache_read_tokens)", sql)
+        self.assertIn("SUM(total_cache_write_tokens)", sql)
+
+    def test_stage_breakdown_recovers_weighted_duration_average(self) -> None:
+        # `AVG(duration_s)` cannot be reconstructed from per-day
+        # rollup averages without double-averaging (averaging
+        # averages across days does not preserve the row-weighted
+        # mean), so the rollup carries `duration_s_sum` and
+        # `duration_s_count` separately and the reader recovers
+        # `AVG` as `SUM(sum) / SUM(count)`. The fake's pre-computed
+        # `avg_dur` here mirrors what the SQL division produces;
+        # the test pins the SQL shape so a future regression to a
+        # naive `AVG(duration_s)` would fail.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        # (stage, count, avg_dur, cost, input_tok, output_tok, runs)
+        # Two stages: implementing (sum=125, count=10 -> 12.5),
+        # validating (no row carried a non-null duration -> NULL).
+        conn.rows_for = {
+            "FROM analytics_daily_rollup": [
+                ("implementing", 10, 12.5, 0.50, 0, 0, 10),
+                ("validating", 3, None, 0.05, 0, 0, 3),
+            ],
+        }
+        rows = analytics_read.get_stage_breakdown(connect=_connector(conn))
+        self.assertEqual(rows[0].stage, "implementing")
+        self.assertEqual(rows[0].avg_duration_s, 12.5)
+        # NULL preserved when no row in the window carried a
+        # duration -- the dashboard hides the column rather than
+        # showing a misleading zero.
+        self.assertIsNone(rows[1].avg_duration_s)
+        sql, _ = conn.executed[0]
+        self.assertIn("SUM(duration_s_sum)", sql)
+        self.assertIn("NULLIF(SUM(duration_s_count), 0)", sql)
+        # Regression guard: the cutover MUST NOT regress to a plain
+        # `AVG(duration_s)` over the rollup -- the rollup has no
+        # such column, but more importantly averaging averages
+        # across days would silently produce wrong numbers.
+        self.assertNotIn("AVG(duration_s)", sql)
+
+    def test_backend_efficiency_pins_event_filter_in_sql(self) -> None:
+        # The previous `analytics_agent_runs` view filtered to
+        # `event = 'agent_exit'` internally. The rollup has an
+        # `event` column, so the reader pins the filter in the
+        # WHERE clause directly -- this is how the cutover
+        # preserves the prior view's row scope.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_backend_efficiency(connect=_connector(conn))
+        sql, _ = conn.executed[0]
+        self.assertIn("event = 'agent_exit'", sql)
+        # And the agent-event short-circuit still wins over the
+        # pinned filter when the operator excludes `agent_exit`
+        # from the multiselect: no SQL emitted.
+        conn = _FakeConnection()
+        rows = analytics_read.get_backend_efficiency(
+            events=["stage_enter"], connect=_connector(conn),
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(conn.executed, [])
+
+    def test_throughput_breakdown_uses_day_window(self) -> None:
+        # `get_throughput_breakdown` builds its WHERE clause inline
+        # (it carries a hardcoded `event = 'stage_enter'` predicate),
+        # so the Layer 4 cutover has to migrate that branch too.
+        # The window must bind `.date()` values against the rollup
+        # `day` column rather than the previous `ts >= / ts <`
+        # pair against the events table.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        start = datetime(2026, 5, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 5, 28, tzinfo=timezone.utc)
+        analytics_read.get_throughput_breakdown(
+            start=start, end=end, repo="owner/r", issue=42,
+            connect=_connector(conn),
+        )
+        sql, params = conn.executed[0]
+        self.assertIn("FROM analytics_daily_rollup", sql)
+        self.assertIn("day >= %s", sql)
+        self.assertIn("day < %s", sql)
+        self.assertIn("event = %s", sql)
+        self.assertIn("stage_enter", params)
+        # `.date()` binding so the planner sees a date-range scan
+        # against the `(day, repo)` supporting index.
+        self.assertIn(start.date(), params)
+        self.assertIn(end.date(), params)
+        self.assertIn("owner/r", params)
+        self.assertIn(42, params)
+
+
+class RawReaderRollupKeepsTest(unittest.TestCase):
+    """The issue is explicit about which readers stay on the raw
+    table or the agent-run view: recent agent exits, top-cost
+    issues, review-round breakdown, hourly heatmap, issue events,
+    and cost coverage. The other view-backed read
+    (`get_backend_daily_tokens`) and `get_event_breakdown` also stay
+    where they are. This test class is a regression guard so a
+    future change cannot quietly move one of them to the rollup
+    where it would lose row-level detail (`ts` precision,
+    `review_round`, `retry_count`, hour-of-day).
+    """
+
+    def test_recent_agent_exits_reads_base_table(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_recent_agent_exits(connect=_connector(conn))
+        sql, _ = conn.executed[0]
+        self.assertIn("FROM analytics_events", sql)
+        self.assertNotIn("FROM analytics_daily_rollup", sql)
+
+    def test_top_cost_issues_reads_base_table(self) -> None:
+        # `get_issues` carries MIN(ts), MAX(ts), `latest_stage`,
+        # MAX(review_round), and MAX(retry_count) which the rollup
+        # cannot answer -- the rollup throws away the per-row `ts`
+        # precision and never carried `review_round` / `retry_count`.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_issues(connect=_connector(conn))
+        sql, _ = conn.executed[0]
+        self.assertIn("FROM analytics_events", sql)
+        self.assertNotIn("FROM analytics_daily_rollup", sql)
+
+    def test_review_round_breakdown_stays_on_view(self) -> None:
+        # `review_round` is not in the rollup key, so the rollup
+        # cannot bucket by it. Stays on `analytics_agent_runs`.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_review_round_breakdown(connect=_connector(conn))
+        sql, _ = conn.executed[0]
+        self.assertIn("FROM analytics_agent_runs", sql)
+        self.assertNotIn("FROM analytics_daily_rollup", sql)
+
+    def test_hourly_heatmap_stays_on_base_table(self) -> None:
+        # The rollup is day-bucketed -- hour-of-day is not
+        # recoverable from `day`, so this widget must keep reading
+        # from `analytics_events`.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_hourly_heatmap(connect=_connector(conn))
+        sql, _ = conn.executed[0]
+        self.assertIn("FROM analytics_events", sql)
+        self.assertNotIn("FROM analytics_daily_rollup", sql)
+
+    def test_issue_events_stays_on_base_table(self) -> None:
+        # Per-row drill-down -- the rollup pre-aggregates per group
+        # so individual rows are no longer addressable.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_issue_events(
+            repo="owner/r", issue=1, connect=_connector(conn),
+        )
+        sql, _ = conn.executed[0]
+        self.assertIn("FROM analytics_events", sql)
+        self.assertNotIn("FROM analytics_daily_rollup", sql)
+
+    def test_cost_coverage_stays_on_view(self) -> None:
+        # Cost coverage stays on `analytics_agent_runs` per the
+        # issue's "unless the rollup can match behavior exactly"
+        # guardrail -- being conservative here lets the
+        # `unknown-price` cohort's run / token accounting stay
+        # exactly as it was.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_cost_coverage(connect=_connector(conn))
+        sql, _ = conn.executed[0]
+        self.assertIn("FROM analytics_agent_runs", sql)
+        self.assertNotIn("FROM analytics_daily_rollup", sql)
 
 
 if __name__ == "__main__":
