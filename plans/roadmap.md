@@ -379,11 +379,19 @@ subsequent reapplies a no-op. `ANALYTICS_DB_URL` is
 a single libpq URL so swapping local for remote managed Postgres is a
 one-line repoint. `orchestrator/analytics/sync.py` is the operator-
 driven CLI (`python -m orchestrator.analytics.sync`) that replays
-JSONL records into Postgres by accumulating validated row tuples
-into a `_BATCH_SIZE`-sized buffer (default 500, sized to match
-`_PROGRESS_INTERVAL`) and flushing each batch via
+JSONL records into Postgres. At startup it pulls every persisted
+`content_hash` (filtered by `WHERE content_hash IS NOT NULL` so
+legacy pre-`content_hash` rows do not pollute the set) into an
+in-process Python set; each parsed JSONL record's hash is checked
+against that set and against intra-file duplicates already queued
+in this run, so already-present rows never enter the batch buffer
+or hit the wire. Surviving records accumulate into a
+`_BATCH_SIZE`-sized buffer (default 500, sized to match
+`_PROGRESS_INTERVAL`) and each batch flushes via
 `cur.executemany("INSERT ... ON CONFLICT (content_hash) DO
-NOTHING", batch)`, idempotent across repeated runs and across
+NOTHING", batch)`, with the `ON CONFLICT` arbiter staying the
+server-side dedup backstop for the rare concurrent-writer race.
+The result is idempotent across repeated runs and across
 `prune_old_records` rewrites; a final partial batch flushes at EOF
 so the tail still lands and per-batch `cursor.rowcount` drives the
 cumulative `inserted` / `skipped_duplicate` totals. The CLI
@@ -644,24 +652,6 @@ swallowed.
   pool, in-worker continuation loop, per-state caps, event-stream stall
   detection, `linear_graphql` tool, strict template engine, full
   `WORKFLOW.md` adoption) as deliberately not adopted.
-- **Server-side dedup pre-check for analytics sync (Phase 2 — shipped).**
-  See [`plans/analytics-sync-performance.md`](analytics-sync-performance.md)
-  for the full design. Phase 1 landed first:
-  `orchestrator/analytics/sync.py` accumulates validated row tuples
-  into a `_BATCH_SIZE`-sized buffer and flushes each batch via
-  `cur.executemany(insert_sql, batch)` with `ON CONFLICT (content_hash)
-  DO NOTHING` retained as the dedup backstop, taking the projected
-  5-hour wall-clock against a remote Postgres into the minutes range
-  without changing the operator-visible progress shape. Phase 2 is now
-  shipped on top: the sync issues a single
-  `SELECT content_hash FROM analytics_events WHERE content_hash IS NOT
-  NULL` before opening the JSONL file, snapshots the result into an
-  in-process set, and skips already-present hashes (and intra-file
-  duplicates) before they enter the batch buffer — so a 100 %-duplicate
-  re-sync now pays one SELECT and zero `executemany` calls while the
-  `ON CONFLICT` arbiter stays the correctness backstop for the rare
-  concurrent-writer race. Phase 3 (a `COPY ... FROM STDIN` path with
-  staging table) stays deferred.
 
 ## Risks
 
