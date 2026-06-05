@@ -604,6 +604,7 @@ def hour_weekday_heatmap(
     points: Sequence[HourlyHeatmapPoint],
     *,
     title: Optional[str] = None,
+    tz_label: str = "UTC",
 ) -> go.Figure:
     """7x24 weekday-by-hour token-volume heatmap.
 
@@ -617,7 +618,9 @@ def hour_weekday_heatmap(
     `stage_evaluation` cells against the agent-exit rows that
     actually drive spend. `HourlyHeatmapPoint.count` stays available
     for callers that want the event count, but the heatmap renders
-    `total_tokens`.
+    `total_tokens`. `tz_label` only annotates the x-axis -- the
+    caller is responsible for passing the matching offset to
+    `get_hourly_heatmap` so the cells already reflect that zone.
     """
     matrix = [[0] * 24 for _ in range(7)]
     for p in points:
@@ -654,7 +657,9 @@ def hour_weekday_heatmap(
     # like missing data rather than empty cells.
     layout["plot_bgcolor"] = theme.BORDER
     fig.update_layout(**layout)
-    fig.update_xaxes(title_text="hour (UTC)", type="category", showgrid=False)
+    fig.update_xaxes(
+        title_text=f"hour ({tz_label})", type="category", showgrid=False,
+    )
     fig.update_yaxes(title_text="", autorange="reversed", showgrid=False)
     if not points:
         fig.add_annotation(

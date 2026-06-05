@@ -138,6 +138,15 @@ PRESET_INLINE_LABELS: dict[str, str] = {
 PRESET_DAYS: dict[str, int] = {PRESET_3D: 3, PRESET_7D: 7}
 DEFAULT_PRESET = PRESET_ALL
 
+# UTC-offset selector for the "When agents run" heatmap and the
+# "Recent agent runs" table. `ts` is stored in UTC; the dashboard
+# applies the offset at read time (heatmap bucketing) and at
+# display time (recent-runs table). Range -12 .. +14 covers every
+# IANA-style fixed offset in use; default `+7` matches the
+# operator's home timezone.
+TZ_OFFSET_OPTIONS: tuple[int, ...] = tuple(range(-12, 15))
+DEFAULT_TZ_OFFSET_HOURS = 7
+
 # Insight thresholds.
 FAILURE_RATE_BANNER_THRESHOLD = 0.10
 UNPRICED_COVERAGE_THRESHOLD = 0.10
@@ -296,6 +305,35 @@ def kpi_delta(
     if previous <= 0:
         return None
     return (current - previous) / previous
+
+
+def format_tz_offset(hours: int) -> str:
+    """Render an integer UTC offset as `UTC` / `UTC+N` / `UTC-N`."""
+    if hours == 0:
+        return "UTC"
+    sign = "+" if hours > 0 else "-"
+    return f"UTC{sign}{abs(int(hours))}"
+
+
+def shift_ts(ts: Any, offset: timedelta) -> Any:
+    """Return `ts` shifted by `offset` so the displayed wall-clock
+    reflects the selected UTC offset; `None` passes through.
+
+    The orchestrator persists `ts` in UTC; the dashboard adds the
+    operator's selected offset before display so the "Recent agent
+    runs" table reads in the same timezone the heatmap was bucketed
+    in. Naive datetimes (no tzinfo) are shifted in place; aware
+    datetimes are converted via `astimezone(timezone(offset))` so the
+    rendered string still shows the wall-clock for the selected
+    offset rather than the original UTC reading.
+    """
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            return ts + offset
+        return ts.astimezone(timezone(offset))
+    return ts
 
 
 def parse_issue_number(raw: str) -> Optional[int]:
@@ -976,6 +1014,17 @@ def main() -> None:
             ),
         )
 
+    # Timezone selector lives inside the "When agents run" block (see
+    # the heatmap card below), but the offset is read here so the
+    # second-wave fan-out can bucket the heatmap in the chosen zone.
+    # Seeding session_state on first render lets the selectbox default
+    # to UTC+7 while subsequent renders read whatever the operator
+    # picked. The widget is wired with `key="tz_offset_hours"` further
+    # down so it round-trips through this same session_state slot.
+    if "tz_offset_hours" not in st.session_state:
+        st.session_state.tz_offset_hours = DEFAULT_TZ_OFFSET_HOURS
+    tz_offset_choice = int(st.session_state.tz_offset_hours)
+
     # Topbar: title + spend pill. We render a placeholder spend now
     # so it occupies the right slot; we replace it after the summary
     # query lands below.
@@ -1220,13 +1269,16 @@ def main() -> None:
             )
 
     @st.cache_data(show_spinner=False, ttl=60)
-    def _read_hourly_heatmap(start, end, repo, events_t, stages_t, issue):
+    def _read_hourly_heatmap(
+        start, end, repo, events_t, stages_t, issue, tz_offset_hours,
+    ):
         with analytics_read.analytics_connection() as conn:
             return analytics_read.get_hourly_heatmap(
                 start=start, end=end, repo=repo,
                 events=list(events_t) if events_t is not None else None,
                 stages=list(stages_t) if stages_t is not None else None,
                 issue=issue,
+                tz_offset_hours=tz_offset_hours,
                 conn=conn,
             )
 
@@ -1284,7 +1336,9 @@ def main() -> None:
         ("issues_rows", lambda: _read_top_cost_issues(*key)),
         ("backend_rows", lambda: _read_backend_efficiency(*key)),
         ("repo_rows", lambda: _read_repo_breakdown(*key)),
-        ("heatmap_rows", lambda: _read_hourly_heatmap(*key)),
+        ("heatmap_rows", lambda: _read_hourly_heatmap(
+            *key, int(tz_offset_choice),
+        )),
         ("backend_daily_rows", lambda: _read_backend_daily_tokens(*key)),
     ]
     total_reads = len(first_wave_readers) + len(second_wave_readers)
@@ -1789,16 +1843,35 @@ def main() -> None:
             )
 
     # ── When agents run (heatmap) ────────────────────────────────
+    tz_label = format_tz_offset(int(tz_offset_choice))
     with st.container(border=True):
         st.markdown(
             _card_header_html(
                 "When agents run",
-                "Token volume by hour (UTC) × weekday",
+                f"Token volume by hour ({tz_label}) × weekday",
             ),
             unsafe_allow_html=True,
         )
+        # Per-card UTC-offset selector. `key="tz_offset_hours"` ties
+        # it to the session_state slot seeded above so the heatmap
+        # read (which already fired in the second-wave fan-out) and
+        # this widget agree on the value. On change Streamlit reruns
+        # the script and the next read uses the new offset.
+        st.selectbox(
+            "Timezone",
+            TZ_OFFSET_OPTIONS,
+            key="tz_offset_hours",
+            format_func=format_tz_offset,
+            help=(
+                "Shifts heatmap bucketing and the \"Recent agent "
+                "runs\" `ts` column to the selected UTC offset. "
+                "`ts` is stored in UTC."
+            ),
+        )
         st.plotly_chart(
-            dashboard_charts.hour_weekday_heatmap(heatmap_rows),
+            dashboard_charts.hour_weekday_heatmap(
+                heatmap_rows, tz_label=tz_label,
+            ),
             use_container_width=True,
             config=PLOTLY_CONFIG,
         )
@@ -1806,9 +1879,10 @@ def main() -> None:
     # ── Recent agent runs expander ───────────────────────────────
     with st.expander("Recent agent runs", expanded=False):
         if agent_exits:
+            ts_offset = timedelta(hours=int(tz_offset_choice))
             df_exits = pd.DataFrame([
                 {
-                    "ts": r.ts,
+                    "ts": shift_ts(r.ts, ts_offset),
                     "repo": r.repo,
                     "issue": r.issue,
                     "stage": r.stage,

@@ -1670,5 +1670,60 @@ class FanOutReadsErrorPropagationTest(unittest.TestCase):
         self.assertIn("second wave dead", str(cm.exception))
 
 
+class FormatTzOffsetTest(unittest.TestCase):
+    """`format_tz_offset` renders the integer offset for the sidebar
+    label and the heatmap subtitle."""
+
+    def test_zero_is_utc(self) -> None:
+        _, dashboard = _reload()
+        self.assertEqual(dashboard.format_tz_offset(0), "UTC")
+
+    def test_positive_offset(self) -> None:
+        _, dashboard = _reload()
+        self.assertEqual(dashboard.format_tz_offset(7), "UTC+7")
+
+    def test_negative_offset(self) -> None:
+        _, dashboard = _reload()
+        self.assertEqual(dashboard.format_tz_offset(-5), "UTC-5")
+
+    def test_default_offset_is_plus_seven(self) -> None:
+        _, dashboard = _reload()
+        self.assertEqual(dashboard.DEFAULT_TZ_OFFSET_HOURS, 7)
+        self.assertIn(dashboard.DEFAULT_TZ_OFFSET_HOURS, dashboard.TZ_OFFSET_OPTIONS)
+
+
+class ShiftTsTest(unittest.TestCase):
+    """`shift_ts` converts a UTC `ts` to the wall-clock of the
+    selected offset for display in the "Recent agent runs" table."""
+
+    def test_none_passes_through(self) -> None:
+        from datetime import timedelta
+        _, dashboard = _reload()
+        self.assertIsNone(dashboard.shift_ts(None, timedelta(hours=7)))
+
+    def test_aware_ts_converted_to_offset(self) -> None:
+        from datetime import timedelta
+        _, dashboard = _reload()
+        ts = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+        shifted = dashboard.shift_ts(ts, timedelta(hours=7))
+        self.assertEqual(shifted.hour, 19)
+        self.assertEqual(shifted.utcoffset(), timedelta(hours=7))
+
+    def test_aware_ts_negative_offset(self) -> None:
+        from datetime import timedelta
+        _, dashboard = _reload()
+        ts = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+        shifted = dashboard.shift_ts(ts, timedelta(hours=-5))
+        self.assertEqual(shifted.hour, 7)
+        self.assertEqual(shifted.utcoffset(), timedelta(hours=-5))
+
+    def test_naive_ts_shifted_in_place(self) -> None:
+        from datetime import timedelta
+        _, dashboard = _reload()
+        ts = datetime(2026, 6, 5, 12, 0)
+        shifted = dashboard.shift_ts(ts, timedelta(hours=7))
+        self.assertEqual(shifted, datetime(2026, 6, 5, 19, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

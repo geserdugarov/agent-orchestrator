@@ -2180,6 +2180,7 @@ def get_hourly_heatmap(
     events: Optional[Sequence[str]] = None,
     stages: Optional[Sequence[str]] = None,
     issue: Optional[int] = None,
+    tz_offset_hours: int = 0,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
     conn: Any = None,
@@ -2192,6 +2193,11 @@ def get_hourly_heatmap(
     the rest of the 7x24 grid at render time. `weekday` is the
     raw `EXTRACT(DOW FROM ts)` value (0 = Sunday) so the chart
     layer owns the Monday-first re-ordering choice.
+
+    `tz_offset_hours` shifts `ts` by the given integer hours before
+    the `EXTRACT(DOW / HOUR ...)` calls so the operator can view
+    the heatmap in a non-UTC timezone (the orchestrator stores
+    `ts` in UTC). Zero is the historical behavior.
     """
     url = _resolve_db_url(db_url)
     if conn is None and not url:
@@ -2201,10 +2207,18 @@ def get_hourly_heatmap(
         start=start, end=end, repo=repo,
         events=events, stages=stages, issue=issue,
     )
+    # Normalize `ts` (TIMESTAMPTZ) to a UTC naive `TIMESTAMP` via
+    # `AT TIME ZONE 'UTC'` before applying the offset and extracting.
+    # `EXTRACT()` on a TIMESTAMPTZ is read in the database session
+    # timezone, so without this normalization a non-UTC session would
+    # shift the buckets again on top of our explicit offset.
+    # Parameterised so the integer is never spliced into the SQL.
     sql = (
         "SELECT "
-        "EXTRACT(DOW FROM ts)::int AS weekday, "
-        "EXTRACT(HOUR FROM ts)::int AS hour, "
+        "EXTRACT(DOW FROM ((ts AT TIME ZONE 'UTC') "
+        "+ %s * INTERVAL '1 hour'))::int AS weekday, "
+        "EXTRACT(HOUR FROM ((ts AT TIME ZONE 'UTC') "
+        "+ %s * INTERVAL '1 hour'))::int AS hour, "
         "COUNT(*) AS c, "
         # Per-cell token volume so the dashboard heatmap can render
         # token intensity instead of event count -- matching the
@@ -2218,6 +2232,8 @@ def get_hourly_heatmap(
         "GROUP BY weekday, hour "
         "ORDER BY weekday ASC, hour ASC"
     )
+    offset_int = int(tz_offset_hours)
+    params = [offset_int, offset_int, *params]
     rows = _query(connect_fn, url, sql, params, conn=conn)
     out: list[HourlyHeatmapPoint] = []
     for row in rows:

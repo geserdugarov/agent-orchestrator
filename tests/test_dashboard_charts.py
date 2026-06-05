@@ -321,6 +321,14 @@ class HourWeekdayHeatmapTest(unittest.TestCase):
         self.assertGreater(fig.data[0].xgap, 0)
         self.assertGreater(fig.data[0].ygap, 0)
 
+    def test_x_axis_label_defaults_to_utc(self) -> None:
+        fig = dashboard_charts.hour_weekday_heatmap([])
+        self.assertEqual(fig.layout.xaxis.title.text, "hour (UTC)")
+
+    def test_x_axis_label_reflects_tz_label(self) -> None:
+        fig = dashboard_charts.hour_weekday_heatmap([], tz_label="UTC+7")
+        self.assertEqual(fig.layout.xaxis.title.text, "hour (UTC+7)")
+
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
 class DonePerDayBarsTest(unittest.TestCase):
