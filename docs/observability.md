@@ -152,10 +152,10 @@ The sync surfaces feedback through the module logger and the stdout summary:
 
 Run `uv run python -m orchestrator.analytics.sync` on whatever cadence you prefer; `--log-path` and `--db-url` override the env values for one-off replays of archived JSONL files. The default cadence is operator-chosen because the JSONL sink is already the authoritative analytics surface on disk — the database is for aggregation and reporting, not durability.
 
-For an unattended deployment, drive the sync from `cron`. A typical entry runs hourly at five past the hour, guards against overlap with `flock`, and captures output:
+For an unattended deployment, drive the sync from `cron`. A typical entry runs hourly, guards against overlap with `flock`, and captures output:
 
 ```cron
-05 * * * * cd /path/to/agent-orchestrator && /usr/bin/flock -n /tmp/agent-orchestrator-analytics-sync.lock /home/<user>/.local/bin/uv run python -m orchestrator.analytics.sync --log-path /path/to/agent-orchestrator/logs/analytics.jsonl --db-url 'postgresql://<user>:<password>@<host>:<port>/<database>' >> /path/to/agent-orchestrator/logs/analytics-sync.cron.log 2>&1
+00 * * * * cd /path/to/agent-orchestrator && /usr/bin/flock -n /tmp/agent-orchestrator-analytics-sync.lock /home/<user>/.local/bin/uv run python -m orchestrator.analytics.sync --log-path /path/to/agent-orchestrator/logs/analytics.jsonl --db-url 'postgresql://<user>:<password>@<host>:<port>/<database>' >> /path/to/agent-orchestrator/logs/analytics-sync.cron.log 2>&1
 ```
 
 - `cd /path/to/agent-orchestrator` so `uv run` finds the project's `pyproject.toml`.
