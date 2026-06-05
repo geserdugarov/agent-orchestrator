@@ -158,8 +158,8 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 | decomposer agent (`DECOMPOSE_AGENT`) | subprocess (fresh or resumed) | `_handle_decomposing` (retry budget OK) or HITL resume | one shot per tick when needed |
 | implementer agent (`DEV_AGENT`) | subprocess | `_handle_implementing` (no commits yet, retry budget OK) or HITL resume | one shot per tick when needed |
 | reviewer agent (`REVIEW_AGENT`) | subprocess (fresh session) | `_handle_validating`, round < max | one shot per tick |
-| dev-fix agent | subprocess (resumed dev session) | reviewer says CHANGES_REQUESTED | one shot per tick |
-| `_handle_resolving_conflict` | function call | issue label `resolving_conflict` (operator-applied or per-tick detour); also fires on closed-`resolving_conflict` issues from the polling sweep | once per tick per such issue |
+| dev-fix agent | subprocess (resumed dev session) | reviewer says CHANGES_REQUESTED (dispatched from `_handle_validating` after the relabel to `fixing`), or fresh in_review PR feedback (dispatched from `_handle_fixing` after the quiet window) — both run with `stage="fixing"` and bounce back to `validating` for re-review | one shot per tick |
+| `_handle_resolving_conflict` | function call | issue label `resolving_conflict` (operator relabel or refresh-time conflicted rebase); also fires on closed-`resolving_conflict` issues from the polling sweep | once per tick per such issue |
 | dev-conflict agent | subprocess (resumed dev session) | `_handle_resolving_conflict` and `git rebase` left conflicts | one shot per tick |
 | `_handle_question` | function call | issue label `question` OR closed-`question` issue from the polling sweep | once per tick per such issue |
 | question agent (`DECOMPOSE_AGENT` backend) | subprocess (read-only) | `_handle_question` (no prior session OR new human comment on a parked Q&A) | one shot per tick when needed |

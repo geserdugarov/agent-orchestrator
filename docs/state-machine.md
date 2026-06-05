@@ -39,7 +39,7 @@ Two guards run at `GitHubClient.set_workflow_label` (the single label-write chok
 | `umbrella` | Parent issue with no implementation of its own; closes to `done` when all children resolve. |
 | `implementing` | The dev agent is producing commits in a per-issue worktree. |
 | `documenting` | The dev session runs the single docs pass on the existing PR worktree, reached only via the **final-docs handoff** in `_handle_validating`'s approval branch (after verify + squash). Advances to `in_review` after a pushed docs commit OR an explicit `DOCS: NO_CHANGE` verdict against a remote-clean head. Every pre-approval push (implementing, validating/fixing, in_review drift, resolving_conflict) hands straight back to `validating` instead — the docs pass runs exactly once per reviewer-approval handoff. |
-| `validating` | The reviewer agent is checking the diff and may bounce fixes back to the dev agent. |
+| `validating` | The reviewer agent is checking the diff; on `VERDICT: APPROVED` the local verify gate runs `VERIFY_COMMANDS` against the worktree before the squash + `documenting` handoff. A `CHANGES_REQUESTED` verdict relabels to `fixing` before the dev spawn so the dev-fix subphase is observably outside `validating`. |
 | `in_review` | A PR is open and ready for human review and manual merge. The orchestrator never merges from here -- humans drive the merge. A mergeable PR whose current head completed the reviewer-approved final-docs handoff (or carries a real GitHub APPROVED review), with no standing human CHANGES_REQUESTED, earns a one-shot HITL ping per head SHA; an unmergeable PR parks awaiting human attention. |
 | `fixing` | The dev fix-loop is active. Entered from two routes: `_handle_in_review` on unread in-review feedback (any of the four PR comment surfaces) or a human CI-fix request, AND `_handle_validating` on a `CHANGES_REQUESTED` verdict (the relabel lands BEFORE the dev spawn so the dev-fix subphase is observably under `fixing`, not `validating`). A successful fix — and a rescan finding no unread feedback — both bounce DIRECTLY back to `validating` so the reviewer re-approves before the in_review ready-ping gate can pass. Docs are deferred to the final-docs handoff after reviewer approval. |
 | `resolving_conflict` | The orchestrator is resolving a rebase conflict on a PR branch against `<remote>/<base>` (the remote name comes from `spec.remote_name`, default `origin`). Reached only when the per-tick base-sync rebase actually leaves conflicted files, or via an operator relabel; a merely-behind-base clean rebase is handled in the refresh itself and routes straight to `validating`. `_handle_in_review` no longer routes here. |
@@ -686,8 +686,11 @@ The Q&A flow deliberately keeps state minimal: no PR is ever opened, no branch i
      success path and the failure path -- the orchestrator's own park
      comment is filtered by id + body marker on the next tick's
      rescan, so the broad bump is unnecessary). On a pushed fix clear
-     bookmarks, reset `review_round`, and flip DIRECTLY to `validating`
-     so the reviewer re-evaluates the
+     bookmarks, adjust `review_round` per the route discriminator
+     `pending_fix_at` (in_review->fixing reset to 0 -- the previous
+     reviewer round was APPROVED; validating->fixing bumped by 1 --
+     still inside the same CHANGES_REQUESTED review cycle), and flip
+     DIRECTLY to `validating` so the reviewer re-evaluates the
      new head next tick (docs do not run on this exit -- the single
      docs pass is deferred to the final-docs handoff after reviewer
      approval). On failure (timeout / dirty / push fail
