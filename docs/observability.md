@@ -152,6 +152,18 @@ The sync surfaces feedback through the module logger and the stdout summary:
 
 Run `uv run python -m orchestrator.analytics.sync` on whatever cadence you prefer; `--log-path` and `--db-url` override the env values for one-off replays of archived JSONL files. The default cadence is operator-chosen because the JSONL sink is already the authoritative analytics surface on disk — the database is for aggregation and reporting, not durability.
 
+For an unattended deployment, drive the sync from `cron`. A typical entry runs hourly at five past the hour, guards against overlap with `flock`, and captures output:
+
+```cron
+05 * * * * cd /path/to/agent-orchestrator && /usr/bin/flock -n /tmp/agent-orchestrator-analytics-sync.lock /home/<user>/.local/bin/uv run python -m orchestrator.analytics.sync --log-path /path/to/agent-orchestrator/logs/analytics.jsonl --db-url 'postgresql://<user>:<password>@<host>:<port>/<database>' >> /path/to/agent-orchestrator/logs/analytics-sync.cron.log 2>&1
+```
+
+- `cd /path/to/agent-orchestrator` so `uv run` finds the project's `pyproject.toml`.
+- Absolute `/home/<user>/.local/bin/uv` because cron's `PATH` does not include `~/.local/bin`.
+- `flock -n` makes the run a no-op when a previous invocation is still holding the lock, so a long replay never overlaps with the next tick.
+- `--log-path` and `--db-url` are explicit CLI overrides, so the cron entry does not depend on `.env` being loadable from cron's environment.
+- `>> ...analytics-sync.cron.log 2>&1` keeps stdout and stderr in the project log area instead of routing failures to local `mail`.
+
 ### Read model (`orchestrator/analytics/read.py`)
 
 Thin, testable data-access layer over `analytics_events`, the `analytics_agent_runs` view, and the `analytics_daily_rollup` materialized view. The dashboard's window-bounded aggregates read from the rollup; per-row drill-downs and widgets the rollup cannot reconstruct exactly stay on the base table or the agent-run view. The module is Streamlit-free so the read path can be wired into any UI.

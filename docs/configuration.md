@@ -220,7 +220,7 @@ The pipeline is opt-in and layered: the orchestrator writes JSONL (`ANALYTICS_LO
    uv run python -m orchestrator.analytics.sync
    ```
 
-   Inserts dedupe by `content_hash`, so re-running is idempotent. No-op when `ANALYTICS_DB_URL` is unset/disabled, `ANALYTICS_LOG_PATH` is explicitly disabled, or the JSONL file is absent. Schedule on whatever cadence you prefer.
+   Inserts dedupe by `content_hash`, so re-running is idempotent. No-op when `ANALYTICS_DB_URL` is unset/disabled, `ANALYTICS_LOG_PATH` is explicitly disabled, or the JSONL file is absent. Schedule on whatever cadence you prefer; see [`observability.md#operator-workflow`](observability.md#operator-workflow) for a sample `cron` entry.
 5. **Launch the dashboard.** Install the optional `dashboard` group once, then run Streamlit:
 
    ```sh
