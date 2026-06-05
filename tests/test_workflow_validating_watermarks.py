@@ -39,7 +39,7 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
     """
 
     PR_NUMBER = 22
-    BRANCH = "orchestrator/issue-15"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-15"
 
     def _setup(self):
         gh = FakeGitHubClient()
@@ -136,7 +136,7 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 25
-    BRANCH = "orchestrator/issue-20"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-20"
 
     def _setup(self):
         gh = FakeGitHubClient()
@@ -240,7 +240,7 @@ class ValidatingHandoffSeedsAllWatermarksTest(
     """
 
     PR_NUMBER = 600
-    BRANCH = "orchestrator/issue-200"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-200"
 
     def _setup(self, *, reviews=(), review_comments=()):
         gh = FakeGitHubClient()
@@ -369,7 +369,7 @@ class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 800
-    BRANCH = "orchestrator/issue-300"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-300"
 
     def test_inline_comment_with_bot_issue_id_survives_handoff(self) -> None:
         gh = FakeGitHubClient()
@@ -449,7 +449,7 @@ class HandoffWithoutPickupIdLegacyStateTest(
     """
 
     PR_NUMBER = 1000
-    BRANCH = "orchestrator/issue-500"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-500"
 
     def test_legacy_human_during_implementing_survives_handoff(self) -> None:
         gh = FakeGitHubClient()
@@ -549,7 +549,7 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 1500
-    BRANCH = "orchestrator/issue-900"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-900"
 
     def test_consumed_reply_does_not_replay_after_handoff(self) -> None:
         gh = FakeGitHubClient()
@@ -651,7 +651,7 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         state = gh.read_pinned_state(issue)
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", lambda *a, **kw: _agent()):
             result = workflow._resume_developer_on_human_reply(
                 gh, _TEST_SPEC, issue, state
@@ -676,7 +676,7 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
     """
 
     PR_NUMBER = 1600
-    BRANCH = "orchestrator/issue-800"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-800"
 
     def test_pr_conv_comment_below_consumed_through_is_preserved(self) -> None:
         gh = FakeGitHubClient()

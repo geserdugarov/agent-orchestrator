@@ -36,20 +36,18 @@ they route to) still lives in `workflow.py` and `orchestrator/stages/`.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 from . import config
 from .config import RepoSpec
 from .git_plumbing import _authed_target_fetch, _git, _target_root_lock
-from .github import GitHubClient
+from .github import GitHubClient, PinnedState
 
 log = logging.getLogger(__name__)
-
-
-def _branch_name(issue_number: int) -> str:
-    return f"orchestrator/issue-{issue_number}"
 
 
 # Allowed characters in a worktree directory segment: alphanumerics plus
@@ -76,6 +74,152 @@ def _sanitize_slug(slug: str) -> str:
     return cleaned
 
 
+def _sanitize_branch_segment(slug: str) -> str:
+    """Make a slug safe for use as a single git branch-name segment.
+
+    Layers on top of `_sanitize_slug` (filesystem-safe single segment)
+    the additional `git check-ref-format` rules so a branch like
+    `orchestrator/<segment>/issue-N` is accepted by git. Without this,
+    a configured `REPOS` slug whose name contains `.lock`, `..`, or a
+    trailing `.` would yield a ref name git rejects, breaking every
+    push for that repo before the PR even exists -- the
+    filesystem-only sanitizer happily produces `owner__foo.lock` /
+    `owner__foo..bar` / `owner__foo.` even though `git
+    check-ref-format` flags them.
+
+    Rules applied beyond `_sanitize_slug`:
+
+    * Collapse any run of two or more dots to a single `_` so the
+      segment never carries the forbidden `..` sequence. A single
+      `.` mid-segment is allowed by git and left alone.
+    * Replace a trailing `.lock` with `_lock` -- git rejects any
+      slash-separated component ending in `.lock` (reserved for
+      git's own lock files).
+    * Replace any trailing `.` with `_` -- git rejects refs ending
+      in `.`.
+
+    Any of those three rewrites is information-lossy: `foo.lock` and
+    `foo_lock` would both collapse to `foo_lock`, so two `REPOS`
+    entries sharing a `target_root` could still collide on the same
+    branch and defeat slug-namespacing. To stay injective, whenever
+    the ref-only rewrites change the filesystem-safe form, the
+    segment carries a `__h<digest>` suffix derived from the
+    untransformed slug. Distinct slugs therefore always hash to
+    distinct branches; the suffix only appears on the rare
+    pathological inputs, so common slugs keep their readable
+    `<owner>__<name>` form. (The hash is 64 bits; an exact-match
+    collision would require an attacker-crafted REPOS entry, which
+    is not in our threat model.)
+
+    Path layout (`_repo_worktrees_root`) keeps the filesystem-only
+    `_sanitize_slug` because directory names tolerate `.lock` /
+    trailing-dot just fine; the branch segment is the stricter
+    surface, so it gets its own sanitizer rather than tightening the
+    filesystem one and uglifying every common slug's worktree path.
+    """
+    s_path = _sanitize_slug(slug)
+    s = s_path
+    # `..` anywhere is forbidden. Collapse any run of dots to a single
+    # `_` so a segment cannot smuggle the sequence past the trailing-
+    # dot / `.lock` checks below.
+    s = re.sub(r"\.{2,}", "_", s)
+    # `.lock` suffix on a component is reserved by git.
+    if s.endswith(".lock"):
+        s = s[: -len(".lock")] + "_lock"
+    # Trailing `.` on a component is rejected. Loop so any
+    # follow-on dot revealed by the trim is also handled.
+    while s.endswith("."):
+        s = s[:-1] + "_"
+    # Defensive fallbacks: the substitutions above could in principle
+    # produce an empty / leading-dot string (e.g. an input of `.` or
+    # `..` collapses far enough that the leading-dot escape from
+    # `_sanitize_slug` no longer covers the result).
+    if not s:
+        s = "_"
+    if s.startswith("."):
+        s = "_" + s
+    if s == s_path:
+        return s
+    # Ref-only rewrites changed the filesystem form. Append a
+    # content-derived hash of the ORIGINAL slug so two distinct
+    # inputs that collapsed to the same `s` (e.g. `owner/foo.lock`
+    # and `owner/foo_lock`) stay distinct on the branch ref --
+    # without this, two `REPOS` entries sharing a `target_root`
+    # would collide on the same branch and the slug-namespacing
+    # fix would silently regress for those slug shapes.
+    digest = hashlib.sha1((slug or "").encode("utf-8")).hexdigest()[:16]
+    return f"{s}__h{digest}"
+
+
+def _branch_name(spec: RepoSpec, issue_number: int) -> str:
+    """Per-issue branch name namespaced by the spec's git-ref-safe slug.
+
+    Two RepoSpecs that share the same `target_root` (a single local clone
+    with multiple remotes, e.g. `lance-open-source` and `lance-private`)
+    would otherwise collide on `orchestrator/issue-<n>` because git
+    refuses to check the same branch out in two worktrees of one repo.
+    Including the sanitized slug keeps each spec's worktree on its own
+    branch. The `orchestrator/` prefix is preserved so
+    `_cleanup_terminal_branch`'s "orchestrator-owned namespace"
+    invariant still holds.
+
+    Uses `_sanitize_branch_segment` rather than the filesystem-only
+    `_sanitize_slug` so a slug like `owner/foo.lock` or
+    `owner/foo..bar` does not produce a branch name `git
+    check-ref-format` rejects.
+    """
+    return (
+        f"orchestrator/{_sanitize_branch_segment(spec.slug)}"
+        f"/issue-{issue_number}"
+    )
+
+
+def _resolve_branch_name(
+    state: PinnedState, spec: RepoSpec, issue_number: int,
+) -> str:
+    """Branch to use for this issue, preferring an already-pinned value.
+
+    Issues that were already in flight when slug-namespacing landed
+    have a live PR open against the legacy `orchestrator/issue-<n>`
+    ref. If we recomputed via `_branch_name(spec, n)` we would (a)
+    fail to find the existing PR on lookup, (b) push to a brand-new
+    slug-namespaced branch, and (c) leave the legacy branch + PR
+    orphaned. The resolver therefore prefers, in order:
+
+    1. `state["branch"]` when it names a value in the orchestrator-
+       owned `orchestrator/...` namespace (the post-slug-namespacing
+       persistence path; also covers in-flight PRs that recorded the
+       legacy form before this code shipped).
+    2. The legacy `orchestrator/issue-<n>` ref when `state["pr_number"]`
+       is set but `state["branch"]` is not. Pre-slug-namespacing
+       handlers were inconsistent about persisting `branch`, so a
+       legacy in-flight PR can carry `pr_number` without `branch`.
+       The PR's head is the legacy ref by construction (the only
+       form the orchestrator ever produced before this change), so
+       inferring `orchestrator/issue-<n>` keeps us anchored on the
+       existing PR instead of opening a duplicate on the namespaced
+       branch.
+    3. The slug-namespaced `_branch_name(spec, n)` form for fresh
+       issues with no PR yet.
+
+    The pinned value is only honored when it is in the orchestrator-
+    owned `orchestrator/...` namespace so a corrupted / foreign pinned
+    state cannot redirect us at an arbitrary branch.
+    """
+    pinned = state.get("branch")
+    if isinstance(pinned, str) and pinned.startswith("orchestrator/"):
+        return pinned
+    if state.get("pr_number") is not None:
+        # Legacy in-flight PR: branch was not persisted, but a PR
+        # was opened. The pre-slug-namespacing branch name was always
+        # `orchestrator/issue-<n>`, so the live PR head is on that
+        # ref. Targeting it keeps the orchestrator anchored on the
+        # existing PR rather than orphaning it on the new namespaced
+        # branch.
+        return f"orchestrator/issue-{issue_number}"
+    return _branch_name(spec, issue_number)
+
+
 def _repo_worktrees_root(spec: RepoSpec) -> Path:
     """Per-repo subdirectory under WORKTREES_DIR for this spec.
 
@@ -90,12 +234,20 @@ def _worktree_path(spec: RepoSpec, issue_number: int) -> Path:
     return _repo_worktrees_root(spec) / f"issue-{issue_number}"
 
 
-def _ensure_worktree(spec: RepoSpec, issue_number: int) -> Path:
+def _ensure_worktree(
+    spec: RepoSpec, issue_number: int, *, branch: str | None = None,
+) -> Path:
     """Return a worktree on a per-issue branch, reusing one with unpushed work.
 
     The reuse is what lets the orchestrator survive a crash between codex
     committing and the orchestrator pushing -- without it, the next tick would
     wipe the worktree and we'd burn another codex run on the same prompt.
+
+    `branch` overrides the default `_branch_name(spec, issue_number)`
+    derivation so callers can anchor on an already-pinned branch (e.g.
+    a legacy `orchestrator/issue-<n>` ref kept in pinned state when
+    slug-namespacing landed) instead of forcing the issue onto a new
+    branch and orphaning its existing PR.
 
     All git operations target `spec.target_root` and therefore mutate the
     parent clone's `.git/config`. The per-target_root lock (see
@@ -106,7 +258,8 @@ def _ensure_worktree(spec: RepoSpec, issue_number: int) -> Path:
     with _target_root_lock(spec.target_root):
         _repo_worktrees_root(spec).mkdir(parents=True, exist_ok=True)
         wt = _worktree_path(spec, issue_number)
-        branch = _branch_name(issue_number)
+        if branch is None:
+            branch = _branch_name(spec, issue_number)
 
         if wt.exists():
             if _has_new_commits(spec, wt):
@@ -140,7 +293,9 @@ def _ensure_worktree(spec: RepoSpec, issue_number: int) -> Path:
         return wt
 
 
-def _ensure_pr_worktree(spec: RepoSpec, issue_number: int) -> Path:
+def _ensure_pr_worktree(
+    spec: RepoSpec, issue_number: int, *, branch: str | None = None,
+) -> Path:
     """Like `_ensure_worktree`, but restores the local branch from
     `origin/<branch>` when it is missing instead of branching from
     `origin/<base>`.
@@ -167,7 +322,8 @@ def _ensure_pr_worktree(spec: RepoSpec, issue_number: int) -> Path:
     with _target_root_lock(spec.target_root):
         _repo_worktrees_root(spec).mkdir(parents=True, exist_ok=True)
         wt = _worktree_path(spec, issue_number)
-        branch = _branch_name(issue_number)
+        if branch is None:
+            branch = _branch_name(spec, issue_number)
 
         if wt.exists():
             if _has_new_commits(spec, wt):
@@ -231,7 +387,7 @@ def _has_new_commits(spec: RepoSpec, worktree: Path) -> bool:
 
 # The decomposer needs a working directory to run `git ls-files` / `wc -l`
 # against, but it must never touch the implementer's per-issue branch. If
-# it shared `_worktree_path(issue)`, the local `orchestrator/issue-<n>`
+# it shared `_worktree_path(issue)`, the local `orchestrator/<slug>/issue-<n>`
 # branch would get anchored at whatever `origin/<base>` snapshot the
 # decomposer saw -- and a `split` decision parks the parent on `blocked`
 # for the duration of its children's lifecycle. By the time the parent
@@ -303,10 +459,22 @@ def _cleanup_decompose_worktree(spec: RepoSpec, issue_number: int) -> None:
 
 def _branch_has_unpushed_commits(
     spec: RepoSpec, issue_number: int,
-) -> bool:
-    """True if the local `orchestrator/issue-N` branch exists in
-    `spec.target_root` and carries commits beyond
-    `<remote>/<base>`.
+) -> Optional[str]:
+    """Return the per-issue branch carrying unpushed commits, or None.
+
+    Probes BOTH the slug-namespaced branch and the legacy
+    `orchestrator/issue-<n>` form. A pre-slug-namespacing
+    `question_commits` park (or any in-flight question worktree
+    created before this code shipped) holds its commits on the
+    legacy ref and never persisted `state["branch"]`, so probing
+    only the slug-namespaced form would let the
+    `_handle_implementing` question-relabel guard clear the park,
+    `_ensure_worktree` reuse the on-disk worktree (still checked
+    out on the legacy branch), and the recovered-worktree
+    shortcut push those read-only question commits through as
+    fresh dev work. Returning the offending branch lets the
+    caller name it in the operator message so the cleanup hint
+    (`git branch -D <name>`) points at the right ref.
 
     Inspects the parent clone directly so the answer does not
     depend on a per-issue worktree existing on disk. The question-
@@ -320,17 +488,18 @@ def _branch_has_unpushed_commits(
     the recovered-worktree shortcut would then push those commits
     as if a dev session authored them.
 
-    Returns False when:
+    Returns None when:
 
-    * the local branch does not exist (no state to inspect);
-    * the local branch exists at exactly `<remote>/<base>` (a
-      fresh-from-base reset);
+    * neither candidate branch exists (no state to inspect);
+    * a candidate branch exists at exactly `<remote>/<base>` (a
+      fresh-from-base reset) AND no other candidate carries
+      commits;
     * the `rev-list` itself errors (transient git failure -- the
       caller's later steps will surface the underlying problem if
       it persists).
 
-    Returns True only when the branch has at least one commit
-    that is not in `<remote>/<base>`, which is the exact
+    Returns the name of the first candidate branch that has at
+    least one commit not in `<remote>/<base>`, which is the exact
     condition the recovered-worktree shortcut would treat as
     "unpushed dev work" -- the read-only-violation we are trying
     to prevent.
@@ -340,29 +509,44 @@ def _branch_has_unpushed_commits(
     `RLock` re-entry keeps callers that already hold the lock
     safe.
     """
-    branch = _branch_name(issue_number)
+    namespaced = _branch_name(spec, issue_number)
+    legacy = f"orchestrator/issue-{issue_number}"
+    # Probe the namespaced form first so a worktree created after
+    # slug-namespacing is named in the operator message before any
+    # surviving legacy ref. Dedup so a deployment whose sanitized
+    # slug somehow produced the legacy form does not double-probe.
+    candidates: list[str] = [namespaced]
+    if legacy != namespaced:
+        candidates.append(legacy)
+    base_ref = f"refs/remotes/{spec.remote_name}/{spec.base_branch}"
     with _target_root_lock(spec.target_root):
-        have_local = _git(
-            "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
-            cwd=spec.target_root,
-        ).returncode == 0
-        if not have_local:
-            return False
-        r = _git(
-            "rev-list", "--count",
-            f"refs/remotes/{spec.remote_name}/{spec.base_branch}"
-            f"..refs/heads/{branch}",
-            cwd=spec.target_root,
-        )
-    if r.returncode != 0:
-        return False
-    try:
-        return int((r.stdout or "0").strip() or "0") > 0
-    except ValueError:
-        return False
+        for branch in candidates:
+            have_local = _git(
+                "rev-parse", "--verify", "--quiet",
+                f"refs/heads/{branch}",
+                cwd=spec.target_root,
+            ).returncode == 0
+            if not have_local:
+                continue
+            r = _git(
+                "rev-list", "--count",
+                f"{base_ref}..refs/heads/{branch}",
+                cwd=spec.target_root,
+            )
+            if r.returncode != 0:
+                continue
+            try:
+                count = int((r.stdout or "0").strip() or "0")
+            except ValueError:
+                continue
+            if count > 0:
+                return branch
+    return None
 
 
-def _cleanup_question_worktree(spec: RepoSpec, issue_number: int) -> None:
+def _cleanup_question_worktree(
+    spec: RepoSpec, issue_number: int, *, branch: str | None = None,
+) -> None:
     """Tear down the per-issue worktree and local branch after a
     `_handle_question` tick.
 
@@ -397,7 +581,8 @@ def _cleanup_question_worktree(spec: RepoSpec, issue_number: int) -> None:
     handler. Serialized via `_target_root_lock` for the same
     `.git/config.lock` reason described on `_ensure_worktree`.
     """
-    branch = _branch_name(issue_number)
+    if branch is None:
+        branch = _branch_name(spec, issue_number)
     try:
         wt = _worktree_path(spec, issue_number)
         if wt.exists():
@@ -437,7 +622,11 @@ def _cleanup_question_worktree(spec: RepoSpec, issue_number: int) -> None:
 
 
 def _cleanup_terminal_branch(
-    gh: GitHubClient, spec: RepoSpec, issue_number: int
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue_number: int,
+    *,
+    branch: str | None = None,
 ) -> None:
     """Remove the per-issue worktree and delete the local + remote branches.
 
@@ -449,9 +638,15 @@ def _cleanup_terminal_branch(
     time we reach here the issue has already flipped to `done` or
     `rejected`, and a stale ref is tidiness, not correctness.
 
-    The branch name is derived from the issue number and constrained to the
-    orchestrator-owned `orchestrator/issue-<n>` namespace, so this cleanup
-    cannot touch an arbitrary branch.
+    `branch` overrides the default `_branch_name(spec, issue_number)`
+    so terminal cleanup of an in-flight issue that was opened on the
+    legacy `orchestrator/issue-<n>` ref reaps that branch (not the new
+    namespaced one that was never pushed).
+
+    The branch name is constrained to the orchestrator-owned
+    `orchestrator/...` namespace (verified via the
+    `orchestrator/`-prefix check in `_resolve_branch_name` upstream),
+    so this cleanup cannot touch an arbitrary branch.
 
     Order matters: the worktree must come down before `git branch -D`,
     because git refuses to delete a branch that's still checked out in a
@@ -467,7 +662,8 @@ def _cleanup_terminal_branch(
     `.git/config.lock`. The remote delete is a GitHub-side HTTP call
     (no local git plumbing) and stays outside the lock.
     """
-    branch = _branch_name(issue_number)
+    if branch is None:
+        branch = _branch_name(spec, issue_number)
 
     # Each step is wrapped individually: a raise from `_git` (missing
     # `spec.target_root`, missing `git` binary, OSError) or from the

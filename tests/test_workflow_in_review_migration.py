@@ -40,7 +40,7 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 300
-    BRANCH = "orchestrator/issue-150"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-150"
 
     def _legacy_setup(self):
         gh = FakeGitHubClient()
@@ -162,7 +162,7 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
     """
 
     PR_NUMBER = 900
-    BRANCH = "orchestrator/issue-400"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-400"
 
     def _legacy_setup(self):
         gh = FakeGitHubClient()
@@ -279,7 +279,7 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
     """
 
     PR_NUMBER = 1100
-    BRANCH = "orchestrator/issue-600"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-600"
 
     def test_zero_watermark_does_not_fall_back_to_last_action(self) -> None:
         gh = FakeGitHubClient()

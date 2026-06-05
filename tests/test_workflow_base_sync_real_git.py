@@ -63,7 +63,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.wt_root.mkdir(parents=True)
         self.wt = self.wt_root / "issue-7"
         self._git(
-            "worktree", "add", "-b", "orchestrator/issue-7",
+            "worktree", "add", "-b", "orchestrator/acme__widget/issue-7",
             str(self.wt), "origin/main", cwd=self.work,
         )
         (self.wt / "feature.py").write_text("feature\n")
@@ -111,11 +111,11 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
     ) -> None:
         self.gh.seed_state(
             issue_number, pr_number=pr_number,
-            branch=f"orchestrator/issue-{issue_number}",
+            branch=f"orchestrator/acme__widget/issue-{issue_number}",
         )
         self.gh.add_pr(FakePR(
             number=pr_number,
-            head_branch=f"orchestrator/issue-{issue_number}",
+            head_branch=f"orchestrator/acme__widget/issue-{issue_number}",
             merged=merged, state=state,
         ))
 
@@ -206,17 +206,17 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7", review_round=4,
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7", review_round=4,
         )
         self.gh.add_pr(FakePR(
-            number=42, head_branch="orchestrator/issue-7",
+            number=42, head_branch="orchestrator/acme__widget/issue-7",
             merged=False, state="open",
         ))
         # Publish the orchestrator branch to the bare remote so the
         # force-with-lease check has a known SHA to compare against
         # (the production PR flow does the same first push when
         # `_handle_implementing` opens the PR).
-        self._git("push", "origin", "orchestrator/issue-7", cwd=self.wt)
+        self._git("push", "origin", "orchestrator/acme__widget/issue-7", cwd=self.wt)
         self._advance_base(conflicting=False)
         head_before = self._wt_head()
 
@@ -255,7 +255,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertTrue(self._is_clean())
         # The push was issued with force-with-lease pinned to the
         # pre-rebase SHA (= the remote PR head at the time).
-        self.assertEqual(captured.get("branch"), "orchestrator/issue-7")
+        self.assertEqual(captured.get("branch"), "orchestrator/acme__widget/issue-7")
         self.assertEqual(captured.get("force_with_lease"), head_before)
         # Label flipped to `validating`, NOT `resolving_conflict`.
         self.assertIn((7, "validating"), self.gh.label_history)
@@ -278,14 +278,14 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # and the next refresh tick picks the work up again.
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self.gh.add_pr(FakePR(
-            number=42, head_branch="orchestrator/issue-7",
+            number=42, head_branch="orchestrator/acme__widget/issue-7",
             merged=False, state="open",
         ))
         # Publish the branch so the lease has a real SHA to compare
         # against, then advance base cleanly.
-        self._git("push", "origin", "orchestrator/issue-7", cwd=self.wt)
+        self._git("push", "origin", "orchestrator/acme__widget/issue-7", cwd=self.wt)
         self._advance_base(conflicting=False)
         head_before = self._wt_head()
 
@@ -330,9 +330,9 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # that still enters `resolving_conflict` from the refresh.
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self.gh.add_pr(FakePR(
-            number=42, head_branch="orchestrator/issue-7",
+            number=42, head_branch="orchestrator/acme__widget/issue-7",
             merged=False, state="open",
         ))
         self._advance_base(conflicting=True)

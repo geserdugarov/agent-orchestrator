@@ -37,7 +37,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 77
-    BRANCH = "orchestrator/issue-30"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-30"
 
     def _seed(
         self,
@@ -92,6 +92,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # weight that should not survive past the `done` flip.
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 30,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-30",
         )
 
     def test_in_review_pr_closed_unmerged(self) -> None:
@@ -112,6 +113,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # declined. Cleanup must fire on the rejected terminal too.
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 30,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-30",
         )
 
     def test_in_review_mergeable_final_docs_handoff_pings_human(self) -> None:
@@ -526,12 +528,12 @@ class HandleInReviewClosedIssueExternalMergeTest(
         issue.closed = True  # Resolves #N has already auto-closed it.
         gh.add_issue(issue)
         pr = FakePR(
-            number=99, head_branch="orchestrator/issue-40",
+            number=99, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-40",
             head=FakePRRef(sha="cafe1234"),
             merged=True, state="closed",
         )
         gh.add_pr(pr)
-        gh.seed_state(40, pr_number=99, branch="orchestrator/issue-40")
+        gh.seed_state(40, pr_number=99, branch="orchestrator/geserdugarov__agent-orchestrator/issue-40")
 
         self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
@@ -553,7 +555,7 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 130
-    BRANCH = "orchestrator/issue-90"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-90"
 
     def _setup_with_review(self, review):
         gh = FakeGitHubClient()

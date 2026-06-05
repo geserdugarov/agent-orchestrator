@@ -66,7 +66,10 @@ class HandleQuestionFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("last_question_at", data)
 
         # The agent ran in the per-issue worktree, not the decomposer one.
-        mocks["_ensure_worktree"].assert_called_once_with(_TEST_SPEC, 1)
+        mocks["_ensure_worktree"].assert_called_once_with(
+            _TEST_SPEC, 1,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-1",
+        )
         mocks["_ensure_decompose_worktree"].assert_not_called()
 
     def test_uses_decompose_agent_backend(self) -> None:
@@ -413,6 +416,7 @@ class HandleQuestionClosedIssueTerminalTest(
         # Cleanup ran.
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, 50,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-50",
         )
 
     def test_closed_issue_with_unsafe_park_still_cleans_up(self) -> None:
@@ -441,6 +445,7 @@ class HandleQuestionClosedIssueTerminalTest(
         self.assertEqual(gh.label_history, [(51, "done")])
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, 51,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-51",
         )
 
     def test_closed_issue_without_prior_state_finalizes_cleanly(self) -> None:
@@ -463,6 +468,7 @@ class HandleQuestionClosedIssueTerminalTest(
         self.assertIn("question_closed_at", data)
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, 52,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-52",
         )
 
 
@@ -497,6 +503,7 @@ class HandleQuestionWorktreeCleanupTest(
         )
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, 100,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-100",
         )
 
     def test_silent_path_cleans_up_worktree(self) -> None:
@@ -508,6 +515,7 @@ class HandleQuestionWorktreeCleanupTest(
         )
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, 101,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-101",
         )
 
     def test_resume_no_new_comments_still_cleans_stale_worktree(
@@ -536,6 +544,7 @@ class HandleQuestionWorktreeCleanupTest(
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, 102,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-102",
         )
 
     def test_timeout_park_keeps_worktree_for_inspection(self) -> None:
@@ -650,6 +659,7 @@ class HandleQuestionUnsafeParkStabilityTest(
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, 303,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-303",
         )
 
     def test_resume_after_unsafe_park_with_clean_answer_cleans_up(
@@ -691,6 +701,7 @@ class HandleQuestionUnsafeParkStabilityTest(
         # Worktree is now safe to reap.
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, 304,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-304",
         )
 
     def test_resume_after_unsafe_park_with_re_park_preserves_worktree(
@@ -854,7 +865,9 @@ class QuestionRelabelToImplementingTest(
                     workflow, "_worktree_path", return_value=wt_path,
                 ), patch.object(
                     workflow, "_branch_has_unpushed_commits",
-                    return_value=True,
+                    return_value=(
+                        "orchestrator/geserdugarov__agent-orchestrator/issue-82"
+                    ),
                 ):
                     workflow._handle_implementing(gh, _TEST_SPEC, issue)
 
@@ -910,7 +923,9 @@ class QuestionRelabelToImplementingTest(
                 workflow, "_worktree_path", return_value=missing,
             ), patch.object(
                 workflow, "_branch_has_unpushed_commits",
-                return_value=True,
+                return_value=(
+                    "orchestrator/geserdugarov__agent-orchestrator/issue-86"
+                ),
             ):
                 workflow._handle_implementing(gh, _TEST_SPEC, issue)
 
@@ -934,7 +949,7 @@ class QuestionRelabelToImplementingTest(
         # reset it.
         last = gh.posted_comments[-1][1]
         self.assertIn("question_commits", last)
-        self.assertIn("orchestrator/issue-86", last)
+        self.assertIn("orchestrator/geserdugarov__agent-orchestrator/issue-86", last)
         self.assertIn("git branch -D", last)
 
     def test_relabel_with_question_dirty_state_refuses_to_push(self) -> None:
@@ -999,7 +1014,9 @@ class QuestionRelabelToImplementingTest(
                     workflow, "_worktree_path", return_value=wt_path,
                 ), patch.object(
                     workflow, "_branch_has_unpushed_commits",
-                    return_value=True,
+                    return_value=(
+                        "orchestrator/geserdugarov__agent-orchestrator/issue-84"
+                    ),
                 ):
                     workflow._handle_implementing(gh, _TEST_SPEC, issue)
 
@@ -1309,12 +1326,12 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
             )
 
     def test_returns_false_when_branch_at_base(self) -> None:
-        # `orchestrator/issue-N` exists at exactly origin/main: a
+        # `orchestrator/orch__realgit/issue-N` exists at exactly origin/main: a
         # fresh-from-base branch has no commits to inspect.
         with tempfile.TemporaryDirectory(prefix="bhpc-atBase-") as td:
             target, base_sha = _seed_target_root(Path(td))
             _run_git(
-                "branch", "orchestrator/issue-701", base_sha, cwd=target,
+                "branch", "orchestrator/orch__realgit/issue-701", base_sha, cwd=target,
             )
             spec = _spec_for(target)
             self.assertFalse(
@@ -1324,13 +1341,13 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
     def test_returns_true_when_branch_has_commits_ahead_of_base(
         self,
     ) -> None:
-        # `orchestrator/issue-N` has at least one commit beyond
+        # `orchestrator/orch__realgit/issue-N` has at least one commit beyond
         # origin/main. This is the read-only-violation we are
         # trying to detect.
         with tempfile.TemporaryDirectory(prefix="bhpc-ahead-") as td:
             target, base_sha = _seed_target_root(Path(td))
             _run_git(
-                "branch", "orchestrator/issue-702", base_sha, cwd=target,
+                "branch", "orchestrator/orch__realgit/issue-702", base_sha, cwd=target,
             )
             # Add a commit on the issue branch. Update the ref
             # directly via `commit-tree` so we don't touch the
@@ -1343,7 +1360,7 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
                 cwd=target,
             ).stdout.strip()
             _run_git(
-                "update-ref", "refs/heads/orchestrator/issue-702",
+                "update-ref", "refs/heads/orchestrator/orch__realgit/issue-702",
                 new_commit, cwd=target,
             )
             spec = _spec_for(target)
@@ -1355,20 +1372,90 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
         # If `refs/remotes/origin/main` has been pruned (a
         # mis-configured local clone, a fetch failure earlier in
         # the tick), `git rev-list` exits non-zero. The helper
-        # conservatively returns False -- the caller's later steps
+        # conservatively returns None -- the caller's later steps
         # surface any persistent problem.
         with tempfile.TemporaryDirectory(prefix="bhpc-noBase-") as td:
             target, base_sha = _seed_target_root(Path(td))
             _run_git(
-                "branch", "orchestrator/issue-703", base_sha, cwd=target,
+                "branch", "orchestrator/orch__realgit/issue-703", base_sha, cwd=target,
             )
             _run_git(
                 "update-ref", "-d",
                 "refs/remotes/origin/main", cwd=target,
             )
             spec = _spec_for(target)
-            self.assertFalse(
+            self.assertIsNone(
                 worktrees._branch_has_unpushed_commits(spec, 703),
+            )
+
+    def test_detects_commits_on_legacy_orchestrator_issue_branch(
+        self,
+    ) -> None:
+        # Regression: a pre-slug-namespacing `question_commits` park
+        # holds the question agent's commits on the legacy
+        # `orchestrator/issue-N` ref. The pinned state never recorded
+        # `branch` (question stage is read-only and never pushed), so
+        # the resolver falls back to the slug-namespaced form -- but
+        # that branch does not exist locally. Probing ONLY the
+        # namespaced form would return None, the `_handle_implementing`
+        # relabel guard would clear the park, `_ensure_worktree` would
+        # reuse the on-disk worktree (still checked out on the legacy
+        # branch), and the recovered-worktree shortcut would push the
+        # question-agent commits as a fresh dev PR. The helper must
+        # also probe the legacy ref and name it in the return value
+        # so the operator hint targets the right branch.
+        with tempfile.TemporaryDirectory(prefix="bhpc-legacy-") as td:
+            target, base_sha = _seed_target_root(Path(td))
+            legacy = "orchestrator/issue-704"
+            _run_git("branch", legacy, base_sha, cwd=target)
+            tree = _run_git(
+                "rev-parse", "HEAD^{tree}", cwd=target,
+            ).stdout.strip()
+            new_commit = _run_git(
+                "commit-tree", tree, "-p", base_sha,
+                "-m", "stale question commit",
+                cwd=target,
+            ).stdout.strip()
+            _run_git(
+                "update-ref", f"refs/heads/{legacy}", new_commit,
+                cwd=target,
+            )
+            spec = _spec_for(target)
+            # Slug-namespaced form does NOT exist; only the legacy
+            # form does. Helper must still return the offending
+            # branch name (the legacy ref) so the relabel guard fires.
+            self.assertEqual(
+                worktrees._branch_has_unpushed_commits(spec, 704),
+                legacy,
+            )
+
+    def test_prefers_namespaced_branch_when_both_exist(self) -> None:
+        # Both refs carry commits (a host-restart edge case where the
+        # operator force-recreated the namespaced branch without
+        # reaping the legacy one). The helper must report the
+        # namespaced form first -- that is the branch the rest of the
+        # tick will operate on, so it is the one the operator should
+        # reset.
+        with tempfile.TemporaryDirectory(prefix="bhpc-both-") as td:
+            target, base_sha = _seed_target_root(Path(td))
+            namespaced = "orchestrator/orch__realgit/issue-705"
+            legacy = "orchestrator/issue-705"
+            tree = _run_git(
+                "rev-parse", "HEAD^{tree}", cwd=target,
+            ).stdout.strip()
+            for ref in (namespaced, legacy):
+                new_commit = _run_git(
+                    "commit-tree", tree, "-p", base_sha, "-m", f"c on {ref}",
+                    cwd=target,
+                ).stdout.strip()
+                _run_git(
+                    "update-ref", f"refs/heads/{ref}", new_commit,
+                    cwd=target,
+                )
+            spec = _spec_for(target)
+            self.assertEqual(
+                worktrees._branch_has_unpushed_commits(spec, 705),
+                namespaced,
             )
 
 
@@ -1404,7 +1491,7 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
                 expected.parent.mkdir(parents=True, exist_ok=True)
                 _run_git(
                     "worktree", "add", "-b",
-                    "orchestrator/issue-800",
+                    "orchestrator/orch__realgit/issue-800",
                     str(expected), base_sha, cwd=target,
                 )
                 self.assertTrue(expected.exists())
@@ -1413,7 +1500,7 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
                     0,
                     subprocess.run(
                         ["git", "rev-parse", "--verify", "--quiet",
-                         "refs/heads/orchestrator/issue-800"],
+                         "refs/heads/orchestrator/orch__realgit/issue-800"],
                         cwd=str(target), env=_git_env(),
                         capture_output=True, text=True,
                     ).returncode,
@@ -1427,7 +1514,7 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
                     0,
                     subprocess.run(
                         ["git", "rev-parse", "--verify", "--quiet",
-                         "refs/heads/orchestrator/issue-800"],
+                         "refs/heads/orchestrator/orch__realgit/issue-800"],
                         cwd=str(target), env=_git_env(),
                         capture_output=True, text=True,
                     ).returncode,
@@ -1455,7 +1542,7 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
             tdp = Path(td)
             target, base_sha = _seed_target_root(tdp)
             _run_git(
-                "branch", "orchestrator/issue-802", base_sha, cwd=target,
+                "branch", "orchestrator/orch__realgit/issue-802", base_sha, cwd=target,
             )
             with patch.object(config, "WORKTREES_DIR", tdp / "wts"):
                 spec = self._spec_with_worktrees_dir(target, tdp)
@@ -1468,7 +1555,7 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
                     0,
                     subprocess.run(
                         ["git", "rev-parse", "--verify", "--quiet",
-                         "refs/heads/orchestrator/issue-802"],
+                         "refs/heads/orchestrator/orch__realgit/issue-802"],
                         cwd=str(target), env=_git_env(),
                         capture_output=True, text=True,
                     ).returncode,

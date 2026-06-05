@@ -37,7 +37,7 @@ class AwaitingHumanParkStaysParkedTest(
     """
 
     PR_NUMBER = 500
-    BRANCH = "orchestrator/issue-170"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-170"
 
     def _parked_issue(self, *, park_reason: str, pr_kwargs: dict):
         gh = FakeGitHubClient()
@@ -139,7 +139,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 700
-    BRANCH = "orchestrator/issue-250"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-250"
 
     def _setup(self, **pr_kwargs):
         gh = FakeGitHubClient()
@@ -244,12 +244,12 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=701, head_branch="orchestrator/issue-251",
+            number=701, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-251",
             head=FakePRRef(sha="cafe1234"),
             merged=True, state="closed",
         )
         gh.add_pr(pr)
-        gh.seed_state(251, pr_number=701, branch="orchestrator/issue-251")
+        gh.seed_state(251, pr_number=701, branch="orchestrator/geserdugarov__agent-orchestrator/issue-251")
 
         self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
@@ -271,7 +271,7 @@ class StaleParkReasonClearedOnFixingRouteTest(
     """
 
     PR_NUMBER = 1200
-    BRANCH = "orchestrator/issue-700"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-700"
 
     def test_stale_park_reason_cleared_on_route_to_fixing(self) -> None:
         gh = FakeGitHubClient()

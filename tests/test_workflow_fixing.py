@@ -54,7 +54,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 880
-    BRANCH = "orchestrator/issue-880"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-880"
 
     def _seed(
         self,

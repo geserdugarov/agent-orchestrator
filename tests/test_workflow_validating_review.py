@@ -30,7 +30,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         defaults = dict(
             pr_number=11,
-            branch="orchestrator/issue-5",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-5",
             codex_session_id="dev-sess",
             review_round=0,
         )
@@ -257,7 +257,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         gh.add_issue(issue)
         defaults = dict(
             pr_number=12,
-            branch="orchestrator/issue-6",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-6",
             codex_session_id="dev-sess",
             review_round=0,
         )
@@ -444,7 +444,7 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
             codex_session_id="dev-sess",
             review_round=1,
             pr_number=13,
-            branch="orchestrator/issue-7",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-7",
         )
 
         mocks = self._run(
@@ -494,7 +494,7 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
             dev_session_id="dev-sess",
             review_round=1,
             pr_number=14,
-            branch="orchestrator/issue-70",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-70",
             # Carryover from an earlier silent park; one short of the
             # fresh-session threshold.
             silent_park_count=1,
@@ -544,7 +544,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             dev_session_id="dev-sess",
             dev_agent="codex",
             pr_number=15,
-            branch="orchestrator/issue-80",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-80",
         )
         defaults.update(state)
         gh.seed_state(80, **defaults)
@@ -756,7 +756,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             81,
             review_round=config.MAX_REVIEW_ROUNDS,
             pr_number=16,
-            branch="orchestrator/issue-81",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-81",
         )
 
         self._run(
@@ -781,7 +781,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             82,
             review_round=config.MAX_REVIEW_ROUNDS,
             pr_number=17,
-            branch="orchestrator/issue-82",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-82",
         )
 
         self._run(
@@ -809,7 +809,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             83,
             review_round=config.MAX_REVIEW_ROUNDS,
             pr_number=18,
-            branch="orchestrator/issue-83",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-83",
             pickup_comment_id=900,
             dev_session_id="dev-sess",
             dev_agent="codex",

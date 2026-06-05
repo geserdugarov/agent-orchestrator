@@ -82,7 +82,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(311, label="in_review")
         gh.add_issue(issue)
         pr = FakePR(
-            number=31100, head_branch="orchestrator/issue-311",
+            number=31100, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-311",
             head=FakePRRef(sha="cafe1234"),
             merged=False, state="open",
         )
@@ -111,13 +111,14 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(312, label="fixing")
         gh.add_issue(issue)
         pr = FakePR(
-            number=31200, head_branch="orchestrator/issue-312",
+            number=31200, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-312",
             head=FakePRRef(sha="cafe1234"),
             merged=True, state="closed",
         )
         gh.add_pr(pr)
         state = self._state_with_pr_number(
             gh, 312, 31200, review_round=2, conflict_round=0,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-312",
         )
 
         result = self._run(
@@ -134,6 +135,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(issue.closed)
         result["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 312,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-312",
         )
         merged_events = [
             e for e in gh.recorded_events if e["event"] == "pr_merged"
@@ -158,13 +160,14 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(313, label="resolving_conflict")
         gh.add_issue(issue)
         pr = FakePR(
-            number=31300, head_branch="orchestrator/issue-313",
+            number=31300, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-313",
             head=FakePRRef(sha="dead0001"),
             merged=False, state="closed",
         )
         gh.add_pr(pr)
         state = self._state_with_pr_number(
             gh, 313, 31300, review_round=3, conflict_round=2,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-313",
         )
 
         result = self._run(
@@ -182,6 +185,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(issue.closed)
         result["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 313,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-313",
         )
         closed_events = [
             e for e in gh.recorded_events
@@ -210,7 +214,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=31400, head_branch="orchestrator/issue-314",
+            number=31400, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-314",
             head=FakePRRef(sha="cafe1234"),
             merged=False, state="open",
         )
@@ -259,7 +263,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(316, label="resolving_conflict")
         gh.add_issue(issue)
         pr = FakePR(
-            number=31600, head_branch="orchestrator/issue-316",
+            number=31600, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-316",
             head=FakePRRef(sha="feed1234"),
             merged=True, state="closed",
         )
@@ -292,7 +296,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue2 = make_issue(317, label="resolving_conflict")
         gh.add_issue(issue2)
         pr2 = FakePR(
-            number=31700, head_branch="orchestrator/issue-317",
+            number=31700, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-317",
             head=FakePRRef(sha="feed5678"),
             merged=False, state="closed",
         )
@@ -329,7 +333,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(318, label="in_review")
         gh.add_issue(issue)
         pr = FakePR(
-            number=31800, head_branch="orchestrator/issue-318",
+            number=31800, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-318",
             head=FakePRRef(sha="cafe5678"),
             merged=True, state="closed",
         )
@@ -364,7 +368,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=31500, head_branch="orchestrator/issue-315",
+            number=31500, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-315",
             head=FakePRRef(sha="feed0001"),
             merged=True, state="closed",
         )

@@ -55,7 +55,9 @@ REPOS=acme/api|/srv/clones/acme-api|main;acme/web|/srv/clones/acme-web|master|pr
 
 Validation happens at import — a malformed entry, empty owner/name, empty base branch, empty `remote_name`, a non-integer or non-positive `parallel_limit`, or a duplicate slug aborts startup with a clear error. A `target_root` that does not exist on disk warns to stderr but does not block startup.
 
-Each repo can have its own PAT at `~/.config/<owner>/<repo>/token`, or a single `GITHUB_TOKEN` covering every listed repo. Worktrees are namespaced `WORKTREES_DIR/<owner>__<name>/issue-N` so two repos with the same issue number cannot collide on disk.
+Each repo can have its own PAT at `~/.config/<owner>/<repo>/token`, or a single `GITHUB_TOKEN` covering every listed repo. Worktrees are namespaced `WORKTREES_DIR/<owner>__<name>/issue-N` and PR branches are namespaced `orchestrator/<owner>__<name>/issue-N`, so two repos with the same issue number cannot collide on disk or on the branch ref — important when several `REPOS` entries share a `target_root` (e.g. one local clone with multiple remotes), where git would otherwise refuse to check the same `orchestrator/issue-N` ref out in two worktrees. In-flight issues whose pinned `branch` was set before this change keep using the legacy `orchestrator/issue-N` name; fresh issues take the namespaced form.
+
+Slugs whose repo name contains `.lock`, `..`, or a trailing `.` (all rejected by `git check-ref-format`) get an extra `__h<16-hex>` suffix on the branch segment so two distinct slugs that would otherwise collapse to the same form (e.g. `owner/foo.lock` and `owner/foo_lock`) stay on distinct branches. The worktree directory keeps the readable `<owner>__<name>` form because filesystems tolerate these characters; only the branch ref carries the hash.
 
 ## Agent roles
 

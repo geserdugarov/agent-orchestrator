@@ -39,14 +39,14 @@ class HandleValidatingExternalMergeTest(
         gh.add_issue(issue)
         pr = FakePR(
             number=12000,
-            head_branch="orchestrator/issue-120",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-120",
             head=FakePRRef(sha="cafe1234"),
             merged=True,
             state="closed",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            120, pr_number=12000, branch="orchestrator/issue-120",
+            120, pr_number=12000, branch="orchestrator/geserdugarov__agent-orchestrator/issue-120",
             dev_agent="claude", dev_session_id="dev-sess",
             review_round=0,
         )
@@ -64,6 +64,7 @@ class HandleValidatingExternalMergeTest(
         # Terminal cleanup runs for the external-merge arc.
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 120,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-120",
         )
 
 
@@ -83,14 +84,14 @@ class HandleValidatingClosedIssueTest(
         gh.add_issue(issue)
         pr = FakePR(
             number=12100,
-            head_branch="orchestrator/issue-121",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-121",
             head=FakePRRef(sha="cafe1234"),
             merged=False,
             state="open",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            121, pr_number=12100, branch="orchestrator/issue-121",
+            121, pr_number=12100, branch="orchestrator/geserdugarov__agent-orchestrator/issue-121",
             dev_agent="claude", dev_session_id="dev-sess",
             review_round=0,
         )
@@ -119,7 +120,7 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
     """
 
     PR_NUMBER = 91
-    BRANCH = "orchestrator/issue-9"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-9"
     REVIEWED_SHA = "rev91"
     SQUASHED_SHA = "sq91"
 

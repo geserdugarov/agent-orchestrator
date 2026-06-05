@@ -44,7 +44,7 @@ class HandleImplementingResumeOnHashChangeTest(
             dev_session_id="dev-sess",
             awaiting_human=True,
             last_action_comment_id=500,
-            branch="orchestrator/issue-60",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-60",
         )
 
         mocks = self._run(
@@ -151,7 +151,7 @@ class ImplementingDriftHeadShaDeltaTest(
             dev_session_id="dev-sess",
             awaiting_human=True,
             last_action_comment_id=100,
-            branch="orchestrator/issue-850",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-850",
         )
 
         # The drift resume returns no new commit (`last_message=""` so
@@ -206,7 +206,7 @@ class ImplementingDriftNoDevSessionRecoveredCommitsTest(
         gh.seed_state(
             860,
             user_content_hash="stale-hash",
-            branch="orchestrator/issue-860",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-860",
         )
 
         mocks = self._run(

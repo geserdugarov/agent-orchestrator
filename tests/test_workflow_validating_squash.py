@@ -44,7 +44,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 31
-    BRANCH = "orchestrator/issue-5"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-5"
     REVIEWED_SHA = "reviewedAA"
     SQUASHED_SHA = "squashedBB"
 
@@ -309,7 +309,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self._git("push", "origin", "main", cwd=self.work)
 
         # Topic branch with three dev commits.
-        self.branch = "orchestrator/issue-9"
+        self.branch = "orchestrator/geserdugarov__agent-orchestrator/issue-9"
         self._git("checkout", "-b", self.branch, cwd=self.work)
         for i, msg in enumerate(["fix: typo", "add foo", "add bar"], start=1):
             (self.work / f"f{i}.txt").write_text(f"{i}\n")
@@ -333,7 +333,9 @@ class SquashHelperRealGitTest(unittest.TestCase):
 
     def test_squash_collapses_three_commits_to_one(self) -> None:
         # First commit's subject ("fix: typo") is conventional-commit form,
-        # so the squash subject reuses it; body lists all three.
+        # so the squash subject reuses it. The squash message is
+        # subject-only: the repo's Conventional-Commits-subject-only rule
+        # forbids bodies on orchestrator-authored commits.
         issue = self._make_issue()
         with patch.object(config, "BASE_BRANCH", "main"), \
              patch.object(branch_publication, "_push_branch", return_value=True):
@@ -352,13 +354,15 @@ class SquashHelperRealGitTest(unittest.TestCase):
         )
         # Squash subject reuses the conventional-commit first subject.
         self.assertEqual(commits[0], "fix: typo")
-        # Body aggregates all original subjects.
+        # Body is empty (subject-only commit): the repo's commit-style
+        # rule forbids a body or trailer on orchestrator-authored
+        # commits, so the squash MUST NOT carry the legacy
+        # `Squashed commits: -...` listing.
         body = self._git(
             "log", "-1", "--pretty=%B", cwd=self.work,
-        )
-        self.assertIn("Squashed commits:", body)
-        for original in ("- fix: typo", "- add foo", "- add bar"):
-            self.assertIn(original, body)
+        ).strip()
+        self.assertEqual(body, "fix: typo")
+        self.assertNotIn("Squashed commits:", body)
 
     def test_squash_uses_issue_title_when_no_conventional_first_subject(
         self,

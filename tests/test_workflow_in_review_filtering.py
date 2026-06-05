@@ -44,7 +44,7 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 200
-    BRANCH = "orchestrator/issue-100"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-100"
 
     def test_same_account_human_pr_comment_routes_to_fixing(self) -> None:
         gh = FakeGitHubClient()
@@ -133,13 +133,13 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         ])
         gh.add_issue(issue)
         pr = FakePR(
-            number=210, head_branch="orchestrator/issue-101",
+            number=210, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-101",
             head=FakePRRef(sha="cafe1234"),
             mergeable=True, check_state="success",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            101, pr_number=210, branch="orchestrator/issue-101",
+            101, pr_number=210, branch="orchestrator/geserdugarov__agent-orchestrator/issue-101",
             dev_agent="claude", dev_session_id="dev-sess",
             review_round=0,
             orchestrator_comment_ids=[900, 901],
@@ -200,7 +200,7 @@ class OrchestratorMarkerFeedbackFilterTest(
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr = FakePR(
             number=220,
-            head_branch="orchestrator/issue-120",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-120",
             head=FakePRRef(sha="ready-sha"),
             mergeable=True,
             check_state="success",
@@ -220,7 +220,7 @@ class OrchestratorMarkerFeedbackFilterTest(
         gh.seed_state(
             120,
             pr_number=220,
-            branch="orchestrator/issue-120",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-120",
             dev_agent="claude",
             dev_session_id="dev-sess",
             pr_last_comment_id=2999,
@@ -262,7 +262,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr = FakePR(
-            number=400, head_branch="orchestrator/issue-160",
+            number=400, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-160",
             head=FakePRRef(sha="cafe1234"),
             mergeable=True, check_state="success",
             review_comments=[
@@ -278,7 +278,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         # The same numeric id on the inline-review surface is a different
         # object -- the filter must ignore the namespace collision.
         gh.seed_state(
-            160, pr_number=400, branch="orchestrator/issue-160",
+            160, pr_number=400, branch="orchestrator/geserdugarov__agent-orchestrator/issue-160",
             dev_agent="claude", dev_session_id="dev-sess",
             pr_last_comment_id=4242,
             pr_last_review_comment_id=4241,
@@ -308,7 +308,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr = FakePR(
-            number=401, head_branch="orchestrator/issue-161",
+            number=401, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-161",
             head=FakePRRef(sha="cafe1234"),
             mergeable=True, check_state="success",
             reviews=[
@@ -323,7 +323,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         gh.add_pr(pr)
         gh.seed_state(
-            161, pr_number=401, branch="orchestrator/issue-161",
+            161, pr_number=401, branch="orchestrator/geserdugarov__agent-orchestrator/issue-161",
             dev_agent="claude", dev_session_id="dev-sess",
             pr_last_comment_id=5000,
             pr_last_review_comment_id=0,

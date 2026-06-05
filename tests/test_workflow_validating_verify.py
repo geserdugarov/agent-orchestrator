@@ -47,7 +47,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         defaults = dict(
             pr_number=21,
-            branch="orchestrator/issue-7",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-7",
             codex_session_id="dev-sess",
             review_round=0,
         )

@@ -42,14 +42,14 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(60, label="in_review")
         gh.add_issue(issue)
         pr = FakePR(
-            number=70, head_branch="orchestrator/issue-60",
+            number=70, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-60",
             head=FakePRRef(sha="cafe1234"),
             approved=True, approval_head_sha="cafe1234",
             mergeable=False, check_state="success",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            60, pr_number=70, branch="orchestrator/issue-60",
+            60, pr_number=70, branch="orchestrator/geserdugarov__agent-orchestrator/issue-60",
             dev_agent="claude", dev_session_id="dev-sess",
             pr_last_comment_id=900,  # an old watermark from validating handoff
         )
@@ -87,7 +87,7 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
     comments on the other.
     """
 
-    BRANCH = "orchestrator/issue-65"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-65"
     PR_NUMBER = 95
 
     def _setup(self, *, issue_comments=(), review_comments=(), state_extra=None):

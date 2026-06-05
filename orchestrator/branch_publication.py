@@ -170,8 +170,9 @@ def _squash_and_force_push(
 
     The squash commit subject reuses the first commit's subject when it
     already matches conventional-commit form; otherwise it builds one from
-    the issue title with a `feat:` prefix. Body aggregates the prior
-    subjects so reviewers see what landed in the squash. The commit is
+    the issue title with a `feat:` prefix. The message is subject-only --
+    no body, no trailers -- so the orchestrator-authored squash matches
+    the repo's Conventional-Commits-subject-only rule. The commit is
     authored under the AGENT_GIT_* identity (via env vars) so attribution
     matches the per-step commits this squash replaces.
     """
@@ -227,11 +228,14 @@ def _squash_and_force_push(
         title = (issue.title or "").strip() or f"resolve issue #{issue.number}"
         subject = f"feat: {title}"
 
-    body_lines = [
-        "Squashed commits:",
-        *(f"- {s}" for s in subjects),
-    ]
-    message = subject + "\n\n" + "\n".join(body_lines) + "\n"
+    # Subject-only message: the repo's Conventional Commits rule
+    # forbids bodies and trailers on orchestrator-authored commits
+    # (see CLAUDE.md). The per-step commit subjects this squash
+    # replaces are still visible via `git log <branch>@{1}` until the
+    # local ref is reaped, and the squashed PR carries the same
+    # context in its description; aggregating them into the commit
+    # body would just trip the next reviewer's commit-style check.
+    message = subject + "\n"
 
     reset_r = _git("reset", "--soft", base_sha, cwd=worktree)
     if reset_r.returncode != 0:

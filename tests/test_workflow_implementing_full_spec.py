@@ -116,7 +116,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             67002,
             pr_number=67002,
-            branch="orchestrator/issue-67002",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67002",
             dev_agent=self._CODEX_SPEC,
             dev_session_id="dev-67002",
             review_round=0,
@@ -165,7 +165,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             last_action_comment_id=2000,
             dev_agent="codex",  # legacy bare-backend pinned form.
             dev_session_id="dev-legacy-spec",
-            branch="orchestrator/issue-67003",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67003",
         )
 
         # Flip current config to a spec with args -- which the resume must IGNORE.
@@ -203,7 +203,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             awaiting_human=True,
             last_action_comment_id=2100,
             codex_session_id="sess-legacy-67004",
-            branch="orchestrator/issue-67004",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67004",
         )
 
         self._enter(self._patch_dev_config(
@@ -248,7 +248,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             captured["extra_args"] = extra_args
             return _agent(session_id="fresh-67005", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -286,7 +286,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             captured["extra_args"] = extra_args
             return _agent(session_id="fresh-legacy-67006", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -308,7 +308,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             67010,
             pr_number=67010,
-            branch="orchestrator/issue-67010",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67010",
             dev_agent="claude",
             dev_session_id="dev-67010",
             review_round=0,
@@ -346,7 +346,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             67011,
             pr_number=67011,
-            branch="orchestrator/issue-67011",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67011",
             dev_agent="codex",
             dev_session_id="dev-67011",
             review_round=0,
@@ -377,7 +377,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             67012,
             pr_number=67012,
-            branch="orchestrator/issue-67012",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67012",
             dev_agent="codex",
             dev_session_id="dev-67012",
             review_round=0,

@@ -113,6 +113,8 @@ from .worktree_lifecycle import _ensure_pr_worktree as _ensure_pr_worktree
 from .worktree_lifecycle import _ensure_worktree as _ensure_worktree
 from .worktree_lifecycle import _has_new_commits as _has_new_commits
 from .worktree_lifecycle import _repo_worktrees_root as _repo_worktrees_root
+from .worktree_lifecycle import _resolve_branch_name as _resolve_branch_name
+from .worktree_lifecycle import _sanitize_branch_segment as _sanitize_branch_segment
 from .worktree_lifecycle import _sanitize_slug as _sanitize_slug
 from .worktree_lifecycle import _worktree_path as _worktree_path
 

@@ -42,7 +42,7 @@ class HandleInReviewResumeOnHashChangeTest(
         gh = FakeGitHubClient()
         issue = make_issue(80, label="in_review", body="new acceptance")
         gh.add_issue(issue)
-        pr = FakePR(number=800, head_branch="orchestrator/issue-80")
+        pr = FakePR(number=800, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-80")
         gh.add_pr(pr)
         gh.seed_state(
             80,
@@ -53,7 +53,7 @@ class HandleInReviewResumeOnHashChangeTest(
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
-            branch="orchestrator/issue-80",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-80",
         )
 
         self._run(
@@ -94,7 +94,7 @@ class HandleInReviewResumeOnHashChangeTest(
         gh = FakeGitHubClient()
         issue = make_issue(81, label="in_review", body="new acceptance")
         gh.add_issue(issue)
-        pr = FakePR(number=801, head_branch="orchestrator/issue-81")
+        pr = FakePR(number=801, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-81")
         gh.add_pr(pr)
         gh.seed_state(
             81,
@@ -105,7 +105,7 @@ class HandleInReviewResumeOnHashChangeTest(
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
-            branch="orchestrator/issue-81",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-81",
             review_round=2,
         )
 
@@ -147,7 +147,7 @@ class HandleInReviewResumeOnHashChangeTest(
         gh = FakeGitHubClient()
         issue = make_issue(82, label="in_review", body="new acceptance")
         gh.add_issue(issue)
-        pr = FakePR(number=802, head_branch="orchestrator/issue-82")
+        pr = FakePR(number=802, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-82")
         gh.add_pr(pr)
         gh.seed_state(
             82,
@@ -158,7 +158,7 @@ class HandleInReviewResumeOnHashChangeTest(
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
-            branch="orchestrator/issue-82",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-82",
         )
 
         self._run(
@@ -201,7 +201,7 @@ class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
             user=FakeUser("alice"),
         ))
         gh.add_issue(issue)
-        pr = FakePR(number=13000, head_branch="orchestrator/issue-1300")
+        pr = FakePR(number=13000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-1300")
         # Concurrent PR-conversation comment at id 150 (between the
         # prior watermark and the issue-thread max).
         pr.issue_comments.append(FakeComment(
@@ -218,7 +218,7 @@ class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
             pr_last_comment_id=100,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
-            branch="orchestrator/issue-1300",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-1300",
             last_action_comment_id=100,
         )
 
@@ -250,7 +250,7 @@ class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
         gh = FakeGitHubClient()
         issue = make_issue(1310, label="in_review", body="updated body")
         gh.add_issue(issue)
-        pr = FakePR(number=13100, head_branch="orchestrator/issue-1310")
+        pr = FakePR(number=13100, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-1310")
         pr.issue_comments.append(FakeComment(
             id=600, body="additional ask",
             user=FakeUser("alice"),
@@ -265,7 +265,7 @@ class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
             pr_last_comment_id=100,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
-            branch="orchestrator/issue-1310",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-1310",
             last_action_comment_id=100,
         )
 

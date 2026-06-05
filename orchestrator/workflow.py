@@ -156,7 +156,9 @@ from .worktrees import (
     _pr_title_from_commit_or_issue as _pr_title_from_commit_or_issue,
 )
 from .worktrees import _push_branch as _push_branch
+from .worktrees import _resolve_branch_name as _resolve_branch_name
 from .worktrees import _run_verify_commands as _run_verify_commands
+from .worktrees import _sanitize_branch_segment as _sanitize_branch_segment
 from .worktrees import _sanitize_slug as _sanitize_slug
 from .worktrees import _squash_and_force_push as _squash_and_force_push
 from .worktrees import _worktree_dirty_files as _worktree_dirty_files
@@ -1114,7 +1116,10 @@ def _finalize_if_pr_merged(
                 "issue=#%s could not close after detecting external merge",
                 issue.number,
             )
-    _cleanup_terminal_branch(gh, spec, issue.number)
+    _cleanup_terminal_branch(
+        gh, spec, issue.number,
+        branch=_resolve_branch_name(state, spec, issue.number),
+    )
     return True
 
 
@@ -1192,7 +1197,10 @@ def _drain_review_pr_terminals(
             log.exception(
                 "issue=#%s could not close after merge", issue.number,
             )
-        _cleanup_terminal_branch(gh, spec, issue.number)
+        _cleanup_terminal_branch(
+            gh, spec, issue.number,
+            branch=_resolve_branch_name(state, spec, issue.number),
+        )
         return True
     if pr_status == "closed":
         state.set("closed_without_merge_at", _now_iso())
@@ -1214,7 +1222,10 @@ def _drain_review_pr_terminals(
             log.exception(
                 "issue=#%s could not close after reject", issue.number,
             )
-        _cleanup_terminal_branch(gh, spec, issue.number)
+        _cleanup_terminal_branch(
+            gh, spec, issue.number,
+            branch=_resolve_branch_name(state, spec, issue.number),
+        )
         return True
     if getattr(issue, "state", "open") == "closed":
         state.set("closed_without_merge_at", _now_iso())
@@ -1313,5 +1324,8 @@ def _finalize_if_issue_closed(
         conflict_round=state.get("conflict_round"),
         retry_count=state.get("retry_count"),
     )
-    _cleanup_terminal_branch(gh, spec, issue.number)
+    _cleanup_terminal_branch(
+        gh, spec, issue.number,
+        branch=_resolve_branch_name(state, spec, issue.number),
+    )
     return True

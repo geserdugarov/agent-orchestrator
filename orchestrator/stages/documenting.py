@@ -194,7 +194,7 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         gh.write_pinned_state(issue, state)
         return
 
-    branch = _wf._branch_name(issue.number)
+    branch = _wf._resolve_branch_name(state, spec, issue.number)
 
     # User-content drift: a human edited the issue title/body while the
     # final-docs hop was in flight. The reviewer approved the OLD
@@ -433,7 +433,7 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         if not gh.comments_after(issue, last_action_id):
             return
 
-    wt = _wf._ensure_pr_worktree(spec, issue.number)
+    wt = _wf._ensure_pr_worktree(spec, issue.number, branch=branch)
 
     # Refresh `<remote>/<branch>` BEFORE the ahead/behind check. A stale
     # local remote-tracking ref would mis-classify a "remote moved out

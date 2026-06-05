@@ -58,7 +58,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((1, "documenting"), gh.label_history)
         data = gh.pinned_data(1)
         self.assertEqual(data["pr_number"], opened.number)
-        self.assertEqual(data["branch"], "orchestrator/issue-1")
+        self.assertEqual(data["branch"], "orchestrator/geserdugarov__agent-orchestrator/issue-1")
         # First fresh dev spawn writes the new keys; the legacy field is
         # deliberately not migrated.
         self.assertEqual(data["dev_agent"], config.DEV_AGENT)
@@ -231,7 +231,7 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
             awaiting_human=True,
             last_action_comment_id=900,
             codex_session_id="sess-old",
-            branch="orchestrator/issue-2",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-2",
         )
 
         mocks = self._run(

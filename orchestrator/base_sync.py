@@ -70,7 +70,7 @@ from .github import (
 from .scheduler import IssueScheduler
 from .verify import _head_sha, _worktree_dirty_files
 from .workflow_messages import _post_pr_comment
-from .worktree_lifecycle import _branch_name, _repo_worktrees_root
+from .worktree_lifecycle import _repo_worktrees_root, _resolve_branch_name
 
 log = logging.getLogger(__name__)
 
@@ -385,7 +385,7 @@ def _recover_pending_auto_base_rebase(
         )
         return True
 
-    branch = _branch_name(issue.number)
+    branch = _resolve_branch_name(state, spec, issue.number)
 
     def _abort_recovery_unverified(detail: str) -> bool:
         """Reset HEAD to the pre-rebase anchor and park awaiting human.
@@ -1423,7 +1423,7 @@ def _sync_pr_worktree_to_base(
         )
         return
 
-    branch = _branch_name(issue.number)
+    branch = _resolve_branch_name(state, spec, issue.number)
     if not _push_branch(
         spec, worktree, branch, force_with_lease=before_sha or None,
     ):

@@ -118,7 +118,10 @@ def _resume_question_on_human_reply(
     state.set("last_action_comment_id", consumed_max)
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
-        wt = _wf._ensure_worktree(spec, issue.number)
+        wt = _wf._ensure_worktree(
+            spec, issue.number,
+            branch=_wf._resolve_branch_name(state, spec, issue.number),
+        )
     question_spec, question_backend, question_args, question_sid = (
         _read_question_session(state)
     )
@@ -205,7 +208,10 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         state.set("question_closed_at", _wf._now_iso())
         gh.set_workflow_label(issue, WorkflowLabel.DONE)
         gh.write_pinned_state(issue, state)
-        _wf._cleanup_question_worktree(spec, issue.number)
+        _wf._cleanup_question_worktree(
+            spec, issue.number,
+            branch=_wf._resolve_branch_name(state, spec, issue.number),
+        )
         return
 
     # Tracks whether to KEEP the per-issue worktree past this tick.
@@ -247,7 +253,10 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             result = resumed
             wt = _wf._worktree_path(spec, issue.number)
         else:
-            wt = _wf._ensure_worktree(spec, issue.number)
+            wt = _wf._ensure_worktree(
+                spec, issue.number,
+                branch=_wf._resolve_branch_name(state, spec, issue.number),
+            )
             question_spec, question_backend, question_args, _ = (
                 _read_question_session(state)
             )
@@ -381,4 +390,7 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         gh.write_pinned_state(issue, state)
     finally:
         if not keep_worktree:
-            _wf._cleanup_question_worktree(spec, issue.number)
+            _wf._cleanup_question_worktree(
+                spec, issue.number,
+                branch=_wf._resolve_branch_name(state, spec, issue.number),
+            )

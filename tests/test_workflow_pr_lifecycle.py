@@ -32,7 +32,7 @@ class ReviewVerdictEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         pr = FakePR(
             number=99,
-            head_branch="orchestrator/issue-5",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-5",
             base_branch="main",
             mergeable=True,
             check_state="success",
@@ -133,7 +133,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
         gh.add_issue(issue)
         gh.seed_state(8, pr_number=42, review_round=1)
         pr = FakePR(
-            number=42, head_branch="orchestrator/issue-8",
+            number=42, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-8",
             base_branch="main", mergeable=True, check_state="success",
         )
         gh.add_pr(pr)
@@ -164,7 +164,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
             10, pr_number=33, review_round=config.MAX_REVIEW_ROUNDS,
         )
         pr = FakePR(
-            number=33, head_branch="orchestrator/issue-10",
+            number=33, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-10",
             base_branch="main", mergeable=True, check_state="success",
         )
         gh.add_pr(pr)
@@ -203,7 +203,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
         issue = make_issue(9, label="validating")
         gh.add_issue(issue)
         pr = FakePR(
-            number=11, head_branch="orchestrator/issue-9",
+            number=11, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-9",
             base_branch="main", mergeable=True, check_state="success",
         )
         gh.add_pr(pr)
@@ -232,7 +232,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
     handler is permanently manual-merge-only and never emits it.
     """
 
-    BRANCH = "orchestrator/issue-50"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-50"
     PR_NUMBER = 500
 
     @staticmethod
@@ -288,7 +288,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(ev["stage"], "implementing")
         self.assertEqual(ev["issue"], 50)
         self.assertEqual(ev["pr_number"], gh.opened_prs[0].number)
-        self.assertEqual(ev["branch"], "orchestrator/issue-50")
+        self.assertEqual(ev["branch"], "orchestrator/geserdugarov__agent-orchestrator/issue-50")
         # `sha` carries the PR head sha from `pr.head.sha` so the audit
         # sink can correlate the open event with later merge / review IDs.
         self.assertEqual(ev["sha"], gh.opened_prs[0].head.sha)
@@ -300,8 +300,8 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh = FakeGitHubClient()
         issue = make_issue(51, label="implementing")
         gh.add_issue(issue)
-        existing = FakePR(number=123, head_branch="orchestrator/issue-51")
-        gh.existing_open_pr["orchestrator/issue-51"] = existing
+        existing = FakePR(number=123, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-51")
+        gh.existing_open_pr["orchestrator/geserdugarov__agent-orchestrator/issue-51"] = existing
         self._run(
             lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
             run_agent=_agent(session_id="sess-1", last_message="implemented"),

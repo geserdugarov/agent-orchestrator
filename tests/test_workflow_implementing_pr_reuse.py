@@ -34,8 +34,8 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh = FakeGitHubClient()
         issue = make_issue(4, label="implementing")
         gh.add_issue(issue)
-        existing = FakePR(number=42, head_branch="orchestrator/issue-4")
-        gh.existing_open_pr["orchestrator/issue-4"] = existing
+        existing = FakePR(number=42, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-4")
+        gh.existing_open_pr["orchestrator/geserdugarov__agent-orchestrator/issue-4"] = existing
 
         self._run(
             lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
@@ -51,6 +51,97 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
                              for _, body in gh.posted_comments))
         self.assertIn((4, "validating"), gh.label_history)
         self.assertEqual(gh.pinned_data(4).get("pr_number"), 42)
+
+    def test_legacy_pinned_branch_anchors_pr_lookup_and_push(self) -> None:
+        # Regression: an in-flight issue that was already running before
+        # branches were slug-namespaced has `state["branch"]` pinned to
+        # the legacy `orchestrator/issue-<n>` form and a live PR whose
+        # head is that legacy ref. The orchestrator must keep using the
+        # pinned branch -- otherwise the PR lookup misses, a fresh
+        # slug-namespaced branch gets pushed, and a duplicate PR opens
+        # against the new branch while the original PR is orphaned.
+        LEGACY = "orchestrator/issue-4"
+        gh = FakeGitHubClient()
+        issue = make_issue(4, label="implementing")
+        gh.add_issue(issue)
+        existing = FakePR(number=42, head_branch=LEGACY)
+        gh.existing_open_pr[LEGACY] = existing
+        # Pinned state mirrors what an issue picked up before this
+        # change would carry.
+        gh.seed_state(4, branch=LEGACY)
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-1", last_message="done"),
+            has_new_commits=[False, True],
+            dirty_files=(),
+            push_branch=True,
+        )
+
+        # PR lookup hit the legacy ref -- no duplicate PR opened, no
+        # `:sparkles: PR opened` comment.
+        self.assertEqual(gh.opened_prs, [])
+        self.assertFalse(any(":sparkles: PR opened" in body
+                             for _, body in gh.posted_comments))
+        self.assertEqual(gh.pinned_data(4).get("pr_number"), 42)
+        # Push targeted the legacy branch, not the new namespaced one.
+        push_call = mocks["_push_branch"].call_args
+        self.assertEqual(push_call.args[2], LEGACY)
+        # State stays pinned to the legacy branch.
+        self.assertEqual(gh.pinned_data(4).get("branch"), LEGACY)
+
+    def test_on_commits_persists_branch_for_branchless_resume_state(self) -> None:
+        # Regression: a state that lacks `branch` going into `_on_commits`
+        # (the awaiting-human resume path skips the fresh-spawn
+        # `state.set("branch", ...)` block) would, before this fix, leave
+        # `pr_number` persisted with `branch` absent. The next tick's
+        # `_resolve_branch_name` then takes the legacy-PR fallback and
+        # routes validation / base-sync / cleanup to
+        # `orchestrator/issue-N` while the live PR is actually on the
+        # slug-namespaced ref this push just published. `_on_commits`
+        # must persist the pushed branch alongside `pr_number` so the
+        # resolver recovers it directly.
+        gh = FakeGitHubClient()
+        issue = make_issue(11, label="implementing")
+        # Pending human comment that triggers the awaiting-human resume.
+        issue.comments.append(
+            FakeComment(id=2100, body="please retry", user=FakeUser("alice"))
+        )
+        gh.add_issue(issue)
+        # State carries `awaiting_human=True` and a dev session id but
+        # NO `branch` -- the pre-existing shape for a relabel-from-
+        # question or any park whose pre-spawn site never persisted
+        # `branch`. `pr_number` is also absent because no PR exists
+        # yet; the resume produces the first commit.
+        gh.seed_state(
+            11,
+            awaiting_human=True,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            last_action_comment_id=2000,
+        )
+
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dev-sess", last_message="done"),
+            # Resume path: no recovered-worktree shortcut, post-agent
+            # check sees the new commit.
+            has_new_commits=[True],
+            dirty_files=(),
+            push_branch=True,
+        )
+
+        # A PR was opened and persisted to state.
+        self.assertEqual(len(gh.opened_prs), 1)
+        data = gh.pinned_data(11)
+        self.assertEqual(data.get("pr_number"), gh.opened_prs[0].number)
+        # The branch was persisted alongside `pr_number` so the next
+        # tick's `_resolve_branch_name` recovers the slug-namespaced
+        # form directly instead of mis-inferring the legacy ref.
+        self.assertEqual(
+            data.get("branch"),
+            "orchestrator/geserdugarov__agent-orchestrator/issue-11",
+        )
 
 
 class ConventionalCommitPromptTest(unittest.TestCase):

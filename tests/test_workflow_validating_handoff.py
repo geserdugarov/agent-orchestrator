@@ -55,7 +55,7 @@ class ValidatingPushedFixesStayOnValidatingTest(
         gh.add_issue(issue)
         defaults = dict(
             pr_number=2_000 + issue_number,
-            branch=f"orchestrator/issue-{issue_number}",
+            branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{issue_number}",
             dev_agent="claude",
             dev_session_id="dev-sess",
             review_round=0,
@@ -290,7 +290,7 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
     """
 
     PR_NUMBER = 11
-    BRANCH = "orchestrator/issue-5"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-5"
 
     def _setup(self):
         gh = FakeGitHubClient()
@@ -407,7 +407,7 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         ])
         gh.add_issue(issue)
         pr = FakePR(
-            number=50, head_branch="orchestrator/issue-99",
+            number=50, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-99",
             head=FakePRRef(sha="cafe9999"),
             issue_comments=[
                 FakeComment(
@@ -420,7 +420,7 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             99,
             pr_number=50,
-            branch="orchestrator/issue-99",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-99",
             dev_agent="claude",
             dev_session_id="dev-sess",
             review_round=1,

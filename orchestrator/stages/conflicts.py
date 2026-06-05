@@ -164,7 +164,10 @@ def _handle_resolving_conflict(
         _wf._mark_drift_comments_consumed(gh, issue, state)
         wt = _wf._worktree_path(spec, issue.number)
         if not wt.exists():
-            wt = _wf._ensure_pr_worktree(spec, issue.number)
+            wt = _wf._ensure_pr_worktree(
+                spec, issue.number,
+                branch=_wf._resolve_branch_name(state, spec, issue.number),
+            )
         before_sha = _wf._head_sha(wt)
         followup = _wf._build_user_content_change_prompt(
             issue, _wf._recent_comments_text(issue),
@@ -215,7 +218,10 @@ def _handle_resolving_conflict(
         )
         wt = _wf._worktree_path(spec, issue.number)
         if not wt.exists():
-            wt = _wf._ensure_pr_worktree(spec, issue.number)
+            wt = _wf._ensure_pr_worktree(
+                spec, issue.number,
+                branch=_wf._resolve_branch_name(state, spec, issue.number),
+            )
         before_sha = _wf._head_sha(wt)
         wt, result = _wf._resume_dev_with_text(gh, spec, issue, state, followup)
         state.set("last_agent_action_at", _wf._now_iso())
@@ -245,14 +251,17 @@ def _handle_resolving_conflict(
         # `origin/<branch>` if it has been pruned. `_ensure_worktree`
         # would rebuild from `origin/<base>` and silently discard the
         # PR's commits.
-        wt = _wf._ensure_pr_worktree(spec, issue.number)
+        wt = _wf._ensure_pr_worktree(
+            spec, issue.number,
+            branch=_wf._resolve_branch_name(state, spec, issue.number),
+        )
 
     # Refresh `<remote>/<branch>` (the PR branch's remote tip) via the
     # same hardened authenticated path `_push_branch` uses. We need a
     # current ref before the ahead/behind check below: a stale local
     # `<remote>/<branch>` would mis-classify a real "remote moved out from
     # under us" situation as in-sync.
-    branch = _wf._branch_name(issue.number)
+    branch = _wf._resolve_branch_name(state, spec, issue.number)
     fetch_branch = _wf._authed_fetch(
         spec,
         f"+refs/heads/{branch}:refs/remotes/{spec.remote_name}/{branch}",
@@ -452,7 +461,7 @@ def _handle_resolving_conflict(
             gh.write_pinned_state(issue, state)
             return
         if not _wf._push_branch(
-            spec, wt, _wf._branch_name(issue.number),
+            spec, wt, _wf._resolve_branch_name(state, spec, issue.number),
             force_with_lease=before_sha or None,
         ):
             _wf._park_awaiting_human(
@@ -570,7 +579,7 @@ def _post_conflict_resolution_result(
         gh.write_pinned_state(issue, state)
         return
 
-    branch = _wf._branch_name(issue.number)
+    branch = _wf._resolve_branch_name(state, spec, issue.number)
     pushed = _wf._push_branch(
         spec, wt, branch,
         force_with_lease=force_with_lease,

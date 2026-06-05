@@ -25,7 +25,7 @@ class CleanupTerminalBranchTest(unittest.TestCase):
     """
 
     ISSUE_NUMBER = 99
-    BRANCH = "orchestrator/issue-99"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-99"
 
     def _run_helper(
         self,
@@ -197,18 +197,18 @@ class DeleteRemoteBranchTest(unittest.TestCase):
 
     def test_success(self) -> None:
         client = self._client_with_ref(raise_status=None)
-        self.assertTrue(client.delete_remote_branch("orchestrator/issue-1"))
+        self.assertTrue(client.delete_remote_branch("orchestrator/geserdugarov__agent-orchestrator/issue-1"))
         client.repo.get_git_ref.assert_called_once_with(
-            "heads/orchestrator/issue-1"
+            "heads/orchestrator/geserdugarov__agent-orchestrator/issue-1"
         )
 
     def test_404_treated_as_success(self) -> None:
         client = self._client_with_ref(raise_status=404)
-        self.assertTrue(client.delete_remote_branch("orchestrator/issue-1"))
+        self.assertTrue(client.delete_remote_branch("orchestrator/geserdugarov__agent-orchestrator/issue-1"))
 
     def test_other_error_returns_false(self) -> None:
         client = self._client_with_ref(raise_status=403)
-        self.assertFalse(client.delete_remote_branch("orchestrator/issue-1"))
+        self.assertFalse(client.delete_remote_branch("orchestrator/geserdugarov__agent-orchestrator/issue-1"))
 
 
 if __name__ == "__main__":

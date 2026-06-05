@@ -240,7 +240,10 @@ def _resume_dev_with_text(
 
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
-        wt = _wf._ensure_worktree(spec, issue.number)
+        wt = _wf._ensure_worktree(
+            spec, issue.number,
+            branch=_wf._resolve_branch_name(state, spec, issue.number),
+        )
     dev_spec, dev_backend, dev_args, dev_sid = _read_dev_session(state)
     silent_count = int(state.get("silent_park_count") or 0)
     fresh_spawn = (
@@ -401,7 +404,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
     #     cannot replay it as fresh PR feedback, and fall through to
     #     the fresh-spawn path.
     #   * Worktree carries dirty edits OR the local
-    #     `orchestrator/issue-N` branch carries commits beyond
+    #     `orchestrator/<slug>/issue-N` branch carries commits beyond
     #     `origin/<base>` -> refuse to proceed. The branch check
     #     covers the case where the worktree was removed
     #     (`_cleanup_question_worktree` ran on a safe park, or the
@@ -427,21 +430,31 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
         worktree_dirty = wt.exists() and bool(
             _wf._worktree_dirty_files(wt)
         )
-        branch_has_commits = _wf._branch_has_unpushed_commits(
+        unpushed_branch = _wf._branch_has_unpushed_commits(
             spec, issue.number,
         )
-        if worktree_dirty or branch_has_commits:
+        if worktree_dirty or unpushed_branch:
             if park_reason != "question_unsafe_relabel":
+                # Name the actual offending branch so the cleanup
+                # hint (`git branch -D <name>`) targets it; a
+                # legacy `orchestrator/issue-N` ref from a pre-
+                # slug-namespacing park would otherwise be missed
+                # if we only printed the resolved (namespaced)
+                # name.
+                branch_for_hint = (
+                    unpushed_branch
+                    or _wf._resolve_branch_name(state, spec, issue.number)
+                )
                 trigger = (
                     "dirty edits in the per-issue worktree"
-                    if worktree_dirty and not branch_has_commits
+                    if worktree_dirty and not unpushed_branch
                     else (
                         "unreviewed commits on the per-issue "
-                        f"branch `{_wf._branch_name(issue.number)}`"
-                        if branch_has_commits and not worktree_dirty
+                        f"branch `{branch_for_hint}`"
+                        if unpushed_branch and not worktree_dirty
                         else (
                             "unreviewed commits on the per-issue "
-                            f"branch `{_wf._branch_name(issue.number)}` "
+                            f"branch `{branch_for_hint}` "
                             "AND dirty edits in its worktree"
                         )
                     )
@@ -457,7 +470,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                     "`git -C <worktree> reset --hard origin/<base> && "
                     "git -C <worktree> clean -fd`), or delete the "
                     f"local branch (`git branch -D "
-                    f"{_wf._branch_name(issue.number)}` in "
+                    f"{branch_for_hint}` in "
                     "`target_root`), before re-relabeling so the dev "
                     "agent starts from a clean base.",
                     reason="question_unsafe_relabel",
@@ -512,7 +525,10 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             _wf._mark_drift_comments_consumed(gh, issue, state)
             wt = _wf._worktree_path(spec, issue.number)
             if not wt.exists():
-                wt = _wf._ensure_worktree(spec, issue.number)
+                wt = _wf._ensure_worktree(
+                    spec, issue.number,
+                    branch=_wf._resolve_branch_name(state, spec, issue.number),
+                )
             # Snapshot HEAD BEFORE the resume so the post-result check
             # below can tell whether THIS resume produced a new commit.
             # `_has_new_commits` only compares against `origin/<base>`,
@@ -529,7 +545,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 gh, spec, issue, state, followup,
             )
             state.set("last_agent_action_at", _wf._now_iso())
-            state.set("branch", _wf._branch_name(issue.number))
+            state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
             after_sha = _wf._head_sha(wt)
             this_resume_committed = (
                 bool(after_sha) and after_sha != before_sha
@@ -645,7 +661,10 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             return
         wt, result = resumed
     else:
-        wt = _wf._ensure_worktree(spec, issue.number)
+        wt = _wf._ensure_worktree(
+            spec, issue.number,
+            branch=_wf._resolve_branch_name(state, spec, issue.number),
+        )
         if _wf._has_new_commits(spec, wt):
             # Recovered worktree: the dev agent already committed on a
             # previous tick; skip a fresh run and go straight to push.
@@ -694,7 +713,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             )
             if result.session_id:
                 state.set("dev_session_id", result.session_id)
-        state.set("branch", _wf._branch_name(issue.number))
+        state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
 
     state.set("last_agent_action_at", _wf._now_iso())
 
@@ -734,7 +753,7 @@ def _on_commits(
     from .. import workflow as _wf
 
     wt = _wf._worktree_path(spec, issue.number)
-    branch = _wf._branch_name(issue.number)
+    branch = _wf._resolve_branch_name(state, spec, issue.number)
     if not _wf._push_branch(spec, wt, branch):
         # Park on awaiting_human like the timeout/question paths. Otherwise the
         # worktree's commits keep _has_new_commits() true, so every poll would
@@ -775,6 +794,16 @@ def _on_commits(
     else:
         _wf.log.info("issue=#%s reusing existing PR #%d for %s", issue.number, pr.number, branch)
     state.set("pr_number", pr.number)
+    # Persist the pushed branch alongside `pr_number` so the next
+    # tick's `_resolve_branch_name` can recover it directly. Without
+    # this, a state that lacked `branch` going in (e.g. an
+    # awaiting-human resume that opened the PR here without first
+    # passing through the fresh-spawn branch-persist site) would
+    # leave `pr_number` set with `branch` unset; the legacy-PR
+    # fallback in `_resolve_branch_name` would then misroute every
+    # downstream tick to `orchestrator/issue-<n>` while the live PR
+    # is on the slug-namespaced branch this push just published.
+    state.set("branch", branch)
     # Reset the review counter every time we (re-)open a PR so the validating
     # handler starts fresh on the new branch state.
     state.set("review_round", 0)

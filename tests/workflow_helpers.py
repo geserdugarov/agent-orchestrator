@@ -136,12 +136,14 @@ class _PatchedWorkflowMixin:
         # different tuple via the `branch_ahead_behind` kwarg.
         ahead_behind_mock = MagicMock(return_value=tuple(branch_ahead_behind))
         # `_branch_has_unpushed_commits` shells out to `git rev-list`
-        # against the parent clone; default to False ("local branch is
-        # clean or absent") so existing tests don't trip the
-        # question-stage-park branch check in `_handle_implementing`.
-        # The question-stage relabel tests override this mock to True
-        # to assert the unsafe-branch refusal.
-        branch_unpushed_mock = MagicMock(return_value=False)
+        # against the parent clone; default to None ("no candidate
+        # branch carries unpushed commits") so existing tests don't
+        # trip the question-stage-park branch check in
+        # `_handle_implementing`. The question-stage relabel tests
+        # override this mock with the offending branch name to assert
+        # the unsafe-branch refusal -- the function returns Optional[str]
+        # (branch name when commits exist, None when clean), not bool.
+        branch_unpushed_mock = MagicMock(return_value=None)
         # Decomposer worktree helpers run real `git` calls in production.
         # Mock them with the same _FAKE_WT so `_handle_decomposing` tests
         # don't shell out (and the cleanup helper is a no-op).

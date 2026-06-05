@@ -226,7 +226,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.add_issue(issue)
             pr = FakePR(
                 number=44,
-                head_branch="orchestrator/issue-103",
+                head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-103",
                 base_branch="main",
                 mergeable=True,
                 check_state="success",

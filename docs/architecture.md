@@ -233,8 +233,9 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
                   ▼                                       ▼
    ┌─────────────────────────────────────────────────────────────────────┐
    │  git worktree:  <WORKTREES_DIR>/<owner>__<name>/issue-<n>           │
-   │  branch:        orchestrator/issue-<n>                              │
-   │  ─ slug subdir keeps two repos with the same issue # from colliding │
+   │  branch:        orchestrator/<owner>__<name>/issue-<n>              │
+   │  ─ slug subdir + slug-namespaced branch keep two repos sharing a    │
+   │    target_root from colliding on the same `orchestrator/issue-<n>`  │
    │  ─ created from <spec.remote_name>/<spec.base_branch>               │
    │    in spec.target_root                                              │
    │    (or reused if has unpushed commits)                              │

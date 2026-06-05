@@ -39,14 +39,14 @@ class HandleImplementingExternalMergeTest(
         gh.add_issue(issue)
         pr = FakePR(
             number=15000,
-            head_branch="orchestrator/issue-150",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-150",
             head=FakePRRef(sha="cafe1234"),
             merged=True,
             state="closed",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            150, pr_number=15000, branch="orchestrator/issue-150",
+            150, pr_number=15000, branch="orchestrator/geserdugarov__agent-orchestrator/issue-150",
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
@@ -61,6 +61,7 @@ class HandleImplementingExternalMergeTest(
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 150,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-150",
         )
 
 
@@ -97,14 +98,14 @@ class HandleImplementingClosedIssueTest(
         gh.add_issue(issue)
         pr = FakePR(
             number=15200,
-            head_branch="orchestrator/issue-152",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-152",
             head=FakePRRef(sha="cafe1234"),
             merged=False,
             state="open",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            152, pr_number=15200, branch="orchestrator/issue-152",
+            152, pr_number=15200, branch="orchestrator/geserdugarov__agent-orchestrator/issue-152",
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
@@ -127,14 +128,14 @@ class HandleImplementingClosedIssueTest(
         gh.add_issue(issue)
         pr = FakePR(
             number=15300,
-            head_branch="orchestrator/issue-153",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-153",
             head=FakePRRef(sha="cafe1234"),
             merged=False,
             state="closed",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            153, pr_number=15300, branch="orchestrator/issue-153",
+            153, pr_number=15300, branch="orchestrator/geserdugarov__agent-orchestrator/issue-153",
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
@@ -148,6 +149,7 @@ class HandleImplementingClosedIssueTest(
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 153,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-153",
         )
         # `pr_closed_without_merge` event emitted only when the PR
         # itself is closed (mirrors in_review / fixing semantics).
@@ -174,7 +176,7 @@ class HandleImplementingClosedIssueTest(
         # which models the real PyGithub failure surface (any exception
         # from `gh.get_pr` -- transient 5xx, rate limit, network blip).
         gh.seed_state(
-            154, pr_number=15400, branch="orchestrator/issue-154",
+            154, pr_number=15400, branch="orchestrator/geserdugarov__agent-orchestrator/issue-154",
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
@@ -204,14 +206,14 @@ class HandleImplementingClosedIssueTest(
         gh.add_issue(issue)
         pr = FakePR(
             number=15500,
-            head_branch="orchestrator/issue-155",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-155",
             head=FakePRRef(sha="cafe1234"),
             merged=True,
             state="closed",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            155, pr_number=15500, branch="orchestrator/issue-155",
+            155, pr_number=15500, branch="orchestrator/geserdugarov__agent-orchestrator/issue-155",
             dev_agent="claude", dev_session_id="dev-sess",
         )
         # Force `_finalize_if_pr_merged` to bail on the merged-path

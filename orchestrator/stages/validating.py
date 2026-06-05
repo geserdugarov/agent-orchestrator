@@ -157,7 +157,7 @@ def _handle_dev_fix_result(
         _wf._on_dirty_worktree(gh, issue, state, result, dirty)
         return False
 
-    branch = _wf._branch_name(issue.number)
+    branch = _wf._resolve_branch_name(state, spec, issue.number)
     if not _wf._push_branch(spec, wt, branch):
         _wf._park_awaiting_human(
             gh, issue, state,
@@ -259,7 +259,7 @@ def _post_user_content_change_result(
         _wf._on_dirty_worktree(gh, issue, state, result, dirty)
         return "parked"
 
-    branch = _wf._branch_name(issue.number)
+    branch = _wf._resolve_branch_name(state, spec, issue.number)
     if not _wf._push_branch(spec, wt, branch):
         _wf._park_awaiting_human(
             gh, issue, state,
@@ -311,7 +311,7 @@ def _try_recover_validating_transient_park(
             # there is nothing to push. A human has to intervene (relabel
             # back to implementing) -- that's the unblocking signal.
             return "stuck"
-        if not _wf._push_branch(spec, wt, _wf._branch_name(issue.number)):
+        if not _wf._push_branch(spec, wt, _wf._resolve_branch_name(state, spec, issue.number)):
             return "stuck"
         # The dev's fix is now landed; bump the round so the cap reflects
         # the completed fix cycle.
@@ -364,7 +364,7 @@ def _try_recover_validating_transient_park(
         # The dev committed before timing out. Finish what it started
         # by pushing the new SHA; on success the fix is now landed and
         # we bump the round just like the push_failed branch.
-        if not _wf._push_branch(spec, wt, _wf._branch_name(issue.number)):
+        if not _wf._push_branch(spec, wt, _wf._resolve_branch_name(state, spec, issue.number)):
             return "stuck"
         state.set("pre_dev_fix_sha", None)
         round_n = int(state.get("review_round") or 0)
@@ -654,7 +654,10 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             _wf._mark_drift_comments_consumed(gh, issue, state)
             wt = _wf._worktree_path(spec, issue.number)
             if not wt.exists():
-                wt = _wf._ensure_worktree(spec, issue.number)
+                wt = _wf._ensure_worktree(
+                    spec, issue.number,
+                    branch=_wf._resolve_branch_name(state, spec, issue.number),
+                )
             before_sha = _wf._head_sha(wt)
             followup = _wf._build_user_content_change_prompt(
                 issue, _wf._recent_comments_text(issue),
@@ -790,7 +793,10 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         else:
             wt = _wf._worktree_path(spec, issue.number)
             if not wt.exists():
-                wt = _wf._ensure_worktree(spec, issue.number)
+                wt = _wf._ensure_worktree(
+                    spec, issue.number,
+                    branch=_wf._resolve_branch_name(state, spec, issue.number),
+                )
             before_sha = _wf._head_sha(wt)
             resumed = _wf._resume_developer_on_human_reply(gh, spec, issue, state)
             if resumed is None:
@@ -829,7 +835,10 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         gh.write_pinned_state(issue, state)
         return
 
-    wt = _wf._ensure_worktree(spec, issue.number)
+    wt = _wf._ensure_worktree(
+        spec, issue.number,
+        branch=_wf._resolve_branch_name(state, spec, issue.number),
+    )
     _, dev_backend_for_prompt, _, _ = _wf._read_dev_session(state)
     review_prompt = _wf._build_review_prompt(
         spec, issue, _wf._recent_comments_text(issue), dev_backend_for_prompt,
@@ -922,7 +931,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         squashed_count = 0
         if config.SQUASH_ON_APPROVAL:
             success, _sha_after, n_squashed, err = _wf._squash_and_force_push(
-                spec, wt, _wf._branch_name(issue.number), issue,
+                spec, wt, _wf._resolve_branch_name(state, spec, issue.number), issue,
             )
             if not success:
                 _wf._park_awaiting_human(

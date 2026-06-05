@@ -226,7 +226,7 @@ class FirstTimeHashSeedingIsDurableTest(
         gh = FakeGitHubClient()
         issue = make_issue(100, label="validating", body="initial body")
         gh.add_issue(issue)
-        pr = FakePR(number=1000, head_branch="orchestrator/issue-100")
+        pr = FakePR(number=1000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-100")
         gh.add_pr(pr)
         gh.seed_state(
             100,
@@ -279,7 +279,7 @@ class NoCommitAckDoesNotParkTest(
         gh = FakeGitHubClient()
         issue = make_issue(600, label="validating", body="clarified body")
         gh.add_issue(issue)
-        pr = FakePR(number=6000, head_branch="orchestrator/issue-600")
+        pr = FakePR(number=6000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-600")
         gh.add_pr(pr)
         gh.seed_state(
             600,
@@ -288,7 +288,7 @@ class NoCommitAckDoesNotParkTest(
             dev_session_id="dev-sess",
             user_content_hash="stale-hash",
             review_round=1,
-            branch="orchestrator/issue-600",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-600",
         )
 
         self._run(
@@ -326,7 +326,7 @@ class NoCommitAckDoesNotParkTest(
         gh = FakeGitHubClient()
         issue = make_issue(700, label="in_review", body="clarified body")
         gh.add_issue(issue)
-        pr = FakePR(number=7000, head_branch="orchestrator/issue-700")
+        pr = FakePR(number=7000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-700")
         gh.add_pr(pr)
         gh.seed_state(
             700,
@@ -337,7 +337,7 @@ class NoCommitAckDoesNotParkTest(
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
-            branch="orchestrator/issue-700",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-700",
         )
 
         self._run(
@@ -391,7 +391,7 @@ class DriftMarksCommentsConsumedTest(
         )
         issue.comments.append(human)
         gh.add_issue(issue)
-        pr = FakePR(number=9000, head_branch="orchestrator/issue-900")
+        pr = FakePR(number=9000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-900")
         gh.add_pr(pr)
         gh.seed_state(
             900,
@@ -400,7 +400,7 @@ class DriftMarksCommentsConsumedTest(
             dev_session_id="dev-sess",
             user_content_hash="stale-hash",
             review_round=1,
-            branch="orchestrator/issue-900",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-900",
             last_action_comment_id=100,
         )
 
@@ -442,7 +442,7 @@ class DriftMarksCommentsConsumedTest(
         )
         issue.comments.append(human)
         gh.add_issue(issue)
-        pr = FakePR(number=9100, head_branch="orchestrator/issue-910")
+        pr = FakePR(number=9100, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-910")
         gh.add_pr(pr)
         gh.seed_state(
             910,
@@ -453,7 +453,7 @@ class DriftMarksCommentsConsumedTest(
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
-            branch="orchestrator/issue-910",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-910",
             last_action_comment_id=100,
         )
 
@@ -499,7 +499,7 @@ class DriftMarksCommentsConsumedTest(
             user_content_hash="stale-hash",
             awaiting_human=True,
             last_action_comment_id=100,
-            branch="orchestrator/issue-920",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-920",
         )
 
         self._run(
@@ -531,7 +531,7 @@ class DriftMarksCommentsConsumedTest(
         )
         issue.comments.append(human)
         gh.add_issue(issue)
-        pr = FakePR(number=9300, head_branch="orchestrator/issue-930")
+        pr = FakePR(number=9300, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-930")
         gh.add_pr(pr)
         gh.seed_state(
             930,
@@ -540,7 +540,7 @@ class DriftMarksCommentsConsumedTest(
             dev_session_id="dev-sess",
             user_content_hash="stale-hash",
             conflict_round=0,
-            branch="orchestrator/issue-930",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-930",
             last_action_comment_id=100,
         )
 
@@ -722,7 +722,7 @@ class DriftNonAckResponseParksTest(
         gh = FakeGitHubClient()
         issue = make_issue(601, label="validating", body="clarified body")
         gh.add_issue(issue)
-        pr = FakePR(number=6001, head_branch="orchestrator/issue-601")
+        pr = FakePR(number=6001, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-601")
         gh.add_pr(pr)
         gh.seed_state(
             601,
@@ -731,7 +731,7 @@ class DriftNonAckResponseParksTest(
             dev_session_id="dev-sess",
             user_content_hash="stale-hash",
             review_round=1,
-            branch="orchestrator/issue-601",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-601",
         )
 
         self._run(
@@ -766,7 +766,7 @@ class DriftNonAckResponseParksTest(
         gh = FakeGitHubClient()
         issue = make_issue(701, label="in_review", body="clarified body")
         gh.add_issue(issue)
-        pr = FakePR(number=7001, head_branch="orchestrator/issue-701")
+        pr = FakePR(number=7001, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-701")
         gh.add_pr(pr)
         gh.seed_state(
             701,
@@ -777,7 +777,7 @@ class DriftNonAckResponseParksTest(
             pr_last_comment_id=0,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
-            branch="orchestrator/issue-701",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-701",
         )
 
         self._run(
@@ -823,7 +823,7 @@ class DriftNonAckResponseParksTest(
             dev_agent="claude",
             dev_session_id="dev-sess",
             awaiting_human=False,
-            branch="orchestrator/issue-602",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-602",
         )
 
         self._run(

@@ -446,7 +446,10 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         _wf._mark_drift_comments_consumed(gh, issue, state)
         wt = _wf._worktree_path(spec, issue.number)
         if not wt.exists():
-            wt = _wf._ensure_worktree(spec, issue.number)
+            wt = _wf._ensure_worktree(
+                spec, issue.number,
+                branch=_wf._resolve_branch_name(state, spec, issue.number),
+            )
         before_sha = _wf._head_sha(wt)
         # Combine the issue-thread context with the unread PR-conversation
         # comments so the dev sees both surfaces before the watermark

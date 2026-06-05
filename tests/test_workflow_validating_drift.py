@@ -36,7 +36,7 @@ class ValidatingTransientParkRecoveryTest(
     transient cause is gone.
     """
 
-    BRANCH = "orchestrator/issue-170"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-170"
 
     def _parked_issue(self, *, park_reason: str, **extra_state):
         gh = FakeGitHubClient()
@@ -525,7 +525,7 @@ class HandleValidatingResumeOnHashChangeTest(
         gh = FakeGitHubClient()
         issue = make_issue(70, label="validating", body="updated criteria")
         gh.add_issue(issue)
-        pr = FakePR(number=700, head_branch="orchestrator/issue-70")
+        pr = FakePR(number=700, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-70")
         gh.add_pr(pr)
         gh.seed_state(
             70,
@@ -534,7 +534,7 @@ class HandleValidatingResumeOnHashChangeTest(
             dev_session_id="dev-sess",
             pr_number=pr.number,
             review_round=0,
-            branch="orchestrator/issue-70",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-70",
         )
 
         self._run(
@@ -588,7 +588,7 @@ class ValidatingDriftDefersToReviewerRecoveryTest(
         )
         issue.comments.append(human)
         gh.add_issue(issue)
-        pr = FakePR(number=10000, head_branch="orchestrator/issue-1000")
+        pr = FakePR(number=10000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-1000")
         gh.add_pr(pr)
         # Pre-seed a real `user_content_hash` (the bug surfaces only
         # when the hash is already set; first-tick auto-seeding hides it).
@@ -601,7 +601,7 @@ class ValidatingDriftDefersToReviewerRecoveryTest(
             dev_agent="claude",
             dev_session_id="dev-sess",
             review_round=1,
-            branch="orchestrator/issue-1000",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-1000",
             awaiting_human=True,
             park_reason="reviewer_timeout",
             last_action_comment_id=100,

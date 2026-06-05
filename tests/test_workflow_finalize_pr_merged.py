@@ -36,11 +36,14 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
     the per-handler smoke tests.
     """
 
-    def _state_with_pr_number(self, gh, issue_number, pr_number):
+    def _state_with_pr_number(
+        self, gh, issue_number, pr_number, **extra,
+    ):
         from orchestrator.github import PinnedState
-        gh.seed_state(issue_number, pr_number=pr_number)
+        seed = {"pr_number": pr_number, **extra}
+        gh.seed_state(issue_number, **seed)
         # Mirror what handlers do: read pinned state and hand it to the helper.
-        state = PinnedState(comment_id=None, data={"pr_number": pr_number})
+        state = PinnedState(comment_id=None, data=dict(seed))
         return state
 
     def test_no_pr_number_returns_false(self) -> None:
@@ -66,7 +69,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(201, label="validating")
         gh.add_issue(issue)
         pr = FakePR(
-            number=20100, head_branch="orchestrator/issue-201",
+            number=20100, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-201",
             head=FakePRRef(sha="cafe1234"),
             merged=False, state="open",
         )
@@ -94,7 +97,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(202, label="validating")
         gh.add_issue(issue)
         pr = FakePR(
-            number=20200, head_branch="orchestrator/issue-202",
+            number=20200, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-202",
             head=FakePRRef(sha="cafe1234"),
             merged=False, state="closed",
         )
@@ -118,12 +121,15 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(203, label="implementing")
         gh.add_issue(issue)
         pr = FakePR(
-            number=20300, head_branch="orchestrator/issue-203",
+            number=20300, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-203",
             head=FakePRRef(sha="cafe1234"),
             merged=True, state="closed",
         )
         gh.add_pr(pr)
-        state = self._state_with_pr_number(gh, 203, 20300)
+        state = self._state_with_pr_number(
+            gh, 203, 20300,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-203",
+        )
 
         result = self._run(
             lambda: self.assertTrue(
@@ -138,6 +144,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(issue.closed)
         result["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 203,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-203",
         )
         # An `external`-merge audit event is emitted with the
         # entry-stage label.
@@ -158,7 +165,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=20400, head_branch="orchestrator/issue-204",
+            number=20400, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-204",
             head=FakePRRef(sha="cafe1234"),
             merged=True, state="closed",
         )

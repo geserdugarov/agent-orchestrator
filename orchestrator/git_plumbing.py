@@ -396,7 +396,7 @@ def _push_branch(
     When `force_with_lease` is None (the default), the function reads the
     current remote SHA via `ls-remote` and uses that as the lease. This is
     the normal-push path: the orchestrator owns the
-    `orchestrator/issue-<n>` namespace, but a self-restart between commit
+    `orchestrator/<slug>/issue-<n>` namespace, but a self-restart between commit
     and push can leave the worktree on a different SHA than what was
     already pushed -- e.g. a `resume=False` rerun of codex amending
     equivalent work. A plain push then fails non-fast-forward and parks

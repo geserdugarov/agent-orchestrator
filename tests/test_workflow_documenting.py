@@ -69,7 +69,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         defaults = dict(
             pr_number=21,
-            branch="orchestrator/issue-201",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-201",
             dev_agent="codex",
             dev_session_id="dev-sess",
         )
@@ -410,7 +410,7 @@ class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         defaults = dict(
             pr_number=31,
-            branch="orchestrator/issue-301",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-301",
             dev_agent="codex",
             dev_session_id="dev-sess",
         )
@@ -511,7 +511,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         gh.seed_state(
             401,
             pr_number=41,
-            branch="orchestrator/issue-401",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-401",
             awaiting_human=True,
             last_action_comment_id=2000,
             dev_agent="codex",
@@ -539,7 +539,10 @@ class HandleDocumentingAwaitingHumanResumeTest(
         # the helper's `_ensure_worktree` fallback cannot restore the
         # per-issue branch from `<remote>/<base>` and lose the dev's
         # PR commits.
-        mocks["_ensure_pr_worktree"].assert_called_once_with(_TEST_SPEC, 401)
+        mocks["_ensure_pr_worktree"].assert_called_once_with(
+            _TEST_SPEC, 401,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-401",
+        )
         mocks["_push_branch"].assert_called_once()
         self.assertIn((401, "in_review"), gh.label_history)
         data = gh.pinned_data(401)
@@ -562,7 +565,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         gh.seed_state(
             403,
             pr_number=43,
-            branch="orchestrator/issue-403",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-403",
             awaiting_human=True,
             last_action_comment_id=3000,
             dev_agent="codex",
@@ -615,7 +618,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         gh.seed_state(
             404,
             pr_number=44,
-            branch="orchestrator/issue-404",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-404",
             awaiting_human=True,
             last_action_comment_id=4000,
             dev_agent="codex",
@@ -664,7 +667,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         gh.seed_state(
             405,
             pr_number=45,
-            branch="orchestrator/issue-405",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-405",
             awaiting_human=True,
             last_action_comment_id=5000,
             dev_agent="codex",
@@ -696,7 +699,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         gh.seed_state(
             402,
             pr_number=42,
-            branch="orchestrator/issue-402",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-402",
             awaiting_human=True,
             last_action_comment_id=2500,
             dev_agent="codex",
@@ -741,7 +744,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         gh.seed_state(
             406,
             pr_number=46,
-            branch="orchestrator/issue-406",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-406",
             awaiting_human=True,
             last_action_comment_id=6000,
             dev_agent="codex",
@@ -797,7 +800,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         gh.seed_state(
             407,
             pr_number=47,
-            branch="orchestrator/issue-407",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-407",
             awaiting_human=True,
             last_action_comment_id=7000,
             dev_agent="codex",
@@ -841,7 +844,7 @@ class HandleDocumentingParkedSilenceTest(
         gh.add_issue(issue)
         defaults = dict(
             pr_number=61,
-            branch="orchestrator/issue-601",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-601",
             dev_agent="codex",
             dev_session_id="dev-sess",
             awaiting_human=True,
@@ -942,7 +945,7 @@ class HandleDocumentingDriftTest(
         gh.add_issue(issue)
         defaults = dict(
             pr_number=71,
-            branch="orchestrator/issue-701",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-701",
             dev_agent="codex",
             dev_session_id="dev-sess",
             user_content_hash="stale-hash-from-original-body",
@@ -1112,7 +1115,7 @@ class HandleDocumentingDriftTest(
         self.assertEqual(reset_call.args[:2], ("reset", "--hard"))
         self.assertEqual(
             reset_call.args[2],
-            f"{_TEST_SPEC.remote_name}/orchestrator/issue-701",
+            f"{_TEST_SPEC.remote_name}/orchestrator/geserdugarov__agent-orchestrator/issue-701",
         )
         self.assertEqual(reset_call.kwargs.get("cwd"), wt_path)
         self.assertEqual(clean_call.args, ("clean", "-fd"))
@@ -1229,7 +1232,7 @@ class HandleDocumentingDriftTest(
         self.assertEqual(reset_call.args[:2], ("reset", "--hard"))
         self.assertEqual(
             reset_call.args[2],
-            f"{_TEST_SPEC.remote_name}/orchestrator/issue-701",
+            f"{_TEST_SPEC.remote_name}/orchestrator/geserdugarov__agent-orchestrator/issue-701",
         )
         self.assertEqual(clean_call.args, ("clean", "-fd"))
 
@@ -1434,7 +1437,7 @@ class HandleDocumentingDriftTest(
                 issue, set(),
             ),
             pr_number=71,
-            branch="orchestrator/issue-701",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-701",
             dev_agent="codex",
             dev_session_id="dev-sess",
         )
@@ -1504,7 +1507,7 @@ class HandleDocumentingDriftTest(
                 issue, set(),
             ),
             pr_number=71,
-            branch="orchestrator/issue-701",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-701",
             dev_agent="codex",
             dev_session_id="dev-sess",
         )
@@ -1602,14 +1605,14 @@ class HandleDocumentingExternalMergeTest(
         gh.add_issue(issue)
         pr = FakePR(
             number=18000,
-            head_branch="orchestrator/issue-180",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-180",
             head=FakePRRef(sha="cafe1234"),
             merged=True,
             state="closed",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            180, pr_number=18000, branch="orchestrator/issue-180",
+            180, pr_number=18000, branch="orchestrator/geserdugarov__agent-orchestrator/issue-180",
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
@@ -1624,6 +1627,7 @@ class HandleDocumentingExternalMergeTest(
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 180,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-180",
         )
 
 
@@ -1643,14 +1647,14 @@ class HandleDocumentingClosedIssueTest(
         gh.add_issue(issue)
         pr = FakePR(
             number=18100,
-            head_branch="orchestrator/issue-181",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-181",
             head=FakePRRef(sha="cafe1234"),
             merged=False,
             state="closed",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            181, pr_number=18100, branch="orchestrator/issue-181",
+            181, pr_number=18100, branch="orchestrator/geserdugarov__agent-orchestrator/issue-181",
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
@@ -1664,6 +1668,7 @@ class HandleDocumentingClosedIssueTest(
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 181,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-181",
         )
 
 
@@ -1676,7 +1681,7 @@ class HandleDocumentingFinalDocsHandoffTest(
     """
 
     PR_NUMBER = 71
-    BRANCH = "orchestrator/issue-707"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-707"
 
     def _seeded(self, **state):
         gh = FakeGitHubClient()
@@ -1818,7 +1823,7 @@ class HandleDocumentingFinalDocsHandoffTest(
         gh.add_issue(issue)
         pr = FakePR(
             number=73,
-            head_branch="orchestrator/issue-709",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-709",
             head=FakePRRef(sha="docsSha"),
             mergeable=True, check_state="success",
         )
@@ -1826,7 +1831,7 @@ class HandleDocumentingFinalDocsHandoffTest(
         gh.seed_state(
             709,
             pr_number=73,
-            branch="orchestrator/issue-709",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-709",
             dev_agent="codex",
             dev_session_id="dev-sess",
             review_round=1,

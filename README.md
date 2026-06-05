@@ -96,7 +96,7 @@ Basic knobs live in [`.env.example`](.env.example); common advanced overrides an
 
 ## Managing multiple repositories
 
-Set `REPOS` to drive several target repositories from one orchestrator process. Worktrees are namespaced under `WORKTREES_DIR/<owner>__<name>/issue-N` so two repos that share an issue number cannot collide. For the entry syntax (including the optional fifth `parallel_limit` field) and the available per-entry fields, see [`docs/configuration.md#multi-repo-repos-syntax`](docs/configuration.md#multi-repo-repos-syntax). For how multi-repo ticks fan out and the per-repo / global concurrency caps, see [`docs/configuration.md#parallel-processing`](docs/configuration.md#parallel-processing).
+Set `REPOS` to drive several target repositories from one orchestrator process. Worktrees and PR branches are both namespaced by the sanitized repo slug (`WORKTREES_DIR/<owner>__<name>/issue-N` and `orchestrator/<owner>__<name>/issue-N`) so two repos that share an issue number cannot collide on disk or on the branch ref, even when they share a `target_root`. For the entry syntax (including the optional fifth `parallel_limit` field) and the available per-entry fields, see [`docs/configuration.md#multi-repo-repos-syntax`](docs/configuration.md#multi-repo-repos-syntax). For how multi-repo ticks fan out and the per-repo / global concurrency caps, see [`docs/configuration.md#parallel-processing`](docs/configuration.md#parallel-processing).
 
 ## License
 

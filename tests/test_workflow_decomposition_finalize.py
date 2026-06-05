@@ -42,7 +42,7 @@ class ChildMergedPrAutoFinalizeTest(
         gh.add_issue(child)
         pr = FakePR(
             number=pr_number,
-            head_branch=f"orchestrator/issue-{number}",
+            head_branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}",
             head=FakePRRef(sha="cafe1234"),
             merged=True,
             state="closed",
@@ -120,7 +120,7 @@ class ChildMergedPrAutoFinalizeTest(
         gh.add_issue(closed_child)
         pr = FakePR(
             number=7110,
-            head_branch="orchestrator/issue-711",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-711",
             head=FakePRRef(sha="cafe1234"),
             merged=False,
             state="closed",

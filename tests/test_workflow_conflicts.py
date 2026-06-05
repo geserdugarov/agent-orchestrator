@@ -37,7 +37,7 @@ class ResolvingConflictEventEmissionTest(
     same `pr_merged` / `pr_closed_without_merge` terminals as in_review.
     """
 
-    BRANCH = "orchestrator/issue-300"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-300"
     PR_NUMBER = 900
 
     @staticmethod
@@ -190,7 +190,7 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
     """
 
     ISSUE_NUMBER = 300
-    BRANCH = "orchestrator/issue-300"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-300"
 
     def _git_recorder(self, *, local_branch_present: bool):
         """Return a `_git` stand-in that records every invocation and
@@ -361,13 +361,13 @@ class HandleResolvingConflictUsesAuthedFetchTest(
         issue = make_issue(450, label="resolving_conflict")
         gh.add_issue(issue)
         pr = FakePR(
-            number=850, head_branch="orchestrator/issue-450",
+            number=850, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-450",
             head=FakePRRef(sha="cafe1234"),
             mergeable=False, check_state="success",
         )
         gh.add_pr(pr)
         gh.seed_state(
-            450, pr_number=850, branch="orchestrator/issue-450",
+            450, pr_number=850, branch="orchestrator/geserdugarov__agent-orchestrator/issue-450",
             dev_agent="claude", dev_session_id="dev-sess",
             conflict_round=0,
         )
@@ -416,7 +416,7 @@ class HandleResolvingConflictUsesAuthedFetchTest(
             "expected base-branch fetch refspec",
         )
         self.assertIn(
-            "refs/remotes/origin/orchestrator/issue-450", joined,
+            "refs/remotes/origin/orchestrator/geserdugarov__agent-orchestrator/issue-450", joined,
             "expected PR-branch fetch refspec",
         )
 
@@ -911,7 +911,7 @@ class HandleResolvingConflictTest(
     push helper mocked so no shell-out happens.
     """
 
-    BRANCH = "orchestrator/issue-200"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-200"
     PR_NUMBER = 800
 
     def _seed(
@@ -1180,6 +1180,7 @@ class HandleResolvingConflictTest(
         # guards against.
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 200,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-200",
         )
 
     def test_manually_closed_with_open_pr_marks_rejected_without_cleanup(
@@ -1728,7 +1729,7 @@ class HandleResolvingConflictHashDriftTest(
             500, label="resolving_conflict", body="updated body",
         )
         gh.add_issue(issue)
-        pr = FakePR(number=5000, head_branch="orchestrator/issue-500")
+        pr = FakePR(number=5000, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-500")
         gh.add_pr(pr)
         gh.seed_state(
             500,
@@ -1736,7 +1737,7 @@ class HandleResolvingConflictHashDriftTest(
             dev_agent="claude",
             dev_session_id="dev-sess",
             conflict_round=0,
-            branch="orchestrator/issue-500",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-500",
             user_content_hash="stale-hash",
         )
 

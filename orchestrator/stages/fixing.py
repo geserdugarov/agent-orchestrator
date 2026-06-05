@@ -336,7 +336,10 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     followup = _wf._build_pr_comment_followup(new_feedback)
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
-        wt = _wf._ensure_worktree(spec, issue.number)
+        wt = _wf._ensure_worktree(
+            spec, issue.number,
+            branch=_wf._resolve_branch_name(state, spec, issue.number),
+        )
     before_sha = _wf._head_sha(wt)
     wt, dev_result = _wf._resume_dev_with_text(
         gh, spec, issue, state, followup,

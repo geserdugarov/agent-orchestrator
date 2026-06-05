@@ -176,7 +176,7 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         pr = FakePR(
             number=42,
-            head_branch="orchestrator/issue-2",
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-2",
             base_branch="main",
             mergeable=True,
             check_state="success",

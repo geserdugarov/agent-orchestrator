@@ -217,7 +217,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self,
         *,
         pr_number: int = 42,
-        head_branch: str = "orchestrator/issue-7",
+        head_branch: str = "orchestrator/acme__widget/issue-7",
         merged: bool = False,
         state: str = "open",
     ) -> FakePR:
@@ -241,7 +241,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7", review_round=3,
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7", review_round=3,
         )
         self._add_pr()
         merge = MagicMock(return_value=(True, []))
@@ -294,14 +294,14 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         from tests.fakes import FakePR, FakePRRef
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         # Seed an explicit PR head SHA on the PR so the
         # `conflict_round` `action="entered"` event can be asserted
         # against it (the event historically carried the remote PR
         # head SHA and `docs/observability.md` still documents `sha`
         # as part of the event shape).
         self.gh.add_pr(FakePR(
-            number=42, head_branch="orchestrator/issue-7",
+            number=42, head_branch="orchestrator/acme__widget/issue-7",
             head=FakePRRef(sha="cafef00dcafef00d"),
             state="open",
         ))
@@ -357,7 +357,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # label is NOT applied.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="validating"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
@@ -384,7 +384,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # get relabeled to `resolving_conflict`.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="documenting"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=True)
@@ -412,7 +412,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # instead of processing the issue on a behind-base PR head.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=False)  # lease rejection
@@ -473,7 +473,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
 
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
 
         merge = MagicMock(return_value=(True, []))
@@ -528,7 +528,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # `park_reason="auto_base_rebase_dirty"`.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock(return_value=(True, []))
         push = MagicMock()
@@ -582,7 +582,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # behind-base PR.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock(return_value=(False, []))
         push = MagicMock()
@@ -623,7 +623,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             awaiting_human=True,
             park_reason="auto_base_rebase_push_failed",
             last_action_comment_id=99,
@@ -670,7 +670,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             awaiting_human=True,
             park_reason="auto_base_rebase_push_failed",
             last_action_comment_id=99,
@@ -715,7 +715,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             awaiting_human=True,
             park_reason="auto_base_rebase_push_failed",
             last_action_comment_id=99,
@@ -754,7 +754,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
         self.gh.add_issue(issue)
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             awaiting_human=True,
             park_reason="auto_base_rebase_push_failed",
             last_action_comment_id=99,
@@ -788,7 +788,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             awaiting_human=True,
             park_reason="auto_base_rebase_push_failed",
             last_action_comment_id=99,
@@ -826,7 +826,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             awaiting_human=True, park_reason="unmergeable",
             last_action_comment_id=99,
         )
@@ -864,7 +864,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="before-sha",
         )
         self._add_pr()
@@ -926,7 +926,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="before-sha",
             review_round=3,
         )
@@ -978,7 +978,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="before-sha",
         )
         self._add_pr()
@@ -1035,7 +1035,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
 
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="before-sha",
             review_round=3,
         )
@@ -1192,7 +1192,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="before-sha",
             review_round=3,
         )
@@ -1258,7 +1258,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="before-sha",
             review_round=3,
         )
@@ -1323,7 +1323,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="before-sha",
         )
         self._add_pr()
@@ -1375,7 +1375,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7", review_round=2,
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7", review_round=2,
         )
         self._add_pr()
         # Capture the pinned-state anchor value AT THE MOMENT the
@@ -1425,7 +1425,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # reset.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock(return_value=(True, []))
         push = MagicMock(return_value=False)
@@ -1458,7 +1458,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # weaken the lease / recovery safeguard.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock()
         push = MagicMock()
@@ -1498,7 +1498,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # resets HEAD to `before_sha` and parks awaiting human.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock(return_value=(True, []))
         push = MagicMock()
@@ -1546,7 +1546,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="before-sha",
         )
         self._add_pr()
@@ -1614,7 +1614,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # `_PR_REFRESH_DETOUR_LABELS` set.
         self.gh.add_issue(make_issue(7, label="resolving_conflict"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="stale-anchor",
         )
         self._add_pr()
@@ -1654,7 +1654,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pending_auto_base_rebase_push_sha="stale-anchor",
         )
         # Merged PR -- terminal.
@@ -1680,7 +1680,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         issue = make_issue(7, label="in_review")
         issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
         self.gh.add_issue(issue)
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock()
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
@@ -1716,7 +1716,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         issue = make_issue(7, label="in_review")
         issue.labels.append(FakeLabel(BACKLOG_LABEL))
         self.gh.add_issue(issue)
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         merge = MagicMock()
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
@@ -1749,7 +1749,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # second label flip is pointless and would re-post the PR notice.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="resolving_conflict"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         with patch.object(base_sync, "_worktree_dirty_files", return_value=[]), \
@@ -1765,7 +1765,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # behind = 0 short-circuits: nothing to refresh, no detour.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr()
         git_mock = MagicMock(return_value=self._git_result(stdout="0\n"))
         with patch.object(base_sync, "_worktree_dirty_files", return_value=[]), \
@@ -1784,7 +1784,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7", conflict_round=2,
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7", conflict_round=2,
         )
         self._add_pr()
         merge = MagicMock(return_value=(False, ["a.py"]))
@@ -1814,7 +1814,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # do its job.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr(merged=True, state="closed")
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         with patch.object(base_sync, "_worktree_dirty_files", return_value=[]), \
@@ -1829,7 +1829,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # `resolving_conflict`. The handler will finalize to `rejected`.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         self._add_pr(merged=False, state="closed")
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         with patch.object(base_sync, "_worktree_dirty_files", return_value=[]), \
@@ -1844,7 +1844,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # than racing a half-known state.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
         # No PR added -- get_pr will raise KeyError on the FakeGitHubClient.
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))
         with patch.object(base_sync, "_worktree_dirty_files", return_value=[]), \
@@ -1868,7 +1868,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             pr_last_comment_id=100,
         )
         self._add_pr()
@@ -1905,7 +1905,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/issue-7",
+            7, pr_number=42, branch="orchestrator/acme__widget/issue-7",
             awaiting_human=True, park_reason="unmergeable",
         )
         git_mock = MagicMock(return_value=self._git_result(stdout="3\n"))

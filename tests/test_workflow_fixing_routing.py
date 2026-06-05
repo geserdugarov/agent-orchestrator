@@ -182,12 +182,12 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=801, head_branch="orchestrator/issue-705",
+            number=801, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-705",
             head=FakePRRef(sha="cafe1234"),
             merged=True, state="closed",
         )
         gh.add_pr(pr)
-        gh.seed_state(705, pr_number=pr.number, branch="orchestrator/issue-705")
+        gh.seed_state(705, pr_number=pr.number, branch="orchestrator/geserdugarov__agent-orchestrator/issue-705")
 
         mocks = self._run(
             lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
@@ -198,6 +198,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("merged_at", gh.pinned_data(705))
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 705,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-705",
         )
 
     def test_fixing_finalizes_closed_issue_on_closed_without_merge(
@@ -211,12 +212,12 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=802, head_branch="orchestrator/issue-706",
+            number=802, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-706",
             head=FakePRRef(sha="cafe1234"),
             merged=False, state="closed",
         )
         gh.add_pr(pr)
-        gh.seed_state(706, pr_number=pr.number, branch="orchestrator/issue-706")
+        gh.seed_state(706, pr_number=pr.number, branch="orchestrator/geserdugarov__agent-orchestrator/issue-706")
 
         mocks = self._run(
             lambda: workflow._process_issue(gh, _TEST_SPEC, issue),
@@ -227,6 +228,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("closed_without_merge_at", gh.pinned_data(706))
         mocks["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 706,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-706",
         )
 
     def test_closed_fixing_issue_surfaces_in_pollable_sweep(self) -> None:
@@ -256,7 +258,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(720, label="fixing")
         gh.add_issue(issue)
         pr = FakePR(
-            number=901, head_branch="orchestrator/issue-720",
+            number=901, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-720",
             head=FakePRRef(sha="cafe1234"),
             mergeable=True, check_state="success",
             approved=True,
@@ -264,7 +266,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_pr(pr)
         gh.seed_state(
             720, pr_number=pr.number,
-            branch="orchestrator/issue-720",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-720",
             dev_agent="claude",
             dev_session_id="dev-sess",
             pr_last_comment_id=1999,
@@ -314,7 +316,7 @@ class FixingConflictDetourTest(unittest.TestCase):
     def _seed_fixing_with_pending_feedback(self) -> None:
         self.gh.add_issue(make_issue(7, label="fixing"))
         pr = FakePR(
-            number=42, head_branch="orchestrator/issue-7",
+            number=42, head_branch="orchestrator/acme__widget/issue-7",
             head=FakePRRef(sha="cafe1234"),
             state="open",
         )
@@ -322,7 +324,7 @@ class FixingConflictDetourTest(unittest.TestCase):
         self.gh.seed_state(
             7,
             pr_number=42,
-            branch="orchestrator/issue-7",
+            branch="orchestrator/acme__widget/issue-7",
             dev_agent="claude",
             dev_session_id="dev-sess",
             pr_last_comment_id=1999,

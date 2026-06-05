@@ -193,7 +193,7 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             21,
             pr_number=21,
-            branch="orchestrator/issue-21",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-21",
             dev_agent="claude",
             dev_session_id="dev-sess",
             review_round=0,
@@ -222,7 +222,7 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(
             22,
             pr_number=22,
-            branch="orchestrator/issue-22",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-22",
             dev_agent="codex",
             dev_session_id="dev-sess",
             review_round=0,
@@ -266,7 +266,7 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
             awaiting_human=True,
             last_action_comment_id=900,
             codex_session_id="sess-legacy",
-            branch="orchestrator/issue-23",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-23",
         )
 
         with patch.object(config, "DEV_AGENT", "claude"):
@@ -324,7 +324,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             captured["resume_session_id"] = resume_session_id
             return _agent(session_id="ignored", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -353,7 +353,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             captured["resume_session_id"] = resume_session_id
             return _agent(session_id="fresh-sess", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -379,7 +379,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded_issue(silent_park_count=threshold)
         state = gh.read_pinned_state(issue)
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(
                  workflow, "run_agent",
                  lambda *a, **kw: _agent(session_id="", last_message=""),
@@ -417,7 +417,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             captured["resume_session_id"] = resume_session_id
             return _agent(session_id="fresh-legacy", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -514,7 +514,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 )
             return _agent(session_id="fresh-sess", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -547,7 +547,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 )
             return _agent(session_id="", last_message="")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -572,7 +572,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 session_id="", last_message="", stderr=self.STALE_STDERR,
             )
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             _, result = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "go",
@@ -601,7 +601,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 session_id="", last_message="", stderr=self.STALE_STDERR,
             )
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 

@@ -46,7 +46,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
     """
 
     PR_NUMBER = 880
-    BRANCH = "orchestrator/issue-880"
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-880"
 
     def _seed_in_review_with_pr(self, *, pr=None, extra_state=None):
         gh = FakeGitHubClient()
@@ -198,7 +198,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         ))
         gh.add_issue(issue)
         pr = FakePR(
-            number=1661, head_branch="orchestrator/issue-1660",
+            number=1661, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-1660",
             head=FakePRRef(sha="cafe1234"),
             mergeable=True, check_state="success",
         )
@@ -206,7 +206,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         gh.seed_state(
             1660,
             pr_number=pr.number,
-            branch="orchestrator/issue-1660",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-1660",
             dev_agent="claude",
             dev_session_id="dev-sess",
             pr_last_comment_id=6999,
