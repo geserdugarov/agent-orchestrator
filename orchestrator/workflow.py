@@ -590,11 +590,22 @@ def tick(
     family_numbers: list[int] = []
     fanout_numbers: list[int] = []
     for issue in gh.list_pollable_issues():
+        # `backlog` is a "not yet" hold -- filter it before the family /
+        # fanout split so a parked, workflow-label-less issue is never
+        # folded into the family bucket (see `_dispatch_via_scheduler` for
+        # why that starves fanout under `parallel_limit=1`).
+        # `_process_issue` skips backlog anyway.
         try:
+            if issue_has_label(issue, BACKLOG_LABEL):
+                log.info(
+                    "repo=%s issue=#%s has %r; skipping",
+                    spec.slug, issue.number, BACKLOG_LABEL,
+                )
+                continue
             label = gh.workflow_label(issue)
         except Exception:
             log.exception(
-                "repo=%s issue=#%s workflow_label read failed; routing to "
+                "repo=%s issue=#%s label read failed; routing to "
                 "family bucket so per-issue exception isolation can pick "
                 "up any sustained failure", spec.slug, issue.number,
             )
@@ -772,19 +783,37 @@ def _dispatch_via_scheduler(
     per-repo slot (under the default ``parallel_limit=1``) and deadlock
     the very children it waits on. A bucket containing ``decomposing``
     (spawns the decomposer agent) or an unlabeled-pickup ``None`` stays
-    cap-counted. The family mutex still applies, so a follow-up tick that
-    finds another family issue still serializes against this bucket.
+    cap-counted. ``backlog`` issues are filtered out before this split --
+    a parked issue carries no workflow label, so leaving it in would fold
+    it into the bucket and force ``cap_exempt=False``, starving fanout
+    behind a "not yet" hold under ``parallel_limit=1``. The family mutex
+    still applies, so a follow-up tick that finds another family issue
+    still serializes against this bucket.
     """
     per_repo_cap = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
     family_numbers: list[int] = []
     family_labels: list[Optional[str]] = []
     fanout_numbers: list[int] = []
     for issue in gh.list_pollable_issues():
+        # `backlog` is an operator "not yet" hold: the issue sits outside
+        # the state machine until the label is removed. Drop it BEFORE the
+        # family/fanout split. A parked issue carries no workflow label, so
+        # it would otherwise land in the family bucket and -- being neither
+        # `blocked` nor `umbrella` -- flip the whole bucket to cap-counted,
+        # reserving the only per-repo slot under `parallel_limit=1` and
+        # starving every fanout issue behind it. `_process_issue` skips
+        # backlog anyway; filtering here keeps it from holding a slot.
         try:
+            if issue_has_label(issue, BACKLOG_LABEL):
+                log.info(
+                    "repo=%s issue=#%s has %r; skipping",
+                    spec.slug, issue.number, BACKLOG_LABEL,
+                )
+                continue
             label = gh.workflow_label(issue)
         except Exception:
             log.exception(
-                "repo=%s issue=#%s workflow_label read failed; routing to "
+                "repo=%s issue=#%s label read failed; routing to "
                 "family bucket so per-issue exception isolation can pick "
                 "up any sustained failure", spec.slug, issue.number,
             )

@@ -16,7 +16,7 @@ An issue should have at most one workflow label at a time. Non-workflow labels s
 Three non-workflow **control labels** modify behavior without occupying the workflow slot:
 
 - `hold_base_sync` pauses per-tick base sync, `in_review` HITL pings / unmergeable parks, and `resolving_conflict` rebases until removed.
-- `backlog` makes every per-tick handler skip the issue before the workflow label is read. Removing it hands control back to the state machine on the next tick.
+- `backlog` makes the orchestrator skip the issue: the per-tick dispatcher filters it out before the family/fanout split (so a parked, workflow-label-less issue cannot fold into the cap-counted family bucket and starve other work under `parallel_limit=1`), and each stage handler also skips it before the workflow label is read. Removing it hands control back to the state machine on the next tick.
 - `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR. The orchestrator does not otherwise drive these PRs. With `ALLOWED_ISSUE_AUTHORS` empty (the default), the sweep is a no-op.
 
 ### Typed states and the transition guard

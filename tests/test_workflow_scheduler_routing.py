@@ -12,6 +12,7 @@ from unittest.mock import patch
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import base_sync, config, workflow
+from orchestrator.github import BACKLOG_LABEL
 
 from tests.fakes import FakeGitHubClient, FakeLabel, make_issue
 
@@ -1122,6 +1123,146 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
             for ev in releases.values():
                 ev.set()
         self._wait_idle(sched, "acme/widget")
+
+
+class BacklogDispatchFilterTest(unittest.TestCase):
+    """A `backlog` issue carries no workflow label, so the per-tick
+    dispatcher would otherwise fold it into the family bucket. Because
+    `backlog` is neither `blocked` nor `umbrella`, that flips the whole
+    bucket to cap-counted -- and under `parallel_limit=1` the bucket then
+    reserves the only per-repo slot every tick, starving all fanout work
+    behind a parked "not yet" issue. The dispatcher must drop `backlog`
+    issues BEFORE the family/fanout split so they never reserve or block a
+    scheduler slot (`_process_issue` skips them anyway).
+    """
+
+    def _spec(self, parallel_limit: int = 5) -> config.RepoSpec:
+        return config.RepoSpec(
+            slug="acme/widget",
+            target_root=Path("/tmp/orchestrator-test-target-root"),
+            base_branch="main",
+            parallel_limit=parallel_limit,
+        )
+
+    def _wait_idle(self, sched, repo_slug: str, deadline_s: float = 5.0) -> None:
+        import threading as _threading
+        deadline = _threading.Event()
+        timer = _threading.Timer(deadline_s, deadline.set)
+        timer.daemon = True
+        timer.start()
+        try:
+            while sched.active_count(repo_slug) > 0 and not deadline.is_set():
+                pass
+        finally:
+            timer.cancel()
+        self.assertEqual(sched.active_count(repo_slug), 0)
+
+    def _backlog_issue(self, number: int):
+        issue = make_issue(number)
+        issue.labels.append(FakeLabel(BACKLOG_LABEL))
+        return issue
+
+    def test_backlog_only_does_not_starve_fanout(self) -> None:
+        # Per-repo cap 1: a parked `backlog` issue (no workflow label) and a
+        # real `implementing` fanout issue. Before the fix the backlog issue
+        # formed a cap-counted family bucket that grabbed the only slot, so
+        # the implementer was `per_repo_cap`-skipped every tick. After the
+        # fix the backlog issue is filtered out and the fanout runs.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="implementing"))
+        gh.add_issue(self._backlog_issue(2))
+
+        start = threading.Event()
+        release = threading.Event()
+        processed: list[int] = []
+        lock = threading.Lock()
+
+        def fake_process(_gh, _spec, issue) -> None:
+            with lock:
+                processed.append(issue.number)
+            if issue.number == 1:
+                start.set()
+                release.wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+                self.assertTrue(
+                    start.wait(timeout=2.0),
+                    "implementing #1 was starved -- the backlog issue must "
+                    "not occupy the only per-repo slot",
+                )
+        finally:
+            release.set()
+        self._wait_idle(sched, "acme/widget")
+        with lock:
+            self.assertNotIn(
+                2, processed,
+                "backlog #2 must be filtered at dispatch, never processed",
+            )
+
+    def test_backlog_does_not_make_blocked_bucket_cap_counted(self) -> None:
+        # The production regression: a `blocked` parent and a parked
+        # `backlog` issue share the family bucket. The backlog issue (label
+        # None) used to force `cap_exempt=False`, so the bucket reserved the
+        # only slot and the `implementing` fanout never ran. With the backlog
+        # issue filtered out, the bucket is `blocked`-only -> cap-exempt, so
+        # BOTH the blocked parent and the fanout implementer run this tick.
+        import threading
+        from orchestrator.scheduler import IssueScheduler
+        sched = IssueScheduler(global_cap=8, per_repo_cap=1)
+        self.addCleanup(sched.shutdown)
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="implementing"))
+        gh.add_issue(make_issue(2, label="blocked"))
+        gh.add_issue(self._backlog_issue(3))
+
+        starts: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+        }
+        releases: dict[int, threading.Event] = {
+            1: threading.Event(),
+            2: threading.Event(),
+        }
+        processed: list[int] = []
+        lock = threading.Lock()
+
+        def fake_process(_gh, _spec, issue) -> None:
+            with lock:
+                processed.append(issue.number)
+            ev = starts.get(issue.number)
+            if ev is not None:
+                ev.set()
+                releases[issue.number].wait(timeout=5.0)
+
+        try:
+            with patch.object(workflow, "_refresh_base_and_worktrees"), \
+                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+                workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
+                self.assertTrue(
+                    starts[1].wait(timeout=2.0),
+                    "implementing fanout #1 did not start",
+                )
+                self.assertTrue(
+                    starts[2].wait(timeout=2.0),
+                    "blocked #2 did not start -- the bucket must stay "
+                    "cap-exempt once the backlog issue is filtered out",
+                )
+        finally:
+            for ev in releases.values():
+                ev.set()
+        self._wait_idle(sched, "acme/widget")
+        with lock:
+            self.assertNotIn(
+                3, processed,
+                "backlog #3 must be filtered at dispatch, never processed",
+            )
 
 
 if __name__ == "__main__":
