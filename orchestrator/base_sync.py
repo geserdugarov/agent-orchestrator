@@ -50,6 +50,7 @@ from typing import Optional, Tuple
 from github.Issue import Issue
 
 from . import config
+from .config import RepoSpec
 from .branch_publication import _branch_ahead_behind
 from .git_plumbing import (
     _authed_fetch,

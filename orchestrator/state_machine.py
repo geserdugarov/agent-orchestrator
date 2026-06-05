@@ -87,10 +87,12 @@ class IllegalTransition(Exception):
 
 
 # Terminal states have no outgoing edges.
-# The per-tick base-sync detour relabels a behind-base PR-having issue to
-# `resolving_conflict`. These are the ONLY states it fires from. Enumerated
-# explicitly here (rather than imported from `base_sync`) so the table is
-# self-describing; `tests/test_state_machine.py` asserts it stays equal to
+# The per-tick base-sync detour relabels a PR-having issue to
+# `resolving_conflict` only when the refresh-time rebase leaves conflicted
+# files; clean behind-base rebases route straight to `validating`. These are
+# the ONLY states the conflict detour fires from. Enumerated explicitly here
+# (rather than imported from `base_sync`) so the table is self-describing;
+# `tests/test_state_machine.py` asserts it stays equal to
 # `base_sync._PR_REFRESH_DETOUR_LABELS` so the two cannot drift apart.
 _DETOUR_TO_RESOLVING: frozenset[WorkflowLabel] = frozenset(
     {
@@ -160,7 +162,7 @@ _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
 #                  `question` reach `done` via their own forward edge, above.
 #  * -> rejected : PR / issue closed without merge
 #                  (`_finalize_if_issue_closed`, `_drain_review_pr_terminals`).
-#  * -> resolving_conflict : the per-tick base-sync detour.
+#  * -> resolving_conflict : the per-tick base-sync conflict detour.
 _INTERRUPT_SOURCES: dict[WorkflowLabel, frozenset[WorkflowLabel]] = {
     WorkflowLabel.DONE: frozenset(
         {
