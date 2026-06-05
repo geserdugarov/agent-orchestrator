@@ -56,6 +56,20 @@ even though the bookmarks recorded triggering ids) also relabels to
 `validating` directly: there is no fix work to do, so the reviewer
 re-evaluates the existing head.
 
+A park that the rescan finds nothing new for is a dead end when the
+worktree has drifted out of sync with the PR in the meantime: the
+per-tick base sync stands down on every `awaiting_human` park, so the
+integration work nobody else will do is stranded.
+`_route_parked_fixing_to_resolving_conflict` breaks that dead-lock by
+handing the issue to `resolving_conflict` (which owns rebasing AND
+publishing a PR branch) when the clean worktree is either BEHIND
+`<remote>/<base>` (needs a rebase) or already rebased onto base but
+diverged from a stale remote PR head (a rebase a prior run never pushed
+-- `_handle_resolving_conflict` recognizes the already-rebased worktree
+and force-publishes it). It no-ops when `hold_base_sync` is set, the
+worktree is missing / dirty, or the worktree is already in sync with the
+PR head (a genuine dev question that keeps waiting for a human).
+
 PR-state terminals (merged / closed-without-merge / open-PR-with-closed-issue)
 mirror the in_review arcs so an external manual merge or rejection while
 the issue is mid-fix still finalizes to `done` / `rejected` with branch
@@ -86,7 +100,7 @@ from github.Issue import Issue
 from .. import config
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
-from ..github import GitHubClient
+from ..github import BASE_SYNC_HOLD_LABEL, GitHubClient, issue_has_label
 
 
 def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
@@ -296,6 +310,14 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh.write_pinned_state(issue, state)
             return
         if not new_feedback:
+            # Dead-lock breaker: this park has nothing left for the dev
+            # to do, but the worktree may be out of sync with the PR. The
+            # per-tick base sync stands down on every awaiting_human park,
+            # so hand the reconciliation to `resolving_conflict` (which
+            # owns rebasing AND publishing a PR branch) rather than sitting
+            # parked forever. No drift -> the router leaves the park intact
+            # and the issue keeps waiting for a human.
+            _route_parked_fixing_to_resolving_conflict(gh, spec, issue, state, pr)
             return
         state.set("awaiting_human", False)
         state.set("park_reason", None)
@@ -436,6 +458,127 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         state.set("review_round", round_n + 1)
     gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
     gh.write_pinned_state(issue, state)
+
+
+def _route_parked_fixing_to_resolving_conflict(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state, pr,
+) -> bool:
+    """Hand a dead-locked `fixing` park to `resolving_conflict` on worktree drift.
+
+    A `fixing` round that parks `awaiting_human` with no commit (the dev
+    reported nothing to fix) is a dead end when the worktree no longer
+    matches the PR: the per-tick base sync (`_sync_pr_worktree_to_base`)
+    deliberately stands down on every `awaiting_human` park, so the
+    integration work nobody else will do is stranded and the issue sits
+    parked forever. Two shapes both reconcile via `resolving_conflict`,
+    which owns rebasing AND publishing a PR branch:
+
+      * worktree BEHIND `<remote>/<base>` -> needs a rebase.
+      * worktree already rebased locally but the rewrite was never pushed,
+        so local HEAD differs from the (stale) remote PR head -> needs a
+        force-publish (`_handle_resolving_conflict` recognizes an
+        already-rebased worktree and publishes it instead of parking).
+
+    Relabel to `resolving_conflict` so its handler reconciles either shape
+    on the next tick. The routing decision is cheap: base drift is a local
+    `rev-list HEAD..<remote>/<base>`, and the unpushed-rebase check
+    compares local HEAD to `pr.head.sha` (the live remote head the handler
+    already fetched this tick) -- no extra fetch here.
+
+    Returns False (issue stays parked) when the worktree is missing,
+    dirty (an operator may be inspecting a dirty-tree park), the issue
+    carries `hold_base_sync` (an explicit operator pause on base
+    integration), or the worktree is already in sync with the PR head (a
+    genuine dev question must keep waiting for the human).
+
+    The `pending_fix_*` bookmarks and in_review watermarks are left
+    untouched so the eventual `in_review` re-entry still re-discovers the
+    feedback (mirrors the refresh-time conflict detour).
+    """
+    from .. import workflow as _wf
+
+    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
+        return False
+
+    wt = _wf._worktree_path(spec, issue.number)
+    if not wt.exists():
+        return False
+    if _wf._worktree_dirty_files(wt):
+        return False
+
+    # Trust the once-per-tick base fetch `_refresh_base_and_worktrees`
+    # ran before dispatch (mirrors `_sync_worktree_with_base`, which also
+    # measures behind without re-fetching). A stale ref can only undercount
+    # (stay parked) or, on the rare case the per-tick fetch failed,
+    # overcount -- and `_handle_resolving_conflict` re-fetches before it
+    # acts, so an overcount self-corrects.
+    base_ref = f"{spec.remote_name}/{spec.base_branch}"
+    behind_r = _wf._git("rev-list", "--count", f"HEAD..{base_ref}", cwd=wt)
+    if behind_r.returncode != 0:
+        return False
+    try:
+        behind = int((behind_r.stdout or "0").strip() or "0")
+    except ValueError:
+        return False
+
+    if behind > 0:
+        reason = f"{behind} commit(s) behind `{base_ref}`"
+    else:
+        # On top of base: is the local branch out of sync with the PR
+        # head? `pr` was fetched fresh this tick, so `pr.head.sha` is the
+        # live remote head. A mismatch means the worktree carries a rebase
+        # that was never pushed -- `_handle_resolving_conflict` republishes
+        # it (over a stale, orchestrator-produced PR head).
+        local_head = _wf._head_sha(wt) or ""
+        pr_head = getattr(getattr(pr, "head", None), "sha", None) or ""
+        if local_head and pr_head and local_head != pr_head:
+            reason = (
+                f"already rebased onto `{base_ref}`, but the PR head "
+                f"(`{pr_head[:8]}`) is stale (local `{local_head[:8]}`)"
+            )
+        else:
+            return False  # in sync with the PR -> genuine dev question
+
+    pr_number = int(state.get("pr_number"))
+    # Seed `conflict_round` only when absent so a re-entry preserves the
+    # cap counter (mirrors `_route_pr_worktree_to_resolving_conflict`).
+    if state.get("conflict_round") is None:
+        state.set("conflict_round", 0)
+    state.set("awaiting_human", False)
+    state.set("park_reason", None)
+    try:
+        _wf._post_pr_comment(
+            gh, pr_number, state,
+            f":mag: PR worktree is out of sync ({reason}) and the `fixing` "
+            "fix-loop is parked with no pending feedback to apply (the dev "
+            "reported nothing to change). Routing `fixing` -> "
+            "`resolving_conflict` to reconcile the branch before the next "
+            "reviewer round.",
+        )
+    except Exception:
+        _wf.log.exception(
+            "issue=#%s could not post worktree-drift reroute notice to PR #%s",
+            issue.number, pr_number,
+        )
+    gh.emit_event(
+        "conflict_round",
+        issue_number=issue.number,
+        stage="fixing",
+        pr_number=pr_number,
+        sha=getattr(getattr(pr, "head", None), "sha", None) or None,
+        action="entered",
+        conflict_round=int(state.get("conflict_round") or 0),
+        review_round=int(state.get("review_round") or 0),
+        retry_count=state.get("retry_count"),
+    )
+    _wf.log.info(
+        "issue=#%s parked `fixing` worktree is out of sync (%s); routing -> "
+        "resolving_conflict",
+        issue.number, reason,
+    )
+    gh.set_workflow_label(issue, WorkflowLabel.RESOLVING_CONFLICT)
+    gh.write_pinned_state(issue, state)
+    return True
 
 
 def _clear_pending_fix_bookmarks(state) -> None:

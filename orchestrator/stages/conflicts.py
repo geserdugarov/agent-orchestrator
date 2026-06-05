@@ -70,6 +70,51 @@ def _emit_conflict_round_incremented(
     )
 
 
+def _pr_head_orchestrator_produced(state: PinnedState, pr) -> bool:
+    """True when the remote PR head is a SHA the orchestrator itself recorded.
+
+    Guards the force-publish of a diverged-but-already-rebased branch
+    (the `behind > 0` exception in `_handle_resolving_conflict`): only the
+    orchestrator's own prior head (`docs_checked_sha` / `agent_approved_sha`)
+    is safe to overwrite. An unrecognized head may carry a commit pushed
+    directly to the PR branch, so a divergence from it must stay parked.
+    """
+    head = getattr(getattr(pr, "head", None), "sha", None) or ""
+    return bool(head) and head in {
+        state.get("docs_checked_sha"),
+        state.get("agent_approved_sha"),
+    }
+
+
+def _already_rebased_onto_base(spec: RepoSpec, wt: Path) -> bool:
+    """True when the worktree HEAD already sits on top of `<remote>/<base>`.
+
+    Re-fetches base first (the ahead/behind check that calls this runs
+    BEFORE the handler's own base fetch lower down) and checks that no
+    base commit is missing from HEAD. Used to recognize a worktree the
+    dev already rebased in an earlier run -- a no-op rebase that only
+    needs publishing, not the diverged-branch park.
+    """
+    from .. import workflow as _wf
+
+    _wf._authed_fetch(
+        spec,
+        f"+refs/heads/{spec.base_branch}:"
+        f"refs/remotes/{spec.remote_name}/{spec.base_branch}",
+        cwd=wt,
+    )
+    r = _wf._git_hardened(
+        "rev-list", "--count",
+        f"HEAD..{spec.remote_name}/{spec.base_branch}", cwd=wt,
+    )
+    if r.returncode != 0:
+        return False
+    try:
+        return int((r.stdout or "0").strip() or "0") == 0
+    except ValueError:
+        return False
+
+
 def _handle_resolving_conflict(
     gh: GitHubClient, spec: RepoSpec, issue: Issue
 ) -> None:
@@ -300,17 +345,45 @@ def _handle_resolving_conflict(
     #     out-of-band. Refuse and park.
     ahead, behind = _wf._branch_ahead_behind(spec, wt, branch)
     if behind > 0:
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} worktree on `{branch}` is {ahead} "
-            f"ahead and {behind} behind `{spec.remote_name}/{branch}` "
-            f"(PR head `{pr.head.sha[:8]}`); refusing to rebase a stale "
-            "or diverged branch -- force-pushing the local state would "
-            "clobber the real PR head. Manual intervention needed.",
-            reason="diverged_branch",
-        )
-        gh.write_pinned_state(issue, state)
-        return
+        # Normally a behind-the-PR-head worktree is stale or diverged and
+        # we refuse to force-push (it could clobber the real PR head). One
+        # exception: the worktree is already correctly rebased ONTO base,
+        # ahead of the PR head, and the "behind" commits are the
+        # orchestrator's OWN superseded pre-rebase commits on a head it
+        # produced (a rebase a prior run ran but never pushed -- exactly
+        # the case the fixing dead-lock router hands us). That is the
+        # reconciliation this handler exists for: publish instead of park.
+        # `_already_rebased_onto_base` re-fetches base to be sure, and the
+        # orchestrator-produced check proves there is no external commit on
+        # the PR branch to lose.
+        if (
+            ahead > 0
+            and _pr_head_orchestrator_produced(state, pr)
+            and _already_rebased_onto_base(spec, wt)
+        ):
+            _wf.log.info(
+                "issue=#%d resolving_conflict: worktree already rebased onto "
+                "%s/%s and ahead of a stale orchestrator-produced PR head "
+                "(`%s`); force-publishing instead of parking",
+                issue.number, spec.remote_name, spec.base_branch,
+                pr.head.sha[:8],
+            )
+            # Fall through to the `ahead > 0` push below: it force-with-
+            # lease pushes (ls-remote lease == the PR head we just measured,
+            # so a concurrent foreign push still rejects) and flips to
+            # `validating`.
+        else:
+            _wf._park_awaiting_human(
+                gh, issue, state,
+                f"{config.HITL_MENTIONS} worktree on `{branch}` is {ahead} "
+                f"ahead and {behind} behind `{spec.remote_name}/{branch}` "
+                f"(PR head `{pr.head.sha[:8]}`); refusing to rebase a stale "
+                "or diverged branch -- force-pushing the local state would "
+                "clobber the real PR head. Manual intervention needed.",
+                reason="diverged_branch",
+            )
+            gh.write_pinned_state(issue, state)
+            return
     if ahead > 0:
         # Dirty check before pushing recovered work: if the previous
         # tick crashed before its own dirty check ran, the worktree
