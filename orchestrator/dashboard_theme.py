@@ -15,11 +15,11 @@ which is allowed to import plotly because it is imported lazily from
 
 The categorical palettes (`EVENT_COLORS`, `STAGE_COLORS`,
 `COST_SOURCE_COLORS`, `TOKEN_TYPE_COLORS`, `BACKEND_COLORS`,
-`REVIEW_ROUND_COLORS`) map the dimension values the dashboard renders
-to stable colors so the same dimension keeps the same hue on every
-chart and across sessions. Values not in the explicit map fall through
-to `CATEGORICAL_PALETTE`, an ordered sequence used by `color_for(...)`
-as a deterministic backup.
+`REVIEW_ROUND_COLORS`, `AGENT_ROLE_COLORS`) map the dimension values
+the dashboard renders to stable colors so the same dimension keeps
+the same hue on every chart and across sessions. Values not in the
+explicit map fall through to `CATEGORICAL_PALETTE`, an ordered
+sequence used by `color_for(...)` as a deterministic backup.
 
 The palette mirrors the standalone redesigned analytics mock (issue
 #341): a warm cream background, an accent purple, and per-token-type /
@@ -96,6 +96,13 @@ BACKEND_COLORS: Mapping[str, str] = {
     "claude": ACCENT,
     "codex": "#e0913a",
     "unknown": NEUTRAL,
+}
+
+# Agent roles used by the review-cycle cost split. Keys match
+# `_run_agent_tracked(agent_role=...)`.
+AGENT_ROLE_COLORS: Mapping[str, str] = {
+    "developer": ACCENT,
+    "reviewer": "#e0913a",
 }
 
 # Review-round buckets, in the order the chart renders them: the

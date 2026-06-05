@@ -274,7 +274,7 @@ def _resume_dev_with_text(
         agent_spec=dev_spec,
         resume_session_id=dev_sid,
         extra_args=dev_args,
-        review_round=state.get("review_round"),
+        review_round=state.get("review_round", 0),
         retry_count=state.get("retry_count"),
     )
 
@@ -308,7 +308,7 @@ def _resume_dev_with_text(
             agent_spec=dev_spec,
             resume_session_id=None,
             extra_args=dev_args,
-            review_round=state.get("review_round"),
+            review_round=state.get("review_round", 0),
             retry_count=state.get("retry_count"),
         )
 
@@ -689,6 +689,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 cwd=wt,
                 agent_spec=dev_spec,
                 extra_args=dev_args,
+                review_round=state.get("review_round", 0),
                 retry_count=state.get("retry_count"),
             )
             if result.session_id:

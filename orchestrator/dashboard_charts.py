@@ -22,18 +22,20 @@ The chart shapes mirror the redesigned standalone mock (issue #341):
   cost line overlaid on a secondary axis, segmented by either token
   type (Input / Output / Cache) or backend (Claude / Codex).
 - ``cost_horizontal_bars`` -- horizontal cost bars used by the
-  per-stage, per-review-round, and per-repo panels. Each row carries a
-  label, an optional sub-line (e.g. run count), and a single cost
-  value rendered at the bar's tip.
+  per-stage and per-repo panels. Each row carries a label, an optional
+  sub-line (e.g. run count), and a single cost value rendered at the
+  bar's tip.
+- ``cost_by_review_round`` -- grouped horizontal bars per review round,
+  split into development and review cost from ``ReviewRoundBucketRow``.
 - ``hour_weekday_heatmap`` -- weekday-by-hour activity heatmap
   matching the mock's faint-to-saturated accent gradient.
 - ``done_per_day_bars`` -- thin per-day bars for the reliability /
   throughput panel.
 
-Reflecting "the same amount of data is enough" from issue #341, no new
-read-model dimensions were introduced; ``cost_horizontal_bars`` can
-plot per-review-round cost off the ``ReviewRoundBucketRow.total_cost_usd``
-column already exposed by ``orchestrator.analytics.read``.
+Reflecting "the same amount of data is enough" from issue #341, the
+dashboard still reads the same agent-exit row set; ``cost_by_review_round``
+now separates developer and reviewer cost off the role-split columns
+exposed by ``orchestrator.analytics.read``.
 """
 from __future__ import annotations
 
@@ -459,12 +461,14 @@ def cost_by_stage(
 def cost_by_review_round(
     rows: Sequence[ReviewRoundBucketRow], *, height: Optional[int] = None
 ) -> go.Figure:
-    """Build the per-review-round cost bars.
+    """Build grouped development/review cost bars per review round.
 
-    `0` is the initial pass; every later round is rework. Buckets are
-    rendered in logical order -- Initial -> Round 1 -> ... -> Round 5
-    -> Rounds 6+ -> Unknown, top to bottom -- rather than sorted by
-    cost, so the operator reads the rework progression in sequence.
+    `0` is the initial development/review cycle; every later round is
+    rework. Buckets are rendered in logical order -- Initial -> Round 1
+    -> ... -> Round 5 -> Rounds 6+ -> No review round, top to bottom --
+    rather than sorted by cost, so the operator reads the rework
+    progression in sequence. Each row renders two bars: development
+    cost (`agent_role=developer`) and review cost (`agent_role=reviewer`).
     `get_review_round_breakdown` keeps rounds 3, 4 and 5 separate
     (only 6+ is grouped). `height` is forwarded so the panel can be
     pinned to the workflow-stage panel's height.
@@ -482,25 +486,90 @@ def cost_by_review_round(
         "4": "Round 4",
         "5": "Round 5",
         "6+": "Rounds 6+",
-        "unknown": "Unknown",
+        "unknown": "No review round",
     }
-    # Logical sequence, top (Initial) to bottom (Unknown). Plotly draws
-    # the first y-value at the bottom, and `cost_horizontal_bars`
-    # reverses the list before plotting, so passing this order with
-    # `preserve_order=True` lands Initial at the top of the panel.
+    # Logical sequence before Plotly's horizontal-bar reversal:
+    # Initial -> Round 1 -> ... -> No review round.
     order = ["0", "1", "2", "3", "4", "5", "6+", "unknown"]
     by_bucket = {r.bucket: r for r in rows}
-    items = [
-        (
-            label_map.get(b, b),
-            f"{int(by_bucket[b].runs):,} runs",
-            float(by_bucket[b].total_cost_usd or 0.0),
-            theme.color_for(b, explicit=theme.REVIEW_ROUND_COLORS),
+    ordered_rows = [by_bucket[b] for b in order if b in by_bucket]
+    if not ordered_rows:
+        return _empty_figure(
+            "No development or review runs match the current filters.",
+            height=height or 120,
         )
-        for b in order
-        if b in by_bucket
+    labels = [label_map.get(r.bucket, r.bucket) for r in ordered_rows]
+    subs = [
+        (
+            f"{int(r.developer_runs or 0):,} dev / "
+            f"{int(r.reviewer_runs or 0):,} review runs"
+        )
+        for r in ordered_rows
     ]
-    return cost_horizontal_bars(items, preserve_order=True, height=height)
+    dev_values = [float(r.developer_cost_usd or 0.0) for r in ordered_rows]
+    review_values = [float(r.reviewer_cost_usd or 0.0) for r in ordered_rows]
+
+    # Plotly draws the first y-value at the bottom of a horizontal
+    # grouped bar chart, so reverse to keep Initial at the top.
+    labels.reverse()
+    subs.reverse()
+    dev_values.reverse()
+    review_values.reverse()
+    y_ticks = [
+        (
+            f"<b>{lbl}</b><br>"
+            f"<span style='color:{theme.MUTED_TEXT};font-size:11px'>"
+            f"{sub}</span>"
+        )
+        for lbl, sub in zip(labels, subs)
+    ]
+    fig = go.Figure()
+    # For horizontal grouped bars, Plotly lays traces bottom-to-top
+    # within each y bucket. Add Review first so the visible pair reads
+    # Development, then Review from top to bottom.
+    for name, values, role in (
+        ("Review", review_values, "reviewer"),
+        ("Development", dev_values, "developer"),
+    ):
+        fig.add_trace(
+            go.Bar(
+                x=values,
+                y=y_ticks,
+                name=name,
+                orientation="h",
+                marker_color=theme.AGENT_ROLE_COLORS[role],
+                text=[theme.fmt_money(v) for v in values],
+                textposition="outside",
+                textfont={
+                    "color": theme.TEXT,
+                    "size": 12,
+                    "family": theme.MONO_FONT_FAMILY,
+                },
+                cliponaxis=False,
+                hovertemplate=(
+                    "%{y}<br>" + name + ": $%{x:,.2f}<extra></extra>"
+                ),
+            )
+        )
+    layout = theme.base_layout()
+    layout["barmode"] = "group"
+    layout["margin"] = {"l": 160, "r": 64, "t": layout["margin"]["t"], "b": 32}
+    layout["height"] = height if height is not None else 44 * len(y_ticks) + 90
+    layout["legend"] = {
+        "orientation": "h",
+        "x": 0,
+        "y": 1.12,
+        "xanchor": "left",
+        "yanchor": "bottom",
+        "traceorder": "reversed",
+    }
+    fig.update_layout(**layout)
+    fig.update_xaxes(
+        title_text="USD", tickprefix="$",
+        showline=False, zeroline=False,
+    )
+    fig.update_yaxes(automargin=True, showline=False, ticks="")
+    return fig
 
 
 def cost_by_repo(rows: Sequence[RepoBreakdownRow]) -> go.Figure:

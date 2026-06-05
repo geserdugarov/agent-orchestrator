@@ -310,29 +310,31 @@ class IssueEventRow:
 
 @dataclass(frozen=True)
 class ReviewRoundBucketRow:
-    """Per-review-round count and cost of agent runs.
+    """Per-review-round development and review cost of agent runs.
 
     `bucket` is the categorical round string
     (`0`/`1`/`2`/`3`/`4`/`5`/`6+`, plus `unknown` for NULL rounds);
     `get_review_round_breakdown` derives it from the raw
     `review_round` so rounds 3-5 stay separate and only 6+ is grouped.
     It is exposed verbatim so the dashboard chart's labels can map
-    each bucket directly. `failed` is the subset of `runs`
-    that exited non-zero so the chart can stack the failure ratio on
-    top of the total. `total_cost_usd` rolls up the cost-priced
-    agent-run rows in each bucket so the redesigned dashboard can
-    plot "cost by review round" off the same query -- review rounds
-    after the first one are by definition rework, and surfacing the
-    cost of that rework is the lever the operator has. Rows with
-    `review_round IS NULL` surface under the `"unknown"` bucket so
-    they remain visible -- silently dropping them would hide
-    pre-review work the operator expects to see.
+    each bucket directly. `developer_*` and `reviewer_*` split the
+    round's cost into implementation/fix work and automated review
+    work; `total_cost_usd` remains their sum for KPI callers. Rows
+    with `review_round IS NULL` surface under the `"unknown"` bucket
+    when they are still development/review runs. Historical
+    implementation rows that predate fresh-spawn `review_round=0`
+    logging are bucketed as `0` so the dashboard does not strand
+    first-pass development cost under "unknown".
     """
 
     bucket: str
     runs: int
     failed: int = 0
     total_cost_usd: float = 0.0
+    developer_runs: int = 0
+    reviewer_runs: int = 0
+    developer_cost_usd: float = 0.0
+    reviewer_cost_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1789,15 +1791,19 @@ def get_review_round_breakdown(
     connect: Optional[Callable[[str], Any]] = None,
     conn: Any = None,
 ) -> list[ReviewRoundBucketRow]:
-    """Per-review-round agent-run counts.
+    """Per-review-round development/review agent-run counts.
 
     Reads from `analytics_agent_runs` but derives the bucket from the
     raw `review_round` column rather than the view's
     `review_round_bucket`: rounds 0-5 are kept as individual buckets
     (`0`/`1`/`2`/`3`/`4`/`5`) and only 6+ is grouped, so the chart can
-    show rework round-by-round instead of collapsing 3-5. Rows with
-    `review_round IS NULL` surface under `"unknown"` so pre-review
-    work stays visible. The `events` filter is honored by
+    show rework round-by-round instead of collapsing 3-5. Only
+    `developer` and `reviewer` agent roles feed this panel; decomposer
+    and question runs are lifecycle costs, not review-cycle costs.
+    Rows with `review_round IS NULL` surface under `"unknown"` if
+    they are still development/review runs. Historical implementing
+    rows that predate fresh-spawn `review_round=0` logging are
+    bucketed as `0`. The `events` filter is honored by
     short-circuit: if the operator excluded `agent_exit` from the
     events multiselect (or cleared it), every agent-run aggregate
     returns empty so the dashboard's "show nothing for this
@@ -1813,13 +1819,23 @@ def get_review_round_breakdown(
         start=start, end=end, repo=repo,
         stages=stages, issue=issue,
     )
+    role_clause = "agent_role IN ('developer', 'reviewer')"
+    if where:
+        where = f"{where} AND {role_clause}"
+    else:
+        where = f" WHERE {role_clause}"
     sql = (
         "SELECT "
         # Derive the bucket from the raw `review_round` so rounds 3, 4
         # and 5 stay separate (the view's `review_round_bucket` collapses
         # them into a single `3-5`). 6+ is still grouped to bound the
-        # long tail, and NULL rounds surface as `unknown`.
+        # long tail. Fresh implementing runs now log review_round=0;
+        # this explicit stage/role fallback keeps older rows in the
+        # same first-pass development bucket.
         "CASE "
+        "WHEN review_round IS NULL "
+        "AND agent_role = 'developer' "
+        "AND stage = 'implementing' THEN '0' "
         "WHEN review_round IS NULL THEN 'unknown' "
         "WHEN review_round <= 0 THEN '0' "
         "WHEN review_round >= 6 THEN '6+' "
@@ -1827,7 +1843,15 @@ def get_review_round_breakdown(
         "END AS bucket, "
         "COUNT(*) AS runs, "
         "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs, "
-        "COALESCE(SUM(cost_usd), 0) AS bucket_cost_usd "
+        "COALESCE(SUM(cost_usd), 0) AS bucket_cost_usd, "
+        "SUM(CASE WHEN agent_role = 'developer' THEN 1 ELSE 0 END) "
+        "AS developer_runs, "
+        "SUM(CASE WHEN agent_role = 'reviewer' THEN 1 ELSE 0 END) "
+        "AS reviewer_runs, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
+        "THEN cost_usd ELSE 0 END), 0) AS developer_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
+        "THEN cost_usd ELSE 0 END), 0) AS reviewer_cost_usd "
         f"FROM analytics_agent_runs{where} "
         "GROUP BY bucket "
         "ORDER BY runs DESC, bucket ASC"
@@ -1838,17 +1862,23 @@ def get_review_round_breakdown(
         bucket = row[0]
         runs = row[1]
         failed = row[2]
-        # Older fixtures may still emit 3-tuple rows without the
-        # cost rollup; default the cost to 0 so the test harness
-        # does not have to know about the new SQL column in
-        # unrelated cases.
+        # Older fixtures may still emit rows without the role split;
+        # default those columns so unrelated tests keep round-tripping.
         cost = row[3] if len(row) > 3 else 0.0
+        developer_runs = row[4] if len(row) > 4 else 0
+        reviewer_runs = row[5] if len(row) > 5 else 0
+        developer_cost = row[6] if len(row) > 6 else 0.0
+        reviewer_cost = row[7] if len(row) > 7 else 0.0
         out.append(
             ReviewRoundBucketRow(
                 bucket=str(bucket),
                 runs=int(runs or 0),
                 failed=int(failed or 0),
                 total_cost_usd=float(cost or 0.0),
+                developer_runs=int(developer_runs or 0),
+                reviewer_runs=int(reviewer_runs or 0),
+                developer_cost_usd=float(developer_cost or 0.0),
+                reviewer_cost_usd=float(reviewer_cost or 0.0),
             )
         )
     return out

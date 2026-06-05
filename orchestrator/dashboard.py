@@ -14,7 +14,7 @@ mirrors the standalone HTML mock the issue ships:
 - A four-tile KPI strip (total spend, total tokens, cost / resolved
   issue, rework share) with previous-window deltas.
 - A grid of cards: hero spend / token usage stacked-area chart,
-  per-stage cost bars, per-review-round cost bars, top-cost issues
+  per-stage cost bars, per-review-cycle cost bars, top-cost issues
   table, per-backend efficiency cards + cost-source coverage bar,
   per-repo cost bars, reliability tiles + resolved-per-day chart,
   weekday-by-hour activity heatmap.
@@ -1539,7 +1539,7 @@ def main() -> None:
             config=PLOTLY_CONFIG,
         )
 
-    # ── Stage cost (7/12) + review-round cost (5/12) ─────────────
+    # ── Stage cost (7/12) + review-cycle cost (5/12) ─────────────
     # Pin both bar panels to the same height (driven by whichever has
     # more bars) so the two cards line up bottom-to-bottom.
     bars_h = 40 * max(len(stage_rows), len(review_round_rows), 1) + 80
@@ -1562,8 +1562,8 @@ def main() -> None:
         with st.container(border=True):
             st.markdown(
                 _card_header_html(
-                    "Cost by review round",
-                    "Rework is every round after the first",
+                    "Development and review by round",
+                    "Developer and reviewer spend per review cycle",
                 ),
                 unsafe_allow_html=True,
             )

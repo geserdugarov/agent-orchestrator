@@ -1335,10 +1335,10 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         conn = _FakeConnection()
         conn.rows_for = {
             "analytics_agent_runs": [
-                ("0", 12, 1, 40.0),
-                ("1", 8, 2, 25.0),
-                ("3-5", 4, 4, 18.0),
-                ("unknown", 1, 0, 0.0),
+                ("0", 12, 1, 40.0, 7, 5, 28.0, 12.0),
+                ("1", 8, 2, 25.0, 4, 4, 10.0, 15.0),
+                ("3-5", 4, 4, 18.0, 1, 3, 5.0, 13.0),
+                ("unknown", 1, 0, 0.0, 1, 0, 0.0, 0.0),
             ],
         }
         rows = analytics_read.get_review_round_breakdown(
@@ -1354,17 +1354,31 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
             [r.total_cost_usd for r in rows],
             [40.0, 25.0, 18.0, 0.0],
         )
+        self.assertEqual([r.developer_runs for r in rows], [7, 4, 1, 1])
+        self.assertEqual([r.reviewer_runs for r in rows], [5, 4, 3, 0])
+        self.assertEqual(
+            [r.developer_cost_usd for r in rows],
+            [28.0, 10.0, 5.0, 0.0],
+        )
+        self.assertEqual(
+            [r.reviewer_cost_usd for r in rows],
+            [12.0, 15.0, 13.0, 0.0],
+        )
         sql, _ = conn.executed[0]
         # Reads from the view, not the base table, and the view has
         # no `event` column so no `event IN (...)` clause is emitted.
         self.assertIn("FROM analytics_agent_runs", sql)
         self.assertIn("SUM(cost_usd)", sql)
+        self.assertIn("agent_role IN ('developer', 'reviewer')", sql)
+        self.assertIn("agent_role = 'developer'", sql)
+        self.assertIn("agent_role = 'reviewer'", sql)
+        self.assertIn("stage = 'implementing' THEN '0'", sql)
         self.assertNotIn("event IN", sql)
 
     def test_legacy_three_tuple_rows_default_cost_to_zero(self) -> None:
-        # Older fixtures still emit 3-tuple `(bucket, runs, failed)`
-        # rows without the cost rollup; the reader defaults the cost
-        # to `0.0` so unrelated tests keep round-tripping.
+        # Older fixtures still emit 3-tuple `(bucket, runs, failed)` rows
+        # without the cost / role rollups; the reader defaults those
+        # values to zero so unrelated tests keep round-tripping.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {"analytics_agent_runs": [("0", 3, 0)]}
@@ -1373,6 +1387,8 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].total_cost_usd, 0.0)
+        self.assertEqual(rows[0].developer_cost_usd, 0.0)
+        self.assertEqual(rows[0].reviewer_cost_usd, 0.0)
 
     def test_explicit_agent_exit_runs_query(self) -> None:
         # An events list that includes agent_exit must NOT short-circuit

@@ -145,6 +145,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(rec["agent_spec"], config.DEV_AGENT_SPEC)
             self.assertEqual(rec["session_id"], "sess-impl")
             self.assertNotIn("resume_session_id", rec)  # fresh spawn
+            self.assertEqual(rec["review_round"], 0)
             self.assertEqual(rec["exit_code"], 0)
             self.assertFalse(rec["timed_out"])
             self.assertGreaterEqual(rec["duration_s"], 0)

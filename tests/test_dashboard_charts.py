@@ -200,22 +200,46 @@ class CostByReviewRoundTest(unittest.TestCase):
     def test_renders_review_round_labels_in_logical_order(self) -> None:
         rows = [
             ReviewRoundBucketRow(
-                bucket="0", runs=12, failed=0, total_cost_usd=40.0
+                bucket="0", runs=12, failed=0, total_cost_usd=40.0,
+                developer_runs=7, reviewer_runs=5,
+                developer_cost_usd=28.0, reviewer_cost_usd=12.0,
             ),
             ReviewRoundBucketRow(
-                bucket="1", runs=4, failed=1, total_cost_usd=20.0
+                bucket="1", runs=4, failed=1, total_cost_usd=20.0,
+                developer_runs=2, reviewer_runs=2,
+                developer_cost_usd=9.0, reviewer_cost_usd=11.0,
             ),
             ReviewRoundBucketRow(
-                bucket="3", runs=2, failed=2, total_cost_usd=15.0
+                bucket="3", runs=2, failed=2, total_cost_usd=15.0,
+                developer_runs=1, reviewer_runs=1,
+                developer_cost_usd=6.0, reviewer_cost_usd=9.0,
+            ),
+            ReviewRoundBucketRow(
+                bucket="unknown", runs=1, failed=0, total_cost_usd=5.0,
+                developer_runs=1, reviewer_runs=0,
+                developer_cost_usd=5.0, reviewer_cost_usd=0.0,
             ),
         ]
         fig = dashboard_charts.cost_by_review_round(rows)
         # The display labels read off the `label_map`; sub-line
-        # carries the run count.
-        self.assertEqual(len(fig.data[0].y), 3)
+        # carries the per-role run counts. Horizontal grouped bars
+        # render later traces above earlier traces, so the trace list
+        # is Review, Development to make the visible row order read
+        # Development, then Review.
+        self.assertEqual(len(fig.data), 2)
+        self.assertEqual(fig.data[0].name, "Review")
+        self.assertEqual(fig.data[1].name, "Development")
+        self.assertEqual(fig.layout.legend.traceorder, "reversed")
+        self.assertEqual(len(fig.data[0].y), 4)
+        self.assertEqual(len(fig.data[1].y), 4)
         joined = " ".join(fig.data[0].y)
-        for needle in ("Initial", "Round 1", "Round 3", "12 runs"):
+        for needle in (
+            "Initial", "Round 1", "Round 3", "No review round",
+            "7 dev / 5 review runs",
+        ):
             self.assertIn(needle, joined)
+        self.assertEqual(list(fig.data[0].x), [0.0, 9.0, 11.0, 12.0])
+        self.assertEqual(list(fig.data[1].x), [5.0, 6.0, 9.0, 28.0])
 
     def test_empty_renders_placeholder(self) -> None:
         fig = dashboard_charts.cost_by_review_round([])
