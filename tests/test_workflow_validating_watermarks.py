@@ -539,6 +539,100 @@ class HandoffWithoutPickupIdLegacyStateTest(
         )
 
 
+class HandoffWalkerHonorsOrchestratorMarkerTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """`_seed_watermark_past_self` must recognise orchestrator-authored
+    content by hidden body marker AS WELL AS by recorded id. Without the
+    marker check, a bot comment whose id was evicted from the bounded
+    `orchestrator_comment_ids` cap (or never persisted due to a state-write
+    race) stops the walker early and leaves the in_review watermark
+    stranded at the previous orchestrator id. The in_review filter still
+    drops the marker-bearing bot content at scan time, so no human comment
+    is mis-routed, but the validating->documenting->in_review->fixing
+    cycle described in #437 made the cost of that stranded watermark
+    visible: every in_review tick re-scanned the same orchestrator backlog,
+    and the fixing-bounce path silently relabelled to `validating`,
+    looping the issue indefinitely.
+    """
+
+    PR_NUMBER = 700
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-300"
+
+    def test_marker_only_orchestrator_comment_does_not_stop_walker(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        marker = workflow._ORCH_COMMENT_MARKER
+        # Lifecycle: pickup (900) -> PR-opened (901) -> orchestrator
+        # reviewer-requested-changes comment whose id was never tracked
+        # (902, marker present, MISSING from orchestrator_comment_ids) ->
+        # orchestrator approval (903, tracked). The id=902 case models the
+        # PR #433 incident where 3 review-request comments were posted
+        # but their ids never made it into `orchestrator_comment_ids` -- a
+        # state-write race window.
+        issue = make_issue(300, label="validating", comments=[
+            FakeComment(
+                id=900, body=":robot: orchestrator picking this up.",
+                user=FakeUser("orchestrator"), created_at=long_ago,
+            ),
+            FakeComment(
+                id=901, body=f":sparkles: PR opened: #700\n\n{marker}",
+                user=FakeUser("orchestrator"), created_at=long_ago,
+            ),
+        ])
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=True, check_state="success",
+            issue_comments=[
+                FakeComment(
+                    id=902,
+                    body=(
+                        f":eyes: codex review requested changes\n\n"
+                        f"{marker}"
+                    ),
+                    user=FakeUser("orchestrator"), created_at=long_ago,
+                ),
+                FakeComment(
+                    id=903,
+                    body=f":white_check_mark: codex review approved.\n\n{marker}",
+                    user=FakeUser("orchestrator"), created_at=long_ago,
+                ),
+            ],
+        )
+        gh.add_pr(pr)
+        # Crucially: id 902 is NOT in orchestrator_comment_ids. Without
+        # the marker check the walker would stop at 902 and leave the
+        # watermark at 901.
+        gh.seed_state(
+            300, pr_number=self.PR_NUMBER, branch=self.BRANCH,
+            dev_agent="claude", dev_session_id="dev-sess",
+            review_round=0,
+            orchestrator_comment_ids=[900, 901, 903],
+            pickup_comment_id=900,
+        )
+
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+        )
+
+        # Watermark must advance past the marker-only id 902 -- ideally
+        # to id 903 (the latest tracked orchestrator comment on either
+        # surface). The exact value is not part of the contract, but it
+        # must NOT be stuck at <=901.
+        wm = gh.pinned_data(300).get("pr_last_comment_id")
+        self.assertIsNotNone(wm)
+        self.assertGreaterEqual(
+            wm, 902,
+            f"walker must advance past marker-only bot comment id=902; "
+            f"got {wm}",
+        )
+
+
 class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
     """A human reply consumed by `_resume_developer_on_human_reply` during
     implementing or validating must not re-surface as fresh PR feedback in

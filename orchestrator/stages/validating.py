@@ -406,11 +406,21 @@ def _seed_watermark_past_self(
     unread PR-conversation feedback.
 
     Identification of orchestrator-authored content is by exact comment id
-    (recorded when the orchestrator posted the comment) rather than author
-    login. The login-based check would also drop comments authored by a
-    human reviewer who shares the PAT's GitHub account -- a common
-    deployment shape -- causing real review feedback to be silently
-    dropped and the PR to be pinged ready for human merge over it.
+    (recorded when the orchestrator posted the comment) OR by the hidden
+    body marker `_ORCH_COMMENT_MARKER` -- mirroring the in_review feedback
+    filter. The id-only check would mis-treat a bot comment whose id was
+    evicted from the bounded `orchestrator_comment_ids` cap (or never
+    persisted due to a state-write race) as a human comment, stopping the
+    walker early and stranding the watermark at a low value: the next
+    in_review tick would then re-scan the same orchestrator content on
+    every poll (the in_review filter still drops it via the marker, but
+    the walker should not amplify that cost), and once a real human
+    comment lands ABOVE the orchestrator backlog the seed walker would
+    keep yielding a stale watermark indefinitely. The login-based check
+    would also drop comments authored by a human reviewer who shares the
+    PAT's GitHub account -- a common deployment shape -- causing real
+    review feedback to be silently dropped and the PR to be pinged ready
+    for human merge over it.
 
     Returns None when the pickup id is unknown (legacy state from a deploy
     that pre-dates pickup-id tracking, or a manually-relabeled issue) or
@@ -419,6 +429,8 @@ def _seed_watermark_past_self(
     advance past historical content; the orchestrator_comment_ids id-set
     filter in `_handle_in_review` drops recorded bot comments at scan time.
     """
+    from .. import workflow as _wf
+
     if pickup_comment_id is None:
         # Legacy state without a pickup anchor: refuse to advance. We
         # cannot tell pre-pickup chatter (safe to skip) from human feedback
@@ -432,12 +444,19 @@ def _seed_watermark_past_self(
         + [(c, False) for c in pr_conversation_comments],
         key=lambda p: p[0].id,
     )
-    if not any(c.id in orchestrator_ids for c, _ in sorted_pairs):
+
+    def _is_self(c) -> bool:
+        return (
+            c.id in orchestrator_ids
+            or _wf._ORCH_COMMENT_MARKER in (getattr(c, "body", None) or "")
+        )
+
+    if not any(_is_self(c) for c, _ in sorted_pairs):
         return None
     watermark: Optional[int] = None
     seen_self = False
     for c, is_issue_thread in sorted_pairs:
-        is_self = c.id in orchestrator_ids
+        is_self = _is_self(c)
         already_consumed = (
             is_issue_thread
             and consumed_through is not None

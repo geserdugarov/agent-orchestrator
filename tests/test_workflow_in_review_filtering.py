@@ -247,6 +247,101 @@ class OrchestratorMarkerFeedbackFilterTest(
             for _, body in gh.posted_comments
         ))
 
+    def test_pr433_loop_legacy_state_with_marker_only_comments(self) -> None:
+        # Regression test for #437 / PR #433 loop: an issue that reached
+        # in_review with `pickup_comment_id=None` (a legacy state from an
+        # issue picked up via operator relabel out of `question`) keeps
+        # `pr_last_comment_id=0` across the validating handoff, so every
+        # in_review tick re-scans every visible PR-conversation comment.
+        # A subset of those comments have the orchestrator marker in their
+        # body but their ids were never tracked (state-write race during
+        # an earlier review round): without the marker filter the in_review
+        # scan would treat them as fresh PR feedback and route to `fixing`,
+        # which then rescans, finds nothing past its own (marker-aware)
+        # filter, bounces back to `validating`, and the
+        # validating->documenting->in_review->fixing cycle repeats
+        # indefinitely. The handler must drop the marker-bearing bot
+        # comments on the id-OR-marker filter and reach the ready-ping
+        # branch instead.
+        gh = FakeGitHubClient()
+        issue = make_issue(431, label="in_review")
+        gh.add_issue(issue)
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        marker = workflow._ORCH_COMMENT_MARKER
+        # Mix of orchestrator-marked PR-conversation comments: most tracked
+        # in orchestrator_comment_ids, three deliberately untracked to
+        # model the eviction / race case the marker filter must catch. The
+        # ids are above the watermark (0) so every one of them is scanned.
+        tracked_ids = [
+            1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010,
+        ]
+        untracked_ids = [2001, 2002, 2003]
+        pr_issue_comments = []
+        for cid in tracked_ids:
+            pr_issue_comments.append(FakeComment(
+                id=cid,
+                body=f":books: orchestrator post {cid}.\n\n{marker}",
+                user=FakeUser("orchestrator"),
+                created_at=long_ago,
+            ))
+        for cid in untracked_ids:
+            pr_issue_comments.append(FakeComment(
+                id=cid,
+                body=(
+                    f":eyes: codex review (round 1/10) requested changes "
+                    f"(comment {cid}).\n\n{marker}"
+                ),
+                user=FakeUser("orchestrator"),
+                created_at=long_ago,
+            ))
+        pr = FakePR(
+            number=433,
+            head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-431",
+            head=FakePRRef(sha="553237e1"),
+            mergeable=True,
+            check_state="success",
+            issue_comments=pr_issue_comments,
+        )
+        gh.add_pr(pr)
+        gh.seed_state(
+            431,
+            pr_number=433,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-431",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            review_round=1,
+            # Legacy state from the PR #433 incident: watermarks all 0
+            # because the validating handoff's seed-walk returned None
+            # (no pickup_comment_id) and defaulted to 0.
+            pr_last_comment_id=0,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            # pickup_comment_id deliberately missing -- the issue was
+            # picked up via operator relabel out of `question`.
+            orchestrator_comment_ids=tracked_ids,
+            docs_checked_sha="553237e1",
+            docs_verdict="no_change",
+        )
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+
+        mocks["run_agent"].assert_not_called()
+        self.assertNotIn((431, "fixing"), gh.label_history)
+        self.assertEqual(gh.merge_calls, [])
+        # The HITL ping must fire so the manual-merge loop can actually
+        # complete instead of silently bouncing through fixing every tick.
+        self.assertEqual(
+            gh.pinned_data(431).get("ready_ping_sha"), "553237e1",
+        )
+        self.assertTrue(any(
+            "ready for review/merge" in body
+            for _, body in gh.posted_comments
+        ))
+
 
 class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
     """orchestrator_comment_ids records ids from the IssueComment namespace
