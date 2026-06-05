@@ -49,6 +49,7 @@ from .agents import AgentResult, run_agent
 from .config import RepoSpec
 from .github import (
     BACKLOG_LABEL,
+    COMMUNITY_CONTRIBUTION_LABEL,
     GitHubClient,
     PinnedState,
     issue_has_label,
@@ -380,6 +381,66 @@ def _configured_model(
     return None
 
 
+def _sweep_community_contribution_prs(
+    gh: GitHubClient, spec: RepoSpec
+) -> None:
+    """Label open PRs from authors outside ALLOWED_ISSUE_AUTHORS and ping HITL.
+
+    No-op when ALLOWED_ISSUE_AUTHORS is empty (the default) so a single-user
+    deployment keeps the legacy "anyone is trusted" behavior. When the list
+    is populated, every open PR whose author is not in it earns the
+    `community_contribution` label and a one-shot HITL ping comment; the
+    label is idempotent (already-labeled PRs are skipped) so the comment
+    fires exactly once per PR.
+
+    All errors are caught and logged: a PyGithub lazy-load failure on one
+    PR must not abort the rest of the sweep, and the sweep itself must not
+    abort the polling tick.
+    """
+    allowed = config.ALLOWED_ISSUE_AUTHORS
+    if not allowed:
+        return
+    allowed_lower = {h.lower() for h in allowed}
+    try:
+        prs = list(gh.iter_open_prs())
+    except Exception:
+        log.exception(
+            "repo=%s community-contribution sweep: open-PR enumeration failed",
+            spec.slug,
+        )
+        return
+    for pr in prs:
+        try:
+            author = getattr(getattr(pr, "user", None), "login", None) or ""
+            if author.lower() in allowed_lower:
+                continue
+            if gh.pr_has_label(pr, COMMUNITY_CONTRIBUTION_LABEL):
+                continue
+            # Post the HITL ping BEFORE adding the label. The label is the
+            # dedup marker that suppresses re-pinging on later ticks, so a
+            # failure between the two writes must leave the PR un-labeled --
+            # otherwise a comment failure would mark the PR done while no
+            # human was ever called. Order: comment first, then label.
+            # Worst case (comment ok, label fails) is a double-ping on the
+            # next tick, which is acceptable; the silent-skip failure mode
+            # is not.
+            gh.pr_comment(
+                pr.number,
+                f"{config.HITL_MENTIONS} community contribution from "
+                f"@{author or 'unknown'} -- please review this PR.",
+            )
+            gh.add_pr_label(pr, COMMUNITY_CONTRIBUTION_LABEL)
+            log.info(
+                "repo=%s pr=#%s author=%r pinged HITL and labeled %r",
+                spec.slug, pr.number, author, COMMUNITY_CONTRIBUTION_LABEL,
+            )
+        except Exception:
+            log.exception(
+                "repo=%s pr=#%s community-contribution sweep step failed; continuing",
+                spec.slug, getattr(pr, "number", "?"),
+            )
+
+
 def tick(
     gh: GitHubClient,
     spec: RepoSpec,
@@ -425,6 +486,11 @@ def tick(
         log.exception(
             "repo=%s pre-tick base refresh failed; continuing", spec.slug,
         )
+    # Per-tick: label any open PR from an outsider author and ping HITL once.
+    # Independent from the per-issue dispatch (PRs not driven by the
+    # orchestrator have no pinned state to consult), so failures inside the
+    # sweep are swallowed by the helper itself and cannot stop the tick.
+    _sweep_community_contribution_prs(gh, spec)
     if scheduler is not None:
         _dispatch_via_scheduler(gh, spec, scheduler)
         return

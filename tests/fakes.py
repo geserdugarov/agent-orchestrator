@@ -114,6 +114,11 @@ class FakePR:
     head: FakePRRef = field(default_factory=FakePRRef)
     approved: bool = False
     check_state: str = "none"  # one of success/pending/failure/none
+    # PR author and labels, used by the community-contribution sweep.
+    # Default user matches the orchestrator's own account so existing tests
+    # that don't care about authorship keep treating PRs as owned by the bot.
+    user: FakeUser = field(default_factory=lambda: FakeUser("orchestrator"))
+    labels: list[FakeLabel] = field(default_factory=list)
     issue_comments: list[FakeComment] = field(default_factory=list)
     review_comments: list[FakeComment] = field(default_factory=list)
     # PR review summaries (the body posted alongside an APPROVE / REQUEST
@@ -423,6 +428,24 @@ class FakeGitHubClient:
 
     def find_open_pr(self, *, branch: str, base: str) -> Optional[FakePR]:
         return self.existing_open_pr.get(branch)
+
+    def iter_open_prs(self) -> Iterable[FakePR]:
+        """Mirror `GitHubClient.iter_open_prs` for the community-contribution
+        sweep. Returns every PR in `pulls` whose state is open.
+        """
+        return [pr for pr in self.pulls.values() if pr.state == "open"]
+
+    @staticmethod
+    def pr_has_label(pr: FakePR, label_name: str) -> bool:
+        wanted = (label_name or "").lower()
+        return any(
+            ((getattr(label, "name", "") or "").lower() == wanted)
+            for label in (pr.labels or [])
+        )
+
+    def add_pr_label(self, pr: FakePR, label_name: str) -> None:
+        if not self.pr_has_label(pr, label_name):
+            pr.labels.append(FakeLabel(label_name))
 
     def add_pr(self, pr: FakePR) -> None:
         """Pre-seed a PR for `_handle_in_review` to read. Tests usually pair

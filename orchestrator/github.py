@@ -53,6 +53,11 @@ WORKFLOW_LABELS = frozenset(name for name, _, _ in WORKFLOW_LABEL_SPECS)
 
 BASE_SYNC_HOLD_LABEL = "hold_base_sync"
 BACKLOG_LABEL = "backlog"
+# Applied by `sweep_community_contribution_prs` to any open PR whose author
+# is not in `ALLOWED_ISSUE_AUTHORS`. The orchestrator only labels and pings
+# HITL once per PR; it never drives the PR's lifecycle, so the label is a
+# pure "needs a human" signal rather than a workflow stage.
+COMMUNITY_CONTRIBUTION_LABEL = "community_contribution"
 CONTROL_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
     (
         BASE_SYNC_HOLD_LABEL,
@@ -63,6 +68,11 @@ CONTROL_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
         BACKLOG_LABEL,
         "c5def5",
         "Skip orchestrator processing entirely until the label is removed",
+    ),
+    (
+        COMMUNITY_CONTRIBUTION_LABEL,
+        "7057ff",
+        "PR opened by an author outside ALLOWED_ISSUE_AUTHORS; human review requested",
     ),
 )
 
@@ -452,6 +462,29 @@ class GitHubClient:
         for pr in self.repo.get_pulls(state="open", head=head, base=base):
             return pr
         return None
+
+    def iter_open_prs(self) -> Iterable[PullRequest]:
+        """Yield every open PR on the repo, regardless of head branch.
+
+        Used by the community-contribution sweep, which does not know branch
+        names up front and only needs author + labels off each PR. Errors
+        from PyGithub propagate; the caller (the sweep) catches them so a
+        single bad enumeration cannot break the polling tick.
+        """
+        for pr in self.repo.get_pulls(state="open"):
+            yield pr
+
+    @staticmethod
+    def pr_has_label(pr: PullRequest, label_name: str) -> bool:
+        wanted = (label_name or "").lower()
+        return any(
+            ((getattr(label, "name", "") or "").lower() == wanted)
+            for label in (pr.labels or [])
+        )
+
+    def add_pr_label(self, pr: PullRequest, label_name: str) -> None:
+        """Add a single label to an open PR. Idempotent at the GitHub layer."""
+        pr.add_to_labels(label_name)
 
     def get_pr(self, pr_number: int) -> PullRequest:
         return self.repo.get_pull(pr_number)

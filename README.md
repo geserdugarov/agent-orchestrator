@@ -48,7 +48,7 @@ For the high-level design (process / agent / push model and module map), see [`d
    - `HITL_HANDLE` — comma-separated GitHub logins (the users the orchestrator @-mentions on questions)
    - `REPO` — leave default unless pointing at a different repo
    - `TARGET_REPO_ROOT` — uncomment and set when `REPO` points at a different repo (path to its local clone)
-   - `ALLOWED_ISSUE_AUTHORS` — uncomment and set on any public repo to gate auto-pickup; an empty allowlist lets anyone spend the orchestrator's compute budget
+   - `ALLOWED_ISSUE_AUTHORS` — uncomment and set on any public repo to gate auto-pickup; an empty allowlist lets anyone spend the orchestrator's compute budget. When set, the per-tick sweep also labels open PRs from anyone outside the list with `community_contribution` and @-mentions `HITL_HANDLE` once per PR so a human reviews community-submitted work.
 
    Then store the PAT **outside** the repo so the implementer agent (which runs
    in a sibling worktree with sandbox bypass) cannot read it via a relative

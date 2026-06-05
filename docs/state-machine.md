@@ -17,6 +17,8 @@ The orchestrator also creates the non-workflow control label `hold_base_sync`; w
 
 A second control label `backlog` is created for postponed work. While present on an issue, every per-tick handler skips it before the workflow label is even read, so the orchestrator does not pick up, decompose, or otherwise advance the issue. Removing the label hands control back to the state machine on the next tick — typically applied at issue creation to queue work that should sit until a human is ready.
 
+A third control label `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR so a human reviews community-submitted work. The orchestrator does not drive these PRs through the workflow; the label is a pure "needs a human" signal. With `ALLOWED_ISSUE_AUTHORS` empty (the default), the sweep is a no-op.
+
 | Label | Meaning |
 |---|---|
 | _(none)_ | Open issue not yet picked up by the orchestrator. |
