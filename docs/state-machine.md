@@ -21,7 +21,7 @@ A third control label `community_contribution` is applied by the per-tick open-P
 
 ### Typed states and the transition guard
 
-The label vocabulary is defined once in [`orchestrator/state_machine.py`](../orchestrator/state_machine.py): `WorkflowLabel` (a `StrEnum`) is the single source of truth for the workflow states, and `ControlLabel` holds the modifiers (`backlog`, `hold_base_sync`). Because `StrEnum` members *are* their wire strings, the GitHub labels, pinned-state JSON, and ordinary string comparisons are unchanged — the enum only gives the names one authoritative definition.
+The label vocabulary is defined once in [`orchestrator/state_machine.py`](../orchestrator/state_machine.py): `WorkflowLabel` (a `StrEnum`) is the single source of truth for the workflow states, and `ControlLabel` holds the modifiers (`backlog`, `hold_base_sync`, `community_contribution`). Because `StrEnum` members *are* their wire strings, the GitHub labels, pinned-state JSON, and ordinary string comparisons are unchanged — the enum only gives the names one authoritative definition.
 
 Two guards run at `GitHubClient.set_workflow_label` (the single label-write chokepoint; `create_child_issue` shares the typo guard for its direct write):
 

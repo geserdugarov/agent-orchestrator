@@ -59,11 +59,20 @@ class WorkflowLabelEnumTest(unittest.TestCase):
         )
 
     def test_control_labels_are_not_workflow_states(self) -> None:
-        # backlog / hold_base_sync are modifiers, not FSM states: they must
-        # not leak into the workflow vocabulary.
+        # Control labels are modifiers, not FSM states: they must not leak
+        # into the workflow vocabulary.
         self.assertEqual(ControlLabel.BACKLOG, "backlog")
-        self.assertNotIn(ControlLabel.BACKLOG, github.WORKFLOW_LABELS)
-        self.assertNotIn(ControlLabel.HOLD_BASE_SYNC, github.WORKFLOW_LABELS)
+        self.assertEqual(
+            ControlLabel.COMMUNITY_CONTRIBUTION, "community_contribution",
+        )
+        for label in ControlLabel:
+            self.assertNotIn(label, github.WORKFLOW_LABELS)
+
+    def test_control_label_specs_are_exhaustive(self) -> None:
+        self.assertEqual(
+            {spec[0] for spec in github.CONTROL_LABEL_SPECS},
+            set(ControlLabel),
+        )
 
 
 class CoerceWorkflowLabelTest(unittest.TestCase):

@@ -22,7 +22,12 @@ from github.PullRequest import PullRequest
 from github.Repository import Repository
 
 from . import analytics, config
-from .state_machine import WorkflowLabel, coerce_workflow_label, guard_transition
+from .state_machine import (
+    ControlLabel,
+    WorkflowLabel,
+    coerce_workflow_label,
+    guard_transition,
+)
 
 log = logging.getLogger(__name__)
 
@@ -56,14 +61,14 @@ WORKFLOW_LABEL_SPECS: tuple[tuple[WorkflowLabel, str, str], ...] = (
 assert {spec[0] for spec in WORKFLOW_LABEL_SPECS} == set(WorkflowLabel)
 WORKFLOW_LABELS = frozenset(WorkflowLabel)
 
-BASE_SYNC_HOLD_LABEL = "hold_base_sync"
-BACKLOG_LABEL = "backlog"
+BASE_SYNC_HOLD_LABEL = ControlLabel.HOLD_BASE_SYNC
+BACKLOG_LABEL = ControlLabel.BACKLOG
 # Applied by `sweep_community_contribution_prs` to any open PR whose author
 # is not in `ALLOWED_ISSUE_AUTHORS`. The orchestrator only labels and pings
 # HITL once per PR; it never drives the PR's lifecycle, so the label is a
 # pure "needs a human" signal rather than a workflow stage.
-COMMUNITY_CONTRIBUTION_LABEL = "community_contribution"
-CONTROL_LABEL_SPECS: tuple[tuple[str, str, str], ...] = (
+COMMUNITY_CONTRIBUTION_LABEL = ControlLabel.COMMUNITY_CONTRIBUTION
+CONTROL_LABEL_SPECS: tuple[tuple[ControlLabel, str, str], ...] = (
     (
         BASE_SYNC_HOLD_LABEL,
         "5319e7",
