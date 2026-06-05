@@ -30,10 +30,12 @@ Module map for the extractions:
   `_is_conventional_subject`, `_first_commit_subject`,
   `_pr_title_from_commit_or_issue`, `_branch_ahead_behind`, and
   `_squash_and_force_push` -- live in `branch_publication.py`.
-* The per-tick base refresh and rebase routing --
-  `_rebase_base_into_worktree`, `_merge_base_into_worktree`,
+* The per-tick base refresh, rebase routing, and crash-recovery
+  helpers -- `_rebase_base_into_worktree`, `_merge_base_into_worktree`,
   `_rebase_in_progress`, `_refresh_base_and_worktrees`,
-  `_PR_REFRESH_DETOUR_LABELS`, `_sync_worktree_with_base`,
+  `_PR_REFRESH_DETOUR_LABELS`, `_AUTO_REBASE_PARK_REASONS`,
+  `_park_auto_rebase_failure`, `_recover_pending_auto_base_rebase`,
+  `_sync_worktree_with_base`, `_sync_pr_worktree_to_base`,
   `_route_pr_worktree_to_resolving_conflict` -- live in `base_sync.py`.
 
 Test patches that need to INTERCEPT a call from inside
@@ -54,15 +56,25 @@ from __future__ import annotations
 
 import logging
 
+from .base_sync import _AUTO_REBASE_PARK_REASONS as _AUTO_REBASE_PARK_REASONS
 from .base_sync import _PR_REFRESH_DETOUR_LABELS as _PR_REFRESH_DETOUR_LABELS
 from .base_sync import _merge_base_into_worktree as _merge_base_into_worktree
+from .base_sync import (
+    _park_auto_rebase_failure as _park_auto_rebase_failure,
+)
 from .base_sync import _rebase_base_into_worktree as _rebase_base_into_worktree
 from .base_sync import _rebase_in_progress as _rebase_in_progress
+from .base_sync import (
+    _recover_pending_auto_base_rebase as _recover_pending_auto_base_rebase,
+)
 from .base_sync import (
     _refresh_base_and_worktrees as _refresh_base_and_worktrees,
 )
 from .base_sync import (
     _route_pr_worktree_to_resolving_conflict as _route_pr_worktree_to_resolving_conflict,
+)
+from .base_sync import (
+    _sync_pr_worktree_to_base as _sync_pr_worktree_to_base,
 )
 from .base_sync import _sync_worktree_with_base as _sync_worktree_with_base
 from .branch_publication import _CONVENTIONAL_RE as _CONVENTIONAL_RE

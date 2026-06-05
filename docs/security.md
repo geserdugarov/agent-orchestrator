@@ -45,7 +45,7 @@ Add a branch-protection rule for `main` (and any release branch) at `Settings �
 
 - **Require a pull request before merging.** The orchestrator only ever opens PRs; humans click Merge ([`architecture.md`](architecture.md)).
 - **Require status checks to pass before merging** — list the checks in [Required checks](#required-checks).
-- **Require branches to be up to date before merging** — keeps the [`resolving_conflict`](state-machine.md#_handle_resolving_conflict-label-resolving_conflict) detour honest.
+- **Require branches to be up to date before merging** — keeps the per-tick base-sync auto rebase + [`resolving_conflict`](state-machine.md#_handle_resolving_conflict-label-resolving_conflict) (for actual rebase conflicts) flow honest.
 - **Do not allow force pushes.**
 - **Do not allow deletions.**
 - **Restrict who can push** to `main`. The restriction applies to every protected-branch update including PR merges (see [GitHub docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)). The allowlist is the small named set of maintainers permitted to merge or push break-glass fixes. The orchestrator's PAT does **not** belong here — granting it direct-push access would only widen blast radius if the PAT leaked.

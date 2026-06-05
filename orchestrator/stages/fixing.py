@@ -258,6 +258,15 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # handler held that responsibility for parks under `validating`).
     if state.get("awaiting_human"):
         park_reason = state.get("park_reason")
+        # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
+        # the `_sync_pr_worktree_to_base` retry loop -- the operator's
+        # new comment is the "retry the rebase" signal, NOT fresh PR
+        # feedback for the dev fix-loop. Stay silent so the refresh
+        # keeps ownership of the comment; resuming the dev here would
+        # spawn it on a prompt that has nothing to do with the
+        # outstanding fix.
+        if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
+            return
         validating_routed = state.get("pending_fix_at") is None
         if (
             not new_feedback

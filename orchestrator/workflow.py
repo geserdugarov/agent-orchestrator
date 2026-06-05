@@ -117,10 +117,16 @@ from .workflow_messages import _redact_secrets as _redact_secrets
 from .workflow_messages import _stderr_log_tail as _stderr_log_tail
 from .workflow_messages import _with_orch_marker as _with_orch_marker
 from .base_sync import (
+    _AUTO_REBASE_PARK_REASONS as _AUTO_REBASE_PARK_REASONS,
+)
+from .base_sync import (
     _refresh_base_and_worktrees as _refresh_base_and_worktrees,
 )
 from .base_sync import _rebase_base_into_worktree as _rebase_base_into_worktree
 from .base_sync import _rebase_in_progress as _rebase_in_progress
+from .base_sync import (
+    _sync_pr_worktree_to_base as _sync_pr_worktree_to_base,
+)
 from .base_sync import _sync_worktree_with_base as _sync_worktree_with_base
 # TODO(remove after 2026-08-24): remove this compatibility re-export with
 # base_sync._merge_base_into_worktree.

@@ -697,9 +697,19 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # only fires on new issue-thread comments and the human action
         # that unstuck the underlying condition typically does not include
         # one.
+        park_reason = state.get("park_reason")
+        # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
+        # the `_sync_pr_worktree_to_base` retry loop -- the operator's
+        # new comment is the "retry the rebase" signal, NOT a dev /
+        # reviewer trigger for this stage. Stay silent so the refresh
+        # keeps ownership of the comment; resuming the dev or
+        # respawning the reviewer here would consume the comment as
+        # input it has no context for and silently drop the retry
+        # intent.
+        if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
+            return
         last_action_id = state.get("last_action_comment_id")
         new_comments = gh.comments_after(issue, last_action_id)
-        park_reason = state.get("park_reason")
         # `/orchestrator add-review-rounds N` operator command. Only honored
         # on a `review_cap` park: the cap has consumed every review round and
         # plain resuming the dev would re-park on the same cap next tick (the

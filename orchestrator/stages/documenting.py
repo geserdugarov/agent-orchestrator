@@ -421,6 +421,13 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # transient-park recovery branch; documenting has no transient
     # recovery yet, so the early return alone is enough.
     if state.get("awaiting_human"):
+        # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
+        # the `_sync_pr_worktree_to_base` retry loop -- the operator's
+        # new comment is the "retry the rebase" signal, NOT a
+        # documenting-stage trigger. Stay silent so the refresh keeps
+        # ownership of the comment.
+        if state.get("park_reason") in _wf._AUTO_REBASE_PARK_REASONS:
+            return
         last_action_id = state.get("last_action_comment_id")
         if not gh.comments_after(issue, last_action_id):
             return

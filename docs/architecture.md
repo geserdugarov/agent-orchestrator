@@ -43,7 +43,9 @@ orchestrator/
   worktree_lifecycle.py worktree naming, layout, creation, restoration, cleanup
   branch_publication.py PR-branch publication helpers (conventional-subject
                         detection, ahead/behind probe, squash-and-force-push)
-  base_sync.py          per-tick base refresh, rebase routing, conflict detour
+  base_sync.py          per-tick base refresh, PR-aware rebase + push, crash
+                        recovery, and the conflict-only `resolving_conflict`
+                        route (clean rebases route directly to `validating`)
   worktrees.py          compatibility re-export hub for the five worktree-
                         subsystem modules above
   stages/
@@ -95,7 +97,7 @@ The dispatch loop classifies each issue as family-aware (`decomposing` / `blocke
 
 Per-issue durable state lives in a single **pinned comment** on the issue (`<!--orchestrator-state {...json...}-->`). The orchestrator process is stateless; the label and the pinned JSON are the entire dispatch input.
 
-For the full per-tick sequence (eligible-issue enumeration, family vs. fan-out partitioning, the pre-PR rebase / PR-having `resolving_conflict` detour, the `hold_base_sync` / `question` skips, the per-tick external-merge sweeps, and the complete pinned-state JSON schema), see [`state-machine.md#per-tick-flow-workflowtick`](state-machine.md#per-tick-flow-workflowtick).
+For the full per-tick sequence (eligible-issue enumeration, family vs. fan-out partitioning, the pre-PR rebase / PR-having clean-rebase + push (with `resolving_conflict` reserved for actual rebase conflicts), the `hold_base_sync` / `question` skips, the per-tick external-merge sweeps, and the complete pinned-state JSON schema), see [`state-machine.md#per-tick-flow-workflowtick`](state-machine.md#per-tick-flow-workflowtick).
 
 ## Stage handlers
 
@@ -149,7 +151,7 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
 |---|---|---|---|
 | `main` polling loop | long-lived Python process | manual start (or wrapper) | every `POLL_INTERVAL`s |
 | `workflow.tick(gh, spec)` | function call | each loop iteration | once per tick per configured `RepoSpec`; multi-repo fans out across a `ThreadPoolExecutor`, single-repo stays in-thread |
-| `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo: one `git fetch <spec.remote_name> <spec.base_branch>`, then per-worktree dispatch (pre-PR worktrees rebase directly; PR-having worktrees behind base detour to `resolving_conflict`) |
+| `_refresh_base_and_worktrees(gh, spec)` | function call | start of each `workflow.tick` | once per tick per repo: one `git fetch <spec.remote_name> <spec.base_branch>`, then per-worktree dispatch (pre-PR worktrees rebase directly; PR-having worktrees behind base are rebased + pushed in the refresh itself via `_sync_pr_worktree_to_base` and routed to `validating` on success, with `resolving_conflict` reserved for actual rebase conflicts) |
 | `_handle_*` per issue | function call | issue's workflow label | once per tick per open issue; concurrent up to `spec.parallel_limit` per repo and `MAX_PARALLEL_ISSUES_GLOBAL` across all repos. Umbrella-only family buckets are cap-exempt |
 | decomposer agent (`DECOMPOSE_AGENT`) | subprocess (fresh or resumed) | `_handle_decomposing` (retry budget OK) or HITL resume | one shot per tick when needed |
 | implementer agent (`DEV_AGENT`) | subprocess | `_handle_implementing` (no commits yet, retry budget OK) or HITL resume | one shot per tick when needed |

@@ -35,7 +35,7 @@ in `verify.py`; the PR branch publication helpers (`_CONVENTIONAL_RE`,
 per-tick base refresh and rebase routing (`_rebase_base_into_worktree`,
 `_merge_base_into_worktree`, `_rebase_in_progress`,
 `_refresh_base_and_worktrees`, `_PR_REFRESH_DETOUR_LABELS`,
-`_sync_worktree_with_base`,
+`_sync_worktree_with_base`, `_sync_pr_worktree_to_base`,
 `_route_pr_worktree_to_resolving_conflict`) lives in `base_sync.py`.
 All those modules' names are re-exported from `worktrees.py` under
 their original names so existing imports and

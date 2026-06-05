@@ -62,6 +62,46 @@ class AwaitingHumanParkStaysParkedTest(
         )
         return gh, issue, pr
 
+    def test_auto_rebase_park_ignores_new_comment_as_fresh_feedback(
+        self,
+    ) -> None:
+        # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
+        # `_sync_pr_worktree_to_base`'s retry loop. The human's new
+        # comment is the operator's "retry the rebase" signal, NOT
+        # fresh PR feedback to route to `fixing`. The handler must
+        # stay silent and let the refresh own the comment; otherwise
+        # the in_review -> fixing route consumes it as a fix trigger
+        # and silently drops the retry intent.
+        gh, issue, pr = self._parked_issue(
+            park_reason="auto_base_rebase_push_failed",
+            pr_kwargs=dict(mergeable=True, check_state="success"),
+        )
+        # Fresh human comment past the watermark.
+        gh._issues[170].comments.append(FakeComment(
+            id=20_000, body="branch reconciled, please retry",
+            user=FakeUser("human"),
+        ))
+
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        # No fixing route, no relabel, no `pending_fix_*` bookmarks,
+        # no PR comment posted.
+        mocks["run_agent"].assert_not_called()
+        self.assertEqual(gh.label_history, [])
+        self.assertEqual(gh.posted_pr_comments, [])
+        self.assertEqual(gh.posted_comments, [])
+        # Park preserved verbatim so the refresh's next tick still sees
+        # the comment + park combo and can drive the retry.
+        data = gh.pinned_data(170)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(
+            data.get("park_reason"), "auto_base_rebase_push_failed",
+        )
+        self.assertIsNone(data.get("pending_fix_at"))
+
     def test_unmergeable_park_stays_parked_when_pr_becomes_mergeable(
         self,
     ) -> None:

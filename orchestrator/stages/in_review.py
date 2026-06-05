@@ -312,6 +312,18 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # branches above.
     if state.get("awaiting_human") and not new_comments:
         return
+    # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to the
+    # `_sync_pr_worktree_to_base` retry loop -- the new human comment
+    # is the operator's "retry the rebase" signal, NOT fresh PR
+    # feedback to route to `fixing`. Stay silent so the refresh keeps
+    # ownership of the comment and processes it on its next tick;
+    # routing here would consume it as feedback and silently drop the
+    # retry intent.
+    if (
+        state.get("awaiting_human")
+        and state.get("park_reason") in _wf._AUTO_REBASE_PARK_REASONS
+    ):
+        return
 
     if new_comments:
         # Hand the fresh PR feedback off to the `fixing` stage instead of

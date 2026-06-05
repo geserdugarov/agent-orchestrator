@@ -1,11 +1,12 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
 """`fixing` label bootstrap, family-aware partitioning, PR-refresh
-detour membership, dispatcher routing, the closed-issue sweep
-inclusion, the no-`pr_number` park, the externally-merged /
-closed-without-merge terminal arcs on a closed issue, the auto-merge
-prohibition, and the `fixing` -> `resolving_conflict` rebase detour
-that must preserve pending PR feedback bookmarks. The quiet-window /
+membership, dispatcher routing, the closed-issue sweep inclusion,
+the no-`pr_number` park, the externally-merged / closed-without-merge
+terminal arcs on a closed issue, the auto-merge prohibition, and the
+pre-tick base rebase that must preserve pending PR feedback bookmarks
+across BOTH refresh exits (clean rebase -> `validating`; rebase
+leaves conflicted files -> `resolving_conflict`). The quiet-window /
 dev-resume tests live in `tests/test_workflow_fixing.py`."""
 from __future__ import annotations
 
@@ -286,13 +287,12 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
 
 class FixingConflictDetourTest(unittest.TestCase):
-    """A behind-base `fixing` worktree is detoured into
-    `resolving_conflict` by the pre-tick refresh. The detour must NOT
-    swallow pending PR feedback: the `pending_fix_*` bookmarks recorded
-    by the in_review handoff and the in_review watermarks MUST survive
-    the relabel, so the eventual return from `resolving_conflict` ->
-    `validating` -> `in_review` re-discovers the unread feedback and
-    routes it back to `fixing`.
+    """A behind-base `fixing` worktree goes through the pre-tick base
+    rebase. Both exits (clean rebase -> `validating`, conflicted rebase
+    -> `resolving_conflict`) must PRESERVE the `pending_fix_*`
+    bookmarks recorded by the in_review handoff and the in_review
+    watermarks, so the eventual return from `validating` -> `in_review`
+    re-discovers the unread feedback and routes it back to `fixing`.
     """
 
     def setUp(self) -> None:
@@ -311,17 +311,7 @@ class FixingConflictDetourTest(unittest.TestCase):
             args=["git"], returncode=returncode, stdout=stdout, stderr="",
         )
 
-    def test_fixing_detour_preserves_pending_feedback(self) -> None:
-        # A `fixing` worktree that is N commits behind `origin/<base>`
-        # must flip to `resolving_conflict` and PRESERVE the
-        # `pending_fix_*` bookmarks and `pr_last_comment_id` watermark.
-        # Any bump of those values here would silently consume the
-        # unread feedback that triggered the original in_review ->
-        # fixing route: when the resolving_conflict handler eventually
-        # pushes the rebase and the validating -> in_review handoff
-        # runs, the rescan would skip the (now-watermarked-past) human
-        # comment and the in_review HITL ready-ping could advertise
-        # the PR as ready for human merge over it.
+    def _seed_fixing_with_pending_feedback(self) -> None:
         self.gh.add_issue(make_issue(7, label="fixing"))
         pr = FakePR(
             number=42, head_branch="orchestrator/issue-7",
@@ -343,30 +333,77 @@ class FixingConflictDetourTest(unittest.TestCase):
             pending_fix_review_max_id=3000,
             pending_fix_review_summary_max_id=4000,
         )
-        # Behind base by 3 commits drives the detour.
-        git_mock = patch.object(
-            base_sync, "_git",
-            return_value=self._git_result(stdout="3\n"),
-        )
-        with patch.object(base_sync, "_worktree_dirty_files", return_value=[]), \
-             git_mock:
-            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
 
-        # Detour fired: label flipped to resolving_conflict.
-        self.assertIn((7, "resolving_conflict"), self.gh.label_history)
+    def _assert_pending_feedback_intact(self) -> None:
         # Pending-fix bookmarks survived the relabel so the eventual
-        # in_review re-entry can correlate the triggering ids.
+        # in_review re-entry can correlate the triggering ids. The
+        # in_review watermark is unchanged so the rescan after
+        # `validating` -> `in_review` surfaces the original triggering
+        # comment as fresh feedback again.
         data = self.gh.pinned_data(7)
         self.assertEqual(data.get("pending_fix_at"), "2026-05-23T00:00:00+00:00")
         self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
         self.assertEqual(data.get("pending_fix_review_max_id"), 3000)
         self.assertEqual(data.get("pending_fix_review_summary_max_id"), 4000)
-        # And the in_review watermark is unchanged -- the rescan after
-        # resolving_conflict -> validating -> in_review will surface
-        # the original triggering comment as fresh feedback again.
         self.assertEqual(data.get("pr_last_comment_id"), 1999)
         self.assertEqual(data.get("pr_last_review_comment_id"), 0)
         self.assertEqual(data.get("pr_last_review_summary_id"), 0)
+
+    def test_fixing_clean_rebase_preserves_pending_feedback(self) -> None:
+        # A clean refresh-time rebase now routes the `fixing` issue to
+        # `validating` (no longer to `resolving_conflict`). Either way
+        # the pending-fix bookmarks and in_review watermarks must
+        # survive the relabel.
+        from unittest.mock import MagicMock
+
+        self._seed_fixing_with_pending_feedback()
+        merge = MagicMock(return_value=(True, []))
+        push = MagicMock(return_value=True)
+        head_sha = MagicMock(side_effect=["before", "after"])
+        git_mock = patch.object(
+            base_sync, "_git",
+            return_value=self._git_result(stdout="3\n"),
+        )
+        with patch.object(base_sync, "_worktree_dirty_files", return_value=[]), \
+             patch.object(base_sync, "_rebase_base_into_worktree", merge), \
+             patch.object(base_sync, "_push_branch", push), \
+             patch.object(base_sync, "_head_sha", head_sha), \
+             git_mock:
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+
+        # Clean rebase routed `fixing` straight to `validating`.
+        self.assertIn((7, "validating"), self.gh.label_history)
+        self.assertNotIn((7, "resolving_conflict"), self.gh.label_history)
+        self._assert_pending_feedback_intact()
+
+    def test_fixing_conflicting_rebase_preserves_pending_feedback(self) -> None:
+        # A conflicting refresh-time rebase still routes to
+        # `resolving_conflict` so the handler can drive the dev agent.
+        # The pending-fix bookmarks and watermarks must survive that
+        # relabel too.
+        from unittest.mock import MagicMock
+
+        self._seed_fixing_with_pending_feedback()
+        merge = MagicMock(return_value=(False, ["src/feature.py"]))
+        push = MagicMock()
+        head_sha = MagicMock(return_value="before")
+        hardened = MagicMock(return_value=self._git_result())
+        git_mock = patch.object(
+            base_sync, "_git",
+            return_value=self._git_result(stdout="3\n"),
+        )
+        with patch.object(base_sync, "_worktree_dirty_files", return_value=[]), \
+             patch.object(base_sync, "_rebase_base_into_worktree", merge), \
+             patch.object(base_sync, "_push_branch", push), \
+             patch.object(base_sync, "_head_sha", head_sha), \
+             patch.object(base_sync, "_git_hardened", hardened), \
+             git_mock:
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
+
+        self.assertIn((7, "resolving_conflict"), self.gh.label_history)
+        self.assertNotIn((7, "validating"), self.gh.label_history)
+        push.assert_not_called()
+        self._assert_pending_feedback_intact()
 
 
 if __name__ == "__main__":

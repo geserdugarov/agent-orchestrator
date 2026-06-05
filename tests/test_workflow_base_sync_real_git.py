@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
@@ -193,35 +193,169 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertTrue((self.wt / "scratch.py").exists())
         self.assertFalse((self.wt / "extra.txt").exists())
 
-    def test_pr_open_worktree_is_not_merged_locally(self) -> None:
-        # Regression: once a PR exists, the per-issue branch has been pushed
-        # and `pr.head.sha` equals local HEAD. A local-only base rebase would
-        # diverge them and break the validating reviewer (it reads local
-        # HEAD) and `_squash_and_force_push`'s lease check (it expects the
-        # remote to equal `original_head` = local HEAD). The refresh must
-        # NOT do a local rebase here; instead it routes the issue to
-        # `resolving_conflict` so the existing handler does rebase + push +
-        # relabel-to-validating in one consistent flow.
-        # Replace the default `implementing` issue with one in `in_review`
-        # plus the PR-having pinned state.
+    def test_pr_open_clean_base_advance_rebases_and_routes_to_validating(
+        self,
+    ) -> None:
+        # The #402-style case: an open PR branch is merely behind base
+        # (no content conflicts). The refresh must rebase the worktree
+        # onto the new base, push the rewritten branch with
+        # force-with-lease pinned to the pre-rebase SHA, reset
+        # `review_round`, and relabel to `validating` -- NOT to
+        # `resolving_conflict`. `resolving_conflict` is reserved for
+        # rebases that actually leave conflicted files.
         self.gh = FakeGitHubClient()
         self.gh.add_issue(make_issue(7, label="in_review"))
-        self._seed_pr_state(7, pr_number=42)
+        self.gh.seed_state(
+            7, pr_number=42, branch="orchestrator/issue-7", review_round=4,
+        )
+        self.gh.add_pr(FakePR(
+            number=42, head_branch="orchestrator/issue-7",
+            merged=False, state="open",
+        ))
+        # Publish the orchestrator branch to the bare remote so the
+        # force-with-lease check has a known SHA to compare against
+        # (the production PR flow does the same first push when
+        # `_handle_implementing` opens the PR).
+        self._git("push", "origin", "orchestrator/issue-7", cwd=self.wt)
         self._advance_base(conflicting=False)
         head_before = self._wt_head()
-        with patch.object(
-            workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
-        ):
-            workflow._refresh_base_and_worktrees(self.gh, self.spec)
-        # HEAD did NOT move: no local-only rebase was performed.
-        self.assertEqual(head_before, self._wt_head())
-        # The base file did NOT land in the worktree (not yet -- it will
-        # after `_handle_resolving_conflict` runs and pushes).
-        self.assertFalse((self.wt / "extra.txt").exists())
-        # But the issue WAS routed to resolving_conflict so the handler
-        # picks it up.
-        self.assertIn((7, "resolving_conflict"), self.gh.label_history)
 
+        # Stub `_push_branch` so the real git push (which would dial out
+        # to a non-existent remote) is replaced with a local push to the
+        # bare remote we set up in setUp -- and so we can verify the
+        # force-with-lease value the caller pinned. The signature mirrors
+        # the production helper.
+        captured: dict[str, str] = {}
+
+        def fake_push(spec, worktree, branch, *, force_with_lease=None):
+            captured["branch"] = branch
+            captured["force_with_lease"] = force_with_lease or ""
+            r = subprocess.run(
+                ["git", "push",
+                 f"--force-with-lease=refs/heads/{branch}:{force_with_lease or ''}",
+                 "origin", f"HEAD:refs/heads/{branch}"],
+                cwd=str(worktree),
+                capture_output=True, text=True,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+            return r.returncode == 0
+
+        with patch.object(base_sync, "_push_branch", side_effect=fake_push), \
+             patch.object(
+                workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
+             ):
+            workflow._refresh_base_and_worktrees(self.gh, self.spec)
+
+        # The local HEAD moved: the rebase replayed the feature commit
+        # onto the new base, then the push delivered the rewrite.
+        self.assertNotEqual(head_before, self._wt_head())
+        # The base file landed in the worktree -- the rebase result.
+        self.assertTrue((self.wt / "extra.txt").exists())
+        # Worktree is clean.
+        self.assertTrue(self._is_clean())
+        # The push was issued with force-with-lease pinned to the
+        # pre-rebase SHA (= the remote PR head at the time).
+        self.assertEqual(captured.get("branch"), "orchestrator/issue-7")
+        self.assertEqual(captured.get("force_with_lease"), head_before)
+        # Label flipped to `validating`, NOT `resolving_conflict`.
+        self.assertIn((7, "validating"), self.gh.label_history)
+        self.assertNotIn((7, "resolving_conflict"), self.gh.label_history)
+        # `review_round` reset so the reviewer re-runs against the new head.
+        data = self.gh.pinned_data(7)
+        self.assertEqual(data.get("review_round"), 0)
+        # No `conflict_round` seeded -- this was not a conflict path.
+        self.assertIsNone(data.get("conflict_round"))
+
+    def test_pr_open_clean_rebase_push_failure_resets_local_head(self) -> None:
+        # Regression for issue #413 review: a clean local rebase whose
+        # push fails (lease rejection on a diverged remote, transient
+        # network error, etc.) must NOT leave local HEAD on the
+        # rebased SHA. If we did, the next tick's behind check (HEAD vs
+        # `origin/<base>`) would report `behind == 0` and never retry,
+        # and `validating` would review a local HEAD that is NOT on
+        # the PR. The recovery path resets HEAD back to the pre-rebase
+        # SHA so the worktree matches the still-stale remote PR head
+        # and the next refresh tick picks the work up again.
+        self.gh = FakeGitHubClient()
+        self.gh.add_issue(make_issue(7, label="in_review"))
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.add_pr(FakePR(
+            number=42, head_branch="orchestrator/issue-7",
+            merged=False, state="open",
+        ))
+        # Publish the branch so the lease has a real SHA to compare
+        # against, then advance base cleanly.
+        self._git("push", "origin", "orchestrator/issue-7", cwd=self.wt)
+        self._advance_base(conflicting=False)
+        head_before = self._wt_head()
+
+        # Stub `_push_branch` to simulate the lease rejection: return
+        # False without touching the bare remote (the production lease
+        # check would have done the same thing on a diverged remote).
+        push = MagicMock(return_value=False)
+
+        with patch.object(base_sync, "_push_branch", push), \
+             patch.object(
+                workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
+             ):
+            workflow._refresh_base_and_worktrees(self.gh, self.spec)
+
+        # Push was attempted exactly once.
+        push.assert_called_once()
+        # Local HEAD is back at the pre-rebase SHA (= the still-stale
+        # remote PR head), NOT the rebased SHA the failed push would
+        # have published.
+        self.assertEqual(head_before, self._wt_head())
+        # The base file did NOT land in the worktree -- the reset
+        # restored the tree to its pre-rebase state.
+        self.assertFalse((self.wt / "extra.txt").exists())
+        # Worktree is clean.
+        self.assertTrue(self._is_clean())
+        # Label stays put; no relabel to `validating` or
+        # `resolving_conflict`.
+        self.assertEqual(self.gh.label_history, [])
+        # No PR notice posted -- the recovery is silent so a
+        # transient push failure does not spam the PR thread.
+        self.assertEqual(self.gh.posted_pr_comments, [])
+        # `review_round` was NOT reset since we did not flip the label.
+        data = self.gh.pinned_data(7)
+        self.assertIsNone(data.get("review_round"))
+
+    def test_pr_open_conflicting_base_advance_relabels_resolving_conflict(
+        self,
+    ) -> None:
+        # When the rebase actually leaves conflicted files, the refresh
+        # DOES relabel to `resolving_conflict` so `_handle_resolving_conflict`
+        # can drive the dev agent to resolve them. This is the only path
+        # that still enters `resolving_conflict` from the refresh.
+        self.gh = FakeGitHubClient()
+        self.gh.add_issue(make_issue(7, label="in_review"))
+        self.gh.seed_state(7, pr_number=42, branch="orchestrator/issue-7")
+        self.gh.add_pr(FakePR(
+            number=42, head_branch="orchestrator/issue-7",
+            merged=False, state="open",
+        ))
+        self._advance_base(conflicting=True)
+        head_before = self._wt_head()
+
+        push = MagicMock()
+        with patch.object(base_sync, "_push_branch", push), \
+             patch.object(
+                workflow.config, "WORKTREES_DIR", self.tmpdir / "worktrees",
+             ):
+            workflow._refresh_base_and_worktrees(self.gh, self.spec)
+
+        # The rebase was attempted and aborted on conflict -- HEAD stays.
+        self.assertEqual(head_before, self._wt_head())
+        # Worktree clean (the abort restored it).
+        self.assertTrue(self._is_clean())
+        # No push was issued -- the dev agent will resolve the conflict.
+        push.assert_not_called()
+        # Label flipped to `resolving_conflict`.
+        self.assertIn((7, "resolving_conflict"), self.gh.label_history)
+        # `conflict_round` initialized to 0.
+        data = self.gh.pinned_data(7)
+        self.assertEqual(data.get("conflict_round"), 0)
 
 
 if __name__ == "__main__":

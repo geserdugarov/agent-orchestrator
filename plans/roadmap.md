@@ -5,7 +5,10 @@
 The full label lifecycle (no label → `decomposing` → `ready` / `blocked` /
 `umbrella` → `implementing` → `validating` → `documenting` (final-docs
 hop) → `in_review` → `fixing` (on fresh PR feedback) or
-`resolving_conflict` (operator relabel or per-tick base-sync detour)
+`resolving_conflict` (operator relabel, or per-tick base-sync flow only
+when the auto rebase actually leaves conflicted files — a merely-
+behind-base PR is rebased + pushed in the refresh itself and routes
+straight to `validating`)
 → `done` / `rejected`) is wired end-to-end. The single docs pass runs
 after the reviewer's final approval via the `documenting` handoff, so
 docs land against the approved/squashed head without spending a no-op
@@ -223,15 +226,24 @@ in_review-route reset-to-0 semantics). PR-state terminals and the
 closed-issue sweep mirror `_handle_in_review`.
 
 **Conflict resolution stage.** `_handle_resolving_conflict` is reached
-via an operator relabel or the per-tick base-sync detour (a PR-having
-worktree behind `<remote>/<base>`). `_handle_resolving_conflict`
-fetches base and runs `git rebase` under the hardened envelope.
-Every exit — pushed resolution or base-up-to-date no-op — hands
-straight back to `validating`; the single docs pass runs after the
-reviewer's final approval via the `documenting` handoff. Real
-conflicts resume the dev with up to 20 conflicted paths.
-`MAX_CONFLICT_ROUNDS` (default 3) caps attempts; every pushed rebase
-resets `review_round`.
+via an operator relabel or the per-tick base-sync flow *only when the
+auto rebase actually leaves conflicted files*. A merely-behind-base
+PR (clean rebase, no conflicts) is rebased + pushed in
+`_sync_pr_worktree_to_base` itself (force-with-lease pinned to the
+pre-rebase SHA) and routed straight to `validating` with
+`review_round` reset, so the `resolving_conflict` label is reserved
+for true content conflicts. `_handle_resolving_conflict` itself
+fetches base and runs `git rebase` under the hardened envelope; every
+exit — pushed resolution or base-up-to-date no-op — hands straight
+back to `validating`. The single docs pass runs after the reviewer's
+final approval via the `documenting` handoff. Real conflicts resume
+the dev with up to 20 conflicted paths. `MAX_CONFLICT_ROUNDS`
+(default 3) caps attempts; every pushed rebase resets `review_round`.
+The refresh-only failure modes (rebase-fail-no-conflicts,
+dirty-after-clean-rebase, push-lease-rejection) reset local HEAD back
+to the pre-rebase SHA and park awaiting human with a durable
+`auto_base_rebase_*` `park_reason`; recovery is refresh-only and
+gated on a new human issue-thread comment.
 
 **Question stage.** The operator-applied `question` label runs
 `_handle_question` as a read-only side-branch: no implementation, no
