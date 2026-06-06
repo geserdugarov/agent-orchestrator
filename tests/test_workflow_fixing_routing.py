@@ -458,8 +458,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
             state="open",
         )
         gh.add_pr(pr)
-        gh.seed_state(
-            number,
+        state = dict(
             pr_number=pr.number,
             branch=f"orchestrator/issue-{number}",
             dev_agent="claude",
@@ -477,6 +476,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
             pr_last_review_summary_id=0,
             review_round=1,
         )
+        gh.seed_state(number, **state)
 
     def _drift_patches(
         self,

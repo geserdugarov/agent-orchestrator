@@ -102,6 +102,7 @@ def _handle_dev_fix_result(
     wt: Path,
     result: AgentResult,
     before_sha: str,
+    after_sha: Optional[str] = None,
 ) -> bool:
     """Post-agent handling for a dev fix during validating.
 
@@ -111,6 +112,10 @@ def _handle_dev_fix_result(
     approval state must be reset by the caller before relabeling).
     Returns False if the run produced no fix (timeout, no-new-commit,
     dirty tree, or push failure); caller should write state and return.
+
+    `after_sha`, when provided, is the post-agent HEAD the caller already
+    read (e.g. the fixing handler's ACK fast path); passing it avoids a
+    redundant `_head_sha` call. When None it is read here.
     """
     from .. import workflow as _wf
 
@@ -136,7 +141,8 @@ def _handle_dev_fix_result(
         state.set("pre_dev_fix_sha", before_sha or "")
         return False
 
-    after_sha = _wf._head_sha(wt)
+    if after_sha is None:
+        after_sha = _wf._head_sha(wt)
     if after_sha == before_sha or not after_sha:
         # No new commit: dev asked a question or did nothing.
         _wf._on_question(gh, issue, state, result)

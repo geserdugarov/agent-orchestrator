@@ -140,7 +140,17 @@ _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
     WorkflowLabel.IN_REVIEW: frozenset(
         {WorkflowLabel.FIXING, WorkflowLabel.VALIDATING}
     ),
-    WorkflowLabel.FIXING: frozenset({WorkflowLabel.VALIDATING}),
+    WorkflowLabel.FIXING: frozenset(
+        {
+            WorkflowLabel.VALIDATING,
+            # The worktree-drift dead-lock breaker hands a parked fixing
+            # issue to `resolving_conflict` (out of sync with the PR) or
+            # back to `in_review` (in sync, nothing to fix on the in_review
+            # route -- the ACK / in-sync return).
+            WorkflowLabel.RESOLVING_CONFLICT,
+            WorkflowLabel.IN_REVIEW,
+        }
+    ),
     WorkflowLabel.RESOLVING_CONFLICT: frozenset({WorkflowLabel.VALIDATING}),
     WorkflowLabel.QUESTION: frozenset({WorkflowLabel.DONE}),
     WorkflowLabel.DONE: frozenset(),

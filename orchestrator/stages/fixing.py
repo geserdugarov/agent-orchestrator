@@ -78,6 +78,10 @@ the HITL contract. The router also no-ops when `hold_base_sync` is set,
 the worktree is missing / dirty, or the worktree is already in sync
 with the PR head.
 
+Separately, an in_review-route resume that produces no commit but ends
+with an explicit `ACK: <reason>` marker returns straight to `in_review`
+without parking. Unmarked no-commit replies still park for human input.
+
 PR-state terminals (merged / closed-without-merge / open-PR-with-closed-issue)
 mirror the in_review arcs so an external manual merge or rejection while
 the issue is mid-fix still finalizes to `done` / `rejected` with branch
@@ -408,8 +412,45 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         ),
     )
 
+    # Read HEAD only when the run did not time out -- the timeout branch of
+    # `_handle_dev_fix_result` returns before it would use `after_sha`, and
+    # reading here would burn an extra `_head_sha` the timeout path never did.
+    after_sha = None if dev_result.timed_out else _wf._head_sha(wt)
+
+    # ACK fast path (in_review route only): the dev made no commit but
+    # explicitly signaled via the `ACK: <reason>` marker that the PR
+    # feedback carries no actionable change. A vague "continue" / "ok"
+    # nudge should not strand a complete, mergeable PR in `fixing`, so
+    # return to `in_review` (re-arming the ready-ping) instead of parking.
+    # The validating CHANGES_REQUESTED route (`pending_fix_at` unset) is
+    # excluded -- the reviewer DID request a concrete change, so an ACK
+    # there must still park for the human.
+    if (
+        pending_fix_at_was_set
+        and not dev_result.timed_out
+        and (not after_sha or after_sha == before_sha)
+    ):
+        ack_reason = _wf._drift_ack_reason(dev_result.last_message or "")
+        if ack_reason:
+            _advance_consumed_watermarks(
+                state, issue_space_new, review_space_new, review_summary_new,
+            )
+            _clear_pending_fix_bookmarks(state)
+            quoted = "> " + ack_reason.replace("\n", "\n> ")
+            _wf._post_issue_comment(
+                gh, issue, state,
+                ":speech_balloon: dev session reports the PR feedback needs "
+                f"no change:\n\n{quoted}\n\nReturning to `in_review`.",
+            )
+            # The session is alive and producing a coherent ack, so reset
+            # the silent-park streak (mirrors the drift-ack handling).
+            state.set("silent_park_count", 0)
+            gh.set_workflow_label(issue, WorkflowLabel.IN_REVIEW)
+            gh.write_pinned_state(issue, state)
+            return
+
     pushed = _wf._handle_dev_fix_result(
-        gh, spec, issue, state, wt, dev_result, before_sha,
+        gh, spec, issue, state, wt, dev_result, before_sha, after_sha=after_sha,
     )
 
     # Advance the three in_review watermarks ONLY to the max id actually
@@ -499,17 +540,15 @@ def _route_parked_fixing_to_resolving_conflict(
     `resolving_conflict`, which owns rebasing AND publishing a PR
     branch:
 
-      * worktree BEHIND `<remote>/<base>` -> needs a rebase.
-      * worktree already rebased locally but the rewrite was never pushed,
-        so local HEAD differs from the (stale) remote PR head -> needs a
-        force-publish (`_handle_resolving_conflict` recognizes an
-        already-rebased worktree and publishes it instead of parking).
+    * **Worktree out of sync with the PR** (behind base, or already rebased
+      locally but never pushed so local HEAD ≠ the live `pr.head.sha`) ->
+      route to `resolving_conflict`, which owns rebasing AND publishing a
+      PR branch:
 
-    Relabel to `resolving_conflict` so its handler reconciles either shape
-    on the next tick. The routing decision is cheap: base drift is a local
-    `rev-list HEAD..<remote>/<base>`, and the unpushed-rebase check
-    compares local HEAD to `pr.head.sha` (the live remote head the handler
-    already fetched this tick) -- no extra fetch here.
+        - behind `<remote>/<base>` (a local `rev-list HEAD..<remote>/<base>`)
+          -> needs a rebase;
+        - already rebased locally but never pushed (local HEAD ≠ the live
+          `pr.head.sha`) -> needs a force-publish.
 
     Returns False (issue stays parked) when the worktree is missing,
     dirty (an operator may be inspecting a dirty-tree park), the issue
@@ -517,9 +556,11 @@ def _route_parked_fixing_to_resolving_conflict(
     integration), or the worktree is already in sync with the PR head
     (the transient condition is the real blocker, not drift).
 
-    The `pending_fix_*` bookmarks and in_review watermarks are left
-    untouched so the eventual `in_review` re-entry still re-discovers the
-    feedback (mirrors the refresh-time conflict detour).
+    The routing decision is cheap: no extra fetch, since `pr` was already
+    fetched this tick. For the drift routes, the `pending_fix_*` bookmarks
+    and in_review watermarks are left untouched so the eventual `in_review`
+    re-entry still re-discovers the feedback (mirrors the refresh-time
+    conflict detour).
     """
     from .. import workflow as _wf
 

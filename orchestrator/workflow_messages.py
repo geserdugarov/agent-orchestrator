@@ -798,5 +798,11 @@ def _build_pr_comment_followup(comments: list) -> str:
         "`git commit -m \"<type>: <subject>\"` with a single `-m`.\n\n"
         "If you genuinely disagree with a point, end your final message with a "
         "question for the human and leave that item un-fixed; the orchestrator "
-        "will park the issue for human review."
+        "will park the issue for human review.\n\n"
+        "If the comments contain NO concrete, actionable change request -- e.g. "
+        "a vague 'continue', 'ok', or 'ping' that names no specific defect -- "
+        "and the branch already satisfies them, make NO commit and end your "
+        "final message with a single line `ACK: <brief reason>`. The "
+        "orchestrator will then return the PR to review-ready instead of "
+        "parking it for a fix that is not warranted."
     )

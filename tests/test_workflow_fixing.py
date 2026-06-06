@@ -165,6 +165,69 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(backend, "claude")
 
+    # --- ACK fast path ----------------------------------------------------
+
+    def test_no_commit_ack_returns_to_in_review(self) -> None:
+        # in_review route: the dev makes no commit and ends with the
+        # `ACK: <reason>` marker (the PR feedback carried no actionable
+        # change). The handler returns to `in_review` (re-arming the
+        # ready-ping) WITHOUT parking in `fixing`.
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="continue",
+            user=FakeUser("alice"), created_at=old,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    last_message=(
+                        "The branch already satisfies the comment.\n\n"
+                        "ACK: nothing to fix; 'continue' names no defect"
+                    ),
+                ),
+                head_shas=("same-sha", "same-sha"),  # no new commit
+            )
+
+        self.assertIn((880, "in_review"), gh.label_history)
+        data = gh.pinned_data(880)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertIsNone(data.get("pending_fix_at"))
+        mocks["_push_branch"].assert_not_called()
+        # An FYI quoting the ack reason is posted on the issue thread.
+        self.assertTrue(any(
+            "no change" in body.lower()
+            for _, body in gh.posted_comments
+        ))
+
+    def test_no_commit_without_ack_still_parks(self) -> None:
+        # A no-commit reply WITHOUT the marker is a genuine question and
+        # must still park awaiting human until a fresh human reply arrives.
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please reconsider the approach",
+            user=FakeUser("alice"), created_at=old,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    last_message="Which trade-off do you prefer, A or B?",
+                ),
+                head_shas=("same-sha", "same-sha"),
+            )
+
+        self.assertNotIn((880, "in_review"), gh.label_history)
+        self.assertTrue(gh.pinned_data(880).get("awaiting_human"))
+
     # --- newer comments extend the debounce window ------------------------
 
     def test_newer_comment_extends_debounce_window(self) -> None:
