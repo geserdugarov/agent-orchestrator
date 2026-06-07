@@ -1396,8 +1396,11 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         self.assertIn("agent_role = 'reviewer'", sql)
         self.assertIn("stage = 'implementing' THEN '0'", sql)
         self.assertNotIn("event IN", sql)
-        # The cache / no-cache split keys off any cached / cache-read
-        # / cache-write tokens being billed by the run.
+        # The cache / no-cache split is proportional: each run's cost
+        # is weighted by the cache-token share of its billable token
+        # volume. Codex `cached_tokens` is already a subset of
+        # `input_tokens`, so it appears in the numerator only -- not
+        # the denominator -- to avoid double-counting.
         self.assertIn("cached_tokens", sql)
         self.assertIn("cache_read_tokens", sql)
         self.assertIn("cache_write_tokens", sql)

@@ -320,10 +320,12 @@ class ReviewRoundBucketRow:
     each bucket directly. `developer_*` and `reviewer_*` split the
     round's cost into implementation/fix work and automated review
     work; `total_cost_usd` remains their sum for KPI callers. Each
-    role's cost is further split into `*_cache_cost_usd` (runs that
-    billed any cached / cache-read / cache-write tokens) and
-    `*_no_cache_cost_usd` (runs without cache use) so the dashboard
-    chart can stack cache vs no-cache spend per round. Rows with
+    role's cost is further split into `*_cache_cost_usd` (the portion
+    attributable to cached / cache-read / cache-write tokens) and
+    `*_no_cache_cost_usd` (the portion attributable to input + output
+    tokens). The split is prorated per run by token share so cache +
+    no-cache sums back to the role's total cost, letting the dashboard
+    chart stack cache vs no-cache spend per round. Rows with
     `review_round IS NULL` surface under the `"unknown"` bucket when
     they are still development/review runs. Historical implementation
     rows that predate fresh-spawn `review_round=0` logging are
@@ -1832,18 +1834,42 @@ def get_review_round_breakdown(
         where = f"{where} AND {role_clause}"
     else:
         where = f" WHERE {role_clause}"
-    # A run "uses cache" when it billed any cached / cache-read /
-    # cache-write tokens. Splitting cost on that flag lets the chart
-    # surface how much spend per round still bypasses prompt caching
-    # (older runs predating cache adoption, or backends without cache
-    # support). `total_cache_tokens` would let us inline this from the
-    # view but the column is only available there, not on the raw
-    # table, so encode the predicate directly off the underlying token
-    # columns for forward-compat with rollup paths.
-    cache_predicate = (
+    # Each run is split into a cache portion (the share of its tokens
+    # billed as cached / cache-read / cache-write) and a no-cache
+    # portion (the remaining input + output tokens). Cost is attributed
+    # proportionally so the per-round chart shows what fraction of
+    # spend actually flowed through the cache vs ran against fresh
+    # tokens -- the prior binary "any cache token => fully cache"
+    # classification collapsed to ~100% cache once every backend
+    # started reporting cache writes on the first call, leaving the
+    # no-cache stack empty. `total_cache_tokens` / `total_tokens` would
+    # let us inline these from the view but the columns only live
+    # there, not on the raw table, so encode the expressions directly
+    # off the underlying token columns for forward-compat with rollup
+    # paths.
+    #
+    # `cached_tokens` (Codex) is a subset of `input_tokens` -- the
+    # portion of the prompt served from cache -- so it stays out of
+    # the denominator to avoid double-counting. `cache_read_tokens` /
+    # `cache_write_tokens` (Claude) are reported alongside `input_tokens`
+    # rather than inside it, so they add to the denominator normally.
+    cache_tokens_expr = (
         "(COALESCE(cached_tokens, 0) "
         "+ COALESCE(cache_read_tokens, 0) "
-        "+ COALESCE(cache_write_tokens, 0)) > 0"
+        "+ COALESCE(cache_write_tokens, 0))"
+    )
+    all_tokens_expr = (
+        "(COALESCE(input_tokens, 0) "
+        "+ COALESCE(output_tokens, 0) "
+        "+ COALESCE(cache_read_tokens, 0) "
+        "+ COALESCE(cache_write_tokens, 0))"
+    )
+    # Guard the denominator so a token-less row contributes its whole
+    # cost (if any) to the no-cache stack rather than dividing by zero.
+    cache_fraction_expr = (
+        f"CASE WHEN {all_tokens_expr} = 0 THEN 0 "
+        f"ELSE {cache_tokens_expr}::numeric / {all_tokens_expr}::numeric "
+        f"END"
     )
     sql = (
         "SELECT "
@@ -1874,17 +1900,17 @@ def get_review_round_breakdown(
         "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
         "THEN cost_usd ELSE 0 END), 0) AS reviewer_cost_usd, "
         "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
-        f"AND {cache_predicate} "
-        "THEN cost_usd ELSE 0 END), 0) AS developer_cache_cost_usd, "
+        f"THEN COALESCE(cost_usd, 0) * ({cache_fraction_expr}) "
+        "ELSE 0 END), 0) AS developer_cache_cost_usd, "
         "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
-        f"AND NOT {cache_predicate} "
-        "THEN cost_usd ELSE 0 END), 0) AS developer_no_cache_cost_usd, "
+        f"THEN COALESCE(cost_usd, 0) * (1 - ({cache_fraction_expr})) "
+        "ELSE 0 END), 0) AS developer_no_cache_cost_usd, "
         "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
-        f"AND {cache_predicate} "
-        "THEN cost_usd ELSE 0 END), 0) AS reviewer_cache_cost_usd, "
+        f"THEN COALESCE(cost_usd, 0) * ({cache_fraction_expr}) "
+        "ELSE 0 END), 0) AS reviewer_cache_cost_usd, "
         "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
-        f"AND NOT {cache_predicate} "
-        "THEN cost_usd ELSE 0 END), 0) AS reviewer_no_cache_cost_usd "
+        f"THEN COALESCE(cost_usd, 0) * (1 - ({cache_fraction_expr})) "
+        "ELSE 0 END), 0) AS reviewer_no_cache_cost_usd "
         f"FROM analytics_agent_runs{where} "
         "GROUP BY bucket "
         "ORDER BY runs DESC, bucket ASC"

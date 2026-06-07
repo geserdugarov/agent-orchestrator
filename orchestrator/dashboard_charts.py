@@ -28,8 +28,8 @@ The chart shapes mirror the redesigned standalone mock (issue #341):
 - ``cost_by_review_round`` -- grouped horizontal bars per review round,
   split into development and review cost from ``ReviewRoundBucketRow``;
   each role's bar is further stacked into no-cache + cache cost so the
-  operator can see how much per-round spend still bypasses prompt
-  caching.
+  operator can see how much per-round spend was prorated through cached
+  tokens vs charged against fresh input + output tokens.
 - ``hour_weekday_heatmap`` -- weekday-by-hour activity heatmap
   matching the mock's faint-to-saturated accent gradient.
 - ``done_per_day_bars`` -- thin per-day bars for the reliability /
@@ -488,12 +488,14 @@ def cost_by_review_round(
     rather than sorted by cost, so the operator reads the rework
     progression in sequence. Each row renders two bars: development
     cost (`agent_role=developer`) and review cost (`agent_role=reviewer`).
-    Each role's bar is further stacked into no-cache + cache cost (the
-    cache segment uses a translucent shade of the role color so the
-    pair stays visibly tied to the role). `get_review_round_breakdown`
-    keeps rounds 3, 4 and 5 separate (only 6+ is grouped). `height` is
-    forwarded so the panel can be pinned to the workflow-stage panel's
-    height.
+    Each role's bar is further stacked into no-cache + cache cost
+    (each run's cost prorated by the share of its tokens that were
+    cached / cache-read / cache-write vs the remaining input + output
+    tokens). The cache segment uses a translucent shade of the role
+    color so the pair stays visibly tied to the role.
+    `get_review_round_breakdown` keeps rounds 3, 4 and 5 separate
+    (only 6+ is grouped). `height` is forwarded so the panel can be
+    pinned to the workflow-stage panel's height.
     """
     if not rows:
         return _empty_figure(
