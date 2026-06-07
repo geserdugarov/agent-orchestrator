@@ -203,43 +203,138 @@ class CostByReviewRoundTest(unittest.TestCase):
                 bucket="0", runs=12, failed=0, total_cost_usd=40.0,
                 developer_runs=7, reviewer_runs=5,
                 developer_cost_usd=28.0, reviewer_cost_usd=12.0,
+                developer_cache_cost_usd=20.0,
+                developer_no_cache_cost_usd=8.0,
+                reviewer_cache_cost_usd=9.0,
+                reviewer_no_cache_cost_usd=3.0,
             ),
             ReviewRoundBucketRow(
                 bucket="1", runs=4, failed=1, total_cost_usd=20.0,
                 developer_runs=2, reviewer_runs=2,
                 developer_cost_usd=9.0, reviewer_cost_usd=11.0,
+                developer_cache_cost_usd=7.0,
+                developer_no_cache_cost_usd=2.0,
+                reviewer_cache_cost_usd=8.0,
+                reviewer_no_cache_cost_usd=3.0,
             ),
             ReviewRoundBucketRow(
                 bucket="3", runs=2, failed=2, total_cost_usd=15.0,
                 developer_runs=1, reviewer_runs=1,
                 developer_cost_usd=6.0, reviewer_cost_usd=9.0,
+                developer_cache_cost_usd=6.0,
+                developer_no_cache_cost_usd=0.0,
+                reviewer_cache_cost_usd=9.0,
+                reviewer_no_cache_cost_usd=0.0,
             ),
             ReviewRoundBucketRow(
                 bucket="unknown", runs=1, failed=0, total_cost_usd=5.0,
                 developer_runs=1, reviewer_runs=0,
                 developer_cost_usd=5.0, reviewer_cost_usd=0.0,
+                developer_cache_cost_usd=0.0,
+                developer_no_cache_cost_usd=5.0,
+                reviewer_cache_cost_usd=0.0,
+                reviewer_no_cache_cost_usd=0.0,
             ),
         ]
         fig = dashboard_charts.cost_by_review_round(rows)
-        # The display labels read off the `label_map`; sub-line
-        # carries the per-role run counts. Horizontal grouped bars
-        # render later traces above earlier traces, so the trace list
-        # is Review, Development to make the visible row order read
-        # Development, then Review.
-        self.assertEqual(len(fig.data), 2)
-        self.assertEqual(fig.data[0].name, "Review")
-        self.assertEqual(fig.data[1].name, "Development")
+        # Four traces: Review (no cache), Review (cache),
+        # Development (no cache), Development (cache). Review is
+        # added first so the visible role order per round reads
+        # Development above Review. Within each role the no-cache
+        # trace stacks below cache (cache reads outward).
+        self.assertEqual(len(fig.data), 4)
+        self.assertEqual(
+            [t.name for t in fig.data],
+            [
+                "Review (no cache)",
+                "Review (cache)",
+                "Development (no cache)",
+                "Development (cache)",
+            ],
+        )
+        # `offsetgroup` separates Development from Review (side by
+        # side), while same-role traces share an offsetgroup so they
+        # stack at the same y bucket under `barmode="relative"`.
+        self.assertEqual(fig.layout.barmode, "relative")
+        self.assertEqual(fig.data[0].offsetgroup, "reviewer")
+        self.assertEqual(fig.data[1].offsetgroup, "reviewer")
+        self.assertEqual(fig.data[2].offsetgroup, "developer")
+        self.assertEqual(fig.data[3].offsetgroup, "developer")
         self.assertEqual(fig.layout.legend.traceorder, "reversed")
-        self.assertEqual(len(fig.data[0].y), 4)
-        self.assertEqual(len(fig.data[1].y), 4)
+        for trace in fig.data:
+            self.assertEqual(len(trace.y), 4)
         joined = " ".join(fig.data[0].y)
         for needle in (
             "Initial", "Round 1", "Round 3", "No review round",
             "7 dev / 5 review runs",
         ):
             self.assertIn(needle, joined)
-        self.assertEqual(list(fig.data[0].x), [0.0, 9.0, 11.0, 12.0])
-        self.assertEqual(list(fig.data[1].x), [5.0, 6.0, 9.0, 28.0])
+        # Logical order before Plotly's horizontal-bar reversal is
+        # Initial -> Round 1 -> Round 3 -> No review round, so the
+        # rendered y array is the reverse of that.
+        # Reviewer no-cache: [0=initial: 3, 1: 3, 3: 0, unknown: 0]
+        # -> reversed = [0, 0, 3, 3].
+        self.assertEqual(list(fig.data[0].x), [0.0, 0.0, 3.0, 3.0])
+        # Reviewer cache: initial 9, 1 -> 8, 3 -> 9, unknown 0
+        # reversed = [0, 9, 8, 9].
+        self.assertEqual(list(fig.data[1].x), [0.0, 9.0, 8.0, 9.0])
+        # Developer no-cache: initial 8, 1 -> 2, 3 -> 0, unknown 5
+        # reversed = [5, 0, 2, 8].
+        self.assertEqual(list(fig.data[2].x), [5.0, 0.0, 2.0, 8.0])
+        # Developer cache: initial 20, 1 -> 7, 3 -> 6, unknown 0
+        # reversed = [0, 6, 7, 20].
+        self.assertEqual(list(fig.data[3].x), [0.0, 6.0, 7.0, 20.0])
+        # Only the cache (outer) segments carry the per-role total
+        # text so the dollar label lands once per role bar; per-role
+        # total per round = no_cache + cache.
+        self.assertEqual(fig.data[0].text, None)
+        self.assertEqual(fig.data[2].text, None)
+        # Review totals reversed: initial 12, 1 -> 11, 3 -> 9, unknown 0
+        # reversed text values match those role totals (per `fmt_money`:
+        # values below $10 keep cents, $10+ rounds to whole dollars).
+        self.assertEqual(
+            list(fig.data[1].text),
+            ["$0.00", "$9.00", "$11", "$12"],
+        )
+        # Developer totals reversed: initial 28, 1 -> 9, 3 -> 6, unknown 5
+        self.assertEqual(
+            list(fig.data[3].text),
+            ["$5.00", "$6.00", "$9.00", "$28"],
+        )
+
+    def test_cache_segment_uses_lighter_role_color(self) -> None:
+        # Cache and no-cache must stay visibly paired by role, so the
+        # cache segment is a translucent shade of the role's base
+        # color rather than a separate palette.
+        rows = [
+            ReviewRoundBucketRow(
+                bucket="0", runs=4, failed=0, total_cost_usd=20.0,
+                developer_runs=2, reviewer_runs=2,
+                developer_cost_usd=10.0, reviewer_cost_usd=10.0,
+                developer_cache_cost_usd=6.0,
+                developer_no_cache_cost_usd=4.0,
+                reviewer_cache_cost_usd=7.0,
+                reviewer_no_cache_cost_usd=3.0,
+            ),
+        ]
+        fig = dashboard_charts.cost_by_review_round(rows)
+        from orchestrator import dashboard_theme as theme
+        # Reviewer no-cache uses the canonical role color verbatim.
+        self.assertEqual(
+            fig.data[0].marker.color, theme.AGENT_ROLE_COLORS["reviewer"],
+        )
+        # Reviewer cache uses an rgba() shade of the same color.
+        self.assertTrue(
+            fig.data[1].marker.color.startswith("rgba("),
+            f"expected rgba() cache shade, got {fig.data[1].marker.color}",
+        )
+        self.assertEqual(
+            fig.data[2].marker.color, theme.AGENT_ROLE_COLORS["developer"],
+        )
+        self.assertTrue(
+            fig.data[3].marker.color.startswith("rgba("),
+            f"expected rgba() cache shade, got {fig.data[3].marker.color}",
+        )
 
     def test_empty_renders_placeholder(self) -> None:
         fig = dashboard_charts.cost_by_review_round([])

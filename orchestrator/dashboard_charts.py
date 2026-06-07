@@ -26,7 +26,10 @@ The chart shapes mirror the redesigned standalone mock (issue #341):
   sub-line (e.g. run count), and a single cost value rendered at the
   bar's tip.
 - ``cost_by_review_round`` -- grouped horizontal bars per review round,
-  split into development and review cost from ``ReviewRoundBucketRow``.
+  split into development and review cost from ``ReviewRoundBucketRow``;
+  each role's bar is further stacked into no-cache + cache cost so the
+  operator can see how much per-round spend still bypasses prompt
+  caching.
 - ``hour_weekday_heatmap`` -- weekday-by-hour activity heatmap
   matching the mock's faint-to-saturated accent gradient.
 - ``done_per_day_bars`` -- thin per-day bars for the reliability /
@@ -458,6 +461,22 @@ def cost_by_stage(
     return cost_horizontal_bars(items, height=height)
 
 
+def _lighten_hex(hex_color: str, alpha: float) -> str:
+    """Return an `rgba(...)` string of `hex_color` with `alpha`.
+
+    Used to derive the cache-portion shade from the role's base color
+    so the no-cache and cache segments stay visibly paired without
+    introducing a second palette. Caller passes a `#rrggbb` value;
+    short forms / named colors are out of scope -- the chart palette
+    only emits 6-hex strings.
+    """
+    h = hex_color.lstrip("#")
+    r = int(h[0:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha:.2f})"
+
+
 def cost_by_review_round(
     rows: Sequence[ReviewRoundBucketRow], *, height: Optional[int] = None
 ) -> go.Figure:
@@ -469,9 +488,12 @@ def cost_by_review_round(
     rather than sorted by cost, so the operator reads the rework
     progression in sequence. Each row renders two bars: development
     cost (`agent_role=developer`) and review cost (`agent_role=reviewer`).
-    `get_review_round_breakdown` keeps rounds 3, 4 and 5 separate
-    (only 6+ is grouped). `height` is forwarded so the panel can be
-    pinned to the workflow-stage panel's height.
+    Each role's bar is further stacked into no-cache + cache cost (the
+    cache segment uses a translucent shade of the role color so the
+    pair stays visibly tied to the role). `get_review_round_breakdown`
+    keeps rounds 3, 4 and 5 separate (only 6+ is grouped). `height` is
+    forwarded so the panel can be pinned to the workflow-stage panel's
+    height.
     """
     if not rows:
         return _empty_figure(
@@ -506,15 +528,35 @@ def cost_by_review_round(
         )
         for r in ordered_rows
     ]
-    dev_values = [float(r.developer_cost_usd or 0.0) for r in ordered_rows]
-    review_values = [float(r.reviewer_cost_usd or 0.0) for r in ordered_rows]
+    # Each role splits into (no-cache portion, cache portion). The
+    # read model guarantees no_cache + cache == role total, so the
+    # stacked segments add back to the per-role total the previous
+    # design plotted.
+    dev_no_cache = [
+        float(r.developer_no_cache_cost_usd or 0.0) for r in ordered_rows
+    ]
+    dev_cache = [
+        float(r.developer_cache_cost_usd or 0.0) for r in ordered_rows
+    ]
+    review_no_cache = [
+        float(r.reviewer_no_cache_cost_usd or 0.0) for r in ordered_rows
+    ]
+    review_cache = [
+        float(r.reviewer_cache_cost_usd or 0.0) for r in ordered_rows
+    ]
+    dev_totals = [a + b for a, b in zip(dev_no_cache, dev_cache)]
+    review_totals = [a + b for a, b in zip(review_no_cache, review_cache)]
 
     # Plotly draws the first y-value at the bottom of a horizontal
     # grouped bar chart, so reverse to keep Initial at the top.
     labels.reverse()
     subs.reverse()
-    dev_values.reverse()
-    review_values.reverse()
+    dev_no_cache.reverse()
+    dev_cache.reverse()
+    review_no_cache.reverse()
+    review_cache.reverse()
+    dev_totals.reverse()
+    review_totals.reverse()
     y_ticks = [
         (
             f"<b>{lbl}</b><br>"
@@ -523,28 +565,64 @@ def cost_by_review_round(
         )
         for lbl, sub in zip(labels, subs)
     ]
+    dev_color = theme.AGENT_ROLE_COLORS["developer"]
+    review_color = theme.AGENT_ROLE_COLORS["reviewer"]
+    # 0.45 alpha keeps the cache segment legible on the page
+    # background while leaving the no-cache portion as the dominant
+    # role color.
+    dev_cache_color = _lighten_hex(dev_color, 0.45)
+    review_cache_color = _lighten_hex(review_color, 0.45)
     fig = go.Figure()
-    # For horizontal grouped bars, Plotly lays traces bottom-to-top
-    # within each y bucket. Add Review first so the visible pair reads
-    # Development, then Review from top to bottom.
-    for name, values, role in (
-        ("Review", review_values, "reviewer"),
-        ("Development", dev_values, "developer"),
+    # Horizontal grouped+stacked layout: `offsetgroup` controls the
+    # side-by-side offset (one for development, one for review); two
+    # traces sharing an `offsetgroup` stack at that offset under
+    # `barmode="relative"`. Plotly lays traces bottom-to-top within
+    # each y bucket, so adding the Review pair first keeps the visible
+    # role order Development above Review per round. Within each
+    # offset, the no-cache trace is added before the cache trace so
+    # no-cache reads as the base segment and cache stacks outward --
+    # matching the issue's "no-cache + cache in stacked form" framing.
+    monofont = {
+        "color": theme.TEXT,
+        "size": 12,
+        "family": theme.MONO_FONT_FAMILY,
+    }
+    for name, values, color, offset, totals in (
+        (
+            "Review (no cache)", review_no_cache, review_color,
+            "reviewer", None,
+        ),
+        (
+            "Review (cache)", review_cache, review_cache_color,
+            "reviewer", review_totals,
+        ),
+        (
+            "Development (no cache)", dev_no_cache, dev_color,
+            "developer", None,
+        ),
+        (
+            "Development (cache)", dev_cache, dev_cache_color,
+            "developer", dev_totals,
+        ),
     ):
+        # Only the outer (cache) trace carries the per-role total
+        # text so the dollar label still lands once per role bar
+        # instead of duplicating on each segment.
+        text = (
+            [theme.fmt_money(v) for v in totals]
+            if totals is not None else None
+        )
         fig.add_trace(
             go.Bar(
                 x=values,
                 y=y_ticks,
                 name=name,
                 orientation="h",
-                marker_color=theme.AGENT_ROLE_COLORS[role],
-                text=[theme.fmt_money(v) for v in values],
-                textposition="outside",
-                textfont={
-                    "color": theme.TEXT,
-                    "size": 12,
-                    "family": theme.MONO_FONT_FAMILY,
-                },
+                marker_color=color,
+                offsetgroup=offset,
+                text=text,
+                textposition="outside" if text is not None else "none",
+                textfont=monofont if text is not None else None,
                 cliponaxis=False,
                 hovertemplate=(
                     "%{y}<br>" + name + ": $%{x:,.2f}<extra></extra>"
@@ -552,7 +630,10 @@ def cost_by_review_round(
             )
         )
     layout = theme.base_layout()
-    layout["barmode"] = "group"
+    # `relative` honors `offsetgroup` so same-offset traces stack and
+    # different-offset traces sit side-by-side. With all-positive
+    # values this acts identically to `stack` per offset.
+    layout["barmode"] = "relative"
     layout["margin"] = {"l": 160, "r": 64, "t": layout["margin"]["t"], "b": 32}
     layout["height"] = height if height is not None else 44 * len(y_ticks) + 90
     layout["legend"] = {

@@ -1333,12 +1333,16 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
     def test_query_against_view_and_buckets_round_trip(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
+        # 12-tuple rows carry the role + cache split the new chart
+        # consumes: (bucket, runs, failed, cost, dev_runs, rev_runs,
+        # dev_cost, rev_cost, dev_cache, dev_no_cache, rev_cache,
+        # rev_no_cache).
         conn.rows_for = {
             "analytics_agent_runs": [
-                ("0", 12, 1, 40.0, 7, 5, 28.0, 12.0),
-                ("1", 8, 2, 25.0, 4, 4, 10.0, 15.0),
-                ("3-5", 4, 4, 18.0, 1, 3, 5.0, 13.0),
-                ("unknown", 1, 0, 0.0, 1, 0, 0.0, 0.0),
+                ("0", 12, 1, 40.0, 7, 5, 28.0, 12.0, 20.0, 8.0, 9.0, 3.0),
+                ("1", 8, 2, 25.0, 4, 4, 10.0, 15.0, 7.0, 3.0, 11.0, 4.0),
+                ("3-5", 4, 4, 18.0, 1, 3, 5.0, 13.0, 5.0, 0.0, 13.0, 0.0),
+                ("unknown", 1, 0, 0.0, 1, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
             ],
         }
         rows = analytics_read.get_review_round_breakdown(
@@ -1364,6 +1368,24 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
             [r.reviewer_cost_usd for r in rows],
             [12.0, 15.0, 13.0, 0.0],
         )
+        # Cache vs no-cache split per role -- the chart stacks these
+        # so cache_cost + no_cache_cost must equal the role's total.
+        self.assertEqual(
+            [r.developer_cache_cost_usd for r in rows],
+            [20.0, 7.0, 5.0, 0.0],
+        )
+        self.assertEqual(
+            [r.developer_no_cache_cost_usd for r in rows],
+            [8.0, 3.0, 0.0, 0.0],
+        )
+        self.assertEqual(
+            [r.reviewer_cache_cost_usd for r in rows],
+            [9.0, 11.0, 13.0, 0.0],
+        )
+        self.assertEqual(
+            [r.reviewer_no_cache_cost_usd for r in rows],
+            [3.0, 4.0, 0.0, 0.0],
+        )
         sql, _ = conn.executed[0]
         # Reads from the view, not the base table, and the view has
         # no `event` column so no `event IN (...)` clause is emitted.
@@ -1374,11 +1396,20 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         self.assertIn("agent_role = 'reviewer'", sql)
         self.assertIn("stage = 'implementing' THEN '0'", sql)
         self.assertNotIn("event IN", sql)
+        # The cache / no-cache split keys off any cached / cache-read
+        # / cache-write tokens being billed by the run.
+        self.assertIn("cached_tokens", sql)
+        self.assertIn("cache_read_tokens", sql)
+        self.assertIn("cache_write_tokens", sql)
+        self.assertIn("developer_cache_cost_usd", sql)
+        self.assertIn("developer_no_cache_cost_usd", sql)
+        self.assertIn("reviewer_cache_cost_usd", sql)
+        self.assertIn("reviewer_no_cache_cost_usd", sql)
 
     def test_legacy_three_tuple_rows_default_cost_to_zero(self) -> None:
         # Older fixtures still emit 3-tuple `(bucket, runs, failed)` rows
-        # without the cost / role rollups; the reader defaults those
-        # values to zero so unrelated tests keep round-tripping.
+        # without the cost / role / cache rollups; the reader defaults
+        # those values to zero so unrelated tests keep round-tripping.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {"analytics_agent_runs": [("0", 3, 0)]}
@@ -1389,6 +1420,10 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         self.assertEqual(rows[0].total_cost_usd, 0.0)
         self.assertEqual(rows[0].developer_cost_usd, 0.0)
         self.assertEqual(rows[0].reviewer_cost_usd, 0.0)
+        self.assertEqual(rows[0].developer_cache_cost_usd, 0.0)
+        self.assertEqual(rows[0].developer_no_cache_cost_usd, 0.0)
+        self.assertEqual(rows[0].reviewer_cache_cost_usd, 0.0)
+        self.assertEqual(rows[0].reviewer_no_cache_cost_usd, 0.0)
 
     def test_explicit_agent_exit_runs_query(self) -> None:
         # An events list that includes agent_exit must NOT short-circuit

@@ -319,12 +319,16 @@ class ReviewRoundBucketRow:
     It is exposed verbatim so the dashboard chart's labels can map
     each bucket directly. `developer_*` and `reviewer_*` split the
     round's cost into implementation/fix work and automated review
-    work; `total_cost_usd` remains their sum for KPI callers. Rows
-    with `review_round IS NULL` surface under the `"unknown"` bucket
-    when they are still development/review runs. Historical
-    implementation rows that predate fresh-spawn `review_round=0`
-    logging are bucketed as `0` so the dashboard does not strand
-    first-pass development cost under "unknown".
+    work; `total_cost_usd` remains their sum for KPI callers. Each
+    role's cost is further split into `*_cache_cost_usd` (runs that
+    billed any cached / cache-read / cache-write tokens) and
+    `*_no_cache_cost_usd` (runs without cache use) so the dashboard
+    chart can stack cache vs no-cache spend per round. Rows with
+    `review_round IS NULL` surface under the `"unknown"` bucket when
+    they are still development/review runs. Historical implementation
+    rows that predate fresh-spawn `review_round=0` logging are
+    bucketed as `0` so the dashboard does not strand first-pass
+    development cost under "unknown".
     """
 
     bucket: str
@@ -335,6 +339,10 @@ class ReviewRoundBucketRow:
     reviewer_runs: int = 0
     developer_cost_usd: float = 0.0
     reviewer_cost_usd: float = 0.0
+    developer_cache_cost_usd: float = 0.0
+    developer_no_cache_cost_usd: float = 0.0
+    reviewer_cache_cost_usd: float = 0.0
+    reviewer_no_cache_cost_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1824,6 +1832,19 @@ def get_review_round_breakdown(
         where = f"{where} AND {role_clause}"
     else:
         where = f" WHERE {role_clause}"
+    # A run "uses cache" when it billed any cached / cache-read /
+    # cache-write tokens. Splitting cost on that flag lets the chart
+    # surface how much spend per round still bypasses prompt caching
+    # (older runs predating cache adoption, or backends without cache
+    # support). `total_cache_tokens` would let us inline this from the
+    # view but the column is only available there, not on the raw
+    # table, so encode the predicate directly off the underlying token
+    # columns for forward-compat with rollup paths.
+    cache_predicate = (
+        "(COALESCE(cached_tokens, 0) "
+        "+ COALESCE(cache_read_tokens, 0) "
+        "+ COALESCE(cache_write_tokens, 0)) > 0"
+    )
     sql = (
         "SELECT "
         # Derive the bucket from the raw `review_round` so rounds 3, 4
@@ -1851,7 +1872,19 @@ def get_review_round_breakdown(
         "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
         "THEN cost_usd ELSE 0 END), 0) AS developer_cost_usd, "
         "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
-        "THEN cost_usd ELSE 0 END), 0) AS reviewer_cost_usd "
+        "THEN cost_usd ELSE 0 END), 0) AS reviewer_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
+        f"AND {cache_predicate} "
+        "THEN cost_usd ELSE 0 END), 0) AS developer_cache_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
+        f"AND NOT {cache_predicate} "
+        "THEN cost_usd ELSE 0 END), 0) AS developer_no_cache_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
+        f"AND {cache_predicate} "
+        "THEN cost_usd ELSE 0 END), 0) AS reviewer_cache_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
+        f"AND NOT {cache_predicate} "
+        "THEN cost_usd ELSE 0 END), 0) AS reviewer_no_cache_cost_usd "
         f"FROM analytics_agent_runs{where} "
         "GROUP BY bucket "
         "ORDER BY runs DESC, bucket ASC"
@@ -1862,13 +1895,18 @@ def get_review_round_breakdown(
         bucket = row[0]
         runs = row[1]
         failed = row[2]
-        # Older fixtures may still emit rows without the role split;
-        # default those columns so unrelated tests keep round-tripping.
+        # Older fixtures may still emit rows without the role / cache
+        # split; default those columns so unrelated tests keep
+        # round-tripping.
         cost = row[3] if len(row) > 3 else 0.0
         developer_runs = row[4] if len(row) > 4 else 0
         reviewer_runs = row[5] if len(row) > 5 else 0
         developer_cost = row[6] if len(row) > 6 else 0.0
         reviewer_cost = row[7] if len(row) > 7 else 0.0
+        developer_cache_cost = row[8] if len(row) > 8 else 0.0
+        developer_no_cache_cost = row[9] if len(row) > 9 else 0.0
+        reviewer_cache_cost = row[10] if len(row) > 10 else 0.0
+        reviewer_no_cache_cost = row[11] if len(row) > 11 else 0.0
         out.append(
             ReviewRoundBucketRow(
                 bucket=str(bucket),
@@ -1879,6 +1917,14 @@ def get_review_round_breakdown(
                 reviewer_runs=int(reviewer_runs or 0),
                 developer_cost_usd=float(developer_cost or 0.0),
                 reviewer_cost_usd=float(reviewer_cost or 0.0),
+                developer_cache_cost_usd=float(developer_cache_cost or 0.0),
+                developer_no_cache_cost_usd=float(
+                    developer_no_cache_cost or 0.0
+                ),
+                reviewer_cache_cost_usd=float(reviewer_cache_cost or 0.0),
+                reviewer_no_cache_cost_usd=float(
+                    reviewer_no_cache_cost or 0.0
+                ),
             )
         )
     return out
