@@ -8,20 +8,20 @@ The orchestrator is deliberately stateless: every setting here selects backends 
 
 | Variable                  | Default                                       | Purpose                                                                 |
 | ------------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
-| `GITHUB_TOKEN`            | _(required, env-only — not read from `.env`)_ | fine-grained PAT. Putting it in `.env` is rejected at startup.          |
-| `ORCHESTRATOR_TOKEN_FILE` | `~/.config/<owner>/<repo>/token` (from `REPO`) | path to the PAT file (used when `GITHUB_TOKEN` is not in env)          |
+| `GITHUB_TOKEN`            | _(required, env-only — not read from `.env`)_ | fine-grained personal access token. Putting it in `.env` is rejected at startup. |
+| `ORCHESTRATOR_TOKEN_FILE` | `~/.config/<owner>/<repo>/token` (from `REPO`) | path to the personal access token file (used when `GITHUB_TOKEN` is not in env) |
 | `HITL_HANDLE`             | `geserdugarov`                                | comma-separated GitHub logins to @-mention when a human is needed      |
 
-### GitHub PAT
+### GitHub Personal Access Token
 
-`GITHUB_TOKEN` is the fine-grained PAT the orchestrator uses for every GitHub call. Required scopes on the target repository:
+`GITHUB_TOKEN` is the fine-grained personal access token the orchestrator uses for every GitHub call. Required scopes on the target repository:
 
 - **Contents** — read/write (worktree branches and squash commits)
 - **Issues** — read/write (label transitions, pinned-state comments, `HITL_HANDLE` @-mentions)
 - **Pull requests** — read/write (opening PRs and posting PR comments; the orchestrator never merges PRs)
 - **Metadata** — read-only (issue / PR enumeration)
 
-Create the PAT at <https://github.com/settings/personal-access-tokens>.
+Create the personal access token at <https://github.com/settings/personal-access-tokens>.
 
 The token is deliberately NOT loaded from `.env`. The implementer agent runs in a sibling worktree with sandbox bypass, so anything readable inside `REPO_ROOT` (including `.env`) is recoverable by a prompt-injected agent via a relative-path read like `cat ../agent-orchestrator/.env`. `GITHUB_TOKEN` (and the aliases `GH_TOKEN`, `GITHUB_PAT`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_TOKEN`) found in `.env` is logged-and-skipped at startup.
 
@@ -55,7 +55,7 @@ REPOS=acme/api|/srv/clones/acme-api|main;acme/web|/srv/clones/acme-web|master|pr
 
 Validation happens at import — a malformed entry, empty owner/name, empty base branch, empty `remote_name`, a non-integer or non-positive `parallel_limit`, or a duplicate slug aborts startup with a clear error. A `target_root` that does not exist on disk warns to stderr but does not block startup.
 
-Each repo can have its own PAT at `~/.config/<owner>/<repo>/token`, or a single `GITHUB_TOKEN` covering every listed repo. Worktrees are namespaced `WORKTREES_DIR/<owner>__<name>/issue-N` and PR branches are namespaced `orchestrator/<owner>__<name>/issue-N`, so two repos with the same issue number cannot collide on disk or on the branch ref — important when several `REPOS` entries share a `target_root` (e.g. one local clone with multiple remotes), where git would otherwise refuse to check the same `orchestrator/issue-N` ref out in two worktrees. In-flight issues whose pinned `branch` was set before this change keep using the legacy `orchestrator/issue-N` name; fresh issues take the namespaced form.
+Each repo can have its own personal access token at `~/.config/<owner>/<repo>/token`, or a single `GITHUB_TOKEN` covering every listed repo. Worktrees are namespaced `WORKTREES_DIR/<owner>__<name>/issue-N` and PR branches are namespaced `orchestrator/<owner>__<name>/issue-N`, so two repos with the same issue number cannot collide on disk or on the branch ref — important when several `REPOS` entries share a `target_root` (e.g. one local clone with multiple remotes), where git would otherwise refuse to check the same `orchestrator/issue-N` ref out in two worktrees. In-flight issues whose pinned `branch` was set before this change keep using the legacy `orchestrator/issue-N` name; fresh issues take the namespaced form.
 
 Slugs whose repo name contains `.lock`, `..`, or a trailing `.` (all rejected by `git check-ref-format`) get an extra `__h<16-hex>` suffix on the branch segment so two distinct slugs that would otherwise collapse to the same form (e.g. `owner/foo.lock` and `owner/foo_lock`) stay on distinct branches. The worktree directory keeps the readable `<owner>__<name>` form because filesystems tolerate these characters; only the branch ref carries the hash.
 
