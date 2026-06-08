@@ -144,30 +144,99 @@ class CostHorizontalBarsTest(unittest.TestCase):
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
 class CostByStageTest(unittest.TestCase):
 
-    def test_passes_stage_rows_to_horizontal_bars(self) -> None:
+    def test_stacks_no_cache_and_cache_per_stage(self) -> None:
+        # Each stage splits into (no-cache portion, cache portion).
+        # The read model guarantees no_cache + cache == total cost,
+        # so the stacked segments add back to the per-stage total.
         rows = [
             StageBreakdown(
                 stage="implementing",
                 count=20,
                 total_cost_usd=12.0,
                 runs=8,
+                cache_cost_usd=9.0,
+                no_cache_cost_usd=3.0,
             ),
             StageBreakdown(
                 stage="validating",
                 count=5,
                 total_cost_usd=4.0,
                 runs=3,
+                cache_cost_usd=1.0,
+                no_cache_cost_usd=3.0,
             ),
         ]
         fig = dashboard_charts.cost_by_stage(rows)
-        # Two bars, with the per-stage cost labelled in money
-        # shorthand at each bar's tip.
-        self.assertEqual(len(fig.data[0].y), 2)
+        # Two traces (no-cache base, cache outer), two bars per trace
+        # (one per stage). No-cache is added first so cache stacks
+        # outward; the chart stacks under `barmode="stack"`.
+        self.assertEqual(len(fig.data), 2)
+        self.assertEqual([t.name for t in fig.data], ["No cache", "Cache"])
+        self.assertEqual(fig.layout.barmode, "stack")
+        for trace in fig.data:
+            self.assertEqual(len(trace.y), 2)
         for stage in ("implementing", "validating"):
             self.assertTrue(
                 any(stage in lbl for lbl in fig.data[0].y),
                 f"stage {stage!r} missing from y labels",
             )
+        # Largest total ($12) sits at the top, but Plotly's horizontal
+        # bar draws the first y-value at the bottom, so the y array is
+        # reversed: [validating, implementing] in render order.
+        # No-cache reversed: [validating: 3, implementing: 3].
+        self.assertEqual(list(fig.data[0].x), [3.0, 3.0])
+        # Cache reversed: [validating: 1, implementing: 9].
+        self.assertEqual(list(fig.data[1].x), [1.0, 9.0])
+        # Only the outer (cache) trace carries the per-stage dollar
+        # text so the label lands once per bar instead of duplicating
+        # on each segment.
+        self.assertEqual(fig.data[0].text, None)
+        # Total per stage reversed: [validating $4, implementing $12].
+        self.assertEqual(list(fig.data[1].text), ["$4.00", "$12"])
+
+    def test_cache_segment_uses_lighter_stage_color(self) -> None:
+        # Cache and no-cache must stay visibly paired by stage, so the
+        # cache segment is a translucent shade of the stage's base
+        # color rather than a separate palette.
+        rows = [
+            StageBreakdown(
+                stage="implementing",
+                count=10,
+                total_cost_usd=10.0,
+                runs=4,
+                cache_cost_usd=6.0,
+                no_cache_cost_usd=4.0,
+            ),
+        ]
+        fig = dashboard_charts.cost_by_stage(rows)
+        stage_color = theme.color_for(
+            "implementing", explicit=theme.STAGE_COLORS,
+        )
+        # No-cache uses the canonical stage color verbatim.
+        self.assertEqual(fig.data[0].marker.color[0], stage_color)
+        # Cache uses an rgba() shade of the same color.
+        self.assertTrue(
+            fig.data[1].marker.color[0].startswith("rgba("),
+            f"expected rgba() cache shade, got {fig.data[1].marker.color[0]}",
+        )
+
+    def test_legacy_rows_without_cache_split_plot_full_total(self) -> None:
+        # Fixtures predating the cache-split read model leave
+        # `cache_cost_usd` / `no_cache_cost_usd` at the dataclass
+        # default of 0.0; falling through would render an empty bar.
+        # The chart falls back to plotting the full total as no-cache
+        # so the bar length still reads correctly.
+        rows = [
+            StageBreakdown(
+                stage="implementing",
+                count=10,
+                total_cost_usd=7.5,
+                runs=3,
+            ),
+        ]
+        fig = dashboard_charts.cost_by_stage(rows)
+        self.assertEqual(list(fig.data[0].x), [7.5])
+        self.assertEqual(list(fig.data[1].x), [0.0])
 
     def test_sub_line_labels_runs_not_events(self) -> None:
         # The standalone mock aggregates per-agent-run records and
@@ -181,6 +250,8 @@ class CostByStageTest(unittest.TestCase):
                 count=20,
                 total_cost_usd=12.0,
                 runs=8,
+                cache_cost_usd=9.0,
+                no_cache_cost_usd=3.0,
             ),
         ]
         fig = dashboard_charts.cost_by_stage(rows)

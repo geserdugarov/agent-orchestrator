@@ -22,9 +22,14 @@ The chart shapes mirror the redesigned standalone mock (issue #341):
   cost line overlaid on a secondary axis, segmented by either token
   type (Input / Output / Cache) or backend (Claude / Codex).
 - ``cost_horizontal_bars`` -- horizontal cost bars used by the
-  per-stage and per-repo panels. Each row carries a label, an optional
-  sub-line (e.g. run count), and a single cost value rendered at the
-  bar's tip.
+  per-repo panel. Each row carries a label, an optional sub-line
+  (e.g. run count), and a single cost value rendered at the bar's
+  tip.
+- ``cost_by_stage`` -- horizontal cost bars per workflow stage with
+  each bar stacked into no-cache + cache cost from
+  ``StageBreakdown.no_cache_cost_usd`` / ``cache_cost_usd`` so the
+  operator can see how much per-stage spend was prorated through
+  cached tokens vs charged against fresh input + output tokens.
 - ``cost_by_review_round`` -- grouped horizontal bars per review round,
   split into development and review cost from ``ReviewRoundBucketRow``;
   each role's bar is further stacked into no-cache + cache cost so the
@@ -441,7 +446,13 @@ def cost_by_stage(
     stage (so it includes `stage_enter` / `stage_evaluation`
     alongside `agent_exit`), which would overstate stage activity
     against the per-run cost; `runs` narrows to the
-    `event = 'agent_exit'` subset for the same query. `height` is
+    `event = 'agent_exit'` subset for the same query.
+
+    Each stage's bar is stacked into no-cache + cache cost (each
+    rollup row's cost prorated by the share of its tokens that were
+    cached / cache-read / cache-write vs the remaining input + output
+    tokens). The cache segment uses a translucent shade of the stage
+    color so the pair stays visibly tied to the stage. `height` is
     forwarded so the panel can be pinned to a paired panel's height.
     """
     if not rows:
@@ -449,16 +460,108 @@ def cost_by_stage(
             "No stage data matches the current filters.",
             height=height or 120,
         )
-    items = [
-        (
-            r.stage,
-            f"{int(r.runs):,} runs",
-            float(r.total_cost_usd or 0.0),
-            theme.color_for(r.stage, explicit=theme.STAGE_COLORS),
-        )
-        for r in rows
+    # Sort by total cost descending so the largest spend sits at the
+    # top -- matching the prior `cost_horizontal_bars` layout.
+    ordered = sorted(
+        rows, key=lambda r: -float(r.total_cost_usd or 0.0)
+    )
+    labels = [r.stage for r in ordered]
+    subs = [f"{int(r.runs or 0):,} runs" for r in ordered]
+    no_cache = [float(r.no_cache_cost_usd or 0.0) for r in ordered]
+    cache = [float(r.cache_cost_usd or 0.0) for r in ordered]
+    # When the rollup carries no cache split (legacy fixture with
+    # cache_cost + no_cache_cost both zero) fall back to plotting the
+    # full total as no-cache so the bar length still reads correctly.
+    totals = [
+        float(r.total_cost_usd or 0.0) for r in ordered
     ]
-    return cost_horizontal_bars(items, height=height)
+    for i, (nc, c, tot) in enumerate(zip(no_cache, cache, totals)):
+        if nc == 0.0 and c == 0.0 and tot > 0.0:
+            no_cache[i] = tot
+    colors = [
+        theme.color_for(r.stage, explicit=theme.STAGE_COLORS)
+        for r in ordered
+    ]
+    # 0.45 alpha keeps the cache segment legible on the page
+    # background while leaving the no-cache portion as the dominant
+    # stage color -- mirroring `cost_by_review_round`.
+    cache_colors = [_lighten_hex(c, 0.45) for c in colors]
+    # Plotly draws the first y-value at the bottom of a horizontal
+    # bar chart; reverse so the largest cost sits at the top.
+    labels.reverse()
+    subs.reverse()
+    no_cache.reverse()
+    cache.reverse()
+    totals.reverse()
+    colors.reverse()
+    cache_colors.reverse()
+    y_ticks = [
+        (
+            f"<b>{lbl}</b><br>"
+            f"<span style='color:{theme.MUTED_TEXT};font-size:11px'>"
+            f"{sub}</span>"
+        )
+        for lbl, sub in zip(labels, subs)
+    ]
+    monofont = {
+        "color": theme.TEXT,
+        "size": 12,
+        "family": theme.MONO_FONT_FAMILY,
+    }
+    fig = go.Figure()
+    # No-cache trace is added first so it reads as the base segment
+    # and cache stacks outward -- matching the issue's "with and
+    # without cache parts" framing. Only the outer (cache) trace
+    # carries the per-stage total text so the dollar label lands once
+    # per bar instead of duplicating on each segment.
+    fig.add_trace(
+        go.Bar(
+            x=no_cache,
+            y=y_ticks,
+            name="No cache",
+            orientation="h",
+            marker_color=colors,
+            cliponaxis=False,
+            hovertemplate=(
+                "%{y}<br>No cache: $%{x:,.2f}<extra></extra>"
+            ),
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=cache,
+            y=y_ticks,
+            name="Cache",
+            orientation="h",
+            marker_color=cache_colors,
+            text=[theme.fmt_money(v) for v in totals],
+            textposition="outside",
+            textfont=monofont,
+            cliponaxis=False,
+            hovertemplate=(
+                "%{y}<br>Cache: $%{x:,.2f}<extra></extra>"
+            ),
+        )
+    )
+    layout = theme.base_layout()
+    layout["barmode"] = "stack"
+    layout["margin"] = {"l": 160, "r": 64, "t": layout["margin"]["t"], "b": 32}
+    n_rows = max(len(y_ticks), 1)
+    layout["height"] = height if height is not None else 40 * n_rows + 80
+    layout["legend"] = {
+        "orientation": "h",
+        "x": 0,
+        "y": 1.12,
+        "xanchor": "left",
+        "yanchor": "bottom",
+    }
+    fig.update_layout(**layout)
+    fig.update_xaxes(
+        title_text="USD", tickprefix="$",
+        showline=False, zeroline=False,
+    )
+    fig.update_yaxes(automargin=True, showline=False, ticks="")
+    return fig
 
 
 def _lighten_hex(hex_color: str, alpha: float) -> str:

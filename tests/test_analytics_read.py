@@ -1163,19 +1163,24 @@ class StageBreakdownExtensionTest(unittest.TestCase):
     """Extended `get_stage_breakdown` rolls up cost / token totals
     plus an agent-run subset count per stage so the redesigned "Cost
     by workflow stage" panel can label its sub-line as "runs"
-    against the per-stage cost."""
+    against the per-stage cost. The cost is further split into
+    cache_cost_usd / no_cache_cost_usd so the panel can stack
+    cache vs no-cache spend per stage."""
 
-    def test_rolls_up_cost_tokens_and_runs(self) -> None:
+    def test_rolls_up_cost_tokens_runs_and_cache_split(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
-        # 7-tuple shape: stage / events / avg_dur / cost / input /
-        # output / agent-run subset. The reader reads from the
-        # daily rollup so the SQL aggregates the rollup's `total_*`
-        # columns instead of the raw events table.
+        # 9-tuple shape: stage / events / avg_dur / cost / input /
+        # output / agent-run subset / cache_cost / no_cache_cost.
+        # The reader reads from the daily rollup so the SQL aggregates
+        # the rollup's `total_*` columns instead of the raw events
+        # table; the cache split is prorated per rollup row by
+        # token share so cache + no-cache sums back to the stage's
+        # total cost.
         conn.rows_for = {
             "FROM analytics_daily_rollup": [
-                ("implementing", 20, 12.5, 0.50, 2000, 1500, 8),
-                ("validating", 10, None, 0.10, 100, 200, 3),
+                ("implementing", 20, 12.5, 0.50, 2000, 1500, 8, 0.30, 0.20),
+                ("validating", 10, None, 0.10, 100, 200, 3, 0.04, 0.06),
             ],
         }
         rows = analytics_read.get_stage_breakdown(connect=_connector(conn))
@@ -1183,14 +1188,44 @@ class StageBreakdownExtensionTest(unittest.TestCase):
         self.assertEqual(rows[0].total_input_tokens, 2000)
         self.assertEqual(rows[0].total_output_tokens, 1500)
         self.assertEqual(rows[0].runs, 8)
+        self.assertEqual(rows[0].cache_cost_usd, 0.30)
+        self.assertEqual(rows[0].no_cache_cost_usd, 0.20)
         self.assertEqual(rows[1].total_cost_usd, 0.10)
         self.assertEqual(rows[1].runs, 3)
+        self.assertEqual(rows[1].cache_cost_usd, 0.04)
+        self.assertEqual(rows[1].no_cache_cost_usd, 0.06)
         sql, _ = conn.executed[0]
         self.assertIn("SUM(total_cost_usd)", sql)
         # Agent-run subset uses `event = 'agent_exit'`, scoped by
         # the same WHERE clause as the totals so the per-stage sub-
         # line lines up with the per-stage cost.
         self.assertIn("event = 'agent_exit'", sql)
+        # Cache / no-cache split is proportional: each rollup row's
+        # cost is weighted by the cache-token share of its billable
+        # token volume. `total_cached_tokens` is Codex's subset of
+        # `total_input_tokens`, so it appears in the numerator only.
+        self.assertIn("total_cached_tokens", sql)
+        self.assertIn("total_cache_read_tokens", sql)
+        self.assertIn("total_cache_write_tokens", sql)
+        self.assertIn("stage_cache_cost_usd", sql)
+        self.assertIn("stage_no_cache_cost_usd", sql)
+
+    def test_legacy_7tuple_fixture_round_trips(self) -> None:
+        # Older fixtures still emit 7-tuple `(stage, count, avg_dur,
+        # cost, in, out, runs)` rows without the cache split; the
+        # reader defaults `cache_cost_usd` / `no_cache_cost_usd` to
+        # zero so unrelated tests round-trip.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "FROM analytics_daily_rollup": [
+                ("implementing", 20, 12.5, 0.50, 2000, 1500, 8),
+            ],
+        }
+        rows = analytics_read.get_stage_breakdown(connect=_connector(conn))
+        self.assertEqual(rows[0].runs, 8)
+        self.assertEqual(rows[0].cache_cost_usd, 0.0)
+        self.assertEqual(rows[0].no_cache_cost_usd, 0.0)
 
     def test_legacy_6tuple_fixture_round_trips(self) -> None:
         # Older fixtures still emit 6-tuple `(stage, count, avg_dur,
@@ -1206,6 +1241,8 @@ class StageBreakdownExtensionTest(unittest.TestCase):
         }
         rows = analytics_read.get_stage_breakdown(connect=_connector(conn))
         self.assertEqual(rows[0].runs, 0)
+        self.assertEqual(rows[0].cache_cost_usd, 0.0)
+        self.assertEqual(rows[0].no_cache_cost_usd, 0.0)
 
 
 class IssuesExtensionTest(unittest.TestCase):

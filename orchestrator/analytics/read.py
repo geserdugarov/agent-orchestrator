@@ -203,8 +203,14 @@ class StageBreakdown:
     column instead of showing a misleading zero. `total_cost_usd` /
     `total_input_tokens` / `total_output_tokens` roll up the cost /
     token figures across the stage so the breakdown table can plot
-    "where the spend went". Zero-defaulted so a fake fixture without
-    the run / cost / token columns still round-trips.
+    "where the spend went". `cache_cost_usd` and `no_cache_cost_usd`
+    split `total_cost_usd` into the portion attributable to cached /
+    cache-read / cache-write tokens vs the portion attributable to
+    input + output tokens. The split is prorated per rollup row by
+    token share so cache + no-cache sums back to the stage's total
+    cost, letting the dashboard chart stack cache vs no-cache spend
+    per stage. Zero-defaulted so a fake fixture without the run /
+    cost / token / cache-split columns still round-trips.
     """
 
     stage: str
@@ -214,6 +220,8 @@ class StageBreakdown:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     runs: int = 0
+    cache_cost_usd: float = 0.0
+    no_cache_cost_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1347,6 +1355,36 @@ def get_stage_breakdown(
     # the reader recovers `AVG` as `SUM(sum) / SUM(count)` here.
     # `NULLIF` keeps the denominator-NULL case (no row in the window
     # carried a duration) returning NULL rather than raising.
+    #
+    # Each rollup row is split into a cache portion (the share of its
+    # tokens billed as cached / cache-read / cache-write) and a
+    # no-cache portion (the remaining input + output tokens). Cost is
+    # attributed proportionally so the per-stage chart shows what
+    # fraction of spend flowed through the cache vs ran against fresh
+    # tokens -- mirroring `get_review_round_breakdown`'s per-row
+    # proration. Codex `cached_tokens` is a subset of `input_tokens`,
+    # so it stays out of the denominator to avoid double-counting;
+    # Claude `cache_read_tokens` / `cache_write_tokens` are reported
+    # alongside `input_tokens` and so add to the denominator normally.
+    # Proration is per rollup row -- one `(day, repo, issue, event,
+    # stage, backend, cost_source)` bucket -- which is the finest
+    # granularity available without bypassing the rollup.
+    cache_tokens_expr = (
+        "(COALESCE(total_cached_tokens, 0) "
+        "+ COALESCE(total_cache_read_tokens, 0) "
+        "+ COALESCE(total_cache_write_tokens, 0))"
+    )
+    all_tokens_expr = (
+        "(COALESCE(total_input_tokens, 0) "
+        "+ COALESCE(total_output_tokens, 0) "
+        "+ COALESCE(total_cache_read_tokens, 0) "
+        "+ COALESCE(total_cache_write_tokens, 0))"
+    )
+    cache_fraction_expr = (
+        f"CASE WHEN {all_tokens_expr} = 0 THEN 0 "
+        f"ELSE {cache_tokens_expr}::numeric / {all_tokens_expr}::numeric "
+        f"END"
+    )
     sql = (
         "SELECT stage, "
         "COALESCE(SUM(event_count), 0) AS c, "
@@ -1362,7 +1400,11 @@ def get_stage_breakdown(
         # rows the way a `COUNT(*)` on the rollup table would.
         "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
         "                  THEN event_count ELSE 0 END), 0) "
-        "  AS stage_agent_runs "
+        "  AS stage_agent_runs, "
+        "COALESCE(SUM(COALESCE(total_cost_usd, 0) "
+        f"* ({cache_fraction_expr})), 0) AS stage_cache_cost_usd, "
+        "COALESCE(SUM(COALESCE(total_cost_usd, 0) "
+        f"* (1 - ({cache_fraction_expr}))), 0) AS stage_no_cache_cost_usd "
         f"FROM {_DAILY_ROLLUP_VIEW}{clause} "
         "GROUP BY stage ORDER BY c DESC, stage ASC"
     )
@@ -1376,6 +1418,10 @@ def get_stage_breakdown(
         in_tok = row[4] if len(row) > 4 else 0
         out_tok = row[5] if len(row) > 5 else 0
         runs = row[6] if len(row) > 6 else 0
+        # Older fixtures may still emit rows without the cache split;
+        # default those columns so unrelated tests round-trip.
+        cache_cost = row[7] if len(row) > 7 else 0.0
+        no_cache_cost = row[8] if len(row) > 8 else 0.0
         out.append(
             StageBreakdown(
                 stage=stage,
@@ -1385,6 +1431,8 @@ def get_stage_breakdown(
                 total_input_tokens=int(in_tok or 0),
                 total_output_tokens=int(out_tok or 0),
                 runs=int(runs or 0),
+                cache_cost_usd=float(cache_cost or 0.0),
+                no_cache_cost_usd=float(no_cache_cost or 0.0),
             )
         )
     return out
