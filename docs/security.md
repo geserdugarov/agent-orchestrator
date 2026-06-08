@@ -48,7 +48,7 @@ Add a branch-protection rule for `main` (and any release branch) at `Settings �
 - **Require branches to be up to date before merging** — keeps the per-tick base-sync auto rebase + [`resolving_conflict`](state-machine.md#_handle_resolving_conflict-label-resolving_conflict) (for actual rebase conflicts) flow honest.
 - **Do not allow force pushes.**
 - **Do not allow deletions.**
-- **Restrict who can push** to `main`. The restriction applies to every protected-branch update including PR merges (see [GitHub docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)). The allowlist is the small named set of maintainers permitted to merge or push break-glass fixes. The orchestrator's PAT does **not** belong here — granting it direct-push access would only widen blast radius if the PAT leaked.
+- **Restrict who can push** to `main`. The restriction applies to every protected-branch update including PR merges (see [GitHub docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)). The allowlist is the small named set of maintainers permitted to merge or push break-glass fixes. The orchestrator's personal access token does **not** belong here — granting it direct-push access would only widen blast radius if the token leaked.
 
 ### Required human reviews for dependency-touching changes
 
@@ -107,7 +107,7 @@ Operator drill checklist (run at least once after setup, then on a recurring cad
 1. Confirm a current clone of the repo exists off the orchestrator host, tracking `main`.
 2. Export open / recently-closed Issues via the GitHub API (`gh issue list --state all --json …`) off-host. The pinned-state JSON comment is part of the export.
 3. Verify that re-cloning the repo and re-running `./run.sh` against a fresh `WORKTREES_DIR` recovers in-flight Issues from their labels + pinned comments — the documented restart contract ([`configuration.md#what-survives-a-restart`](configuration.md#what-survives-a-restart)).
-4. Confirm `~/.config/<owner>/<repo>/token` (or whatever `ORCHESTRATOR_TOKEN_FILE` points at) is backed up out-of-band; the PAT is not stored in the repo and not recoverable from a code restore alone.
+4. Confirm `~/.config/<owner>/<repo>/token` (or whatever `ORCHESTRATOR_TOKEN_FILE` points at) is backed up out-of-band; the personal access token is not stored in the repo and not recoverable from a code restore alone.
 
 Worktrees under `WORKTREES_DIR` are cache, not state — losing them only forces the next tick to re-create the worktree from `origin/<base>`.
 
