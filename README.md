@@ -75,6 +75,8 @@ For deeper implementation details, use the references below.
 
    Alternatively, export `GITHUB_TOKEN` in the orchestrator's launch environment. Putting the personal access token in `.env` is rejected at startup.
 
+   Basic settings live in [`.env.example`](.env.example); common advanced overrides and opt-in examples are in [`.env.example.advanced`](.env.example.advanced). The full reference — every setting, every default, required vars, target-repo config, agent role specs, cadence and budgets, parallel processing, in-review behavior, observability, and run modes — is in [`docs/configuration.md`](docs/configuration.md).
+
 4. **Verify the agents are authenticated**
 
    ```sh
@@ -83,6 +85,8 @@ For deeper implementation details, use the references below.
    ```
 
    If a backend is not logged in, run its login flow (`codex login` / `claude /login`). Only the backends you actually route to (the first token of `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT`) need to be authenticated.
+
+   To check configuration of agents see [`docs/configuration.md#agent-roles`](docs/configuration.md#agent-roles). Examples of advanced configuration of models and efforts to use could be found in [`docs/workflow.md#examples`](docs/workflow.md#examples).
 
 5. **Run**
 
@@ -117,10 +121,6 @@ uv run streamlit run orchestrator/dashboard.py
 
 See [`docs/observability.md`](docs/observability.md) for the event schemas, retention behavior, database setup, and dashboard details.
 
-## Configuration
-
-Basic settings live in [`.env.example`](.env.example); common advanced overrides and opt-in examples are in [`.env.example.advanced`](.env.example.advanced). The full reference — every setting, every default, required vars, target-repo config, agent role specs, cadence and budgets, parallel processing, in-review behavior, observability, and run modes — is in [`docs/configuration.md`](docs/configuration.md).
-
 ## Managing multiple repositories
 
 Set `REPOS` to drive several target repositories from one orchestrator process. Worktrees and PR branches are both namespaced by the sanitized repo slug (`WORKTREES_DIR/<owner>__<name>/issue-N` and `orchestrator/<owner>__<name>/issue-N`). This allows one local repository to manage multiple remotes, such as public and private repositories that share the same codebase. Identical issue numbers cannot collide on disk or on the branch ref, even when those repositories share a `target_root`.
@@ -130,3 +130,4 @@ For the entry syntax (including the optional fifth `parallel_limit` field) and t
 ## License
 
 Licensed under the Apache License, Version 2.0. See [`LICENSE`](LICENSE) for the full text.
+
