@@ -352,10 +352,13 @@ def _resume_developer_on_human_reply(
         return None
     consumed_max = max(c.id for c in new_comments)
     state.set("last_action_comment_id", consumed_max)
+    from .. import workflow as _wf
+
     followup = "\n\n".join(
         f"@{c.user.login if c.user else 'user'}: {c.body}"
         for c in new_comments if c.body
     )
+    followup = f"{followup}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
     return _resume_dev_with_text(gh, spec, issue, state, followup)
 
 

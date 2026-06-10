@@ -186,6 +186,36 @@ class ConventionalCommitPromptTest(unittest.TestCase):
         self.assertIn("Co-Authored-By", prompt)
 
 
+class ForegroundOnlyPromptTest(unittest.TestCase):
+    """Every prompt that can lead to a commit must spell out the one-shot
+    execution model: the session dies when the model ends its turn, so a
+    backgrounded build/test ("Miri is running, I'll continue when it
+    completes") is never observed and the issue parks forever."""
+
+    MARKER = "NEVER start a background job"
+
+    def test_dev_facing_prompts_carry_foreground_only_note(self) -> None:
+        issue = make_issue(7, title="add a thing", body="please add a thing")
+        comments = [FakeComment(id=42, body="please rename foo to bar",
+                                user=FakeUser("alice"))]
+        prompts = {
+            "implement": workflow._build_implement_prompt(
+                issue, comments_text=""),
+            "fix": workflow._build_fix_prompt("please fix the typo"),
+            "pr_comment_followup": workflow._build_pr_comment_followup(
+                comments),
+            "documentation": workflow._build_documentation_prompt(
+                _TEST_SPEC, issue, comments_text=""),
+            "conflict": workflow._build_conflict_resolution_prompt(
+                "origin/main", ["a.rs"]),
+            "user_content_change": workflow._build_user_content_change_prompt(
+                issue, comments_text=""),
+        }
+        for name, prompt in prompts.items():
+            with self.subTest(prompt=name):
+                self.assertIn(self.MARKER, prompt)
+
+
 class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
     """`_on_commits` derives the PR title from the agent's first commit
     subject when it already follows the Conventional-Commits convention,

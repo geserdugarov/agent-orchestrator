@@ -37,6 +37,7 @@ from github.Issue import Issue
 from .state_machine import WorkflowLabel
 from .github import PINNED_STATE_MARKER, GitHubClient, PinnedState
 from .workflow_messages import (
+    _FOREGROUND_ONLY_NOTE,
     _ORCH_COMMENT_MARKER,
     _orchestrator_ids,
     _post_issue_comment,
@@ -158,7 +159,8 @@ def _build_user_content_change_prompt(
         "and stays on the current label without parking. If you have a "
         "clarification question or are unsure, do NOT use `ACK:`; reply "
         "with the question and the orchestrator will park awaiting a human "
-        "reply (same as a regular agent question)."
+        "reply (same as a regular agent question).\n\n"
+        f"{_FOREGROUND_ONLY_NOTE}"
     )
 
 

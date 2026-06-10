@@ -54,6 +54,22 @@ _ORCH_COMMENT_ID_CAP = 500
 # orchestrator-comment filter are independent identifiers.
 _ORCH_COMMENT_MARKER = "<!--orchestrator-comment-->"
 
+# Appended to every prompt that can lead to a commit. Agent sessions are
+# one-shot headless processes: the CLI exits the moment the model ends its
+# turn, so a backgrounded build/test (a long suite, `cargo miri`, a dev
+# server) dies with the session and its result is never observed -- the
+# issue just parks on "waiting for X to finish" forever. Models default to
+# the interactive habit of backgrounding slow jobs and "checking later",
+# so the execution model has to be spelled out.
+_FOREGROUND_ONLY_NOTE = (
+    "IMPORTANT: your session terminates the moment you finish responding -- "
+    "nothing keeps running between turns, and a later resume starts a fresh "
+    "process. NEVER start a background job (build, test run, Miri, server) "
+    "and end your turn intending to check it later: the job dies with your "
+    "session and its result will never be seen. Run all builds and tests in "
+    "the foreground and wait for them to complete before you commit or reply."
+)
+
 
 def _orchestrator_ids(state: PinnedState) -> set[int]:
     """Set of comment ids the orchestrator itself posted on this issue/PR.
@@ -532,6 +548,7 @@ def _build_implement_prompt(issue: Issue, comments_text: str) -> str:
         "The commit message MUST be the subject line only -- no extended description / "
         "body and no `Co-Authored-By:` (or other) trailer. Use `git commit -m \"<type>: "
         "<subject>\"` with a single `-m`.\n\n"
+        f"{_FOREGROUND_ONLY_NOTE}\n\n"
         "If you cannot proceed because of missing information, leave the working tree "
         "uncommitted (no commits) and end your response with a clear question for the human."
     )
@@ -616,7 +633,8 @@ def _build_documentation_prompt(
         "If you genuinely cannot decide because of missing information, "
         "leave the worktree uncommitted, omit the marker, and end your "
         "final message with a question for the human; the orchestrator "
-        "will park the issue for human review."
+        "will park the issue for human review.\n\n"
+        f"{_FOREGROUND_ONLY_NOTE}"
     )
 
 
@@ -635,6 +653,7 @@ def _build_fix_prompt(review_feedback: str) -> str:
         "The commit message MUST be the subject line only -- no extended description / "
         "body and no `Co-Authored-By:` (or other) trailer. Use `git commit -m \"<type>: "
         "<subject>\"` with a single `-m`.\n\n"
+        f"{_FOREGROUND_ONLY_NOTE}\n\n"
         "If you genuinely disagree with a point, end your final message with a question for "
         "the human and leave that item un-fixed; the orchestrator will park the issue for "
         "human review. Otherwise, fix all items (a single commit is fine)."
@@ -713,7 +732,8 @@ def _build_conflict_resolution_prompt(
         "Use `git status` to inspect the in-progress rebase.\n\n"
         "If you genuinely cannot resolve a conflict, end your final "
         "message with a question for the human and leave the worktree "
-        "mid-rebase; the orchestrator will park the issue for human review."
+        "mid-rebase; the orchestrator will park the issue for human review.\n\n"
+        f"{_FOREGROUND_ONLY_NOTE}"
     )
 
 
@@ -804,5 +824,6 @@ def _build_pr_comment_followup(comments: list) -> str:
         "and the branch already satisfies them, make NO commit and end your "
         "final message with a single line `ACK: <brief reason>`. The "
         "orchestrator will then return the PR to review-ready instead of "
-        "parking it for a fix that is not warranted."
+        "parking it for a fix that is not warranted.\n\n"
+        f"{_FOREGROUND_ONLY_NOTE}"
     )

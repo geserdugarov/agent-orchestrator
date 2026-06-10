@@ -84,6 +84,7 @@ from .workflow_drift import (
 from .workflow_drift import _route_drift_to_decomposing as _route_drift_to_decomposing
 from .workflow_messages import _orchestrator_ids, _post_issue_comment
 from .workflow_messages import _MANIFEST_RE as _MANIFEST_RE
+from .workflow_messages import _FOREGROUND_ONLY_NOTE as _FOREGROUND_ONLY_NOTE
 from .workflow_messages import _ORCH_COMMENT_MARKER as _ORCH_COMMENT_MARKER
 from .workflow_messages import _STDERR_TAIL_BUDGET as _STDERR_TAIL_BUDGET
 from .workflow_messages import (

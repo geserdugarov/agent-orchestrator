@@ -252,6 +252,11 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
         self.assertEqual(call.kwargs.get("resume_session_id"), "sess-old")
         followup_arg = call.args[1]
         self.assertIn("please use sqlite", followup_arg)
+        # The bare human-reply followup must still carry the
+        # foreground-only execution-model note -- a resumed dev that
+        # backgrounds a slow test run and ends its turn "to check later"
+        # strands the issue (the job dies with the session).
+        self.assertIn("NEVER start a background job", followup_arg)
         # Ran through to PR open.
         self.assertEqual(len(gh.opened_prs), 1)
         self.assertFalse(gh.pinned_data(2).get("awaiting_human"))
