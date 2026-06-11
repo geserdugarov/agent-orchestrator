@@ -4,8 +4,9 @@
 
 Owns `_handle_validating` plus the reviewer-side primitives the rest of
 the workflow re-uses: post-agent dev-fix disposition (`_handle_dev_fix_result`,
-with its stage-private stranded-fix deferred-publish gate
-`_stranded_fix_unpushed`),
+with its stranded-fix deferred-publish gate `_stranded_fix_unpushed`,
+which the fixing handler's ACK fast path also consults via the
+workflow facade),
 post-resume disposition for a user-content-change dev resume
 (`_post_user_content_change_result`), the validating-side transient-park
 recovery (`_try_recover_validating_transient_park` plus its

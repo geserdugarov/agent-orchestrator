@@ -202,6 +202,7 @@ from .stages.validating import _latest_pr_comment_ids as _latest_pr_comment_ids
 from .stages.validating import (
     _post_user_content_change_result as _post_user_content_change_result,
 )
+from .stages.validating import _stranded_fix_unpushed as _stranded_fix_unpushed
 from .stages.validating import (
     _try_recover_validating_transient_park as _try_recover_validating_transient_park,
 )

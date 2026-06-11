@@ -1585,6 +1585,82 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data.get("park_reason"), "push_failed")
         self.assertNotIn((880, "validating"), gh.label_history)
 
+    def test_ack_with_stranded_fix_publishes_instead_of_in_review(self) -> None:
+        # in_review route (`pending_fix_at` set): the dev ACKs a no-commit
+        # resume, but the clean worktree HEAD is strictly ahead of the
+        # remote PR branch -- a fix a prior parked run committed that
+        # never reached the PR (e.g. a dirty-park whose stray files were
+        # later cleaned up). The ACK fast path must stand down: returning
+        # to `in_review` would clear the bookmarks and advance the
+        # watermarks while the PR head still lacks the fix. The handler
+        # publishes the stranded HEAD through the normal push tail and
+        # routes to `validating` with the in_review-route round reset.
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="continue",
+            user=FakeUser("alice"), created_at=old,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    last_message=(
+                        "The branch already satisfies the comment.\n\n"
+                        "ACK: nothing to fix; the change is already on HEAD"
+                    ),
+                ),
+                head_shas=("same-sha", "same-sha"),
+                branch_ahead_behind=(1, 0),
+            )
+
+        mocks["_push_branch"].assert_called_once()
+        self.assertNotIn((880, "in_review"), gh.label_history)
+        self.assertIn((880, "validating"), gh.label_history)
+        data = gh.pinned_data(880)
+        self.assertFalse(data.get("awaiting_human"))
+        # in_review route: a pushed fix starts a fresh review cycle.
+        self.assertEqual(data.get("review_round"), 0)
+        self.assertIsNone(data.get("pending_fix_at"))
+        # Watermark advanced past the consumed feedback.
+        self.assertGreaterEqual(data.get("pr_last_comment_id"), 2000)
+
+    def test_ack_stranded_check_behind_remote_keeps_in_review_return(self) -> None:
+        # The remote PR branch moved past the local view (behind > 0):
+        # `_stranded_fix_unpushed` is conservative and reports False
+        # rather than racing a head we have not reconciled, so the ACK
+        # fast path proceeds as before -- return to `in_review` without
+        # pushing blind.
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="continue",
+            user=FakeUser("alice"), created_at=old,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    last_message=(
+                        "The branch already satisfies the comment.\n\n"
+                        "ACK: nothing to fix; 'continue' names no defect"
+                    ),
+                ),
+                head_shas=("same-sha", "same-sha"),
+                branch_ahead_behind=(1, 2),
+            )
+
+        mocks["_push_branch"].assert_not_called()
+        self.assertIn((880, "in_review"), gh.label_history)
+        self.assertNotIn((880, "validating"), gh.label_history)
+        self.assertFalse(gh.pinned_data(880).get("awaiting_human"))
+
     def test_agent_silent_failure_parks_in_fixing(self) -> None:
         # Dev returned empty `last_message` and no commit. The handler
         # routes through `_on_question`'s silent-failure branch, parks

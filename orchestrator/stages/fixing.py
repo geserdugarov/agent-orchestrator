@@ -82,7 +82,16 @@ with an explicit `ACK: <reason>` marker returns straight to `in_review`
 without parking. Unmarked no-commit replies park awaiting human: we
 cannot distinguish "agent has a real question" from "agent reported
 nothing to change" by inspection, and auto-recovering either would
-silently bypass the HITL contract.
+silently bypass the HITL contract. One exception, on both routes: when
+the clean worktree HEAD is strictly ahead of the fetched remote PR
+branch -- a fix a prior parked run committed but never published --
+`_handle_dev_fix_result` pushes that stranded HEAD through its normal
+publish tail and treats the run as a pushed fix instead of parking
+(see `validating._stranded_fix_unpushed`). The stranded check outranks
+the ACK fast path: an in_review-route ACK on that shape falls through
+to the publish tail instead of relabeling, because the `in_review`
+return would clear the bookmarks, advance the watermarks, and present
+a PR head that is still missing the committed fix.
 
 PR-state terminals (merged / closed-without-merge / open-PR-with-closed-issue)
 mirror the in_review arcs so an external manual merge or rejection while
@@ -429,14 +438,33 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # return to `in_review` (re-arming the ready-ping) instead of parking.
     # The validating CHANGES_REQUESTED route (`pending_fix_at` unset) is
     # excluded -- the reviewer DID request a concrete change, so an ACK
-    # there must still park for the human.
+    # there falls through to `_handle_dev_fix_result`, which parks for
+    # the human unless its stranded-fix check finds the clean HEAD
+    # already strictly ahead of the remote PR branch and publishes that
+    # committed-but-unpushed fix instead
+    # (`validating._stranded_fix_unpushed`).
+    #
+    # The fast path itself stands down on the same stranded shape: the
+    # ack vouches for the *feedback*, not for the publish state, so when
+    # the clean HEAD is strictly ahead of the remote PR branch (a fix a
+    # prior parked run committed but never pushed -- e.g. a dirty-park
+    # whose stray files were later cleaned up) relabeling to `in_review`
+    # here would clear the bookmarks, advance the watermarks, and present
+    # a PR head that is still missing the committed fix. Falling through
+    # lets `_handle_dev_fix_result` publish the stranded HEAD through its
+    # normal push tail and the pushed-fix exit below route the freshened
+    # head back to the reviewer. The check is skipped when `after_sha`
+    # is unreadable (mirrors `_handle_dev_fix_result`'s own gate -- no
+    # pushing blind off a worktree whose HEAD we could not read).
     if (
         pending_fix_at_was_set
         and not dev_result.timed_out
         and (not after_sha or after_sha == before_sha)
     ):
         ack_reason = _wf._drift_ack_reason(dev_result.last_message or "")
-        if ack_reason:
+        if ack_reason and not (
+            after_sha and _wf._stranded_fix_unpushed(spec, wt, state, issue)
+        ):
             _advance_consumed_watermarks(
                 state, issue_space_new, review_space_new, review_summary_new,
             )
