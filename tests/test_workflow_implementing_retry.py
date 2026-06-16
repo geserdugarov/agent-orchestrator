@@ -612,3 +612,342 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Poisoned id remains; the existing silent-park-count path is what
         # will eventually drop it.
         self.assertEqual(state.get("dev_session_id"), "poisoned-sess")
+
+
+class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """A claude `--resume` whose replayed transcript outgrew the model context
+    window comes back with "Prompt is too long" and does no work. Resuming the
+    same session only re-fails (every human "continue" / "decompose and
+    continue" reply just appends to an already-over-budget transcript), so it
+    is treated as a poisoned session: drop the id and retry once as a fresh
+    spawn in the same worktree, exactly like the stale-session path.
+    """
+
+    OVERFLOW_MSG = "Prompt is too long"
+
+    def _seeded_issue(self, *, dev_agent: str = "claude"):
+        gh = FakeGitHubClient()
+        issue = make_issue(961, label="implementing")
+        gh.add_issue(issue)
+        gh.seed_state(
+            961,
+            dev_agent=dev_agent,
+            dev_session_id="poisoned-sess",
+            silent_park_count=0,
+        )
+        return gh, issue
+
+    def test_overflow_detector_matches_known_phrasings(self) -> None:
+        # The detector keys off a lowercase PREFIX of the last agent message
+        # so the bare phrase, a token-count suffix, and mixed casing all trip
+        # recovery.
+        for last_message in (
+            "Prompt is too long",
+            "prompt is too long: 215000 tokens > 200000 maximum",
+            "PROMPT IS TOO LONG",
+            "Input is too long",
+            "input length and `max_tokens` exceed context limit: ...",
+        ):
+            with self.subTest(last_message=last_message):
+                result = _agent(session_id="", last_message=last_message)
+                self.assertTrue(
+                    workflow._is_context_overflow_failure("claude", result),
+                    f"{last_message!r} should be classified context overflow",
+                )
+
+    def test_overflow_detector_matches_stderr(self) -> None:
+        # The CLI may print the diagnostic to stderr without emitting a result
+        # event (empty last_message); a substring match still trips recovery.
+        result = _agent(
+            session_id="", last_message="",
+            stderr="API Error: prompt is too long: 210000 tokens > 200000",
+        )
+        self.assertTrue(
+            workflow._is_context_overflow_failure("claude", result)
+        )
+
+    def test_overflow_detector_ignores_phrase_midanswer(self) -> None:
+        # An agent that merely MENTIONS the phrase inside a normal answer must
+        # not be misclassified -- last_message is matched as a prefix only.
+        result = _agent(
+            session_id="sess-1",
+            last_message="I split the work because the prompt is too long "
+            "to handle in one pass; see the sub-issues.",
+        )
+        self.assertFalse(
+            workflow._is_context_overflow_failure("claude", result)
+        )
+
+    def test_overflow_detector_ignores_unrelated(self) -> None:
+        result = _agent(
+            session_id="sess-1", last_message="done",
+            stderr="Error: rate limited, please retry shortly",
+        )
+        self.assertFalse(
+            workflow._is_context_overflow_failure("claude", result)
+        )
+
+    def test_overflow_detector_only_triggers_for_claude(self) -> None:
+        result = _agent(session_id="", last_message=self.OVERFLOW_MSG)
+        self.assertFalse(
+            workflow._is_context_overflow_failure("codex", result)
+        )
+
+    def test_poisoned_predicate_covers_stale_and_overflow(self) -> None:
+        stale = _agent(
+            session_id="", last_message="",
+            stderr="No conversation found with session ID: x",
+        )
+        overflow = _agent(session_id="", last_message=self.OVERFLOW_MSG)
+        unrelated = _agent(session_id="sess-1", last_message="a question?")
+        self.assertTrue(workflow._is_poisoned_session_failure("claude", stale))
+        self.assertTrue(workflow._is_poisoned_session_failure("claude", overflow))
+        self.assertFalse(
+            workflow._is_poisoned_session_failure("claude", unrelated)
+        )
+
+    def test_claude_overflow_retries_once_with_fresh_spawn(self) -> None:
+        # First call resumes the poisoned (overflowed) session and returns the
+        # marker; second is a fresh spawn (no resume id) whose new session id
+        # is persisted on success.
+        gh, issue = self._seeded_issue()
+        state = gh.read_pinned_state(issue)
+
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            calls.append(resume_session_id)
+            if resume_session_id == "poisoned-sess":
+                return _agent(session_id="", last_message=self.OVERFLOW_MSG)
+            return _agent(session_id="fresh-sess", last_message="ok")
+
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+             patch.object(workflow, "run_agent", fake_run):
+            workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
+
+        self.assertEqual(
+            calls, ["poisoned-sess", None],
+            "expected one resume with the poisoned id then one fresh spawn",
+        )
+        self.assertEqual(
+            state.get("dev_session_id"), "fresh-sess",
+            "fresh spawn's session id must be persisted",
+        )
+        self.assertEqual(state.get("silent_park_count"), 0)
+
+    def test_overflow_retry_clears_pinned_even_if_retry_empty(self) -> None:
+        # If the fresh-spawn retry returns no session id, the poisoned id must
+        # still be cleared so the next tick's `_read_dev_session` cannot
+        # resurrect the overflowed session.
+        gh, issue = self._seeded_issue()
+        state = gh.read_pinned_state(issue)
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            if resume_session_id == "poisoned-sess":
+                return _agent(session_id="", last_message=self.OVERFLOW_MSG)
+            return _agent(session_id="", last_message="")
+
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+             patch.object(workflow, "run_agent", fake_run):
+            workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
+
+        self.assertIsNone(state.get("dev_session_id"))
+
+    def test_overflow_retry_does_not_loop_when_fresh_spawn_also_overflows(self) -> None:
+        # A fresh spawn that ALSO overflows (issue body so large even a small
+        # prompt exceeds the window) is bounded to a single retry; the still-
+        # failing result is surfaced so the caller's `_on_question` parks it
+        # for human intervention (split the issue) rather than looping.
+        gh, issue = self._seeded_issue()
+        state = gh.read_pinned_state(issue)
+
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            calls.append(resume_session_id)
+            return _agent(session_id="", last_message=self.OVERFLOW_MSG)
+
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+             patch.object(workflow, "run_agent", fake_run):
+            _, result = workflow._resume_dev_with_text(
+                gh, _TEST_SPEC, issue, state, "go",
+            )
+
+        self.assertEqual(
+            calls, ["poisoned-sess", None],
+            "retry must be bounded to a single fresh spawn",
+        )
+        self.assertEqual(result.last_message, self.OVERFLOW_MSG)
+
+    def test_codex_overflow_does_not_trigger_immediate_retry(self) -> None:
+        # Codex has no analogous stable marker; a codex resume whose message
+        # happens to share the text must not trip the claude-only retry.
+        gh, issue = self._seeded_issue(dev_agent="codex")
+        state = gh.read_pinned_state(issue)
+
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            calls.append(resume_session_id)
+            return _agent(session_id="", last_message=self.OVERFLOW_MSG)
+
+        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+             patch.object(workflow, "run_agent", fake_run):
+            workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
+
+        self.assertEqual(
+            calls, ["poisoned-sess"],
+            "codex backend must NOT trigger the claude-only immediate retry",
+        )
+        self.assertEqual(state.get("dev_session_id"), "poisoned-sess")
+
+
+class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """`--resume` replays the whole transcript every time, so a session resumed
+    past `DEV_SESSION_MAX_RESUMES` is retired proactively and rebuilt fresh from
+    durable state -- capping context creep BEFORE it overflows the window. Each
+    resume charges one against the per-session `dev_resume_count`; a fresh spawn
+    resets it and is re-grounded with the issue requirements + branch pointer.
+    """
+
+    def _seeded_issue(self, *, resume_count: int = 0, dev_agent: str = "claude",
+                      sid: str = "live-sess"):
+        gh = FakeGitHubClient()
+        issue = make_issue(962, label="in_review", body="implement the thing")
+        gh.add_issue(issue)
+        gh.seed_state(
+            962,
+            dev_agent=dev_agent,
+            dev_session_id=sid,
+            silent_park_count=0,
+            dev_resume_count=resume_count,
+        )
+        return gh, issue
+
+    def _run_resume(self, gh, issue, *, fake_run, threshold):
+        state = gh.read_pinned_state(issue)
+        with patch.object(config, "DEV_SESSION_MAX_RESUMES", threshold), \
+             patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+             patch.object(workflow, "run_agent", fake_run):
+            wt, result = workflow._resume_dev_with_text(
+                gh, _TEST_SPEC, issue, state, "fix it",
+            )
+        return state, result
+
+    def test_resume_below_threshold_increments_and_keeps_session(self) -> None:
+        gh, issue = self._seeded_issue(resume_count=3)
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            calls.append(resume_session_id)
+            return _agent(session_id="live-sess", last_message="done")
+
+        state, _ = self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
+
+        self.assertEqual(calls, ["live-sess"], "below budget must resume in place")
+        self.assertEqual(
+            state.get("dev_resume_count"), 4,
+            "each resume charges one against the per-session budget",
+        )
+        self.assertEqual(state.get("dev_session_id"), "live-sess")
+
+    def test_resume_at_threshold_rotates_to_fresh_spawn(self) -> None:
+        gh, issue = self._seeded_issue(resume_count=10)
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            calls.append(resume_session_id)
+            return _agent(session_id="fresh-sess", last_message="ok")
+
+        state, _ = self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
+
+        self.assertEqual(
+            calls, [None],
+            "budget reached must fresh-spawn (no resume id), not resume",
+        )
+        self.assertEqual(state.get("dev_session_id"), "fresh-sess")
+        self.assertEqual(
+            state.get("dev_resume_count"), 0,
+            "rotation resets the budget for the new session",
+        )
+
+    def test_zero_threshold_disables_rotation(self) -> None:
+        gh, issue = self._seeded_issue(resume_count=99)
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            calls.append(resume_session_id)
+            return _agent(session_id="live-sess", last_message="done")
+
+        state, _ = self._run_resume(gh, issue, fake_run=fake_run, threshold=0)
+
+        self.assertEqual(
+            calls, ["live-sess"],
+            "0 = unbounded: must keep resuming regardless of count",
+        )
+        self.assertEqual(state.get("dev_resume_count"), 100)
+
+    def test_rotation_fresh_spawn_prompt_is_regrounded(self) -> None:
+        # The rotated fresh spawn has no transcript, so its prompt must carry
+        # the re-grounding preamble (issue body + branch pointer) AND the
+        # stage followup appended after it.
+        gh, issue = self._seeded_issue(resume_count=5)
+        prompts: list[str] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            prompts.append(prompt)
+            return _agent(session_id="fresh-sess", last_message="ok")
+
+        self._run_resume(gh, issue, fake_run=fake_run, threshold=5)
+
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("resuming work on GitHub issue", prompts[0])
+        self.assertIn("implement the thing", prompts[0], "issue body re-grounds")
+        self.assertTrue(
+            prompts[0].rstrip().endswith("fix it"),
+            "stage followup must be appended after the preamble",
+        )
+
+    def test_resume_in_place_prompt_has_no_preamble(self) -> None:
+        # A live resume already carries the issue context in its transcript, so
+        # the bare followup is sent -- no re-grounding, no token duplication.
+        gh, issue = self._seeded_issue(resume_count=1)
+        prompts: list[str] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            prompts.append(prompt)
+            return _agent(session_id="live-sess", last_message="done")
+
+        self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
+
+        self.assertEqual(prompts, ["fix it"])
+
+    def test_overflow_recovery_fresh_spawn_is_regrounded(self) -> None:
+        # Ties the two features together: an overflowed ("Prompt is too long")
+        # resume drops the session and the recovery fresh spawn -- like the
+        # rotation spawn -- is re-grounded with the preamble.
+        gh, issue = self._seeded_issue(resume_count=0, sid="poisoned-sess")
+        seen: list[tuple[Optional[str], str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            seen.append((resume_session_id, prompt))
+            if resume_session_id == "poisoned-sess":
+                return _agent(session_id="", last_message="Prompt is too long")
+            return _agent(session_id="fresh-sess", last_message="ok")
+
+        self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
+
+        self.assertEqual([sid for sid, _ in seen], ["poisoned-sess", None])
+        self.assertEqual(seen[0][1], "fix it", "the initial resume sends the bare followup")
+        self.assertIn(
+            "resuming work on GitHub issue", seen[1][1],
+            "the overflow-recovery fresh spawn must be re-grounded",
+        )
+
+    def test_preamble_builder_includes_requirements_and_branch_pointer(self) -> None:
+        issue = make_issue(963, body="do the work", title="My Issue")
+        text = workflow._build_fresh_respawn_preamble(issue, "@alice: please add tests")
+        self.assertIn("do the work", text)
+        self.assertIn("@alice: please add tests", text)
+        self.assertIn("git diff", text, "must point the fresh agent at the branch")
+        self.assertIn("do NOT restart", text)

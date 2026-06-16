@@ -56,6 +56,27 @@ _CLAUDE_STALE_SESSION_STDERR_MARKERS: Tuple[str, ...] = (
     "conversation not found",
 )
 
+# Substrings Claude's CLI emits when the accumulated session transcript --
+# replayed in full by `--resume <sid>` -- has outgrown the model context
+# window, so the resume is rejected before any work is done. Like a stale
+# session this is deterministic and unrecoverable on the SAME session: every
+# subsequent resume only appends to an already-over-budget transcript and
+# re-fails identically (this is why a human "continue" / "decompose and
+# continue" reply never breaks the loop). Recovery is identical to the stale-
+# session case -- drop the session id and retry once as a fresh spawn, which
+# rebuilds a small prompt from the issue body + recent comments.
+#
+# The overflow phrase can carry a token-count suffix ("prompt is too long:
+# 215000 tokens > 200000 maximum"), so it is matched as a PREFIX of the last
+# agent message (not a substring) to avoid misclassifying an agent that
+# merely quotes the phrase mid-answer, and as a substring of stderr where the
+# CLI may print the same diagnostic without emitting a result event.
+_CLAUDE_CONTEXT_OVERFLOW_MARKERS: Tuple[str, ...] = (
+    "prompt is too long",
+    "input is too long",
+    "input length and `max_tokens` exceed context limit",
+)
+
 
 def _read_dev_session(
     state: PinnedState,
@@ -120,6 +141,37 @@ def _is_stale_session_failure(backend: str, result: AgentResult) -> bool:
     return any(marker in stderr for marker in _CLAUDE_STALE_SESSION_STDERR_MARKERS)
 
 
+def _is_context_overflow_failure(backend: str, result: AgentResult) -> bool:
+    """True iff `result` is a Claude context-window-overflow resume failure.
+
+    Only claude is matched today: codex's resume CLI does not expose a
+    comparable stable marker. The marker is checked as a PREFIX of the
+    stripped, lowercased last agent message -- so an agent that merely
+    mentions the phrase mid-answer is not misclassified -- and as a substring
+    of stderr, where the CLI may print the same diagnostic when it produces
+    no result event at all.
+    """
+    if backend != "claude":
+        return False
+    msg = (result.last_message or "").strip().lower()
+    if any(msg.startswith(marker) for marker in _CLAUDE_CONTEXT_OVERFLOW_MARKERS):
+        return True
+    stderr = (result.stderr or "").lower()
+    return any(marker in stderr for marker in _CLAUDE_CONTEXT_OVERFLOW_MARKERS)
+
+
+def _is_poisoned_session_failure(backend: str, result: AgentResult) -> bool:
+    """True iff resuming this session is futile and a fresh spawn is the only
+    recovery: the session was GC'd (stale) or its transcript overflowed the
+    model context window. Both clear the pinned session id and retry once as
+    a fresh spawn in `_resume_dev_with_text`.
+    """
+    return (
+        _is_stale_session_failure(backend, result)
+        or _is_context_overflow_failure(backend, result)
+    )
+
+
 def _drop_poisoned_dev_session(state: PinnedState) -> None:
     """Clear the pinned dev session id (and legacy `codex_session_id`).
 
@@ -144,6 +196,9 @@ def _drop_poisoned_dev_session(state: PinnedState) -> None:
     state.set("dev_session_id", None)
     state.set("codex_session_id", None)
     state.set("silent_park_count", 0)
+    # The resume budget is per-session; clearing the session resets it so the
+    # fresh spawn that follows starts its own count from zero.
+    state.set("dev_resume_count", 0)
 
 
 def _check_and_increment_retry_budget(
@@ -228,12 +283,25 @@ def _resume_dev_with_text(
     resume; without this fallback every human "retry" comment burns another
     fresh-spawn retry slot on the same poisoned session.
 
+    Proactive rotation: each resume increments a per-session `dev_resume_count`
+    and, once it reaches `config.DEV_SESSION_MAX_RESUMES` (when that knob is
+    > 0), the session is retired and the spawn goes fresh. `--resume` replays
+    the entire accumulated transcript every time, so a session resumed many
+    times creeps toward the model context window; rotating proactively rebuilds
+    a small prompt from durable state (issue body + recent comments + the
+    committed branch) and caps that creep before it overflows. Every fresh
+    spawn -- whether triggered by rotation, the silent-park fallback, or
+    poisoned-session recovery -- is prefixed with a re-grounding preamble
+    (`_build_fresh_respawn_preamble`) because the prior session's in-memory
+    reasoning is gone and only its committed work survives on the branch.
+
     A Claude resume that comes back with `No conversation found with session
-    ID` (or a sibling marker) is treated as the same poisoned-session
-    condition but recognized immediately: the pinned session id is cleared
-    and the call is retried once as a fresh spawn in the same worktree, so
-    a `resolving_conflict` awaiting-human resume on a Claude session whose
-    transcript was GC'd doesn't park `agent_silent` for two ticks before
+    ID` (or a sibling marker), or with a `Prompt is too long` context-window
+    overflow, is treated as the same poisoned-session condition but
+    recognized immediately: the pinned session id is cleared and the call is
+    retried once as a fresh spawn in the same worktree, so a Claude session
+    whose transcript was GC'd or grew past the context window doesn't park
+    (`agent_silent` for two ticks, or `awaiting_human` forever) before
     recovering.
     """
     from .. import workflow as _wf
@@ -246,23 +314,49 @@ def _resume_dev_with_text(
         )
     dev_spec, dev_backend, dev_args, dev_sid = _read_dev_session(state)
     silent_count = int(state.get("silent_park_count") or 0)
-    fresh_spawn = (
+    resume_count = int(state.get("dev_resume_count") or 0)
+    # Proactive rotation: a session resumed past its budget carries a large
+    # replayed transcript that creeps toward the context window. Retire it and
+    # rebuild from durable state. 0 disables (resume forever).
+    max_resumes = config.DEV_SESSION_MAX_RESUMES
+    budget_exhausted = (
+        dev_sid is not None
+        and max_resumes > 0
+        and resume_count >= max_resumes
+    )
+    silent_exhausted = (
         dev_sid is not None
         and silent_count >= _SILENT_PARKS_BEFORE_FRESH_SESSION
     )
+    fresh_spawn = budget_exhausted or silent_exhausted
     if fresh_spawn:
         _wf.log.info(
-            "issue=#%d dropping poisoned dev session %r after %d "
-            "consecutive silent parks; starting fresh",
-            issue.number, dev_sid, silent_count,
+            "issue=#%d retiring dev session %r (%s); starting fresh",
+            issue.number, dev_sid,
+            f"resume budget reached: {resume_count} >= {max_resumes}"
+            if budget_exhausted
+            else f"{silent_count} consecutive silent parks",
         )
         dev_sid = None
-        # Clear the poisoned session from pinned state BEFORE the spawn.
+        # Clear the retired session from pinned state BEFORE the spawn.
         # If the fresh spawn returns no `session_id` (or its persistence
         # is racy), the next tick must see a cleared session -- not the
-        # old poisoned id, which `_read_dev_session` would otherwise
-        # return again and burn another retry.
+        # old id, which `_read_dev_session` would otherwise return again
+        # and burn another retry. Also resets `dev_resume_count` to 0.
         _drop_poisoned_dev_session(state)
+
+    # A fresh spawn has no transcript, so it must be re-grounded in the issue
+    # requirements + conversation and pointed at the committed branch (where
+    # the retired session's work survives). A resume already carries that
+    # context in its transcript, so it gets the bare followup.
+    def _spawn_prompt(fresh: bool) -> str:
+        if not fresh:
+            return followup_text
+        preamble = _wf._build_fresh_respawn_preamble(
+            issue, _wf._recent_comments_text(issue),
+        )
+        return f"{preamble}\n\n{followup_text}"
+
     # Stage context reflects the current label so events from validating /
     # in_review / resolving_conflict resumes (or implementing awaiting-human
     # resumes) are tagged with the handler that triggered the resume.
@@ -272,7 +366,7 @@ def _resume_dev_with_text(
         agent_role="developer",
         stage=resume_stage,
         backend=dev_backend,
-        prompt=followup_text,
+        prompt=_spawn_prompt(fresh_spawn),
         cwd=wt,
         agent_spec=dev_spec,
         resume_session_id=dev_sid,
@@ -281,22 +375,25 @@ def _resume_dev_with_text(
         retry_count=state.get("retry_count"),
     )
 
-    # Deterministic stale-session recovery: if we resumed with a session id
-    # and Claude responded with the "no conversation found" marker, the
-    # pinned session is dead. Drop it and retry once as a fresh spawn in the
-    # same worktree so the caller (typically resolving_conflict awaiting-
-    # human) sees a real agent result on this tick instead of a silent park.
-    # Bounded to one retry: if the fresh spawn ALSO trips a stale-session
-    # marker something deeper is wrong (e.g. a misconfigured CLI) and we
-    # surface that result rather than looping.
+    # Deterministic poisoned-session recovery: if we resumed with a session
+    # id and Claude reported either a stale session ("no conversation found")
+    # or a context-window overflow ("Prompt is too long"), the pinned session
+    # is unrecoverable -- every further resume re-fails identically. Drop it
+    # and retry once as a fresh spawn in the same worktree so the caller
+    # (typically resolving_conflict awaiting-human) sees a real agent result
+    # on this tick instead of a silent park or an endless "needs your input"
+    # loop. Bounded to one retry: if the fresh spawn ALSO trips a poisoned-
+    # session marker something deeper is wrong (a misconfigured CLI, or an
+    # issue body so large even a fresh prompt overflows) and we surface that
+    # result rather than looping.
     if (
         dev_sid is not None
         and not fresh_spawn
-        and _is_stale_session_failure(dev_backend, result)
+        and _is_poisoned_session_failure(dev_backend, result)
     ):
         _wf.log.info(
-            "issue=#%d dropping poisoned dev session %r after stale-session "
-            "stderr marker; retrying once as a fresh spawn",
+            "issue=#%d dropping poisoned dev session %r after poisoned-session "
+            "marker (stale or context overflow); retrying once as a fresh spawn",
             issue.number, dev_sid,
         )
         _drop_poisoned_dev_session(state)
@@ -306,7 +403,7 @@ def _resume_dev_with_text(
             agent_role="developer",
             stage=resume_stage,
             backend=dev_backend,
-            prompt=followup_text,
+            prompt=_spawn_prompt(True),
             cwd=wt,
             agent_spec=dev_spec,
             resume_session_id=None,
@@ -315,11 +412,17 @@ def _resume_dev_with_text(
             retry_count=state.get("retry_count"),
         )
 
-    if fresh_spawn and result.session_id:
+    if fresh_spawn:
         # Fresh spawn produced a session id -- record it so subsequent
         # resumes pick up the live session. Mirrors the persistence done
-        # in `_handle_implementing`'s fresh-spawn branch.
-        state.set("dev_session_id", result.session_id)
+        # in `_handle_implementing`'s fresh-spawn branch. The resume budget
+        # was already reset to 0 by `_drop_poisoned_dev_session`.
+        if result.session_id:
+            state.set("dev_session_id", result.session_id)
+    else:
+        # A live session was resumed -- charge it against the resume budget so
+        # the next tick can rotate once the transcript has grown enough.
+        state.set("dev_resume_count", resume_count + 1)
     state.set("awaiting_human", False)
     return wt, result
 
@@ -716,6 +819,9 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             )
             if result.session_id:
                 state.set("dev_session_id", result.session_id)
+                # Fresh session -> its resume budget starts from zero, even
+                # when a prior (retried) session left a non-zero count.
+                state.set("dev_resume_count", 0)
         state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
 
     state.set("last_agent_action_at", _wf._now_iso())

@@ -83,6 +83,7 @@ The first token of each role spec selects the backend (`codex` / `claude`); any 
 | `MAX_REVIEW_ROUNDS`        | `3`         | review/fix iterations before parking on `awaiting_human`                                         |
 | `MAX_CONFLICT_ROUNDS`      | `3`         | auto-conflict-resolution rounds before parking on `awaiting_human`                               |
 | `MAX_RETRIES_PER_DAY`      | `3`         | fresh implementer spawns per issue per 24h window (`0` = unbounded)                              |
+| `DEV_SESSION_MAX_RESUMES`  | `10`        | resumes of one dev session before it is retired and respawned fresh from durable state (issue body + recent comments + the committed branch), so a growing `--resume` transcript cannot creep into a `Prompt is too long` context overflow. `0` = resume forever. The reactive overflow handler still recovers a session that blows the window in fewer resumes. |
 | `ORCHESTRATOR_BASE_BRANCH` | `main`      | base branch of the orchestrator's own repo, used by the self-update path                          |
 | `SQUASH_ON_APPROVAL`       | `on`        | after the reviewer emits `VERDICT: APPROVED`, squash the dev's commits on the PR branch into a single conventional-commit-shaped commit and force-push with lease. `off` leaves the per-step commit history intact (useful when downstream tooling depends on it). Parsed as a boolean: `1` / `true` / `on` / `yes` enable, anything else disables. |
 
@@ -364,7 +365,7 @@ Each `--once` invocation is a fresh Python process and reads the current `.env` 
 
 | Setting | When the change takes effect |
 | ------- | ---------------------------- |
-| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `SQUASH_ON_APPROVAL`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `LOG_DIR`, `EVENT_LOG_PATH`, `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
+| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `DEV_SESSION_MAX_RESUMES`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `SQUASH_ON_APPROVAL`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `LOG_DIR`, `EVENT_LOG_PATH`, `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
 | `ANALYTICS_DB_URL` | next `python -m orchestrator.analytics.sync` invocation, and next `streamlit run orchestrator/dashboard.py` start (the dashboard reads it from the imported analytics module, so a browser reload is not enough — relaunch Streamlit). The polling loop does not read this setting. |
 | `DASHBOARD_PARALLEL_READS` | next `streamlit run orchestrator/dashboard.py` start. Parsed at dashboard import. |
 | `MAX_PARALLEL_ISSUES_PER_REPO`, `MAX_PARALLEL_ISSUES_GLOBAL` | next Python start. Per-`REPOS` `parallel_limit` overrides take precedence over `MAX_PARALLEL_ISSUES_PER_REPO`. |

@@ -164,6 +164,17 @@ MAX_CONFLICT_ROUNDS: int = int(os.environ.get("MAX_CONFLICT_ROUNDS", "3"))
 # elapses since that start. Resumes on human reply do not count. 0 = unbounded
 # (matches MAX_REVIEW_ROUNDS's implied semantics).
 MAX_RETRIES_PER_DAY: int = int(os.environ.get("MAX_RETRIES_PER_DAY", "3"))
+# Proactive dev-session rotation: after a single `dev_session_id` has been
+# resumed this many times, retire it and start a fresh spawn from durable
+# state (issue body + recent comments + the committed branch) instead of
+# replaying an ever-growing transcript. Each `--resume` replays the whole
+# accumulated history, so a long-lived session creeps toward the model
+# context window and eventually overflows ("Prompt is too long"). This caps
+# that creep before it overflows; the reactive overflow handler in
+# `_resume_dev_with_text` still catches a session that blows the window in
+# fewer resumes (one huge round). 0 = unbounded (resume forever, old
+# behavior).
+DEV_SESSION_MAX_RESUMES: int = int(os.environ.get("DEV_SESSION_MAX_RESUMES", "10"))
 HITL_HANDLES: tuple[str, ...] = (
     _parse_hitl_handles(os.environ.get("HITL_HANDLE", "geserdugarov"))
     or ("geserdugarov",)
