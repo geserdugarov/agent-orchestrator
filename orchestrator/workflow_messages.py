@@ -554,6 +554,36 @@ def _build_implement_prompt(issue: Issue, comments_text: str) -> str:
     )
 
 
+def _build_fresh_respawn_preamble(issue: Issue, comments_text: str) -> str:
+    """Re-grounding header prepended to a FRESH dev spawn that REPLACES a
+    retired or poisoned session mid-issue (proactive rotation, silent-park
+    fallback, or stale/overflow recovery).
+
+    The previous session's in-memory reasoning is gone, but its committed work
+    survives on the current branch, so the fresh agent is pointed at the branch
+    as the source of truth and re-grounded in the issue requirements +
+    conversation. Without this the rotation regresses into a context-starved
+    spawn that could re-implement from scratch or ignore the original spec.
+    The caller appends the stage-specific instruction (fix feedback, drift,
+    conflict, ...) after this block.
+    """
+    body = issue.body or "(no body)"
+    convo = comments_text or "(no prior comments)"
+    return (
+        f"You are resuming work on GitHub issue #{issue.number}: {issue.title!r}. "
+        "A previous agent session worked on this issue and its commits are "
+        "already on the current branch (your working directory); that session's "
+        "history is NOT available to you. Before doing anything, re-ground "
+        "yourself: inspect what has already been done with `git log --oneline` "
+        "and `git diff` against the base branch, and continue from there -- do "
+        "NOT restart the implementation from scratch.\n\n"
+        f"Issue body:\n{body}\n\n"
+        f"Conversation so far:\n{convo}\n\n"
+        "Your immediate task follows.\n"
+        "----------------------------------------"
+    )
+
+
 def _build_review_prompt(
     spec: RepoSpec,
     issue: Issue,
