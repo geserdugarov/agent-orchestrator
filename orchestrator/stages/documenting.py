@@ -556,31 +556,26 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     else:
         before_sha = _wf._head_sha(wt)
         state.set("docs_checked_sha", before_sha or "")
-        dev_spec, dev_backend, dev_args, dev_sid = (
-            _wf._read_dev_session(state)
-        )
         # Persist the spec so a backend hiccup that yields no session
         # id still leaves a durable role-identity record; matches
         # `_handle_implementing`'s fresh-spawn branch.
+        dev_spec, _, _, _ = _wf._read_dev_session(state)
         state.set("dev_agent", dev_spec)
         prompt = _wf._build_documentation_prompt(
             spec, issue, _wf._recent_comments_text(issue),
         )
-        result = _wf._run_agent_tracked(
-            gh, issue.number,
-            agent_role="developer",
-            stage="documenting",
-            backend=dev_backend,
-            prompt=prompt,
-            cwd=wt,
-            agent_spec=dev_spec,
-            resume_session_id=dev_sid,
-            extra_args=dev_args,
-            review_round=state.get("review_round"),
-            retry_count=state.get("retry_count"),
+        # Resume the dev session through the shared helper (rather than a
+        # bare `_run_agent_tracked`) so the initial docs pass participates
+        # in dev-session rotation (`DEV_SESSION_MAX_RESUMES`) and immediate
+        # Claude context-overflow recovery, exactly like the awaiting-human
+        # branch above. A direct resume replays the whole transcript every
+        # tick without charging the resume budget, so a long-lived session
+        # could overflow on the final docs pass without ever rotating. The
+        # `_ensure_worktree` fallback inside the helper is harmless here
+        # because the PR-anchored worktree was already restored above.
+        wt, result = _wf._resume_dev_with_text(
+            gh, spec, issue, state, prompt,
         )
-        if result.session_id:
-            state.set("dev_session_id", result.session_id)
         state.set("branch", branch)
         recovered = False
 

@@ -951,3 +951,72 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("@alice: please add tests", text)
         self.assertIn("git diff", text, "must point the fresh agent at the branch")
         self.assertIn("do NOT restart", text)
+
+    def test_entry_without_session_id_fresh_spawns_and_persists(self) -> None:
+        # `dev_agent` is pinned but `dev_session_id` is absent -- e.g. an
+        # earlier backend hiccup that committed work but surfaced no session
+        # id. There is nothing to resume, so the spawn must open a NEW session
+        # (no resume id), re-ground it, persist the returned id, and zero the
+        # stale resume count -- otherwise later resumes find no live session
+        # and fresh-spawn from scratch every tick.
+        gh = FakeGitHubClient()
+        issue = make_issue(964, label="documenting", body="implement the thing")
+        gh.add_issue(issue)
+        gh.seed_state(
+            964,
+            dev_agent="claude",
+            silent_park_count=0,
+            dev_resume_count=7,
+        )
+        seen: list[tuple[Optional[str], str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            seen.append((resume_session_id, prompt))
+            return _agent(session_id="hiccup-recovered", last_message="ok")
+
+        state, _ = self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
+
+        self.assertEqual(
+            [sid for sid, _ in seen], [None],
+            "no live session -> fresh spawn with no resume id",
+        )
+        self.assertIn(
+            "resuming work on GitHub issue", seen[0][1],
+            "the fresh spawn must be re-grounded",
+        )
+        self.assertEqual(
+            state.get("dev_session_id"), "hiccup-recovered",
+            "the returned session id must be persisted, not dropped",
+        )
+        self.assertEqual(
+            state.get("dev_resume_count"), 0,
+            "the new session starts its resume budget from zero",
+        )
+
+    def test_entry_without_session_id_empty_result_keeps_session_clear(self) -> None:
+        # The recovery spawn ALSO returns no session id (another hiccup): the
+        # session stays unpinned so the next tick fresh-spawns again rather
+        # than resuming a phantom id, and the resume budget is not charged.
+        gh = FakeGitHubClient()
+        issue = make_issue(965, label="documenting", body="implement the thing")
+        gh.add_issue(issue)
+        gh.seed_state(
+            965,
+            dev_agent="claude",
+            silent_park_count=0,
+            dev_resume_count=2,
+        )
+        calls: list[Optional[str]] = []
+
+        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
+            calls.append(resume_session_id)
+            return _agent(session_id="", last_message="")
+
+        state, _ = self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
+
+        self.assertEqual(calls, [None], "still a fresh spawn, no resume id")
+        self.assertIsNone(state.get("dev_session_id"))
+        self.assertEqual(
+            state.get("dev_resume_count"), 2,
+            "a no-session fresh spawn must not charge the resume budget",
+        )

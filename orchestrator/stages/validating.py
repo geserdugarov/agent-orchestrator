@@ -1188,19 +1188,17 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     fix_prompt = _wf._build_fix_prompt(feedback)
     before_sha = _wf._head_sha(wt)
-    dev_spec, dev_backend, dev_args, dev_sid = _wf._read_dev_session(state)
-    dev_result = _wf._run_agent_tracked(
-        gh, issue.number,
-        agent_role="developer",
-        stage="fixing",
-        backend=dev_backend,
-        prompt=fix_prompt,
-        cwd=wt,
-        agent_spec=dev_spec,
-        resume_session_id=dev_sid,
-        extra_args=dev_args,
-        review_round=round_n,
-        retry_count=state.get("retry_count"),
+    # Resume through the shared helper rather than a bare `_run_agent_tracked`:
+    # the reviewer-feedback fix is a dev-session resume like every other, so it
+    # must charge the per-session resume budget (`DEV_SESSION_MAX_RESUMES`),
+    # rotate to a fresh spawn at the threshold, and recover immediately from a
+    # Claude context-window overflow. A direct resume replays the whole
+    # transcript every round and would let this common route slide into the
+    # same overflow loop. The helper tags its events with the current label,
+    # which the `fixing` flip above has already set, so the spawn stays
+    # `fixing`.
+    wt, dev_result = _wf._resume_dev_with_text(
+        gh, spec, issue, state, fix_prompt,
     )
     state.set("last_agent_action_at", _wf._now_iso())
 

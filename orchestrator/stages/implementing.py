@@ -328,8 +328,7 @@ def _resume_dev_with_text(
         dev_sid is not None
         and silent_count >= _SILENT_PARKS_BEFORE_FRESH_SESSION
     )
-    fresh_spawn = budget_exhausted or silent_exhausted
-    if fresh_spawn:
+    if budget_exhausted or silent_exhausted:
         _wf.log.info(
             "issue=#%d retiring dev session %r (%s); starting fresh",
             issue.number, dev_sid,
@@ -344,6 +343,16 @@ def _resume_dev_with_text(
         # old id, which `_read_dev_session` would otherwise return again
         # and burn another retry. Also resets `dev_resume_count` to 0.
         _drop_poisoned_dev_session(state)
+
+    # `dev_sid is None` here means the spawn below opens a NEW session, not a
+    # resume -- either rotation just retired the old one, or there was no live
+    # session to resume on entry: the documenting initial pass, or a prior
+    # backend hiccup that committed work but dropped `dev_session_id` while
+    # leaving `dev_agent` pinned. A new session has no transcript, so it is
+    # re-grounded (preamble below) and its returned id is persisted; it is NOT
+    # charged against the resume budget, whose checks require a non-None
+    # session id and so would otherwise never rotate the freshly pinned id.
+    fresh_spawn = dev_sid is None
 
     # A fresh spawn has no transcript, so it must be re-grounded in the issue
     # requirements + conversation and pointed at the committed branch (where
@@ -413,12 +422,17 @@ def _resume_dev_with_text(
         )
 
     if fresh_spawn:
-        # Fresh spawn produced a session id -- record it so subsequent
-        # resumes pick up the live session. Mirrors the persistence done
-        # in `_handle_implementing`'s fresh-spawn branch. The resume budget
-        # was already reset to 0 by `_drop_poisoned_dev_session`.
+        # Fresh spawn produced a session id -- record it so subsequent resumes
+        # pick up the live session, and zero the resume budget so the new
+        # session starts its own count. Mirrors the persistence done in
+        # `_handle_implementing`'s fresh-spawn branch. Rotation / poisoned-
+        # session recovery already reset `dev_resume_count` to 0 via
+        # `_drop_poisoned_dev_session`; the explicit reset here also covers the
+        # entry case (no live session on entry) where a stale count left by a
+        # prior session would otherwise rotate the brand-new session early.
         if result.session_id:
             state.set("dev_session_id", result.session_id)
+            state.set("dev_resume_count", 0)
     else:
         # A live session was resumed -- charge it against the resume budget so
         # the next tick can rotate once the transcript has grown enough.
