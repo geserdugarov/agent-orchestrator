@@ -76,7 +76,7 @@ Stage-private helpers stay private to their stage module (`_bump_in_review_water
 
 ## Workflow labels
 
-An issue should have at most one workflow label at a time. The set is `decomposing`, `ready`, `blocked`, `umbrella`, `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`, and the two terminals `done` / `rejected`. The orchestrator also creates three non-workflow control labels: `hold_base_sync` pauses per-tick base sync and rebases while present, `backlog` makes per-tick handlers skip the issue entirely, and `community_contribution` is applied by the per-tick open-PR sweep to PRs from authors outside `ALLOWED_ISSUE_AUTHORS` so a human reviews them.
+An issue should have at most one workflow label at a time. The set is `decomposing`, `ready`, `blocked`, `umbrella`, `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`, and the two terminals `done` / `rejected`. The orchestrator also creates three non-workflow control labels: `hold_base_sync` pauses per-tick base sync and rebases while present, `backlog` makes per-tick handlers skip the issue entirely, and `community_contribution` is applied by the per-tick open-PR sweep to PRs from non-bot authors outside `ALLOWED_ISSUE_AUTHORS` so a human reviews them.
 
 Label names are part of the public contract because live GitHub issues already carry them. For the meaning of each label, the control-label semantics, and the per-stage transitions they trigger, see [`state-machine.md#workflow-labels`](state-machine.md#workflow-labels).
 
