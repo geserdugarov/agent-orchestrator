@@ -71,7 +71,7 @@ The first token of each role spec selects the backend (`codex` / `claude`); any 
 | `DECOMPOSE`          | `on`                   | enable the `decomposing` stage; `off` reverts to the legacy "no label → implementing" pickup           |
 | `CODEX_BIN`          | `codex`                | executable launched when a role's first token is `codex`; override only if `codex` is not on `$PATH`   |
 | `CLAUDE_BIN`         | `claude`               | executable launched when a role's first token is `claude`; override only if `claude` is not on `$PATH` |
-| `ALLOWED_ISSUE_AUTHORS` | _(unset)_           | comma-separated GitHub logins; when set, only auto-pick-up unlabeled issues from those authors, and the per-tick sweep labels open PRs from anyone outside the list with `community_contribution` and @-mentions `HITL_HANDLE` once per PR |
+| `ALLOWED_ISSUE_AUTHORS` | _(unset)_           | comma-separated GitHub logins; when set, only auto-pick-up unlabeled issues from those authors, and the per-tick sweep labels open PRs from anyone outside the list with `community_contribution` and @-mentions `HITL_HANDLE` once per PR (bot-authored PRs such as Dependabot are excluded via `user.type == "Bot"`) |
 
 ## Cadence and budgets
 

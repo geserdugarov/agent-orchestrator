@@ -419,6 +419,10 @@ def _sweep_community_contribution_prs(
     label is idempotent (already-labeled PRs are skipped) so the comment
     fires exactly once per PR.
 
+    Bot-authored PRs (Dependabot, Renovate, CI bots) are skipped by
+    GitHub's `user.type == "Bot"` flag -- they open PRs structurally and
+    are not community contributions, so they never earn the label or ping.
+
     All errors are caught and logged: a PyGithub lazy-load failure on one
     PR must not abort the rest of the sweep, and the sweep itself must not
     abort the polling tick.
@@ -437,7 +441,15 @@ def _sweep_community_contribution_prs(
         return
     for pr in prs:
         try:
-            author = getattr(getattr(pr, "user", None), "login", None) or ""
+            user = getattr(pr, "user", None)
+            # Bot accounts (Dependabot, Renovate, CI bots) open PRs
+            # structurally and are not community contributions. Skip them
+            # by GitHub's `user.type == "Bot"` flag -- the same structural
+            # signal the drift detector uses -- so a weekly Dependabot bump
+            # never earns the `community_contribution` label or a HITL ping.
+            if getattr(user, "type", None) == "Bot":
+                continue
+            author = getattr(user, "login", None) or ""
             if author.lower() in allowed_lower:
                 continue
             if gh.pr_has_label(pr, COMMUNITY_CONTRIBUTION_LABEL):

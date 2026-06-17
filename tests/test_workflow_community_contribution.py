@@ -15,10 +15,12 @@ from tests.fakes import FakeGitHubClient, FakeLabel, FakePR, FakeUser
 from tests.workflow_helpers import _TEST_SPEC
 
 
-def _pr(number: int, *, author: str, labels=()) -> FakePR:
+def _pr(
+    number: int, *, author: str, labels=(), user_type: str = "User"
+) -> FakePR:
     return FakePR(
         number=number,
-        user=FakeUser(author),
+        user=FakeUser(author, type=user_type),
         labels=[FakeLabel(name) for name in labels],
     )
 
@@ -61,6 +63,19 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         self.assertEqual(gh.pulls[1].labels, [])
         self.assertEqual(gh.pulls[2].labels, [])
+        self.assertEqual(gh.posted_pr_comments, [])
+
+    def test_bot_authored_pr_is_skipped(self) -> None:
+        # Dependabot (and other Bot-account) PRs open structurally and are
+        # not community contributions. They must not earn the label or a
+        # HITL ping even though their author is outside the allowlist.
+        gh = FakeGitHubClient()
+        gh.add_pr(
+            _pr(5, author="dependabot[bot]", user_type="Bot")
+        )
+        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
+            workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
+        self.assertEqual(gh.pulls[5].labels, [])
         self.assertEqual(gh.posted_pr_comments, [])
 
     def test_idempotent_does_not_re_ping_already_labeled_prs(self) -> None:

@@ -17,7 +17,7 @@ Three non-workflow **control labels** modify behavior without occupying the work
 
 - `hold_base_sync` pauses per-tick base sync, `in_review` HITL pings / unmergeable parks, and `resolving_conflict` rebases until removed.
 - `backlog` makes the orchestrator skip the issue: the per-tick dispatcher filters it out before the family/fanout split (so a parked, workflow-label-less issue cannot fold into the cap-counted family bucket and starve other work under `parallel_limit=1`), and each stage handler also skips it before the workflow label is read. Removing it hands control back to the state machine on the next tick.
-- `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR. The orchestrator does not otherwise drive these PRs. With `ALLOWED_ISSUE_AUTHORS` empty (the default), the sweep is a no-op.
+- `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR. Bot-authored PRs (Dependabot, Renovate, CI bots) are skipped via GitHub's `user.type == "Bot"` flag — they open PRs structurally and are not community contributions. The orchestrator does not otherwise drive these PRs. With `ALLOWED_ISSUE_AUTHORS` empty (the default), the sweep is a no-op.
 
 ### Typed states and the transition guard
 
