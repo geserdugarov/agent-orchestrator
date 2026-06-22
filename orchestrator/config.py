@@ -593,6 +593,19 @@ SQUASH_ON_APPROVAL: bool = os.environ.get(
     "SQUASH_ON_APPROVAL", "on"
 ).strip().lower() in ("1", "true", "on", "yes")
 
+# Whether working agents are told about the *other* repos this orchestrator
+# tracks (slug, local `target_root`, base branch) for cross-repo reference.
+# Default on, but inert for single-repo hosts: the context builder gates on
+# `len(specs) > 1`, so a default single-repo deployment sees zero added prompt
+# tokens and zero behavior change. Off forces the disclosure off globally --
+# the operator escape hatch for a security-conscious multi-repo host. The
+# disclosed data is operator-configured and non-secret (no tokens, no remote
+# URLs), and write-containment is unchanged, so default-on-when-multi-repo is
+# the right posture; the kill switch keeps it reversible.
+EXPOSE_TRACKED_REPOS: bool = os.environ.get(
+    "EXPOSE_TRACKED_REPOS", "on"
+).strip().lower() in ("1", "true", "on", "yes")
+
 
 def _parse_verify_commands(raw: str) -> tuple[str, ...]:
     """Parse VERIFY_COMMANDS into an ordered tuple of shell command strings.

@@ -90,6 +90,55 @@ _COMMIT_STYLE_NOTE = (
 )
 
 
+# How many other tracked repos to list inline before collapsing the rest into
+# a single `… and N more` line. Caps the steady-state prompt cost so a host
+# driving dozens of repos cannot blow the prompt with one line per repo.
+_TRACKED_REPOS_CAP = 10
+
+
+def _build_tracked_repos_context(
+    current: RepoSpec, specs: list[RepoSpec]
+) -> str:
+    """Render the 'other tracked repos' awareness block, or '' when there is
+    nothing useful to say.
+
+    Returns '' when `EXPOSE_TRACKED_REPOS` is off or there is at most one
+    tracked repo -- so the default single-repo deployment sees zero added
+    tokens and zero behavior change. For a multi-repo deployment it lists each
+    *other* repo (the `current` one is excluded from the list) on one line with
+    its slug, durable `target_root` checkout, and base branch, capped at
+    `_TRACKED_REPOS_CAP` with an `… and N more` overflow line.
+
+    The framing is deliberately stage-neutral: it says only that the sibling
+    checkouts are read-only references and says nothing about whether the agent
+    may write in its own working directory -- that grant (or withholding) is
+    owned by the surrounding stage prompt, not by this list. No secrets are
+    disclosed: only operator-configured slugs, base branches, and paths the
+    agent could already read; never tokens or remote URLs.
+    """
+    if not config.EXPOSE_TRACKED_REPOS or len(specs) <= 1:
+        return ""
+    others = [s for s in specs if s.slug != current.slug]
+    if not others:
+        return ""
+    lines = [
+        f"- {s.slug} — source at {s.target_root} (base `{s.base_branch}`)"
+        for s in others[:_TRACKED_REPOS_CAP]
+    ]
+    overflow = len(others) - _TRACKED_REPOS_CAP
+    if overflow > 0:
+        lines.append(f"- … and {overflow} more")
+    listing = "\n".join(lines)
+    return (
+        "This orchestrator also tracks the repositories below. Their source is "
+        "checked out locally for cross-repo reference only -- treat every path "
+        "listed here as read-only and do NOT modify, commit, or push in any of "
+        "them. (Whether you may write in your own working directory is governed "
+        "by the rest of this prompt, not by this list.) Your task is on "
+        f"`{current.slug}`.\n\n{listing}"
+    )
+
+
 def _orchestrator_ids(state: PinnedState) -> set[int]:
     """Set of comment ids the orchestrator itself posted on this issue/PR.
     Used to filter the orchestrator's own messages out of "new feedback"
