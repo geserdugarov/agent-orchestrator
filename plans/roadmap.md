@@ -69,6 +69,12 @@ linked docs.
   `ThreadPoolExecutor` with per-repo exception isolation; worktrees are
   slug-namespaced. See
   [`docs/architecture.md#per-tick-flow-workflowtick`](../docs/architecture.md#per-tick-flow-workflowtick).
+- **Tracked-repos awareness.** Working-agent reasoning prompts carry a
+  compact read-only block listing the *other* repos this orchestrator
+  tracks (slug, local `target_root`, base branch), gated on
+  `EXPOSE_TRACKED_REPOS` and inert for single-repo hosts. See
+  [`docs/workflow.md`](../docs/workflow.md#tracked-repos-awareness-in-working-agent-prompts)
+  and [`docs/security.md`](../docs/security.md#cross-repo-awareness-disclosure-expose_tracked_repos).
 - **Parallel issue processing.** `MAX_PARALLEL_ISSUES_PER_REPO` and
   `MAX_PARALLEL_ISSUES_GLOBAL` bound concurrency; a long-lived
   `IssueScheduler` enforces the in-flight set, per-repo counter,
