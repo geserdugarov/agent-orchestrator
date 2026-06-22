@@ -93,7 +93,7 @@ _COMMIT_STYLE_NOTE = (
 # How many other tracked repos to list inline before collapsing the rest into
 # a single `… and N more` line. Caps the steady-state prompt cost so a host
 # driving dozens of repos cannot blow the prompt with one line per repo.
-_TRACKED_REPOS_CAP = 10
+_TRACKED_REPOS_CAP = 20
 
 
 def _build_tracked_repos_context(

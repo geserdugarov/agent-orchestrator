@@ -89,14 +89,14 @@ class BuildTrackedReposContextTest(unittest.TestCase):
 
     def test_caps_listing_with_and_n_more(self) -> None:
         cur = _spec("owner/lance", "/srv/lance")
-        others = [_spec(f"sib/{i}", f"/srv/{i}") for i in range(12)]
+        others = [_spec(f"sib/{i}", f"/srv/{i}") for i in range(22)]
         out = self._build(cur, [cur, *others])
 
-        # First 10 listed inline, the remaining 2 collapsed into one line.
-        for i in range(10):
+        # First 20 listed inline, the remaining 2 collapsed into one line.
+        for i in range(20):
             self.assertIn(f"sib/{i}", out)
-        self.assertNotIn("sib/10", out)
-        self.assertNotIn("sib/11", out)
+        self.assertNotIn("sib/20", out)
+        self.assertNotIn("sib/21", out)
         self.assertIn("and 2 more", out)
 
     def test_omits_secret_and_remote_fields(self) -> None:
