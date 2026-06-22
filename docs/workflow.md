@@ -30,6 +30,23 @@ A read-only violation (commits, dirty tree, timeout) parks awaiting human AND pr
 
 For the per-`park_reason` semantics and the implementing-side relabel guard (`question_unsafe_relabel`), see [`state-machine.md#_handle_question-label-question`](state-machine.md#_handle_question-label-question).
 
+### Tracked-repos awareness in working-agent prompts
+
+When the orchestrator drives more than one repo (`REPOS`) and `EXPOSE_TRACKED_REPOS` is on (the default), the reasoning-prompt builders prepend a compact, read-only awareness block naming the *other* repos this process tracks. It lets an agent implementing an issue in one repo know that a sibling repo is also monitored and where its source is checked out locally. The block is built once by `_build_tracked_repos_context(current, specs)` in `workflow_messages.py` from `config.default_repo_specs()` — no GitHub round-trip, no pinned state, no new config surface.
+
+Shape of the block:
+
+- One line per *other* repo (`- owner/name — source at <target_root> (base <base>)`), excluding the current repo, with a closing `Your task is on owner/name.` marker. The list is capped at 20 entries with an `… and N more` overflow line so a host driving dozens of repos cannot blow the prompt.
+- Only the durable `target_root` checkout is exposed — never the ephemeral per-issue `issue-N` worktrees. No tokens, no remote URLs — see [`security.md#cross-repo-awareness-disclosure-expose_tracked_repos`](security.md#cross-repo-awareness-disclosure-expose_tracked_repos) for the full disclosure analysis.
+- The framing is deliberately **stage-neutral**: it says only that the sibling checkouts are read-only references and explicitly defers the question of whether the agent may write in its *own* working directory to the surrounding stage prompt. So the same block is safe in both the write-granting prompts (implementer / documentation) and the read-only prompts (reviewer / decomposer / question).
+
+Which prompts carry it:
+
+- **Embedded** in `_build_implement_prompt`, `_build_documentation_prompt`, `_build_review_prompt`, `_build_decompose_prompt`, `_build_question_prompt`, and `_build_fresh_respawn_preamble`. The fresh-respawn preamble matters because a transcript-less respawn (proactive `DEV_SESSION_MAX_RESUMES` rotation, the consecutive-silent-park fallback, or poisoned-session recovery) never saw the original spawn's block, so the re-grounding text must re-feed it alongside the issue body and conversation.
+- **Omitted** from the bare resume / followup builders (`_build_fix_prompt`, `_build_conflict_resolution_prompt`, `_build_pr_comment_followup`, `_build_question_followup_prompt`): those text payloads resume a live session that already received the block at spawn time, so repeating it would only burn tokens.
+
+The default single-repo deployment (or any host with `EXPOSE_TRACKED_REPOS=off`) gets an empty string here — **zero added prompt tokens and zero behavior change**. See [`configuration.md#agent-roles`](configuration.md#agent-roles) for the env var.
+
 ### Local verify gate (not an agent)
 
 After the reviewer emits `VERDICT: APPROVED`, `_handle_validating` runs the configured `VERIFY_COMMANDS` directly in the per-issue worktree — these are plain shell commands, not an agent role, so no `*_AGENT` env var applies. The gate runs before the approval comment, the squash, the watermark seeding, and the `documenting` (final-docs) label flip. A clean run advances the issue; any failure parks on `validating` with a typed `park_reason` (`verify_failed` / `verify_timeout` / `verify_dirty` / `verify_head_changed`). See [`configuration.md#local-verification-gate`](configuration.md#local-verification-gate) for the env-var reference.
