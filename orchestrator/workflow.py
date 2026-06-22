@@ -107,6 +107,9 @@ from .workflow_messages import (
 )
 from .workflow_messages import _build_question_prompt as _build_question_prompt
 from .workflow_messages import _build_review_prompt as _build_review_prompt
+from .workflow_messages import (
+    _build_tracked_repos_context as _build_tracked_repos_context,
+)
 from .workflow_messages import _drift_ack_reason as _drift_ack_reason
 from .workflow_messages import (
     _format_stderr_diagnostics as _format_stderr_diagnostics,

@@ -433,6 +433,52 @@ class DecomposeKillSwitchConfigTest(unittest.TestCase):
         self.assertFalse(config.DECOMPOSE)
 
 
+class ExposeTrackedReposConfigTest(unittest.TestCase):
+    """The EXPOSE_TRACKED_REPOS kill switch defaults on (but is inert for
+    single-repo hosts, where the context builder gates on `len(specs) > 1`).
+    Parsed exactly like DECOMPOSE / SQUASH_ON_APPROVAL: truthy spellings keep
+    it on, explicit off / typos disable it.
+    """
+
+    def _load_config(self, env: dict[str, str] | None = None):
+        full_env = {
+            "ORCHESTRATOR_SKIP_DOTENV": "1",
+            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
+        }
+        if env:
+            full_env.update(env)
+        with patch.dict(os.environ, full_env, clear=True):
+            sys.modules.pop("orchestrator.config", None)
+            import orchestrator.config as config
+
+            return config
+
+    def test_default_is_on(self) -> None:
+        config = self._load_config()
+        self.assertTrue(config.EXPOSE_TRACKED_REPOS)
+
+    def test_explicit_off(self) -> None:
+        config = self._load_config({"EXPOSE_TRACKED_REPOS": "off"})
+        self.assertFalse(config.EXPOSE_TRACKED_REPOS)
+
+    def test_truthy_spellings_keep_on(self) -> None:
+        for value in ("on", "ON", " on ", "1", "true", "True", "yes"):
+            with self.subTest(value=value):
+                config = self._load_config({"EXPOSE_TRACKED_REPOS": value})
+                self.assertTrue(config.EXPOSE_TRACKED_REPOS)
+
+    def test_falsy_spellings_disable(self) -> None:
+        for value in ("0", "false", "no", "off"):
+            with self.subTest(value=value):
+                config = self._load_config({"EXPOSE_TRACKED_REPOS": value})
+                self.assertFalse(config.EXPOSE_TRACKED_REPOS)
+
+    def test_typo_defaults_to_off(self) -> None:
+        # Strict parser: any unrecognized value disables the disclosure.
+        config = self._load_config({"EXPOSE_TRACKED_REPOS": "enabled"})
+        self.assertFalse(config.EXPOSE_TRACKED_REPOS)
+
+
 class InReviewDebounceConfigTest(unittest.TestCase):
     def _load_config(self, env: dict[str, str] | None = None):
         full_env = {
