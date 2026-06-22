@@ -27,7 +27,8 @@ state. A locked-backend resume is used for any human reply that
 follows a park.
 
 Outcomes the handler distinguishes:
-  * A `docs:` commit landed on the worktree -> push + advance to
+  * A fresh docs commit landed on the worktree (any subject -- the prompt
+    no longer mandates a `docs:` prefix) -> push + advance to
     `in_review`.
   * The agent emitted the explicit `DOCS: NO_CHANGE` marker against a
     remote-clean head -> persist the verdict, post a one-liner, advance

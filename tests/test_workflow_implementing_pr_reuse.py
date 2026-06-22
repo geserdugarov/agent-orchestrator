@@ -144,46 +144,62 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
 
-class ConventionalCommitPromptTest(unittest.TestCase):
-    """Both implement and fix prompts must teach the agent the repo's
-    Conventional-Commits convention (the prefixes and the `git log` step
-    that lets the agent confirm the local style)."""
+class RepoLocalCommitStylePromptTest(unittest.TestCase):
+    """Every commit-producing prompt teaches the agent to mirror the repo's
+    OWN recent commit history (`git log`) rather than a hardcoded
+    Conventional-Commits prefix list. The orchestrator runs against
+    arbitrary configured repos, so a project-specific subject prefix such as
+    `event:` or `career:` must be permitted by the instruction; the closed
+    `feat:`/`chore:`/`refactor:`/`test:` enumeration is removed."""
 
-    def test_implement_prompt_mentions_conventional_commits(self) -> None:
-        issue = make_issue(7, title="add a thing", body="please add a thing")
-        prompt = workflow._build_implement_prompt(issue, comments_text="")
+    # Prefixes the prompt must NOT present as a fixed/closed set of choices.
+    _HARDCODED_LIST = ("feat:", "chore:", "refactor:", "test:")
 
+    def _assert_repo_local_style(self, prompt: str) -> None:
+        # Learn the convention from recent history.
         self.assertIn("git log", prompt)
-        self.assertIn("Conventional Commits", prompt)
-        # The exact prefixes from the issue body must be listed so the agent
-        # picks one rather than inventing a custom type.
-        for prefix in ("feat:", "fix:", "chore:", "docs:", "refactor:", "test:"):
-            self.assertIn(prefix, prompt)
+        self.assertIn("repository-local", prompt)
+        # Custom, project-specific prefixes are explicitly allowed by example.
+        self.assertIn("event:", prompt)
+        self.assertIn("career:", prompt)
+        # The old hardcoded Conventional-Commits teaching is gone.
+        self.assertNotIn("Conventional", prompt)
+        for prefix in self._HARDCODED_LIST:
+            self.assertNotIn(prefix, prompt)
         # Subject-only commits, no extended body and no Co-Authored-By trailer.
         self.assertIn("subject line only", prompt)
         self.assertIn("Co-Authored-By", prompt)
 
-    def test_fix_prompt_mentions_conventional_commits(self) -> None:
-        prompt = workflow._build_fix_prompt("please fix the typo")
+    def test_implement_prompt_teaches_repo_local_style(self) -> None:
+        issue = make_issue(7, title="add a thing", body="please add a thing")
+        self._assert_repo_local_style(
+            workflow._build_implement_prompt(issue, comments_text=""))
 
-        self.assertIn("git log", prompt)
-        self.assertIn("Conventional Commits", prompt)
-        for prefix in ("feat:", "fix:", "chore:", "docs:", "refactor:", "test:"):
-            self.assertIn(prefix, prompt)
-        self.assertIn("subject line only", prompt)
-        self.assertIn("Co-Authored-By", prompt)
+    def test_fix_prompt_teaches_repo_local_style(self) -> None:
+        self._assert_repo_local_style(
+            workflow._build_fix_prompt("please fix the typo"))
 
-    def test_pr_comment_followup_mentions_conventional_commits(self) -> None:
+    def test_pr_comment_followup_teaches_repo_local_style(self) -> None:
         comments = [FakeComment(id=42, body="please rename foo to bar",
                                 user=FakeUser("alice"))]
-        prompt = workflow._build_pr_comment_followup(comments)
+        self._assert_repo_local_style(
+            workflow._build_pr_comment_followup(comments))
 
-        self.assertIn("git log", prompt)
-        self.assertIn("Conventional Commits", prompt)
-        for prefix in ("feat:", "fix:", "chore:", "docs:", "refactor:", "test:"):
-            self.assertIn(prefix, prompt)
-        self.assertIn("subject line only", prompt)
-        self.assertIn("Co-Authored-By", prompt)
+    def test_user_content_change_prompt_teaches_repo_local_style(self) -> None:
+        issue = make_issue(7, title="add a thing", body="please add a thing")
+        self._assert_repo_local_style(
+            workflow._build_user_content_change_prompt(issue, comments_text=""))
+
+    def test_documentation_prompt_does_not_mandate_docs_prefix(self) -> None:
+        issue = make_issue(7, title="add a thing", body="please add a thing")
+        prompt = workflow._build_documentation_prompt(
+            _TEST_SPEC, issue, comments_text="")
+        # Same repo-local contract as the other commit-producing prompts.
+        self._assert_repo_local_style(prompt)
+        # The `docs:` type is no longer forced; a docs update may carry any
+        # repo-local subject. The no-update escape hatch is preserved.
+        self.assertNotIn("docs:", prompt)
+        self.assertIn("DOCS: NO_CHANGE", prompt)
 
 
 class ForegroundOnlyPromptTest(unittest.TestCase):

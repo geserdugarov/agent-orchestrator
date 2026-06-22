@@ -71,6 +71,25 @@ _FOREGROUND_ONLY_NOTE = (
 )
 
 
+# Commit-subject instruction shared by every commit-producing prompt. It
+# tells the agent to learn the convention from the repo's OWN recent history
+# rather than from a hardcoded prefix list: the orchestrator runs against
+# arbitrary configured repos, so a fixed Conventional-Commits set would be
+# wrong for a project that uses its own prefixes (e.g. `event:`, `career:`).
+_COMMIT_STYLE_NOTE = (
+    "Before committing, run `git log --oneline -20` to see how recent commit "
+    "subjects are formatted, and write your subject in the SAME "
+    "repository-local style. Mirror whatever subject/prefix convention that "
+    "history uses rather than assuming a fixed set of types -- it may be a "
+    "`<type>: <subject>` form, or a project-specific prefix such as `event:` "
+    "or `career:`; the repo's own recent history is the source of truth. Keep "
+    "the subject a single short, imperative line.\n\n"
+    "The commit message MUST be the subject line only -- no extended "
+    "description / body and no `Co-Authored-By:` (or other) trailer. Use "
+    "`git commit -m \"<subject>\"` with a single `-m`."
+)
+
+
 def _orchestrator_ids(state: PinnedState) -> set[int]:
     """Set of comment ids the orchestrator itself posted on this issue/PR.
     Used to filter the orchestrator's own messages out of "new feedback"
@@ -334,9 +353,9 @@ def _parse_documentation_verdict(last_message: str) -> Tuple[str, str]:
           - markers with trailing punctuation like "DOCS: NO_CHANGE.".
 
     The `"updated"` outcome (docs were modified) is signalled by a fresh
-    `docs:`-prefixed commit on the branch and is detected at the stage
-    handler level rather than here -- this parser only resolves the
-    no-commit branch.
+    commit on the branch (any subject; the prompt no longer mandates a
+    `docs:` prefix) and is detected at the stage handler level rather than
+    here -- this parser only resolves the no-commit branch.
     """
     if not last_message:
         return "unknown", ""
@@ -540,14 +559,7 @@ def _build_implement_prompt(issue: Issue, comments_text: str) -> str:
         "Implement the change in the current working directory (a fresh git worktree on a "
         "new branch). When done, COMMIT your changes with a clear message. Do NOT push - "
         "the orchestrator pushes and opens the PR.\n\n"
-        "Before committing, run `git log --oneline -20` to see how recent commit subjects "
-        "are formatted, and follow the same convention. This repo uses Conventional Commits "
-        "of the form `<type>: <subject>` (e.g. `feat:`, `fix:`, `chore:`, `docs:`, "
-        "`refactor:`, `test:`); pick the type that best fits your change and keep the "
-        "subject short and imperative.\n\n"
-        "The commit message MUST be the subject line only -- no extended description / "
-        "body and no `Co-Authored-By:` (or other) trailer. Use `git commit -m \"<type>: "
-        "<subject>\"` with a single `-m`.\n\n"
+        f"{_COMMIT_STYLE_NOTE}\n\n"
         f"{_FOREGROUND_ONLY_NOTE}\n\n"
         "If you cannot proceed because of missing information, leave the working tree "
         "uncommitted (no commits) and end your response with a clear question for the human."
@@ -647,10 +659,7 @@ def _build_documentation_prompt(
         "NOT inspect or modify the `plans/` tree or roadmap entries: those "
         "are working notes owned by humans and are out of scope for the "
         "final-docs pass.\n\n"
-        "The commit subject MUST use the `docs:` Conventional-Commit type "
-        "and be a single short imperative line -- no extended description / "
-        "body and no `Co-Authored-By:` (or other) trailer. Use "
-        "`git commit -m \"docs: <subject>\"` with a single `-m`.\n\n"
+        f"{_COMMIT_STYLE_NOTE}\n\n"
         "If the branch genuinely requires no documentation change, do NOT "
         "commit and end your final message with EXACTLY this marker, alone "
         "on its own line:\n\n"
@@ -676,13 +685,7 @@ def _build_fix_prompt(review_feedback: str) -> str:
         "below, then COMMIT the fix in your current worktree. Do NOT push -- the orchestrator "
         "pushes and re-runs the review.\n\n"
         f"Review feedback:\n\n{quoted}\n\n"
-        "Before committing, run `git log --oneline -20` to see how recent commit subjects "
-        "are formatted, and follow the same convention. This repo uses Conventional Commits "
-        "of the form `<type>: <subject>` (e.g. `feat:`, `fix:`, `chore:`, `docs:`, "
-        "`refactor:`, `test:`); for a review fix `fix:` is usually the right type.\n\n"
-        "The commit message MUST be the subject line only -- no extended description / "
-        "body and no `Co-Authored-By:` (or other) trailer. Use `git commit -m \"<type>: "
-        "<subject>\"` with a single `-m`.\n\n"
+        f"{_COMMIT_STYLE_NOTE}\n\n"
         f"{_FOREGROUND_ONLY_NOTE}\n\n"
         "If you genuinely disagree with a point, end your final message with a question for "
         "the human and leave that item un-fixed; the orchestrator will park the issue for "
@@ -838,14 +841,7 @@ def _build_pr_comment_followup(comments: list) -> str:
         "then COMMIT the fix in your current worktree. Do NOT push -- the "
         "orchestrator pushes and re-runs the reviewer.\n\n"
         f"PR comments:\n\n{quoted}\n\n"
-        "Before committing, run `git log --oneline -20` to see how recent commit "
-        "subjects are formatted, and follow the same convention. This repo uses "
-        "Conventional Commits of the form `<type>: <subject>` (e.g. `feat:`, "
-        "`fix:`, `chore:`, `docs:`, `refactor:`, `test:`); for a review fix "
-        "`fix:` is usually the right type.\n\n"
-        "The commit message MUST be the subject line only -- no extended "
-        "description / body and no `Co-Authored-By:` (or other) trailer. Use "
-        "`git commit -m \"<type>: <subject>\"` with a single `-m`.\n\n"
+        f"{_COMMIT_STYLE_NOTE}\n\n"
         "If you genuinely disagree with a point, end your final message with a "
         "question for the human and leave that item un-fixed; the orchestrator "
         "will park the issue for human review.\n\n"

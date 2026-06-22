@@ -37,6 +37,7 @@ from github.Issue import Issue
 from .state_machine import WorkflowLabel
 from .github import PINNED_STATE_MARKER, GitHubClient, PinnedState
 from .workflow_messages import (
+    _COMMIT_STYLE_NOTE,
     _FOREGROUND_ONLY_NOTE,
     _ORCH_COMMENT_MARKER,
     _orchestrator_ids,
@@ -147,9 +148,7 @@ def _build_user_content_change_prompt(
         f"Updated issue title: {title!r}\n\n"
         f"Updated issue body:\n\n{quoted}\n\n"
         f"Conversation so far:\n{convo}\n\n"
-        "Before committing, run `git log --oneline -20` to see how recent "
-        "commit subjects are formatted, and follow the same convention. Use "
-        "`git commit -m \"<type>: <subject>\"` with a single `-m`.\n\n"
+        f"{_COMMIT_STYLE_NOTE}\n\n"
         "If your existing commits already satisfy the new requirements and "
         "no further code change is needed, end your final message with "
         "EXACTLY this marker, alone on its own line:\n\n"

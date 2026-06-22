@@ -24,9 +24,10 @@ class BuildDocumentationPromptTest(unittest.TestCase):
     the parser relies on. Verify the contract is actually communicated:
     diff vs stable docs (README and `docs/` only -- the `plans/` tree
     and roadmap entries are working notes owned by humans and the
-    prompt must steer the agent away from them), `docs:` commit subject
-    for the update branch, explicit `DOCS: NO_CHANGE` marker for the
-    no-update branch, and a refusal to accept ambiguous phrasing.
+    prompt must steer the agent away from them), a repo-local (NOT
+    forced `docs:`) commit subject for the update branch, explicit
+    `DOCS: NO_CHANGE` marker for the no-update branch, and a refusal to
+    accept ambiguous phrasing.
     """
 
     def _build(self) -> str:
@@ -53,10 +54,19 @@ class BuildDocumentationPromptTest(unittest.TestCase):
         self.assertIn("roadmap", prompt)
         self.assertIn("out of scope", prompt)
 
-    def test_instructs_docs_commit_subject_for_updated_case(self) -> None:
+    def test_does_not_mandate_docs_prefix_for_updated_case(self) -> None:
+        # The docs pass must no longer force the `docs:` Conventional-Commit
+        # type: the agent mirrors the repo's own recent commit style, so a
+        # project-specific prefix (`event:`, `career:`, ...) is allowed for a
+        # documentation update just as for any other commit.
         prompt = self._build()
-        self.assertIn("docs:", prompt)
-        self.assertIn('git commit -m "docs: <subject>"', prompt)
+        self.assertNotIn("docs:", prompt)
+        self.assertNotIn('git commit -m "docs: <subject>"', prompt)
+        # Repo-local style is taught instead, and the subject-only rule is
+        # still enforced.
+        self.assertIn("git log", prompt)
+        self.assertIn("repository-local", prompt)
+        self.assertIn("subject line only", prompt)
 
     def test_specifies_machine_readable_no_change_marker(self) -> None:
         prompt = self._build()
