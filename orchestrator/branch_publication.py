@@ -2,18 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """PR branch publication helpers.
 
-Owns the small set of conventional-commit / branch-state probes and the
+Owns the small set of commit-style / branch-state probes and the
 squash-and-force-push rewrite path that together drive how the
 orchestrator publishes a PR branch:
 
-* `_CONVENTIONAL_RE` -- regex matching `<type>[(scope)][!]: <subject>`
-  Conventional Commits subjects.
-* `_is_conventional_subject` -- predicate over a subject line.
+* `_CONVENTIONAL_RE` / `_is_conventional_subject` -- regex + predicate
+  matching the Conventional Commits `<type>[(scope)][!]: <subject>`
+  allowlist (`feat`, `fix`, ...). Used to classify whether an inferred
+  history prefix is a Conventional type or a repo-local one.
+* `_PREFIXED_RE` / `_is_prefixed_subject` / `_subject_prefix` -- the
+  broader `<token>[(scope)][!]: <subject>` shape that also matches
+  repo-local prefixes such as `event:` or `career:`. This is what
+  decides whether a subject is reusable verbatim, so a repo that does
+  not use Conventional Commits still keeps its own first-commit
+  subjects on PR titles and squash commits.
 * `_first_commit_subject` -- oldest commit subject in
   `<remote>/<base>..HEAD` for a worktree, or `''` on git error.
-* `_pr_title_from_commit_or_issue` -- pick a Conventional-Commits PR
-  title, preferring the agent's first commit subject and falling back
-  to `<type>: <issue title>`.
+* `_recent_base_subjects` / `_infer_subject_prefix` -- read recent
+  base-branch history and pick the fallback `<type>` prefix for an
+  orchestrator-synthesized subject: a repo-local prefix when one
+  dominates the history, otherwise `fix` for bug-labelled issues and
+  `feat` everywhere else.
+* `_pr_title_from_commit_or_issue` -- pick a PR title (also reused as
+  the squash subject), preferring a reusable first commit subject and
+  falling back to `<inferred-prefix>: <issue title>`.
 * `_branch_ahead_behind` -- `(ahead, behind)` commit counts for HEAD
   relative to `<remote>/<branch>` in a worktree.
 * `_squash_and_force_push` -- squash every commit since `<remote>/<base>`
@@ -48,8 +60,9 @@ import logging
 import os
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from github.Issue import Issue
 
@@ -60,14 +73,31 @@ from .verify import _head_sha, _worktree_dirty_files
 
 log = logging.getLogger(__name__)
 
-# Conventional Commits subject: `<type>[(scope)][!]: <subject>`. The type
-# allowlist matches the ones the implement/fix prompts teach plus the broader
-# Conventional Commits set, so an agent that picks `perf:` or `ci:` still
-# gets credited as conventional.
+# Conventional Commits type allowlist: the ones the implement/fix prompts
+# teach plus the broader Conventional Commits set, so an agent that picks
+# `perf:` or `ci:` still gets classified as conventional.
+_CONVENTIONAL_TYPES = (
+    "feat", "fix", "chore", "docs", "refactor",
+    "test", "perf", "build", "ci", "style", "revert",
+)
+
+# Conventional Commits subject: `<type>[(scope)][!]: <subject>` restricted
+# to the allowlist above.
 _CONVENTIONAL_RE = re.compile(
-    r"^(?:feat|fix|chore|docs|refactor|test|perf|build|ci|style|revert)"
+    r"^(?:" + "|".join(_CONVENTIONAL_TYPES) + r")"
     r"(?:\([^)]+\))?!?:\s+\S",
 )
+
+# Broader "prefixed subject" shape: `<token>[(scope)][!]: <subject>` where
+# `<token>` is any lowercase identifier, not just a Conventional type. This
+# is what decides whether the agent's first commit subject is reusable
+# verbatim, so a repo that prefixes commits with `event:` / `career:` keeps
+# its own style on PR titles and squash commits instead of being forced into
+# a Conventional `feat:` / `fix:`. The capturing variant pulls the bare
+# token (scope / `!` stripped) for history inference. The leading-lowercase
+# anchor keeps prose like `Note: ...` or a bare `TODO:` from matching.
+_PREFIXED_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\([^)]+\))?!?:\s+\S")
+_PREFIX_TOKEN_RE = re.compile(r"^([a-z][a-z0-9-]*)(?:\([^)]+\))?!?:\s+\S")
 
 
 def _branch_ahead_behind(
@@ -108,11 +138,11 @@ def _branch_ahead_behind(
 def _first_commit_subject(spec: RepoSpec, worktree: Path) -> str:
     """Subject line of the oldest commit in `origin/<base>..HEAD`, or ''.
 
-    Used by `_on_commits` to derive a Conventional-Commits PR title from what
-    the agent actually wrote, so the PR title matches the commit history
-    when the agent followed the convention. Reads the base branch from the
-    spec so a multi-repo deployment with mixed default branches (e.g. one
-    repo on `main`, another on `master`) compares against the right remote.
+    Used by `_on_commits` to derive a PR title from what the agent actually
+    wrote, so the PR title matches the commit history when the subject is
+    reusable. Reads the base branch from the spec so a multi-repo deployment
+    with mixed default branches (e.g. one repo on `main`, another on
+    `master`) compares against the right remote.
     """
     r = _git(
         "log", "--reverse", "--format=%s",
@@ -129,28 +159,94 @@ def _is_conventional_subject(subject: str) -> bool:
     return bool(_CONVENTIONAL_RE.match(subject or ""))
 
 
-def _pr_title_from_commit_or_issue(issue: Issue, first_subject: str) -> str:
-    """Pick a Conventional-Commits PR title.
+def _is_prefixed_subject(subject: str) -> bool:
+    """True if `subject` is a reusable `<token>: <subject>` line.
 
-    Prefer the agent's first commit subject when it already follows the
-    convention (so the PR title matches the commit history). Otherwise
-    fall back to `<type>: <issue title>`, choosing `fix` for bug-labelled
-    issues and `feat` everywhere else. Traceability is preserved by the
-    `Resolves #<n>` line in the PR body, so the title stays clean.
+    Broader than `_is_conventional_subject`: any lowercase prefix counts,
+    so a repo-local `event:` / `career:` subject is reused verbatim rather
+    than discarded for a synthesized `feat:`.
     """
-    subject = (first_subject or "").strip()
-    if _is_conventional_subject(subject):
-        return subject
-    issue_title = (issue.title or "").strip()
-    if _is_conventional_subject(issue_title):
-        return issue_title
+    return bool(_PREFIXED_RE.match(subject or ""))
+
+
+def _subject_prefix(subject: str) -> Optional[str]:
+    """Bare prefix token of a `<token>[(scope)][!]: ...` subject, or None."""
+    m = _PREFIX_TOKEN_RE.match(subject or "")
+    return m.group(1) if m else None
+
+
+def _recent_base_subjects(
+    spec: RepoSpec, worktree: Path, limit: int = 30
+) -> List[str]:
+    """Subjects of the most recent non-merge base-branch commits (newest
+    first), or `[]` on git error.
+
+    Reads `<remote>/<base>` so the sample reflects the repo's own commit
+    history rather than the topic branch under construction. Merge commits
+    are excluded so their `Merge pull request #...` subjects don't drown
+    out the real prefix style.
+    """
+    r = _git(
+        "log", "--no-merges", f"--max-count={limit}", "--format=%s",
+        f"{spec.remote_name}/{spec.base_branch}",
+        cwd=worktree,
+    )
+    if r.returncode != 0:
+        return []
+    return [line.strip() for line in (r.stdout or "").splitlines() if line.strip()]
+
+
+def _infer_subject_prefix(
+    spec: RepoSpec, worktree: Path, issue: Issue
+) -> str:
+    """Fallback `<type>` prefix for an orchestrator-synthesized subject.
+
+    Called only when neither the agent's first commit subject nor the issue
+    title already carries a reusable `<prefix>:` form. When a repo-local
+    prefix (one outside the Conventional Commits allowlist, e.g. `event:` /
+    `career:`) dominates recent base-branch history, reuse it so the
+    synthesized subject matches the repo's own style instead of blindly
+    defaulting to `feat:`. Otherwise fall back to `fix` for bug-labelled
+    issues and `feat` everywhere else.
+    """
+    counts: Counter[str] = Counter()
+    for subject in _recent_base_subjects(spec, worktree):
+        prefix = _subject_prefix(subject)
+        if prefix:
+            counts[prefix] += 1
+    if counts:
+        # `most_common` breaks ties by first insertion; subjects arrive
+        # newest-first, so the most recent of any tied prefixes wins.
+        dominant = counts.most_common(1)[0][0]
+        if dominant not in _CONVENTIONAL_TYPES:
+            return dominant
     label_names = {(getattr(l, "name", "") or "").lower() for l in (issue.labels or [])}
     if {"bug", "fix"} & label_names:
-        ctype = "fix"
-    else:
-        ctype = "feat"
+        return "fix"
+    return "feat"
+
+
+def _pr_title_from_commit_or_issue(
+    issue: Issue, first_subject: str, fallback_prefix: str = "feat",
+) -> str:
+    """Pick a PR title (also reused as the squash subject).
+
+    Prefer the agent's first commit subject when it already carries a
+    reusable `<prefix>:` form (so the PR title matches the commit history),
+    then the issue title when it does, and only otherwise synthesize a
+    `<fallback_prefix>: <issue title>` -- `fallback_prefix` comes from
+    `_infer_subject_prefix`, so the synthesized form honors the repo's own
+    style. Traceability is preserved by the `Resolves #<n>` line in the PR
+    body, so the title stays clean.
+    """
+    subject = (first_subject or "").strip()
+    if _is_prefixed_subject(subject):
+        return subject
+    issue_title = (issue.title or "").strip()
+    if _is_prefixed_subject(issue_title):
+        return issue_title
     body = issue_title or f"address issue #{issue.number}"
-    return f"{ctype}: {body}"
+    return f"{fallback_prefix}: {body}"
 
 
 def _squash_and_force_push(
@@ -169,10 +265,12 @@ def _squash_and_force_push(
         not updated.
 
     The squash commit subject reuses the first commit's subject when it
-    already matches conventional-commit form; otherwise it builds one from
-    the issue title with a `feat:` prefix. The message is subject-only --
-    no body, no trailers -- so the orchestrator-authored squash matches
-    the repo's Conventional-Commits-subject-only rule. The commit is
+    already carries a reusable `<prefix>:` form (Conventional or repo-local,
+    so an `event:` / `career:` subject survives); otherwise it builds one
+    from the issue title with `_infer_subject_prefix` -- a repo-local prefix
+    when recent base history uses one, else `fix`/`feat`. The message is
+    subject-only -- no body, no trailers -- so the orchestrator-authored
+    squash matches the repo's subject-only commit rule. The commit is
     authored under the AGENT_GIT_* identity (via env vars) so attribution
     matches the per-step commits this squash replaces.
     """
@@ -222,11 +320,13 @@ def _squash_and_force_push(
         # Nothing to squash.
         return True, original_head, 0, None
 
-    if _is_conventional_subject(subjects[0]):
+    if _is_prefixed_subject(subjects[0]):
         subject = subjects[0]
     else:
-        title = (issue.title or "").strip() or f"resolve issue #{issue.number}"
-        subject = f"feat: {title}"
+        fallback_prefix = _infer_subject_prefix(spec, worktree, issue)
+        subject = _pr_title_from_commit_or_issue(
+            issue, subjects[0], fallback_prefix
+        )
 
     # Subject-only message: the repo's Conventional Commits rule
     # forbids bodies and trailers on orchestrator-authored commits

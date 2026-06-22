@@ -155,7 +155,9 @@ from .worktrees import _git as _git
 from .worktrees import _git_hardened as _git_hardened
 from .worktrees import _has_new_commits as _has_new_commits
 from .worktrees import _head_sha as _head_sha
+from .worktrees import _infer_subject_prefix as _infer_subject_prefix
 from .worktrees import _is_conventional_subject as _is_conventional_subject
+from .worktrees import _is_prefixed_subject as _is_prefixed_subject
 from .worktrees import (
     _pr_title_from_commit_or_issue as _pr_title_from_commit_or_issue,
 )

@@ -29,9 +29,11 @@ The worktree naming / layout / creation / cleanup helpers live in
 worktree-state probes (`VerifyResult`, `_run_verify_commands`,
 `_truncate_verify_output`, `_head_sha`, `_worktree_dirty_files`) live
 in `verify.py`; the PR branch publication helpers (`_CONVENTIONAL_RE`,
-`_is_conventional_subject`, `_first_commit_subject`,
-`_pr_title_from_commit_or_issue`, `_branch_ahead_behind`,
-`_squash_and_force_push`) live in `branch_publication.py`; the
+`_is_conventional_subject`, `_is_prefixed_subject`,
+`_first_commit_subject`, `_recent_base_subjects`,
+`_infer_subject_prefix`, `_pr_title_from_commit_or_issue`,
+`_branch_ahead_behind`, `_squash_and_force_push`) live in
+`branch_publication.py`; the
 per-tick base refresh and rebase routing (`_rebase_base_into_worktree`,
 `_merge_base_into_worktree`, `_rebase_in_progress`,
 `_refresh_base_and_worktrees`, `_PR_REFRESH_DETOUR_LABELS`,

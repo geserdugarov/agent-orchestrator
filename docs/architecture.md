@@ -43,8 +43,9 @@ orchestrator/
                         per-target-root locks, authed fetch / push helpers
   verify.py             local-verify runner and worktree-state probes
   worktree_lifecycle.py worktree naming, layout, creation, restoration, cleanup
-  branch_publication.py PR-branch publication helpers (conventional-subject
-                        detection, ahead/behind probe, squash-and-force-push)
+  branch_publication.py PR-branch publication helpers (reusable-prefix
+                        detection + repo-local prefix inference, ahead/behind
+                        probe, squash-and-force-push)
   base_sync.py          per-tick base refresh, PR-aware rebase + push, crash
                         recovery, and the conflict-only `resolving_conflict`
                         route (clean rebases route directly to `validating`)

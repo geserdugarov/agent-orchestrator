@@ -27,9 +27,11 @@ Module map for the extractions:
   `VerifyResult`, `_run_verify_commands`, `_truncate_verify_output`,
   `_head_sha`, `_worktree_dirty_files` -- live in `verify.py`.
 * The PR branch publication helpers -- `_CONVENTIONAL_RE`,
-  `_is_conventional_subject`, `_first_commit_subject`,
-  `_pr_title_from_commit_or_issue`, `_branch_ahead_behind`, and
-  `_squash_and_force_push` -- live in `branch_publication.py`.
+  `_is_conventional_subject`, `_is_prefixed_subject`,
+  `_first_commit_subject`, `_recent_base_subjects`,
+  `_infer_subject_prefix`, `_pr_title_from_commit_or_issue`,
+  `_branch_ahead_behind`, and `_squash_and_force_push` -- live in
+  `branch_publication.py`.
 * The per-tick base refresh, rebase routing, and crash-recovery
   helpers -- `_rebase_base_into_worktree`, `_merge_base_into_worktree`,
   `_rebase_in_progress`, `_refresh_base_and_worktrees`,
@@ -80,12 +82,15 @@ from .base_sync import _sync_worktree_with_base as _sync_worktree_with_base
 from .branch_publication import _CONVENTIONAL_RE as _CONVENTIONAL_RE
 from .branch_publication import _branch_ahead_behind as _branch_ahead_behind
 from .branch_publication import _first_commit_subject as _first_commit_subject
+from .branch_publication import _infer_subject_prefix as _infer_subject_prefix
 from .branch_publication import (
     _is_conventional_subject as _is_conventional_subject,
 )
+from .branch_publication import _is_prefixed_subject as _is_prefixed_subject
 from .branch_publication import (
     _pr_title_from_commit_or_issue as _pr_title_from_commit_or_issue,
 )
+from .branch_publication import _recent_base_subjects as _recent_base_subjects
 from .branch_publication import _squash_and_force_push as _squash_and_force_push
 from .git_plumbing import _GIT_NO_PROMPT_ENV as _GIT_NO_PROMPT_ENV
 from .git_plumbing import _TARGET_ROOT_LOCKS as _TARGET_ROOT_LOCKS

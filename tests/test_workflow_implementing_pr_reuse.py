@@ -334,6 +334,41 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(gh.opened_prs[0].title, "docs: clarify the README")
 
+    def test_pr_title_preserves_custom_repo_prefix_first_commit(self) -> None:
+        # A repo-local prefix that is NOT a Conventional type (e.g. an
+        # events repo's `event:`) must be preserved verbatim, not replaced
+        # with a synthesized `feat:`.
+        gh, issue = self._seeded(issue_number=36)
+
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-1", last_message="done"),
+            has_new_commits=[False, True],
+            dirty_files=(),
+            push_branch=True,
+            first_commit_subject="event: add the winter gala",
+        )
+
+        self.assertEqual(gh.opened_prs[0].title, "event: add the winter gala")
+
+    def test_pr_title_fallback_uses_inferred_repo_prefix(self) -> None:
+        # First commit subject is unprefixed, so the orchestrator must
+        # synthesize a title -- and it honors the repo-local prefix that
+        # `_infer_subject_prefix` reads from base history instead of `feat:`.
+        gh, issue = self._seeded(issue_number=37)
+
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-1", last_message="done"),
+            has_new_commits=[False, True],
+            dirty_files=(),
+            push_branch=True,
+            first_commit_subject="updated the listings",
+            fallback_prefix="career",
+        )
+
+        self.assertEqual(gh.opened_prs[0].title, "career: add a sparkly thing")
+
 
 class ConventionalSubjectHelperTest(unittest.TestCase):
     """Direct coverage for the regex helper, since the convention list grew
@@ -374,6 +409,136 @@ class ConventionalSubjectHelperTest(unittest.TestCase):
                 workflow._is_conventional_subject(subject),
                 f"expected non-conventional: {subject!r}",
             )
+
+
+class PrefixedSubjectHelperTest(unittest.TestCase):
+    """`_is_prefixed_subject` is broader than `_is_conventional_subject`: it
+    accepts any lowercase `<token>: <subject>` prefix, so repo-local styles
+    survive, while still rejecting prose and bare prefixes."""
+
+    def test_accepts_conventional_and_repo_local_prefixes(self) -> None:
+        for subject in (
+            "feat: add thing",
+            "fix(api)!: drop endpoint",
+            "event: add the gala",       # not a Conventional type
+            "career: open a role",
+            "ui: tweak the spacing",
+        ):
+            self.assertTrue(
+                workflow._is_prefixed_subject(subject),
+                f"expected prefixed: {subject!r}",
+            )
+
+    def test_rejects_prose_and_bare_prefixes(self) -> None:
+        for subject in (
+            "",
+            "updated stuff",            # no colon
+            "fixed it",                 # no colon
+            "Add a thing",              # not prefixed
+            "Note: capitalized token",  # token must start lowercase
+            "event:",                   # no subject after colon
+            "event:   ",                # whitespace-only subject
+            "  event: leading",         # leading whitespace not accepted
+        ):
+            self.assertFalse(
+                workflow._is_prefixed_subject(subject),
+                f"expected non-prefixed: {subject!r}",
+            )
+
+
+class InferSubjectPrefixTest(unittest.TestCase):
+    """`_infer_subject_prefix` reads recent base-branch history and reuses a
+    dominant repo-local prefix; otherwise it falls back to `fix` for
+    bug-labelled issues and `feat` everywhere else."""
+
+    def _capture_git(self, stdout: str):
+        from unittest.mock import MagicMock
+
+        captured: list[tuple] = []
+
+        def fake_git(*args, cwd):
+            captured.append((args, cwd))
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = stdout
+            r.stderr = ""
+            return r
+
+        return fake_git, captured
+
+    def _infer(self, stdout: str, *, bug: bool = False) -> str:
+        issue = make_issue(50, title="do a thing")
+        if bug:
+            issue.labels.append(FakeLabel("bug"))
+        fake_git, _ = self._capture_git(stdout)
+        with patch.object(branch_publication, "_git", fake_git):
+            return workflow._infer_subject_prefix(
+                _TEST_SPEC, Path("/tmp/wt-not-real"), issue
+            )
+
+    def test_dominant_repo_local_prefix_is_reused(self) -> None:
+        # Events repo: `event:` dominates, so the fallback honors it.
+        self.assertEqual(
+            self._infer("event: gala\nevent: meetup\nfeat: tooling\n"),
+            "event",
+        )
+
+    def test_repo_local_prefix_overrides_bug_label(self) -> None:
+        # The repo's own style wins even for a bug-labelled issue -- a repo
+        # that doesn't use `fix:` shouldn't suddenly get one.
+        self.assertEqual(
+            self._infer("event: gala\nevent: meetup\n", bug=True),
+            "event",
+        )
+
+    def test_conventional_history_keeps_feat_default(self) -> None:
+        # When the dominant prefix is itself a Conventional type, defer to
+        # the bug/feat heuristic rather than echoing the history prefix.
+        self.assertEqual(self._infer("feat: a\nfix: b\nfeat: c\n"), "feat")
+
+    def test_conventional_history_with_bug_label_uses_fix(self) -> None:
+        self.assertEqual(self._infer("feat: a\nfeat: b\n", bug=True), "fix")
+
+    def test_empty_history_falls_back_to_feat(self) -> None:
+        self.assertEqual(self._infer(""), "feat")
+
+    def test_unprefixed_history_falls_back_to_feat(self) -> None:
+        # History with no `<prefix>:` subjects yields no dominant prefix.
+        self.assertEqual(self._infer("initial commit\nmore work\n"), "feat")
+
+    def test_git_error_falls_back_without_crashing(self) -> None:
+        from unittest.mock import MagicMock
+
+        def failing_git(*args, cwd):
+            r = MagicMock()
+            r.returncode = 1
+            r.stdout = ""
+            r.stderr = "fatal: bad revision"
+            return r
+
+        issue = make_issue(51, title="do a thing")
+        with patch.object(branch_publication, "_git", failing_git):
+            prefix = workflow._infer_subject_prefix(
+                _TEST_SPEC, Path("/tmp/wt-not-real"), issue
+            )
+        self.assertEqual(prefix, "feat")
+
+    def test_reads_per_spec_base_and_remote(self) -> None:
+        private_spec = config.RepoSpec(
+            slug="acme/widget",
+            target_root=Path("/tmp/orchestrator-test-target-root"),
+            base_branch="master",
+            remote_name="private",
+        )
+        fake_git, captured = self._capture_git("event: x\n")
+        with patch.object(branch_publication, "_git", fake_git):
+            workflow._infer_subject_prefix(
+                private_spec, Path("/tmp/wt-not-real"), make_issue(52)
+            )
+        args, _cwd = captured[0]
+        # The history log targets `<remote>/<base>`, honoring the spec.
+        self.assertIn("private/master", args)
+        self.assertNotIn("origin/main", args)
 
 
 class FirstCommitSubjectBaseBranchTest(unittest.TestCase):

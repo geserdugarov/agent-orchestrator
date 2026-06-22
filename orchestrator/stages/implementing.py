@@ -892,7 +892,9 @@ def _on_commits(
     # relabel: reuse the existing open PR instead of 422-ing on duplicate.
     pr = gh.find_open_pr(branch=branch, base=spec.base_branch)
     if pr is None:
-        title = _wf._pr_title_from_commit_or_issue(issue, _wf._first_commit_subject(spec, wt))
+        first_subject = _wf._first_commit_subject(spec, wt)
+        fallback_prefix = _wf._infer_subject_prefix(spec, wt, issue)
+        title = _wf._pr_title_from_commit_or_issue(issue, first_subject, fallback_prefix)
         _, dev_backend, _, dev_sid = _read_dev_session(state)
         body_parts = [
             f"Resolves #{issue.number}",

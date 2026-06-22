@@ -9,6 +9,7 @@ patch surface stays in one place when a new helper is plumbed through.
 """
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -58,6 +59,17 @@ def _agent(
     )
 
 
+def _default_infer_subject_prefix(spec, worktree, issue):
+    """Stand-in for `_infer_subject_prefix` with no base history: reproduces
+    the `fix` (bug-labelled) / `feat` (everything else) fallback so tests
+    that don't care about repo-local prefix inference see unchanged titles."""
+    labels = {
+        (getattr(label, "name", "") or "").lower()
+        for label in (getattr(issue, "labels", None) or [])
+    }
+    return "fix" if {"bug", "fix"} & labels else "feat"
+
+
 def _as_mock(value_or_seq):
     if callable(value_or_seq):
         return value_or_seq
@@ -83,6 +95,7 @@ class _PatchedWorkflowMixin:
         push_branch=True,
         head_shas=("",),
         first_commit_subject="",
+        fallback_prefix=None,
         squash_result=(True, None, 0, None),
         branch_ahead_behind=(0, 0),
         rebase_in_progress=False,
@@ -158,6 +171,15 @@ class _PatchedWorkflowMixin:
         # `_on_commits` reads the worktree's first commit subject to derive
         # the PR title; mock it so tests don't shell out to git.
         first_subject_mock = MagicMock(return_value=first_commit_subject)
+        # `_infer_subject_prefix` reads recent base history to pick the
+        # fallback prefix; mock it so tests don't shell out. A `None`
+        # default reproduces the no-history `fix`/`feat` fallback; tests
+        # that exercise repo-local prefix inference pass an explicit
+        # `fallback_prefix` (e.g. "event") to drive the synthesized title.
+        if fallback_prefix is not None:
+            infer_prefix_mock = MagicMock(return_value=fallback_prefix)
+        else:
+            infer_prefix_mock = MagicMock(side_effect=_default_infer_subject_prefix)
         cleanup_terminal_mock = MagicMock()
         # Squash helper would otherwise shell out to `git merge-base` etc.
         # against `_FAKE_WT`. Default: success-no-op.
@@ -175,29 +197,10 @@ class _PatchedWorkflowMixin:
             else VerifyResult(status="ok")
         )
 
-        with patch.object(workflow, "run_agent", rc_mock), \
-             patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path_target), \
-             patch.object(workflow, "_ensure_worktree", wt_mock), \
-             patch.object(workflow, "_ensure_pr_worktree", pr_wt_mock), \
-             patch.object(workflow, "_ensure_decompose_worktree", decompose_wt_mock), \
-             patch.object(workflow, "_decompose_worktree_path", decompose_path_mock), \
-             patch.object(workflow, "_cleanup_decompose_worktree", cleanup_decompose_mock), \
-             patch.object(workflow, "_cleanup_question_worktree", cleanup_question_mock), \
-             patch.object(workflow, "_cleanup_terminal_branch", cleanup_terminal_mock), \
-             patch.object(workflow, "_has_new_commits", hnc_mock), \
-             patch.object(workflow, "_worktree_dirty_files", df_mock), \
-             patch.object(workflow, "_push_branch", push_mock), \
-             patch.object(workflow, "_head_sha", head_mock), \
-             patch.object(workflow, "_first_commit_subject", first_subject_mock), \
-             patch.object(workflow, "_squash_and_force_push", squash_mock), \
-             patch.object(workflow, "_run_verify_commands", verify_mock), \
-             patch.object(workflow, "_authed_fetch", authed_fetch_ok), \
-             patch.object(workflow, "_branch_ahead_behind", ahead_behind_mock), \
-             patch.object(workflow, "_branch_has_unpushed_commits", branch_unpushed_mock), \
-             patch.object(workflow, "_rebase_in_progress", rebase_in_progress_mock):
-            callable_()
-
-        return {
+        # One mock per `workflow` attribute the stage handlers reach. Driven
+        # through an ExitStack rather than a stacked `with` so adding a new
+        # patch never trips CPython's 20-nested-block limit.
+        workflow_mocks = {
             "run_agent": rc_mock,
             "_ensure_worktree": wt_mock,
             "_ensure_pr_worktree": pr_wt_mock,
@@ -211,6 +214,7 @@ class _PatchedWorkflowMixin:
             "_push_branch": push_mock,
             "_head_sha": head_mock,
             "_first_commit_subject": first_subject_mock,
+            "_infer_subject_prefix": infer_prefix_mock,
             "_squash_and_force_push": squash_mock,
             "_run_verify_commands": verify_mock,
             "_authed_fetch": authed_fetch_ok,
@@ -218,3 +222,14 @@ class _PatchedWorkflowMixin:
             "_branch_has_unpushed_commits": branch_unpushed_mock,
             "_rebase_in_progress": rebase_in_progress_mock,
         }
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    analytics, "ANALYTICS_LOG_PATH", analytics_path_target
+                )
+            )
+            for attr, mock in workflow_mocks.items():
+                stack.enter_context(patch.object(workflow, attr, mock))
+            callable_()
+
+        return workflow_mocks

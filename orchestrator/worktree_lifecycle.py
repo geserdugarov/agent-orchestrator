@@ -11,8 +11,9 @@ unpushed work.
 Imports the hardened git subprocess layer from `git_plumbing.py` and
 reuses its per-target_root lock so concurrent workers cannot race the
 parent clone's `.git/config.lock`. The PR branch publication helpers
-(`_CONVENTIONAL_RE`, `_is_conventional_subject`,
-`_first_commit_subject`, `_pr_title_from_commit_or_issue`,
+(`_CONVENTIONAL_RE`, `_is_conventional_subject`, `_is_prefixed_subject`,
+`_first_commit_subject`, `_recent_base_subjects`,
+`_infer_subject_prefix`, `_pr_title_from_commit_or_issue`,
 `_branch_ahead_behind`, `_squash_and_force_push`) live in
 `branch_publication.py`; the local-verify runner and its
 worktree-state probes (`VerifyResult`, `_run_verify_commands`,

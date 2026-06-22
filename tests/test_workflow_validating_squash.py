@@ -392,6 +392,81 @@ class SquashHelperRealGitTest(unittest.TestCase):
         subject = self._git("log", "-1", "--pretty=%s", cwd=self.work).strip()
         self.assertEqual(subject, "feat: rename frobnicator")
 
+    def test_squash_preserves_custom_repo_prefix_first_subject(self) -> None:
+        # A repo-local first-commit prefix that is NOT a Conventional type
+        # (e.g. a careers site's `career:`) must be reused verbatim as the
+        # squash subject -- previously it would have been discarded for a
+        # synthesized `feat: <issue title>`.
+        self._git("reset", "--hard", "origin/main", cwd=self.work)
+        author_env = {
+            "GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "dev@example.com",
+            "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.com",
+        }
+        for i, msg in enumerate(
+            ["career: add a senior role", "fix wording"], start=1
+        ):
+            (self.work / f"c{i}.txt").write_text(f"{i}\n")
+            self._git("add", ".", cwd=self.work)
+            self._git(
+                "commit", "-m", msg, cwd=self.work, env_extra=author_env,
+            )
+
+        issue = self._make_issue(title="hiring page")
+        with patch.object(config, "BASE_BRANCH", "main"), \
+             patch.object(branch_publication, "_push_branch", return_value=True):
+            success, _, count, err = workflow._squash_and_force_push(
+                _TEST_SPEC, self.work, self.branch, issue,
+            )
+        self.assertTrue(success, err)
+        self.assertEqual(count, 2)
+        subject = self._git("log", "-1", "--pretty=%s", cwd=self.work).strip()
+        self.assertEqual(subject, "career: add a senior role")
+
+    def test_squash_infers_repo_prefix_from_base_history(self) -> None:
+        # No reusable first-commit subject, so the squash subject is
+        # synthesized -- and it honors the repo-local `event:` prefix that
+        # dominates recent base-branch history instead of defaulting to
+        # `feat:`.
+        author_env = {
+            "GIT_AUTHOR_NAME": "Dev", "GIT_AUTHOR_EMAIL": "dev@example.com",
+            "GIT_COMMITTER_NAME": "Dev", "GIT_COMMITTER_EMAIL": "dev@example.com",
+        }
+        # Seed the base branch with a history dominated by `event:`.
+        self._git("checkout", "main", cwd=self.work)
+        for i, msg in enumerate(
+            ["event: launch the site", "event: add a gala", "event: add a meetup"],
+            start=1,
+        ):
+            (self.work / f"e{i}.txt").write_text(f"{i}\n")
+            self._git("add", ".", cwd=self.work)
+            self._git(
+                "commit", "-m", msg, cwd=self.work, env_extra=author_env,
+            )
+        # Pushing updates the local `origin/main` tracking ref that
+        # `_recent_base_subjects` reads.
+        self._git("push", "origin", "main", cwd=self.work)
+        # Rebuild the topic branch on the refreshed base with unprefixed
+        # commits so the squash must fall back to inference.
+        self._git("checkout", self.branch, cwd=self.work)
+        self._git("reset", "--hard", "origin/main", cwd=self.work)
+        for i, msg in enumerate(["tweak the layout", "polish the copy"], start=1):
+            (self.work / f"t{i}.txt").write_text(f"{i}\n")
+            self._git("add", ".", cwd=self.work)
+            self._git(
+                "commit", "-m", msg, cwd=self.work, env_extra=author_env,
+            )
+
+        issue = self._make_issue(title="redesign the homepage")
+        with patch.object(config, "BASE_BRANCH", "main"), \
+             patch.object(branch_publication, "_push_branch", return_value=True):
+            success, _, count, err = workflow._squash_and_force_push(
+                _TEST_SPEC, self.work, self.branch, issue,
+            )
+        self.assertTrue(success, err)
+        self.assertEqual(count, 2)
+        subject = self._git("log", "-1", "--pretty=%s", cwd=self.work).strip()
+        self.assertEqual(subject, "event: redesign the homepage")
+
     def test_squash_with_only_one_commit_is_a_no_op(self) -> None:
         # Reset to a single commit on top of base.
         self._git("reset", "--hard", "origin/main", cwd=self.work)
