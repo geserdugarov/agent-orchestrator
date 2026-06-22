@@ -946,7 +946,8 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_preamble_builder_includes_requirements_and_branch_pointer(self) -> None:
         issue = make_issue(963, body="do the work", title="My Issue")
-        text = workflow._build_fresh_respawn_preamble(issue, "@alice: please add tests")
+        text = workflow._build_fresh_respawn_preamble(
+            _TEST_SPEC, issue, "@alice: please add tests", [_TEST_SPEC])
         self.assertIn("do the work", text)
         self.assertIn("@alice: please add tests", text)
         self.assertIn("git diff", text, "must point the fresh agent at the branch")

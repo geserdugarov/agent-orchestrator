@@ -518,9 +518,11 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         state.set("docs_checked_sha", before_sha or "")
         prompt = _wf._build_documentation_prompt(
             spec, issue, _wf._recent_comments_text(issue),
+            config.default_repo_specs(),
         )
         wt, result = _wf._resume_dev_with_text(
             gh, spec, issue, state, prompt,
+            followup_has_tracked_repos=True,
         )
         recovered = False
     elif ahead > 0:
@@ -564,6 +566,7 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         state.set("dev_agent", dev_spec)
         prompt = _wf._build_documentation_prompt(
             spec, issue, _wf._recent_comments_text(issue),
+            config.default_repo_specs(),
         )
         # Resume the dev session through the shared helper (rather than a
         # bare `_run_agent_tracked`) so the initial docs pass participates
@@ -576,6 +579,7 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # because the PR-anchored worktree was already restored above.
         wt, result = _wf._resume_dev_with_text(
             gh, spec, issue, state, prompt,
+            followup_has_tracked_repos=True,
         )
         state.set("branch", branch)
         recovered = False

@@ -173,7 +173,8 @@ class RepoLocalCommitStylePromptTest(unittest.TestCase):
     def test_implement_prompt_teaches_repo_local_style(self) -> None:
         issue = make_issue(7, title="add a thing", body="please add a thing")
         self._assert_repo_local_style(
-            workflow._build_implement_prompt(issue, comments_text=""))
+            workflow._build_implement_prompt(
+                _TEST_SPEC, issue, comments_text="", specs=[_TEST_SPEC]))
 
     def test_fix_prompt_teaches_repo_local_style(self) -> None:
         self._assert_repo_local_style(
@@ -193,7 +194,7 @@ class RepoLocalCommitStylePromptTest(unittest.TestCase):
     def test_documentation_prompt_does_not_mandate_docs_prefix(self) -> None:
         issue = make_issue(7, title="add a thing", body="please add a thing")
         prompt = workflow._build_documentation_prompt(
-            _TEST_SPEC, issue, comments_text="")
+            _TEST_SPEC, issue, comments_text="", specs=[_TEST_SPEC])
         # Same repo-local contract as the other commit-producing prompts.
         self._assert_repo_local_style(prompt)
         # The `docs:` type is no longer forced; a docs update may carry any
@@ -216,12 +217,12 @@ class ForegroundOnlyPromptTest(unittest.TestCase):
                                 user=FakeUser("alice"))]
         prompts = {
             "implement": workflow._build_implement_prompt(
-                issue, comments_text=""),
+                _TEST_SPEC, issue, comments_text="", specs=[_TEST_SPEC]),
             "fix": workflow._build_fix_prompt("please fix the typo"),
             "pr_comment_followup": workflow._build_pr_comment_followup(
                 comments),
             "documentation": workflow._build_documentation_prompt(
-                _TEST_SPEC, issue, comments_text=""),
+                _TEST_SPEC, issue, comments_text="", specs=[_TEST_SPEC]),
             "conflict": workflow._build_conflict_resolution_prompt(
                 "origin/main", ["a.rs"]),
             "user_content_change": workflow._build_user_content_change_prompt(

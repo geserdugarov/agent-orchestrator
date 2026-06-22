@@ -35,6 +35,7 @@ class BuildDocumentationPromptTest(unittest.TestCase):
             _TEST_SPEC,
             make_issue(67100, title="add foo flag", body="users want a foo flag"),
             comments_text="",
+            specs=[_TEST_SPEC],
         )
 
     def test_instructs_diff_against_readme_and_docs(self) -> None:

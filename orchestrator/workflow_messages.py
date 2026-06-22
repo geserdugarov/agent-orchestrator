@@ -598,13 +598,21 @@ def _recent_comments_text(issue: Issue, max_chars: int = 4000) -> str:
     return text[-max_chars:] if len(text) > max_chars else text
 
 
-def _build_implement_prompt(issue: Issue, comments_text: str) -> str:
+def _build_implement_prompt(
+    spec: RepoSpec,
+    issue: Issue,
+    comments_text: str,
+    specs: list[RepoSpec],
+) -> str:
     body = issue.body or "(no body)"
     convo = comments_text or "(no prior comments)"
+    tracked = _build_tracked_repos_context(spec, specs)
+    tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
         f"You are the implementer for GitHub issue #{issue.number}: {issue.title!r}.\n\n"
         f"Issue body:\n{body}\n\n"
         f"Conversation so far:\n{convo}\n\n"
+        f"{tracked_block}"
         "Implement the change in the current working directory (a fresh git worktree on a "
         "new branch). When done, COMMIT your changes with a clear message. Do NOT push - "
         "the orchestrator pushes and opens the PR.\n\n"
@@ -615,7 +623,12 @@ def _build_implement_prompt(issue: Issue, comments_text: str) -> str:
     )
 
 
-def _build_fresh_respawn_preamble(issue: Issue, comments_text: str) -> str:
+def _build_fresh_respawn_preamble(
+    spec: RepoSpec,
+    issue: Issue,
+    comments_text: str,
+    specs: list[RepoSpec],
+) -> str:
     """Re-grounding header prepended to a FRESH dev spawn that REPLACES a
     retired or poisoned session mid-issue (proactive rotation, silent-park
     fallback, or stale/overflow recovery).
@@ -630,6 +643,8 @@ def _build_fresh_respawn_preamble(issue: Issue, comments_text: str) -> str:
     """
     body = issue.body or "(no body)"
     convo = comments_text or "(no prior comments)"
+    tracked = _build_tracked_repos_context(spec, specs)
+    tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
         f"You are resuming work on GitHub issue #{issue.number}: {issue.title!r}. "
         "A previous agent session worked on this issue and its commits are "
@@ -640,6 +655,7 @@ def _build_fresh_respawn_preamble(issue: Issue, comments_text: str) -> str:
         "NOT restart the implementation from scratch.\n\n"
         f"Issue body:\n{body}\n\n"
         f"Conversation so far:\n{convo}\n\n"
+        f"{tracked_block}"
         "Your immediate task follows.\n"
         "----------------------------------------"
     )
@@ -679,6 +695,7 @@ def _build_documentation_prompt(
     spec: RepoSpec,
     issue: Issue,
     comments_text: str,
+    specs: list[RepoSpec],
 ) -> str:
     """Prompt for the documentation pass that runs as the final-docs
     handoff between reviewer approval and `in_review`.
@@ -691,12 +708,15 @@ def _build_documentation_prompt(
     body = issue.body or "(no body)"
     convo = comments_text or "(no prior comments)"
     base_ref = f"{spec.remote_name}/{spec.base_branch}"
+    tracked = _build_tracked_repos_context(spec, specs)
+    tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
         f"You are the documentation pass for GitHub issue #{issue.number}: "
         f"{issue.title!r}. A separate session has implemented this issue and "
         f"committed to the current branch. The base branch is `{base_ref}`.\n\n"
         f"Issue body:\n{body}\n\n"
         f"Conversation so far:\n{convo}\n\n"
+        f"{tracked_block}"
         "Inspect the change with:\n"
         f"  git log --oneline {base_ref}..HEAD\n"
         f"  git diff {base_ref}...HEAD\n\n"

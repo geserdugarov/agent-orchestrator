@@ -267,6 +267,8 @@ def _resume_dev_with_text(
     issue: Issue,
     state: PinnedState,
     followup_text: str,
+    *,
+    followup_has_tracked_repos: bool = False,
 ) -> Tuple[Path, AgentResult]:
     """Resume the dev's locked-backend session with the given prompt text.
 
@@ -361,8 +363,16 @@ def _resume_dev_with_text(
     def _spawn_prompt(fresh: bool) -> str:
         if not fresh:
             return followup_text
+        # A fresh respawn re-grounds the transcript-less agent with the
+        # preamble, which normally carries the tracked-repos block. When the
+        # followup already embeds that block (documentation prompts), pass no
+        # sibling specs so the block builder returns "" -- otherwise the
+        # composed prompt would list the tracked repos twice.
+        preamble_specs = (
+            [] if followup_has_tracked_repos else config.default_repo_specs()
+        )
         preamble = _wf._build_fresh_respawn_preamble(
-            issue, _wf._recent_comments_text(issue),
+            spec, issue, _wf._recent_comments_text(issue), preamble_specs,
         )
         return f"{preamble}\n\n{followup_text}"
 
@@ -818,7 +828,10 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             # else `config.DEV_AGENT_SPEC` for a first-ever spawn --
             # so this is a no-op when state already carries the spec.
             state.set("dev_agent", dev_spec)
-            prompt = _wf._build_implement_prompt(issue, _wf._recent_comments_text(issue))
+            prompt = _wf._build_implement_prompt(
+                spec, issue, _wf._recent_comments_text(issue),
+                config.default_repo_specs(),
+            )
             result = _wf._run_agent_tracked(
                 gh, issue.number,
                 agent_role="developer",
