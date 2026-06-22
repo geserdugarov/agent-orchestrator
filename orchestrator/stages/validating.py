@@ -908,7 +908,8 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     )
     _, dev_backend_for_prompt, _, _ = _wf._read_dev_session(state)
     review_prompt = _wf._build_review_prompt(
-        spec, issue, _wf._recent_comments_text(issue), dev_backend_for_prompt,
+        spec, issue, _wf._recent_comments_text(issue),
+        config.default_repo_specs(), dev_backend_for_prompt,
     )
     # Persist the full configured spec BEFORE the spawn so a reviewer
     # backend hiccup that yields no session id still leaves a durable

@@ -1,13 +1,15 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""The tracked-repos awareness block is threaded into the developer-side
-prompts so a multi-repo deployment's implementer / documentation / fresh-
-respawn spawns learn about the sibling read-only checkouts. This module pins
-the wiring end-to-end: the production stage handlers must pass the *full*
-specs list (not just the current repo) so the block actually renders, the
-single-repo default must stay byte-for-byte block-free, and a transcript-less
-fresh respawn must carry the block exactly once while a true in-place resume
-followup stays block-free.
+"""The tracked-repos awareness block is threaded into both the developer-side
+prompts (implementer / documentation / fresh-respawn) and the read-only /
+reviewer-only reasoning prompts (decomposer / reviewer / question) so a
+multi-repo deployment's spawns learn about the sibling read-only checkouts.
+This module pins the wiring end-to-end: the production stage handlers must pass
+the *full* specs list (not just the current repo) so the block actually
+renders, the single-repo default must stay byte-for-byte block-free, a
+transcript-less fresh respawn must carry the block exactly once while a true
+in-place resume followup stays block-free, and the read-only / reviewer-only
+stages must keep their no-write contract intact alongside the block.
 """
 from __future__ import annotations
 
@@ -245,6 +247,203 @@ class FreshRespawnTrackedReposTest(unittest.TestCase):
         prompt = self._resume(gh, issue, threshold=10)
         self.assertEqual(prompt, "fix it")
         self.assertNotIn(_BLOCK_MARKER, prompt)
+
+
+class DecomposerSpawnTrackedReposTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """The fresh decomposer spawn carries the block in a multi-repo deployment
+    and stays block-free in the single-repo default. The decomposer is
+    read-only -- the block is additive and must not override that contract."""
+
+    _MANIFEST = (
+        "fits one context\n\n"
+        "```orchestrator-manifest\n"
+        '{"decision": "single", "rationale": "small"}\n'
+        "```\n"
+    )
+
+    def _spawn_prompt(self) -> str:
+        gh = FakeGitHubClient()
+        issue = make_issue(710, label="decomposing")
+        gh.add_issue(issue)
+        mocks = self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dec-1", last_message=self._MANIFEST),
+        )
+        return _prompt_of(mocks["run_agent"])
+
+    def test_multi_repo_spawn_carries_block(self) -> None:
+        with _multi_repo():
+            prompt = self._spawn_prompt()
+        self.assertIn(_BLOCK_MARKER, prompt)
+        self.assertIn("acme/sibling", prompt)
+        self.assertIn("/srv/sibling-checkout", prompt)
+        # Still the decomposer prompt with its read-only contract intact.
+        self.assertIn("You are the decomposer", prompt)
+        self.assertIn("you are read-only", prompt)
+
+    def test_single_repo_spawn_has_no_block(self) -> None:
+        with patch.object(config, "EXPOSE_TRACKED_REPOS", True), \
+             patch.object(config, "default_repo_specs", lambda: [_TEST_SPEC]):
+            prompt = self._spawn_prompt()
+        self.assertNotIn(_BLOCK_MARKER, prompt)
+
+
+class ReviewerSpawnTrackedReposTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """The reviewer spawn carries the block in a multi-repo deployment and
+    stays block-free in the single-repo default. The block must not soften
+    the reviewer-only no-edit contract."""
+
+    def _seeded(self):
+        gh = FakeGitHubClient()
+        issue = make_issue(711, label="validating")
+        gh.add_issue(issue)
+        gh.seed_state(
+            711,
+            pr_number=11,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-711",
+            codex_session_id="dev-sess",
+            review_round=0,
+        )
+        return gh, issue
+
+    def _spawn_prompt(self) -> str:
+        gh, issue = self._seeded()
+        # APPROVED keeps the reviewer the only agent spawned this tick, so the
+        # captured prompt is unambiguously the review prompt.
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+        )
+        return _prompt_of(mocks["run_agent"])
+
+    def test_multi_repo_spawn_carries_block(self) -> None:
+        with _multi_repo():
+            prompt = self._spawn_prompt()
+        self.assertIn(_BLOCK_MARKER, prompt)
+        self.assertIn("acme/sibling", prompt)
+        # Still the reviewer prompt with the reviewer-only contract intact.
+        self.assertIn("automated code reviewer", prompt)
+        self.assertIn("you are a reviewer only", prompt)
+
+    def test_single_repo_spawn_has_no_block(self) -> None:
+        with patch.object(config, "EXPOSE_TRACKED_REPOS", True), \
+             patch.object(config, "default_repo_specs", lambda: [_TEST_SPEC]):
+            prompt = self._spawn_prompt()
+        self.assertNotIn(_BLOCK_MARKER, prompt)
+
+
+class QuestionSpawnTrackedReposTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """Question-stage prompt routing: the fresh spawn AND the no-session-id
+    recovery spawn carry the block in a multi-repo deployment, while a true
+    live-session resume sends the block-free followup. The block never softens
+    the read-only contract."""
+
+    def test_fresh_spawn_carries_block(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(712, label="question", body="Where does X live?")
+        gh.add_issue(issue)
+        with _multi_repo():
+            mocks = self._run(
+                lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="q-1", last_message="X lives in src/x.py.",
+                ),
+            )
+        prompt = _prompt_of(mocks["run_agent"])
+        self.assertIn(_BLOCK_MARKER, prompt)
+        self.assertIn("acme/sibling", prompt)
+        # Still the question prompt with its read-only contract intact.
+        self.assertIn("answering a standing question", prompt)
+        self.assertIn("You MUST NOT modify", prompt)
+
+    def test_fresh_spawn_single_repo_has_no_block(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(712, label="question", body="Where does X live?")
+        gh.add_issue(issue)
+        with patch.object(config, "EXPOSE_TRACKED_REPOS", True), \
+             patch.object(config, "default_repo_specs", lambda: [_TEST_SPEC]):
+            mocks = self._run(
+                lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="q-1", last_message="X lives in src/x.py.",
+                ),
+            )
+        self.assertNotIn(_BLOCK_MARKER, _prompt_of(mocks["run_agent"]))
+
+    def test_recovery_without_session_id_carries_block(self) -> None:
+        # No `question_session_id` -> a transcript-less FRESH spawn. The
+        # handler must send the full question prompt (block included) so the
+        # recovery run sees the same context a first-tick spawn would, rather
+        # than the bare followup a live session would get.
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            713, label="question",
+            title="Where does X live?",
+            body="We need to know where X lives.",
+        )
+        issue.comments.append(
+            FakeComment(id=42000, body="any progress?", user=FakeUser("alice")),
+        )
+        gh.add_issue(issue)
+        gh.seed_state(
+            713,
+            awaiting_human=True,
+            last_action_comment_id=41000,
+            question_agent=config.DECOMPOSE_AGENT_SPEC,
+            # No prior session id -- the previous run hiccupped.
+            park_reason="question_answer",
+        )
+        with _multi_repo():
+            mocks = self._run(
+                lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="q-fresh", last_message="X lives in src/x.py.",
+                ),
+            )
+        prompt = _prompt_of(mocks["run_agent"])
+        # Fresh spawn (no resume) carrying the full question prompt + block.
+        self.assertIsNone(
+            mocks["run_agent"].call_args.kwargs.get("resume_session_id")
+        )
+        self.assertIn(_BLOCK_MARKER, prompt)
+        self.assertIn("acme/sibling", prompt)
+        self.assertIn("answering a standing question", prompt)
+
+    def test_live_session_resume_followup_is_block_free(self) -> None:
+        # A live `question_session_id` resumes in place: the followup prompt
+        # carries only the human's reply, never the block (the session already
+        # saw the initial block at spawn).
+        gh = FakeGitHubClient()
+        issue = make_issue(714, label="question", title="Q", body="body")
+        issue.comments.append(
+            FakeComment(
+                id=52000, body="here is more detail", user=FakeUser("alice"),
+            ),
+        )
+        gh.add_issue(issue)
+        gh.seed_state(
+            714,
+            awaiting_human=True,
+            last_action_comment_id=51000,
+            question_agent=config.DECOMPOSE_AGENT_SPEC,
+            question_session_id="q-live",
+            park_reason="question_answer",
+        )
+        with _multi_repo():
+            mocks = self._run(
+                lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+                run_agent=_agent(session_id="q-live", last_message="answer"),
+            )
+        prompt = _prompt_of(mocks["run_agent"])
+        self.assertNotIn(_BLOCK_MARKER, prompt)
+        # It IS the followup prompt carrying the human's reply.
+        self.assertIn("here is more detail", prompt)
 
 
 if __name__ == "__main__":

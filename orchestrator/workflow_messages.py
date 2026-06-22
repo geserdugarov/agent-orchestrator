@@ -665,17 +665,21 @@ def _build_review_prompt(
     spec: RepoSpec,
     issue: Issue,
     comments_text: str,
+    specs: list[RepoSpec],
     dev_backend: str = "agent",
 ) -> str:
     body = issue.body or "(no body)"
     convo = comments_text or "(no prior comments)"
     base_ref = f"{spec.remote_name}/{spec.base_branch}"
+    tracked = _build_tracked_repos_context(spec, specs)
+    tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
         f"You are an automated code reviewer for GitHub issue #{issue.number}: {issue.title!r}. "
         f"A separate {dev_backend} session has implemented this issue and committed to the current "
         f"branch. The base branch is `{base_ref}`.\n\n"
         f"Issue body:\n{body}\n\n"
         f"Conversation so far:\n{convo}\n\n"
+        f"{tracked_block}"
         "Inspect the change with:\n"
         f"  git log --oneline {base_ref}..HEAD\n"
         f"  git diff {base_ref}...HEAD\n\n"
@@ -762,13 +766,21 @@ def _build_fix_prompt(review_feedback: str) -> str:
     )
 
 
-def _build_decompose_prompt(issue: Issue, comments_text: str) -> str:
+def _build_decompose_prompt(
+    spec: RepoSpec,
+    issue: Issue,
+    comments_text: str,
+    specs: list[RepoSpec],
+) -> str:
     body = issue.body or "(no body)"
     convo = comments_text or "(no prior comments)"
+    tracked = _build_tracked_repos_context(spec, specs)
+    tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
         f"You are the decomposer for GitHub issue #{issue.number}: {issue.title!r}.\n\n"
         f"Issue body:\n{body}\n\n"
         f"Conversation so far:\n{convo}\n\n"
+        f"{tracked_block}"
         "Decide whether this issue can be implemented in ONE coding-agent "
         "context window. If yes, return decision='single'. If no, propose a "
         "list of smaller child issues each one-shottable on its own.\n\n"
@@ -839,7 +851,12 @@ def _build_conflict_resolution_prompt(
     )
 
 
-def _build_question_prompt(issue: Issue, comments_text: str) -> str:
+def _build_question_prompt(
+    spec: RepoSpec,
+    issue: Issue,
+    comments_text: str,
+    specs: list[RepoSpec],
+) -> str:
     """Compose the read-only prompt used by the `question` stage.
 
     The agent runs in the per-issue `issue-N` worktree with read-only
@@ -847,14 +864,23 @@ def _build_question_prompt(issue: Issue, comments_text: str) -> str:
     follow-up of its own) without touching code, committing, or pushing.
     The orchestrator parks on any commit / dirty-tree output, so the
     prompt is explicit about that contract.
+
+    The tracked-repos awareness block is included for a multi-repo
+    deployment; it lists the sibling checkouts as read-only references
+    and does not soften this stage's own no-write contract (the block's
+    framing defers write permission to the surrounding prompt, which
+    grants none here).
     """
     body = issue.body or "(no body)"
     convo = comments_text or "(no prior comments)"
+    tracked = _build_tracked_repos_context(spec, specs)
+    tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
         f"You are answering a standing question on GitHub issue "
         f"#{issue.number}: {issue.title!r}.\n\n"
         f"Issue body:\n{body}\n\n"
         f"Conversation so far:\n{convo}\n\n"
+        f"{tracked_block}"
         "Read the issue and the conversation above, inspect the codebase "
         "with read-only commands (`git ls-files`, `git log`, `cat`, "
         "`grep`, etc.), and write a focused answer to the open question. "

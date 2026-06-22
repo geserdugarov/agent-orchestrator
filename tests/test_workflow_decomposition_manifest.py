@@ -10,7 +10,7 @@ os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 from orchestrator import workflow
 
 from tests.fakes import make_issue
-from tests.workflow_helpers import _manifest
+from tests.workflow_helpers import _TEST_SPEC, _manifest
 
 
 class ParseManifestTest(unittest.TestCase):
@@ -234,7 +234,8 @@ class ParseManifestTest(unittest.TestCase):
         # through the same parser the orchestrator runs on agent
         # output to keep the prompt and parser in lockstep.
         prompt = workflow._build_decompose_prompt(
-            make_issue(1, title="example", body="some body"), ""
+            _TEST_SPEC, make_issue(1, title="example", body="some body"), "",
+            [_TEST_SPEC],
         )
         m = workflow._MANIFEST_RE.search(prompt)
         self.assertIsNotNone(m, "prompt must contain a fenced example")

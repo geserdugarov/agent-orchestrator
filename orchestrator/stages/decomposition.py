@@ -343,7 +343,10 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             # this issue. Storing the parsed backend alone would also
             # strip configured CLI args on subsequent resumes.
             state.set("decomposer_agent", decomposer_spec)
-            prompt = _wf._build_decompose_prompt(issue, _wf._recent_comments_text(issue))
+            prompt = _wf._build_decompose_prompt(
+                spec, issue, _wf._recent_comments_text(issue),
+                config.default_repo_specs(),
+            )
             result = _wf._run_agent_tracked(
                 gh, issue.number,
                 agent_role="decomposer",

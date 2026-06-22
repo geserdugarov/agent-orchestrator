@@ -413,7 +413,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         prompt = workflow._build_review_prompt(
             _TEST_SPEC,
             make_issue(67013),
-            comments_text="",
+            "",
+            [_TEST_SPEC],
             dev_backend="claude",
         )
         self.assertIn("A separate claude session", prompt)

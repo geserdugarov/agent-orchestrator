@@ -139,7 +139,8 @@ def _resume_question_on_human_reply(
     # block via `_recent_comments_text`.
     if question_sid is None:
         prompt = _wf._build_question_prompt(
-            issue, _wf._recent_comments_text(issue),
+            spec, issue, _wf._recent_comments_text(issue),
+            config.default_repo_specs(),
         )
     else:
         prompt = _wf._build_question_followup_prompt(new_comments)
@@ -270,7 +271,8 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             # from subsequent resumes.
             state.set("question_agent", question_spec)
             prompt = _wf._build_question_prompt(
-                issue, _wf._recent_comments_text(issue),
+                spec, issue, _wf._recent_comments_text(issue),
+                config.default_repo_specs(),
             )
             result = _wf._run_agent_tracked(
                 gh, issue.number,
