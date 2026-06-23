@@ -35,6 +35,56 @@ def _reload(env: dict[str, str] | None = None):
         return config, analytics
 
 
+def _read_records(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _claude_stdout_with_skills(
+    *,
+    skills: tuple[str, ...],
+    args_marker: str = "skill-args-must-never-be-stored",
+    input_tokens: int = 1000,
+    output_tokens: int = 500,
+) -> str:
+    """A claude stream-json stdout that both reports usage AND triggers
+    `Skill` tool_use blocks.
+
+    Each name in `skills` becomes one `tool_use` block named `"Skill"`
+    whose `input` carries the name plus an `args` string we assert never
+    reaches the analytics record (Privacy: only the skill name is read).
+    The single `assistant` frame also carries a `usage` block so the
+    baseline usage/cost record is produced regardless of the skill switch.
+    """
+    content = [
+        {
+            "type": "tool_use",
+            "name": "Skill",
+            "input": {"skill": name, "args": args_marker},
+        }
+        for name in skills
+    ]
+    assistant = {
+        "type": "assistant",
+        "message": {
+            "id": "msg-skill",
+            "model": "claude-sonnet-4-6",
+            "content": content,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+        },
+    }
+    result_frame = {"type": "result", "num_turns": 1}
+    return "\n".join([json.dumps(assistant), json.dumps(result_frame)])
+
+
 class AnalyticsConfigTest(unittest.TestCase):
     """`ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` parse at import
     inside the analytics package: default-enabled under `config.LOG_DIR`,
@@ -531,6 +581,195 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             ]
             self.assertEqual(len(remaining), 1)
             self.assertEqual(remaining[0]["issue"], 2)
+
+
+class SkillTriggerConfigTest(unittest.TestCase):
+    """`TRACK_SKILL_TRIGGERS` parses at import inside the analytics package,
+    defaults off, is exported in `__all__`, and honors the same truthy
+    spellings as the other boolean knobs in `orchestrator.config`."""
+
+    def test_defaults_off_and_is_exported(self) -> None:
+        _, analytics = _reload()
+        self.assertFalse(analytics.TRACK_SKILL_TRIGGERS)
+        self.assertIn("TRACK_SKILL_TRIGGERS", analytics.__all__)
+
+    def test_truthy_spellings_enable(self) -> None:
+        for value in ("1", "true", "on", "yes", "On", " YES "):
+            with self.subTest(value=value):
+                _, analytics = _reload({"TRACK_SKILL_TRIGGERS": value})
+                self.assertTrue(analytics.TRACK_SKILL_TRIGGERS)
+
+    def test_falsey_and_unknown_values_stay_off(self) -> None:
+        for value in ("0", "false", "off", "no", "", "maybe"):
+            with self.subTest(value=value):
+                _, analytics = _reload({"TRACK_SKILL_TRIGGERS": value})
+                self.assertFalse(analytics.TRACK_SKILL_TRIGGERS)
+
+
+class RecordAgentExitSkillTest(unittest.TestCase):
+    """`record_agent_exit` folds skill triggers into the `agent_exit`
+    record only when `TRACK_SKILL_TRIGGERS` is on, never leaks the `Skill`
+    args or raw stdout, and keeps emitting the baseline usage/cost record
+    even when the skill parse raises (its own fail-open guard)."""
+
+    def _emit(
+        self, analytics, path, *, stdout, backend="claude", track=True,
+    ) -> list[dict]:
+        with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
+                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track):
+            analytics.record_agent_exit(
+                repo="owner/repo",
+                issue=7,
+                stage="implementing",
+                agent_role="developer",
+                backend=backend,
+                agent_spec="claude",
+                resume_session_id=None,
+                result=analytics.AgentResult(
+                    session_id="sess",
+                    last_message="",
+                    exit_code=0,
+                    timed_out=False,
+                    stdout=stdout,
+                    stderr="",
+                ),
+                duration_s=0.0,
+                review_round=0,
+                retry_count=1,
+            )
+        return _read_records(path)
+
+    def test_switch_off_drops_all_skill_fields(self) -> None:
+        # Default-off: a skill-bearing stream still records usage but none
+        # of the three skill keys appear -- shape-compatible with today.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            records = self._emit(
+                analytics, Path(td) / "a.jsonl",
+                stdout=_claude_stdout_with_skills(skills=("develop",)),
+                track=False,
+            )
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        self.assertEqual(rec["event"], "agent_exit")
+        self.assertEqual(rec["input_tokens"], 1000)
+        for key in (
+            "skills_triggered", "skills_triggered_count", "skills_available",
+        ):
+            self.assertNotIn(key, rec)
+
+    def test_switch_on_records_triggered_fields(self) -> None:
+        # develop fires twice and review once: the de-duplicated list keeps
+        # first-seen order, the count sums every invocation, and the
+        # uncaptured offered set leaves `skills_available` dropped.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            records = self._emit(
+                analytics, Path(td) / "a.jsonl",
+                stdout=_claude_stdout_with_skills(
+                    skills=("develop", "develop", "review"),
+                ),
+                track=True,
+            )
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        self.assertEqual(rec["skills_triggered"], ["develop", "review"])
+        self.assertEqual(rec["skills_triggered_count"], 3)
+        self.assertNotIn("skills_available", rec)
+        self.assertEqual(rec["input_tokens"], 1000)
+
+    def test_switch_on_no_triggers_matches_off_shape(self) -> None:
+        # Switch on but the stream triggered nothing: all three skill keys
+        # stay dropped, so the record is shape-identical to the off case.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            off = self._emit(
+                analytics, Path(td) / "off.jsonl",
+                stdout=_claude_stdout_with_skills(skills=("develop",)),
+                track=False,
+            )
+            on_none = self._emit(
+                analytics, Path(td) / "on.jsonl",
+                stdout=_claude_stdout_with_skills(skills=()),
+                track=True,
+            )
+        for key in (
+            "skills_triggered", "skills_triggered_count", "skills_available",
+        ):
+            self.assertNotIn(key, on_none[0])
+        self.assertEqual(set(off[0]), set(on_none[0]))
+
+    def test_skill_args_and_stdout_never_reach_the_record(self) -> None:
+        # Privacy: the `Skill` tool's `args` can echo issue/user content; the
+        # record carries the skill NAME but never the args payload nor the
+        # raw stdout. Mirrors the usage-sink redaction contract.
+        _, analytics = _reload()
+        marker = "ghp_LEAKED_SKILL_ARG_PAYLOAD_DO_NOT_STORE"
+        stdout = _claude_stdout_with_skills(
+            skills=("develop",), args_marker=marker,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            records = self._emit(
+                analytics, Path(td) / "a.jsonl", stdout=stdout, track=True,
+            )
+        rec = records[0]
+        self.assertEqual(rec["skills_triggered"], ["develop"])
+        blob = json.dumps(rec)
+        self.assertNotIn(marker, blob)
+        self.assertNotIn(stdout, blob)
+        for forbidden in ("args", "stdout", "prompt"):
+            self.assertNotIn(forbidden, rec)
+
+    def test_available_field_recorded_when_parser_reports_it(self) -> None:
+        # The offered-set wiring: when the extractor positively returns an
+        # `available` set it lands as `skills_available`. Today's parser
+        # always returns empty, so this exercises the branch via a stubbed
+        # extractor that mimics a future capture.
+        _, analytics = _reload()
+        fake = analytics.usage.SkillTriggers(
+            triggered=("develop",),
+            trigger_counts={"develop": 1},
+            available=("develop", "review"),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(
+                analytics.usage, "parse_agent_skills", return_value=fake,
+            ):
+                records = self._emit(
+                    analytics, Path(td) / "a.jsonl",
+                    stdout=_claude_stdout_with_skills(skills=("develop",)),
+                    track=True,
+                )
+        rec = records[0]
+        self.assertEqual(rec["skills_triggered"], ["develop"])
+        self.assertEqual(rec["skills_triggered_count"], 1)
+        self.assertEqual(rec["skills_available"], ["develop", "review"])
+
+    def test_skill_parse_failure_still_emits_baseline_record(self) -> None:
+        # A skill-parser bug must NOT drop the usage/cost record: the inner
+        # fail-open guard logs and falls through with the skill fields unset.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(
+                analytics.usage, "parse_agent_skills",
+                side_effect=RuntimeError("boom"),
+            ), self.assertLogs(analytics.log, level="ERROR"):
+                records = self._emit(
+                    analytics, Path(td) / "a.jsonl",
+                    stdout=_claude_stdout_with_skills(skills=("develop",)),
+                    track=True,
+                )
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        # Baseline usage fields survived the skill-parse failure...
+        self.assertEqual(rec["event"], "agent_exit")
+        self.assertEqual(rec["input_tokens"], 1000)
+        self.assertEqual(rec["output_tokens"], 500)
+        # ...and the skill fields were left off.
+        for key in (
+            "skills_triggered", "skills_triggered_count", "skills_available",
+        ):
+            self.assertNotIn(key, rec)
 
 
 if __name__ == "__main__":
