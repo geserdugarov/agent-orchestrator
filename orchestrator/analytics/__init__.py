@@ -23,10 +23,15 @@ Event kinds written today:
   clean return, `"error"` when the handler raised). Backlog-skips
   short-circuit before the timing wrapper and are NOT recorded.
 - `agent_exit` -- one record per tracked agent invocation, written
-  from `workflow._run_agent_tracked` with parsed usage / cost.
+  from `workflow._run_agent_tracked` with parsed usage / cost. When the
+  opt-in `TRACK_SKILL_TRIGGERS` switch is on it additionally carries the
+  agent's triggered skills (`skills_triggered` / `skills_triggered_count`
+  / `skills_available`); with the switch off (the default) those keys are
+  absent and the record shape is unchanged.
 
-`ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, and the libpq URL
-for the analytics Postgres service (`ANALYTICS_DB_URL`) are parsed at
+`ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, the libpq URL
+for the analytics Postgres service (`ANALYTICS_DB_URL`), and the
+skill-trigger opt-in (`TRACK_SKILL_TRIGGERS`, default off) are parsed at
 import here -- not in `orchestrator.config` -- so the sink owns its own
 configuration surface and `config` does not pull analytics defaults in
 transitively. `append_record` is a no-op when
@@ -84,6 +89,7 @@ __all__ = [
     "ANALYTICS_DB_URL",
     "ANALYTICS_LOG_PATH",
     "ANALYTICS_RETENTION_DAYS",
+    "TRACK_SKILL_TRIGGERS",
     "append_record",
     "build_record",
     "config",
@@ -143,12 +149,31 @@ def _parse_db_url() -> Optional[str]:
     return raw
 
 
+def _parse_track_skill_triggers() -> bool:
+    """Resolve `TRACK_SKILL_TRIGGERS` from the environment.
+
+    Default off. When on, `record_agent_exit` runs the skill-trigger
+    extractor (`usage.parse_agent_skills`) and folds `skills_triggered` /
+    `skills_triggered_count` / `skills_available` into the `agent_exit`
+    record. The switch defaults off *because* the sink itself is default-on
+    (`ANALYTICS_LOG_PATH` -> `LOG_DIR/analytics.jsonl`): an on-by-default
+    switch would silently add skill fields to every default install's
+    records, breaking the "absent opt-in -> today's record shape"
+    guarantee. Truthy spellings match `orchestrator.config`'s other boolean
+    knobs: `1` / `true` / `on` / `yes` (case-insensitive).
+    """
+    return os.environ.get("TRACK_SKILL_TRIGGERS", "off").strip().lower() in (
+        "1", "true", "on", "yes",
+    )
+
+
 # Sink configuration. Parsed at import so a fresh process picks up the
 # operator's env immediately; tests patch these module attributes
 # directly (`patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`).
 ANALYTICS_LOG_PATH: Optional[Path] = _parse_log_path()
 ANALYTICS_RETENTION_DAYS: int = _parse_retention_days()
 ANALYTICS_DB_URL: Optional[str] = _parse_db_url()
+TRACK_SKILL_TRIGGERS: bool = _parse_track_skill_triggers()
 
 
 def build_record(
@@ -285,6 +310,19 @@ def record_agent_exit(
     `workflow._configured_model`) the codex parser uses when no usage
     frame carries one; the claude parser ignores it (claude streams always
     include `message.model`).
+
+    When `TRACK_SKILL_TRIGGERS` is on, the agent's triggered skills are
+    parsed from the same stdout and folded into the record as
+    `skills_triggered` / `skills_triggered_count` / `skills_available`.
+    That parse rides its OWN inner try/except -- it must NOT share the
+    usage-parse guard above, which `return`s and drops the whole record on
+    failure: an opt-in skill-parser bug must never cost the baseline
+    usage / cost record that ships today. On any skill-parse failure we log
+    and fall through with the three fields left `None`, so `build_record`
+    drops them and the record degrades to "agent_exit without skill
+    fields," never a missing record. With the switch off the extractor
+    never runs and the record stays byte-for-byte shape-compatible with
+    today's.
     """
     try:
         metrics = usage.parse_agent_usage(
@@ -297,6 +335,23 @@ def record_agent_exit(
             issue, backend,
         )
         return
+    skills_triggered: Optional[list[str]] = None
+    skills_triggered_count: Optional[int] = None
+    skills_available: Optional[list[str]] = None
+    if TRACK_SKILL_TRIGGERS:
+        try:
+            skills = usage.parse_agent_skills(backend, result.stdout)
+            if skills.triggered:
+                skills_triggered = list(skills.triggered)
+                skills_triggered_count = sum(skills.trigger_counts.values())
+            if skills.available:
+                skills_available = list(skills.available)
+        except Exception:
+            log.exception(
+                "issue=#%d analytics: parse_agent_skills(%s) failed; "
+                "emitting record without skill fields",
+                issue, backend,
+            )
     append_record(
         build_record(
             repo=repo,
@@ -322,6 +377,9 @@ def record_agent_exit(
             turns=metrics.turns,
             cost_usd=metrics.cost_usd,
             cost_source=metrics.cost_source,
+            skills_triggered=skills_triggered,
+            skills_triggered_count=skills_triggered_count,
+            skills_available=skills_available,
         )
     )
 
