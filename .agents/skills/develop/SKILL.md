@@ -1,6 +1,6 @@
 ---
 name: develop
-description: Project conventions and recurring gotchas for implementer agents working on agent-orchestrator, plus Rust-specific LLM gotchas. Use before opening a PR for any change in orchestrator/, tests/, or docs/, and for any change in a Rust codebase.
+description: Project conventions and recurring gotchas for implementer agents working on agent-orchestrator. Use before opening a PR for any change in orchestrator/, tests/, or docs/.
 ---
 
 # Developer skill — agent-orchestrator
@@ -49,25 +49,6 @@ When you move a handler, helper, or constant, grep for the symbol across these f
 - the module docstrings at the top of `orchestrator/workflow.py`, `workflow_drift.py`, `workflow_messages.py`, `worktrees.py`, and `orchestrator/stages/*.py`
 
 Be precise about what is and isn't re-exported — overstated claims like "every helper is re-exported" get flagged.
-
-## Rust gotchas
-
-When the issue is for a Rust codebase, watch for these patterns LLMs reliably get wrong:
-
-- **Lifetime laundering.** Don't return references whose lifetime is implicitly bound to a temporary or to an unrelated input — a cache keyed by `&'a str` collapses to an empty lifetime the moment any of its inputs goes out of scope. If two references have independent lifetimes, give them independent parameters (`<'a, 'b>`); if the borrow checker still won't let it pass, store owned data (`String`, `Vec<T>`) instead of `&str` / `&[T]`. When asking for help, show the calling code — lifetime errors usually live at the call site, not the signature.
-- **Sync mutex inside async.** Use `tokio::sync::Mutex` whenever a guard may be held across an `.await`. `std::sync::Mutex` blocks the worker thread and deadlocks under tokio. Same rule for `RwLock`, channels, and `Notify` — pick the async-aware variant. State `tokio` / `axum` / `sqlx` major.minor up front in prompts so the LLM doesn't mix `std` and tokio primitives.
-- **Drop order / RAII in async.** `Drop` runs in reverse declaration order and cannot be `async`. Transactions, file handles, and pooled connections must be closed explicitly (`tx.commit().await?`, `handle.shutdown().await?`) — never lean on implicit drop in async paths, which silently rolls back, blocks the executor, or panics.
-- **Unsafe without invariants.** Every `unsafe { ... }` block needs a `// SAFETY:` comment naming the invariants the caller is upholding (alignment, aliasing, lifetime, init state). `ptr::read` on a network buffer without an alignment guarantee is UB even when the test passes on x86. Run `cargo miri test` against any change touching `unsafe`; bare `cargo test` won't catch UB that happens to compile.
-- **Cancel-safety in async.** Any future passed to `tokio::select!`, `timeout`, or `JoinSet` can be dropped mid-`.await` — a cancellation between "write to DB" and "send ACK" duplicates work on retry. Annotate every async fn `// cancel-safe` or `// NOT cancel-safe` with one-line justification, and isolate non-cancel-safe critical sections behind `tokio::spawn(...).await` so the join, not the inner future, is what gets cancelled.
-- **Blanket impls in public APIs.** `impl<T: Trait> Mine for T` is a semver landmine: a downstream `impl Mine for Foo` conflicts the moment your crate adds its own impl, and the breakage doesn't show up until someone else upgrades. Reserve blanket impls for sealed traits; otherwise write concrete impls per type.
-- **Large values on the stack.** `fn f() -> [u8; 1 << 20]` and `let buf = [0u8; 1 << 20];` overflow in debug builds and aren't reliably elided by NRVO. Allocate on the heap instead: `vec![0u8; N].into_boxed_slice()` for a zeroed `Box<[u8]>`, or `Box::<[T]>::new_uninit_slice(N)` followed by per-element initialization and an `unsafe { slice.assume_init() }` (with a `// SAFETY:` note) when the element type doesn't have a meaningful zero. Don't reach for `Box::<[T; N]>::new_zeroed()` — it yields `Box<MaybeUninit<[T; N]>>`, needs unsafe `assume_init`, and is UB unless all-zero is a valid bit pattern for `T`.
-
-Before committing Rust changes:
-
-- `cargo fmt --all -- --check`
-- `cargo clippy --all-targets --all-features -- -D warnings` (consider enabling `clippy::pedantic` / `clippy::nursery` for newly-added code)
-- `cargo test --all-features`
-- `cargo miri test` if the diff touches any `unsafe` block
 
 ## Out of scope without explicit ask
 

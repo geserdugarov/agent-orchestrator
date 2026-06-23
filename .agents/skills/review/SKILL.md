@@ -1,6 +1,6 @@
 ---
 name: review
-description: Review checklist for reviewer agents on agent-orchestrator PRs, plus Rust-specific LLM defect patterns. Use when evaluating a developer-produced branch before approval or change-requests, including Rust PRs.
+description: Review checklist for reviewer agents on agent-orchestrator PRs. Use when evaluating a developer-produced branch before approval or change-requests.
 ---
 
 # Reviewer skill — agent-orchestrator
@@ -48,25 +48,6 @@ Treat blanket statements like "every helper is re-exported" with suspicion — v
 ## Commit hygiene
 
 - Conventional Commits: `<type>: <subject>` only. Reject any commit with a body, a `Co-Authored-By` trailer, or a non-imperative subject. Type must be one of `feat`, `fix`, `chore`, `docs`, `refactor`, `test`.
-
-## Rust gotchas
-
-For PRs against a Rust codebase, the patterns below are LLM-prone defects to call out explicitly:
-
-- **Lifetime laundering.** Reject functions whose returned reference is implicitly tied to a temporary or to an unrelated input — the borrow checker collapses both lifetimes to their intersection and the caller will see a `does not live long enough` error far from the signature. Ask for split lifetimes (`<'a, 'b>`) or owned data (`String`, `Vec<T>`).
-- **Sync mutex in async paths.** Flag any `std::sync::Mutex` / `std::sync::RwLock` / `std::mpsc` whose guard or receiver can span an `.await`. Require `tokio::sync::*` (or `parking_lot` only where the critical section is provably sync). Verify dependency major.minor versions are stated, not guessed.
-- **Drop in async paths.** A `Drop` impl that performs blocking or async-unsafe work inside an async path is a defect — silent rollback on a failed `commit().await?`, blocking I/O on an executor thread, panics from re-entry. Require an explicit `commit().await?` / `close().await?` / `shutdown().await?`, not implicit drop.
-- **Unsafe without `// SAFETY:`.** Every `unsafe` block must carry a `// SAFETY:` comment naming the invariants the caller upholds (alignment, aliasing, lifetime, init state). PRs touching `unsafe` must run `cargo miri test` and the result must be referenced in the description. `ptr::read` / `from_raw_parts` / `transmute` over external bytes are the usual suspects.
-- **Cancel-safety unanalyzed.** Reject newly-introduced or modified async fns that don't declare `// cancel-safe` or `// NOT cancel-safe` with justification. Futures used inside `tokio::select!`, `timeout`, or `JoinSet` whose cancellation can leave state half-written (e.g. DB write committed but ACK not sent) need an isolating `tokio::spawn(...).await`.
-- **Blanket impls in public APIs.** `impl<T: Trait> MyTrait for T` in a non-sealed public trait is a semver landmine — a downstream `impl MyTrait for Foo` conflicts the moment the upstream adds its own impl. Ask for concrete impls per type or a sealed trait.
-- **Large stack values.** Returning `[T; N]` or binding `let x = [T; N];` with large `N` (rule of thumb: > ~16 KiB) belongs on the heap. NRVO is not guaranteed and debug builds will overflow. Expect `Vec<T>`, `vec![..; N].into_boxed_slice()`, or `Box::<[T]>::new_uninit_slice(N)` with explicit initialization and a `// SAFETY:` note around `assume_init()`. Reject `Box::<[T; N]>::new_zeroed()` patterns — they return `Box<MaybeUninit<_>>`, require unsafe `assume_init`, and are only sound when zero is a valid bit pattern for `T`.
-
-CI / lint gates to require for Rust PRs:
-
-- `cargo fmt --all -- --check`
-- `cargo clippy --all-targets --all-features -- -D warnings` (prefer `clippy::pedantic` / `clippy::nursery` enabled for new code)
-- `cargo test --all-features`
-- `cargo miri test` for any PR touching `unsafe`
 
 ## Out of scope — push back
 
