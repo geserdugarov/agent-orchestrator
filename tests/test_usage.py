@@ -868,6 +868,42 @@ class ClaudeSkillTriggerTest(unittest.TestCase):
         # Offered set stays empty until its stream source is captured.
         self.assertEqual(s.available, ())
 
+    def test_partial_frame_snapshots_not_double_counted(self) -> None:
+        # Under `--include-partial-messages` claude emits several cumulative
+        # snapshots of one message sharing a `message.id` (the same reason
+        # `parse_claude_usage` groups by id and keeps the last frame). A
+        # `Skill` block present in an early snapshot persists into every later
+        # snapshot, so counting every frame would over-report the trigger.
+        # The final snapshot per id wins, so one trigger counts once.
+        stdout = _jsonl(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "tool_use", "name": "Skill",
+                         "input": {"skill": "develop"}},
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "tool_use", "name": "Skill",
+                         "input": {"skill": "develop"}},
+                        {"type": "tool_use", "name": "Read",
+                         "input": {"file_path": "x.py"}},
+                    ],
+                },
+            },
+            {"type": "result", "num_turns": 1},
+        )
+        s = parse_claude_skills(stdout)
+        self.assertEqual(s.triggered, ("develop",))
+        self.assertEqual(s.trigger_counts, {"develop": 1})
+
     def test_malformed_lines_are_skipped(self) -> None:
         good = json.dumps({
             "type": "assistant",
@@ -1024,6 +1060,58 @@ class CodexSkillTriggerTest(unittest.TestCase):
         s = parse_codex_skills(stdout)
         self.assertEqual(s.triggered, ("review",))
         self.assertNotIn(secret, repr(s))
+
+    def test_nested_args_payload_is_not_inspected(self) -> None:
+        # A non-Skill call whose `arguments` dict echoes user content that
+        # happens to contain a skill-shaped object must NOT register as a
+        # trigger: the scan descends only through codex's structural envelope
+        # keys, never into free-form `arguments` / `input` payloads. A full
+        # recursion would both false-positive and leak the nested value.
+        leaked = "user-content-skill-name"
+        stdout = _jsonl(
+            {"type": "item.completed", "item": {
+                "type": "function_call", "name": "Read",
+                "arguments": {
+                    "file_path": "x.py",
+                    "echo": {"type": "skill_invoked", "skill": leaked},
+                }}},
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s, SkillTriggers())
+        self.assertNotIn(leaked, repr(s))
+
+    def test_skill_name_in_input_payload_is_not_inspected(self) -> None:
+        # Same guard for a non-Skill call carrying a nested skill-shaped dict
+        # under `input`: the payload is never walked, so nothing is recorded.
+        leaked = "another-leaked-name"
+        stdout = _jsonl(
+            {"type": "item.completed", "item": {
+                "type": "function_call", "name": "Bash",
+                "input": {"cmd": "ls",
+                          "meta": {"type": "skill_event", "skill_name": leaked}}}},
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s, SkillTriggers())
+        self.assertNotIn(leaked, repr(s))
+
+    def test_list_valued_envelope_preserves_order(self) -> None:
+        # A list-valued envelope (`payload=[first, second]`) must yield its
+        # skills in document order, not reversed -- the first-seen-order
+        # contract `triggered` promises.
+        stdout = _jsonl(
+            {"type": "batch", "payload": [
+                {"type": "skill_invoked", "skill": "develop"},
+                {"type": "skill_invoked", "skill": "review"},
+            ]},
+            {"type": "item.completed", "item": [
+                {"type": "function_call", "name": "Skill",
+                 "arguments": json.dumps({"skill": "verify"})},
+                {"type": "function_call", "name": "Skill",
+                 "arguments": json.dumps({"skill": "simplify"})},
+            ]},
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s.triggered, ("develop", "review", "verify", "simplify"))
 
     def test_empty_stdout(self) -> None:
         self.assertEqual(parse_codex_skills(""), SkillTriggers())

@@ -30,8 +30,70 @@ debugging "why did the implementer ignore the commit convention" or
 to correlate skill use with review-round count or cost.
 
 This document designs a narrow, observation-only system to track skill
-triggering. **Scope of the picked-up issue is this design doc only** —
-no implementation lands here.
+triggering. The design issue that picked this up landed the design doc
+only; **Sequencing step 1 (the extractor + `agent_exit` fields + opt-in
+switch) has since shipped** — see [Status](#status) for what is now in the
+tree and what remains a follow-up or a capture task.
+
+## Status
+
+Sequencing step 1 landed across three commits: `parse_claude_skills` /
+`parse_codex_skills` / `parse_agent_skills` plus the `SkillTriggers`
+dataclass in `orchestrator/usage.py` (`a3e2c0a`); the
+`record_agent_exit` wiring, the `TRACK_SKILL_TRIGGERS` opt-in switch, and
+the `agent_exit` fields in `orchestrator/analytics/__init__.py`
+(`ec6f1df`); and the `docs/configuration.md` / `docs/observability.md`
+updates (`ec6f1df`, `1a7d607`). Unit tests cover both backends over
+synthetic skill-bearing and skill-free streams.
+
+One narrow defect was fixed during the post-landing review: the claude
+*triggered* extractor counted every `assistant` frame, so a `Skill` block
+that persists across the cumulative partial snapshots one message emits
+under `--include-partial-messages` was over-counted in `trigger_counts`.
+`parse_claude_skills` now groups by `message.id` and keeps the final
+snapshot per id — the same last-frame-wins discipline `parse_claude_usage`
+already applies for exactly this reason — so a single trigger counts once.
+
+Steps 2 (audit `skill_triggered` event) and 3 (dashboard widget) did
+**not** land and remain the deferred follow-ups below; the offered-skills
+set and the codex event shape remain best-effort capture tasks (Open
+questions). The remaining design sections describe the shipped behavior.
+
+### Live data after the switch was turned on
+
+The operator has flipped `TRACK_SKILL_TRIGGERS=on` in production, so the
+sink has now *incidentally* captured real skill-bearing records (these are
+live `agent_exit` rows, **not** Step-0 test fixtures — no captured
+`*.jsonl` fixtures exist in the tree, so Sequencing step 0 is still
+outstanding). The signal so far, all from 2026-06-23:
+
+| backend | role / stage             | runs (switch on) | skill-bearing            |
+| ------- | ------------------------ | ---------------- | ------------------------ |
+| claude  | developer / implementing | 9                | 3 → `['develop']`, count 1 |
+| codex   | reviewer / validating    | 5                | 0                        |
+| codex   | decomposer               | 2                | 0                        |
+
+What this confirms empirically:
+
+- The **claude triggered path is validated on real streams** (3 genuine
+  `develop` hits). Across ~2160 `agent_exit` records the extractor logged
+  zero crashes and clean output — the low-noise evidence the switch
+  default wants before any flip.
+- The **codex extractor has captured nothing** across 5 real reviewer
+  runs and 2 decomposer runs — the default reviewer's `review` skill is
+  going unobserved in production today (see the codex Open question).
+- `skills_available` has **never appeared in a single record** — the
+  offered set is confirmed uncaptured live, not just unconfirmed in
+  theory (see the claude offered-skills Open question).
+- The partial-frame fix has **no live reproduction**: all 3 claude
+  records were captured on `main` *before* the fix and already read
+  count 1, so `tool_use`-block duplication across partial snapshots has
+  not been observed directly — only the usage sub-object is known to
+  repeat. The fix is still correct (defensive, and consistent with
+  `parse_claude_usage`, whose docstring confirms claude emits multiple
+  `type:"assistant"` frames per `message.id`), and the synthetic test is
+  its direct evidence; a Step-0 capture would confirm whether `tool_use`
+  blocks duplicate in the same way the usage block does.
 
 ## What "triggered" means on the wire
 
@@ -131,10 +193,12 @@ two-parser-plus-dispatcher shape and resilience contract:
 
 - `parse_claude_skills(stdout) -> SkillTriggers` walks `assistant`
   frames, collecting `tool_use` blocks whose `name == "Skill"` and
-  reading `input.skill` (the firm *triggered* signal). It *additionally*
-  attempts a best-effort read of the offered set from the `system`/`init`
-  frame, returning nothing for it until the exact field is confirmed
-  against a captured stream — never raising when the field is absent.
+  reading `input.skill` (the firm *triggered* signal). As shipped it
+  reads **only** that triggered set and leaves `available` empty — it does
+  not inspect the `system`/`init` frame, because no captured stream has
+  confirmed an offered-skills field there yet (Open questions). Pinning
+  that source stays a pure capture task; the parser never raises on its
+  absence.
 - `parse_codex_skills(stdout) -> SkillTriggers` walks the same
   `codex exec --json` event stream `parse_codex_usage` consumes and
   collects skill-invocation events (best-effort: the precise codex event
@@ -324,49 +388,94 @@ that ships the parser.
 
 ## Open questions
 
-- **Claude offered-skills source (capture task).** The exact
+Status as of the step-1 landing (see [Status](#status)): the two capture
+tasks are **still open** — step 1 shipped grounded on synthetic streams,
+not captured ones, so the parsers extract from plausible-but-unconfirmed
+shapes — while the switch-default is **settled for v1** and the audit
+event and dashboard are **explicitly deferred** follow-ups. The
+[live data](#live-data-after-the-switch-was-turned-on) gathered since the
+operator turned the switch on now confirms both capture-task gaps
+empirically (codex captured nothing; `skills_available` never appeared)
+and makes the **codex capture the priority** — that is where the default
+reviewer's signal is lost in production today.
+
+- **Claude offered-skills source (capture task — still open).** The exact
   stream-json location of the offered set is unconfirmed — the headless
   docs frame `system/init` as model / tools / MCP / plugins, not a skills
-  list. Capture a real `claude --output-format stream-json` run that has
-  skills available and pin down whether the offered set is derivable
-  (e.g. a `Skill` entry in the init `tools` array) before relying on
-  `skills_available`. If it is not cleanly derivable, ship
-  `skills_triggered` only.
-- **Codex skill event shape (capture task).** Capture a `codex exec
-  --json` run that triggers a repo-local skill and pin down the event
-  the trigger emits, so `parse_codex_skills` reads a real field rather
-  than a guess. Until then the codex extractor is best-effort and may
-  return empty; this is the residual reviewer-observability gap, tracked
-  rather than hidden.
-- **Switch default.** Ships **off** so default installs are unchanged.
-  Whether a later release flips it on by default depends on how noisy the
-  fields prove in practice.
-- **Audit-event follow-up.** Whether per-invocation ordering (the audit
-  `skill_triggered` event) is ever needed, or the `agent_exit`
-  first-seen-ordered list suffices.
-- **Dashboard surface.** A skill-trigger-rate-per-role widget is a
-  natural read-model addition once data accumulates, but is out of this
-  design's scope — the `extras JSONB` column makes it a pure read-side
-  change later.
+  list. As shipped, `parse_claude_skills` returns an empty `available`
+  set and `record_agent_exit` therefore drops `skills_available`
+  entirely; the *triggered* set does not depend on it. Live data backs
+  keeping it dropped: `skills_available` has appeared in **zero** records
+  since the switch went on, so the empty-best-effort handling is right and
+  `skills_triggered` standing alone is the correct call today. This is
+  capturable now — the orchestrator already runs claude in `implementing`
+  with `develop` on offer, so the only blocker is that raw stdout is not
+  persisted; a one-off manual capture of a real
+  `claude --output-format stream-json` run resolves it and pins whether
+  the offered set is derivable (e.g. a `Skill` entry in the init `tools`
+  array) before relying on `skills_available`. If it is not cleanly
+  derivable, `skills_triggered` stands alone as it does today.
+- **Codex skill event shape (capture task — still open; the HEADLINE
+  gap).** This is the single most important open question, not a residual
+  one: `REVIEW_AGENT=codex` makes the reviewer the most common skill case,
+  and live data shows it is effectively non-functional. Across the **5
+  codex reviewer runs** (plus 2 decomposer runs) after the switch went on,
+  **0 captured a skill trigger** — the default reviewer's `review` skill
+  is going unobserved in production today. The shipped `parse_codex_skills`
+  is best-effort: it scans for a `Skill`-named tool/function call or a
+  `*skill*`-typed event and returns empty on a real stream whose shape
+  differs. A raw `codex exec --json` capture of a reviewer run is needed to
+  tell whether the reviewer simply does not trigger `review` or the guessed
+  event shape does not match the real one. When that capture lands, point
+  the parser at the confirmed field and guard against the same
+  per-invocation double-count the claude path was fixed for — codex emits
+  started/completed events for one call. This is the next step to
+  prioritize: it is where the default reviewer's signal is lost today.
+- **Switch default (settled for v1; keep off).** Shipped **off** so
+  default installs are unchanged. Live data is reassuring on noise — the
+  operator has run with the switch on across ~2160 `agent_exit` records
+  with zero crashes and clean output, exactly the "low-noise in practice"
+  evidence a flip would want. But do **not** flip to default-on yet: the
+  noise is low partly *because codex emits nothing*, so promoting the
+  default now would advertise a feature that silently covers only the
+  claude backend. Keep it off until codex coverage exists (the headline
+  gap above); revisit then.
+- **Audit-event follow-up (deferred).** Whether per-invocation ordering
+  (the audit `skill_triggered` event) is ever needed, or the `agent_exit`
+  first-seen-ordered list suffices. Live data makes this premature: all 3
+  real triggers so far are single (`count 1`, one skill), so per-invocation
+  ordering is moot. Not implemented — step 2 below.
+- **Dashboard surface (deferred).** A skill-trigger-rate-per-role widget
+  is a natural read-model addition once data accumulates, but is out of
+  this design's scope — the `extras JSONB` column makes it a pure
+  read-side change later. With only 3 skill-bearing records (and one
+  backend) there is nothing to chart yet. Not implemented — step 3 below.
 
 ## Sequencing
 
-0. **Stream capture (prerequisite).** Capture real `claude` and `codex`
-   stream samples (skill-bearing and skill-free) to pin the trigger event
-   shape per backend and resolve the two capture-task open questions
-   above. This grounds the parsers in observed frames, not assumed ones.
-1. **Extractor + `agent_exit` fields + opt-in switch.** One logical
-   commit: `parse_claude_skills` / `parse_codex_skills` /
-   `parse_agent_skills` in `usage.py`, the
+0. **Stream capture (prerequisite — not done).** Capture real `claude`
+   and `codex` stream samples (skill-bearing and skill-free) to pin the
+   trigger event shape per backend and resolve the two capture-task open
+   questions above. Step 1 shipped *ahead* of this, grounded on synthetic
+   frames; the captures remain outstanding and keep `skills_available` and
+   the codex extractor best-effort. Prioritize the **codex reviewer
+   capture** — live data (above) shows 0/5 codex reviewer runs captured a
+   trigger, so that is where the default reviewer's signal is lost today;
+   the claude offered-set capture is the secondary piece and is doable as
+   a one-off manual run since `develop` is already on offer in
+   `implementing`.
+1. **Extractor + `agent_exit` fields + opt-in switch — LANDED**
+   (`a3e2c0a`, `ec6f1df`, `1a7d607`): `parse_claude_skills` /
+   `parse_codex_skills` / `parse_agent_skills` in `usage.py`, the
    `analytics.record_agent_exit` wiring (gated on the switch, fail-open
    inner try/except, passing `None` for empty skill fields), the
-   `TRACK_SKILL_TRIGGERS` knob, unit tests over the captured
-   skill-bearing claude *and* codex streams plus a skill-free stream per
-   backend, and the `docs/observability.md` / `docs/configuration.md`
-   updates. No DDL — `extras JSONB` ingests the fields immediately.
+   `TRACK_SKILL_TRIGGERS` knob, unit tests over synthetic skill-bearing
+   claude *and* codex streams plus a skill-free stream per backend, and
+   the `docs/observability.md` / `docs/configuration.md` updates. No DDL —
+   `extras JSONB` ingests the fields immediately.
 2. **(Optional) Audit `skill_triggered` event** if per-invocation
-   forensics are wanted.
-3. **(Optional) Dashboard widget** over the accumulated field.
+   forensics are wanted. Not done.
+3. **(Optional) Dashboard widget** over the accumulated field. Not done.
 
 Steps 2 and 3 are independent follow-ups; step 1 stands alone and is
 fully reversible by clearing the switch.

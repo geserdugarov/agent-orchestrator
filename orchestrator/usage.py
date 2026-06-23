@@ -751,13 +751,22 @@ def parse_claude_skills(stdout: str) -> SkillTriggers:
     """Extract triggered skills from a ``claude ... stream-json`` run.
 
     A skill invocation surfaces as a ``tool_use`` content block named
-    ``"Skill"`` inside an ``assistant`` message; we walk those blocks and read
-    ``input.skill`` in first-seen order. ``available`` stays empty: the
-    headless stream has no confirmed offered-skills field yet (the design's
-    capture-task Open question), and we never raise on its absence.
+    ``"Skill"`` inside an ``assistant`` message; we read ``input.skill`` in
+    first-seen order. ``available`` stays empty: the headless stream has no
+    confirmed offered-skills field yet (the design's capture-task Open
+    question), and we never raise on its absence.
+
+    Assistant frames are grouped by ``message.id`` and the last frame per id
+    wins -- the same discipline ``parse_claude_usage`` applies, and for the
+    same reason: under ``--include-partial-messages`` claude emits several
+    cumulative snapshots of one message, so a ``Skill`` block appears in the
+    snapshot where it lands *and* every later snapshot of that message.
+    Counting every frame would inflate ``trigger_counts`` for a single
+    trigger; taking the final (complete) snapshot per id counts it once.
     """
-    names: list[str] = []
-    for ev in _iter_events(stdout):
+    by_id: dict[str, list[str]] = {}
+    id_order: list[str] = []
+    for idx, ev in enumerate(_iter_events(stdout)):
         if ev.get("type") != "assistant":
             continue
         msg = ev.get("message")
@@ -766,11 +775,19 @@ def parse_claude_skills(stdout: str) -> SkillTriggers:
         content = msg.get("content")
         if not isinstance(content, list):
             continue
-        for block in content:
-            name = _claude_skill_name(block)
-            if name is not None:
-                names.append(name)
-    return _collect(names)
+        names = [
+            name
+            for name in (_claude_skill_name(block) for block in content)
+            if name is not None
+        ]
+        msg_id = msg.get("id") or ev.get("request_id") or str(idx)
+        if msg_id not in by_id:
+            id_order.append(msg_id)
+        by_id[msg_id] = names
+    flat: list[str] = []
+    for msg_id in id_order:
+        flat.extend(by_id[msg_id])
+    return _collect(flat)
 
 
 def _codex_skill_from_call(obj: dict[str, Any]) -> Optional[str]:
@@ -823,18 +840,63 @@ def _codex_skill_from_event(obj: dict[str, Any]) -> Optional[str]:
     return None
 
 
+# Codex wraps its events/items under these structural envelope keys. The
+# skill scan descends ONLY through them -- never into free-form payload keys
+# (``arguments`` / ``args`` / ``input`` / ``output`` / ``content`` ...) whose
+# values can echo issue or user text. A full ``.. | objects`` recursion (as
+# the usage parser uses for cost) would let a nested payload object shaped
+# like ``{"type": "...skill...", "skill": "<user text>"}`` false-positive as a
+# trigger and record arbitrary content -- the names-only Privacy contract
+# (see ``plans/skill-trigger-tracking.md``) forbids that.
+_CODEX_SKILL_CONTAINER_KEYS: tuple[str, ...] = ("item", "msg", "payload")
+
+
+def _codex_skill_objects(ev: Any) -> Iterable[dict[str, Any]]:
+    """Yield the event and its structurally-nested envelope dicts, in order.
+
+    Steps through ``_CODEX_SKILL_CONTAINER_KEYS`` only, so a skill name is
+    read from a real ``Skill`` call/event shape but never from an arbitrary
+    nested ``args`` / ``input`` payload (Privacy: names only). The
+    ``name == "Skill"`` / ``*skill*``-typed matchers still read their own
+    object's ``input`` / ``arguments`` ``skill`` key directly -- they just no
+    longer have free-form sub-payloads handed to them as candidate objects.
+
+    Yields in document order (parent before children, list items left to
+    right) -- a recursive walk like ``_walk_objects`` rather than a LIFO
+    stack, so a list-valued envelope (``payload=[first, second]``) preserves
+    the first-seen ordering ``triggered`` promises.
+    """
+    if not isinstance(ev, dict):
+        return
+    yield ev
+    for key in _CODEX_SKILL_CONTAINER_KEYS:
+        child = ev.get(key)
+        if isinstance(child, dict):
+            yield from _codex_skill_objects(child)
+        elif isinstance(child, list):
+            for item in child:
+                yield from _codex_skill_objects(item)
+
+
 def parse_codex_skills(stdout: str) -> SkillTriggers:
     """Extract triggered skills from a ``codex exec --json`` run (best-effort).
 
     The precise codex skill-event shape is an open capture task, so this is
-    deliberately *best-effort rather than hardcoded empty*: each event is
-    searched for either a ``Skill``-named tool/function call or a dedicated
-    ``*skill*``-typed event. A stream that surfaces neither -- e.g. a normal
-    usage-only run -- returns an empty ``SkillTriggers`` without raising.
+    deliberately *best-effort rather than hardcoded empty*: each event and its
+    structural envelopes (``item`` / ``msg`` / ``payload``) are searched for
+    either a ``Skill``-named tool/function call or a dedicated ``*skill*``-typed
+    event. A stream that surfaces neither -- e.g. a normal usage-only run --
+    returns an empty ``SkillTriggers`` without raising.
+
+    The walk is bounded to those envelope keys rather than recursing into every
+    nested dict (``_codex_skill_objects``): free-form ``arguments`` / ``args``
+    / ``input`` payloads can echo user content, and inspecting them for a
+    skill-shaped object would both leak that content and false-positify
+    non-skill payloads as triggers (names-only Privacy contract).
     """
     names: list[str] = []
     for ev in _iter_events(stdout):
-        for obj in _walk_objects(ev):
+        for obj in _codex_skill_objects(ev):
             name = _codex_skill_from_call(obj) or _codex_skill_from_event(obj)
             if name is not None:
                 names.append(name)
