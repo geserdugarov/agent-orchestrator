@@ -13,6 +13,7 @@ from unittest.mock import patch
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import branch_publication, config, workflow, worktree_lifecycle
+from orchestrator.stages import implementing
 
 from tests.fakes import (
     FakeComment,
@@ -142,6 +143,107 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
             data.get("branch"),
             "orchestrator/geserdugarov__agent-orchestrator/issue-11",
         )
+
+
+class FormatPrAgentMessageTest(unittest.TestCase):
+    """`_format_pr_agent_message` caps the agent's final message with a visible
+    truncation marker (issue #499): a short message is verbatim, a long one is
+    trimmed on a boundary and explicitly marked, and a dangling code fence is
+    closed so the marker still renders."""
+
+    def test_short_message_returned_verbatim(self) -> None:
+        msg = "all done — see the diff."
+        out = implementing._format_pr_agent_message(msg)
+        self.assertEqual(out, msg)
+        self.assertNotIn(implementing._PR_BODY_TRUNCATION_MARKER, out)
+
+    def test_message_at_cap_is_not_marked(self) -> None:
+        msg = "x" * implementing._PR_BODY_AGENT_MESSAGE_CAP
+        out = implementing._format_pr_agent_message(msg)
+        self.assertEqual(out, msg)
+        self.assertNotIn(implementing._PR_BODY_TRUNCATION_MARKER, out)
+
+    def test_long_message_truncated_with_visible_marker(self) -> None:
+        msg = "word " * 20000  # ~100k chars, well over the cap
+        out = implementing._format_pr_agent_message(msg)
+        # Explicit, visible truncation marker is present.
+        self.assertIn(implementing._PR_BODY_TRUNCATION_MARKER, out)
+        # The kept text stays within the cap (plus the appended marker).
+        self.assertLessEqual(
+            len(out),
+            implementing._PR_BODY_AGENT_MESSAGE_CAP
+            + len(implementing._PR_BODY_TRUNCATION_MARKER)
+            + 8,
+        )
+        # And the body ends with the marker, not mid-word.
+        self.assertTrue(out.rstrip().endswith(
+            implementing._PR_BODY_TRUNCATION_MARKER))
+
+    def test_truncation_lands_on_a_boundary_not_mid_token(self) -> None:
+        # A single unbroken run with one space near the cap: the cut must
+        # fall back to the word boundary rather than slicing mid-token.
+        head = "a" * (implementing._PR_BODY_AGENT_MESSAGE_CAP - 5)
+        msg = head + " " + "b" * 4000
+        out = implementing._format_pr_agent_message(msg)
+        kept = out.split("\n\n" + implementing._PR_BODY_TRUNCATION_MARKER)[0]
+        # Cut at the space: no stray `b` characters leaked past the boundary.
+        self.assertEqual(kept, head)
+
+    def test_dangling_code_fence_is_closed(self) -> None:
+        # Force the cut to land inside an open code fence and assert it gets
+        # closed so the marker renders outside the block.
+        msg = "intro\n\n```python\n" + "x = 1\n" * 20000
+        out = implementing._format_pr_agent_message(msg)
+        self.assertEqual(out.count("```") % 2, 0)
+        self.assertIn(implementing._PR_BODY_TRUNCATION_MARKER, out)
+
+
+class OnCommitsBodyTruncationTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """End-to-end: a long dev message yields a PR body that fits GitHub's
+    65,536-char limit and carries the visible truncation marker."""
+
+    _GITHUB_BODY_LIMIT = 65536
+
+    def test_long_agent_message_body_is_capped_and_marked(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(60, label="implementing", title="add a thing")
+        gh.add_issue(issue)
+
+        long_message = "This is a long closing note. " * 5000  # ~145k chars
+
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-1", last_message=long_message),
+            has_new_commits=[False, True],
+            dirty_files=(),
+            push_branch=True,
+            first_commit_subject="feat: add a thing",
+        )
+
+        self.assertEqual(len(gh.opened_prs), 1)
+        body = gh.opened_prs[0].body
+        self.assertIn("_Last agent message:_", body)
+        # Visible marker present, and the whole body fits GitHub's limit.
+        self.assertIn(implementing._PR_BODY_TRUNCATION_MARKER, body)
+        self.assertLessEqual(len(body), self._GITHUB_BODY_LIMIT)
+
+    def test_short_agent_message_body_has_no_marker(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(61, label="implementing", title="add a thing")
+        gh.add_issue(issue)
+
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-1", last_message="all done"),
+            has_new_commits=[False, True],
+            dirty_files=(),
+            push_branch=True,
+            first_commit_subject="feat: add a thing",
+        )
+
+        body = gh.opened_prs[0].body
+        self.assertIn("all done", body)
+        self.assertNotIn(implementing._PR_BODY_TRUNCATION_MARKER, body)
 
 
 class RepoLocalCommitStylePromptTest(unittest.TestCase):
