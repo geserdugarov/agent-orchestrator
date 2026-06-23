@@ -12,14 +12,16 @@ from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
+import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
-from . import analytics, config, workflow
+from . import agents, analytics, config, workflow
 from .github import GitHubClient
 from .scheduler import IssueScheduler
 
@@ -28,6 +30,11 @@ log = logging.getLogger("orchestrator")
 _running = True
 _received_signal: Optional[int] = None
 _scheduler: Optional[IssueScheduler] = None
+# Set once `main`'s shutdown drain has finished. The shutdown watchdog waits
+# on this with a timeout so it only force-exits when the drain genuinely
+# overran the grace window -- a clean fast drain sets it and the watchdog
+# returns without touching the process.
+_shutdown_complete = threading.Event()
 
 
 def _shutdown(signum, _frame) -> None:
@@ -69,10 +76,80 @@ def _shutdown(signum, _frame) -> None:
             log.exception(
                 "signal handler scheduler.shutdown(wait=False) failed",
             )
+    # Arm the bounded-exit backstop. The cooperative drain in `main` only
+    # advances at tick boundaries and then blocks on `scheduler.shutdown`,
+    # so a tick wedged in a long GitHub retry loop or a worker parked in a
+    # 30-minute agent subprocess would otherwise hold the process well past
+    # systemd's `TimeoutStopSec` and earn a SIGKILL. The watchdog guarantees
+    # we exit within `SHUTDOWN_GRACE_SECONDS` no matter what any thread is
+    # blocked on.
+    _arm_shutdown_watchdog(signum)
     try:
         signal.signal(signum, signal.SIG_DFL)
     except (OSError, ValueError):
         pass
+
+
+def _arm_shutdown_watchdog(signum: int) -> None:
+    """Start the daemon watchdog that force-exits if the drain overruns."""
+    threading.Thread(
+        target=_run_shutdown_watchdog,
+        args=(signum,),
+        name="shutdown-watchdog",
+        daemon=True,
+    ).start()
+
+
+def _shutdown_terminate_grace() -> float:
+    """Slice of `SHUTDOWN_GRACE_SECONDS` reserved for the forced terminate sweep.
+
+    `SHUTDOWN_GRACE_SECONDS` is documented and configured as a HARD ceiling on
+    total signal->exit time. `_force_exit`'s `terminate_all_running` sweep
+    itself takes up to its own grace to SIGTERM-then-SIGKILL a child that
+    ignores SIGTERM, so that time must come OUT OF the budget rather than be
+    added on top -- otherwise actual exit is `SHUTDOWN_GRACE_SECONDS` + sweep
+    grace, overrunning the ceiling. The watchdog spends the remainder on the
+    cooperative drain; this reserve bounds the sweep. Capped at half the
+    budget so a small `SHUTDOWN_GRACE_SECONDS` still leaves the drain the
+    larger share, and is never the full budget (which would leave the drain
+    no window at all).
+    """
+    return min(5.0, config.SHUTDOWN_GRACE_SECONDS / 2)
+
+
+def _run_shutdown_watchdog(signum: int) -> None:
+    # Returns immediately once the drain completes; only force-exits when the
+    # grace window elapses first. Daemon thread, so a clean exit tears it down
+    # before it can fire. The drain gets `SHUTDOWN_GRACE_SECONDS` minus the
+    # reserved terminate grace so that the subsequent `_force_exit` sweep fits
+    # INSIDE the ceiling -- total signal->exit stays within
+    # `SHUTDOWN_GRACE_SECONDS` even when an agent ignores SIGTERM.
+    drain_budget = max(
+        0.0, config.SHUTDOWN_GRACE_SECONDS - _shutdown_terminate_grace()
+    )
+    if _shutdown_complete.wait(timeout=drain_budget):
+        return
+    _force_exit(signum)
+
+
+def _force_exit(signum: int) -> None:
+    """Last resort: kill in-flight agents, then hard-exit with the signal code.
+
+    `os._exit` skips interpreter cleanup (atexit, buffer flush) on purpose --
+    the point is to leave even if a thread is wedged in an uninterruptible
+    C call. Agent and verify process groups are terminated first so they are
+    not orphaned past the parent. The sweep is bounded by
+    `_shutdown_terminate_grace()`, the slice of the budget the watchdog held
+    back, so this path cannot push total exit beyond `SHUTDOWN_GRACE_SECONDS`.
+    """
+    log.warning(
+        "shutdown grace (%ss) expired; terminating agents and forcing exit",
+        config.SHUTDOWN_GRACE_SECONDS,
+    )
+    try:
+        agents.terminate_all_running(grace=_shutdown_terminate_grace())
+    finally:
+        os._exit(128 + signum)
 
 
 def _configure_logging(level: str) -> None:
@@ -212,8 +289,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         # scheduler's `shutdown` is documented as repeatable, the second
         # call still waits for in-flight workers to exit, and the
         # trailing reap drains any completion that landed in between.
+        if _received_signal is not None:
+            # Signal-initiated stop runs under systemd's `TimeoutStopSec`.
+            # Kill in-flight agent subprocesses up front so their worker
+            # threads unwind now instead of holding the drain below for up
+            # to `AGENT_TIMEOUT` -- this is what makes the common
+            # "restart while an agent is running" case exit in seconds
+            # rather than timing out into a SIGKILL. Idempotent with the
+            # watchdog's own sweep.
+            agents.terminate_all_running()
         scheduler.shutdown(wait=True)
         _scheduler = None
+        # Release the watchdog: the drain is done, so a clean exit must not
+        # be pre-empted by a force-exit.
+        _shutdown_complete.set()
 
     if _received_signal is not None:
         return 128 + _received_signal

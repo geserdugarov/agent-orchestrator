@@ -88,7 +88,7 @@ There is **only one long-lived process**: `python -m orchestrator.main`. It is w
 - **Trigger**: started manually (or by a wrapper). Optional `--once` for a single tick.
 - **Tick cadence**: every `POLL_INTERVAL` seconds (default 60).
 - **Self-restart guard** (`main._self_modifying_merge_happened`): each tick fetches `origin/<ORCHESTRATOR_BASE_BRANCH>` (default `main`); if it advanced past the process's startup SHA *and* the new commits touch `orchestrator/`, the loop exits 0 so the wrapper can re-exec the new code. The branch is decoupled from `BASE_BRANCH` so a target repo with a different default branch does not interfere with self-update detection.
-- **Signals**: SIGINT/SIGTERM set a flag; the current tick finishes, then the loop exits. The signal handler also calls `scheduler.shutdown(wait=False)` synchronously so the submit path is closed mid-tick.
+- **Signals**: SIGINT/SIGTERM set a flag and call `scheduler.shutdown(wait=False)` synchronously so the submit path is closed mid-tick; the loop then stops at the next tick boundary and drains. The drain terminates in-flight agent and verify subprocess groups up front (`agents.terminate_all_running`) so a worker parked in a long agent / verify run unwinds in seconds instead of holding the process for up to `AGENT_TIMEOUT`. A daemon watchdog backstops the drain: if it overruns, the watchdog terminates those same groups and hard-exits (`os._exit(128+signum)`) so total signal→exit stays within `SHUTDOWN_GRACE_SECONDS` no matter what a thread is blocked on. A second Ctrl+C hits the re-armed kernel default handler and kills immediately.
 
 The coding agent runs as a **transient child subprocess**, not a daemon — spawned per tick when work is needed.
 
@@ -194,8 +194,10 @@ For the per-sink schema, event-kind tables, append / retention / rotation semant
    │                     one worker thread per repo                       │
    │       3. scheduler.reap()  (drain completions; surface failures)     │
    │       4. analytics.prune_with_retention_logging()                    │
-   │     shutdown: scheduler.shutdown(wait=True) so in-flight workers     │
-   │               complete cleanly on exit (signal / --once / restart)   │
+   │     shutdown: scheduler.shutdown(wait=True) drains workers on        │
+   │               --once / self-restart; a signal stop first kills       │
+   │               in-flight agent+verify groups, and a watchdog          │
+   │               hard-exits within SHUTDOWN_GRACE_SECONDS on overrun    │
    │                    │                                                 │
    │                    ▼                                                 │
    │   workflow.tick(gh, spec, scheduler) →                               │

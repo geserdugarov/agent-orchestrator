@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from orchestrator import agents
 from orchestrator.agents import (
     _AGENT_PROVIDER_AUTH_ALLOWLIST,
     _AGENT_WRITE_CREDENTIAL_LOCATORS,
@@ -510,6 +515,146 @@ class RunAgentExtraArgsTest(unittest.TestCase):
         self.assertEqual(codex_argv[1], "exec")
         claude_argv = self._argv_for("claude", extra_args=())
         self.assertEqual(claude_argv[1], "-p")
+
+
+class TerminateAllRunningTest(unittest.TestCase):
+    """`terminate_all_running` is the shutdown hook that kills in-flight agent
+    process groups so a restart does not hang for up to `AGENT_TIMEOUT`. It
+    must SIGTERM every registered group, SIGKILL anything still alive at the
+    shared grace deadline, and be a clean no-op when nothing is in flight.
+    """
+
+    def test_no_procs_is_noop(self) -> None:
+        # Registry empty between tests (every spawn unregisters in a finally),
+        # so this exercises the early return with no signals sent.
+        with patch.object(agents.os, "killpg") as killpg:
+            self.assertEqual(agents.terminate_all_running(), 0)
+        killpg.assert_not_called()
+
+    def test_sigterms_each_group_and_no_sigkill_when_fully_exited(self) -> None:
+        # Both leaders exit on SIGTERM and the signal-0 group probe reports the
+        # group empty, so no SIGKILL is sent -- the clean-shutdown path.
+        p1, p2 = MagicMock(), MagicMock()
+        p1.pid, p2.pid = 111, 222
+        p1.wait.return_value = 0
+        p2.wait.return_value = 0
+        agents._register_proc(p1)
+        agents._register_proc(p2)
+
+        def killpg(pid: int, sig: int) -> None:
+            if sig == 0:  # liveness probe: group has no surviving member
+                raise ProcessLookupError
+
+        try:
+            with patch.object(agents.os, "killpg", side_effect=killpg) as kp:
+                n = agents.terminate_all_running(grace=0.5)
+        finally:
+            agents._unregister_proc(p1)
+            agents._unregister_proc(p2)
+        self.assertEqual(n, 2)
+        sent = {c.args for c in kp.call_args_list}
+        self.assertIn((111, signal.SIGTERM), sent)
+        self.assertIn((222, signal.SIGTERM), sent)
+        self.assertNotIn((111, signal.SIGKILL), sent)
+        self.assertNotIn((222, signal.SIGKILL), sent)
+
+    def test_sigkills_group_when_descendant_survives_leader_exit(self) -> None:
+        # Regression: the leader exits on SIGTERM but a descendant in the same
+        # group ignored it. `proc.wait()` returns, yet the signal-0 probe shows
+        # the group still alive, so the group must be SIGKILLed -- otherwise the
+        # grandchild keeps mutating the worktree after the orchestrator exits.
+        proc = MagicMock()
+        proc.pid = 555
+        proc.wait.return_value = 0  # leader exits promptly on SIGTERM
+        agents._register_proc(proc)
+
+        def killpg(pid: int, sig: int) -> None:
+            return None  # signal-0 probe succeeds: group still has a member
+
+        try:
+            with patch.object(agents.os, "killpg", side_effect=killpg) as kp:
+                agents.terminate_all_running(grace=0.05)
+        finally:
+            agents._unregister_proc(proc)
+        sent = [c.args for c in kp.call_args_list]
+        self.assertIn((555, signal.SIGTERM), sent)
+        self.assertIn((555, 0), sent)  # group liveness probed after leader exit
+        self.assertIn((555, signal.SIGKILL), sent)
+
+    def test_sigkills_straggler_past_deadline(self) -> None:
+        # A group that never exits on SIGTERM must be SIGKILLed once the
+        # shared grace deadline elapses.
+        proc = MagicMock()
+        proc.pid = 333
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="agent", timeout=0.05)
+        agents._register_proc(proc)
+        try:
+            with patch.object(agents.os, "killpg") as killpg:
+                agents.terminate_all_running(grace=0.05)
+        finally:
+            agents._unregister_proc(proc)
+        calls = [c.args for c in killpg.call_args_list]
+        self.assertIn((333, signal.SIGTERM), calls)
+        self.assertIn((333, signal.SIGKILL), calls)
+
+    def test_missing_group_is_swallowed(self) -> None:
+        # The leader can exit between the snapshot and the killpg; the
+        # ProcessLookupError race must not propagate.
+        proc = MagicMock()
+        proc.pid = 444
+        proc.wait.return_value = 0
+        agents._register_proc(proc)
+        try:
+            with patch.object(
+                agents.os, "killpg", side_effect=ProcessLookupError,
+            ):
+                self.assertEqual(agents.terminate_all_running(grace=0.05), 1)
+        finally:
+            agents._unregister_proc(proc)
+
+    def test_process_group_alive_real_process(self) -> None:
+        # The mock tests can't exercise the actual `killpg(_, 0)` probe the
+        # SIGKILL decision now relies on, so drive a real process group:
+        # alive while the leader runs, empty once it is killed and reaped.
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.assertTrue(agents._process_group_alive(proc.pid))
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=5)
+        self.assertFalse(agents._process_group_alive(proc.pid))
+
+
+class RunSubprocessRegistrationTest(unittest.TestCase):
+    """`_run_subprocess` must register its child for the lifetime of the run
+    so the shutdown sweep can reach it, and clear it afterward so the registry
+    does not leak completed processes.
+    """
+
+    def test_registers_during_run_and_clears_after(self) -> None:
+        proc = _completed(stdout="{}", returncode=0)
+        seen: dict[str, bool] = {}
+
+        def check_registered(*_a, **_k):
+            with agents._running_procs_lock:
+                seen["during"] = proc in agents._running_procs
+            return ("{}", "")
+
+        proc.communicate.side_effect = check_registered
+        with patch("orchestrator.agents.subprocess.Popen", return_value=proc):
+            agents._run_subprocess(["agent"], _CWD, {}, 10)
+
+        self.assertTrue(seen["during"], "child not registered during the run")
+        with agents._running_procs_lock:
+            self.assertNotIn(proc, agents._running_procs)
 
 
 if __name__ == "__main__":

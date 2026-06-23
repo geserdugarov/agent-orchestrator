@@ -17,6 +17,8 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -24,6 +26,99 @@ from typing import Any, Optional
 from . import config
 
 log = logging.getLogger(__name__)
+
+# Registry of live orchestrator-spawned subprocess groups, keyed by the
+# `Popen` object. Two producers register here: `_run_subprocess` (the agent
+# CLI children) and `verify._run_verify_commands` (the operator-configured
+# `VERIFY_COMMANDS` shells). Each call registers its child for the lifetime of
+# the run and clears it in a `finally`. Both producers spawn with
+# `start_new_session=True`, so every registered `pid` is a process-group
+# leader and `terminate_all_running` can `killpg` the whole group. The
+# orchestrator's shutdown path signals every registered group so a
+# long-running agent (bounded only by `AGENT_TIMEOUT`, 1800s) or a slow verify
+# command cannot keep its worker thread -- and therefore `main`'s drain --
+# alive past systemd's stop deadline, nor survive a watchdog hard-exit and go
+# on mutating the worktree after the orchestrator has stopped. The lock guards
+# the set against the worker threads mutating it concurrently with a shutdown
+# sweep.
+_running_procs: set[subprocess.Popen] = set()
+_running_procs_lock = threading.Lock()
+
+
+def _register_proc(proc: subprocess.Popen) -> None:
+    with _running_procs_lock:
+        _running_procs.add(proc)
+
+
+def _unregister_proc(proc: subprocess.Popen) -> None:
+    with _running_procs_lock:
+        _running_procs.discard(proc)
+
+
+def _process_group_alive(pgid: int) -> bool:
+    """True if process group `pgid` still has a live member.
+
+    Probes with signal 0: no signal is delivered, the kernel just runs the
+    existence/permission check. `ProcessLookupError` means the group is empty
+    (leader and every descendant have exited). Used after a leader's `wait()`
+    returns to tell "the whole group is gone" apart from "the leader exited
+    but a descendant ignored SIGTERM and is still running".
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def terminate_all_running(grace: float = 5.0) -> int:
+    """SIGTERM every in-flight subprocess group, then SIGKILL stragglers.
+
+    Sweeps both producers in `_running_procs`: the agent CLI children and the
+    `VERIFY_COMMANDS` shells (`verify._run_verify_commands`). Returns the
+    number of process groups signaled. Called from the orchestrator's shutdown
+    path so a restart does not hang waiting for an agent that would otherwise
+    run for up to `AGENT_TIMEOUT`, and so a long verify command cannot keep
+    mutating the worktree after a watchdog hard-exit. SIGTERM is sent to the
+    whole group (every producer spawns with `start_new_session=True`) so build
+    grandchildren a child forked are reaped too. A single shared `grace`
+    deadline bounds the total wait regardless of how many groups are in
+    flight; any group still alive at the deadline is SIGKILLed.
+
+    `proc.wait()` only observes the group *leader*: a descendant that ignored
+    SIGTERM keeps running -- and keeps mutating the worktree -- after the
+    leader exits, so leader-exit is not proof the group is gone. We SIGKILL
+    unless the leader exited AND a `killpg(_, 0)` probe shows the group has no
+    surviving member; a leader that hit the deadline is still alive, so its
+    group is SIGKILLed without a probe.
+
+    `ProcessLookupError` races are expected (a group may exit between the
+    snapshot and the signal) and are swallowed.
+    """
+    with _running_procs_lock:
+        procs = list(_running_procs)
+    if not procs:
+        return 0
+    for proc in procs:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + grace
+    for proc in procs:
+        remaining = max(0.0, deadline - time.monotonic())
+        leader_exited = True
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            leader_exited = False
+        if leader_exited and not _process_group_alive(proc.pid):
+            continue
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return len(procs)
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -272,16 +367,22 @@ def _run_subprocess(
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         start_new_session=True,
     )
+    # Register before the first blocking call so a shutdown that fires while
+    # this worker is parked in `communicate` can still reach the child group.
+    _register_proc(proc)
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        return stdout or "", stderr or "", proc.returncode, False
-    except subprocess.TimeoutExpired:
-        _terminate_process_group(proc)
         try:
-            stdout, stderr = proc.communicate(timeout=10)
+            stdout, stderr = proc.communicate(timeout=timeout)
+            return stdout or "", stderr or "", proc.returncode, False
         except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
-        return stdout or "", stderr or "", -1, True
+            _terminate_process_group(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            return stdout or "", stderr or "", -1, True
+    finally:
+        _unregister_proc(proc)
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:

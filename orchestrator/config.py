@@ -125,6 +125,19 @@ GITHUB_TOKEN: str = _resolve_github_token(REPO)
 POLL_INTERVAL: int = int(os.environ.get("POLL_INTERVAL", "60"))
 AGENT_TIMEOUT: int = int(os.environ.get("AGENT_TIMEOUT", "1800"))
 
+# Hard ceiling, in seconds, on how long the polling loop may take to exit
+# after a SIGTERM/SIGINT before it force-terminates in-flight agent
+# subprocesses and hard-exits. Must stay comfortably below the systemd
+# unit's `TimeoutStopSec` (90s by default) so `systemctl restart` sees a
+# clean stop instead of escalating to SIGKILL. Without a bound, `main`'s
+# shutdown drain waits on in-flight workers and an agent subprocess is
+# capped only by `AGENT_TIMEOUT` (1800s) -- 20x the stop deadline -- so a
+# restart issued while any agent was running always timed out into a brute
+# kill of both `run.sh` and python.
+SHUTDOWN_GRACE_SECONDS: int = max(
+    1, int(os.environ.get("SHUTDOWN_GRACE_SECONDS", "30"))
+)
+
 # Persistent log location. main.py attaches a FileHandler here in addition to
 # the existing stderr stream, so post-mortems don't depend on the terminal
 # `run.sh` was started in. Already covered by the `*.log` .gitignore rule.

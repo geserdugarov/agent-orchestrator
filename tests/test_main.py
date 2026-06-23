@@ -1088,5 +1088,159 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             self.assertEqual(reap.call_count, 1)
 
 
+class ShutdownWatchdogTest(unittest.TestCase):
+    """A signal-initiated stop must exit within `SHUTDOWN_GRACE_SECONDS`
+    regardless of what an in-flight worker is blocked on. The cooperative
+    drain only advances at tick boundaries and then waits on
+    `scheduler.shutdown`, so without a bound a tick wedged in a GitHub retry
+    loop -- or a worker parked in a 30-minute agent subprocess -- held the
+    process past systemd's `TimeoutStopSec` and earned a SIGKILL. The
+    watchdog is the hard backstop; terminating in-flight agents up front is
+    what makes the common case exit cleanly before the backstop fires.
+    """
+
+    _LEGACY = {
+        "REPO": "owner/legacy",
+        "TARGET_REPO_ROOT": "/tmp",
+        "BASE_BRANCH": "trunk",
+    }
+
+    def test_shutdown_arms_watchdog(self) -> None:
+        with _reload_main(self._LEGACY) as main_mod:
+            with patch.object(main_mod, "_arm_shutdown_watchdog") as arm:
+                main_mod._shutdown(signal.SIGTERM, None)
+            arm.assert_called_once_with(signal.SIGTERM)
+
+    def test_watchdog_force_exits_when_drain_overruns(self) -> None:
+        with _reload_main(self._LEGACY) as main_mod:
+            main_mod._shutdown_complete.clear()
+            forced: list[int] = []
+            with patch.object(
+                main_mod, "_force_exit",
+                side_effect=lambda s: forced.append(s),
+            ), patch.object(main_mod.config, "SHUTDOWN_GRACE_SECONDS", 0.05):
+                main_mod._run_shutdown_watchdog(signal.SIGTERM)
+            self.assertEqual(forced, [signal.SIGTERM])
+
+    def test_watchdog_returns_clean_when_drain_completes(self) -> None:
+        with _reload_main(self._LEGACY) as main_mod:
+            # Drain already finished: the watchdog must return without ever
+            # touching the process even though grace has not elapsed.
+            main_mod._shutdown_complete.set()
+            forced: list[int] = []
+            with patch.object(
+                main_mod, "_force_exit",
+                side_effect=lambda s: forced.append(s),
+            ), patch.object(main_mod.config, "SHUTDOWN_GRACE_SECONDS", 5):
+                main_mod._run_shutdown_watchdog(signal.SIGTERM)
+            self.assertEqual(forced, [])
+
+    def test_force_exit_terminates_agents_then_hard_exits(self) -> None:
+        with _reload_main(self._LEGACY) as main_mod:
+            with patch.object(
+                main_mod.agents, "terminate_all_running",
+            ) as term, patch.object(
+                main_mod.os, "_exit", side_effect=RuntimeError("exit"),
+            ) as os_exit:
+                with self.assertRaises(RuntimeError):
+                    main_mod._force_exit(signal.SIGTERM)
+            # The sweep is bounded by the reserved terminate grace -- NOT the
+            # default 5s -- so the watchdog path cannot push total exit past
+            # `SHUTDOWN_GRACE_SECONDS` (the Finding-1 ceiling contract).
+            term.assert_called_once_with(
+                grace=main_mod._shutdown_terminate_grace(),
+            )
+            os_exit.assert_called_once_with(128 + signal.SIGTERM)
+
+    def test_watchdog_drain_window_reserves_terminate_grace(self) -> None:
+        # The hard ceiling is `SHUTDOWN_GRACE_SECONDS`. `_force_exit`'s own
+        # SIGTERM->SIGKILL sweep takes up to `_shutdown_terminate_grace()`, so
+        # the watchdog must wait only `grace - reserve` for the drain; adding
+        # the sweep on top of the full grace would overrun the ceiling by the
+        # sweep's grace. Capture the timeout the watchdog waits on to prove
+        # drain_window + sweep_reserve == SHUTDOWN_GRACE_SECONDS.
+        with _reload_main(self._LEGACY) as main_mod:
+            captured: dict[str, float] = {}
+            fake_event = MagicMock()
+
+            def fake_wait(timeout=None):
+                captured["timeout"] = timeout
+                return True  # drain reported complete; no force-exit
+
+            fake_event.wait.side_effect = fake_wait
+            with patch.object(main_mod, "_shutdown_complete", fake_event), \
+                 patch.object(main_mod.config, "SHUTDOWN_GRACE_SECONDS", 30):
+                main_mod._run_shutdown_watchdog(signal.SIGTERM)
+            reserve = main_mod._shutdown_terminate_grace()
+            self.assertEqual(captured["timeout"], 30 - reserve)
+            self.assertLessEqual(captured["timeout"] + reserve, 30)
+
+    def test_terminate_grace_capped_and_within_budget(self) -> None:
+        # The reserve is a slice of the budget, never the whole of it (which
+        # would starve the drain) and never more than 5s for a large grace.
+        with _reload_main(self._LEGACY) as main_mod:
+            for grace in (1, 2, 10, 30, 3600):
+                with patch.object(
+                    main_mod.config, "SHUTDOWN_GRACE_SECONDS", grace,
+                ):
+                    reserve = main_mod._shutdown_terminate_grace()
+                self.assertGreater(reserve, 0.0)
+                self.assertLess(reserve, grace)
+                self.assertLessEqual(reserve, 5.0)
+
+    def test_signal_exit_terminates_in_flight_agents(self) -> None:
+        with _reload_main(self._LEGACY) as main_mod:
+            def fake_tick(gh, spec, *, scheduler=None):
+                main_mod._shutdown(signal.SIGTERM, None)
+
+            def fake_client(*, repo_spec):
+                m = MagicMock()
+                m.slug = repo_spec.slug
+                return m
+
+            with patch.object(main_mod, "_arm_shutdown_watchdog"), \
+                 patch.object(
+                     main_mod.agents, "terminate_all_running",
+                 ) as term, \
+                 patch.object(
+                     main_mod, "GitHubClient", side_effect=fake_client,
+                 ), \
+                 patch.object(
+                     main_mod.workflow, "tick", side_effect=fake_tick,
+                 ):
+                rc = main_mod.main(["--once"])
+
+            self.assertEqual(rc, 128 + signal.SIGTERM)
+            term.assert_called_once_with()
+
+    def test_normal_exit_does_not_terminate_agents(self) -> None:
+        # The non-signal paths (`--once` finishing, self-modifying-merge
+        # restart) must keep the existing "let in-flight work finish" drain
+        # -- only a signal stop, which is under the systemd deadline, kills
+        # agents up front.
+        with _reload_main(self._LEGACY) as main_mod:
+            def fake_tick(gh, spec, *, scheduler=None):
+                pass
+
+            def fake_client(*, repo_spec):
+                m = MagicMock()
+                m.slug = repo_spec.slug
+                return m
+
+            with patch.object(
+                main_mod.agents, "terminate_all_running",
+            ) as term, \
+                 patch.object(
+                     main_mod, "GitHubClient", side_effect=fake_client,
+                 ), \
+                 patch.object(
+                     main_mod.workflow, "tick", side_effect=fake_tick,
+                 ):
+                rc = main_mod.main(["--once"])
+
+            self.assertEqual(rc, 0)
+            term.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

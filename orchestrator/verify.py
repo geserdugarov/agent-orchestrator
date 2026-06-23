@@ -25,7 +25,11 @@ False)` to strip GitHub tokens / production secret shapes / agent
 provider keys / write-credential locators from the verify shell's
 child environment, and the per-command dirty / HEAD-movement probes
 that block an unreviewed verify-created commit from sneaking past
-`_squash_and_force_push`.
+`_squash_and_force_push`. Each running command is also registered in
+`agents._running_procs` so the orchestrator's shutdown sweep
+(`agents.terminate_all_running`) tears down a slow verify group on
+SIGTERM/SIGINT instead of leaving it to mutate the worktree after a
+watchdog hard-exit.
 
 `worktrees.py` re-exports every name below under its original name so
 existing imports (`from orchestrator.worktrees import VerifyResult`)
@@ -45,7 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .agents import _filter_agent_env
+from .agents import _filter_agent_env, _register_proc, _unregister_proc
 from .git_plumbing import _git
 from .workflow_messages import _redact_secrets
 
@@ -223,89 +227,102 @@ def _run_verify_commands(
             start_new_session=True,
             env=child_env,
         )
+        # Register the group so the orchestrator's shutdown sweep
+        # (`agents.terminate_all_running`) can SIGTERM/SIGKILL it. Without
+        # this a slow verify command is invisible to the sweep and survives
+        # the shutdown watchdog's `os._exit`, going on to mutate the worktree
+        # after the orchestrator has stopped -- the same bounded-lifetime
+        # guarantee the agent subprocesses already get. `start_new_session=
+        # True` above makes `proc.pid` the group leader the sweep targets;
+        # the `finally` clears the registry so a completed command does not
+        # leak into it.
+        _register_proc(proc)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # SIGKILL the WHOLE group so the shell AND every descendant
-            # die together. `os.getpgid(proc.pid)` reads the new group
-            # id we just created; ProcessLookupError covers the narrow
-            # race where the shell exited between TimeoutExpired and
-            # this call (then there is nothing left to kill, which is
-            # fine -- a survivor would still be inside the group and
-            # caught had it existed).
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            # Drain whatever the shell wrote before it was killed. A
-            # bounded second-stage timeout guards against a wedged pipe
-            # (e.g. a descendant that escaped the group via its own
-            # `setsid` and is still holding the fd open); the fallback
-            # `proc.kill()` covers that hostile case.
-            try:
-                stdout, stderr = proc.communicate(timeout=5)
+                stdout, stderr = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                # SIGKILL the WHOLE group so the shell AND every descendant
+                # die together. `os.getpgid(proc.pid)` reads the new group
+                # id we just created; ProcessLookupError covers the narrow
+                # race where the shell exited between TimeoutExpired and
+                # this call (then there is nothing left to kill, which is
+                # fine -- a survivor would still be inside the group and
+                # caught had it existed).
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                # Drain whatever the shell wrote before it was killed. A
+                # bounded second-stage timeout guards against a wedged pipe
+                # (e.g. a descendant that escaped the group via its own
+                # `setsid` and is still holding the fd open); the fallback
+                # `proc.kill()` covers that hostile case.
                 try:
                     stdout, stderr = proc.communicate(timeout=5)
                 except subprocess.TimeoutExpired:
-                    stdout, stderr = "", ""
-            partial = stdout or ""
+                    proc.kill()
+                    try:
+                        stdout, stderr = proc.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        stdout, stderr = "", ""
+                partial = stdout or ""
+                if stderr:
+                    if partial and not partial.endswith("\n"):
+                        partial += "\n"
+                    partial += stderr
+                return VerifyResult(
+                    status="timeout",
+                    command=command,
+                    exit_code=None,
+                    output=_truncate_verify_output(partial),
+                )
+            combined = stdout or ""
             if stderr:
-                if partial and not partial.endswith("\n"):
-                    partial += "\n"
-                partial += stderr
-            return VerifyResult(
-                status="timeout",
-                command=command,
-                exit_code=None,
-                output=_truncate_verify_output(partial),
-            )
-        combined = stdout or ""
-        if stderr:
-            if combined and not combined.endswith("\n"):
-                combined += "\n"
-            combined += stderr
-        if proc.returncode != 0:
-            return VerifyResult(
-                status="failed",
-                command=command,
-                exit_code=proc.returncode,
-                output=_truncate_verify_output(combined),
-            )
-        # Check dirtiness PER COMMAND so a dirty failure can be
-        # attributed to the actual command that produced the
-        # untracked/modified files and surface that command's stdout/
-        # stderr in the park comment. A single end-of-loop check would
-        # always blame `commands[-1]` even when an earlier command was
-        # the cause, and would have already lost its captured output
-        # by the time we got here.
-        dirty = _worktree_dirty_files(worktree)
-        if dirty:
-            return VerifyResult(
-                status="dirty",
-                command=command,
-                exit_code=proc.returncode,
-                output=_truncate_verify_output(combined),
-                dirty_files=tuple(dirty),
-            )
-        # HEAD-movement check. A verify command that `git commit`s its
-        # own auto-fix leaves `git status` clean and exits 0 -- looking
-        # identical to a passing gate -- yet the squash-on-approval +
-        # force-push that follows would publish that unreviewed commit.
-        # Fail the gate so the operator decides whether the auto-commit
-        # belongs in the PR (re-spawn the reviewer) or should be
-        # reverted before re-trying.
-        head_after = _head_sha(worktree)
-        if head_after != head_before:
-            return VerifyResult(
-                status="head_changed",
-                command=command,
-                exit_code=proc.returncode,
-                output=_truncate_verify_output(combined),
-                head_before=head_before,
-                head_after=head_after,
-            )
+                if combined and not combined.endswith("\n"):
+                    combined += "\n"
+                combined += stderr
+            if proc.returncode != 0:
+                return VerifyResult(
+                    status="failed",
+                    command=command,
+                    exit_code=proc.returncode,
+                    output=_truncate_verify_output(combined),
+                )
+            # Check dirtiness PER COMMAND so a dirty failure can be
+            # attributed to the actual command that produced the
+            # untracked/modified files and surface that command's stdout/
+            # stderr in the park comment. A single end-of-loop check would
+            # always blame `commands[-1]` even when an earlier command was
+            # the cause, and would have already lost its captured output
+            # by the time we got here.
+            dirty = _worktree_dirty_files(worktree)
+            if dirty:
+                return VerifyResult(
+                    status="dirty",
+                    command=command,
+                    exit_code=proc.returncode,
+                    output=_truncate_verify_output(combined),
+                    dirty_files=tuple(dirty),
+                )
+            # HEAD-movement check. A verify command that `git commit`s its
+            # own auto-fix leaves `git status` clean and exits 0 -- looking
+            # identical to a passing gate -- yet the squash-on-approval +
+            # force-push that follows would publish that unreviewed commit.
+            # Fail the gate so the operator decides whether the auto-commit
+            # belongs in the PR (re-spawn the reviewer) or should be
+            # reverted before re-trying.
+            head_after = _head_sha(worktree)
+            if head_after != head_before:
+                return VerifyResult(
+                    status="head_changed",
+                    command=command,
+                    exit_code=proc.returncode,
+                    output=_truncate_verify_output(combined),
+                    head_before=head_before,
+                    head_after=head_after,
+                )
+        finally:
+            _unregister_proc(proc)
     return VerifyResult(status="ok")
 
 

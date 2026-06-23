@@ -8,11 +8,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import config, workflow
+from orchestrator import agents, config, verify, workflow
 
 from tests.fakes import (
     FakeGitHubClient,
@@ -670,3 +670,35 @@ class RunVerifyCommandsTest(unittest.TestCase):
         # The command's stdout is preserved for the park comment so the
         # operator can triage what the command actually did.
         self.assertIn("BUILD_LOG_LINE", r.output)
+
+    def test_running_command_registered_for_shutdown_sweep(self) -> None:
+        # The shutdown sweep (`agents.terminate_all_running`) only reaches
+        # process groups registered in `agents._running_procs`. A verify
+        # command must be registered for the lifetime of its run -- otherwise
+        # the watchdog's `os._exit` leaves a slow command running and
+        # mutating the worktree after the orchestrator has stopped -- and
+        # cleared in the `finally` afterward so a finished command does not
+        # leak into the registry. Popen is faked so the registry can be
+        # inspected mid-run deterministically.
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.returncode = 0
+        seen: dict[str, bool] = {}
+
+        def check_registered(*_a, **_k):
+            with agents._running_procs_lock:
+                seen["during"] = proc in agents._running_procs
+            return ("", "")
+
+        proc.communicate.side_effect = check_registered
+        with patch.object(verify.subprocess, "Popen", return_value=proc), \
+             patch.object(verify, "_worktree_dirty_files", return_value=[]), \
+             patch.object(verify, "_head_sha", return_value="sha"):
+            r = verify._run_verify_commands(self.tmp, ("true",), 60)
+
+        self.assertEqual(r.status, "ok")
+        self.assertTrue(
+            seen.get("during"), "verify child not registered during the run",
+        )
+        with agents._running_procs_lock:
+            self.assertNotIn(proc, agents._running_procs)
