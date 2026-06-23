@@ -85,6 +85,8 @@ Before rebasing, the flow fetches `gh.get_pr(pr_number)` and skips when `pr_stat
 
 Pre-PR labels (`decomposing` / `blocked` / `umbrella` / `ready`) are not swept closed — a closed issue at those stages is a hard human stop until an operator relabels.
 
+The closed-issue sweep issues one closed-issue query per sweep label per repo, every tick — a fixed request cost that drives GitHub primary-rate-limit exhaustion on multi-repo hosts. `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` (default `1`) batches it to once every N ticks; the open-issue poll is unaffected, so the only effect of `N>1` is that an externally-merged/closed issue can take up to `N-1` extra ticks to finalize. See [configuration.md#github-rate-limits](configuration.md#github-rate-limits).
+
 `done` and `rejected` are terminal no-ops. Every handler receives the active `RepoSpec`, so `git worktree add`, `git fetch <spec.remote_name> <spec.base_branch>`, push-token resolution, and PR-base selection all flow from the spec.
 
 ### Pinned state

@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
+from github import GithubException
+
+from orchestrator import config
+from orchestrator.github import GitHubClient
 from tests.fakes import FakeGitHubClient, make_issue
 
 
@@ -81,6 +86,99 @@ class ListPollableIssuesClosedSweepTest(unittest.TestCase):
         gh.add_issue(closed)
         yielded = [i.number for i in gh.list_pollable_issues()]
         self.assertIn(303, yielded)
+
+
+class ClosedSweepCadenceTest(unittest.TestCase):
+    """`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` batches the per-label closed-issue
+    recovery sweep so its fixed request cost is not paid every tick. The
+    open-issue poll must stay every tick; only the closed sweep is throttled.
+    """
+
+    def test_default_runs_closed_sweep_every_tick(self) -> None:
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="implementing"))
+        closed = make_issue(7, label="in_review")
+        closed.closed = True
+        gh.add_issue(closed)
+        # Default knob (1): the closed issue surfaces on every call.
+        for _ in range(3):
+            out = {i.number for i in gh.list_pollable_issues()}
+            self.assertEqual(out, {1, 7})
+
+    def test_throttled_sweep_runs_on_first_then_every_nth_call(self) -> None:
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="implementing"))
+        closed = make_issue(7, label="in_review")
+        closed.closed = True
+        gh.add_issue(closed)
+        with mock.patch.object(config, "CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", 3):
+            # Call 1 (first): sweep runs -> closed issue present.
+            self.assertEqual({i.number for i in gh.list_pollable_issues()}, {1, 7})
+            # Calls 2 and 3: sweep skipped -> open issue only.
+            self.assertEqual({i.number for i in gh.list_pollable_issues()}, {1})
+            self.assertEqual({i.number for i in gh.list_pollable_issues()}, {1})
+            # Call 4 (== first + N): sweep runs again.
+            self.assertEqual({i.number for i in gh.list_pollable_issues()}, {1, 7})
+
+    def test_throttle_never_drops_open_issues(self) -> None:
+        gh = FakeGitHubClient()
+        gh.add_issue(make_issue(1, label="implementing"))
+        gh.add_issue(make_issue(2, label="validating"))
+        with mock.patch.object(config, "CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", 5):
+            for _ in range(5):
+                out = {i.number for i in gh.list_pollable_issues()}
+                self.assertEqual(out, {1, 2})
+
+
+class _StubLabel:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _CountingRepo:
+    """Minimal stand-in for PyGithub's Repository that records how many times
+    `get_label` is called, so the cache can be asserted without network."""
+
+    def __init__(self, *, missing: set[str] | None = None) -> None:
+        self.get_label_calls: list[str] = []
+        self._missing = missing or set()
+
+    def get_label(self, name: str):
+        self.get_label_calls.append(name)
+        if name in self._missing:
+            raise GithubException(403, {"message": "Forbidden"}, None)
+        return _StubLabel(name)
+
+
+class CachedLabelTest(unittest.TestCase):
+    """`_cached_label` must fetch each workflow label at most once per client
+    (labels are immutable after `ensure_workflow_labels`), while still
+    retrying a failed lookup every call so a fixed PAT / created label is
+    picked up without a restart.
+    """
+
+    def _bare_client(self, repo: _CountingRepo) -> GitHubClient:
+        # Bypass the networked __init__; wire only what _cached_label touches.
+        gh = GitHubClient.__new__(GitHubClient)
+        gh.repo = repo
+        gh._label_cache = {}
+        return gh
+
+    def test_resolved_label_is_fetched_once(self) -> None:
+        repo = _CountingRepo()
+        gh = self._bare_client(repo)
+        for _ in range(5):
+            label = gh._cached_label("implementing")
+            self.assertEqual(label.name, "implementing")
+        self.assertEqual(repo.get_label_calls, ["implementing"])
+
+    def test_failed_lookup_is_not_cached_and_retries(self) -> None:
+        repo = _CountingRepo(missing={"implementing"})
+        gh = self._bare_client(repo)
+        self.assertIsNone(gh._cached_label("implementing"))
+        self.assertIsNone(gh._cached_label("implementing"))
+        # Both calls hit GitHub: a transient 403 must not poison the cache.
+        self.assertEqual(repo.get_label_calls, ["implementing", "implementing"])
 
 
 if __name__ == "__main__":

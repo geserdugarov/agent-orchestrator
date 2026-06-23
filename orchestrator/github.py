@@ -18,6 +18,7 @@ from typing import Any, Iterable, Optional
 from github import Auth, Github, GithubException
 from github.Issue import Issue
 from github.IssueComment import IssueComment
+from github.Label import Label
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
@@ -199,6 +200,16 @@ class GitHubClient:
         # FakeGitHubClient mirrors this attribute so workflow tests can read
         # captured events without touching disk.
         self.recorded_events: list[dict] = []
+        # Per-name cache of resolved workflow Label objects (see
+        # `_cached_label`). Workflow labels are immutable after
+        # `ensure_workflow_labels`, so the closed-issue sweep can stop
+        # re-fetching them every tick.
+        self._label_cache: dict[str, Label] = {}
+        # Count of `list_pollable_issues` calls on this client. Because that
+        # method is invoked exactly once per repo per tick, this doubles as a
+        # tick counter and drives the closed-issue-sweep cadence throttle
+        # (`config.CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`).
+        self._pollable_calls = 0
 
     def _for_worker_thread(self) -> "GitHubClient":
         """Build a fresh GitHubClient for a single worker thread.
@@ -222,6 +233,41 @@ class GitHubClient:
         carries event ordering across threads.
         """
         return GitHubClient(token=self._token, repo_slug=self._repo_slug)
+
+    def _cached_label(self, name: str) -> Optional[Label]:
+        """Resolve a workflow Label object, caching successes for this client.
+
+        The closed-issue sweep in `list_pollable_issues` needs Label OBJECTS
+        because PyGithub's `get_issues(labels=...)` reads `label.name`.
+        Workflow labels are created once by `ensure_workflow_labels` and are
+        never mutated by the orchestrator, so re-fetching each one every tick
+        is pure waste -- on a multi-repo deployment those
+        `GET /repos/.../labels/<name>` calls are a large fraction of the
+        per-tick request volume that exhausts the GitHub primary rate limit.
+        Cache the resolved object so each label is fetched at most once per
+        repo client.
+
+        Failures are NOT cached: a missing label (under-scoped PAT, or one not
+        yet created) keeps being retried every tick exactly as before, so
+        fixing the PAT or creating the label takes effect without a restart.
+        Returns None on a lookup failure so the caller can skip that label's
+        sweep instead of raising out of the generator.
+        """
+        cached = self._label_cache.get(name)
+        if cached is not None:
+            return cached
+        try:
+            label_obj = self.repo.get_label(name)
+        except GithubException as e:
+            log.warning(
+                "could not look up %r label for closed-issue sweep "
+                "(HTTP %s); skipping. Externally-merged %s issues will "
+                "not finalize to `done` until the label exists.",
+                name, e.status, name,
+            )
+            return None
+        self._label_cache[name] = label_obj
+        return label_obj
 
     def list_pollable_issues(self, since: Optional[datetime] = None) -> Iterable[Issue]:
         """Open issues plus closed issues still labeled with any non-terminal
@@ -258,6 +304,7 @@ class GitHubClient:
         worktree on disk indefinitely.
         """
         seen: set[int] = set()
+        self._pollable_calls += 1
 
         kwargs: dict[str, Any] = {
             "state": "open",
@@ -271,32 +318,36 @@ class GitHubClient:
                 seen.add(issue.number)
                 yield issue
 
+        # The closed-issue recovery sweep below issues one GET per non-terminal
+        # label, per repo. That fixed cost -- paid every tick regardless of how
+        # much real work exists -- dominates request volume on multi-repo
+        # deployments and exhausts GitHub's primary rate limit (see
+        # `config.CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`). Run it on the first call
+        # (so startup recovery is never delayed) and then once every N ticks;
+        # the open-issue poll above always runs. `<= 1` keeps it every tick.
+        every = config.CLOSED_ISSUE_SWEEP_EVERY_N_TICKS
+        if every > 1 and (self._pollable_calls - 1) % every != 0:
+            return
+
         # PyGithub's Repository.get_issues(labels=...) expects Label OBJECTS
         # and reads `label.name`; passing a raw string list raises a
         # TypeError before the sweep yields anything. Because that exception
         # propagates out of this generator on the second `for` -- past the
         # per-issue try/except in `tick()` -- it would silently break every
         # tick after open issues processed and leave externally-merged
-        # in_review issues stuck closed-but-labeled forever. Look up
-        # each Label once per call; treat a missing label as "nothing to
-        # sweep" and skip rather than raising. Multi-label-OR is achieved
-        # by issuing one query per label (the GitHub Issues API treats
-        # `labels` as AND, not OR).
+        # in_review issues stuck closed-but-labeled forever. Resolve each
+        # Label via the per-client cache (`_cached_label`); treat a missing
+        # label as "nothing to sweep" and skip rather than raising.
+        # Multi-label-OR is achieved by issuing one query per label (the
+        # GitHub Issues API treats `labels` as AND, not OR).
         for label_name in (
             WorkflowLabel.IMPLEMENTING, WorkflowLabel.DOCUMENTING,
             WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW,
             WorkflowLabel.FIXING, WorkflowLabel.RESOLVING_CONFLICT,
             WorkflowLabel.QUESTION,
         ):
-            try:
-                label_obj = self.repo.get_label(label_name)
-            except GithubException as e:
-                log.warning(
-                    "could not look up %r label for closed-issue sweep "
-                    "(HTTP %s); skipping. Externally-merged %s issues will "
-                    "not finalize to `done` until the label exists.",
-                    label_name, e.status, label_name,
-                )
+            label_obj = self._cached_label(label_name)
+            if label_obj is None:
                 continue
             closed_kwargs: dict[str, Any] = {
                 "state": "closed",

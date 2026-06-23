@@ -184,6 +184,11 @@ class FakeGitHubClient:
         # writes to disk via the same helper the real client uses, so a
         # single test can cover both surfaces.
         self.recorded_events: list[dict] = []
+        # Mirrors GitHubClient._pollable_calls: drives the closed-issue-sweep
+        # cadence throttle (`config.CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`) so the
+        # public "closed issues may be omitted on N-1 of every N calls"
+        # contract is exercisable through the fake.
+        self._pollable_calls = 0
         self._issues: dict[int, FakeIssue] = {i.number: i for i in issues}
         self._pinned: dict[int, PinnedState] = {}
         self._comment_id = count(start=1000)
@@ -252,11 +257,19 @@ class FakeGitHubClient:
         """
         out: list[FakeIssue] = []
         seen: set[int] = set()
+        self._pollable_calls += 1
         for issue in self._issues.values():
             if issue.closed:
                 continue
             seen.add(issue.number)
             out.append(issue)
+        # Throttle the closed-issue recovery sweep to once every N calls,
+        # always running it on the first call. Mirrors the real client so
+        # `config.CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` is testable through the
+        # fake; `<= 1` (default) keeps every call sweeping.
+        every = config.CLOSED_ISSUE_SWEEP_EVERY_N_TICKS
+        if every > 1 and (self._pollable_calls - 1) % every != 0:
+            return out
         for issue in self._issues.values():
             if not issue.closed or issue.number in seen:
                 continue

@@ -125,6 +125,25 @@ GITHUB_TOKEN: str = _resolve_github_token(REPO)
 POLL_INTERVAL: int = int(os.environ.get("POLL_INTERVAL", "60"))
 AGENT_TIMEOUT: int = int(os.environ.get("AGENT_TIMEOUT", "1800"))
 
+# How many polling ticks apart the closed-issue recovery sweep in
+# `GitHubClient.list_pollable_issues` runs. That sweep issues one
+# `GET /repos/.../issues?state=closed&labels=<L>` per non-terminal workflow
+# label, PER REPO, every tick -- a fixed request cost that is independent of
+# how much real work the repo has. Across many configured repos at a short
+# `POLL_INTERVAL` it dominates per-tick request volume and is the principal
+# driver of GitHub *primary* rate-limit (5000 req/hour/PAT) exhaustion: once
+# the hourly budget is spent PyGithub's GithubRetry sleeps until the reset
+# (~uninterruptible 1000s+ stalls observed). The latency-sensitive open-issue
+# poll still runs every tick; only the closed recovery sweep is batched to
+# once per N ticks. `1` (default) preserves the legacy every-tick behavior.
+# Raise it (e.g. 4-5) on multi-repo deployments to stay under the hourly cap;
+# the only cost is that an externally-merged/closed issue may take up to N-1
+# extra ticks to finalize to `done` -- pinned GitHub state stays authoritative
+# in the meantime, so nothing is lost, only briefly deferred.
+CLOSED_ISSUE_SWEEP_EVERY_N_TICKS: int = max(
+    1, int(os.environ.get("CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", "1"))
+)
+
 # Hard ceiling, in seconds, on how long the polling loop may take to exit
 # after a SIGTERM/SIGINT before it force-terminates in-flight agent
 # subprocesses and hard-exits. Must stay comfortably below the systemd

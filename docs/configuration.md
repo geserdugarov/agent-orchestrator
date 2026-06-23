@@ -78,6 +78,7 @@ The first token of each role spec selects the backend (`codex` / `claude`); any 
 | Variable                   | Default     | Purpose                                                                                          |
 | -------------------------- | ----------- | ------------------------------------------------------------------------------------------------ |
 | `POLL_INTERVAL`            | `60`        | seconds between polling ticks                                                                    |
+| `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` | `1` | how many ticks apart the closed-issue recovery sweep runs (see [GitHub rate limits](#github-rate-limits) below). The sweep issues one `GET …/issues?state=closed&labels=<L>` per non-terminal workflow label **per repo**; across many repos at a short `POLL_INTERVAL` that fixed cost dominates request volume and is the main driver of GitHub *primary* rate-limit (5000 req/hour/PAT) exhaustion. `1` runs it every tick (unchanged behavior). Raise it (e.g. `4`–`5`) on multi-repo deployments; the only cost is that an externally-merged/closed issue may take up to `N-1` extra ticks to finalize to `done`. The latency-sensitive open-issue poll always runs every tick. |
 | `AGENT_TIMEOUT`            | `1800`      | wall-clock cap per agent invocation, seconds                                                     |
 | `REVIEW_TIMEOUT`           | (= `AGENT_TIMEOUT`) | wall-clock cap per reviewer invocation, seconds                                          |
 | `SHUTDOWN_GRACE_SECONDS`   | `30`        | seconds after SIGTERM/SIGINT before the loop force-terminates in-flight agent subprocesses and hard-exits (`128 + signum`). Keep below the systemd unit's `TimeoutStopSec` (90s) so `systemctl restart` sees a clean stop instead of escalating to SIGKILL — without it the drain waits on in-flight workers bounded only by `AGENT_TIMEOUT` (1800s) or a blocking GitHub retry/backoff, which overruns the stop deadline. |
@@ -88,6 +89,23 @@ The first token of each role spec selects the backend (`codex` / `claude`); any 
 | `ORCHESTRATOR_BASE_BRANCH` | `main`      | base branch of the orchestrator's own repo, used by the self-update path                          |
 | `SQUASH_ON_APPROVAL`       | `on`        | after the reviewer emits `VERDICT: APPROVED`, squash the dev's commits on the PR branch into a single subject-only commit and force-push with lease. The subject reuses the dev's first commit subject when it carries a reusable `<prefix>:` form (Conventional **or** repo-local such as `event:`/`career:`); otherwise it is synthesized with a prefix inferred from recent base-branch history. `off` leaves the per-step commit history intact (useful when downstream tooling depends on it). Parsed as a boolean: `1` / `true` / `on` / `yes` enable, anything else disables. |
 | `EXPOSE_TRACKED_REPOS`     | `on`        | tell working agents about the *other* repos this orchestrator tracks (slug, local `target_root`, base branch) for cross-repo reference. Inert for single-repo hosts — the awareness block is emitted only when more than one repo is configured, so a default deployment sees zero added prompt tokens. The disclosed data is operator-configured and non-secret (no tokens, no remote URLs), and write-containment is unchanged. `off` forces the disclosure off globally. Parsed as a boolean: `1` / `true` / `on` / `yes` enable, anything else disables. |
+
+### GitHub rate limits
+
+A single fine-grained PAT gets **5000 REST requests/hour** (the GitHub *primary* rate limit). Each tick spends a roughly fixed number of `GET /repos/…` requests **per repo**, independent of how much real work the repo has:
+
+- the open-issue poll (`list_pollable_issues`): 1+ requests,
+- the closed-issue recovery sweep: one `GET …/issues?state=closed&labels=<L>` per non-terminal workflow label (7 today), and
+- the community-contribution PR sweep: 1 `GET …/pulls` request.
+
+With `R` repos at `POLL_INTERVAL` seconds, the floor is roughly `R × (9 + sweep) × 3600 / POLL_INTERVAL` requests/hour even when every repo is idle. Past ~5–6 repos at the 60s default this exceeds 5000/hour: the budget is spent partway into each hour, GitHub starts returning `403: Forbidden` with an `X-RateLimit-Reset` in the future, and PyGithub's `GithubRetry` sleeps (uninterruptibly) until the reset — typically a ~15–18 minute stall **every hour**, on the hour. The signature in `orchestrator.log` is repeated `github.GithubRetry: … failed with 403: Forbidden` followed by `Setting next backoff to <hundreds-to-1000+>s`.
+
+Two built-in mitigations reduce the floor without touching `POLL_INTERVAL`:
+
+- **Workflow-label objects are cached** per repo client. They are immutable after `ensure_workflow_labels`, so the closed sweep no longer re-fetches them every tick — eliminating 7 `GET …/labels/<name>` requests per repo per tick automatically.
+- **`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`** batches the closed-issue recovery sweep to once every N ticks (see the table above). At `N=4`–`5` the seven closed-label queries are amortized down by the same factor while the open-issue poll stays every tick.
+
+If you still approach the cap, the remaining levers are operator-side: raise `POLL_INTERVAL`, split repos across more than one PAT (one token file per slug under `~/.config/<owner>/<repo>/token`), or reduce the number of tracked repos. Check current consumption with `curl -H "Authorization: Bearer $TOKEN" https://api.github.com/rate_limit`.
 
 ## Local verification gate
 

@@ -28,6 +28,10 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         # Bypass __init__: it would require a real PAT and Github client.
         client = GitHubClient.__new__(GitHubClient)
         client.repo = MagicMock()
+        # __init__ normally seeds these; the closed sweep and label cache
+        # both read them.
+        client._pollable_calls = 0
+        client._label_cache = {}
         # All get_issues calls (open sweep + per-label closed sweeps)
         # return nothing -- we only care about the call arguments.
         client.repo.get_issues.return_value = iter([])
@@ -92,6 +96,8 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
 
         client = GitHubClient.__new__(GitHubClient)
         client.repo = MagicMock()
+        client._pollable_calls = 0
+        client._label_cache = {}
         client.repo.get_issues.return_value = iter([])
         client.repo.get_label.side_effect = GithubException(
             404, {"message": "Not Found"}, None
