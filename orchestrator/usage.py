@@ -22,12 +22,18 @@ silently-wrong cost cannot end up in analytics records.
 Malformed JSONL lines (truncation, partial flushes, banner text) are
 skipped silently; usage events buried inside otherwise-broken streams are
 still picked up.
+
+A sibling extractor (``parse_claude_skills`` / ``parse_codex_skills`` /
+``parse_agent_skills``) reuses the same event iterator and resilience
+contract to record which agent *skills* a run triggered. It reads only the
+skill name -- never the ``Skill`` tool's ``args`` -- and is observation-only;
+see ``plans/skill-trigger-tracking.md`` for the design.
 """
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
 
@@ -679,6 +685,172 @@ def parse_agent_usage(
         return parse_claude_usage(stdout)
     if backend == "codex":
         return parse_codex_usage(stdout, fallback_model=fallback_model)
+    raise ValueError(
+        f"unknown agent backend {backend!r}; expected 'claude' or 'codex'"
+    )
+
+
+# --- skill-trigger extractor ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SkillTriggers:
+    """Which agent skills a single run triggered, parsed from its JSONL stdout.
+
+    ``triggered`` lists the distinct skill names in first-seen order;
+    ``trigger_counts`` maps each name to how many times it fired, so a run
+    that pulls ``develop`` in twice records ``{"develop": 2}`` while
+    ``triggered`` still carries it once. ``available`` is the best-effort
+    *offered*-skills set -- it stays empty until the exact stream field is
+    confirmed against a captured run (see ``plans/skill-trigger-tracking.md``
+    Open questions) and is forward-compatible with that later capture.
+
+    Only the skill *name* is ever read: the ``Skill`` tool's ``input`` can
+    carry an ``args`` string echoing issue or user content, and that field is
+    deliberately never touched (Privacy, same doc). A missing or renamed
+    field yields an empty result, never an exception -- the same resilience
+    contract the usage parsers above honor.
+    """
+
+    triggered: tuple[str, ...] = ()
+    trigger_counts: dict[str, int] = field(default_factory=dict)
+    available: tuple[str, ...] = ()
+
+
+def _collect(names: Iterable[str]) -> SkillTriggers:
+    """Fold first-seen skill names into the de-duplicated / counted shape."""
+    order: list[str] = []
+    counts: dict[str, int] = {}
+    for name in names:
+        if name not in counts:
+            order.append(name)
+            counts[name] = 0
+        counts[name] += 1
+    return SkillTriggers(triggered=tuple(order), trigger_counts=counts)
+
+
+def _claude_skill_name(block: Any) -> Optional[str]:
+    """Return the skill name from a ``Skill`` tool_use block, else ``None``.
+
+    Reads only ``input.skill``; ``input.args`` is never inspected (Privacy).
+    """
+    if not isinstance(block, dict):
+        return None
+    if block.get("type") != "tool_use" or block.get("name") != "Skill":
+        return None
+    inp = block.get("input")
+    if not isinstance(inp, dict):
+        return None
+    skill = inp.get("skill")
+    if isinstance(skill, str) and skill:
+        return skill
+    return None
+
+
+def parse_claude_skills(stdout: str) -> SkillTriggers:
+    """Extract triggered skills from a ``claude ... stream-json`` run.
+
+    A skill invocation surfaces as a ``tool_use`` content block named
+    ``"Skill"`` inside an ``assistant`` message; we walk those blocks and read
+    ``input.skill`` in first-seen order. ``available`` stays empty: the
+    headless stream has no confirmed offered-skills field yet (the design's
+    capture-task Open question), and we never raise on its absence.
+    """
+    names: list[str] = []
+    for ev in _iter_events(stdout):
+        if ev.get("type") != "assistant":
+            continue
+        msg = ev.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            name = _claude_skill_name(block)
+            if name is not None:
+                names.append(name)
+    return _collect(names)
+
+
+def _codex_skill_from_call(obj: dict[str, Any]) -> Optional[str]:
+    """Read a skill name from a ``Skill``-named tool/function call object.
+
+    Codex echoes the same agent-agnostic repo-local skills, so a trigger may
+    arrive as a call whose ``input`` (dict) or ``arguments`` (dict or a
+    JSON-encoded string) carries ``skill``. Only that key is read -- a
+    sibling ``args`` payload is never decoded for content (Privacy).
+    """
+    if obj.get("name") != "Skill":
+        return None
+    inp = obj.get("input")
+    if isinstance(inp, dict):
+        skill = inp.get("skill")
+        if isinstance(skill, str) and skill:
+            return skill
+    args = obj.get("arguments")
+    if isinstance(args, dict):
+        skill = args.get("skill")
+        if isinstance(skill, str) and skill:
+            return skill
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            skill = parsed.get("skill")
+            if isinstance(skill, str) and skill:
+                return skill
+    return None
+
+
+def _codex_skill_from_event(obj: dict[str, Any]) -> Optional[str]:
+    """Read a skill name from a dedicated ``*skill*``-typed event object.
+
+    A scalar ``skill`` / ``skill_name`` string is treated as a single
+    invocation; an offered-skills *list* (plural ``skills``) is intentionally
+    not matched here -- the offered set is best-effort and out of scope until
+    its exact shape is captured.
+    """
+    t = obj.get("type")
+    if not isinstance(t, str) or "skill" not in t.lower():
+        return None
+    for key in ("skill", "skill_name"):
+        v = obj.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
+def parse_codex_skills(stdout: str) -> SkillTriggers:
+    """Extract triggered skills from a ``codex exec --json`` run (best-effort).
+
+    The precise codex skill-event shape is an open capture task, so this is
+    deliberately *best-effort rather than hardcoded empty*: each event is
+    searched for either a ``Skill``-named tool/function call or a dedicated
+    ``*skill*``-typed event. A stream that surfaces neither -- e.g. a normal
+    usage-only run -- returns an empty ``SkillTriggers`` without raising.
+    """
+    names: list[str] = []
+    for ev in _iter_events(stdout):
+        for obj in _walk_objects(ev):
+            name = _codex_skill_from_call(obj) or _codex_skill_from_event(obj)
+            if name is not None:
+                names.append(name)
+    return _collect(names)
+
+
+def parse_agent_skills(backend: str, stdout: str) -> SkillTriggers:
+    """Dispatch by backend name; raise on anything other than claude/codex.
+
+    Mirrors ``parse_agent_usage``'s dispatch contract so callers can reuse the
+    same backend string they spawned the agent with.
+    """
+    if backend == "claude":
+        return parse_claude_skills(stdout)
+    if backend == "codex":
+        return parse_codex_skills(stdout)
     raise ValueError(
         f"unknown agent backend {backend!r}; expected 'claude' or 'codex'"
     )

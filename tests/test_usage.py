@@ -6,9 +6,13 @@ import json
 import unittest
 
 from orchestrator.usage import (
+    SkillTriggers,
     UsageMetrics,
+    parse_agent_skills,
     parse_agent_usage,
+    parse_claude_skills,
     parse_claude_usage,
+    parse_codex_skills,
     parse_codex_usage,
 )
 
@@ -816,6 +820,240 @@ class UsageMetricsTest(unittest.TestCase):
         self.assertEqual(decoded["models"], ["gpt-5-codex"])
         self.assertEqual(decoded["turns"], 3)
         self.assertEqual(decoded["cost_source"], "estimated")
+
+
+class ClaudeSkillTriggerTest(unittest.TestCase):
+    """``parse_claude_skills`` over synthetic ``stream-json`` runs.
+
+    Skill invocations surface as ``Skill`` ``tool_use`` blocks inside
+    ``assistant`` messages; the parser reads only ``input.skill``, keeps
+    first-seen order, de-duplicates names, and counts repeats.
+    """
+
+    def test_order_dedup_and_counts(self) -> None:
+        stdout = _jsonl(
+            {"type": "system", "subtype": "init"},
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "text", "text": "reading the guide"},
+                        {"type": "tool_use", "name": "Skill",
+                         "input": {"skill": "develop"}},
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_2",
+                    "content": [
+                        {"type": "tool_use", "name": "Read",
+                         "input": {"file_path": "x.py"}},
+                        {"type": "tool_use", "name": "Skill",
+                         "input": {"skill": "review"}},
+                        {"type": "tool_use", "name": "Skill",
+                         "input": {"skill": "develop"}},
+                    ],
+                },
+            },
+            {"type": "result", "num_turns": 2},
+        )
+        s = parse_claude_skills(stdout)
+        # First-seen order, de-duplicated.
+        self.assertEqual(s.triggered, ("develop", "review"))
+        # `develop` fired twice (across two messages), `review` once.
+        self.assertEqual(s.trigger_counts, {"develop": 2, "review": 1})
+        # Offered set stays empty until its stream source is captured.
+        self.assertEqual(s.available, ())
+
+    def test_malformed_lines_are_skipped(self) -> None:
+        good = json.dumps({
+            "type": "assistant",
+            "message": {
+                "id": "msg_1",
+                "content": [
+                    {"type": "tool_use", "name": "Skill",
+                     "input": {"skill": "develop"}},
+                ],
+            },
+        })
+        stdout = "\n".join([
+            "starting claude...",
+            '{"type":"assistant","message"',
+            good,
+            "",
+            "not json either",
+        ])
+        s = parse_claude_skills(stdout)
+        self.assertEqual(s.triggered, ("develop",))
+        self.assertEqual(s.trigger_counts, {"develop": 1})
+
+    def test_skill_free_stream_is_empty(self) -> None:
+        # Text and non-Skill tool_use blocks must not register as triggers.
+        stdout = _jsonl(
+            {"type": "system", "subtype": "init"},
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "text", "text": "no skills here"},
+                        {"type": "tool_use", "name": "Read",
+                         "input": {"file_path": "x.py"}},
+                    ],
+                    "usage": {"input_tokens": 5, "output_tokens": 3},
+                },
+            },
+            {"type": "result", "num_turns": 1},
+        )
+        self.assertEqual(parse_claude_skills(stdout), SkillTriggers())
+
+    def test_malformed_skill_blocks_are_ignored(self) -> None:
+        # Missing ``input``, missing/empty ``skill``, and non-dict content
+        # entries all skip silently rather than raise.
+        stdout = _jsonl(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "tool_use", "name": "Skill"},
+                        {"type": "tool_use", "name": "Skill", "input": {}},
+                        {"type": "tool_use", "name": "Skill",
+                         "input": {"skill": ""}},
+                        "not-a-block",
+                        {"type": "tool_use", "name": "Skill",
+                         "input": {"skill": "develop"}},
+                    ],
+                },
+            },
+        )
+        s = parse_claude_skills(stdout)
+        self.assertEqual(s.triggered, ("develop",))
+        self.assertEqual(s.trigger_counts, {"develop": 1})
+
+    def test_ignores_skill_args_for_privacy(self) -> None:
+        # `input.args` can echo issue / user content; only the name is read.
+        secret = "user secret: api_key=sk-deadbeef"
+        stdout = _jsonl(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "tool_use", "name": "Skill",
+                         "input": {"skill": "develop", "args": secret}},
+                    ],
+                },
+            },
+        )
+        s = parse_claude_skills(stdout)
+        self.assertEqual(s.triggered, ("develop",))
+        self.assertEqual(s.trigger_counts, {"develop": 1})
+        self.assertNotIn(secret, repr(s))
+
+    def test_empty_stdout(self) -> None:
+        self.assertEqual(parse_claude_skills(""), SkillTriggers())
+
+
+class CodexSkillTriggerTest(unittest.TestCase):
+    """``parse_codex_skills`` is best-effort over the ``codex exec --json`` stream.
+
+    The exact codex skill-event shape is an open capture task, so the parser
+    attempts two plausible shapes rather than hardcoding empty, and returns an
+    empty result -- never an exception -- when neither is present.
+    """
+
+    def test_extracts_skill_from_function_call(self) -> None:
+        stdout = _jsonl(
+            {"type": "task_started"},
+            {"type": "item.completed", "item": {
+                "type": "function_call", "name": "Skill",
+                "arguments": json.dumps({"skill": "review", "args": "..."})}},
+            {"type": "item.completed", "item": {
+                "type": "function_call", "name": "Skill",
+                "arguments": json.dumps({"skill": "review"})}},
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s.triggered, ("review",))
+        self.assertEqual(s.trigger_counts, {"review": 2})
+
+    def test_extracts_skill_from_dedicated_event_order_and_counts(self) -> None:
+        stdout = _jsonl(
+            {"type": "skill_invoked", "skill": "develop"},
+            {"type": "skill_invoked", "skill": "review"},
+            {"type": "skill_invoked", "skill": "develop"},
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s.triggered, ("develop", "review"))
+        self.assertEqual(s.trigger_counts, {"develop": 2, "review": 1})
+
+    def test_skill_free_usage_stream_is_empty(self) -> None:
+        # A normal usage-only run (model + token events) carries no skill
+        # marker; the parser must not false-positive on it.
+        stdout = _jsonl(
+            {"type": "task_started"},
+            {"type": "turn_complete", "model": "gpt-5-codex",
+             "usage": {"input_tokens": 100, "cached_input_tokens": 0,
+                       "output_tokens": 50}},
+            {"type": "task_complete", "total_cost_usd": 0.01, "num_turns": 1},
+        )
+        self.assertEqual(parse_codex_skills(stdout), SkillTriggers())
+
+    def test_malformed_lines_are_skipped(self) -> None:
+        good = json.dumps({"type": "skill_invoked", "skill": "develop"})
+        stdout = "\n".join([
+            "codex starting...",
+            '{"truncated":',
+            good,
+            "trailing-noise",
+        ])
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s.triggered, ("develop",))
+        self.assertEqual(s.trigger_counts, {"develop": 1})
+
+    def test_ignores_skill_args_for_privacy(self) -> None:
+        secret = "user secret payload"
+        stdout = _jsonl(
+            {"type": "item.completed", "item": {
+                "type": "function_call", "name": "Skill",
+                "arguments": json.dumps({"skill": "review", "args": secret})}},
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s.triggered, ("review",))
+        self.assertNotIn(secret, repr(s))
+
+    def test_empty_stdout(self) -> None:
+        self.assertEqual(parse_codex_skills(""), SkillTriggers())
+
+
+class SkillDispatcherTest(unittest.TestCase):
+    """``parse_agent_skills`` routes by backend, mirroring ``parse_agent_usage``."""
+
+    def test_routes_claude(self) -> None:
+        # An assistant/tool_use stream is recognized only by the claude path.
+        stdout = _jsonl({
+            "type": "assistant",
+            "message": {"id": "m", "content": [
+                {"type": "tool_use", "name": "Skill",
+                 "input": {"skill": "develop"}}]}})
+        self.assertEqual(parse_agent_skills("claude", stdout).triggered,
+                         ("develop",))
+
+    def test_routes_codex(self) -> None:
+        # A dedicated skill event is recognized only by the codex path; the
+        # claude parser would return empty on it, so a non-empty result here
+        # proves the codex parser ran.
+        stdout = _jsonl({"type": "skill_invoked", "skill": "review"})
+        self.assertEqual(parse_agent_skills("codex", stdout).triggered,
+                         ("review",))
+        self.assertEqual(parse_claude_skills(stdout), SkillTriggers())
+
+    def test_unknown_backend_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_agent_skills("gemini", "")
 
 
 if __name__ == "__main__":
