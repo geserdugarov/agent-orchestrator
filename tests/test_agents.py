@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,6 +16,7 @@ from orchestrator import agents
 from orchestrator.agents import (
     _AGENT_PROVIDER_AUTH_ALLOWLIST,
     _AGENT_WRITE_CREDENTIAL_LOCATORS,
+    AgentResult,
     _claude_last_message,
     _filter_agent_env,
     _is_secret_shaped,
@@ -26,6 +28,9 @@ from orchestrator.agents import (
 
 
 _CWD = Path("/tmp/agent-orchestrator-test-cwd-doesnt-matter")
+# A real directory for tests that spawn an actual subprocess (Popen rejects a
+# non-existent cwd); the mock-Popen tests above never touch the filesystem.
+_REAL_CWD = Path(tempfile.gettempdir())
 
 
 def _completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> MagicMock:
@@ -655,6 +660,166 @@ class RunSubprocessRegistrationTest(unittest.TestCase):
         self.assertTrue(seen["during"], "child not registered during the run")
         with agents._running_procs_lock:
             self.assertNotIn(proc, agents._running_procs)
+
+
+class InterruptedClassificationTest(unittest.TestCase):
+    """A run cut short by SIGTERM/SIGKILL -- the shape the orchestrator's
+    shutdown sweep (`terminate_all_running`) produces when it kills an
+    in-flight agent group -- must surface as `interrupted=True`, distinct from
+    a normal completion and from the orchestrator's own `timed_out` path.
+    """
+
+    def _kill_self(self, sig: signal.Signals) -> tuple[str, str, int, bool, bool]:
+        # Drive a REAL child that signals itself, so the negative returncode is
+        # produced by the kernel + Popen exactly as it is when the shutdown
+        # sweep SIGTERMs/SIGKILLs the group, not synthesized by a mock.
+        cmd = [
+            sys.executable, "-c",
+            f"import os, signal; os.kill(os.getpid(), {int(sig)})",
+        ]
+        return agents._run_subprocess(cmd, _REAL_CWD, dict(os.environ), 30)
+
+    def test_run_subprocess_flags_sigterm_exit_interrupted(self) -> None:
+        stdout, stderr, exit_code, timed_out, interrupted = self._kill_self(
+            signal.SIGTERM
+        )
+        self.assertEqual(exit_code, -signal.SIGTERM)
+        self.assertFalse(timed_out)
+        self.assertTrue(interrupted)
+
+    def test_run_subprocess_flags_sigkill_exit_interrupted(self) -> None:
+        stdout, stderr, exit_code, timed_out, interrupted = self._kill_self(
+            signal.SIGKILL
+        )
+        self.assertEqual(exit_code, -signal.SIGKILL)
+        self.assertFalse(timed_out)
+        self.assertTrue(interrupted)
+
+    def test_run_subprocess_clean_exit_not_interrupted(self) -> None:
+        # A normal non-zero failure (exit 3) is a completed run, NOT an
+        # interruption -- the two must stay distinguishable downstream.
+        cmd = [sys.executable, "-c", "import sys; sys.exit(3)"]
+        stdout, stderr, exit_code, timed_out, interrupted = agents._run_subprocess(
+            cmd, _REAL_CWD, dict(os.environ), 30
+        )
+        self.assertEqual(exit_code, 3)
+        self.assertFalse(timed_out)
+        self.assertFalse(interrupted)
+
+    def test_run_codex_threads_interrupted_through(self) -> None:
+        with patch(
+            "orchestrator.agents.subprocess.Popen",
+            return_value=_completed(returncode=-signal.SIGTERM),
+        ):
+            result = _run_codex("p", _CWD)
+        self.assertTrue(result.interrupted)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(result.exit_code, -signal.SIGTERM)
+
+    def test_run_claude_threads_interrupted_through(self) -> None:
+        with patch(
+            "orchestrator.agents.subprocess.Popen",
+            return_value=_completed(returncode=-signal.SIGKILL),
+        ):
+            result = _run_claude("p", _CWD)
+        self.assertTrue(result.interrupted)
+        self.assertFalse(result.timed_out)
+
+    def test_clean_run_reports_not_interrupted(self) -> None:
+        with patch(
+            "orchestrator.agents.subprocess.Popen",
+            return_value=_completed(returncode=0),
+        ):
+            result = run_agent("codex", "p", _CWD)
+        self.assertFalse(result.interrupted)
+
+    def test_agent_result_interrupted_defaults_false(self) -> None:
+        # Backwards-compat: existing positional/keyword constructions that omit
+        # the new field still build and read `interrupted` as False.
+        result = AgentResult(
+            session_id=None,
+            last_message="",
+            exit_code=0,
+            timed_out=False,
+            stdout="",
+            stderr="",
+        )
+        self.assertFalse(result.interrupted)
+
+
+class ClaudeLastMessageGatingTest(unittest.TestCase):
+    """The assistant/message fallback is a forward-compat crutch for clean
+    runs only. An interrupted or non-zero claude run with no terminal
+    `result` event must expose an empty `last_message` rather than treating
+    the last streamed chunk as the agent's considered final answer.
+    """
+
+    _PARTIAL = json.dumps({"type": "assistant", "message": {
+        "content": [{"type": "text", "text": "partial work so far"}],
+    }})
+
+    def test_fallback_gated_off_directly(self) -> None:
+        # With the fallback disabled, a transcript carrying only assistant
+        # chunks yields ""; a terminal result event is still honored.
+        self.assertEqual(
+            _claude_last_message(self._PARTIAL, allow_assistant_fallback=False),
+            "",
+        )
+        with_result = self._PARTIAL + "\n" + json.dumps(
+            {"type": "result", "result": "final"}
+        )
+        self.assertEqual(
+            _claude_last_message(with_result, allow_assistant_fallback=False),
+            "final",
+        )
+
+    def test_interrupted_run_without_result_event_is_empty(self) -> None:
+        with patch(
+            "orchestrator.agents.subprocess.Popen",
+            return_value=_completed(
+                stdout=self._PARTIAL, returncode=-signal.SIGTERM,
+            ),
+        ):
+            result = _run_claude("p", _CWD)
+        self.assertTrue(result.interrupted)
+        self.assertEqual(result.last_message, "")
+
+    def test_nonzero_run_without_result_event_is_empty(self) -> None:
+        with patch(
+            "orchestrator.agents.subprocess.Popen",
+            return_value=_completed(stdout=self._PARTIAL, returncode=1),
+        ):
+            result = _run_claude("p", _CWD)
+        self.assertFalse(result.interrupted)
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.last_message, "")
+
+    def test_interrupted_run_with_result_event_keeps_it(self) -> None:
+        # A run that emitted the terminal result before being killed still
+        # surfaces that result -- the gate only suppresses the partial-chunk
+        # fallback, never the documented final-message channel.
+        out = self._PARTIAL + "\n" + json.dumps(
+            {"type": "result", "result": "done before kill"}
+        )
+        with patch(
+            "orchestrator.agents.subprocess.Popen",
+            return_value=_completed(stdout=out, returncode=-signal.SIGKILL),
+        ):
+            result = _run_claude("p", _CWD)
+        self.assertTrue(result.interrupted)
+        self.assertEqual(result.last_message, "done before kill")
+
+    def test_clean_run_still_uses_assistant_fallback(self) -> None:
+        # The clean-completion path keeps the forward-compat fallback so a
+        # schema drift that drops the result event does not silently blank the
+        # final message on a successful run.
+        with patch(
+            "orchestrator.agents.subprocess.Popen",
+            return_value=_completed(stdout=self._PARTIAL, returncode=0),
+        ):
+            result = _run_claude("p", _CWD)
+        self.assertFalse(result.interrupted)
+        self.assertEqual(result.last_message, "partial work so far")
 
 
 if __name__ == "__main__":

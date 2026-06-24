@@ -284,6 +284,18 @@ def _filter_agent_env(
     return filtered
 
 
+# Negative `Popen.returncode` values (the kernel reports `-N` for a child
+# killed by signal N) that mean the run was cut short rather than completing
+# on its own. The orchestrator's shutdown sweep (`terminate_all_running`)
+# SIGTERMs then SIGKILLs every in-flight group, so a worker parked in
+# `communicate` observes exactly these codes when a restart kills its agent
+# mid-run; an external SIGKILL (OOM killer, operator `kill`) lands here too.
+# Classifying them as `interrupted` keeps stage handlers from treating a
+# half-finished run as a normal non-zero failure and from publishing a partial
+# last message as the agent's considered final answer.
+_INTERRUPTED_RETURNCODES = frozenset({-signal.SIGTERM, -signal.SIGKILL})
+
+
 @dataclass
 class AgentResult:
     session_id: Optional[str]
@@ -292,6 +304,9 @@ class AgentResult:
     timed_out: bool
     stdout: str
     stderr: str
+    # Shutdown-killed / signal-terminated mid-run (distinct from `timed_out`).
+    # Defaulted so existing constructions stay valid without the field.
+    interrupted: bool = False
 
 
 # Transitional alias for one release so external imports (debugging scripts,
@@ -355,7 +370,7 @@ def _run_subprocess(
     cwd: Path,
     env: dict[str, str],
     timeout: int,
-) -> tuple[str, str, int, bool]:
+) -> tuple[str, str, int, bool, bool]:
     # Spawn the agent in its own process group (start_new_session=True =>
     # setsid). On timeout we send SIGTERM to the whole group, not just the
     # direct child, so that grandchildren the agent forked (Maven, gradle,
@@ -373,14 +388,21 @@ def _run_subprocess(
     try:
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
-            return stdout or "", stderr or "", proc.returncode, False
+            # A child killed by SIGTERM/SIGKILL exits with a negative code; the
+            # most common cause is the shutdown sweep reaching this group while
+            # we were parked in `communicate`. Flag it interrupted so it is not
+            # mistaken for a normal non-timeout completion.
+            interrupted = proc.returncode in _INTERRUPTED_RETURNCODES
+            return stdout or "", stderr or "", proc.returncode, False, interrupted
         except subprocess.TimeoutExpired:
+            # Our own timeout: classified as `timed_out`, not `interrupted`,
+            # even though `_terminate_process_group` signals the group below.
             _terminate_process_group(proc)
             try:
                 stdout, stderr = proc.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 stdout, stderr = "", ""
-            return stdout or "", stderr or "", -1, True
+            return stdout or "", stderr or "", -1, True, False
     finally:
         _unregister_proc(proc)
 
@@ -460,7 +482,9 @@ def _run_codex(
             cwd, bool(resume_session_id), timeout,
         )
 
-        stdout, stderr, exit_code, timed_out = _run_subprocess(cmd, cwd, env, timeout)
+        stdout, stderr, exit_code, timed_out, interrupted = _run_subprocess(
+            cmd, cwd, env, timeout
+        )
 
         sid = resume_session_id or parse_session_id(stdout)
         last_msg = ""
@@ -477,6 +501,7 @@ def _run_codex(
             timed_out=timed_out,
             stdout=stdout,
             stderr=stderr,
+            interrupted=interrupted,
         )
     finally:
         try:
@@ -485,14 +510,21 @@ def _run_codex(
             pass
 
 
-def _claude_last_message(jsonl_output: str) -> str:
+def _claude_last_message(
+    jsonl_output: str, *, allow_assistant_fallback: bool = True,
+) -> str:
     """Pull the final assistant text out of claude's stream-json output.
 
     Prefers the terminal `{"type":"result", "result": "..."}` event, which is
-    the documented final-message channel. Falls back to the last `assistant`
-    or `message` event's text content for forward-compat with schema drift.
-    Returns "" on total absence; the question/timeout paths in workflow.py
-    already accept an empty last_message.
+    the documented final-message channel and is honored regardless of how the
+    run ended. Falls back to the last `assistant` or `message` event's text
+    content for forward-compat with schema drift -- but only when
+    `allow_assistant_fallback` is True. The caller passes False for interrupted
+    or non-zero runs: without a terminal `result` event those produce a partial
+    transcript, and treating the last streamed chunk as the agent's considered
+    final answer is wrong, so they get "" instead. Returns "" on total absence;
+    the question/timeout paths in workflow.py already accept an empty
+    last_message.
     """
     last_result: Optional[str] = None
     last_assistant_text: Optional[str] = None
@@ -527,7 +559,9 @@ def _claude_last_message(jsonl_output: str) -> str:
                 last_assistant_text = content
     if last_result is not None:
         return last_result
-    return last_assistant_text or ""
+    if allow_assistant_fallback:
+        return last_assistant_text or ""
+    return ""
 
 
 def _run_claude(
@@ -566,10 +600,16 @@ def _run_claude(
         cwd, bool(resume_session_id), timeout,
     )
 
-    stdout, stderr, exit_code, timed_out = _run_subprocess(cmd, cwd, env, timeout)
+    stdout, stderr, exit_code, timed_out, interrupted = _run_subprocess(
+        cmd, cwd, env, timeout
+    )
 
     sid = resume_session_id or parse_session_id(stdout)
-    last_msg = _claude_last_message(stdout)
+    # Only a clean, completed run may fall back to the last streamed assistant
+    # chunk; interrupted/timed-out/non-zero runs expose "" unless they emitted
+    # a terminal `result` event.
+    succeeded = exit_code == 0 and not timed_out and not interrupted
+    last_msg = _claude_last_message(stdout, allow_assistant_fallback=succeeded)
 
     return AgentResult(
         session_id=sid,
@@ -578,6 +618,7 @@ def _run_claude(
         timed_out=timed_out,
         stdout=stdout,
         stderr=stderr,
+        interrupted=interrupted,
     )
 
 
