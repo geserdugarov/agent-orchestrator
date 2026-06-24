@@ -84,6 +84,37 @@ def _claude_stdout(
     return "\n".join([json.dumps(assistant), json.dumps(result_frame)])
 
 
+def _claude_stdout_with_skills(
+    *,
+    skills: tuple[str, ...],
+    args_marker: str = "skill-args-must-never-be-stored",
+) -> str:
+    """A claude stream-json stdout that reports usage AND triggers `Skill`
+    blocks -- each name in `skills` becomes one `tool_use` block named
+    `"Skill"`. The `args` string is asserted never to reach an emitted event
+    (Privacy: only the skill name is read).
+    """
+    content = [
+        {
+            "type": "tool_use",
+            "name": "Skill",
+            "input": {"skill": name, "args": args_marker},
+        }
+        for name in skills
+    ]
+    assistant = {
+        "type": "assistant",
+        "message": {
+            "id": "msg-skill",
+            "model": "claude-sonnet-4-6",
+            "content": content,
+            "usage": {"input_tokens": 1000, "output_tokens": 500},
+        },
+    }
+    result_frame = {"type": "result", "num_turns": 1}
+    return "\n".join([json.dumps(assistant), json.dumps(result_frame)])
+
+
 class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
     """`_run_agent_tracked` appends a single analytics record per agent
     exit, carrying the configured spec, resume/session context, retry
@@ -462,3 +493,160 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             records = self._exit_records(path)
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["models"], ["claude-sonnet-4-6"])
+
+
+class SkillTriggeredEventTest(unittest.TestCase):
+    """`_run_agent_tracked` emits one `skill_triggered` audit event per
+    distinct triggered skill, gated on `TRACK_SKILL_TRIGGERS` and reusing the
+    list `record_agent_exit` already parsed -- never re-reading stdout, never
+    leaking the `Skill` args, and never breaking a run if the emit raises."""
+
+    @staticmethod
+    def _skill_events(gh: FakeGitHubClient) -> list[dict]:
+        return [e for e in gh.recorded_events if e["event"] == "skill_triggered"]
+
+    def _run(
+        self,
+        gh: FakeGitHubClient,
+        *,
+        stdout: str,
+        track: bool,
+        backend: str = "claude",
+        review_round: Optional[int] = 2,
+        retry_count: Optional[int] = 1,
+    ) -> AgentResult:
+        # Sink path None: the analytics record is a no-op, but the skill
+        # parse + return (which drives the audit emission) still runs.
+        with patch.object(analytics, "ANALYTICS_LOG_PATH", None), \
+                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track), \
+                patch.object(workflow, "run_agent") as run_mock:
+            run_mock.return_value = AgentResult(
+                session_id="sess-skill",
+                last_message="",
+                exit_code=0,
+                timed_out=False,
+                stdout=stdout,
+                stderr="",
+            )
+            return workflow._run_agent_tracked(
+                gh, 201,
+                agent_role="developer",
+                stage="implementing",
+                backend=backend,
+                prompt="ignored",
+                cwd=_FAKE_WT,
+                agent_spec=backend,
+                review_round=review_round,
+                retry_count=retry_count,
+            )
+
+    def test_switch_on_emits_one_event_per_distinct_skill(self) -> None:
+        # develop fires twice, review once: two events in first-seen order,
+        # one per DISTINCT skill (the repeat does not double-emit).
+        gh = FakeGitHubClient()
+        self._run(
+            gh,
+            stdout=_claude_stdout_with_skills(
+                skills=("develop", "develop", "review"),
+            ),
+            track=True,
+        )
+        events = self._skill_events(gh)
+        self.assertEqual([e["skill"] for e in events], ["develop", "review"])
+        for ev in events:
+            self.assertEqual(ev["agent"], "claude")
+            self.assertEqual(ev["agent_role"], "developer")
+            self.assertEqual(ev["stage"], "implementing")
+            self.assertEqual(ev["review_round"], 2)
+            self.assertEqual(ev["retry_count"], 1)
+        # The baseline audit lifecycle events still fire alongside.
+        kinds = {e["event"] for e in gh.recorded_events}
+        self.assertIn("agent_spawn", kinds)
+        self.assertIn("agent_exit", kinds)
+
+    def test_switch_off_emits_no_skill_events(self) -> None:
+        # Default-off: a skill-bearing stream produces the lifecycle events
+        # but no `skill_triggered` at all -- gating is inherited from the
+        # analytics layer returning an empty list.
+        gh = FakeGitHubClient()
+        self._run(
+            gh,
+            stdout=_claude_stdout_with_skills(skills=("develop", "review")),
+            track=False,
+        )
+        self.assertEqual(self._skill_events(gh), [])
+        self.assertIn(
+            "agent_exit", {e["event"] for e in gh.recorded_events},
+        )
+
+    def test_no_triggers_emits_no_skill_events(self) -> None:
+        # Switch on but the stream triggered nothing: no events emitted.
+        gh = FakeGitHubClient()
+        self._run(gh, stdout=_claude_stdout(), track=True)
+        self.assertEqual(self._skill_events(gh), [])
+
+    def test_skill_args_never_reach_the_event(self) -> None:
+        # Privacy: the `Skill` args payload must never land in an event.
+        gh = FakeGitHubClient()
+        marker = "ghp_LEAKED_SKILL_ARG_DO_NOT_EMIT"
+        self._run(
+            gh,
+            stdout=_claude_stdout_with_skills(
+                skills=("develop",), args_marker=marker,
+            ),
+            track=True,
+        )
+        events = self._skill_events(gh)
+        self.assertEqual([e["skill"] for e in events], ["develop"])
+        blob = json.dumps(events)
+        self.assertNotIn(marker, blob)
+        self.assertNotIn("args", blob)
+
+    def test_emission_reuses_record_agent_exit_return(self) -> None:
+        # The events are driven by `record_agent_exit`'s return value, not a
+        # second parse of stdout: a stubbed return emits exactly its names.
+        gh = FakeGitHubClient()
+        with patch.object(analytics, "ANALYTICS_LOG_PATH", None), \
+                patch.object(
+                    analytics, "record_agent_exit",
+                    return_value=["alpha", "beta"],
+                ), \
+                patch.object(workflow, "run_agent") as run_mock:
+            run_mock.return_value = AgentResult(
+                session_id="s", last_message="", exit_code=0,
+                timed_out=False, stdout="ignored-not-reparsed", stderr="",
+            )
+            workflow._run_agent_tracked(
+                gh, 202,
+                agent_role="reviewer",
+                stage="validating",
+                backend="codex",
+                prompt="ignored",
+                cwd=_FAKE_WT,
+            )
+        self.assertEqual(
+            [e["skill"] for e in self._skill_events(gh)], ["alpha", "beta"],
+        )
+
+    def test_emission_is_fail_open(self) -> None:
+        # A bug in the skill emit must NOT break a run whose baseline audit
+        # events already fired: the loop's own guard logs and falls through,
+        # and `_run_agent_tracked` still returns the AgentResult.
+        class _RaisingOnSkillGH(FakeGitHubClient):
+            def emit_event(self, event, **kwargs):
+                if event == "skill_triggered":
+                    raise RuntimeError("emit boom")
+                return super().emit_event(event, **kwargs)
+
+        gh = _RaisingOnSkillGH()
+        with self.assertLogs(workflow.log, level="ERROR"):
+            result = self._run(
+                gh,
+                stdout=_claude_stdout_with_skills(skills=("develop",)),
+                track=True,
+            )
+        self.assertEqual(result.session_id, "sess-skill")
+        # The raising path emitted no skill event, but the lifecycle events
+        # (which do not raise) still landed.
+        self.assertEqual(self._skill_events(gh), [])
+        self.assertIn("agent_exit", {e["event"] for e in gh.recorded_events})
