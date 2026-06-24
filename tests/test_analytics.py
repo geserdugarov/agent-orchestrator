@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -770,6 +771,88 @@ class RecordAgentExitSkillTest(unittest.TestCase):
             "skills_triggered", "skills_triggered_count", "skills_available",
         ):
             self.assertNotIn(key, rec)
+
+    def _record(
+        self, analytics, *, stdout, track=True, parse=None,
+    ):
+        """Call `record_agent_exit` with the sink disabled and return its
+        value -- the de-duplicated triggered list the caller emits events
+        from. `parse` optionally stubs the skill extractor.
+        """
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch.object(analytics, "ANALYTICS_LOG_PATH", None)
+            )
+            stack.enter_context(
+                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track)
+            )
+            if parse is not None:
+                stack.enter_context(
+                    patch.object(analytics.usage, "parse_agent_skills", parse)
+                )
+            return analytics.record_agent_exit(
+                repo="owner/repo",
+                issue=7,
+                stage="implementing",
+                agent_role="developer",
+                backend="claude",
+                agent_spec="claude",
+                resume_session_id=None,
+                result=analytics.AgentResult(
+                    session_id="sess",
+                    last_message="",
+                    exit_code=0,
+                    timed_out=False,
+                    stdout=stdout,
+                    stderr="",
+                ),
+                duration_s=0.0,
+                review_round=0,
+                retry_count=1,
+            )
+
+    def test_returns_triggered_list_when_switch_on(self) -> None:
+        # The return value is the de-duplicated first-seen list the audit
+        # emitter consumes -- here develop fires twice, review once.
+        _, analytics = _reload()
+        triggered = self._record(
+            analytics,
+            stdout=_claude_stdout_with_skills(
+                skills=("develop", "develop", "review"),
+            ),
+            track=True,
+        )
+        self.assertEqual(triggered, ["develop", "review"])
+
+    def test_returns_none_when_switch_off(self) -> None:
+        _, analytics = _reload()
+        triggered = self._record(
+            analytics,
+            stdout=_claude_stdout_with_skills(skills=("develop",)),
+            track=False,
+        )
+        self.assertIsNone(triggered)
+
+    def test_returns_none_when_nothing_triggered(self) -> None:
+        _, analytics = _reload()
+        triggered = self._record(
+            analytics,
+            stdout=_claude_stdout_with_skills(skills=()),
+            track=True,
+        )
+        self.assertIsNone(triggered)
+
+    def test_returns_none_on_skill_parse_failure(self) -> None:
+        # A skill-parse bug returns None (no events) but still emits baseline.
+        _, analytics = _reload()
+        with self.assertLogs(analytics.log, level="ERROR"):
+            triggered = self._record(
+                analytics,
+                stdout=_claude_stdout_with_skills(skills=("develop",)),
+                track=True,
+                parse=MagicMock(side_effect=RuntimeError("boom")),
+            )
+        self.assertIsNone(triggered)
 
 
 if __name__ == "__main__":

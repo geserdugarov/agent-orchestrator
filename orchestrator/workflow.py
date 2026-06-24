@@ -339,6 +339,16 @@ def _run_agent_tracked(
     a debugging mirror, and `result.stdout` may contain user-issue text.
     A parser failure or a sink IO error is swallowed so an analytics
     misconfiguration cannot stop the per-issue tick.
+
+    When `TRACK_SKILL_TRIGGERS` is on, `record_agent_exit` returns the
+    distinct skills the run triggered and one `skill_triggered` audit event
+    is emitted per skill (carrying `agent`, `agent_role`, `review_round`,
+    `retry_count`, and `skill`), reusing that parsed list rather than
+    re-reading stdout. The switch off (the default) yields no list and thus
+    no events, so the gating is inherited from the analytics layer; the
+    emission is wrapped in its own fail-open guard so an opt-in bug can never
+    cost a run whose baseline `agent_spawn` / `agent_exit` events already
+    fired.
     """
     start = time.monotonic()
     gh.emit_event(
@@ -374,7 +384,7 @@ def _run_agent_tracked(
         review_round=review_round,
         retry_count=retry_count,
     )
-    analytics.record_agent_exit(
+    triggered_skills = analytics.record_agent_exit(
         repo=getattr(gh, "_repo_slug", None) or "",
         issue=issue_number,
         stage=stage,
@@ -388,6 +398,29 @@ def _run_agent_tracked(
         retry_count=retry_count,
         fallback_model=_configured_model(backend, extra_args),
     )
+    # One `skill_triggered` audit event per distinct triggered skill, reusing
+    # the list `record_agent_exit` already parsed (no second pass over stdout).
+    # Empty unless `TRACK_SKILL_TRIGGERS` is on, so the gating is inherited
+    # from the analytics layer. This is opt-in observability, so it rides its
+    # own fail-open guard exactly like the skill parse does -- a bug here must
+    # never break a run whose baseline audit events have already fired.
+    try:
+        for skill in triggered_skills or ():
+            gh.emit_event(
+                "skill_triggered",
+                issue_number=issue_number,
+                stage=stage,
+                agent=backend,
+                agent_role=agent_role,
+                review_round=review_round,
+                retry_count=retry_count,
+                skill=skill,
+            )
+    except Exception:
+        log.exception(
+            "issue=#%d: skill_triggered audit emission failed; continuing",
+            issue_number,
+        )
     return result
 
 

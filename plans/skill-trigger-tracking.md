@@ -54,10 +54,14 @@ under `--include-partial-messages` was over-counted in `trigger_counts`.
 snapshot per id — the same last-frame-wins discipline `parse_claude_usage`
 already applies for exactly this reason — so a single trigger counts once.
 
-Steps 2 (audit `skill_triggered` event) and 3 (dashboard widget) did
-**not** land and remain the deferred follow-ups below; the offered-skills
-set and the codex event shape remain best-effort capture tasks (Open
-questions). The remaining design sections describe the shipped behavior.
+Step 2 (the audit `skill_triggered` event) **has since shipped**:
+`_run_agent_tracked` now emits one event per distinct triggered skill,
+gated on the same `TRACK_SKILL_TRIGGERS` switch and reusing the list
+`record_agent_exit` parses (see [Audit event log](#3-audit-event-log)).
+Step 3 (dashboard widget) did **not** land and remains the deferred
+follow-up below; the offered-skills set and the codex event shape remain
+best-effort capture tasks (Open questions). The remaining design sections
+describe the shipped behavior.
 
 ### Live data after the switch was turned on
 
@@ -267,22 +271,26 @@ ships.
 
 ### 3. Audit event log
 
-Keep the audit log (`EVENT_LOG_PATH`) as the per-skill granularity
-surface *if* per-trigger forensics are wanted: emit one
-`skill_triggered` audit event per distinct skill through
-`GitHubClient.emit_event`, carrying `agent`, `agent_role`,
-`review_round`, `retry_count`, and `skill`. Note the wiring wrinkle: the
-audit `agent_exit` event is emitted from `_run_agent_tracked` (the
-`emit_event` call site), while the skill parse lands one call deeper in
-`record_agent_exit`, so this follow-up needs the parsed skill list
-surfaced back to the emit site (return it from `record_agent_exit`, or
-have that function emit the audit events itself). The default
-recommendation is to **defer** this and ship only the `agent_exit`
-analytics rollup first — one record per run avoids an event-count
-explosion on multi-skill runs, the analytics field already answers the
-headline questions, and it sidesteps that wiring wrinkle entirely. The
-audit event is a clean follow-up if per-invocation ordering proves
-necessary (Open questions).
+The audit log (`EVENT_LOG_PATH`) carries the per-skill granularity
+surface for per-trigger forensics: **as shipped** (step 2),
+`_run_agent_tracked` emits one `skill_triggered` audit event per distinct
+skill through `GitHubClient.emit_event`, carrying `agent`, `agent_role`,
+`review_round`, `retry_count`, and `skill`. The wiring wrinkle the first
+cut deferred — the audit `agent_exit` event is emitted from
+`_run_agent_tracked` (the `emit_event` call site), while the skill parse
+lands one call deeper in `record_agent_exit` — is resolved by the first of
+the two options this section floated: `record_agent_exit` **returns** the
+de-duplicated first-seen triggered list it already parsed, and
+`_run_agent_tracked` loops over it to emit. That reuses the single parse
+(no second pass over stdout), keeps the analytics layer free of any
+`GitHubClient` dependency, and inherits the gate for free — the switch off
+yields an empty/`None` list, so no events fire. The emission rides its own
+fail-open `try/except` (log-and-continue), mirroring the skill parse's
+guard, so an opt-in bug can never disturb the baseline `agent_spawn` /
+`agent_exit` events that already fired. The `agent_exit` analytics rollup
+still ships alongside it: one record per run answers the headline
+questions and avoids leaning on the per-event stream for aggregate counts;
+the audit events add the per-invocation ordering on top.
 
 ### 4. Integration point
 
@@ -368,8 +376,10 @@ that ships the parser.
   rotation, retention, and dedup machinery for one field group.
 - **A `skill_triggered` audit event per invocation as the v1 surface.**
   Multi-skill runs would multiply event volume for a signal the
-  `agent_exit` rollup already carries. Kept as a documented follow-up,
-  not the first cut.
+  `agent_exit` rollup already carries, so it was kept out of the first cut
+  and documented as a follow-up. That follow-up (step 2) has since shipped
+  *alongside* the rollup, not in place of it, and stays gated off by
+  default — so the volume concern only applies to operators who opt in.
 - **Required-skill enforcement / gating.** Blocking or re-prompting a run
   that skips `develop` is workflow policy, not observability, and would
   couple a correctness decision to a best-effort stream parse. The
@@ -391,8 +401,9 @@ that ships the parser.
 Status as of the step-1 landing (see [Status](#status)): the two capture
 tasks are **still open** — step 1 shipped grounded on synthetic streams,
 not captured ones, so the parsers extract from plausible-but-unconfirmed
-shapes — while the switch-default is **settled for v1** and the audit
-event and dashboard are **explicitly deferred** follow-ups. The
+shapes — while the switch-default is **settled for v1**, the audit
+`skill_triggered` event has since **shipped** (step 2), and the dashboard
+remains an **explicitly deferred** follow-up. The
 [live data](#live-data-after-the-switch-was-turned-on) gathered since the
 operator turned the switch on now confirms both capture-task gaps
 empirically (codex captured nothing; `skills_available` never appeared)
@@ -440,11 +451,14 @@ reviewer's signal is lost in production today.
   default now would advertise a feature that silently covers only the
   claude backend. Keep it off until codex coverage exists (the headline
   gap above); revisit then.
-- **Audit-event follow-up (deferred).** Whether per-invocation ordering
-  (the audit `skill_triggered` event) is ever needed, or the `agent_exit`
-  first-seen-ordered list suffices. Live data makes this premature: all 3
-  real triggers so far are single (`count 1`, one skill), so per-invocation
-  ordering is moot. Not implemented — step 2 below.
+- **Audit-event follow-up (implemented — step 2).** The per-invocation
+  audit `skill_triggered` event has shipped, reusing the list
+  `record_agent_exit` parses and gated on the same switch. Live data still
+  says the *signal* it adds is thin — all 3 real triggers so far are single
+  (`count 1`, one skill), so per-invocation ordering is moot in today's
+  data — but the wiring is cheap, fail-open, and inert when the switch is
+  off, so it ships now rather than waiting for a multi-skill run to prove
+  the need. The remaining open piece is the dashboard surface below.
 - **Dashboard surface (deferred).** A skill-trigger-rate-per-role widget
   is a natural read-model addition once data accumulates, but is out of
   this design's scope — the `extras JSONB` column makes it a pure
@@ -473,9 +487,14 @@ reviewer's signal is lost in production today.
    claude *and* codex streams plus a skill-free stream per backend, and
    the `docs/observability.md` / `docs/configuration.md` updates. No DDL —
    `extras JSONB` ingests the fields immediately.
-2. **(Optional) Audit `skill_triggered` event** if per-invocation
-   forensics are wanted. Not done.
+2. **Audit `skill_triggered` event — LANDED.** `record_agent_exit`
+   returns the de-duplicated triggered list it parses, and
+   `_run_agent_tracked` emits one `skill_triggered` audit event per
+   distinct skill (`agent`, `agent_role`, `review_round`, `retry_count`,
+   `skill`) under its own fail-open guard, gated on `TRACK_SKILL_TRIGGERS`.
+   Focused tests cover the on / off / multi-skill / parse-failure paths;
+   `docs/observability.md` documents the event.
 3. **(Optional) Dashboard widget** over the accumulated field. Not done.
 
-Steps 2 and 3 are independent follow-ups; step 1 stands alone and is
+Step 3 is an independent follow-up; steps 1 and 2 stand alone and are
 fully reversible by clearing the switch.

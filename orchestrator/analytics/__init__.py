@@ -295,7 +295,7 @@ def record_agent_exit(
     review_round: Optional[int],
     retry_count: Optional[int],
     fallback_model: Optional[str] = None,
-) -> None:
+) -> Optional[list[str]]:
     """Parse usage from agent stdout and append a single `agent_exit` record.
 
     Pulled out of `workflow._run_agent_tracked` so the parse + append step
@@ -323,6 +323,11 @@ def record_agent_exit(
     fields," never a missing record. With the switch off the extractor
     never runs and the record stays byte-for-byte shape-compatible with
     today's.
+
+    Returns the distinct triggered skill names (first-seen order) so the
+    caller can emit per-skill audit events without reparsing stdout, or
+    `None` when nothing fired, the switch is off, the skill parse failed,
+    or the usage parse failed (no record was written).
     """
     try:
         metrics = usage.parse_agent_usage(
@@ -334,7 +339,7 @@ def record_agent_exit(
             "skipping record",
             issue, backend,
         )
-        return
+        return None
     skills_triggered: Optional[list[str]] = None
     skills_triggered_count: Optional[int] = None
     skills_available: Optional[list[str]] = None
@@ -382,6 +387,7 @@ def record_agent_exit(
             skills_available=skills_available,
         )
     )
+    return skills_triggered
 
 
 def prune_with_retention_logging() -> None:
