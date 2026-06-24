@@ -32,8 +32,9 @@ to correlate skill use with review-round count or cost.
 This document designs a narrow, observation-only system to track skill
 triggering. The design issue that picked this up landed the design doc
 only; **Sequencing step 1 (the extractor + `agent_exit` fields + opt-in
-switch) has since shipped** — see [Status](#status) for what is now in the
-tree and what remains a follow-up or a capture task.
+switch) and step 3 (the dashboard widget) have since shipped** — see
+[Status](#status) for what is now in the tree and what remains a
+follow-up or a capture task.
 
 ## Status
 
@@ -54,14 +55,16 @@ under `--include-partial-messages` was over-counted in `trigger_counts`.
 snapshot per id — the same last-frame-wins discipline `parse_claude_usage`
 already applies for exactly this reason — so a single trigger counts once.
 
-Step 2 (the audit `skill_triggered` event) **has since shipped**:
-`_run_agent_tracked` now emits one event per distinct triggered skill,
-gated on the same `TRACK_SKILL_TRIGGERS` switch and reusing the list
-`record_agent_exit` parses (see [Audit event log](#3-audit-event-log)).
-Step 3 (dashboard widget) did **not** land and remains the deferred
-follow-up below; the offered-skills set and the codex event shape remain
-best-effort capture tasks (Open questions). The remaining design sections
-describe the shipped behavior.
+Steps 2 and 3 **have both since shipped**. Step 2 (the audit
+`skill_triggered` event): `_run_agent_tracked` now emits one event per
+distinct triggered skill, gated on the same `TRACK_SKILL_TRIGGERS` switch
+and reusing the list `record_agent_exit` parses (see [Audit event
+log](#3-audit-event-log)). Step 3 (the dashboard widget):
+`analytics.read.get_skill_trigger_rates` plus the "Skill trigger rates"
+panel in `orchestrator/dashboard.py`, a pure read-side addition over the
+`extras JSONB` fields with no DDL. The offered-skills set and the codex
+event shape remain best-effort capture tasks (Open questions). The
+remaining design sections describe the shipped behavior.
 
 ### Live data after the switch was turned on
 
@@ -458,12 +461,17 @@ reviewer's signal is lost in production today.
   (`count 1`, one skill), so per-invocation ordering is moot in today's
   data — but the wiring is cheap, fail-open, and inert when the switch is
   off, so it ships now rather than waiting for a multi-skill run to prove
-  the need. The remaining open piece is the dashboard surface below.
-- **Dashboard surface (deferred).** A skill-trigger-rate-per-role widget
-  is a natural read-model addition once data accumulates, but is out of
-  this design's scope — the `extras JSONB` column makes it a pure
-  read-side change later. With only 3 skill-bearing records (and one
-  backend) there is nothing to chart yet. Not implemented — step 3 below.
+  the need.
+- **Dashboard surface (implemented — step 3).** The
+  skill-trigger-rate-per-role widget landed as a pure read-side change
+  over the `extras JSONB` fields: `analytics.read.get_skill_trigger_rates`
+  aggregates per `(agent_role, backend)` — `runs`, `skill_runs` (rows
+  carrying a `skills_triggered` key), and `total_triggers` — and
+  `orchestrator/dashboard.py` renders the "Skill trigger rates" panel as
+  an HTML table (no Plotly builder, no DDL). Because the field is only
+  written when tracking is on and a skill fired, a `0%` rate reads as
+  "no trigger observed" and the panel captions the `TRACK_SKILL_TRIGGERS`
+  switch when nothing has fired in the window.
 
 ## Sequencing
 
@@ -494,7 +502,12 @@ reviewer's signal is lost in production today.
    `skill`) under its own fail-open guard, gated on `TRACK_SKILL_TRIGGERS`.
    Focused tests cover the on / off / multi-skill / parse-failure paths;
    `docs/observability.md` documents the event.
-3. **(Optional) Dashboard widget** over the accumulated field. Not done.
+3. **Dashboard widget — LANDED.** `get_skill_trigger_rates` in
+   `analytics/read.py` plus the "Skill trigger rates" panel in
+   `orchestrator/dashboard.py`, wired into the second read fan-out wave
+   and covered by `tests/test_analytics_read.py` and
+   `tests/test_dashboard.py`. A pure read-side addition over the
+   `extras JSONB` fields — no DDL.
 
-Step 3 is an independent follow-up; steps 1 and 2 stand alone and are
-fully reversible by clearing the switch.
+Steps 1, 2, and 3 have all landed; the feature is fully reversible by
+clearing the switch.

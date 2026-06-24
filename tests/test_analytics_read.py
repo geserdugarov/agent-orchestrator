@@ -1649,6 +1649,113 @@ class BackendEfficiencyTest(unittest.TestCase):
         self.assertEqual(rows[0].total_cache_write_tokens, 0)
 
 
+class SkillTriggerRatesTest(unittest.TestCase):
+    """`get_skill_trigger_rates` aggregates the base `analytics_events`
+    table by `(agent_role, backend)` over the `extras` JSONB skill
+    fields, honoring the same `agent_exit` event-filter contract as
+    `get_backend_efficiency`."""
+
+    def test_unset_db_url_returns_empty(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        self.assertEqual(
+            analytics_read.get_skill_trigger_rates(
+                connect=lambda url: _FakeConnection(),
+            ),
+            [],
+        )
+
+    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        rows = analytics_read.get_skill_trigger_rates(
+            events=["stage_enter"], connect=_connector(conn),
+        )
+        self.assertEqual(rows, [])
+        # No DB round-trip when the events filter excludes agent_exit.
+        self.assertEqual(conn.executed, [])
+
+    def test_aggregates_round_trip(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        # (agent_role, backend, runs, skill_runs, total_triggers) --
+        # mirrors the live-data table in the design doc.
+        conn.rows_for = {
+            "GROUP BY role_label, backend_label": [
+                ("developer", "claude", 9, 3, 3),
+                ("reviewer", "codex", 5, 0, 0),
+                ("decomposer", "codex", 2, 0, 0),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_rates(connect=_connector(conn))
+        self.assertEqual(
+            [(r.agent_role, r.backend) for r in rows],
+            [
+                ("developer", "claude"),
+                ("reviewer", "codex"),
+                ("decomposer", "codex"),
+            ],
+        )
+        self.assertEqual(rows[0].runs, 9)
+        self.assertEqual(rows[0].skill_runs, 3)
+        self.assertEqual(rows[0].total_triggers, 3)
+        self.assertAlmostEqual(rows[0].rate, 3 / 9)
+        # The quiet reviewer reads as a real 0% trigger rate, not a
+        # dropped category.
+        self.assertEqual(rows[1].skill_runs, 0)
+        self.assertEqual(rows[1].rate, 0.0)
+        sql, _ = conn.executed[0]
+        # Skill fields live in `extras` JSONB, which the rollup does
+        # not carry, so the reader scans the base table and pins
+        # agent_exit directly.
+        self.assertIn("FROM analytics_events", sql)
+        self.assertIn("event = 'agent_exit'", sql)
+        self.assertIn("GROUP BY role_label, backend_label", sql)
+        # Key-presence test (not the jsonb `?` operator) and the
+        # trigger-count sum off `extras`.
+        self.assertIn("extras -> 'skills_triggered' IS NOT NULL", sql)
+        self.assertIn("skills_triggered_count", sql)
+
+    def test_null_role_and_backend_bucket_unknown(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        # COALESCE maps NULL -> 'unknown' in SQL; the reader also
+        # guards None defensively so a fake row without COALESCE still
+        # round-trips.
+        conn.rows_for = {
+            "GROUP BY role_label, backend_label": [
+                (None, None, 4, 0, 0),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_rates(connect=_connector(conn))
+        self.assertEqual(rows[0].agent_role, "unknown")
+        self.assertEqual(rows[0].backend, "unknown")
+
+    def test_rate_zero_runs_does_not_divide(self) -> None:
+        # Defensive: a zero-run group (never emitted by the SQL) still
+        # yields 0.0 rather than a ZeroDivisionError.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        row = analytics_read.SkillTriggerRateRow(
+            agent_role="developer", backend="claude", runs=0,
+        )
+        self.assertEqual(row.rate, 0.0)
+
+    def test_window_and_repo_params_bound(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_skill_trigger_rates(
+            start=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            end=datetime(2026, 6, 24, tzinfo=timezone.utc),
+            repo="owner/repo",
+            connect=_connector(conn),
+        )
+        sql, params = conn.executed[0]
+        self.assertIn("ts >= %s", sql)
+        self.assertIn("ts < %s", sql)
+        self.assertIn("repo = %s", sql)
+        self.assertIn(datetime(2026, 6, 1, tzinfo=timezone.utc), params)
+        self.assertIn("owner/repo", params)
+
+
 class RepoBreakdownTest(unittest.TestCase):
     """`get_repo_breakdown` reads the base table so the standard
     event/stage/date/repo/issue filter shape applies (no agent_runs

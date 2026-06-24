@@ -429,6 +429,47 @@ class CostCoverageRow:
 
 
 @dataclass(frozen=True)
+class SkillTriggerRateRow:
+    """Per-`(agent_role, backend)` skill-trigger aggregate over agent runs.
+
+    Powers the dashboard's opt-in "Skill trigger rates" panel. The
+    skill fields live in `analytics_events.extras` JSONB -- they are
+    not promoted columns and the daily rollup does not carry them --
+    so this reader scans the base table directly (no DDL, no view
+    change). `runs` is every `agent_exit` row in the group; `skill_runs`
+    is how many of those carried a `skills_triggered` key (the firm
+    "the stream surfaced at least one skill" signal); `total_triggers`
+    sums `skills_triggered_count` so a run that pulled `develop` three
+    times weighs more than one clean trigger.
+
+    `record_agent_exit` only writes the skill keys when
+    `TRACK_SKILL_TRIGGERS` is on *and* a skill fired (an empty field is
+    dropped, not written), so `skill_runs` is a *floor* on observed
+    skill use: a `0` rate conflates a run that triggered nothing with
+    one whose tracking was off. The dashboard captions the panel
+    accordingly. See [`../../plans/skill-trigger-tracking.md`]. NULL
+    `agent_role` / `backend` bucket under `"unknown"` so a category is
+    never silently dropped.
+    """
+
+    agent_role: str
+    backend: str
+    runs: int
+    skill_runs: int = 0
+    total_triggers: int = 0
+
+    @property
+    def rate(self) -> float:
+        """Share of runs in the group that triggered >=1 skill (0.0-1.0).
+
+        Returns `0.0` for a zero-run group so callers never divide by
+        zero; the reader only emits rows for groups with at least one
+        `agent_exit` run, so the guard is defensive.
+        """
+        return self.skill_runs / self.runs if self.runs else 0.0
+
+
+@dataclass(frozen=True)
 class BackendDailyTokensRow:
     """One `(day, backend, total_tokens)` cell of the per-backend daily
     token series.
@@ -2093,6 +2134,88 @@ def get_backend_efficiency(
                 total_output_tokens=int(out_tok or 0),
                 total_cache_read_tokens=int(cache_read or 0),
                 total_cache_write_tokens=int(cache_write or 0),
+            )
+        )
+    return out
+
+
+def get_skill_trigger_rates(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
+) -> list[SkillTriggerRateRow]:
+    """Per-`(agent_role, backend)` skill-trigger rates over agent runs.
+
+    Reads the base `analytics_events` table rather than the rollup: the
+    skill fields live in `extras` JSONB, which the materialized rollup
+    does not carry, so this widget stays a pure read-side addition with
+    zero DDL. Pins `event = 'agent_exit'` so only tracked agent runs
+    count, and short-circuits to empty when the events multiselect
+    excludes `agent_exit` (the same contract `get_backend_efficiency`
+    honors). A run counts toward `skill_runs` when its `extras` carries
+    a `skills_triggered` key -- `record_agent_exit` writes that key only
+    when `TRACK_SKILL_TRIGGERS` is on *and* a skill fired, so its
+    presence is the firm "a skill triggered" signal. `total_triggers`
+    sums `skills_triggered_count`. NULL `agent_role` / `backend` bucket
+    under `"unknown"`. Rows are ordered skill-active groups first.
+    """
+    url = _resolve_db_url(db_url)
+    if conn is None and not url:
+        return []
+    if _agent_event_excluded(events):
+        return []
+    connect_fn = connect or _default_connect
+    where, params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=None, stages=stages, issue=issue,
+    )
+    clause = (
+        f"{where} AND event = 'agent_exit'"
+        if where
+        else " WHERE event = 'agent_exit'"
+    )
+    # `extras -> 'skills_triggered' IS NOT NULL` (not the jsonb `?`
+    # operator) tests key presence without tripping the `?`/`%s`
+    # placeholder ambiguity some drivers and poolers apply.
+    sql = (
+        "SELECT "
+        "COALESCE(agent_role, 'unknown') AS role_label, "
+        "COALESCE(backend, 'unknown') AS backend_label, "
+        "COUNT(*) AS runs, "
+        "COUNT(*) FILTER "
+        "  (WHERE extras -> 'skills_triggered' IS NOT NULL) AS skill_runs, "
+        "COALESCE(SUM((extras ->> 'skills_triggered_count')::int), 0) "
+        "  AS total_triggers "
+        f"FROM analytics_events{clause} "
+        "GROUP BY role_label, backend_label "
+        "ORDER BY skill_runs DESC, runs DESC, role_label ASC, "
+        "backend_label ASC"
+    )
+    rows = _query(connect_fn, url, sql, params, conn=conn)
+    out: list[SkillTriggerRateRow] = []
+    for row in rows:
+        role = row[0]
+        backend = row[1]
+        runs = row[2]
+        # Older fixtures may emit 3-tuple rows without the skill
+        # columns; default to zero so unrelated test cases need not
+        # know about the JSONB aggregates.
+        skill_runs = row[3] if len(row) > 3 else 0
+        total_triggers = row[4] if len(row) > 4 else 0
+        out.append(
+            SkillTriggerRateRow(
+                agent_role=str(role) if role is not None else "unknown",
+                backend=str(backend) if backend is not None else "unknown",
+                runs=int(runs or 0),
+                skill_runs=int(skill_runs or 0),
+                total_triggers=int(total_triggers or 0),
             )
         )
     return out

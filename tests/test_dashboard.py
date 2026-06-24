@@ -779,6 +779,66 @@ class IssuesTableHtmlTest(unittest.TestCase):
         self.assertIn('class="orch-badge-warn">4', html_out)
 
 
+class SkillTriggersHtmlTest(unittest.TestCase):
+    """The "Skill trigger rates" panel is hand-rolled HTML (matching
+    the backend-efficiency cards and cost-coverage bar) so the small,
+    categorical per-(role, backend) table reads cleanly even when every
+    rate is 0% -- the `TRACK_SKILL_TRIGGERS=off` baseline.
+    """
+
+    def _row(self, role, backend, runs, skill_runs, triggers):
+        from orchestrator.analytics.read import SkillTriggerRateRow
+        return SkillTriggerRateRow(
+            agent_role=role,
+            backend=backend,
+            runs=runs,
+            skill_runs=skill_runs,
+            total_triggers=triggers,
+        )
+
+    def test_columns_present(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("developer", "claude", 9, 3, 3)]
+        html_out = dashboard._skill_triggers_html(rows)
+        for header in ("Role", "Backend", "Runs", "Skill runs",
+                       "Trigger rate", "Triggers"):
+            self.assertIn(f">{header}<", html_out)
+
+    def test_rate_rendered_as_percent(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("developer", "claude", 4, 1, 1)]
+        html_out = dashboard._skill_triggers_html(rows)
+        # 1 of 4 runs triggered a skill -> 25%.
+        self.assertIn(">25%<", html_out)
+
+    def test_rate_bar_relative_to_busiest_group(self) -> None:
+        _, dashboard = _reload()
+        rows = [
+            self._row("developer", "claude", 10, 10, 10),  # rate 1.0
+            self._row("reviewer", "codex", 10, 5, 5),       # rate 0.5
+        ]
+        html_out = dashboard._skill_triggers_html(rows)
+        # Full-width bar on the 100%-rate group, half-width on the 50%.
+        self.assertIn("width:100.0%", html_out)
+        self.assertIn("width:50.0%", html_out)
+
+    def test_zero_rate_group_renders_zero_percent(self) -> None:
+        # A quiet reviewer (0 skill runs) is a real signal, not a
+        # dropped row: it renders as an explicit 0% with an empty bar.
+        _, dashboard = _reload()
+        rows = [self._row("reviewer", "codex", 5, 0, 0)]
+        html_out = dashboard._skill_triggers_html(rows)
+        self.assertIn(">0%<", html_out)
+        self.assertIn("width:0.0%", html_out)
+
+    def test_role_html_escaped(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("dev<&>", "claude", 1, 0, 0)]
+        html_out = dashboard._skill_triggers_html(rows)
+        self.assertIn("dev&lt;&amp;&gt;", html_out)
+        self.assertNotIn("dev<&>", html_out)
+
+
 class DeltaPillTest(unittest.TestCase):
     """KPI delta pills must paint cost / token increases red and
     drops green. An earlier draft mapped `invert=True && value > 0`
@@ -1280,7 +1340,7 @@ class FanOutReadsParallelTest(unittest.TestCase):
 
 
 class MainParallelFanOutWiringTest(unittest.TestCase):
-    """`main()` must dispatch the 13 widget reads through
+    """`main()` must dispatch the 14 widget reads through
     `_fan_out_reads`, drive the parallel switch off the env-backed
     helper, and emit a single `dashboard.load:` INFO line so the A/B
     rollout has a measurement surface. Streamlit is not installed for
@@ -1419,7 +1479,7 @@ class StagedRenderTest(unittest.TestCase):
     the topbar / filter meta / insight banners / KPI strip paint as
     soon as their inputs are available, rather than blocking on every
     widget. The first wave covers the six reads those above-the-fold
-    widgets consume; the second wave covers the seven remaining
+    widgets consume; the second wave covers the eight remaining
     widget reads. Worker threads only return data; every `st.*` /
     placeholder write happens on the main render thread between the
     two waves.
@@ -1457,13 +1517,13 @@ class StagedRenderTest(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertIn(f'"{name}"', wave)
-        # The remaining seven reads are NOT in the first wave -- they
+        # The remaining eight reads are NOT in the first wave -- they
         # would force the spinner to wait for the slowest widget read
         # before the KPI strip can paint.
         for name in (
             "stage_rows", "agent_exits", "issues_rows",
             "backend_rows", "repo_rows", "heatmap_rows",
-            "backend_daily_rows",
+            "backend_daily_rows", "skill_rows",
         ):
             with self.subTest(name=name):
                 self.assertNotIn(f'"{name}"', wave)
@@ -1474,7 +1534,7 @@ class StagedRenderTest(unittest.TestCase):
         for name in (
             "stage_rows", "agent_exits", "issues_rows",
             "backend_rows", "repo_rows", "heatmap_rows",
-            "backend_daily_rows",
+            "backend_daily_rows", "skill_rows",
         ):
             with self.subTest(name=name):
                 self.assertIn(f'"{name}"', wave)
@@ -1559,7 +1619,7 @@ class StagedRenderTest(unittest.TestCase):
 
     def test_empty_window_short_circuits_second_wave(self) -> None:
         # When the first wave's summary returns no events, the
-        # second wave never fires -- the seven remaining widget
+        # second wave never fires -- the eight remaining widget
         # reads would just paint empty cards. Pin the short-circuit
         # so a future refactor cannot silently re-introduce the
         # wasted reads on an empty window.

@@ -88,6 +88,7 @@ from orchestrator.analytics.read import (  # noqa: E402
     CostCoverageRow,
     DataExtent,
     IssueSummaryRow,
+    SkillTriggerRateRow,
     Summary,
 )
 
@@ -160,7 +161,7 @@ REWORK_BUCKETS: frozenset[str] = frozenset(
     {"1", "2", "3", "4", "5", "6+"}
 )
 
-# Parallel read fan-out for `main()`'s 13 independent widget reads.
+# Parallel read fan-out for `main()`'s 14 independent widget reads.
 # Opt-in via `DASHBOARD_PARALLEL_READS` so the new path can be A/B'd
 # against the sequential baseline. Default off: the reads keep running
 # one-at-a-time on the Streamlit render thread unless the operator
@@ -382,7 +383,7 @@ def _fan_out_reads(
     `parallel=False` runs readers one-at-a-time in submission order on
     the calling thread -- the sequential baseline. The thread-local
     `analytics_connection` keeps the single psycopg socket warm across
-    all 13 reads.
+    all 14 reads.
 
     `parallel=True` dispatches across a `ThreadPoolExecutor` capped at
     `max_workers`. Each worker thread opens its own thread-local
@@ -856,6 +857,88 @@ def _issues_table_html(rows: Sequence[IssueSummaryRow]) -> str:
     )
 
 
+def _skill_triggers_html(rows: Sequence[SkillTriggerRateRow]) -> str:
+    """Render the "Skill trigger rates" table to inline HTML.
+
+    One row per `(agent_role, backend)` group in the order the read
+    model returned them (skill-active groups first). Each Trigger-rate
+    cell carries a thin bar whose width is the group's rate relative to
+    the busiest group, so the operator can eyeball which roles actually
+    pull their skills without comparing percentages row by row.
+
+    Rendered as inline HTML (matching the backend-efficiency cards and
+    the cost-coverage bar) rather than a Plotly chart: the data is
+    small and categorical, and the panel has to read cleanly even when
+    every rate is `0%` (the `TRACK_SKILL_TRIGGERS=off` baseline). The
+    local CSS sits inline next to the table -- the skill panel is its
+    only consumer -- and reuses the shared `var(--orch-*)` theme tokens.
+    """
+    max_rate = max((r.rate for r in rows), default=0.0) or 1.0
+    css = """
+<style>
+  .orch-skills { width: 100%; border-collapse: collapse;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12.5px; }
+  .orch-skills thead th { color: var(--orch-muted);
+    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
+    text-transform: uppercase; text-align: left;
+    padding: 4px 6px 8px; border-bottom: 1px solid var(--orch-border); }
+  .orch-skills thead th.r { text-align: right; }
+  .orch-skills tbody td { padding: 8px 6px; vertical-align: middle;
+    border-bottom: 1px solid var(--orch-grid); }
+  .orch-skills tbody tr:last-child td { border-bottom: 0; }
+  .orch-skills td.r { text-align: right; font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums; color: var(--orch-ink); }
+  .orch-skills td.strong { font-weight: 600; color: var(--orch-ink); }
+  .orch-skill-rate { display: flex; align-items: center; gap: 8px;
+    justify-content: flex-end; }
+  .orch-skill-bar { display: block; height: 4px; width: 64px;
+    border-radius: 2px; background: var(--orch-grid); overflow: hidden; }
+  .orch-skill-bar > span { display: block; height: 100%;
+    background: var(--orch-accent); border-radius: 2px; }
+  .orch-skill-pct { min-width: 34px; color: var(--orch-ink); }
+</style>
+"""
+    body: list[str] = []
+    for r in rows:
+        role = r.agent_role or "unknown"
+        backend = r.backend or "unknown"
+        rate_pct = r.rate * 100.0
+        bar_pct = (r.rate / max_rate * 100.0) if max_rate > 0 else 0.0
+        body.append(
+            "<tr>"
+            f'<td class="strong">{html.escape(role)}</td>'
+            f'<td>{html.escape(backend)}</td>'
+            f'<td class="r">{int(r.runs)}</td>'
+            f'<td class="r">{int(r.skill_runs)}</td>'
+            '<td class="r"><span class="orch-skill-rate">'
+            '<span class="orch-skill-bar">'
+            f'<span style="width:{bar_pct:.1f}%"></span></span>'
+            f'<span class="orch-skill-pct">{rate_pct:.0f}%</span>'
+            "</span></td>"
+            f'<td class="r">{int(r.total_triggers)}</td>'
+            "</tr>"
+        )
+    head = (
+        "<thead><tr>"
+        "<th>Role</th>"
+        "<th>Backend</th>"
+        '<th class="r">Runs</th>'
+        '<th class="r">Skill runs</th>'
+        '<th class="r">Trigger rate</th>'
+        '<th class="r">Triggers</th>'
+        "</tr></thead>"
+    )
+    return (
+        css
+        + '<table class="orch-skills">'
+        + head
+        + "<tbody>" + "".join(body) + "</tbody>"
+        + "</table>"
+    )
+
+
 def _card_header_html(title: str, subtitle: str = "") -> str:
     """Inline HTML for the title + subtitle at the top of a card.
 
@@ -1306,6 +1389,19 @@ def main() -> None:
                 conn=conn,
             )
 
+    @st.cache_data(show_spinner=False, ttl=60)
+    def _read_skill_trigger_rates(
+        start, end, repo, events_t, stages_t, issue
+    ):
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_skill_trigger_rates(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
+
     # Read fan-out. Each entry is `(name, zero-arg callable)` so
     # `_fan_out_reads` can dispatch them across worker threads when
     # `DASHBOARD_PARALLEL_READS` is set; the sequential path stays in
@@ -1319,7 +1415,7 @@ def main() -> None:
     # carries the six reads those above-the-fold widgets consume
     # (`summary`, `prev_summary`, `ts_points`, `review_round_rows`,
     # `throughput_rows`, `cost_coverage_rows`); the second wave runs
-    # the seven remaining widget reads. Worker threads only return
+    # the eight remaining widget reads. Worker threads only return
     # data back to this render thread -- every `st.*` / placeholder
     # write happens on the main thread between waves.
     first_wave_readers: list[tuple[str, Callable[[], Any]]] = [
@@ -1340,6 +1436,7 @@ def main() -> None:
             *key, int(tz_offset_choice),
         )),
         ("backend_daily_rows", lambda: _read_backend_daily_tokens(*key)),
+        ("skill_rows", lambda: _read_skill_trigger_rates(*key)),
     ]
     total_reads = len(first_wave_readers) + len(second_wave_readers)
     parallel = dashboard_parallel_reads_enabled()
@@ -1539,6 +1636,7 @@ def main() -> None:
     repo_rows = results["repo_rows"]
     heatmap_rows = results["heatmap_rows"]
     backend_daily_rows = results["backend_daily_rows"]
+    skill_rows = results["skill_rows"]
 
     # ── Hero: Spend & token usage over time ──────────────────────
     with st.container(border=True):
@@ -1875,6 +1973,37 @@ def main() -> None:
             use_container_width=True,
             config=PLOTLY_CONFIG,
         )
+
+    # ── Skill trigger rates ──────────────────────────────────────
+    # Opt-in read-side widget over the `skills_triggered` /
+    # `skills_triggered_count` fields `record_agent_exit` folds into
+    # `extras` when `TRACK_SKILL_TRIGGERS` is on. A `0%` rate is a real
+    # signal ("this role's skill is not firing"), but it cannot tell a
+    # tracked-but-quiet run from one whose tracking was off, so the
+    # caption names the switch when nothing has triggered yet.
+    with st.container(border=True):
+        st.markdown(
+            _card_header_html(
+                "Skill trigger rates",
+                "Share of agent runs that triggered a skill, by role and "
+                "backend (requires TRACK_SKILL_TRIGGERS)",
+            ),
+            unsafe_allow_html=True,
+        )
+        if skill_rows:
+            st.markdown(
+                _skill_triggers_html(skill_rows),
+                unsafe_allow_html=True,
+            )
+            if not any(r.skill_runs for r in skill_rows):
+                st.caption(
+                    "No skill triggers recorded in this window. Enable "
+                    "`TRACK_SKILL_TRIGGERS` (default off) so "
+                    "`record_agent_exit` records which skills each run "
+                    "pulls."
+                )
+        else:
+            st.info("No `agent_exit` rows match the current filters.")
 
     # ── Recent agent runs expander ───────────────────────────────
     with st.expander("Recent agent runs", expanded=False):
