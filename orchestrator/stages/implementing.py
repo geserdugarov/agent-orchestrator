@@ -680,6 +680,14 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             this_resume_committed = (
                 bool(after_sha) and after_sha != before_sha
             )
+            # Shutdown-sweep interruption on the user-content-change resume:
+            # ignore the partial result and return WITHOUT writing pinned
+            # state, so the drift (and its consumed-comment / user_content_hash
+            # bookkeeping above) is left unrecorded and the next process
+            # re-detects and re-runs it. Must precede the timeout/commit/ack/
+            # question branches below.
+            if _wf._ignore_if_interrupted(issue, result):
+                return
             if result.timed_out:
                 _wf._park_awaiting_human(
                     gh, issue, state,
@@ -852,6 +860,14 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
         state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
 
     state.set("last_agent_action_at", _wf._now_iso())
+
+    # Shutdown-sweep interruption: a run the orchestrator killed mid-flight
+    # has no trustworthy result, so ignore it and return WITHOUT writing
+    # pinned state (the in-memory `awaiting_human=False` / watermark / session
+    # mutations above are discarded) so the next process retries from durable
+    # state. Must precede the timeout/question/dirty/push branches below.
+    if _wf._ignore_if_interrupted(issue, result):
+        return
 
     if result.timed_out:
         # Park on awaiting_human so the next tick doesn't restart codex or

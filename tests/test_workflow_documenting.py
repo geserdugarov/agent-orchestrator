@@ -830,6 +830,96 @@ class HandleDocumentingAwaitingHumanResumeTest(
         self.assertEqual(data.get("docs_checked_sha"), "pr-head-sha")
 
 
+class HandleDocumentingInterruptedTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """A docs run the shutdown sweep killed mid-flight
+    (`AgentResult.interrupted`) must be ignored: the handler returns WITHOUT
+    writing pinned state, so the pre-spawn `docs_checked_sha` / watermark
+    writes are discarded and durable state stays retryable. It must not park,
+    advance to `in_review`, post a HITL question, or set a docs verdict off
+    the partial result."""
+
+    def test_final_docs_spawn_interrupted_leaves_state_untouched(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(202, label="documenting")
+        gh.add_issue(issue)
+        gh.seed_state(
+            202,
+            pr_number=21,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-202",
+            dev_agent="codex",
+            dev_session_id="dev-sess",
+            # Seed the drift baseline so the first-encounter persistence
+            # doesn't itself write -- this test asserts ZERO state writes.
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
+        )
+        before_writes = gh.write_state_calls
+
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dev-sess", interrupted=True),
+            # Only `before_sha` is read -- the guard fires before the
+            # post-spawn `after_sha` probe.
+            head_shas=["aaa"],
+            branch_ahead_behind=(0, 0),
+        )
+
+        self.assertEqual(mocks["run_agent"].call_count, 1)
+        self.assertEqual(gh.write_state_calls, before_writes)
+        self.assertNotIn((202, "in_review"), gh.label_history)
+        data = gh.pinned_data(202)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertNotIn("docs_verdict", data)
+        # The pre-spawn `docs_checked_sha=before_sha` write was discarded.
+        self.assertNotIn("docs_checked_sha", data)
+        self.assertEqual(gh.posted_pr_comments, [])
+        self.assertFalse(any(
+            "agent needs your input" in body or "timed out" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_awaiting_human_resume_interrupted_does_not_consume_reply(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(203, label="documenting")
+        issue.comments.append(
+            FakeComment(id=2100, body="add a note about flag X",
+                        user=FakeUser("alice"))
+        )
+        gh.add_issue(issue)
+        gh.seed_state(
+            203,
+            pr_number=23,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-203",
+            awaiting_human=True,
+            last_action_comment_id=2000,
+            dev_agent="codex",
+            dev_session_id="dev-sess",
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
+        )
+        before_writes = gh.write_state_calls
+
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dev-sess", interrupted=True),
+            head_shas=["aaa"],
+            branch_ahead_behind=(0, 0),
+        )
+
+        # The reply DID drive a resume, but the interruption is ignored.
+        self.assertEqual(mocks["run_agent"].call_count, 1)
+        self.assertEqual(gh.write_state_calls, before_writes)
+        data = gh.pinned_data(203)
+        # The park is not consumed and the consumed-reply watermark bump is
+        # discarded, so the next process re-resumes on the same reply.
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("last_action_comment_id"), 2000)
+        self.assertNotIn((203, "in_review"), gh.label_history)
+        self.assertNotIn("docs_verdict", data)
+
+
 class HandleDocumentingParkedSilenceTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):

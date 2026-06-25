@@ -229,6 +229,16 @@ def _handle_resolving_conflict(
         )
         wt, result = _wf._resume_dev_with_text(gh, spec, issue, state, followup)
         state.set("last_agent_action_at", _wf._now_iso())
+        # Shutdown-sweep interruption: ignore the partial result and return
+        # WITHOUT writing pinned state -- the drift bookkeeping (refreshed
+        # `user_content_hash`, consumed comments, session mutations) above is
+        # discarded so the next process re-detects and re-runs the drift
+        # resume. Must precede `_post_user_content_change_result`, which has
+        # no interrupted check of its own and would otherwise parse
+        # `last_message` / route through `_on_question` before the caller
+        # persists those changes below.
+        if _wf._ignore_if_interrupted(issue, result):
+            return
         outcome = _wf._post_user_content_change_result(
             gh, spec, issue, state, wt, result, before_sha,
         )
@@ -661,8 +671,10 @@ def _post_conflict_resolution_result(
     """Common post-agent handling for both fresh conflict resolution
     and the awaiting-human resume path in `_handle_resolving_conflict`.
 
-    Always calls `gh.write_pinned_state` before returning so the caller
-    can return immediately after invoking this helper. Increments
+    Calls `gh.write_pinned_state` before returning on every branch EXCEPT
+    the shutdown-sweep-interrupted short-circuit below, which returns without
+    writing so durable GitHub state stays retryable. The caller returns
+    immediately after invoking this helper either way. Increments
     `conflict_round` only on the success path -- failure paths leave
     the counter alone so a human-reply resume that lands cleanly still
     consumes a slot, but a timeout/dirty/push-failure on the same
@@ -672,6 +684,15 @@ def _post_conflict_resolution_result(
     `documenting` in `_handle_validating`.
     """
     from .. import workflow as _wf
+
+    # Shutdown-sweep interruption: a conflict-resolution run the orchestrator
+    # killed mid-flight has no trustworthy result, so ignore it and return
+    # WITHOUT writing pinned state -- the caller's in-memory watermark /
+    # session mutations are discarded and the next process re-runs the
+    # rebase from durable state. Must precede the timeout/unfinished-rebase/
+    # question/dirty/push branches below.
+    if _wf._ignore_if_interrupted(issue, result):
+        return
 
     if result.timed_out:
         _wf._park_awaiting_human(

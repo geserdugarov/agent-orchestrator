@@ -586,6 +586,16 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     state.set("last_agent_action_at", _wf._now_iso())
 
+    # Shutdown-sweep interruption: a docs run the orchestrator killed
+    # mid-flight has no trustworthy result (the recovered `ahead > 0` branch
+    # synthesizes its own non-interrupted result, so only a real resume /
+    # fresh-docs spawn can land here). Ignore it and return WITHOUT writing
+    # pinned state -- the pre-spawn `docs_checked_sha` / watermark mutations
+    # are discarded so the next process re-runs the docs pass. Must precede
+    # the timeout/dirty/commit/no-change/question branches below.
+    if _wf._ignore_if_interrupted(issue, result):
+        return
+
     if result.timed_out:
         _wf._park_awaiting_human(
             gh, issue, state,
