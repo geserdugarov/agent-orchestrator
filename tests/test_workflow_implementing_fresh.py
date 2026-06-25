@@ -262,6 +262,86 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
         self.assertFalse(gh.pinned_data(2).get("awaiting_human"))
 
 
+class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """A dev run the shutdown sweep killed mid-flight (`AgentResult.interrupted`)
+    must be ignored: the handler returns quietly WITHOUT writing pinned state,
+    so durable GitHub state stays retryable by the next process. It must not
+    park, post a HITL question, consume `awaiting_human`, advance the
+    action watermark, or open a PR off a partial result."""
+
+    def test_awaiting_human_resume_interrupted_leaves_state_untouched(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(70, label="implementing")
+        issue.comments.append(
+            FakeComment(id=1100, body="please use sqlite", user=FakeUser("alice"))
+        )
+        gh.add_issue(issue)
+        gh.seed_state(
+            70,
+            awaiting_human=True,
+            last_action_comment_id=900,
+            codex_session_id="sess-old",
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-70",
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
+        )
+        before_writes = gh.write_state_calls
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-old", interrupted=True),
+        )
+
+        # The resume DID spawn -- the interruption is observed only after
+        # the agent returns.
+        mocks["run_agent"].assert_called_once()
+        # No durable state churn: the in-memory `awaiting_human=False` /
+        # watermark-bump / session writes are all discarded.
+        self.assertEqual(gh.write_state_calls, before_writes)
+        data = gh.pinned_data(70)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("last_action_comment_id"), 900)
+        # No PR, no label flip, no HITL question / timeout park comment.
+        self.assertEqual(gh.opened_prs, [])
+        self.assertEqual(gh.label_history, [])
+        self.assertFalse(any(
+            "agent needs your input" in body or "timed out" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_fresh_spawn_interrupted_does_not_persist_session_or_pr(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(71, label="implementing")
+        gh.add_issue(issue)
+        # Seed the content hash so the first-encounter drift baseline write
+        # doesn't fire -- this test asserts ZERO state writes.
+        gh.seed_state(
+            71, user_content_hash=workflow._compute_user_content_hash(issue, set()),
+        )
+        before_writes = gh.write_state_calls
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-new", interrupted=True),
+            # First probe: not a recovered worktree -> the dev runs and is
+            # then seen to be interrupted; the post-agent commit check must
+            # never be reached.
+            has_new_commits=[False],
+        )
+
+        mocks["run_agent"].assert_called_once()
+        self.assertEqual(gh.write_state_calls, before_writes)
+        self.assertEqual(gh.opened_prs, [])
+        self.assertEqual(gh.label_history, [])
+        data = gh.pinned_data(71)
+        # The interrupted spawn's session id is NOT persisted -- the next
+        # process re-spawns fresh rather than resuming a half-built session.
+        self.assertNotIn("dev_session_id", data)
+
+
 class HandleImplementingRecoveredWorktreeTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_recovered_worktree_skips_codex_and_pushes(self) -> None:
         gh = FakeGitHubClient()

@@ -46,6 +46,7 @@ def _agent(
     session_id: str = "sess-1",
     last_message: str = "",
     timed_out: bool = False,
+    interrupted: bool = False,
     stderr: str = "",
     exit_code: Optional[int] = None,
 ) -> AgentResult:
@@ -56,6 +57,7 @@ def _agent(
         timed_out=timed_out,
         stdout="",
         stderr=stderr,
+        interrupted=interrupted,
     )
 
 

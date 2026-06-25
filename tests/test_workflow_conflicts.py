@@ -1397,6 +1397,99 @@ class HandleResolvingConflictTest(
         # Watermark advanced past the consumed comment.
         self.assertEqual(data.get("last_action_comment_id"), 2000)
 
+    def _seed_with_baseline_hash(self, gh, issue, **extra):
+        # Re-seed pinned state with a matching `user_content_hash` (plus any
+        # extra fields) so the drift detector's first-encounter persistence
+        # doesn't itself write -- these interrupted tests assert ZERO writes.
+        data = gh.pinned_data(200)
+        data.update(extra)
+        data["user_content_hash"] = workflow._compute_user_content_hash(
+            issue, set(),
+        )
+        gh.seed_state(200, **data)
+
+    def test_conflict_resolution_interrupted_leaves_state_untouched(self) -> None:
+        # A dev run spawned to resolve the rebase conflict, but the shutdown
+        # sweep killed it mid-flight. The partial result must be ignored:
+        # `_post_conflict_resolution_result` returns WITHOUT writing pinned
+        # state, so durable state stays retryable -- no park, no flip, no
+        # round increment, no push off the partial tree.
+        gh, issue, pr = self._seed()
+        self._seed_with_baseline_hash(gh, issue)
+        before_writes = gh.write_state_calls
+
+        mocks, merge_mock, _ = self._run_with_merge(
+            gh, issue,
+            merge_succeeded=False,
+            conflicted_files=["a.py"],
+            head_shas=["beforehead", "after"],
+            run_agent_result=_agent(
+                session_id="dev-sess", last_message="", interrupted=True,
+            ),
+        )
+
+        # The conflict-resolution dev run spawned, then was seen interrupted.
+        mocks["run_agent"].assert_called_once()
+        self.assertEqual(gh.write_state_calls, before_writes)
+        mocks["_push_branch"].assert_not_called()
+        data = gh.pinned_data(200)
+        self.assertFalse(data.get("awaiting_human"))
+        # `conflict_round` not bumped and no flip back to validating.
+        self.assertEqual(data.get("conflict_round"), 0)
+        self.assertNotIn((200, "validating"), gh.label_history)
+        self.assertFalse(any(
+            "timed out" in body
+            or "rebase is still in progress" in body
+            or "agent needs your input" in body
+            or "git push failed" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_awaiting_human_resume_interrupted_does_not_consume_reply(
+        self,
+    ) -> None:
+        gh, issue, pr = self._seed(
+            extra_state={
+                "awaiting_human": True,
+                "conflict_round": 1,
+                "last_action_comment_id": 1000,
+            },
+        )
+        # Fresh comment above the watermark drives the resume.
+        issue.comments.append(
+            FakeComment(
+                id=2000, body="try the three-way merge",
+                user=FakeUser("alice"),
+            )
+        )
+        # Seed the hash AFTER the comment so drift stays quiet and the
+        # awaiting-human branch (not the drift path) owns the resume.
+        self._seed_with_baseline_hash(
+            gh, issue,
+            awaiting_human=True, conflict_round=1, last_action_comment_id=1000,
+        )
+        before_writes = gh.write_state_calls
+
+        mocks, merge_mock, _ = self._run_with_merge(
+            gh, issue,
+            merge_succeeded=True,  # unused on the resume path
+            head_shas=["beforehead", "merged"],
+            run_agent_result=_agent(
+                session_id="dev-sess", last_message="", interrupted=True,
+            ),
+        )
+
+        mocks["run_agent"].assert_called_once()
+        merge_mock.assert_not_called()
+        self.assertEqual(gh.write_state_calls, before_writes)
+        data = gh.pinned_data(200)
+        # Park not consumed, reply watermark not advanced -- the next process
+        # re-resumes on the same comment.
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("last_action_comment_id"), 1000)
+        self.assertEqual(data.get("conflict_round"), 1)
+        self.assertNotIn((200, "validating"), gh.label_history)
+
     def test_awaiting_human_resume_recovers_from_stale_claude_session(self) -> None:
         # Regression: a `resolving_conflict` issue parked awaiting human
         # whose pinned `dev_session_id` references a Claude transcript that
@@ -1850,6 +1943,61 @@ class HandleResolvingConflictHashDriftTest(
         self.assertTrue(any(
             "issue body changed" in body
             for _, body in gh.posted_pr_comments
+        ))
+
+    def test_drift_resume_interrupted_leaves_state_untouched(self) -> None:
+        # The drift resume routes through the shared
+        # `_post_user_content_change_result`, which has no interrupted check
+        # of its own. The conflicts caller must short-circuit BEFORE it so a
+        # shutdown-sweep-killed run cannot ACK / park off partial output and
+        # then persist the consumed-comment / refreshed-hash changes.
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            501, label="resolving_conflict", body="updated body",
+        )
+        gh.add_issue(issue)
+        pr = FakePR(number=5001, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-501")
+        gh.add_pr(pr)
+        gh.seed_state(
+            501,
+            pr_number=pr.number,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            conflict_round=0,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-501",
+            user_content_hash="stale-hash",
+        )
+        before_writes = gh.write_state_calls
+
+        mocks = self._run(
+            lambda: workflow._handle_resolving_conflict(
+                gh, _TEST_SPEC, issue,
+            ),
+            run_agent=_agent(
+                session_id="dev-sess", last_message="", interrupted=True,
+            ),
+            has_new_commits=True,
+            push_branch=True,
+            head_shas=["before-sha", "after-sha"],
+        )
+
+        # The drift resume spawned, then was seen interrupted.
+        mocks["run_agent"].assert_called_once()
+        mocks["_push_branch"].assert_not_called()
+        # No durable state churn: the refreshed `user_content_hash`,
+        # consumed-comment, and session mutations are all discarded.
+        self.assertEqual(gh.write_state_calls, before_writes)
+        data = gh.pinned_data(501)
+        self.assertEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertEqual(data.get("conflict_round"), 0)
+        # No flip back to validating and no HITL question / ack on the issue.
+        self.assertNotIn((501, "validating"), gh.label_history)
+        self.assertFalse(any(
+            "agent needs your input" in body
+            or "existing work" in body
+            or "timed out" in body
+            for _, body in gh.posted_comments
         ))
 
 

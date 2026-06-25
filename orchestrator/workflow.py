@@ -1148,6 +1148,35 @@ def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     _handle_implementing(gh, spec, issue)
 
 
+def _ignore_if_interrupted(issue: Issue, result: AgentResult) -> bool:
+    """True when `result` came from an agent run the shutdown sweep killed
+    mid-flight (SIGTERM/SIGKILL -- `AgentResult.interrupted`).
+
+    Such a run carries no trustworthy outcome: `last_message` is empty or a
+    partial transcript chunk and no commit / question / timeout signal can be
+    read from it. Dev-resume stage handlers call this BEFORE their
+    timeout/question/dirty/push branches and `return` WITHOUT writing pinned
+    state on a True result, so durable GitHub state stays exactly as the prior
+    tick left it and the next orchestrator process re-runs the resume from
+    scratch. Returning quietly here is what keeps the interrupted path from
+    posting an agent-question HITL comment, consuming an `awaiting_human`
+    park, advancing an action/comment watermark, or interpreting partial
+    `last_message` content -- all of which the in-memory `state` mutations the
+    caller already made would persist on a normal `write_pinned_state`.
+
+    Logs once at INFO so the interruption is visible without being mistaken
+    for a real silence/timeout park.
+    """
+    if not result.interrupted:
+        return False
+    log.info(
+        "issue=#%d agent run interrupted by shutdown sweep; leaving durable "
+        "state untouched for retry by the next process",
+        issue.number,
+    )
+    return True
+
+
 def _park_awaiting_human(
     gh: GitHubClient, issue: Issue, state: PinnedState, message: str,
     *,

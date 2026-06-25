@@ -125,6 +125,58 @@ class HandleImplementingResumeOnHashChangeTest(
         self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
 
 
+class ImplementingDriftInterruptedResumeTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """A user-content-change resume whose dev run the shutdown sweep killed
+    mid-flight must be ignored: the handler returns WITHOUT writing pinned
+    state, so the drift bookkeeping (consumed comments, refreshed
+    `user_content_hash`) is discarded and the next process re-detects and
+    re-runs the resume. It must NOT route through `_on_question` / the ack
+    path / a timeout park off the partial result."""
+
+    def test_drift_resume_interrupted_leaves_state_untouched(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(62, label="implementing", body="new requirements")
+        gh.add_issue(issue)
+        gh.seed_state(
+            62,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            awaiting_human=True,
+            last_action_comment_id=500,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-62",
+        )
+        before_writes = gh.write_state_calls
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dev-sess", interrupted=True),
+            # before_sha + after_sha probes around the resume.
+            head_shas=["before-resume", "after-resume"],
+        )
+
+        # The resume spawned, then the interruption was observed.
+        mocks["run_agent"].assert_called_once()
+        # No durable state churn -- the refreshed hash / consumed-comment /
+        # awaiting-human writes are all discarded.
+        self.assertEqual(gh.write_state_calls, before_writes)
+        data = gh.pinned_data(62)
+        self.assertEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("last_action_comment_id"), 500)
+        # No PR, no label flip, and no HITL question / ack / timeout park.
+        self.assertEqual(gh.opened_prs, [])
+        self.assertNotIn((62, "validating"), gh.label_history)
+        self.assertFalse(any(
+            "agent needs your input" in body
+            or "existing work satisfies" in body
+            or "timed out" in body
+            for _, body in gh.posted_comments
+        ))
+
+
 class ImplementingDriftHeadShaDeltaTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
