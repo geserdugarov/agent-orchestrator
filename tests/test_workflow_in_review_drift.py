@@ -174,6 +174,100 @@ class HandleInReviewResumeOnHashChangeTest(
         data = gh.pinned_data(82)
         self.assertTrue(data.get("awaiting_human"))
 
+    def test_body_drift_interrupted_resume_is_ignored(self) -> None:
+        # A shutdown-killed (interrupted) drift resume must be ignored
+        # entirely: the handler bails WITHOUT bumping the in_review
+        # watermarks or writing, so the pre-staged `user_content_hash`
+        # refresh, consumed drift comments, `last_agent_action_at`, and the
+        # `awaiting_human` clear from `_resume_dev_with_text` never reach
+        # GitHub. The next tick re-detects the body change and retries.
+        gh = FakeGitHubClient()
+        issue = make_issue(83, label="in_review", body="new acceptance")
+        gh.add_issue(issue)
+        pr = FakePR(number=803, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-83")
+        gh.add_pr(pr)
+        gh.seed_state(
+            83,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_number=pr.number,
+            pr_last_comment_id=0,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-83",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                interrupted=True,
+                last_message="partial drift fix before the shutdown SIGTERM",
+            ),
+            head_shas=["before"],
+        )
+
+        mocks["run_agent"].assert_called_once()
+        mocks["_push_branch"].assert_not_called()
+        # Nothing persisted: the interrupted resume is ignored.
+        self.assertEqual(gh.write_state_calls, 0)
+        self.assertNotIn((83, "validating"), gh.label_history)
+        self.assertNotIn((83, "documenting"), gh.label_history)
+        data = gh.pinned_data(83)
+        # Drift NOT consumed: the stale hash stands so the next tick fires.
+        self.assertEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertFalse(data.get("awaiting_human"))
+
+    def test_body_drift_no_commit_publishes_stranded_fix(self) -> None:
+        # A no-commit drift resume that finds a committed-but-unpublished
+        # fix stranded on the branch (e.g. left by a PRIOR interrupted drift
+        # resume that committed before being killed) must PUBLISH it through
+        # the push tail and report "pushed" -- even when the reply carries an
+        # `ACK:` marker. Without the stranded-fix gate the ACK would return
+        # "ack" and the caller would consume/advance the drift while the PR
+        # branch never received the commit. Mirrors `_handle_dev_fix_result`.
+        gh = FakeGitHubClient()
+        issue = make_issue(84, label="in_review", body="new acceptance")
+        gh.add_issue(issue)
+        pr = FakePR(number=804, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-84")
+        gh.add_pr(pr)
+        gh.seed_state(
+            84,
+            user_content_hash="stale-hash",
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            pr_number=pr.number,
+            pr_last_comment_id=0,
+            pr_last_review_comment_id=0,
+            pr_last_review_summary_id=0,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-84",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                last_message="ACK: existing work already satisfies the edit",
+            ),
+            head_shas=["same-sha", "same-sha"],  # no NEW commit this run
+            push_branch=True,
+            # HEAD is strictly ahead of the remote branch -> a stranded,
+            # committed-but-unpushed fix exists.
+            branch_ahead_behind=(1, 0),
+        )
+
+        # The stranded fix is published instead of acked.
+        mocks["_push_branch"].assert_called_once()
+        # "pushed" outcome bounces directly to validating with a fresh round.
+        self.assertIn((84, "validating"), gh.label_history)
+        self.assertEqual(gh.pinned_data(84).get("review_round"), 0)
+        # The misleading "satisfies the edit" FYI is NOT posted (we published
+        # a real commit, not an acknowledgement).
+        self.assertFalse(any(
+            "satisfies the edit" in body for _, body in gh.posted_comments
+        ))
+
 
 class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
     unittest.TestCase, _PatchedWorkflowMixin,

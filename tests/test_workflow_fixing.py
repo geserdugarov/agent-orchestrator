@@ -228,6 +228,88 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((880, "in_review"), gh.label_history)
         self.assertTrue(gh.pinned_data(880).get("awaiting_human"))
 
+    def test_interrupted_no_commit_resume_is_ignored(self) -> None:
+        # A shutdown-killed (interrupted) resume that produced no commit
+        # must be ignored entirely: the handler bails WITHOUT persisting, so
+        # the consumed-watermark advance, bookmark clear, and awaiting_human
+        # reset never reach GitHub. The next tick re-feeds the same comment
+        # to a fresh dev session. Distinct from a no-commit no-ACK reply,
+        # which parks awaiting_human via `_on_question`.
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please tighten the error handling",
+            user=FakeUser("alice"), created_at=old,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    interrupted=True,
+                    last_message="partial fix before the shutdown SIGTERM",
+                ),
+                head_shas=("same-sha", "same-sha"),  # no new commit
+            )
+
+        # The resume DID run (so this exercises the post-resume guard, not a
+        # pre-resume bail) but produced no commit and was killed.
+        mocks["run_agent"].assert_called_once()
+        mocks["_push_branch"].assert_not_called()
+        # Nothing persisted this tick: the seeded state stands untouched.
+        self.assertEqual(gh.write_state_calls, 0)
+        # No relabel, no ACK FYI comment.
+        self.assertEqual(gh.label_history, [])
+        self.assertEqual(gh.posted_comments, [])
+        # Watermarks and bookmarks unmoved; awaiting_human not cleared/set.
+        data = gh.pinned_data(880)
+        self.assertEqual(data.get("pr_last_comment_id"), 1999)
+        self.assertEqual(data.get("pending_fix_at"), "2026-05-24T00:00:00+00:00")
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
+        self.assertFalse(data.get("awaiting_human"))
+
+    def test_interrupted_with_new_commit_is_ignored(self) -> None:
+        # An interrupted resume that DID advance HEAD must also be ignored:
+        # `_handle_dev_fix_result` refuses to publish an interrupted run, so
+        # if the handler did not bail here it would advance the consumed
+        # watermarks and write state while the local commit sits unpushed --
+        # consuming the feedback and leaving the next tick with no feedback
+        # and a PR head missing the fix. The guard must therefore fire for
+        # the new-commit case too; the commit stays on disk for a later clean
+        # run to republish via the stranded-fix tail.
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        comment = FakeComment(
+            id=2000, body="please tighten the error handling",
+            user=FakeUser("alice"), created_at=old,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[comment])
+
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id="dev-sess",
+                    interrupted=True,
+                    last_message="committed a partial fix before the SIGTERM",
+                ),
+                head_shas=("sha-before", "sha-after"),  # HEAD advanced
+            )
+
+        mocks["run_agent"].assert_called_once()
+        # The interrupted commit is NOT pushed and nothing is consumed.
+        mocks["_push_branch"].assert_not_called()
+        self.assertEqual(gh.write_state_calls, 0)
+        self.assertEqual(gh.label_history, [])
+        self.assertEqual(gh.posted_comments, [])
+        data = gh.pinned_data(880)
+        self.assertEqual(data.get("pr_last_comment_id"), 1999)
+        self.assertEqual(data.get("pending_fix_at"), "2026-05-24T00:00:00+00:00")
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
+        self.assertFalse(data.get("awaiting_human"))
+
     def test_no_ack_in_review_park_stays_parked_on_next_tick(self) -> None:
         # Regression: a no-commit no-ACK reply parks via `_on_question`
         # (park_reason=None) on the first tick AND leaves the worktree

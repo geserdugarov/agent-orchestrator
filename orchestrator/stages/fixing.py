@@ -431,6 +431,24 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # reading here would burn an extra `_head_sha` the timeout path never did.
     after_sha = None if dev_result.timed_out else _wf._head_sha(wt)
 
+    # A shutdown-killed (interrupted) resume is ignored entirely: its partial
+    # last_message is not a real ACK or question, and `_handle_dev_fix_result`
+    # refuses to publish an interrupted run regardless of HEAD. Bail WITHOUT
+    # persisting state -- the ACK fast path, the consumed-watermark advance,
+    # and the write below never run, and the awaiting_human reset / hash
+    # refresh staged earlier this tick are dropped because we skip
+    # `write_pinned_state`. The next tick re-discovers the same comments
+    # (watermarks unmoved, bookmarks intact, awaiting_human unchanged) and
+    # re-feeds them to a fresh dev session. This MUST cover the new-commit
+    # case too: a kill that had advanced HEAD would otherwise fall through to
+    # `_handle_dev_fix_result` (returns False, no push) and the watermark
+    # advance below would consume the feedback while the local commit sits
+    # unpushed -- the next tick would then see no feedback and bounce a PR
+    # head that is missing the fix. Leaving the commit on disk lets a later
+    # clean run republish it via the stranded-fix tail.
+    if dev_result.interrupted:
+        return
+
     # ACK fast path (in_review route only): the dev made no commit but
     # explicitly signaled via the `ACK: <reason>` marker that the PR
     # feedback carries no actionable change. A vague "continue" / "ok"

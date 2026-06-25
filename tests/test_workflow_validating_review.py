@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from pathlib import Path
 from typing import Optional
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
@@ -427,6 +428,44 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         ]
         self.assertEqual(len(dev_spawns), 1)
         self.assertEqual(dev_spawns[0]["stage"], "fixing")
+
+    def test_dev_fix_interrupted_skips_write_and_does_not_push(self) -> None:
+        # A shutdown-killed CHANGES_REQUESTED dev resume is ignored: the
+        # handler does NOT persist the post-spawn state (so the per-session
+        # resume budget `dev_resume_count` charged by `_resume_dev_with_text`
+        # is not burned) and does NOT push. The pre-spawn `fixing` flip
+        # stands; the next tick re-runs the cycle. Any local commit the
+        # killed run left is republished by `_handle_dev_fix_result`'s
+        # stranded-fix gate on the next clean resume, not this interrupted
+        # one.
+        gh, issue = self._seeded(dev_agent="claude", dev_session_id="dev-sess")
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=[
+                self._changes_requested_review(),
+                _agent(
+                    session_id="dev-sess",
+                    interrupted=True,
+                    last_message="committed a partial fix before the SIGTERM",
+                ),
+            ],
+            head_shas=["aaa"],
+        )
+
+        # Reviewer + dev resume both ran.
+        self.assertEqual(mocks["run_agent"].call_count, 2)
+        # The interrupted run is not pushed.
+        mocks["_push_branch"].assert_not_called()
+        # Pre-spawn flip landed; the issue did NOT bounce to validating this
+        # tick (that happens on a later tick after a clean re-review).
+        self.assertIn((6, "fixing"), gh.label_history)
+        self.assertNotIn((6, "validating"), gh.label_history)
+        data = gh.pinned_data(6)
+        # Post-spawn write skipped: the resume-budget charge from
+        # `_resume_dev_with_text` never persisted.
+        self.assertIsNone(data.get("dev_resume_count"))
+        # Interrupted is not a question / timeout / dirty park.
+        self.assertFalse(data.get("awaiting_human"))
 
 
 class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -878,3 +917,159 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             reviewer_spawns[0]["review_round"],
             config.MAX_REVIEW_ROUNDS - 1,
         )
+
+
+class ValidatingDevFixInterruptedHelperTest(unittest.TestCase):
+    """The shared validating dev-fix helpers must ignore a shutdown-killed
+    (interrupted) result: no park, no HITL comment, no push, no watermark,
+    and no `_on_question`. The guard short-circuits before any of that, so
+    these call the helpers directly without the worktree/git mocks."""
+
+    def _seeded(self, **state):
+        gh = FakeGitHubClient()
+        issue = make_issue(7, label="validating")
+        gh.add_issue(issue)
+        gh.seed_state(7, **state)
+        return gh, gh.read_pinned_state(issue), issue
+
+    def test_handle_dev_fix_result_interrupted_returns_false_no_side_effects(
+        self,
+    ) -> None:
+        gh, state, issue = self._seeded()
+        result = _agent(
+            session_id="dev-sess",
+            interrupted=True,
+            last_message="partial output before the shutdown SIGTERM",
+        )
+
+        pushed = workflow._handle_dev_fix_result(
+            gh, _TEST_SPEC, issue, state, Path("/tmp/wt"), result, "sha-before",
+        )
+
+        self.assertFalse(pushed)
+        # No park: awaiting_human untouched, no transient reason tagged, no
+        # timeout watermark persisted.
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
+        self.assertIsNone(state.get("pre_dev_fix_sha"))
+        # No HITL / question comment posted on either surface.
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.posted_pr_comments, [])
+
+    def test_post_user_content_change_result_interrupted_returns_parked(
+        self,
+    ) -> None:
+        gh, state, issue = self._seeded()
+        result = _agent(
+            session_id="dev-sess",
+            interrupted=True,
+            last_message="ACK: looks fine",  # partial; must NOT be honored
+        )
+
+        outcome = workflow._post_user_content_change_result(
+            gh, _TEST_SPEC, issue, state, Path("/tmp/wt"), result, "sha-before",
+        )
+
+        # Reported parked, but WITHOUT swallowing the partial message as an
+        # ack or parking awaiting_human.
+        self.assertEqual(outcome, "parked")
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
+        self.assertIsNone(state.get("pre_dev_fix_sha"))
+        self.assertEqual(gh.posted_comments, [])
+        self.assertEqual(gh.posted_pr_comments, [])
+
+
+class ValidatingInterruptedResumeHandlerTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """Handler-level guards: an interrupted resume in `_handle_validating`'s
+    user-content-change and awaiting-human paths must NOT persist the
+    consumption pre-staged before the spawn, so the next tick retries the
+    resume rather than treating the input as already handled."""
+
+    def test_user_content_change_interrupted_resume_does_not_persist(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(8, label="validating")
+        issue.comments.append(
+            FakeComment(id=1200, body="tweak the wording", user=FakeUser("alice"))
+        )
+        gh.add_issue(issue)
+        # A stale hash forces `_detect_user_content_change` to report drift
+        # and route into the user-content-change resume.
+        gh.seed_state(
+            8,
+            user_content_hash="stale-hash-forces-drift",
+            last_action_comment_id=900,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            review_round=1,
+            pr_number=18,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-8",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                interrupted=True,
+                last_message="partial drift fix before the shutdown SIGTERM",
+            ),
+            head_shas=["sha-before"],
+        )
+
+        # The dev resume DID run (so this exercises the post-resume guard),
+        # but produced no commit and was killed.
+        mocks["run_agent"].assert_called_once()
+        mocks["_push_branch"].assert_not_called()
+        # Nothing persisted this tick: the seeded state stands untouched, so
+        # the next tick re-detects the drift and retries the resume.
+        self.assertEqual(gh.write_state_calls, 0)
+        self.assertEqual(gh.label_history, [])
+        data = gh.pinned_data(8)
+        self.assertEqual(data.get("user_content_hash"), "stale-hash-forces-drift")
+        self.assertEqual(data.get("last_action_comment_id"), 900)
+
+    def test_awaiting_human_interrupted_resume_does_not_persist(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(9, label="validating")
+        issue.comments.append(
+            FakeComment(id=1300, body="please retry", user=FakeUser("alice"))
+        )
+        gh.add_issue(issue)
+        # Seed a matching content hash so `_detect_user_content_change`
+        # returns None (no drift, no first-call persist) and the handler
+        # reaches the awaiting-human resume path cleanly.
+        prior_hash = workflow._compute_user_content_hash(issue, set())
+        gh.seed_state(
+            9,
+            awaiting_human=True,
+            last_action_comment_id=1000,
+            user_content_hash=prior_hash,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            review_round=1,
+            pr_number=19,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-9",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dev-sess",
+                interrupted=True,
+                last_message="partial fix before the shutdown SIGTERM",
+            ),
+            head_shas=["sha-before"],
+        )
+
+        mocks["run_agent"].assert_called_once()
+        mocks["_push_branch"].assert_not_called()
+        # Nothing persisted: the park stays put and the human reply is
+        # re-consumed next tick against a fresh dev session.
+        self.assertEqual(gh.write_state_calls, 0)
+        data = gh.pinned_data(9)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("last_action_comment_id"), 1000)

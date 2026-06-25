@@ -470,6 +470,16 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             gh, spec, issue, state, followup,
         )
         state.set("last_agent_action_at", _wf._now_iso())
+        # Shutdown-sweep-killed resume: bail WITHOUT writing pinned state so
+        # the consumption staged above (refreshed `user_content_hash`,
+        # consumed drift comments via `_mark_drift_comments_consumed`,
+        # `last_agent_action_at`, and the `awaiting_human` clear inside
+        # `_resume_dev_with_text`) is discarded and the next process re-detects
+        # the body change. Must precede `_post_user_content_change_result` and
+        # the watermark bump below so neither parses partial `last_message`
+        # nor persists the consumption.
+        if _wf._ignore_if_interrupted(issue, dev_result):
+            return
         # The user-content-change result handler treats a no-commit reply
         # as an ack rather than parking on it; a harmless clarification
         # edit (the dev confirms the PR already satisfies it) must not

@@ -150,12 +150,24 @@ def _handle_dev_fix_result(
     a prior parked run had committed (see `_stranded_fix_unpushed`).
     Returns False if the run produced no fix (timeout, no-new-commit,
     dirty tree, or push failure); caller should write state and return.
+    A shutdown-killed (interrupted) run also returns False WITHOUT parking,
+    posting, or publishing, so the next tick re-runs the dev cleanly.
 
     `after_sha`, when provided, is the post-agent HEAD the caller already
     read (e.g. the fixing handler's ACK fast path); passing it avoids a
     redundant `_head_sha` call. When None it is read here.
     """
     from .. import workflow as _wf
+
+    if result.interrupted:
+        # A shutdown-killed run is not a considered result: its partial
+        # `last_message` is not a real question, and a no-commit kill
+        # addressed nothing. Treat it as "no fix" WITHOUT parking
+        # awaiting_human, posting a HITL comment, or publishing -- the next
+        # tick re-runs the dev against the same head. A kill that had already
+        # committed is left unpushed here too; a later clean run republishes
+        # it via the stranded-fix tail.
+        return False
 
     if result.timed_out:
         _wf._park_awaiting_human(
@@ -244,7 +256,10 @@ def _post_user_content_change_result(
       old requirements, so the in_review HITL ready-ping must wait
       for a re-approval) WITHOUT spawning `documenting` -- no commit
       landed for the docs pass to react to.
-    * ``"pushed"`` -- new commit landed and the push succeeded.
+    * ``"pushed"`` -- new commit landed and the push succeeded, OR this
+      no-commit run found a committed-but-unpublished fix stranded on the
+      branch by a prior parked / interrupted resume and published it (the
+      stranded-fix gate, mirroring `_handle_dev_fix_result`).
       Validating stays on `validating` (and bumps `review_round`) so
       the reviewer re-evaluates the new head; in_review also hands
       straight back to `validating`. Docs are not run on this exit --
@@ -254,7 +269,10 @@ def _post_user_content_change_result(
     * ``"parked"`` -- timeout, dirty tree, push fail, silent crash
       (empty `last_message`), OR a no-commit response WITHOUT the
       `ACK:` marker (treated as a clarification question via
-      `_on_question`). State already carries the park flags.
+      `_on_question`). State already carries the park flags. A
+      shutdown-killed (interrupted) run also returns ``"parked"`` but
+      WITHOUT setting any park flags or posting -- the run is ignored
+      and the next tick retries the resume.
 
     The explicit `ACK:` marker is required because a generic non-empty
     no-commit response is often a clarification question, not an
@@ -263,6 +281,14 @@ def _post_user_content_change_result(
     `awaiting_human=False`, stranding the real question.
     """
     from .. import workflow as _wf
+
+    if result.interrupted:
+        # Shutdown-killed: ignore the run. Report "parked" WITHOUT posting an
+        # ack / HITL comment, touching awaiting_human, or pushing -- the
+        # caller writes state and the next tick retries the resume. The
+        # partial `last_message` is not a trustworthy ACK or question, so it
+        # must not be swallowed as either.
+        return "parked"
 
     if result.timed_out:
         _wf._park_awaiting_human(
@@ -277,29 +303,37 @@ def _post_user_content_change_result(
 
     after_sha = _wf._head_sha(wt)
     if not after_sha or after_sha == before_sha:
-        ack_reason = _wf._drift_ack_reason(result.last_message or "")
-        if ack_reason:
-            quoted = "> " + ack_reason.replace("\n", "\n> ")
-            _wf._post_issue_comment(
-                gh, issue, state,
-                ":speech_balloon: dev session reports the existing work "
-                f"satisfies the edit:\n\n{quoted}",
-            )
-            # The session is alive and producing output, so the silent-
-            # park streak must reset (mirrors `_handle_dev_fix_result`'s
-            # reset on a successful commit) -- otherwise a future blip
-            # would tip a healthy session past the fresh-session threshold.
-            state.set("silent_park_count", 0)
-            return "ack"
-        # No commit and no explicit ACK marker. The reply may be a real
-        # clarification question; falling through to `_on_question`
-        # parks the issue awaiting human so a misleading "satisfies"
-        # comment isn't posted over a real question. Empty messages
-        # land in the same branch and surface as the silent-failure
-        # park (`_resume_dev_with_text` uses the streak counter to
-        # eventually drop a poisoned session id).
-        _wf._on_question(gh, issue, state, result)
-        return "parked"
+        if not after_sha or not _stranded_fix_unpushed(spec, wt, state, issue):
+            ack_reason = _wf._drift_ack_reason(result.last_message or "")
+            if ack_reason:
+                quoted = "> " + ack_reason.replace("\n", "\n> ")
+                _wf._post_issue_comment(
+                    gh, issue, state,
+                    ":speech_balloon: dev session reports the existing work "
+                    f"satisfies the edit:\n\n{quoted}",
+                )
+                # The session is alive and producing output, so the silent-
+                # park streak must reset (mirrors `_handle_dev_fix_result`'s
+                # reset on a successful commit) -- otherwise a future blip
+                # would tip a healthy session past the fresh-session threshold.
+                state.set("silent_park_count", 0)
+                return "ack"
+            # No commit and no explicit ACK marker. The reply may be a real
+            # clarification question; falling through to `_on_question`
+            # parks the issue awaiting human so a misleading "satisfies"
+            # comment isn't posted over a real question. Empty messages
+            # land in the same branch and surface as the silent-failure
+            # park (`_resume_dev_with_text` uses the streak counter to
+            # eventually drop a poisoned session id).
+            _wf._on_question(gh, issue, state, result)
+            return "parked"
+        # HEAD carries a committed-but-unpublished fix that a prior parked or
+        # interrupted drift resume left on the branch (it committed before
+        # being killed but never pushed). Fall through to the push tail and
+        # report "pushed" so callers advance against a PR that now actually
+        # carries the commit -- otherwise a no-commit `ACK:` here would let
+        # them consume/advance the drift while the PR branch never received
+        # it. Mirrors `_handle_dev_fix_result`'s stranded-fix gate.
 
     state.set("silent_park_count", 0)
     dirty = _wf._worktree_dirty_files(wt)
@@ -742,6 +776,16 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             outcome = _post_user_content_change_result(
                 gh, spec, issue, state, wt, result, before_sha,
             )
+            if result.interrupted:
+                # Shutdown-killed resume: the consumption pre-staged before
+                # the spawn (`user_content_hash`, the consumed drift-comment
+                # watermark via `_mark_drift_comments_consumed`, and
+                # `last_agent_action_at`) must NOT persist, or the next tick
+                # would treat the body change as already handled and skip the
+                # retry. `_post_user_content_change_result` already returned
+                # "parked" without side effects; bail WITHOUT writing so the
+                # next tick re-detects the drift and resumes a fresh session.
+                return
             if outcome == "pushed":
                 round_n = int(state.get("review_round") or 0)
                 state.set("review_round", round_n + 1)
@@ -873,6 +917,16 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             if not _handle_dev_fix_result(
                 gh, spec, issue, state, wt, result, before_sha
             ):
+                if result.interrupted:
+                    # Shutdown-killed resume:
+                    # `_resume_developer_on_human_reply` advanced
+                    # `last_action_comment_id` and `_resume_dev_with_text`
+                    # cleared `awaiting_human` in-memory. Skip the write so
+                    # neither reaches GitHub -- the park stays put and the
+                    # next tick re-consumes the same human reply against a
+                    # fresh dev session. Other no-fix outcomes (timeout /
+                    # question / dirty / push-fail) still persist their flags.
+                    return
                 gh.write_pinned_state(issue, state)
                 return
             round_n = int(state.get("review_round") or 0)
@@ -1206,6 +1260,18 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     if not _handle_dev_fix_result(
         gh, spec, issue, state, wt, dev_result, before_sha
     ):
+        if dev_result.interrupted:
+            # Shutdown-killed resume: do NOT persist the post-spawn state.
+            # `_resume_dev_with_text` charged the per-session resume budget
+            # (`dev_resume_count`) and `last_agent_action_at` was stamped,
+            # but the run produced no considered result, so persisting them
+            # would burn a retry slot and advance the staleness clock for a
+            # tick that did nothing. Skip the write; the pre-spawn `fixing`
+            # flip stands, the next tick re-runs the CHANGES_REQUESTED cycle,
+            # and any local commit the killed run left is NOT pushed here --
+            # `_handle_dev_fix_result`'s stranded-fix gate republishes it on
+            # the next clean resume rather than this interrupted one.
+            return
         # Park (timeout / no-commit / dirty / push-fail): the issue stays
         # on `fixing` so the next tick's `_handle_fixing` owns the
         # awaiting-human rescan. The fixing handler's filter drops the
