@@ -1137,10 +1137,10 @@ def _codex_cmd(item_id: str, command: str, *, started: bool = False,
                **extra: object) -> dict:
     """One ``codex exec --json`` ``command_execution`` event.
 
-    Mirrors the real envelope a captured reviewer run emits (see
-    ``plans/skill-trigger-tracking.md``): a ``command_execution`` ``item`` under
-    an ``item.started`` / ``item.completed`` frame, carrying a shared ``id`` and
-    the shell ``command``. Sanitized / minimal -- no raw prompts, diffs, or
+    Mirrors the real envelope a captured reviewer run emits: a
+    ``command_execution`` ``item`` under an ``item.started`` /
+    ``item.completed`` frame, carrying a shared ``id`` and the shell
+    ``command``. Sanitized / minimal -- no raw prompts, diffs, or
     secrets, only the fields the parser reads.
     """
     item = {"id": item_id, "type": "command_execution", "command": command}

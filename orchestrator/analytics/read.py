@@ -447,9 +447,8 @@ class SkillTriggerRateRow:
     dropped, not written), so `skill_runs` is a *floor* on observed
     skill use: a `0` rate conflates a run that triggered nothing with
     one whose tracking was off. The dashboard captions the panel
-    accordingly. See [`../../plans/skill-trigger-tracking.md`]. NULL
-    `agent_role` / `backend` bucket under `"unknown"` so a category is
-    never silently dropped.
+    accordingly. NULL `agent_role` / `backend` bucket under `"unknown"`
+    so a category is never silently dropped.
     """
 
     agent_role: str

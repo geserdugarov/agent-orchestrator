@@ -26,8 +26,7 @@ still picked up.
 A sibling extractor (``parse_claude_skills`` / ``parse_codex_skills`` /
 ``parse_agent_skills``) reuses the same event iterator and resilience
 contract to record which agent *skills* a run triggered. It reads only the
-skill name -- never the ``Skill`` tool's ``args`` -- and is observation-only;
-see ``plans/skill-trigger-tracking.md`` for the design.
+skill name -- never the ``Skill`` tool's ``args`` -- and is observation-only.
 """
 from __future__ import annotations
 
@@ -702,11 +701,10 @@ class SkillTriggers:
     that pulls ``develop`` in twice records ``{"develop": 2}`` while
     ``triggered`` still carries it once. ``available`` is the *offered*-skills
     set: on claude it is read from the dedicated ``skills`` array in the
-    ``system``/``init`` frame, confirmed against a captured real stream (see
-    ``plans/skill-trigger-tracking.md``); on codex it stays best-effort and
-    empty until that stream's field is confirmed. It varies independently of
-    ``triggered`` and is empty -- never an error -- when the frame or field
-    is absent.
+    ``system``/``init`` frame, confirmed against a captured real stream; on
+    codex it stays best-effort and empty until that stream's field is
+    confirmed. It varies independently of ``triggered`` and is empty -- never
+    an error -- when the frame or field is absent.
 
     Only the skill *name* is ever read: the ``Skill`` tool's ``input`` can
     carry an ``args`` string echoing issue or user content, and that field is
@@ -767,8 +765,7 @@ def _claude_offered_skills(events: Iterable[dict[str, Any]]) -> tuple[str, ...]:
     The headless ``--output-format stream-json`` init frame carries a
     dedicated top-level ``skills`` array -- the skill names on offer to the
     session, repo-local (``develop`` / ``review``) and built-in alike --
-    confirmed against a captured real stream (see
-    ``plans/skill-trigger-tracking.md``). Read defensively: a missing or
+    confirmed against a captured real stream. Read defensively: a missing or
     renamed field, or a non-string entry, filters out rather than raising;
     names are de-duplicated in first-seen order. The first ``init`` frame
     wins (a single run emits one).
@@ -845,8 +842,8 @@ def parse_claude_skills(stdout: str) -> SkillTriggers:
 # deciding to use a skill, open its SKILL.md," so the only trigger observable
 # on the ``codex exec --json`` stream is a ``command_execution`` item whose
 # shell ``command`` reads a ``skills/<name>/SKILL.md`` path. A captured
-# reviewer run pinned this shape (see ``plans/skill-trigger-tracking.md``):
-# there is NO ``Skill``-named function call and NO dedicated ``*skill*`` event.
+# reviewer run pinned this shape: there is NO ``Skill``-named function call
+# and NO dedicated ``*skill*`` event.
 #
 # Only the ``<name>`` path segment is ever captured -- never the surrounding
 # command text nor the command's ``aggregated_output`` (which carries the
@@ -864,9 +861,9 @@ def parse_codex_skills(stdout: str) -> SkillTriggers:
     """Extract triggered skills from a ``codex exec --json`` run.
 
     Codex's skill mechanism is file-based, not a tool call: a real reviewer
-    capture (``plans/skill-trigger-tracking.md``) confirmed the only observable
-    trigger is a ``command_execution`` item whose ``command`` opens a skill's
-    ``skills/<name>/SKILL.md`` file. We read only the ``<name>`` path segment
+    capture confirmed the only observable trigger is a ``command_execution``
+    item whose ``command`` opens a skill's ``skills/<name>/SKILL.md`` file. We
+    read only the ``<name>`` path segment
     (``_CODEX_SKILL_PATH_RE``) -- never the command text or its
     ``aggregated_output`` (the file's contents) -- honoring the names-only
     Privacy contract.
@@ -883,7 +880,7 @@ def parse_codex_skills(stdout: str) -> SkillTriggers:
     empty ``SkillTriggers`` without raising. The signal is heuristic: opening a
     SKILL.md is the trigger codex's own instructions prescribe, but a run that
     reads a SKILL.md for an unrelated reason (e.g. reviewing a PR that edits
-    one) would also register; the design doc records that limitation.
+    one) would also register; that limitation is inherent to the heuristic.
     """
     by_id: dict[str, list[str]] = {}
     id_order: list[str] = []
