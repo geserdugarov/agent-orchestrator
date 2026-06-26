@@ -601,6 +601,10 @@ class SkillTriggerConfigTest(unittest.TestCase):
     spellings as the other boolean knobs in `orchestrator.config`."""
 
     def test_defaults_off_and_is_exported(self) -> None:
+        # Default-off is a deliberate, revisited decision (#515): even after
+        # codex skill-trigger coverage landed (#513), the new file-open path's
+        # production noise stays unmeasured, so the default holds off until it
+        # proves low-noise live. Flipping this assertion is the flip.
         _, analytics = _reload()
         self.assertFalse(analytics.TRACK_SKILL_TRIGGERS)
         self.assertIn("TRACK_SKILL_TRIGGERS", analytics.__all__)

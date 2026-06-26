@@ -475,9 +475,10 @@ Status update (see [Status](#status)): **both original capture tasks are
 now resolved.** The claude offered-skills source landed via a real
 `claude` stream capture (`system/init.skills`), and the codex *triggered*
 event shape landed via issue #513's reviewer capture (the file-open
-`SKILL.md` shape). The switch-default is **settled for v1**, the audit
-`skill_triggered` event has **shipped** (step 2), and the dashboard has
-**shipped** (step 3). The
+`SKILL.md` shape). The switch-default was **revisited under issue #515**
+once codex coverage landed and **stays off** (see the [Switch
+default](#open-questions) item), the audit `skill_triggered` event has
+**shipped** (step 2), and the dashboard has **shipped** (step 3). The
 [live data](#live-data-after-the-switch-was-turned-on) gathered since the
 operator turned the switch on confirmed both gaps empirically (codex
 captured nothing; `skills_available` had never appeared) and drove the two
@@ -522,21 +523,27 @@ captures that closed them. The only residual best-effort piece is the
   shared `item.id` so one read counts once. The signal is heuristic — a
   SKILL.md opened for an unrelated reason (e.g. reviewing a PR that edits
   one) would also register — but it is observed, not guessed.
-- **Switch default (settled for v1; keep off).** Shipped **off** so
-  default installs are unchanged. Live data is reassuring on noise — the
-  operator has run with the switch on across ~2160 `agent_exit` records
-  with zero crashes and clean output, exactly the "low-noise in practice"
-  evidence a flip would want. But do **not** flip to default-on yet. The
-  codex gap that previously justified holding the default is now closed —
-  issue #513 pinned the file-open shape, so the parser covers both
-  backends — but that coverage has **not yet accumulated its own live
-  data**: the ~2160 reassuring records were captured against the *old*
-  codex parser (which matched nothing), so the new file-open path's
-  real-world noise (including the heuristic false-positive of a SKILL.md
-  opened for an unrelated reason) is still unmeasured. And the codex
-  offered-set behind `skills_available` is still uncaptured (claude's is now
-  pinned to `system/init.skills`). Keep it off until the pinned codex path
-  proves low-noise on production data; revisit then.
+- **Switch default (revisited under #515 — keep off).** Shipped **off** so
+  default installs are unchanged. Issue #515 performed the revisit the
+  earlier "keep off until codex coverage exists" note deferred: it reran the
+  decision once the codex stream-shape gap closed (issue #513 pinned the
+  file-open shape, so the parser now covers both backends — the precondition
+  #515 required before reconsidering). The revisit decision is to **keep it
+  off**. Live data is reassuring on noise — the operator has run with the
+  switch on across ~2160 `agent_exit` records with zero crashes and clean
+  output, exactly the "low-noise in practice" evidence a flip would want —
+  but that coverage has **not yet accumulated its own live data**: the ~2160
+  records were captured against the *old* codex parser (which matched
+  nothing, 0/5 reviewer runs), so the new file-open path's real-world noise —
+  including the heuristic false-positive of a SKILL.md opened for an unrelated
+  reason, on the default `REVIEW_AGENT=codex` reviewer that is the most common
+  skill case — is still unmeasured. The codex offered-set behind
+  `skills_available` also remains uncaptured (claude's is now pinned to
+  `system/init.skills`). Flipping now would turn the default on **solely**
+  because the claude path works and the codex parser exists in code, not
+  because codex coverage has been shown low-noise in production — the exact
+  outcome #515's acceptance criteria rule out. Keep it off until the pinned
+  codex path proves low-noise on production data; revisit then.
 - **Audit-event follow-up (implemented — step 2).** The per-invocation
   audit `skill_triggered` event has shipped, reusing the list
   `record_agent_exit` parses and gated on the same switch. Live data still
