@@ -47,13 +47,19 @@ the `agent_exit` fields in `orchestrator/analytics/__init__.py`
 updates (`ec6f1df`, `1a7d607`). Unit tests cover both backends over
 synthetic skill-bearing and skill-free streams.
 
-One narrow defect was fixed during the post-landing review: the claude
-*triggered* extractor counted every `assistant` frame, so a `Skill` block
-that persists across the cumulative partial snapshots one message emits
-under `--include-partial-messages` was over-counted in `trigger_counts`.
-`parse_claude_skills` now groups by `message.id` and keeps the final
-snapshot per id — the same last-frame-wins discipline `parse_claude_usage`
-already applies for exactly this reason — so a single trigger counts once.
+One narrow defect was addressed during the post-landing review and then
+**superseded** by the Step-0 capture (described below). The original fix
+assumed one message emits *cumulative* partial snapshots under
+`--include-partial-messages` — so a `Skill` block would persist across
+frames and be over-counted — and grouped by `message.id` keeping the final
+snapshot per id (a last-frame-wins discipline borrowed from
+`parse_claude_usage`). The capture **disproved** that assumption for
+content: each completed content block lands in its own *non-cumulative*
+`assistant` frame, so a `tool_use` block appears exactly once and
+last-frame-wins could itself drop a real trigger (a `Skill` block followed
+by a later block of the same message). `parse_claude_skills` now walks
+every frame and de-duplicates by the `tool_use` block `id` instead — see
+the claude-capture write-up two paragraphs down.
 
 Steps 2 and 3 **have both since shipped**. Step 2 (the audit
 `skill_triggered` event): `_run_agent_tracked` now emits one event per
@@ -62,18 +68,42 @@ and reusing the list `record_agent_exit` parses (see [Audit event
 log](#3-audit-event-log)). Step 3 (the dashboard widget):
 `analytics.read.get_skill_trigger_rates` plus the "Skill trigger rates"
 panel in `orchestrator/dashboard.py`, a pure read-side addition over the
-`extras JSONB` fields with no DDL. The codex event shape has since been
-**pinned** by a captured reviewer run (issue #513); the offered-skills set
-remains a best-effort capture task (Open questions). The remaining design
-sections describe the shipped behavior.
+`extras JSONB` fields with no DDL. The codex *triggered* event shape has
+since been **pinned** by a captured reviewer run (issue #513); the
+remaining design sections describe the shipped behavior.
+
+The **claude offered-skills capture has since landed** (the secondary
+Step-0 task): a real `claude --output-format stream-json
+--include-partial-messages` run confirmed the `system/init` frame carries
+a dedicated top-level `skills` array, so `parse_claude_skills` now
+populates `SkillTriggers.available` from it and `record_agent_exit` writes
+`skills_available` for tracked claude runs (resolving the claude offered-
+skills Open question). The same capture **disproved** the assumption
+behind the claude *triggered* de-dup: under `--include-partial-messages`
+the `assistant` content array is partitioned one completed block per
+frame (a text block in its own frame, the following `Skill` block in the
+next), **not** a cumulative snapshot that repeats earlier blocks the way
+the `usage` sub-object does. Each `tool_use` block appears in exactly one
+frame and carries a unique `id`, so the parser now walks every frame and
+de-dups by that `id` rather than keeping the last frame per `message.id`
+— last-frame-wins would have silently dropped a `Skill` block followed by
+a later block of the same message. The **codex offered-set** remains a
+best-effort capture task (Open questions); the codex *triggered* shape is
+pinned (above).
 
 ### Live data after the switch was turned on
 
 The operator has flipped `TRACK_SKILL_TRIGGERS=on` in production, so the
 sink has now *incidentally* captured real skill-bearing records (these are
-live `agent_exit` rows, **not** Step-0 test fixtures — no captured
-`*.jsonl` fixtures exist in the tree, so Sequencing step 0 is still
-outstanding). The signal so far, all from 2026-06-23:
+live `agent_exit` rows, **not** Step-0 test fixtures — no captured raw
+`*.jsonl` files are committed to the tree). The **claude half of
+Sequencing step 0 has since landed**: a real `claude` stream was captured
+and inspected, resolving the offered-set and partial-frame questions, with
+its findings encoded as inline synthetic test fixtures plus this write-up
+rather than a committed raw stream (sanitized, names-only — see the
+Privacy constraint). The **codex *triggered* capture has also landed**
+(issue #513 pinned the file-open `SKILL.md` shape); only the **codex
+offered-set** is still uncaptured. The signal so far, all from 2026-06-23:
 
 | backend | role / stage             | runs (switch on) | skill-bearing            |
 | ------- | ------------------------ | ---------------- | ------------------------ |
@@ -92,18 +122,25 @@ What this confirms empirically:
   old extractor matched a shape codex never emits. Codex *does* trigger the
   `review` skill (it opens the skill's `SKILL.md`); the parser now matches
   that file-open shape (see the resolved codex Open question).
-- `skills_available` has **never appeared in a single record** — the
-  offered set is confirmed uncaptured live, not just unconfirmed in
-  theory (see the claude offered-skills Open question).
-- The partial-frame fix has **no live reproduction**: all 3 claude
-  records were captured on `main` *before* the fix and already read
-  count 1, so `tool_use`-block duplication across partial snapshots has
-  not been observed directly — only the usage sub-object is known to
-  repeat. The fix is still correct (defensive, and consistent with
-  `parse_claude_usage`, whose docstring confirms claude emits multiple
-  `type:"assistant"` frames per `message.id`), and the synthetic test is
-  its direct evidence; a Step-0 capture would confirm whether `tool_use`
-  blocks duplicate in the same way the usage block does.
+- `skills_available` had **never appeared in a single record** at the
+  time this table was gathered — the offered set was uncaptured live, not
+  just unconfirmed in theory. That gap is now **closed on claude**: the
+  Step-0 capture (below) pinned the `system/init.skills` source, so once a
+  tracked claude run streams through the updated parser, `skills_available`
+  is populated. The codex offered set is still uncaptured.
+- The "partial-frame double-count" premise was **disproved by the
+  capture, not just unreproduced.** All 3 live claude records were
+  captured on `main` *before* the original fix and already read count 1,
+  so block duplication was never observed live. The Step-0 capture shows
+  why: claude emits one `assistant` frame **per completed content block**
+  (the content array is *partitioned* across frames, not cumulative), so a
+  `tool_use` block appears in exactly one frame — it does **not** repeat
+  the way the `usage` sub-object does. The original last-frame-wins fix
+  was therefore solving a non-problem and could itself drop a real trigger
+  (a `Skill` block followed by a later text block in the same message);
+  the parser now walks every frame and de-dups by the `tool_use` `id`,
+  which counts each invocation once under the real partitioned framing and
+  stays correct even if a future stream *does* repeat a block.
 
 ## What "triggered" means on the wire
 
@@ -126,17 +163,24 @@ reads the `usage` sub-object. This `tool_use`-block path is the
 well-grounded, confident signal for the *triggered* set on the claude
 backend.
 
-The *offered* set is weaker. An earlier draft asserted a session-init
-frame (`type: "system"`, `subtype: "init"`) enumerates the skills
-offered to the agent, but Claude Code's headless docs
-(<https://code.claude.com/docs/en/headless>) describe the `system/init`
-metadata as model / tools / MCP / plugins — **not** a dedicated
-offered-skills list. No captured sample in this repo confirms a clean
-enumeration. So `skills_available` is **best-effort**: skills may surface
-indirectly (e.g. a `Skill` entry in the init `tools` array, or under
-plugin metadata) or not at all, and the exact field/path must be
-confirmed against a real captured stream before it is relied on (Open
-questions). The *triggered* set does not depend on it.
+The *offered* set was the weaker signal — and a **capture has now
+resolved it on claude.** An earlier draft asserted a session-init frame
+(`type: "system"`, `subtype: "init"`) enumerates the offered skills; a
+later revision walked that back because the headless docs
+(<https://code.claude.com/docs/en/headless>) framed `system/init` as
+model / tools / MCP / plugins, **not** a skills list. A real captured
+`claude --output-format stream-json --include-partial-messages` run
+(claude_code_version `2.1.191`, with this repo's `develop` / `review`
+skills on offer) settles it: the `system/init` frame **does** carry a
+dedicated top-level **`skills` array** — a flat list of the offered skill
+names, repo-local and built-in alike — alongside the documented
+`tools` / `mcp_servers` / `plugins` / `agents` keys. So
+`parse_claude_skills` now reads `system/init.skills` into
+`SkillTriggers.available` on claude (see [Status](#status) and the
+resolved Open question). It stays defensive — a missing / renamed field
+or non-string entry yields an empty set, never an error — and the
+*triggered* set does not depend on it. On **codex** the offered set
+remains best-effort/empty until a codex capture confirms its field.
 
 **Both backends are in scope, not just claude.** `REVIEW_AGENT` defaults
 to `codex` ([`../orchestrator/config.py`](../orchestrator/config.py),
@@ -176,10 +220,14 @@ off (see [Configuration](#5-configuration--opt-in-switch)).
 - *Prompt changes.* We do not change how agents are told to use skills.
 - *Skill argument capture.* Only the skill *name* is recorded (see
   Privacy).
-- *Confirmed `skills_available` source.* The offered-skills field is
-  best-effort, not a guarantee; pinning its exact stream source (claude
-  and codex) is a capture task, not part of this design's commitments
-  (see Open questions). The *triggered* set is the firm deliverable.
+- *Confirmed `skills_available` source (claude resolved; codex still a
+  non-goal).* This design's *original* commitments treated the offered set
+  as best-effort on both backends, pending a capture. The claude source has
+  since been **confirmed and implemented** — `parse_claude_skills` reads
+  `system/init.skills`, so `skills_available` is populated for claude (see
+  [Status](#status) and Open questions). On **codex** the offered set stays
+  best-effort/uncaptured and out of this design's commitments. The
+  *triggered* set was, and remains, the firm cross-backend deliverable.
 
 ## Gap, precisely
 
@@ -204,14 +252,15 @@ not a new subsystem.
 Add a pure-Python extractor next to the usage parsers, mirroring their
 two-parser-plus-dispatcher shape and resilience contract:
 
-- `parse_claude_skills(stdout) -> SkillTriggers` walks `assistant`
-  frames, collecting `tool_use` blocks whose `name == "Skill"` and
-  reading `input.skill` (the firm *triggered* signal). As shipped it
-  reads **only** that triggered set and leaves `available` empty — it does
-  not inspect the `system`/`init` frame, because no captured stream has
-  confirmed an offered-skills field there yet (Open questions). Pinning
-  that source stays a pure capture task; the parser never raises on its
-  absence.
+- `parse_claude_skills(stdout) -> SkillTriggers` walks **every**
+  `assistant` frame, collecting `tool_use` blocks whose `name == "Skill"`
+  and reading `input.skill` (the firm *triggered* signal), de-duplicating
+  per invocation by the block `id`. It also reads the offered set from the
+  `system`/`init` frame's `skills` array into `available` — now that a
+  real capture has confirmed that source (see [What "triggered"
+  means](#what-triggered-means-on-the-wire) and Open questions). Both
+  reads are defensive: a missing / renamed field or non-string entry
+  yields an empty result, never an exception.
 - `parse_codex_skills(stdout) -> SkillTriggers` walks the same
   `codex exec --json` event stream `parse_codex_usage` consumes. Issue #513
   captured a real reviewer run and pinned the shape: codex has no `Skill`
@@ -229,8 +278,9 @@ two-parser-plus-dispatcher shape and resilience contract:
 - `SkillTriggers` is a small frozen dataclass:
   `triggered` (skill names, first-seen order, de-duplicated),
   `trigger_counts` (name → count, for repeated invocations), and
-  `available` (best-effort offered-skills set; empty when unconfirmed or
-  absent — forward-compatible with stream schema drift).
+  `available` (offered-skills set; read from `system/init.skills` on
+  claude, best-effort/empty on codex; empty when the frame/field is absent
+  — forward-compatible with stream schema drift).
 - **Resilience parity.** Malformed JSONL lines are skipped silently, the
   same contract `usage.py` already documents; a missing/renamed field
   yields an empty result, never an exception.
@@ -250,27 +300,30 @@ The rule is therefore applied *per field, on that field's own value* —
 never "drop all skill fields whenever nothing triggered."
 `record_agent_exit` passes `None` (never `[]` / `{}` / `0`) for any
 individual field that is empty/absent, so build_record drops exactly that
-key. This is deliberate: the three fields vary independently, so *when*
-the best-effort offered set is captured, a run that was offered skills but
-triggered none records `skills_available=[...]` while `skills_triggered` /
-`_count` drop out — that asymmetry is what gives the "offered but not
-used" vs "never available" signal the
+key. This is deliberate: the three fields vary independently, so a run
+that was offered skills but triggered none records `skills_available=[...]`
+while `skills_triggered` / `_count` drop out — that asymmetry is what gives
+the "offered but not used" vs "never available" signal the
 [What "triggered" means](#what-triggered-means-on-the-wire) section
-describes. Until the offered-set source is confirmed,
-`skills_available` is simply always `None` and the distinction degrades
-gracefully to "triggered / not triggered" without breaking the record
-shape. Added fields:
+describes. On claude that asymmetry is now **live** (where it was a future
+prospect in the original design): the offered set is read from
+`system/init.skills`, so an implementing run offered `develop` but
+triggering nothing records `skills_available=[...]` while
+`skills_triggered` / `_count` drop out. Where the source is absent — codex
+today, or a claude stream missing the field — `skills_available` stays
+`None` and the distinction degrades gracefully to "triggered / not
+triggered" without breaking the record shape. Added fields:
 
 - `skills_triggered` — list of skill names, first-seen order; `None`
   (and thus dropped) when nothing fired. The firm, well-grounded field.
 - `skills_triggered_count` — total trigger count (sum over
   `trigger_counts`), so a run that invokes `develop` three times is
   distinguishable from one clean trigger; `None` when nothing fired.
-- `skills_available` — **best-effort** offered-skills list; recorded only
-  when the extractor positively captured an offered set (see Open
-  questions for the unconfirmed source), and `None` otherwise — when the
-  source is absent / uncaptured, the backend exposes no offered set, or
-  the switch is off.
+- `skills_available` — offered-skills list; on claude read from
+  `system/init.skills` (confirmed by capture), best-effort on codex.
+  Recorded only when the extractor positively captured an offered set, and
+  `None` otherwise — when the source is absent / uncaptured (codex today),
+  the backend exposes no offered set, or the switch is off.
 
 A fully shape-stable record (all three fields dropped, no new keys) is
 thus the switch-off case and any run — codex or claude — whose stream
@@ -401,46 +454,55 @@ that ships the parser.
   sinks](../docs/observability.md)) is load-bearing; keep it.
 - **Scoping codex out entirely.** Rejected: `REVIEW_AGENT` defaults to
   `codex`, so codex carries the default reviewer's `review`-skill
-  triggers — the most common case, not a corner. Codex is covered
-  best-effort with its capture gap tracked, never silently dropped.
-- **Asserting a confident `system/init` offered-skills list.** Rejected
-  as unverified: the headless docs describe that frame as
-  model / tools / MCP / plugins, and no captured sample confirms a clean
-  skills enumeration. `skills_available` is best-effort instead.
+  triggers — the most common case, not a corner. Codex is covered — its
+  `review`-trigger shape pinned by issue #513, its offered-set gap still
+  tracked — never silently dropped.
+- **Asserting a confident `system/init` offered-skills list (originally
+  rejected — since reversed on claude by capture).** This was rejected as
+  unverified while the headless docs described the frame as
+  model / tools / MCP / plugins and no captured sample confirmed a skills
+  enumeration. A real capture (claude_code_version `2.1.191`) has since
+  shown the `system/init` frame *does* carry a dedicated `skills` array, so
+  the parser now reads it on claude. The rejection stands only for **codex**
+  (its offered-set field is still uncaptured), and the read stays
+  defensive — an absent field yields empty, never an error.
 - **Capturing `input.args`.** Adds a user-content exfiltration surface
   for no analytics value (see Privacy).
 
 ## Open questions
 
-Status as of the step-1 landing (see [Status](#status)): the **codex
-capture task is now resolved** (issue #513 captured a real reviewer stream
-and pinned the file-open shape `parse_codex_skills` matches), while the
-**claude offered-skills capture remains open** — step 1 shipped grounded on
-synthetic streams, so `skills_available` still extracts from a
-plausible-but-unconfirmed source. The switch-default is **settled for v1**,
-the audit `skill_triggered` event has since **shipped** (step 2), and the
-dashboard remains an **explicitly deferred** follow-up. The
+Status update (see [Status](#status)): **both original capture tasks are
+now resolved.** The claude offered-skills source landed via a real
+`claude` stream capture (`system/init.skills`), and the codex *triggered*
+event shape landed via issue #513's reviewer capture (the file-open
+`SKILL.md` shape). The switch-default is **settled for v1**, the audit
+`skill_triggered` event has **shipped** (step 2), and the dashboard has
+**shipped** (step 3). The
 [live data](#live-data-after-the-switch-was-turned-on) gathered since the
-operator turned the switch on confirmed the codex gap empirically (0/5
-reviewer runs captured a trigger) and drove the #513 capture that fixed it;
-`skills_available` never appearing remains the open offered-set gap.
+operator turned the switch on confirmed both gaps empirically (codex
+captured nothing; `skills_available` had never appeared) and drove the two
+captures that closed them. The only residual best-effort piece is the
+**codex offered-set**, still uncaptured.
 
-- **Claude offered-skills source (capture task — still open).** The exact
-  stream-json location of the offered set is unconfirmed — the headless
-  docs frame `system/init` as model / tools / MCP / plugins, not a skills
-  list. As shipped, `parse_claude_skills` returns an empty `available`
-  set and `record_agent_exit` therefore drops `skills_available`
-  entirely; the *triggered* set does not depend on it. Live data backs
-  keeping it dropped: `skills_available` has appeared in **zero** records
-  since the switch went on, so the empty-best-effort handling is right and
-  `skills_triggered` standing alone is the correct call today. This is
-  capturable now — the orchestrator already runs claude in `implementing`
-  with `develop` on offer, so the only blocker is that raw stdout is not
-  persisted; a one-off manual capture of a real
-  `claude --output-format stream-json` run resolves it and pins whether
-  the offered set is derivable (e.g. a `Skill` entry in the init `tools`
-  array) before relying on `skills_available`. If it is not cleanly
-  derivable, `skills_triggered` stands alone as it does today.
+- **Claude offered-skills source (capture task — RESOLVED).** A real
+  `claude --output-format stream-json --include-partial-messages` run
+  (claude_code_version `2.1.191`, this repo's `develop` / `review` skills
+  on offer) confirmed the `system/init` frame carries a dedicated top-level
+  **`skills` array** — a flat list of the offered skill names, repo-local
+  and built-in alike — distinct from its documented `tools` / `mcp_servers`
+  / `plugins` / `agents` keys. (The earlier doubt came from the headless
+  docs, which enumerate the frame as model / tools / MCP / plugins and omit
+  `skills`; the field is present in 2.1.x regardless.) `parse_claude_skills`
+  now reads `system/init.skills` into `SkillTriggers.available`, so
+  `record_agent_exit` writes `skills_available` for tracked claude runs,
+  independently of the triggered set. The read is defensive — a missing /
+  renamed field or non-string entry yields empty, never an error. The same
+  capture also resolved the secondary "do `tool_use` blocks duplicate
+  across partial snapshots?" question: they do **not** (the content array
+  is partitioned one completed block per `assistant` frame, not cumulative
+  like `usage`), so the claude *triggered* de-dup switched from
+  last-frame-wins to `tool_use`-`id` de-dup (see [Status](#status) and the
+  [What "triggered" means](#what-triggered-means-on-the-wire) section).
 - **Codex skill event shape (capture task — RESOLVED, issue #513).** This
   was the headline gap: `REVIEW_AGENT=codex` makes the reviewer the most
   common skill case, yet **0** of the 5 codex reviewer runs (plus 2
@@ -471,9 +533,10 @@ reviewer runs captured a trigger) and drove the #513 capture that fixed it;
   data**: the ~2160 reassuring records were captured against the *old*
   codex parser (which matched nothing), so the new file-open path's
   real-world noise (including the heuristic false-positive of a SKILL.md
-  opened for an unrelated reason) is still unmeasured. And `skills_available`
-  remains best-effort. Keep it off until the pinned codex path proves
-  low-noise on production data; revisit then.
+  opened for an unrelated reason) is still unmeasured. And the codex
+  offered-set behind `skills_available` is still uncaptured (claude's is now
+  pinned to `system/init.skills`). Keep it off until the pinned codex path
+  proves low-noise on production data; revisit then.
 - **Audit-event follow-up (implemented — step 2).** The per-invocation
   audit `skill_triggered` event has shipped, reusing the list
   `record_agent_exit` parses and gated on the same switch. Live data still
@@ -495,17 +558,21 @@ reviewer runs captured a trigger) and drove the #513 capture that fixed it;
 
 ## Sequencing
 
-0. **Stream capture (prerequisite — codex DONE, claude offered-set
-   outstanding).** Capture real `claude` and `codex` stream samples
-   (skill-bearing and skill-free) to pin the trigger event shape per backend
-   and resolve the capture-task open questions above. Step 1 shipped *ahead*
-   of this, grounded on synthetic frames. The **codex reviewer capture has
-   landed** (issue #513): it pinned the file-open shape (`command_execution`
-   reading `skills/<name>/SKILL.md`) `parse_codex_skills` now matches and
-   showed codex *does* trigger `review` — the 0/5 was the parser, not the
-   reviewer. The **claude offered-set capture remains outstanding** and keeps
-   `skills_available` best-effort; it is a one-off manual run since `develop`
-   is already on offer in `implementing`.
+0. **Stream capture (prerequisite — claude AND codex captures landed).**
+   Capture real `claude` and `codex` stream samples (skill-bearing and
+   skill-free) to pin the trigger event shape per backend and resolve the
+   capture-task open questions above. Step 1 shipped *ahead* of this,
+   grounded on synthetic frames; both captures have since landed. The
+   **claude capture**: a real `claude --output-format stream-json
+   --include-partial-messages` run with `develop` / `review` on offer
+   confirmed the `system/init.skills` offered set (so `skills_available` is
+   now populated for claude) and disproved the partial-snapshot
+   block-duplication premise (so the claude *triggered* de-dup is now keyed
+   on the `tool_use` `id`). The **codex reviewer capture** (issue #513)
+   pinned the file-open shape (`command_execution` reading
+   `skills/<name>/SKILL.md`) `parse_codex_skills` now matches and showed
+   codex *does* trigger `review` — the 0/5 was the parser, not the reviewer.
+   The only piece still uncaptured is the **codex offered-set**.
 1. **Extractor + `agent_exit` fields + opt-in switch — LANDED**
    (`a3e2c0a`, `ec6f1df`, `1a7d607`): `parse_claude_skills` /
    `parse_codex_skills` / `parse_agent_skills` in `usage.py`, the

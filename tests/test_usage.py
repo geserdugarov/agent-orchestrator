@@ -827,7 +827,12 @@ class ClaudeSkillTriggerTest(unittest.TestCase):
 
     Skill invocations surface as ``Skill`` ``tool_use`` blocks inside
     ``assistant`` messages; the parser reads only ``input.skill``, keeps
-    first-seen order, de-duplicates names, and counts repeats.
+    first-seen order, de-duplicates per-invocation by the block ``id``, and
+    counts repeats. The offered set comes from the ``system``/``init``
+    frame's ``skills`` array. Fixtures mirror the real captured shape: under
+    ``--include-partial-messages`` the content array is partitioned one
+    completed block per ``assistant`` frame (not a cumulative snapshot), so a
+    ``tool_use`` block appears in exactly one frame and carries a unique id.
     """
 
     def test_order_dedup_and_counts(self) -> None:
@@ -865,16 +870,19 @@ class ClaudeSkillTriggerTest(unittest.TestCase):
         self.assertEqual(s.triggered, ("develop", "review"))
         # `develop` fired twice (across two messages), `review` once.
         self.assertEqual(s.trigger_counts, {"develop": 2, "review": 1})
-        # Offered set stays empty until its stream source is captured.
+        # This `init` frame carries no `skills` array, so the offered set is
+        # empty (the `available` source is read from `system/init.skills`
+        # when present -- see `test_available_from_init_skills`).
         self.assertEqual(s.available, ())
 
-    def test_partial_frame_snapshots_not_double_counted(self) -> None:
-        # Under `--include-partial-messages` claude emits several cumulative
-        # snapshots of one message sharing a `message.id` (the same reason
-        # `parse_claude_usage` groups by id and keeps the last frame). A
-        # `Skill` block present in an early snapshot persists into every later
-        # snapshot, so counting every frame would over-report the trigger.
-        # The final snapshot per id wins, so one trigger counts once.
+    def test_partitioned_content_frames_keep_skill(self) -> None:
+        # The real capture: `--include-partial-messages` emits one `assistant`
+        # frame per completed content block, all sharing the message id. The
+        # content array is partitioned across them -- a text block in its own
+        # frame, then the `Skill` block in the next -- NOT a cumulative
+        # snapshot. The old last-frame-wins logic would drop the trigger here
+        # because the trailing frame's content has no skill; walking every
+        # frame keeps it.
         stdout = _jsonl(
             {
                 "type": "assistant",
@@ -882,6 +890,7 @@ class ClaudeSkillTriggerTest(unittest.TestCase):
                     "id": "msg_1",
                     "content": [
                         {"type": "tool_use", "name": "Skill",
+                         "id": "toolu_a",
                          "input": {"skill": "develop"}},
                     ],
                 },
@@ -891,10 +900,7 @@ class ClaudeSkillTriggerTest(unittest.TestCase):
                 "message": {
                     "id": "msg_1",
                     "content": [
-                        {"type": "tool_use", "name": "Skill",
-                         "input": {"skill": "develop"}},
-                        {"type": "tool_use", "name": "Read",
-                         "input": {"file_path": "x.py"}},
+                        {"type": "text", "text": "now I'll start"},
                     ],
                 },
             },
@@ -903,6 +909,139 @@ class ClaudeSkillTriggerTest(unittest.TestCase):
         s = parse_claude_skills(stdout)
         self.assertEqual(s.triggered, ("develop",))
         self.assertEqual(s.trigger_counts, {"develop": 1})
+
+    def test_repeated_tool_use_id_counted_once(self) -> None:
+        # Defensive: should a future stream repeat one block across frames
+        # (the way the `usage` sub-object repeats), the shared `tool_use` id
+        # de-dups it so a single invocation still counts once.
+        stdout = _jsonl(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "tool_use", "name": "Skill",
+                         "id": "toolu_a",
+                         "input": {"skill": "develop"}},
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "tool_use", "name": "Skill",
+                         "id": "toolu_a",
+                         "input": {"skill": "develop"}},
+                        {"type": "tool_use", "name": "Skill",
+                         "id": "toolu_b",
+                         "input": {"skill": "review"}},
+                    ],
+                },
+            },
+            {"type": "result", "num_turns": 1},
+        )
+        s = parse_claude_skills(stdout)
+        self.assertEqual(s.triggered, ("develop", "review"))
+        self.assertEqual(s.trigger_counts, {"develop": 1, "review": 1})
+
+    def test_distinct_ids_count_repeats(self) -> None:
+        # Two genuine `develop` invocations carry distinct ids -> count 2.
+        stdout = _jsonl(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "tool_use", "name": "Skill",
+                         "id": "toolu_a",
+                         "input": {"skill": "develop"}},
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_2",
+                    "content": [
+                        {"type": "tool_use", "name": "Skill",
+                         "id": "toolu_b",
+                         "input": {"skill": "develop"}},
+                    ],
+                },
+            },
+        )
+        s = parse_claude_skills(stdout)
+        self.assertEqual(s.triggered, ("develop",))
+        self.assertEqual(s.trigger_counts, {"develop": 2})
+
+    def test_available_from_init_skills(self) -> None:
+        # The offered set is read from the `system`/`init` frame's dedicated
+        # `skills` array (confirmed against a real claude 2.1.x capture), and
+        # is independent of what the run triggered: here `review` is offered
+        # but never fired, while `develop` is both offered and triggered.
+        stdout = _jsonl(
+            {"type": "system", "subtype": "init",
+             "skills": ["develop", "review", "verify"]},
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "tool_use", "name": "Skill",
+                         "id": "toolu_a",
+                         "input": {"skill": "develop"}},
+                    ],
+                },
+            },
+            {"type": "result", "num_turns": 1},
+        )
+        s = parse_claude_skills(stdout)
+        self.assertEqual(s.available, ("develop", "review", "verify"))
+        self.assertEqual(s.triggered, ("develop",))
+        self.assertEqual(s.trigger_counts, {"develop": 1})
+
+    def test_available_present_without_any_trigger(self) -> None:
+        # Offered-but-not-triggered: `available` populated, `triggered` empty.
+        stdout = _jsonl(
+            {"type": "system", "subtype": "init",
+             "skills": ["develop", "review"]},
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [{"type": "text", "text": "no skill used"}],
+                },
+            },
+            {"type": "result", "num_turns": 1},
+        )
+        s = parse_claude_skills(stdout)
+        self.assertEqual(s.available, ("develop", "review"))
+        self.assertEqual(s.triggered, ())
+        self.assertEqual(s.trigger_counts, {})
+
+    def test_available_dedups_and_filters_non_strings(self) -> None:
+        # Non-string entries filter out; duplicates collapse, first-seen order.
+        stdout = _jsonl(
+            {"type": "system", "subtype": "init",
+             "skills": ["develop", "review", "develop", 42, None, "", "verify"]},
+        )
+        s = parse_claude_skills(stdout)
+        self.assertEqual(s.available, ("develop", "review", "verify"))
+
+    def test_available_empty_without_init_skills(self) -> None:
+        # An init frame with no `skills` key, a non-list `skills`, and a
+        # stream with no init frame at all all yield an empty offered set,
+        # never an exception.
+        for frame in (
+            {"type": "system", "subtype": "init"},
+            {"type": "system", "subtype": "init", "skills": "develop"},
+            {"type": "system", "subtype": "status"},
+        ):
+            with self.subTest(frame=frame):
+                s = parse_claude_skills(_jsonl(frame))
+                self.assertEqual(s.available, ())
 
     def test_malformed_lines_are_skipped(self) -> None:
         good = json.dumps({

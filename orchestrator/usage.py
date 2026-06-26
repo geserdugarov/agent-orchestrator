@@ -700,10 +700,13 @@ class SkillTriggers:
     ``triggered`` lists the distinct skill names in first-seen order;
     ``trigger_counts`` maps each name to how many times it fired, so a run
     that pulls ``develop`` in twice records ``{"develop": 2}`` while
-    ``triggered`` still carries it once. ``available`` is the best-effort
-    *offered*-skills set -- it stays empty until the exact stream field is
-    confirmed against a captured run (see ``plans/skill-trigger-tracking.md``
-    Open questions) and is forward-compatible with that later capture.
+    ``triggered`` still carries it once. ``available`` is the *offered*-skills
+    set: on claude it is read from the dedicated ``skills`` array in the
+    ``system``/``init`` frame, confirmed against a captured real stream (see
+    ``plans/skill-trigger-tracking.md``); on codex it stays best-effort and
+    empty until that stream's field is confirmed. It varies independently of
+    ``triggered`` and is empty -- never an error -- when the frame or field
+    is absent.
 
     Only the skill *name* is ever read: the ``Skill`` tool's ``input`` can
     carry an ``args`` string echoing issue or user content, and that field is
@@ -717,8 +720,15 @@ class SkillTriggers:
     available: tuple[str, ...] = ()
 
 
-def _collect(names: Iterable[str]) -> SkillTriggers:
-    """Fold first-seen skill names into the de-duplicated / counted shape."""
+def _collect(
+    names: Iterable[str], available: Iterable[str] = (),
+) -> SkillTriggers:
+    """Fold first-seen skill names into the de-duplicated / counted shape.
+
+    ``available`` is passed through verbatim (already de-duplicated by the
+    caller) so the offered set rides the same constructor as the triggered
+    one; codex callers omit it and it defaults to empty.
+    """
     order: list[str] = []
     counts: dict[str, int] = {}
     for name in names:
@@ -726,7 +736,11 @@ def _collect(names: Iterable[str]) -> SkillTriggers:
             order.append(name)
             counts[name] = 0
         counts[name] += 1
-    return SkillTriggers(triggered=tuple(order), trigger_counts=counts)
+    return SkillTriggers(
+        triggered=tuple(order),
+        trigger_counts=counts,
+        available=tuple(available),
+    )
 
 
 def _claude_skill_name(block: Any) -> Optional[str]:
@@ -747,26 +761,64 @@ def _claude_skill_name(block: Any) -> Optional[str]:
     return None
 
 
+def _claude_offered_skills(events: Iterable[dict[str, Any]]) -> tuple[str, ...]:
+    """Read the offered-skills set from claude's ``system``/``init`` frame.
+
+    The headless ``--output-format stream-json`` init frame carries a
+    dedicated top-level ``skills`` array -- the skill names on offer to the
+    session, repo-local (``develop`` / ``review``) and built-in alike --
+    confirmed against a captured real stream (see
+    ``plans/skill-trigger-tracking.md``). Read defensively: a missing or
+    renamed field, or a non-string entry, filters out rather than raising;
+    names are de-duplicated in first-seen order. The first ``init`` frame
+    wins (a single run emits one).
+    """
+    for ev in events:
+        if ev.get("type") != "system" or ev.get("subtype") != "init":
+            continue
+        skills = ev.get("skills")
+        if not isinstance(skills, list):
+            return ()
+        order: list[str] = []
+        seen: set[str] = set()
+        for name in skills:
+            if isinstance(name, str) and name and name not in seen:
+                seen.add(name)
+                order.append(name)
+        return tuple(order)
+    return ()
+
+
 def parse_claude_skills(stdout: str) -> SkillTriggers:
-    """Extract triggered skills from a ``claude ... stream-json`` run.
+    """Extract triggered + offered skills from a ``claude ... stream-json`` run.
 
     A skill invocation surfaces as a ``tool_use`` content block named
     ``"Skill"`` inside an ``assistant`` message; we read ``input.skill`` in
-    first-seen order. ``available`` stays empty: the headless stream has no
-    confirmed offered-skills field yet (the design's capture-task Open
-    question), and we never raise on its absence.
+    first-seen order (never ``input.args`` -- Privacy).
 
-    Assistant frames are grouped by ``message.id`` and the last frame per id
-    wins -- the same discipline ``parse_claude_usage`` applies, and for the
-    same reason: under ``--include-partial-messages`` claude emits several
-    cumulative snapshots of one message, so a ``Skill`` block appears in the
-    snapshot where it lands *and* every later snapshot of that message.
-    Counting every frame would inflate ``trigger_counts`` for a single
-    trigger; taking the final (complete) snapshot per id counts it once.
+    Under ``--include-partial-messages`` claude emits one ``assistant`` frame
+    per *completed content block*, all sharing the message's ``id``: the
+    content array is partitioned across those frames (a text block in its own
+    frame, the following ``Skill`` block in the next), NOT a cumulative
+    snapshot that repeats earlier blocks. A captured real stream confirmed
+    this -- the ``usage`` sub-object repeats across the frames (so
+    ``parse_claude_usage`` keeps the last per id), but a ``tool_use`` block
+    appears in exactly one frame and carries a unique ``id``. So we walk
+    *every* assistant frame and de-duplicate triggers by that block ``id``
+    rather than taking the last frame per message id: last-frame-wins would
+    silently drop a ``Skill`` block followed by a later block of the same
+    message, while the per-block framing already means one trigger is never
+    double-counted. The ``id`` de-dup additionally stays correct if a future
+    stream *does* repeat a block across frames.
+
+    ``available`` is read from the ``system``/``init`` frame's ``skills``
+    array (``_claude_offered_skills``); it varies independently of the
+    triggered set and is empty when that frame/field is absent.
     """
-    by_id: dict[str, list[str]] = {}
-    id_order: list[str] = []
-    for idx, ev in enumerate(_iter_events(stdout)):
+    events = _iter_events(stdout)
+    names: list[str] = []
+    seen_ids: set[str] = set()
+    for ev in events:
         if ev.get("type") != "assistant":
             continue
         msg = ev.get("message")
@@ -775,19 +827,17 @@ def parse_claude_skills(stdout: str) -> SkillTriggers:
         content = msg.get("content")
         if not isinstance(content, list):
             continue
-        names = [
-            name
-            for name in (_claude_skill_name(block) for block in content)
-            if name is not None
-        ]
-        msg_id = msg.get("id") or ev.get("request_id") or str(idx)
-        if msg_id not in by_id:
-            id_order.append(msg_id)
-        by_id[msg_id] = names
-    flat: list[str] = []
-    for msg_id in id_order:
-        flat.extend(by_id[msg_id])
-    return _collect(flat)
+        for block in content:
+            name = _claude_skill_name(block)
+            if name is None:
+                continue
+            block_id = block.get("id")
+            if isinstance(block_id, str) and block_id:
+                if block_id in seen_ids:
+                    continue
+                seen_ids.add(block_id)
+            names.append(name)
+    return _collect(names, available=_claude_offered_skills(events))
 
 
 # Codex has no dedicated ``Skill`` tool the way claude does -- its skill

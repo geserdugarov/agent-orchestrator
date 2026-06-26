@@ -49,6 +49,7 @@ def _read_records(path: Path) -> list[dict]:
 def _claude_stdout_with_skills(
     *,
     skills: tuple[str, ...],
+    offered: tuple[str, ...] = (),
     args_marker: str = "skill-args-must-never-be-stored",
     input_tokens: int = 1000,
     output_tokens: int = 500,
@@ -61,14 +62,19 @@ def _claude_stdout_with_skills(
     reaches the analytics record (Privacy: only the skill name is read).
     The single `assistant` frame also carries a `usage` block so the
     baseline usage/cost record is produced regardless of the skill switch.
+
+    When `offered` is non-empty a `system`/`init` frame carrying that
+    `skills` array is prepended -- the dedicated offered-skills source the
+    real claude stream exposes, so the extractor populates `available`.
     """
     content = [
         {
             "type": "tool_use",
             "name": "Skill",
+            "id": f"toolu_{i}",
             "input": {"skill": name, "args": args_marker},
         }
-        for name in skills
+        for i, name in enumerate(skills)
     ]
     assistant = {
         "type": "assistant",
@@ -83,7 +89,12 @@ def _claude_stdout_with_skills(
         },
     }
     result_frame = {"type": "result", "num_turns": 1}
-    return "\n".join([json.dumps(assistant), json.dumps(result_frame)])
+    frames = [assistant, result_frame]
+    if offered:
+        frames.insert(
+            0, {"type": "system", "subtype": "init", "skills": list(offered)}
+        )
+    return "\n".join(json.dumps(f) for f in frames)
 
 
 class AnalyticsConfigTest(unittest.TestCase):
@@ -721,30 +732,42 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         for forbidden in ("args", "stdout", "prompt"):
             self.assertNotIn(forbidden, rec)
 
-    def test_available_field_recorded_when_parser_reports_it(self) -> None:
-        # The offered-set wiring: when the extractor positively returns an
-        # `available` set it lands as `skills_available`. Today's parser
-        # always returns empty, so this exercises the branch via a stubbed
-        # extractor that mimics a future capture.
+    def test_available_field_recorded_from_real_init_skills(self) -> None:
+        # The offered-set wiring exercised end-to-end through the real claude
+        # extractor (no stub): a `system`/`init` frame carrying a `skills`
+        # array lands as `skills_available`, independent of what triggered.
         _, analytics = _reload()
-        fake = analytics.usage.SkillTriggers(
-            triggered=("develop",),
-            trigger_counts={"develop": 1},
-            available=("develop", "review"),
-        )
         with tempfile.TemporaryDirectory() as td:
-            with patch.object(
-                analytics.usage, "parse_agent_skills", return_value=fake,
-            ):
-                records = self._emit(
-                    analytics, Path(td) / "a.jsonl",
-                    stdout=_claude_stdout_with_skills(skills=("develop",)),
-                    track=True,
-                )
+            records = self._emit(
+                analytics, Path(td) / "a.jsonl",
+                stdout=_claude_stdout_with_skills(
+                    skills=("develop",),
+                    offered=("develop", "review"),
+                ),
+                track=True,
+            )
         rec = records[0]
         self.assertEqual(rec["skills_triggered"], ["develop"])
         self.assertEqual(rec["skills_triggered_count"], 1)
         self.assertEqual(rec["skills_available"], ["develop", "review"])
+
+    def test_available_recorded_independently_of_triggered(self) -> None:
+        # Offered but nothing triggered: `skills_available` is written while
+        # `skills_triggered` / `_count` stay dropped -- the asymmetry that
+        # tells "offered but unused" from "never available."
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            records = self._emit(
+                analytics, Path(td) / "a.jsonl",
+                stdout=_claude_stdout_with_skills(
+                    skills=(), offered=("develop", "review"),
+                ),
+                track=True,
+            )
+        rec = records[0]
+        self.assertEqual(rec["skills_available"], ["develop", "review"])
+        self.assertNotIn("skills_triggered", rec)
+        self.assertNotIn("skills_triggered_count", rec)
 
     def test_skill_parse_failure_still_emits_baseline_record(self) -> None:
         # A skill-parser bug must NOT drop the usage/cost record: the inner
