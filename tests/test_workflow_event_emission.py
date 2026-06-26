@@ -240,6 +240,9 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
             run_agent=_agent(timed_out=True, last_message=""),
             has_new_commits=False,
+            # before_sha == after_sha: the timeout produced no new commit, so
+            # the issue parks (the disposition reads HEAD twice now).
+            head_shas=("sha-pre", "sha-pre"),
         )
         exits = self._events(gh, "agent_exit")
         self.assertEqual(len(exits), 1)

@@ -408,7 +408,18 @@ def _run_subprocess(
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
-    """SIGTERM the whole process group, then SIGKILL after a grace window.
+    """SIGTERM the whole process group, then SIGKILL if anything survives.
+
+    Mirrors `terminate_all_running`'s safety model. `proc.wait()` only
+    observes the group *leader*: a descendant that ignored SIGTERM keeps
+    running -- and keeps mutating the worktree -- after the leader exits, so
+    leader-exit is not proof the group is gone. We SIGKILL the group unless
+    the leader exited AND a `killpg(_, 0)` probe shows it has no surviving
+    member; a leader still alive at the grace deadline is SIGKILLed without a
+    probe. Without the probe, a build grandchild the agent forked (Maven,
+    gradle, a JVM test runner) could go on writing the worktree after the
+    timeout has already been recorded -- exactly the post-timeout commit that
+    stranded a clean implementing branch behind `awaiting_human`.
 
     ProcessLookupError races are expected (the leader may have exited between
     the Python-side timeout firing and our killpg call) -- swallow them.
@@ -417,11 +428,13 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
+    leader_exited = True
     try:
         proc.wait(timeout=5)
-        return
     except subprocess.TimeoutExpired:
-        pass
+        leader_exited = False
+    if leader_exited and not _process_group_alive(proc.pid):
+        return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:

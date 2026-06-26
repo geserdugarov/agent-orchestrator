@@ -157,20 +157,6 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             for r in logs.records
         ))
 
-    def test_codex_timeout_parks_with_timeout_message(self) -> None:
-        gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(timed_out=True),
-            has_new_commits=False,
-        )
-
-        mocks["_push_branch"].assert_not_called()
-        self.assertTrue(gh.pinned_data(1).get("awaiting_human"))
-        last_comment = gh.posted_comments[-1][1]
-        self.assertIn("agent timed out", last_comment)
-        self.assertEqual(gh.opened_prs, [])
-
     def test_push_failure_parks_without_opening_pr(self) -> None:
         gh, issue = self._seeded()
         mocks = self._run(

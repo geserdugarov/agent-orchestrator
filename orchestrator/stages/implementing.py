@@ -5,8 +5,10 @@
 Owns `_handle_implementing` plus the developer-side primitives the rest
 of the workflow re-uses: per-issue dev session lookup, resume on human
 reply, poisoned-session recovery, stale-session detection, the 24h
-retry budget, and the post-agent disposition helpers (`_on_commits`,
-`_on_question`, `_on_dirty_worktree`).
+retry budget, the post-agent disposition helpers (`_on_commits`,
+`_on_question`, `_on_dirty_worktree`), and the next-tick agent-timeout
+recovery (`_try_recover_implementing_timeout_park`) that publishes a clean
+commit a descendant finished around an implementer timeout.
 
 ALL workflow-owned helpers (`_park_awaiting_human`, `_run_agent_tracked`,
 `_now_iso`, the worktree plumbing, the drift / manifest / messaging
@@ -489,6 +491,71 @@ def _resume_developer_on_human_reply(
     return _resume_dev_with_text(gh, spec, issue, state, followup)
 
 
+def _try_recover_implementing_timeout_park(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+) -> str:
+    """Quietly publish a clean commit stranded by an implementer timeout.
+
+    Implementing-stage counterpart to validating's
+    `_try_recover_validating_transient_park`. An `agent_timeout` park can
+    still carry a clean commit: a descendant the timeout cleanup raced
+    finished writing it after disposition (the #77 shape, where the commit
+    timestamp landed after the timeout event). Republish it through the
+    normal commit path so a human does not have to manually clear
+    `awaiting_human` to unstick the issue.
+
+    Returns:
+      * ``"pushed"`` -- a clean commit advanced past `pre_implement_sha` and
+        was published via `_on_commits` (branch pushed, PR opened/reused,
+        label -> validating, park flags cleared). Caller writes state.
+      * ``"stuck"`` -- nothing safely recoverable (worktree reaped, dirty
+        tree, missing watermark, or HEAD unchanged). Caller stays parked.
+
+    Unlike validating's silent reviewer-rerun recovery this DOES post the
+    normal ":sparkles: PR opened" comment via `_on_commits` -- publishing the
+    branch is the entire point of the recovery. It must not spawn the agent.
+    """
+    from .. import workflow as _wf
+
+    wt = _wf._worktree_path(spec, issue.number)
+    if not wt.exists():
+        # Worktree reaped: the local commit is gone, nothing to publish.
+        return "stuck"
+    if _wf._worktree_dirty_files(wt):
+        # A descendant left uncommitted edits; pushing would publish an
+        # incomplete branch. Stay parked for human inspection.
+        return "stuck"
+    pre_sha = state.get("pre_implement_sha")
+    if not isinstance(pre_sha, str):
+        # The timeout-tagging path always persists this; a missing watermark
+        # is foreign state we cannot reason about, so stay parked rather than
+        # risk publishing a branch we cannot vouch for.
+        return "stuck"
+    now_sha = _wf._head_sha(wt)
+    if not now_sha or now_sha == pre_sha:
+        # The timeout produced no new commit; stay parked for a human reply.
+        return "stuck"
+    # A clean commit advanced past the pre-timeout SHA. Clear the park flags
+    # and publish it through the normal commit path.
+    state.set("awaiting_human", False)
+    state.set("park_reason", None)
+    state.set("pre_implement_sha", None)
+    _, _, _, dev_sid = _read_dev_session(state)
+    result = AgentResult(
+        session_id=dev_sid,
+        last_message=(
+            "(orchestrator recovery: publishing commit produced around the "
+            "agent timeout)"
+        ),
+        exit_code=0,
+        timed_out=False,
+        stdout="",
+        stderr="",
+    )
+    _on_commits(gh, spec, issue, state, result)
+    return "pushed"
+
+
 def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     from .. import workflow as _wf
 
@@ -688,19 +755,27 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             # question branches below.
             if _wf._ignore_if_interrupted(issue, result):
                 return
-            if result.timed_out:
+            if this_resume_committed:
+                # A commit landed on THIS resume -- publish it even if the
+                # agent then timed out, rather than stranding it behind
+                # awaiting_human. A dirty tree still parks for inspection.
+                dirty = _wf._worktree_dirty_files(wt)
+                if dirty:
+                    _on_dirty_worktree(gh, issue, state, result, dirty)
+                else:
+                    _on_commits(gh, spec, issue, state, result)
+            elif result.timed_out:
+                # Timed out with no new commit. Park, but tag `agent_timeout`
+                # and persist the pre-agent SHA so the next-tick recovery can
+                # publish a commit a lingering descendant finishes afterward.
                 _wf._park_awaiting_human(
                     gh, issue, state,
                     f"{config.HITL_MENTIONS} agent timed out after "
                     f"{config.AGENT_TIMEOUT}s, manual intervention needed.",
                     reason="agent_timeout",
                 )
-            elif this_resume_committed:
-                dirty = _wf._worktree_dirty_files(wt)
-                if dirty:
-                    _on_dirty_worktree(gh, issue, state, result, dirty)
-                else:
-                    _on_commits(gh, spec, issue, state, result)
+                state.set("park_reason", "agent_timeout")
+                state.set("pre_implement_sha", before_sha or "")
             else:
                 # The dev produced no new commit on THIS resume. Accept
                 # it as an acknowledgement ONLY when the message ends
@@ -794,6 +869,36 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
         # requirements are picked up naturally.
 
     if state.get("awaiting_human"):
+        # Transient timeout-park recovery: a prior tick parked this issue on
+        # `agent_timeout` after the implementer timed out without a commit
+        # visible at disposition time. A descendant the timeout cleanup raced
+        # may have finished a clean commit just after (the #77 shape: the
+        # commit timestamp landed after the timeout event), so re-attempt the
+        # publish silently before falling back to the human-reply resume.
+        # Skip when the human already replied -- their comment IS the resume
+        # signal and the resume path below consumes it.
+        if state.get("park_reason") == "agent_timeout" and not gh.comments_after(
+            issue, state.get("last_action_comment_id")
+        ):
+            outcome = _try_recover_implementing_timeout_park(
+                gh, spec, issue, state
+            )
+            if outcome == "pushed":
+                gh.write_pinned_state(issue, state)
+            # "pushed" -> state written above; "stuck" -> stay parked with no
+            # churn. Either way the tick is done.
+            return
+        # Snapshot HEAD before the resume so the timeout disposition below can
+        # tell whether THIS run produced a new commit. Ensure the worktree
+        # first so a reaped tree does not read "" and then mis-classify the
+        # restored branch tip as a fresh commit.
+        wt_pre = _wf._worktree_path(spec, issue.number)
+        if not wt_pre.exists():
+            wt_pre = _wf._ensure_worktree(
+                spec, issue.number,
+                branch=_wf._resolve_branch_name(state, spec, issue.number),
+            )
+        before_sha = _wf._head_sha(wt_pre)
         resumed = _resume_developer_on_human_reply(gh, spec, issue, state)
         if resumed is None:
             return
@@ -803,6 +908,11 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             spec, issue.number,
             branch=_wf._resolve_branch_name(state, spec, issue.number),
         )
+        # Pre-agent HEAD watermark for the timeout disposition below. On a
+        # fresh spawn this is the base SHA; on a recovered worktree it is the
+        # carried-over commit (the synthetic result below is never timed out,
+        # so it stays unused there).
+        before_sha = _wf._head_sha(wt)
         if _wf._has_new_commits(spec, wt):
             # Recovered worktree: the dev agent already committed on a
             # previous tick; skip a fresh run and go straight to push.
@@ -870,15 +980,37 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
         return
 
     if result.timed_out:
-        # Park on awaiting_human so the next tick doesn't restart codex or
-        # push partial commits left in the worktree. The HITL reply acts as
-        # the unblock signal, identical to the question path.
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} agent timed out after {config.AGENT_TIMEOUT}s, "
-            "manual intervention needed.",
-            reason="agent_timeout",
-        )
+        # The implementer can commit clean work and then get killed by the
+        # timeout (or a descendant finishes the commit during cleanup).
+        # Don't strand that commit behind `awaiting_human`: if HEAD advanced
+        # past the pre-agent SHA and the tree is clean, push/open PR exactly
+        # as a normal completion would; if it advanced but the tree is dirty,
+        # park for inspection; if it did not advance, park as a timeout. The
+        # `before_sha` watermark (not `_has_new_commits`, which only compares
+        # to `origin/<base>`) is what distinguishes a commit produced by THIS
+        # run from carried-over commits already on the branch.
+        wt = _wf._worktree_path(spec, issue.number)
+        after_sha = _wf._head_sha(wt)
+        if after_sha and after_sha != before_sha:
+            dirty = _wf._worktree_dirty_files(wt)
+            if dirty:
+                _on_dirty_worktree(gh, issue, state, result, dirty)
+            else:
+                _on_commits(gh, spec, issue, state, result)
+        else:
+            # No commit landed. Park on awaiting_human so the next tick
+            # doesn't restart the agent or push partial state. Tag the park
+            # `agent_timeout` and persist the pre-agent SHA so the next-tick
+            # recovery can publish a commit a lingering descendant finishes
+            # after this point without waiting for a human reply.
+            _wf._park_awaiting_human(
+                gh, issue, state,
+                f"{config.HITL_MENTIONS} agent timed out after "
+                f"{config.AGENT_TIMEOUT}s, manual intervention needed.",
+                reason="agent_timeout",
+            )
+            state.set("park_reason", "agent_timeout")
+            state.set("pre_implement_sha", before_sha or "")
         gh.write_pinned_state(issue, state)
         return
 
@@ -1016,6 +1148,12 @@ def _on_commits(
     # silent-park streak so a future blip doesn't tip an otherwise-healthy
     # session past the fresh-session threshold.
     state.set("silent_park_count", 0)
+    # The commit shipped, so any agent-timeout park watermark is spent --
+    # clear it (and the stale reason) so it cannot linger into `validating`
+    # or mis-fire the next-tick timeout recovery on a later implementing hop.
+    if state.get("park_reason") == "agent_timeout":
+        state.set("park_reason", None)
+    state.set("pre_implement_sha", None)
     # Hand off straight to `validating`. The docs pass runs only as the
     # final-docs handoff after the reviewer agent approves.
     gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)

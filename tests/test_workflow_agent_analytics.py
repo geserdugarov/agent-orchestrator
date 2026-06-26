@@ -323,6 +323,9 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                     stderr="",
                 ),
                 has_new_commits=False,
+                # before_sha == after_sha: the timeout produced no new commit,
+                # so the issue parks (the disposition reads HEAD twice now).
+                head_shas=("sha-pre", "sha-pre"),
                 analytics_log_path=path,
             )
 
