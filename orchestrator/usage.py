@@ -790,117 +790,76 @@ def parse_claude_skills(stdout: str) -> SkillTriggers:
     return _collect(flat)
 
 
-def _codex_skill_from_call(obj: dict[str, Any]) -> Optional[str]:
-    """Read a skill name from a ``Skill``-named tool/function call object.
-
-    Codex echoes the same agent-agnostic repo-local skills, so a trigger may
-    arrive as a call whose ``input`` (dict) or ``arguments`` (dict or a
-    JSON-encoded string) carries ``skill``. Only that key is read -- a
-    sibling ``args`` payload is never decoded for content (Privacy).
-    """
-    if obj.get("name") != "Skill":
-        return None
-    inp = obj.get("input")
-    if isinstance(inp, dict):
-        skill = inp.get("skill")
-        if isinstance(skill, str) and skill:
-            return skill
-    args = obj.get("arguments")
-    if isinstance(args, dict):
-        skill = args.get("skill")
-        if isinstance(skill, str) and skill:
-            return skill
-    if isinstance(args, str):
-        try:
-            parsed = json.loads(args)
-        except (json.JSONDecodeError, ValueError):
-            parsed = None
-        if isinstance(parsed, dict):
-            skill = parsed.get("skill")
-            if isinstance(skill, str) and skill:
-                return skill
-    return None
-
-
-def _codex_skill_from_event(obj: dict[str, Any]) -> Optional[str]:
-    """Read a skill name from a dedicated ``*skill*``-typed event object.
-
-    A scalar ``skill`` / ``skill_name`` string is treated as a single
-    invocation; an offered-skills *list* (plural ``skills``) is intentionally
-    not matched here -- the offered set is best-effort and out of scope until
-    its exact shape is captured.
-    """
-    t = obj.get("type")
-    if not isinstance(t, str) or "skill" not in t.lower():
-        return None
-    for key in ("skill", "skill_name"):
-        v = obj.get(key)
-        if isinstance(v, str) and v:
-            return v
-    return None
-
-
-# Codex wraps its events/items under these structural envelope keys. The
-# skill scan descends ONLY through them -- never into free-form payload keys
-# (``arguments`` / ``args`` / ``input`` / ``output`` / ``content`` ...) whose
-# values can echo issue or user text. A full ``.. | objects`` recursion (as
-# the usage parser uses for cost) would let a nested payload object shaped
-# like ``{"type": "...skill...", "skill": "<user text>"}`` false-positive as a
-# trigger and record arbitrary content -- the names-only Privacy contract
-# (see ``plans/skill-trigger-tracking.md``) forbids that.
-_CODEX_SKILL_CONTAINER_KEYS: tuple[str, ...] = ("item", "msg", "payload")
-
-
-def _codex_skill_objects(ev: Any) -> Iterable[dict[str, Any]]:
-    """Yield the event and its structurally-nested envelope dicts, in order.
-
-    Steps through ``_CODEX_SKILL_CONTAINER_KEYS`` only, so a skill name is
-    read from a real ``Skill`` call/event shape but never from an arbitrary
-    nested ``args`` / ``input`` payload (Privacy: names only). The
-    ``name == "Skill"`` / ``*skill*``-typed matchers still read their own
-    object's ``input`` / ``arguments`` ``skill`` key directly -- they just no
-    longer have free-form sub-payloads handed to them as candidate objects.
-
-    Yields in document order (parent before children, list items left to
-    right) -- a recursive walk like ``_walk_objects`` rather than a LIFO
-    stack, so a list-valued envelope (``payload=[first, second]``) preserves
-    the first-seen ordering ``triggered`` promises.
-    """
-    if not isinstance(ev, dict):
-        return
-    yield ev
-    for key in _CODEX_SKILL_CONTAINER_KEYS:
-        child = ev.get(key)
-        if isinstance(child, dict):
-            yield from _codex_skill_objects(child)
-        elif isinstance(child, list):
-            for item in child:
-                yield from _codex_skill_objects(item)
+# Codex has no dedicated ``Skill`` tool the way claude does -- its skill
+# mechanism is file-based. Codex's own instructions tell the agent "After
+# deciding to use a skill, open its SKILL.md," so the only trigger observable
+# on the ``codex exec --json`` stream is a ``command_execution`` item whose
+# shell ``command`` reads a ``skills/<name>/SKILL.md`` path. A captured
+# reviewer run pinned this shape (see ``plans/skill-trigger-tracking.md``):
+# there is NO ``Skill``-named function call and NO dedicated ``*skill*`` event.
+#
+# Only the ``<name>`` path segment is ever captured -- never the surrounding
+# command text nor the command's ``aggregated_output`` (which carries the
+# file's contents), both of which can echo issue / user content (names-only
+# Privacy contract). The pattern is anchored to the literal
+# ``skills/<name>/SKILL.md`` path shape and requires ``skills`` to sit on a
+# path-component boundary (``(?<!\w)``), so an ordinary ``git`` / ``grep``
+# command does not false-positive and ``myskills/...`` is not mistaken for a
+# skills root. Nested built-in skills such as ``skills/.system/imagegen/...``
+# do not match because their ``SKILL.md`` is not directly under ``skills/``.
+_CODEX_SKILL_PATH_RE = re.compile(r"(?<!\w)skills/([^/\s\"']+)/SKILL\.md\b")
 
 
 def parse_codex_skills(stdout: str) -> SkillTriggers:
-    """Extract triggered skills from a ``codex exec --json`` run (best-effort).
+    """Extract triggered skills from a ``codex exec --json`` run.
 
-    The precise codex skill-event shape is an open capture task, so this is
-    deliberately *best-effort rather than hardcoded empty*: each event and its
-    structural envelopes (``item`` / ``msg`` / ``payload``) are searched for
-    either a ``Skill``-named tool/function call or a dedicated ``*skill*``-typed
-    event. A stream that surfaces neither -- e.g. a normal usage-only run --
-    returns an empty ``SkillTriggers`` without raising.
+    Codex's skill mechanism is file-based, not a tool call: a real reviewer
+    capture (``plans/skill-trigger-tracking.md``) confirmed the only observable
+    trigger is a ``command_execution`` item whose ``command`` opens a skill's
+    ``skills/<name>/SKILL.md`` file. We read only the ``<name>`` path segment
+    (``_CODEX_SKILL_PATH_RE``) -- never the command text or its
+    ``aggregated_output`` (the file's contents) -- honoring the names-only
+    Privacy contract.
 
-    The walk is bounded to those envelope keys rather than recursing into every
-    nested dict (``_codex_skill_objects``): free-form ``arguments`` / ``args``
-    / ``input`` payloads can echo user content, and inspecting them for a
-    skill-shaped object would both leak that content and false-positify
-    non-skill payloads as triggers (names-only Privacy contract).
+    Codex emits both an ``item.started`` and an ``item.completed`` for one
+    command, each echoing the same ``command``; grouping by the shared
+    ``item.id`` and keeping the last occurrence (the same last-frame-wins
+    discipline ``parse_codex_usage`` / ``parse_claude_skills`` use) counts a
+    single SKILL.md read once rather than twice. Two *separate* reads of the
+    same skill (distinct ``item.id``s) still count as two triggers, mirroring
+    the claude path.
+
+    A run that opens no SKILL.md -- e.g. a normal usage-only run -- returns an
+    empty ``SkillTriggers`` without raising. The signal is heuristic: opening a
+    SKILL.md is the trigger codex's own instructions prescribe, but a run that
+    reads a SKILL.md for an unrelated reason (e.g. reviewing a PR that edits
+    one) would also register; the design doc records that limitation.
     """
-    names: list[str] = []
+    by_id: dict[str, list[str]] = {}
+    id_order: list[str] = []
+    anon: list[str] = []
     for ev in _iter_events(stdout):
-        for obj in _codex_skill_objects(ev):
-            name = _codex_skill_from_call(obj) or _codex_skill_from_event(obj)
-            if name is not None:
-                names.append(name)
-    return _collect(names)
+        item = ev.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        command = item.get("command")
+        if not isinstance(command, str):
+            continue
+        names = _CODEX_SKILL_PATH_RE.findall(command)
+        if not names:
+            continue
+        item_id = item.get("id")
+        if isinstance(item_id, str) and item_id:
+            if item_id not in by_id:
+                id_order.append(item_id)
+            by_id[item_id] = names
+        else:
+            anon.extend(names)
+    flat: list[str] = []
+    for item_id in id_order:
+        flat.extend(by_id[item_id])
+    flat.extend(anon)
+    return _collect(flat)
 
 
 def parse_agent_skills(backend: str, stdout: str) -> SkillTriggers:

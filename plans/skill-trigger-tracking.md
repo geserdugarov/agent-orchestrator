@@ -62,9 +62,10 @@ and reusing the list `record_agent_exit` parses (see [Audit event
 log](#3-audit-event-log)). Step 3 (the dashboard widget):
 `analytics.read.get_skill_trigger_rates` plus the "Skill trigger rates"
 panel in `orchestrator/dashboard.py`, a pure read-side addition over the
-`extras JSONB` fields with no DDL. The offered-skills set and the codex
-event shape remain best-effort capture tasks (Open questions). The
-remaining design sections describe the shipped behavior.
+`extras JSONB` fields with no DDL. The codex event shape has since been
+**pinned** by a captured reviewer run (issue #513); the offered-skills set
+remains a best-effort capture task (Open questions). The remaining design
+sections describe the shipped behavior.
 
 ### Live data after the switch was turned on
 
@@ -86,9 +87,11 @@ What this confirms empirically:
   `develop` hits). Across ~2160 `agent_exit` records the extractor logged
   zero crashes and clean output — the low-noise evidence the switch
   default wants before any flip.
-- The **codex extractor has captured nothing** across 5 real reviewer
-  runs and 2 decomposer runs — the default reviewer's `review` skill is
-  going unobserved in production today (see the codex Open question).
+- The **codex extractor captured nothing** across 5 real reviewer runs and
+  2 decomposer runs — and issue #513's capture has since explained why: the
+  old extractor matched a shape codex never emits. Codex *does* trigger the
+  `review` skill (it opens the skill's `SKILL.md`); the parser now matches
+  that file-open shape (see the resolved codex Open question).
 - `skills_available` has **never appeared in a single record** — the
   offered set is confirmed uncaptured live, not just unconfirmed in
   theory (see the claude offered-skills Open question).
@@ -145,10 +148,13 @@ codex out would therefore leave the single most common skill-trigger case
 (the default reviewer) permanently unobserved. Codex's CLI in this
 workspace exposes skill-related features, and codex emits a
 `codex exec --json` event stream that `parse_codex_usage` already
-consumes; the codex skill extractor parses that same stream. The exact
-codex event shape for a skill invocation is not yet captured here, so the
-codex side ships **best-effort** with the residual gap called out
-explicitly (Open questions) rather than asserted to be empty.
+consumes; the codex skill extractor parses that same stream. A captured
+reviewer run (issue #513) has since **pinned** the codex shape: codex has
+no dedicated `Skill` tool — it discovers a skill (under `$CODEX_HOME/skills/`
+*or* the project-local `.agents/skills/`) and triggers it by opening that
+skill's `SKILL.md`, which surfaces only as a `command_execution` item whose
+shell command reads a `skills/<name>/SKILL.md` path. The extractor matches
+that file-open shape (see [Codex skill event shape](#open-questions)).
 
 ## Goal / non-goals
 
@@ -207,11 +213,16 @@ two-parser-plus-dispatcher shape and resilience contract:
   that source stays a pure capture task; the parser never raises on its
   absence.
 - `parse_codex_skills(stdout) -> SkillTriggers` walks the same
-  `codex exec --json` event stream `parse_codex_usage` consumes and
-  collects skill-invocation events (best-effort: the precise codex event
-  shape is a capture task, so v1 may extract nothing and that gap is
-  documented, not hidden). Codex is **not** short-circuited to empty —
-  the reviewer runs here by default.
+  `codex exec --json` event stream `parse_codex_usage` consumes. Issue #513
+  captured a real reviewer run and pinned the shape: codex has no `Skill`
+  tool, so a trigger surfaces only as a `command_execution` item whose
+  shell command opens a `skills/<name>/SKILL.md` file. The extractor reads
+  only that `<name>` path segment (never the command text or its output),
+  and dedups the started/completed pair codex emits per command by the
+  shared `item.id` so one read counts once. The signal is heuristic — a
+  SKILL.md opened for an unrelated reason would also register — but it is no
+  longer a guess at an unobserved shape. Codex is **not** short-circuited to
+  empty — the reviewer runs here by default.
 - `parse_agent_skills(backend, stdout) -> SkillTriggers` dispatches by
   backend exactly as `parse_agent_usage` does (`claude` →
   `parse_claude_skills`, `codex` → `parse_codex_skills`).
@@ -401,17 +412,18 @@ that ships the parser.
 
 ## Open questions
 
-Status as of the step-1 landing (see [Status](#status)): the two capture
-tasks are **still open** — step 1 shipped grounded on synthetic streams,
-not captured ones, so the parsers extract from plausible-but-unconfirmed
-shapes — while the switch-default is **settled for v1**, the audit
-`skill_triggered` event has since **shipped** (step 2), and the dashboard
-remains an **explicitly deferred** follow-up. The
+Status as of the step-1 landing (see [Status](#status)): the **codex
+capture task is now resolved** (issue #513 captured a real reviewer stream
+and pinned the file-open shape `parse_codex_skills` matches), while the
+**claude offered-skills capture remains open** — step 1 shipped grounded on
+synthetic streams, so `skills_available` still extracts from a
+plausible-but-unconfirmed source. The switch-default is **settled for v1**,
+the audit `skill_triggered` event has since **shipped** (step 2), and the
+dashboard remains an **explicitly deferred** follow-up. The
 [live data](#live-data-after-the-switch-was-turned-on) gathered since the
-operator turned the switch on now confirms both capture-task gaps
-empirically (codex captured nothing; `skills_available` never appeared)
-and makes the **codex capture the priority** — that is where the default
-reviewer's signal is lost in production today.
+operator turned the switch on confirmed the codex gap empirically (0/5
+reviewer runs captured a trigger) and drove the #513 capture that fixed it;
+`skills_available` never appearing remains the open offered-set gap.
 
 - **Claude offered-skills source (capture task — still open).** The exact
   stream-json location of the offered set is unconfirmed — the headless
@@ -429,31 +441,39 @@ reviewer's signal is lost in production today.
   the offered set is derivable (e.g. a `Skill` entry in the init `tools`
   array) before relying on `skills_available`. If it is not cleanly
   derivable, `skills_triggered` stands alone as it does today.
-- **Codex skill event shape (capture task — still open; the HEADLINE
-  gap).** This is the single most important open question, not a residual
-  one: `REVIEW_AGENT=codex` makes the reviewer the most common skill case,
-  and live data shows it is effectively non-functional. Across the **5
-  codex reviewer runs** (plus 2 decomposer runs) after the switch went on,
-  **0 captured a skill trigger** — the default reviewer's `review` skill
-  is going unobserved in production today. The shipped `parse_codex_skills`
-  is best-effort: it scans for a `Skill`-named tool/function call or a
-  `*skill*`-typed event and returns empty on a real stream whose shape
-  differs. A raw `codex exec --json` capture of a reviewer run is needed to
-  tell whether the reviewer simply does not trigger `review` or the guessed
-  event shape does not match the real one. When that capture lands, point
-  the parser at the confirmed field and guard against the same
-  per-invocation double-count the claude path was fixed for — codex emits
-  started/completed events for one call. This is the next step to
-  prioritize: it is where the default reviewer's signal is lost today.
+- **Codex skill event shape (capture task — RESOLVED, issue #513).** This
+  was the headline gap: `REVIEW_AGENT=codex` makes the reviewer the most
+  common skill case, yet **0** of the 5 codex reviewer runs (plus 2
+  decomposer runs) after the switch went on captured a trigger. A real
+  `codex exec --json` capture of a reviewer run resolved the ambiguity:
+  codex **does** trigger the `review` skill — it discovers the skill (both
+  the registered `$CODEX_HOME/skills/` root *and* the project-local
+  `.agents/skills/` were observed) and opens its `SKILL.md` — but the old
+  `parse_codex_skills` looked for the wrong shape (a `Skill`-named
+  function/tool call or a `*skill*`-typed event, neither of which codex
+  emits). The production 0/5 was therefore the parser, not the reviewer.
+  The capture confirmed codex has no dedicated `Skill` tool: its file-based
+  skill mechanism surfaces only as a `command_execution` item whose shell
+  command reads a `skills/<name>/SKILL.md` path. `parse_codex_skills` now
+  matches that shape, reads only the `<name>` segment (names-only Privacy),
+  and dedups the started/completed pair codex emits per command by the
+  shared `item.id` so one read counts once. The signal is heuristic — a
+  SKILL.md opened for an unrelated reason (e.g. reviewing a PR that edits
+  one) would also register — but it is observed, not guessed.
 - **Switch default (settled for v1; keep off).** Shipped **off** so
   default installs are unchanged. Live data is reassuring on noise — the
   operator has run with the switch on across ~2160 `agent_exit` records
   with zero crashes and clean output, exactly the "low-noise in practice"
-  evidence a flip would want. But do **not** flip to default-on yet: the
-  noise is low partly *because codex emits nothing*, so promoting the
-  default now would advertise a feature that silently covers only the
-  claude backend. Keep it off until codex coverage exists (the headline
-  gap above); revisit then.
+  evidence a flip would want. But do **not** flip to default-on yet. The
+  codex gap that previously justified holding the default is now closed —
+  issue #513 pinned the file-open shape, so the parser covers both
+  backends — but that coverage has **not yet accumulated its own live
+  data**: the ~2160 reassuring records were captured against the *old*
+  codex parser (which matched nothing), so the new file-open path's
+  real-world noise (including the heuristic false-positive of a SKILL.md
+  opened for an unrelated reason) is still unmeasured. And `skills_available`
+  remains best-effort. Keep it off until the pinned codex path proves
+  low-noise on production data; revisit then.
 - **Audit-event follow-up (implemented — step 2).** The per-invocation
   audit `skill_triggered` event has shipped, reusing the list
   `record_agent_exit` parses and gated on the same switch. Live data still
@@ -475,17 +495,17 @@ reviewer's signal is lost in production today.
 
 ## Sequencing
 
-0. **Stream capture (prerequisite — not done).** Capture real `claude`
-   and `codex` stream samples (skill-bearing and skill-free) to pin the
-   trigger event shape per backend and resolve the two capture-task open
-   questions above. Step 1 shipped *ahead* of this, grounded on synthetic
-   frames; the captures remain outstanding and keep `skills_available` and
-   the codex extractor best-effort. Prioritize the **codex reviewer
-   capture** — live data (above) shows 0/5 codex reviewer runs captured a
-   trigger, so that is where the default reviewer's signal is lost today;
-   the claude offered-set capture is the secondary piece and is doable as
-   a one-off manual run since `develop` is already on offer in
-   `implementing`.
+0. **Stream capture (prerequisite — codex DONE, claude offered-set
+   outstanding).** Capture real `claude` and `codex` stream samples
+   (skill-bearing and skill-free) to pin the trigger event shape per backend
+   and resolve the capture-task open questions above. Step 1 shipped *ahead*
+   of this, grounded on synthetic frames. The **codex reviewer capture has
+   landed** (issue #513): it pinned the file-open shape (`command_execution`
+   reading `skills/<name>/SKILL.md`) `parse_codex_skills` now matches and
+   showed codex *does* trigger `review` — the 0/5 was the parser, not the
+   reviewer. The **claude offered-set capture remains outstanding** and keeps
+   `skills_available` best-effort; it is a one-off manual run since `develop`
+   is already on offer in `implementing`.
 1. **Extractor + `agent_exit` fields + opt-in switch — LANDED**
    (`a3e2c0a`, `ec6f1df`, `1a7d607`): `parse_claude_skills` /
    `parse_codex_skills` / `parse_agent_skills` in `usage.py`, the

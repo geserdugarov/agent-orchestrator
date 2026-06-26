@@ -994,52 +994,173 @@ class ClaudeSkillTriggerTest(unittest.TestCase):
         self.assertEqual(parse_claude_skills(""), SkillTriggers())
 
 
-class CodexSkillTriggerTest(unittest.TestCase):
-    """``parse_codex_skills`` is best-effort over the ``codex exec --json`` stream.
+def _codex_cmd(item_id: str, command: str, *, started: bool = False,
+               **extra: object) -> dict:
+    """One ``codex exec --json`` ``command_execution`` event.
 
-    The exact codex skill-event shape is an open capture task, so the parser
-    attempts two plausible shapes rather than hardcoding empty, and returns an
-    empty result -- never an exception -- when neither is present.
+    Mirrors the real envelope a captured reviewer run emits (see
+    ``plans/skill-trigger-tracking.md``): a ``command_execution`` ``item`` under
+    an ``item.started`` / ``item.completed`` frame, carrying a shared ``id`` and
+    the shell ``command``. Sanitized / minimal -- no raw prompts, diffs, or
+    secrets, only the fields the parser reads.
+    """
+    item = {"id": item_id, "type": "command_execution", "command": command}
+    item.update(extra)
+    return {"type": "item.started" if started else "item.completed", "item": item}
+
+
+class CodexSkillTriggerTest(unittest.TestCase):
+    """``parse_codex_skills`` over the confirmed ``codex exec --json`` shape.
+
+    Codex has no dedicated ``Skill`` tool: a captured reviewer run pinned the
+    only observable trigger as a ``command_execution`` whose ``command`` opens a
+    ``skills/<name>/SKILL.md`` file. The parser reads only the ``<name>`` path
+    segment, dedups the started/completed pair codex emits per command by its
+    shared ``item.id``, keeps first-seen order, and returns empty -- never an
+    exception -- on a stream that opens no SKILL.md.
     """
 
-    def test_extracts_skill_from_function_call(self) -> None:
+    def test_extracts_skill_from_skill_md_read(self) -> None:
+        # The confirmed shape: the reviewer opens the review skill's SKILL.md
+        # via a shell command. Codex registers the skill under
+        # ``$CODEX_HOME/skills/<name>/SKILL.md``; the read carries an absolute
+        # path plus unrelated commands chained after it.
+        cmd = ("/bin/bash -lc \"sed -n '1,220p' "
+               "/home/u/.codex/skills/review/SKILL.md && git diff -- calc.py\"")
         stdout = _jsonl(
-            {"type": "task_started"},
-            {"type": "item.completed", "item": {
-                "type": "function_call", "name": "Skill",
-                "arguments": json.dumps({"skill": "review", "args": "..."})}},
-            {"type": "item.completed", "item": {
-                "type": "function_call", "name": "Skill",
-                "arguments": json.dumps({"skill": "review"})}},
+            {"type": "thread.started", "thread_id": "t1"},
+            {"type": "turn.started"},
+            _codex_cmd("item_1", cmd, started=True, status="in_progress"),
+            _codex_cmd("item_1", cmd, status="completed", exit_code=0),
+            {"type": "turn.completed", "usage": {"input_tokens": 10,
+                                                 "output_tokens": 5}},
         )
         s = parse_codex_skills(stdout)
         self.assertEqual(s.triggered, ("review",))
-        self.assertEqual(s.trigger_counts, {"review": 2})
+        # started + completed echo the same command; the shared id counts once.
+        self.assertEqual(s.trigger_counts, {"review": 1})
+        self.assertEqual(s.available, ())
 
-    def test_extracts_skill_from_dedicated_event_order_and_counts(self) -> None:
+    def test_started_and_completed_not_double_counted(self) -> None:
+        # Explicit dedup guard: a single SKILL.md read emits two frames sharing
+        # one ``item.id`` -- they must collapse to one trigger.
+        cmd = "/bin/bash -lc 'cat skills/develop/SKILL.md'"
         stdout = _jsonl(
-            {"type": "skill_invoked", "skill": "develop"},
-            {"type": "skill_invoked", "skill": "review"},
-            {"type": "skill_invoked", "skill": "develop"},
+            _codex_cmd("item_2", cmd, started=True, status="in_progress"),
+            _codex_cmd("item_2", cmd, status="completed", exit_code=0),
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s.triggered, ("develop",))
+        self.assertEqual(s.trigger_counts, {"develop": 1})
+
+    def test_project_local_skill_paths(self) -> None:
+        # Codex discovers project-local skills too: a captured clean-CODEX_HOME
+        # run read ``.agents/skills/review/SKILL.md`` directly. Both the
+        # ``.agents/`` source and the ``.claude/`` symlink path resolve.
+        stdout = _jsonl(
+            _codex_cmd("item_1",
+                       "/bin/bash -lc \"sed -n '1,200p' "
+                       ".agents/skills/develop/SKILL.md\""),
+            _codex_cmd("item_2",
+                       "/bin/bash -lc 'cat .claude/skills/review/SKILL.md'"),
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s.triggered, ("develop", "review"))
+        self.assertEqual(s.trigger_counts, {"develop": 1, "review": 1})
+
+    def test_order_dedup_and_counts_across_separate_reads(self) -> None:
+        # Distinct ``item.id``s are separate reads: a skill opened in two
+        # separate commands counts twice, mirroring the claude path, while the
+        # ``triggered`` tuple keeps it once in first-seen order.
+        stdout = _jsonl(
+            _codex_cmd("item_1", "/bin/bash -lc 'cat skills/develop/SKILL.md'"),
+            _codex_cmd("item_2", "/bin/bash -lc 'cat skills/review/SKILL.md'"),
+            _codex_cmd("item_3", "/bin/bash -lc 'cat skills/develop/SKILL.md'"),
         )
         s = parse_codex_skills(stdout)
         self.assertEqual(s.triggered, ("develop", "review"))
         self.assertEqual(s.trigger_counts, {"develop": 2, "review": 1})
 
-    def test_skill_free_usage_stream_is_empty(self) -> None:
-        # A normal usage-only run (model + token events) carries no skill
-        # marker; the parser must not false-positive on it.
+    def test_multiple_skills_in_one_command(self) -> None:
+        # One command that opens two SKILL.md files records both, in order.
         stdout = _jsonl(
-            {"type": "task_started"},
-            {"type": "turn_complete", "model": "gpt-5-codex",
-             "usage": {"input_tokens": 100, "cached_input_tokens": 0,
-                       "output_tokens": 50}},
-            {"type": "task_complete", "total_cost_usd": 0.01, "num_turns": 1},
+            _codex_cmd("item_1",
+                       "/bin/bash -lc 'cat skills/review/SKILL.md "
+                       "skills/develop/SKILL.md'"),
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s.triggered, ("review", "develop"))
+        self.assertEqual(s.trigger_counts, {"review": 1, "develop": 1})
+
+    def test_skill_free_usage_stream_is_empty(self) -> None:
+        # A normal run (thread/turn frames, an agent message, a usage-bearing
+        # turn.completed, and ordinary command_execution items that touch no
+        # SKILL.md) carries no skill trigger; the parser must not false-positive.
+        stdout = _jsonl(
+            {"type": "thread.started", "thread_id": "t1"},
+            {"type": "turn.started"},
+            _codex_cmd("item_1", "/bin/bash -lc 'git diff -- calc.py'"),
+            {"type": "item.completed", "item": {
+                "id": "item_2", "type": "agent_message", "text": "Approve."}},
+            {"type": "turn.completed", "usage": {"input_tokens": 100,
+                                                 "cached_input_tokens": 0,
+                                                 "output_tokens": 50}},
         )
         self.assertEqual(parse_codex_skills(stdout), SkillTriggers())
 
+    def test_non_skill_md_commands_are_ignored(self) -> None:
+        # Touching the skills directory without opening a `<name>/SKILL.md`
+        # file is not a trigger; nor is a path where `skills` is a substring of
+        # a longer component (`myskills/`), which the boundary anchor rejects.
+        stdout = _jsonl(
+            _codex_cmd("item_1", "/bin/bash -lc 'ls -la skills/'"),
+            _codex_cmd("item_2", "/bin/bash -lc 'grep -rn TODO skills/'"),
+            _codex_cmd("item_3", "/bin/bash -lc 'cat myskills/review/SKILL.md'"),
+            _codex_cmd("item_4", "/bin/bash -lc 'cat skills/review/README.md'"),
+        )
+        self.assertEqual(parse_codex_skills(stdout), SkillTriggers())
+
+    def test_system_skill_subdir_is_not_matched(self) -> None:
+        # Built-in skills nest under `skills/.system/<name>/SKILL.md`; their
+        # SKILL.md is not directly under `skills/`, so the anchor skips them.
+        stdout = _jsonl(
+            _codex_cmd("item_1",
+                       "/bin/bash -lc 'cat skills/.system/imagegen/SKILL.md'"),
+        )
+        self.assertEqual(parse_codex_skills(stdout), SkillTriggers())
+
+    def test_aggregated_output_is_never_scanned(self) -> None:
+        # The command's ``aggregated_output`` carries the file's contents and
+        # other command output -- it can echo issue / user text and even a
+        # SKILL.md path. The parser reads only ``command``; a command that
+        # opens no SKILL.md records nothing even when its output mentions one.
+        leaked = "secret: sk-deadbeef and skills/leaked/SKILL.md"
+        stdout = _jsonl(
+            _codex_cmd("item_1", "/bin/bash -lc 'git diff'",
+                       aggregated_output=leaked),
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s, SkillTriggers())
+        self.assertNotIn(leaked, repr(s))
+        self.assertNotIn("leaked", repr(s))
+
+    def test_only_the_name_segment_is_captured_for_privacy(self) -> None:
+        # The command around the SKILL.md read can carry issue / user content;
+        # only the `<name>` path segment is ever extracted, never the rest.
+        secret = "user secret: api_key=sk-deadbeef"
+        stdout = _jsonl(
+            _codex_cmd("item_1",
+                       "/bin/bash -lc \"cat skills/review/SKILL.md; "
+                       f"echo '{secret}'\""),
+        )
+        s = parse_codex_skills(stdout)
+        self.assertEqual(s.triggered, ("review",))
+        self.assertNotIn(secret, repr(s))
+        self.assertNotIn("sk-deadbeef", repr(s))
+
     def test_malformed_lines_are_skipped(self) -> None:
-        good = json.dumps({"type": "skill_invoked", "skill": "develop"})
+        good = json.dumps(
+            _codex_cmd("item_1", "/bin/bash -lc 'cat skills/develop/SKILL.md'"))
         stdout = "\n".join([
             "codex starting...",
             '{"truncated":',
@@ -1049,69 +1170,6 @@ class CodexSkillTriggerTest(unittest.TestCase):
         s = parse_codex_skills(stdout)
         self.assertEqual(s.triggered, ("develop",))
         self.assertEqual(s.trigger_counts, {"develop": 1})
-
-    def test_ignores_skill_args_for_privacy(self) -> None:
-        secret = "user secret payload"
-        stdout = _jsonl(
-            {"type": "item.completed", "item": {
-                "type": "function_call", "name": "Skill",
-                "arguments": json.dumps({"skill": "review", "args": secret})}},
-        )
-        s = parse_codex_skills(stdout)
-        self.assertEqual(s.triggered, ("review",))
-        self.assertNotIn(secret, repr(s))
-
-    def test_nested_args_payload_is_not_inspected(self) -> None:
-        # A non-Skill call whose `arguments` dict echoes user content that
-        # happens to contain a skill-shaped object must NOT register as a
-        # trigger: the scan descends only through codex's structural envelope
-        # keys, never into free-form `arguments` / `input` payloads. A full
-        # recursion would both false-positive and leak the nested value.
-        leaked = "user-content-skill-name"
-        stdout = _jsonl(
-            {"type": "item.completed", "item": {
-                "type": "function_call", "name": "Read",
-                "arguments": {
-                    "file_path": "x.py",
-                    "echo": {"type": "skill_invoked", "skill": leaked},
-                }}},
-        )
-        s = parse_codex_skills(stdout)
-        self.assertEqual(s, SkillTriggers())
-        self.assertNotIn(leaked, repr(s))
-
-    def test_skill_name_in_input_payload_is_not_inspected(self) -> None:
-        # Same guard for a non-Skill call carrying a nested skill-shaped dict
-        # under `input`: the payload is never walked, so nothing is recorded.
-        leaked = "another-leaked-name"
-        stdout = _jsonl(
-            {"type": "item.completed", "item": {
-                "type": "function_call", "name": "Bash",
-                "input": {"cmd": "ls",
-                          "meta": {"type": "skill_event", "skill_name": leaked}}}},
-        )
-        s = parse_codex_skills(stdout)
-        self.assertEqual(s, SkillTriggers())
-        self.assertNotIn(leaked, repr(s))
-
-    def test_list_valued_envelope_preserves_order(self) -> None:
-        # A list-valued envelope (`payload=[first, second]`) must yield its
-        # skills in document order, not reversed -- the first-seen-order
-        # contract `triggered` promises.
-        stdout = _jsonl(
-            {"type": "batch", "payload": [
-                {"type": "skill_invoked", "skill": "develop"},
-                {"type": "skill_invoked", "skill": "review"},
-            ]},
-            {"type": "item.completed", "item": [
-                {"type": "function_call", "name": "Skill",
-                 "arguments": json.dumps({"skill": "verify"})},
-                {"type": "function_call", "name": "Skill",
-                 "arguments": json.dumps({"skill": "simplify"})},
-            ]},
-        )
-        s = parse_codex_skills(stdout)
-        self.assertEqual(s.triggered, ("develop", "review", "verify", "simplify"))
 
     def test_empty_stdout(self) -> None:
         self.assertEqual(parse_codex_skills(""), SkillTriggers())
@@ -1131,10 +1189,11 @@ class SkillDispatcherTest(unittest.TestCase):
                          ("develop",))
 
     def test_routes_codex(self) -> None:
-        # A dedicated skill event is recognized only by the codex path; the
-        # claude parser would return empty on it, so a non-empty result here
-        # proves the codex parser ran.
-        stdout = _jsonl({"type": "skill_invoked", "skill": "review"})
+        # A codex SKILL.md-read command_execution is recognized only by the
+        # codex path; the claude parser returns empty on it, so a non-empty
+        # result here proves the codex parser ran.
+        stdout = _jsonl(_codex_cmd(
+            "item_1", "/bin/bash -lc 'cat skills/review/SKILL.md'"))
         self.assertEqual(parse_agent_skills("codex", stdout).triggered,
                          ("review",))
         self.assertEqual(parse_claude_skills(stdout), SkillTriggers())
