@@ -882,5 +882,351 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         self.assertIsNone(triggered)
 
 
+class TrajectoryConfigTest(unittest.TestCase):
+    """`TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS` parse at import
+    inside the analytics package. Unlike `ANALYTICS_LOG_PATH`, the
+    trajectory sink is opt-in: an *unset* path disables it. Retention
+    mirrors the analytics knob (default 90, non-positive keeps forever).
+    """
+
+    def test_unset_disables(self) -> None:
+        # The opt-in distinction from analytics: no env var => off.
+        _, analytics = _reload()
+        self.assertIsNone(analytics.TRAJECTORY_LOG_PATH)
+
+    def test_empty_value_disables(self) -> None:
+        _, analytics = _reload({"TRAJECTORY_LOG_PATH": ""})
+        self.assertIsNone(analytics.TRAJECTORY_LOG_PATH)
+
+    def test_sentinel_values_disable(self) -> None:
+        for value in ("off", "OFF", " off ", "disabled", "none", "None"):
+            with self.subTest(value=value):
+                _, analytics = _reload({"TRAJECTORY_LOG_PATH": value})
+                self.assertIsNone(analytics.TRAJECTORY_LOG_PATH)
+
+    def test_explicit_path_enables(self) -> None:
+        _, analytics = _reload({"TRAJECTORY_LOG_PATH": "/var/log/orch/t.jsonl"})
+        self.assertEqual(
+            analytics.TRAJECTORY_LOG_PATH, Path("/var/log/orch/t.jsonl")
+        )
+
+    def test_default_retention_is_ninety_days(self) -> None:
+        _, analytics = _reload()
+        self.assertEqual(analytics.TRAJECTORY_RETENTION_DAYS, 90)
+
+    def test_zero_retention_means_keep_forever(self) -> None:
+        _, analytics = _reload({"TRAJECTORY_RETENTION_DAYS": "0"})
+        self.assertEqual(analytics.TRAJECTORY_RETENTION_DAYS, 0)
+
+    def test_retention_env_override(self) -> None:
+        _, analytics = _reload({"TRAJECTORY_RETENTION_DAYS": "7"})
+        self.assertEqual(analytics.TRAJECTORY_RETENTION_DAYS, 7)
+
+    def test_knobs_exported(self) -> None:
+        _, analytics = _reload()
+        self.assertIn("TRAJECTORY_LOG_PATH", analytics.__all__)
+        self.assertIn("TRAJECTORY_RETENTION_DAYS", analytics.__all__)
+        self.assertIn("append_trajectory_record", analytics.__all__)
+        self.assertIn("prune_trajectory_records", analytics.__all__)
+
+
+class TrajectoryDisabledModeTest(unittest.TestCase):
+    """With the trajectory sink disabled (the opt-in default), both
+    `append_trajectory_record` and `prune_trajectory_records` are silent
+    no-ops -- no file is ever opened and the helpers do not raise.
+    """
+
+    def test_append_creates_no_file_when_unset(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            _, analytics = _reload()  # TRAJECTORY_LOG_PATH unset => off
+            analytics.append_trajectory_record({"ts": "x", "event": "y"})
+            self.assertEqual(list(Path(td).iterdir()), [])
+
+    def test_append_creates_no_file_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            sentinel = Path(td) / "must-not-be-created.jsonl"
+            _, analytics = _reload({"TRAJECTORY_LOG_PATH": "off"})
+            analytics.append_trajectory_record({"ts": "x", "event": "y"})
+            self.assertFalse(sentinel.exists())
+            self.assertEqual(list(Path(td).iterdir()), [])
+
+    def test_prune_returns_zero_when_disabled(self) -> None:
+        _, analytics = _reload({"TRAJECTORY_LOG_PATH": "disabled"})
+        self.assertEqual(analytics.prune_trajectory_records(), 0)
+
+    def test_prune_returns_zero_when_unset(self) -> None:
+        _, analytics = _reload()
+        self.assertEqual(analytics.prune_trajectory_records(), 0)
+
+
+class TrajectoryAppendTest(unittest.TestCase):
+    """`append_trajectory_record` reopens append per record, creates
+    parent directories, never overwrites, and downgrades OSError to a
+    warning rather than propagating it.
+    """
+
+    def test_append_writes_one_line_per_record(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
+            analytics.append_trajectory_record({"session_id": "a", "n": 1})
+            analytics.append_trajectory_record({"session_id": "b", "n": 2})
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertEqual(json.loads(lines[0])["session_id"], "a")
+            self.assertEqual(json.loads(lines[1])["n"], 2)
+
+    def test_append_creates_missing_parent_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "a" / "b" / "c" / "trajectory.jsonl"
+            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
+            analytics.append_trajectory_record({"event": "x"})
+            self.assertTrue(path.exists())
+
+    def test_append_is_append_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
+            for n in range(5):
+                analytics.append_trajectory_record({"n": n})
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual([json.loads(x)["n"] for x in lines], list(range(5)))
+
+    def test_oserror_is_downgraded_to_warning(self) -> None:
+        # A path whose parent is a regular file makes `mkdir(parents=True)`
+        # raise NotADirectoryError (an OSError). The append must log a
+        # warning and swallow it -- analytics/trajectory is observability,
+        # never authoritative state, so a misconfigured path cannot raise.
+        with tempfile.TemporaryDirectory() as td:
+            blocker = Path(td) / "blocker"
+            blocker.write_text("i am a file, not a directory", encoding="utf-8")
+            path = blocker / "sub" / "trajectory.jsonl"
+            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
+            with self.assertLogs(analytics.log, level="WARNING") as cm:
+                analytics.append_trajectory_record({"event": "x"})
+            self.assertFalse(path.exists())
+            self.assertTrue(
+                any("could not write" in m for m in cm.output)
+            )
+
+
+class TrajectoryPruneTest(unittest.TestCase):
+    """`prune_trajectory_records` mirrors `prune_old_records`: removes
+    records past `TRAJECTORY_RETENTION_DAYS`, no-ops at retention <= 0 or
+    on an absent file, and preserves malformed / unparseable lines.
+    """
+
+    @staticmethod
+    def _write_lines(path: Path, records: list[dict]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec, sort_keys=True) + "\n")
+
+    def test_removes_old_records_keeps_recent(self) -> None:
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        old_ts = (now - timedelta(days=100)).isoformat(timespec="seconds")
+        new_ts = (now - timedelta(days=10)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({
+                "TRAJECTORY_LOG_PATH": str(path),
+                "TRAJECTORY_RETENTION_DAYS": "90",
+            })
+            self._write_lines(path, [
+                {"ts": old_ts, "session_id": "1"},
+                {"ts": new_ts, "session_id": "2"},
+                {"ts": old_ts, "session_id": "3"},
+            ])
+            self.assertEqual(analytics.prune_trajectory_records(now=now), 2)
+            remaining = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual([r["session_id"] for r in remaining], ["2"])
+
+    def test_zero_retention_is_no_op(self) -> None:
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        ancient = (now - timedelta(days=1000)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({
+                "TRAJECTORY_LOG_PATH": str(path),
+                "TRAJECTORY_RETENTION_DAYS": "0",
+            })
+            self._write_lines(path, [{"ts": ancient, "session_id": "1"}])
+            self.assertEqual(analytics.prune_trajectory_records(now=now), 0)
+            self.assertEqual(
+                len(path.read_text(encoding="utf-8").splitlines()), 1
+            )
+
+    def test_negative_retention_is_no_op(self) -> None:
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        old_ts = (now - timedelta(days=100)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({
+                "TRAJECTORY_LOG_PATH": str(path),
+                "TRAJECTORY_RETENTION_DAYS": "-5",
+            })
+            self._write_lines(path, [{"ts": old_ts, "session_id": "1"}])
+            self.assertEqual(analytics.prune_trajectory_records(now=now), 0)
+
+    def test_missing_file_returns_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "absent.jsonl"
+            _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
+            self.assertEqual(analytics.prune_trajectory_records(), 0)
+            self.assertFalse(path.exists())
+
+    def test_no_records_old_enough_does_not_rewrite(self) -> None:
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        new_ts = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({
+                "TRAJECTORY_LOG_PATH": str(path),
+                "TRAJECTORY_RETENTION_DAYS": "90",
+            })
+            self._write_lines(path, [{"ts": new_ts, "session_id": "1"}])
+            mtime_before = path.stat().st_mtime_ns
+            self.assertEqual(analytics.prune_trajectory_records(now=now), 0)
+            self.assertEqual(path.stat().st_mtime_ns, mtime_before)
+
+    def test_malformed_lines_preserved(self) -> None:
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({
+                "TRAJECTORY_LOG_PATH": str(path),
+                "TRAJECTORY_RETENTION_DAYS": "90",
+            })
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as fh:
+                fh.write("this is not json\n")
+                fh.write(json.dumps({"ts": old_ts, "session_id": "1"}) + "\n")
+                fh.write('{"ts": "not-a-date", "session_id": "2"}\n')
+                fh.write('{"session_id": "no-ts-field"}\n')
+            self.assertEqual(analytics.prune_trajectory_records(now=now), 1)
+            kept = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(kept), 3)
+            self.assertIn("this is not json", kept[0])
+
+    def test_naive_timestamp_treated_as_utc(self) -> None:
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        old_naive = (now - timedelta(days=100)).replace(
+            tzinfo=None
+        ).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({
+                "TRAJECTORY_LOG_PATH": str(path),
+                "TRAJECTORY_RETENTION_DAYS": "90",
+            })
+            self._write_lines(path, [{"ts": old_naive, "session_id": "1"}])
+            self.assertEqual(analytics.prune_trajectory_records(now=now), 1)
+            self.assertEqual(path.read_text(encoding="utf-8"), "")
+
+    def test_existence_probe_oserror_is_downgraded_to_warning(self) -> None:
+        # `Path.exists()` re-raises OSErrors that don't mean "absent"
+        # (e.g. ENAMETOOLONG on an over-long path). That probe runs
+        # before the read/rewrite try-block, so without its own guard
+        # the error would escape the per-tick caller. The prune must
+        # warn and no-op (return 0) instead of raising.
+        with tempfile.TemporaryDirectory() as td:
+            # A single path component well past NAME_MAX (255) makes the
+            # underlying stat() raise OSError [Errno 36] File name too long.
+            path = Path(td) / ("x" * 5000)
+            _, analytics = _reload({
+                "TRAJECTORY_LOG_PATH": str(path),
+                "TRAJECTORY_RETENTION_DAYS": "90",
+            })
+            with self.assertLogs(analytics.log, level="WARNING") as cm:
+                removed = analytics.prune_trajectory_records()
+            self.assertEqual(removed, 0)
+            self.assertTrue(any("prune" in m for m in cm.output))
+
+
+class TrajectorySinkIndependenceTest(unittest.TestCase):
+    """The trajectory sink is a fully independent file: its append /
+    prune never open, write, or rewrite `ANALYTICS_LOG_PATH`, and it
+    holds a dedicated lock so the two sinks do not serialize against one
+    another.
+    """
+
+    def test_dedicated_lock_is_distinct(self) -> None:
+        _, analytics = _reload()
+        self.assertIsNot(analytics._FILE_LOCK, analytics._TRAJECTORY_FILE_LOCK)
+
+    def test_append_trajectory_does_not_touch_analytics_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            a_path = Path(td) / "analytics.jsonl"
+            t_path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({
+                "ANALYTICS_LOG_PATH": str(a_path),
+                "TRAJECTORY_LOG_PATH": str(t_path),
+            })
+            analytics.append_trajectory_record({"session_id": "s"})
+            self.assertTrue(t_path.exists())
+            # The analytics file was never opened by the trajectory append.
+            self.assertFalse(a_path.exists())
+
+    def test_prune_trajectory_leaves_analytics_file_untouched(self) -> None:
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as td:
+            a_path = Path(td) / "analytics.jsonl"
+            t_path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({
+                "ANALYTICS_LOG_PATH": str(a_path),
+                "ANALYTICS_RETENTION_DAYS": "90",
+                "TRAJECTORY_LOG_PATH": str(t_path),
+                "TRAJECTORY_RETENTION_DAYS": "90",
+            })
+            # An equally-old record in BOTH files; pruning trajectory must
+            # drop only the trajectory record and never rewrite analytics.
+            a_path.write_text(
+                json.dumps({"ts": old_ts, "event": "x"}) + "\n",
+                encoding="utf-8",
+            )
+            t_path.write_text(
+                json.dumps({"ts": old_ts, "session_id": "1"}) + "\n",
+                encoding="utf-8",
+            )
+            a_before = a_path.read_text(encoding="utf-8")
+            self.assertEqual(analytics.prune_trajectory_records(now=now), 1)
+            self.assertEqual(t_path.read_text(encoding="utf-8"), "")
+            # Analytics file is byte-for-byte unchanged.
+            self.assertEqual(a_path.read_text(encoding="utf-8"), a_before)
+
+    def test_prune_analytics_leaves_trajectory_file_untouched(self) -> None:
+        # Symmetric guard: the analytics prune must not rewrite the
+        # trajectory file either.
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as td:
+            a_path = Path(td) / "analytics.jsonl"
+            t_path = Path(td) / "trajectory.jsonl"
+            _, analytics = _reload({
+                "ANALYTICS_LOG_PATH": str(a_path),
+                "ANALYTICS_RETENTION_DAYS": "90",
+                "TRAJECTORY_LOG_PATH": str(t_path),
+                "TRAJECTORY_RETENTION_DAYS": "90",
+            })
+            a_path.write_text(
+                json.dumps({"ts": old_ts, "event": "x"}) + "\n",
+                encoding="utf-8",
+            )
+            t_path.write_text(
+                json.dumps({"ts": old_ts, "session_id": "1"}) + "\n",
+                encoding="utf-8",
+            )
+            t_before = t_path.read_text(encoding="utf-8")
+            self.assertEqual(analytics.prune_old_records(now=now), 1)
+            self.assertEqual(a_path.read_text(encoding="utf-8"), "")
+            self.assertEqual(t_path.read_text(encoding="utf-8"), t_before)
+
+
 if __name__ == "__main__":
     unittest.main()

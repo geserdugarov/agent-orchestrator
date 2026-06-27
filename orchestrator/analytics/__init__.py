@@ -42,6 +42,20 @@ calls `prune_with_retention_logging` once per polling tick after every
 configured repo drains, so retention is applied without operator
 intervention; that wrapper delegates to `prune_old_records`, swallowing
 exceptions and logging the removed-record count.
+
+A separate, opt-in trajectory sink lives beside the analytics sink.
+`TRAJECTORY_LOG_PATH` is parsed here too but defaults *off*: unset /
+empty / `off` / `disabled` / `none` all disable it (unlike
+`ANALYTICS_LOG_PATH`, which defaults to a path under `config.LOG_DIR`).
+When enabled it gates an independent JSONL file for per-run reasoning
+trajectories, pruned by `TRAJECTORY_RETENTION_DAYS` with the same
+semantics as `ANALYTICS_RETENTION_DAYS` (default 90; non-positive keeps
+forever). `append_trajectory_record` / `prune_trajectory_records` share
+the append/prune discipline of their analytics counterparts (reopen
+append per record, `mkdir -p` parents, `OSError` downgraded to a
+warning, malformed lines preserved on prune) but hold a dedicated file
+lock and never touch `ANALYTICS_LOG_PATH`, the analytics Postgres sync,
+or the dashboard rollups -- the two sinks are fully independent files.
 The pinned GitHub state on each issue is the authoritative durable
 state -- this sink is local-filesystem observability and may be
 truncated or deleted at any time without affecting workflow
@@ -85,15 +99,25 @@ from ..agents import AgentResult
 # filesystem-level fcntl.
 _FILE_LOCK = threading.Lock()
 
+# A dedicated lock for the trajectory sink so its append / prune
+# serialize against each other (the same read-vs-replace race the
+# analytics lock closes) but NOT against the analytics file -- the two
+# sinks are independent paths and must not block one another.
+_TRAJECTORY_FILE_LOCK = threading.Lock()
+
 __all__ = [
     "ANALYTICS_DB_URL",
     "ANALYTICS_LOG_PATH",
     "ANALYTICS_RETENTION_DAYS",
     "TRACK_SKILL_TRIGGERS",
+    "TRAJECTORY_LOG_PATH",
+    "TRAJECTORY_RETENTION_DAYS",
     "append_record",
+    "append_trajectory_record",
     "build_record",
     "config",
     "prune_old_records",
+    "prune_trajectory_records",
     "prune_with_retention_logging",
     "record_agent_exit",
     "record_stage_enter",
@@ -167,6 +191,37 @@ def _parse_track_skill_triggers() -> bool:
     )
 
 
+def _parse_trajectory_log_path() -> Optional[Path]:
+    """Resolve `TRAJECTORY_LOG_PATH` from the environment.
+
+    Opt-in / default off: unlike `ANALYTICS_LOG_PATH` (which defaults to
+    a path under `config.LOG_DIR`), an *unset* `TRAJECTORY_LOG_PATH`
+    disables the trajectory sink. Empty value and the sentinels `off` /
+    `disabled` / `none` (case-insensitive) also disable it; any other
+    value is the explicit opt-in path. When disabled,
+    `append_trajectory_record` and `prune_trajectory_records` are silent
+    no-ops and no file is ever opened.
+    """
+    raw = os.environ.get("TRAJECTORY_LOG_PATH")
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped or stripped.lower() in ("off", "disabled", "none"):
+        return None
+    return Path(stripped)
+
+
+def _parse_trajectory_retention_days() -> int:
+    """Resolve `TRAJECTORY_RETENTION_DAYS` from the environment.
+
+    Default 90 days, matching `ANALYTICS_RETENTION_DAYS`. 0 (or any
+    non-positive value) keeps trajectories indefinitely --
+    `prune_trajectory_records` becomes a no-op so operators can opt out
+    of cleanup without disabling the sink itself.
+    """
+    return int(os.environ.get("TRAJECTORY_RETENTION_DAYS", "90"))
+
+
 # Sink configuration. Parsed at import so a fresh process picks up the
 # operator's env immediately; tests patch these module attributes
 # directly (`patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`).
@@ -174,6 +229,8 @@ ANALYTICS_LOG_PATH: Optional[Path] = _parse_log_path()
 ANALYTICS_RETENTION_DAYS: int = _parse_retention_days()
 ANALYTICS_DB_URL: Optional[str] = _parse_db_url()
 TRACK_SKILL_TRIGGERS: bool = _parse_track_skill_triggers()
+TRAJECTORY_LOG_PATH: Optional[Path] = _parse_trajectory_log_path()
+TRAJECTORY_RETENTION_DAYS: int = _parse_trajectory_retention_days()
 
 
 def build_record(
@@ -205,6 +262,38 @@ def build_record(
     return rec
 
 
+def _append_jsonl_record(
+    path: Optional[Path], lock: threading.Lock, record: dict
+) -> None:
+    """Append one JSONL line to `path` under `lock`; no-op when `path` is
+    None.
+
+    Shared core for the analytics and trajectory sinks: each passes its
+    own path and dedicated lock so the two files never serialize against
+    one another. OSError is logged and swallowed so a misconfigured path
+    (read-only mount, disk full, permission failure) cannot stop the
+    per-issue tick from making progress.
+
+    Holds `lock` around the actual filesystem ops so a concurrent prune
+    cannot rewrite the file (via `os.replace`) between this append's open
+    and write; otherwise the appended record would be written to the
+    soon-unlinked inode and silently lost. Scheduler workers fan out
+    across threads in the same process, so the race is real on the
+    multi-issue path. JSON serialization is done outside the lock to keep
+    the critical section short.
+    """
+    if path is None:
+        return
+    serialized = json.dumps(record, sort_keys=True) + "\n"
+    try:
+        with lock:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(serialized)
+    except OSError as e:
+        log.warning("could not write record to %s: %s", path, e)
+
+
 def append_record(record: dict) -> None:
     """Append one JSONL line to `ANALYTICS_LOG_PATH` if configured.
 
@@ -221,17 +310,7 @@ def append_record(record: dict) -> None:
     race is real on the multi-issue path. JSON serialization is done
     outside the lock to keep the critical section short.
     """
-    path = ANALYTICS_LOG_PATH
-    if path is None:
-        return
-    serialized = json.dumps(record, sort_keys=True) + "\n"
-    try:
-        with _FILE_LOCK:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(serialized)
-    except OSError as e:
-        log.warning("could not write analytics record to %s: %s", path, e)
+    _append_jsonl_record(ANALYTICS_LOG_PATH, _FILE_LOCK, record)
 
 
 def record_stage_enter(*, repo: str, issue: int, stage: str) -> None:
@@ -440,24 +519,65 @@ def prune_old_records(*, now: Optional[datetime] = None) -> int:
     the polling loop calls this between ticks, so serializing with
     `append_record` is what keeps that prune-window invisible.
     """
-    path = ANALYTICS_LOG_PATH
+    return _prune_jsonl_records(
+        ANALYTICS_LOG_PATH, ANALYTICS_RETENTION_DAYS, _FILE_LOCK, now,
+    )
+
+
+def _prune_jsonl_records(
+    path: Optional[Path],
+    days: int,
+    lock: threading.Lock,
+    now: Optional[datetime],
+) -> int:
+    """Remove records whose `ts` is older than `days` from `path` under
+    `lock`.
+
+    Shared core for the analytics and trajectory prune wrappers. Returns
+    the number of records removed; a no-op (returns 0) when `path` is
+    None (sink disabled), `days` is non-positive (keep forever), or the
+    file does not exist. Malformed lines -- not valid JSON, or a record
+    whose `ts` is missing / non-string / unparseable -- are preserved
+    verbatim so the prune never silently drops data an operator can
+    clean up. The rewrite goes through a temp file plus `os.replace` so
+    a crash mid-prune cannot truncate the file, and `lock` is held
+    across the read + rewrite so a concurrent append cannot land on the
+    soon-unlinked inode.
+
+    Every filesystem touch -- the existence probes as well as the read
+    and rewrite -- downgrades OSError to a logged no-op, so a
+    misconfigured path (e.g. ENAMETOOLONG) never escapes to the
+    per-tick caller.
+    """
     if path is None:
         return 0
-    days = ANALYTICS_RETENTION_DAYS
     if days <= 0:
         return 0
-    if not path.exists():
+    # `Path.exists()` re-raises OSErrors that do not mean "absent" --
+    # e.g. ENAMETOOLONG on a misconfigured path -- so the probe itself
+    # must be guarded, otherwise it escapes the per-tick caller. Treat
+    # any such failure as a logged no-op, same as a read/rewrite OSError.
+    try:
+        if not path.exists():
+            return 0
+    except OSError as e:
+        log.warning("could not probe %s for prune: %s", path, e)
         return 0
 
     cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=days)
 
-    with _FILE_LOCK:
+    with lock:
         # Re-check existence under the lock: a concurrent operator
         # `rm` between the pre-lock probe above and acquiring the
         # lock would otherwise let `path.open` raise an unhandled
         # FileNotFoundError. The pre-lock probe stays for the fast
-        # zero-cost no-op path on a disabled sink.
-        if not path.exists():
+        # zero-cost no-op path on a disabled sink. Guarded for the same
+        # reason as the pre-lock probe.
+        try:
+            if not path.exists():
+                return 0
+        except OSError as e:
+            log.warning("could not probe %s for prune: %s", path, e)
             return 0
         kept: list[str] = []
         removed = 0
@@ -490,9 +610,7 @@ def prune_old_records(*, now: Optional[datetime] = None) -> int:
                         continue
                     kept.append(line)
         except OSError as e:
-            log.warning(
-                "could not read analytics file %s for prune: %s", path, e
-            )
+            log.warning("could not read file %s for prune: %s", path, e)
             return 0
 
         if removed == 0:
@@ -515,9 +633,39 @@ def prune_old_records(*, now: Optional[datetime] = None) -> int:
                     pass
                 raise
         except OSError as e:
-            log.warning(
-                "could not rewrite analytics file %s after prune: %s", path, e
-            )
+            log.warning("could not rewrite file %s after prune: %s", path, e)
             return 0
 
         return removed
+
+
+def append_trajectory_record(record: dict) -> None:
+    """Append one JSONL line to `TRAJECTORY_LOG_PATH` if configured.
+
+    No-op when the trajectory sink is disabled (the opt-in default).
+    Shares `append_record`'s discipline -- reopen append per record,
+    `mkdir -p` parents, OSError downgraded to a warning -- but writes to
+    the trajectory file under `_TRAJECTORY_FILE_LOCK`, so it never opens,
+    serializes against, or otherwise interacts with `ANALYTICS_LOG_PATH`,
+    the analytics Postgres sync, or the dashboard rollups.
+    """
+    _append_jsonl_record(TRAJECTORY_LOG_PATH, _TRAJECTORY_FILE_LOCK, record)
+
+
+def prune_trajectory_records(*, now: Optional[datetime] = None) -> int:
+    """Remove trajectory records older than `TRAJECTORY_RETENTION_DAYS`.
+
+    Reads the module-level `TRAJECTORY_LOG_PATH` /
+    `TRAJECTORY_RETENTION_DAYS`. Mirrors `prune_old_records` exactly
+    (no-op when the sink is disabled, retention is non-positive, or the
+    file is absent; malformed / unparseable lines preserved; atomic
+    temp-file + `os.replace` rewrite) but operates solely on the
+    trajectory file under `_TRAJECTORY_FILE_LOCK` -- it never touches
+    `ANALYTICS_LOG_PATH`, the analytics Postgres sync, or the dashboard
+    rollups. `now` is parameter-overridable so tests can pin the
+    comparison point.
+    """
+    return _prune_jsonl_records(
+        TRAJECTORY_LOG_PATH, TRAJECTORY_RETENTION_DAYS,
+        _TRAJECTORY_FILE_LOCK, now,
+    )
