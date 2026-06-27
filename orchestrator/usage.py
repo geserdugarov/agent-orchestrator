@@ -27,6 +27,15 @@ A sibling extractor (``parse_claude_skills`` / ``parse_codex_skills`` /
 ``parse_agent_skills``) reuses the same event iterator and resilience
 contract to record which agent *skills* a run triggered. It reads only the
 skill name -- never the ``Skill`` tool's ``args`` -- and is observation-only.
+
+A further sibling classifier (``parse_claude_trajectory`` /
+``parse_codex_trajectory`` / ``parse_agent_trajectory``) reuses the same
+event iterator and resilience contract to reconstruct a run's *trajectory*:
+the offered tools, triggered skills, the ordered ``tool_call`` /
+``tool_result`` steps, and the final output. It classifies raw stream data
+only -- it neither writes files nor redacts/truncates content; a downstream
+writer owns that. ``system_prompt`` and ``tools`` stay best-effort and empty
+when a backend's stream does not expose them.
 """
 from __future__ import annotations
 
@@ -919,6 +928,326 @@ def parse_agent_skills(backend: str, stdout: str) -> SkillTriggers:
         return parse_claude_skills(stdout)
     if backend == "codex":
         return parse_codex_skills(stdout)
+    raise ValueError(
+        f"unknown agent backend {backend!r}; expected 'claude' or 'codex'"
+    )
+
+
+# --- trajectory classifier --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TrajectoryStep:
+    """One ordered step in an agent run: a tool call or its result.
+
+    ``kind`` is ``"tool_call"`` or ``"tool_result"``. ``name`` carries the
+    tool name on a call (claude's ``tool_use.name``; codex's synthetic
+    ``"command_execution"``) and is empty on a result -- a result joins back
+    to its call through ``tool_id`` (claude's ``tool_use`` ``id`` /
+    ``tool_use_id``; codex's ``item.id``), which is ``""`` when the stream
+    omits it. ``content`` is the raw, un-redacted payload exactly as the
+    stream carried it: a call's input (claude input dict / codex command
+    string) or a result's output (claude result content / codex
+    ``aggregated_output``). Redaction and truncation are a downstream
+    writer's job, not this classifier's.
+    """
+
+    kind: str
+    name: str = ""
+    tool_id: str = ""
+    content: Any = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "name": self.name,
+            "tool_id": self.tool_id,
+            "content": self.content,
+        }
+
+
+@dataclass(frozen=True)
+class AgentTrajectory:
+    """Structured trajectory reconstructed from one agent run's JSONL stdout.
+
+    ``steps`` is the ordered ``tool_call`` / ``tool_result`` sequence;
+    ``final_output`` is the run's terminal answer (claude's ``result`` frame
+    ``result`` string / codex's last ``agent_message`` ``text``), ``None``
+    when the stream carries none. ``skills`` is the same names-only
+    ``SkillTriggers`` the skill extractor produces. ``tools`` is the offered-
+    tools set when a backend exposes one (claude's ``system``/``init``
+    ``tools`` array) and empty otherwise; ``system_prompt`` stays ``None``
+    until a backend's stream is confirmed to carry it -- both are best-effort
+    and empty when the stream shape is unknown rather than an error.
+
+    This is a *classifier*: it records raw stream data verbatim and never
+    writes files or redacts/truncates. A missing or renamed field yields an
+    empty section, never an exception -- the same resilience contract the
+    usage and skill parsers honor.
+    """
+
+    backend: str
+    system_prompt: Optional[str] = None
+    tools: tuple[str, ...] = ()
+    skills: SkillTriggers = field(default_factory=SkillTriggers)
+    steps: tuple[TrajectoryStep, ...] = ()
+    final_output: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend,
+            "system_prompt": self.system_prompt,
+            "tools": list(self.tools),
+            "skills": {
+                "triggered": list(self.skills.triggered),
+                "trigger_counts": dict(self.skills.trigger_counts),
+                "available": list(self.skills.available),
+            },
+            "steps": [s.to_dict() for s in self.steps],
+            "final_output": self.final_output,
+        }
+
+
+# --- claude trajectory ------------------------------------------------------
+
+def _claude_offered_tools(events: Iterable[dict[str, Any]]) -> tuple[str, ...]:
+    """Read the offered-tools set from claude's ``system``/``init`` frame.
+
+    The headless ``--output-format stream-json`` init frame carries a
+    top-level ``tools`` array -- the tool names on offer to the session.
+    Read defensively, mirroring ``_claude_offered_skills``: a missing or
+    renamed field, or a non-string entry, filters out rather than raising,
+    and names de-duplicate in first-seen order. The first ``init`` frame wins.
+    """
+    for ev in events:
+        if ev.get("type") != "system" or ev.get("subtype") != "init":
+            continue
+        tools = ev.get("tools")
+        if not isinstance(tools, list):
+            return ()
+        order: list[str] = []
+        seen: set[str] = set()
+        for name in tools:
+            if isinstance(name, str) and name and name not in seen:
+                seen.add(name)
+                order.append(name)
+        return tuple(order)
+    return ()
+
+
+def _claude_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
+    """Return the ``result`` frame's final answer string, else ``None``.
+
+    Claude's terminal ``type:"result"`` frame carries the run's final text in
+    its ``result`` field. The last such frame wins (a run emits one); a
+    missing or non-string field yields ``None`` rather than raising.
+    """
+    final: Optional[str] = None
+    for ev in events:
+        if ev.get("type") != "result":
+            continue
+        value = ev.get("result")
+        if isinstance(value, str):
+            final = value
+    return final
+
+
+def _claude_trajectory_steps(
+    events: Iterable[dict[str, Any]],
+) -> tuple[TrajectoryStep, ...]:
+    """Reconstruct ordered tool_call / tool_result steps from a claude stream.
+
+    A ``tool_use`` block in an ``assistant`` message is a call; a
+    ``tool_result`` block in a ``user`` message is a result, joined to its
+    call by ``tool_use_id``. Steps follow stream order. Calls de-duplicate by
+    the ``tool_use`` block ``id`` and results by ``tool_use_id`` -- defensive
+    against ``--include-partial-messages`` re-emitting a block across frames,
+    the same discipline ``parse_claude_skills`` uses. The raw ``input`` /
+    ``content`` payload rides along verbatim (no redaction here).
+    """
+    steps: list[TrajectoryStep] = []
+    seen_calls: set[str] = set()
+    seen_results: set[str] = set()
+    for ev in events:
+        etype = ev.get("type")
+        if etype not in ("assistant", "user"):
+            continue
+        msg = ev.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if etype == "assistant" and btype == "tool_use":
+                name = block.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                bid = block.get("id")
+                tool_id = bid if isinstance(bid, str) and bid else ""
+                if tool_id:
+                    if tool_id in seen_calls:
+                        continue
+                    seen_calls.add(tool_id)
+                steps.append(TrajectoryStep(
+                    kind="tool_call",
+                    name=name,
+                    tool_id=tool_id,
+                    content=block.get("input"),
+                ))
+            elif etype == "user" and btype == "tool_result":
+                rid = block.get("tool_use_id")
+                tool_id = rid if isinstance(rid, str) and rid else ""
+                if tool_id:
+                    if tool_id in seen_results:
+                        continue
+                    seen_results.add(tool_id)
+                steps.append(TrajectoryStep(
+                    kind="tool_result",
+                    tool_id=tool_id,
+                    content=block.get("content"),
+                ))
+    return tuple(steps)
+
+
+def parse_claude_trajectory(stdout: str) -> AgentTrajectory:
+    """Classify a ``claude -p --output-format stream-json`` run's trajectory.
+
+    Reuses ``_iter_events`` and ``parse_claude_skills`` (names-only) and
+    reconstructs the offered tools, ordered tool_call / tool_result steps, and
+    final output. ``system_prompt`` stays ``None`` -- the stream-json shape
+    does not expose it -- and every section is empty rather than an error when
+    its source frame/field is absent.
+    """
+    events = _iter_events(stdout)
+    return AgentTrajectory(
+        backend="claude",
+        tools=_claude_offered_tools(events),
+        skills=parse_claude_skills(stdout),
+        steps=_claude_trajectory_steps(events),
+        final_output=_claude_final_output(events),
+    )
+
+
+# --- codex trajectory -------------------------------------------------------
+
+def _codex_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
+    """Return the last ``agent_message`` item's ``text``, else ``None``.
+
+    Codex emits the run's answer as an ``agent_message`` item; the last one's
+    ``text`` is the final output. A missing item or non-string ``text`` yields
+    ``None`` rather than raising.
+    """
+    final: Optional[str] = None
+    for ev in events:
+        item = ev.get("item")
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            continue
+        text = item.get("text")
+        if isinstance(text, str):
+            final = text
+    return final
+
+
+def _codex_trajectory_steps(
+    events: Iterable[dict[str, Any]],
+) -> tuple[TrajectoryStep, ...]:
+    """Reconstruct ordered tool_call / tool_result steps from a codex stream.
+
+    Codex's tool surface is the shell: each ``command_execution`` item is one
+    call (its ``command``) and, once it completes, one result (its
+    ``aggregated_output``). Codex emits an ``item.started`` then an
+    ``item.completed`` for the same command sharing an ``item.id``; grouping
+    by that id keeps a single command one call + one result rather than two,
+    the same last-frame-wins discipline the usage / skill parsers use. Items
+    are emitted in first-seen id order (call then result); an item without an
+    id falls back to inline emission. Raw command / output text rides along
+    verbatim (no redaction here).
+    """
+    order: list[str] = []
+    seen: set[str] = set()
+    commands: dict[str, str] = {}
+    outputs: dict[str, Any] = {}
+    anon: list[TrajectoryStep] = []
+    for ev in events:
+        item = ev.get("item")
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "command_execution":
+            continue
+        command = item.get("command")
+        has_output = "aggregated_output" in item
+        iid = item.get("id")
+        if isinstance(iid, str) and iid:
+            if iid not in seen:
+                seen.add(iid)
+                order.append(iid)
+            if isinstance(command, str):
+                commands[iid] = command
+            if has_output:
+                outputs[iid] = item.get("aggregated_output")
+        else:
+            if isinstance(command, str):
+                anon.append(TrajectoryStep(
+                    kind="tool_call",
+                    name="command_execution",
+                    content=command,
+                ))
+            if has_output:
+                anon.append(TrajectoryStep(
+                    kind="tool_result",
+                    content=item.get("aggregated_output"),
+                ))
+    steps: list[TrajectoryStep] = []
+    for iid in order:
+        if iid in commands:
+            steps.append(TrajectoryStep(
+                kind="tool_call",
+                name="command_execution",
+                tool_id=iid,
+                content=commands[iid],
+            ))
+        if iid in outputs:
+            steps.append(TrajectoryStep(
+                kind="tool_result",
+                tool_id=iid,
+                content=outputs[iid],
+            ))
+    steps.extend(anon)
+    return tuple(steps)
+
+
+def parse_codex_trajectory(stdout: str) -> AgentTrajectory:
+    """Classify a ``codex exec --json`` run's trajectory.
+
+    Reuses ``_iter_events`` and ``parse_codex_skills`` (names-only) and
+    reconstructs the ordered command tool_call / tool_result steps and final
+    output. ``tools`` and ``system_prompt`` stay empty / ``None`` -- codex's
+    stream exposes no confirmed offered-tools or system-prompt frame -- and
+    every section is empty rather than an error when its source is absent.
+    """
+    events = _iter_events(stdout)
+    return AgentTrajectory(
+        backend="codex",
+        skills=parse_codex_skills(stdout),
+        steps=_codex_trajectory_steps(events),
+        final_output=_codex_final_output(events),
+    )
+
+
+def parse_agent_trajectory(backend: str, stdout: str) -> AgentTrajectory:
+    """Dispatch by backend name; raise on anything other than claude/codex.
+
+    Mirrors ``parse_agent_usage`` / ``parse_agent_skills`` dispatch so callers
+    reuse the same backend string they spawned the agent with.
+    """
+    if backend == "claude":
+        return parse_claude_trajectory(stdout)
+    if backend == "codex":
+        return parse_codex_trajectory(stdout)
     raise ValueError(
         f"unknown agent backend {backend!r}; expected 'claude' or 'codex'"
     )

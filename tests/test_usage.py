@@ -6,13 +6,18 @@ import json
 import unittest
 
 from orchestrator.usage import (
+    AgentTrajectory,
     SkillTriggers,
+    TrajectoryStep,
     UsageMetrics,
     parse_agent_skills,
+    parse_agent_trajectory,
     parse_agent_usage,
     parse_claude_skills,
+    parse_claude_trajectory,
     parse_claude_usage,
     parse_codex_skills,
+    parse_codex_trajectory,
     parse_codex_usage,
 )
 
@@ -1340,6 +1345,287 @@ class SkillDispatcherTest(unittest.TestCase):
     def test_unknown_backend_raises(self) -> None:
         with self.assertRaises(ValueError):
             parse_agent_skills("gemini", "")
+
+
+class ClaudeTrajectoryTest(unittest.TestCase):
+    """``parse_claude_trajectory`` over synthetic ``stream-json`` runs.
+
+    The init frame's ``tools`` array is the offered-tools set; ``tool_use``
+    blocks in ``assistant`` messages are calls and ``tool_result`` blocks in
+    ``user`` messages are results (joined by ``tool_use_id``); the ``result``
+    frame's ``result`` string is the final output. Raw inputs / outputs ride
+    along verbatim -- this layer classifies, it does not redact.
+    """
+
+    def test_extracts_tools_steps_skills_and_final_output(self) -> None:
+        stdout = _jsonl(
+            {"type": "system", "subtype": "init",
+             "tools": ["Bash", "Read", "Skill"],
+             "skills": ["develop", "review"]},
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "content": [
+                        {"type": "text", "text": "let me look"},
+                        {"type": "tool_use", "id": "toolu_a", "name": "Bash",
+                         "input": {"command": "ls"}},
+                    ],
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_a",
+                         "content": "calc.py\n"},
+                    ],
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_2",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_b", "name": "Skill",
+                         "input": {"skill": "develop"}},
+                    ],
+                },
+            },
+            {"type": "result", "result": "All done.", "num_turns": 2},
+        )
+        t = parse_claude_trajectory(stdout)
+        self.assertEqual(t.backend, "claude")
+        self.assertIsNone(t.system_prompt)
+        self.assertEqual(t.tools, ("Bash", "Read", "Skill"))
+        self.assertEqual(t.final_output, "All done.")
+        # Skills reuse the names-only extractor (offered + triggered).
+        self.assertEqual(t.skills.available, ("develop", "review"))
+        self.assertEqual(t.skills.triggered, ("develop",))
+        # Ordered: call -> result -> call.
+        self.assertEqual(len(t.steps), 3)
+        self.assertEqual(
+            t.steps[0],
+            TrajectoryStep(kind="tool_call", name="Bash", tool_id="toolu_a",
+                           content={"command": "ls"}),
+        )
+        self.assertEqual(
+            t.steps[1],
+            TrajectoryStep(kind="tool_result", tool_id="toolu_a",
+                           content="calc.py\n"),
+        )
+        self.assertEqual(
+            t.steps[2],
+            TrajectoryStep(kind="tool_call", name="Skill", tool_id="toolu_b",
+                           content={"skill": "develop"}),
+        )
+
+    def test_partial_frames_dedup_calls_and_results(self) -> None:
+        # Defensive: a tool_use / tool_result block repeated across frames
+        # (sharing its id) is one step, not two -- the same per-id de-dup
+        # ``parse_claude_skills`` applies. Distinct ids stay distinct.
+        stdout = _jsonl(
+            {
+                "type": "assistant",
+                "message": {"id": "msg_1", "content": [
+                    {"type": "tool_use", "id": "toolu_a", "name": "Bash",
+                     "input": {"command": "ls"}}]},
+            },
+            {
+                "type": "assistant",
+                "message": {"id": "msg_1", "content": [
+                    {"type": "tool_use", "id": "toolu_a", "name": "Bash",
+                     "input": {"command": "ls"}}]},
+            },
+            {
+                "type": "user",
+                "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_a",
+                     "content": "out"}]},
+            },
+            {
+                "type": "user",
+                "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_a",
+                     "content": "out"}]},
+            },
+        )
+        t = parse_claude_trajectory(stdout)
+        self.assertEqual([s.kind for s in t.steps],
+                         ["tool_call", "tool_result"])
+
+    def test_missing_fields_yield_empty_sections(self) -> None:
+        # No init frame, no tool blocks, no result frame: every section is
+        # empty / None, never an exception.
+        stdout = _jsonl(
+            {"type": "assistant",
+             "message": {"id": "m", "content": [
+                 {"type": "text", "text": "thinking"}]}},
+        )
+        t = parse_claude_trajectory(stdout)
+        self.assertEqual(t.tools, ())
+        self.assertEqual(t.steps, ())
+        self.assertIsNone(t.final_output)
+        self.assertIsNone(t.system_prompt)
+        self.assertEqual(t.skills, SkillTriggers())
+
+    def test_malformed_lines_are_skipped(self) -> None:
+        good = json.dumps({
+            "type": "assistant",
+            "message": {"id": "m", "content": [
+                {"type": "tool_use", "id": "toolu_a", "name": "Read",
+                 "input": {"file_path": "x.py"}}]},
+        })
+        stdout = "\n".join([
+            "starting claude...",
+            '{"type":"assistant","message"',
+            good,
+            "not json either",
+        ])
+        t = parse_claude_trajectory(stdout)
+        self.assertEqual(len(t.steps), 1)
+        self.assertEqual(t.steps[0].name, "Read")
+
+    def test_empty_stdout(self) -> None:
+        self.assertEqual(parse_claude_trajectory(""),
+                         AgentTrajectory(backend="claude"))
+
+
+class CodexTrajectoryTest(unittest.TestCase):
+    """``parse_codex_trajectory`` over synthetic ``codex exec --json`` runs.
+
+    Codex's tool surface is the shell: each ``command_execution`` is one call
+    (its ``command``) plus one result (its ``aggregated_output``), deduped by
+    the shared ``item.id`` across the started/completed pair. The last
+    ``agent_message`` ``text`` is the final output; ``tools`` /
+    ``system_prompt`` stay empty (no confirmed codex frame exposes them).
+    """
+
+    def test_extracts_steps_skills_and_final_output(self) -> None:
+        stdout = _jsonl(
+            {"type": "thread.started", "thread_id": "t1"},
+            _codex_cmd("item_1", "/bin/bash -lc 'cat skills/develop/SKILL.md'",
+                       started=True, status="in_progress"),
+            _codex_cmd("item_1", "/bin/bash -lc 'cat skills/develop/SKILL.md'",
+                       status="completed", exit_code=0,
+                       aggregated_output="# Developer skill\n"),
+            _codex_cmd("item_2", "/bin/bash -lc 'git diff -- calc.py'",
+                       status="completed", exit_code=0,
+                       aggregated_output="diff --git ...\n"),
+            {"type": "item.completed", "item": {
+                "id": "item_3", "type": "agent_message", "text": "Approve."}},
+        )
+        t = parse_codex_trajectory(stdout)
+        self.assertEqual(t.backend, "codex")
+        self.assertIsNone(t.system_prompt)
+        self.assertEqual(t.tools, ())
+        self.assertEqual(t.final_output, "Approve.")
+        # SKILL.md read surfaces in the names-only skills extractor.
+        self.assertEqual(t.skills.triggered, ("develop",))
+        # started + completed for item_1 collapse to one call + one result.
+        self.assertEqual(
+            t.steps,
+            (
+                TrajectoryStep(
+                    kind="tool_call", name="command_execution",
+                    tool_id="item_1",
+                    content="/bin/bash -lc 'cat skills/develop/SKILL.md'"),
+                TrajectoryStep(
+                    kind="tool_result", tool_id="item_1",
+                    content="# Developer skill\n"),
+                TrajectoryStep(
+                    kind="tool_call", name="command_execution",
+                    tool_id="item_2",
+                    content="/bin/bash -lc 'git diff -- calc.py'"),
+                TrajectoryStep(
+                    kind="tool_result", tool_id="item_2",
+                    content="diff --git ...\n"),
+            ),
+        )
+
+    def test_started_only_command_emits_call_without_result(self) -> None:
+        # A command that never completes (no aggregated_output) is a call with
+        # no result step rather than a fabricated empty result.
+        stdout = _jsonl(
+            _codex_cmd("item_1", "/bin/bash -lc 'sleep 99'",
+                       started=True, status="in_progress"),
+        )
+        t = parse_codex_trajectory(stdout)
+        self.assertEqual(len(t.steps), 1)
+        self.assertEqual(t.steps[0].kind, "tool_call")
+        self.assertEqual(t.steps[0].tool_id, "item_1")
+
+    def test_missing_fields_yield_empty_sections(self) -> None:
+        stdout = _jsonl(
+            {"type": "thread.started"},
+            {"type": "turn.completed", "usage": {"input_tokens": 1}},
+        )
+        t = parse_codex_trajectory(stdout)
+        self.assertEqual(t.steps, ())
+        self.assertIsNone(t.final_output)
+        self.assertEqual(t.tools, ())
+        self.assertEqual(t.skills, SkillTriggers())
+
+    def test_malformed_lines_are_skipped(self) -> None:
+        good = json.dumps(_codex_cmd(
+            "item_1", "/bin/bash -lc 'ls'", status="completed",
+            aggregated_output="out\n"))
+        stdout = "\n".join([
+            "codex starting...",
+            '{"truncated":',
+            good,
+            "trailing-noise",
+        ])
+        t = parse_codex_trajectory(stdout)
+        self.assertEqual([s.kind for s in t.steps],
+                         ["tool_call", "tool_result"])
+
+    def test_empty_stdout(self) -> None:
+        self.assertEqual(parse_codex_trajectory(""),
+                         AgentTrajectory(backend="codex"))
+
+
+class TrajectoryDispatcherTest(unittest.TestCase):
+    """``parse_agent_trajectory`` routes by backend, mirroring the siblings."""
+
+    def test_routes_claude(self) -> None:
+        self.assertEqual(parse_agent_trajectory("claude", "").backend, "claude")
+
+    def test_routes_codex(self) -> None:
+        self.assertEqual(parse_agent_trajectory("codex", "").backend, "codex")
+
+    def test_unknown_backend_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            parse_agent_trajectory("gemini", "")
+
+
+class AgentTrajectoryTest(unittest.TestCase):
+    def test_to_dict_round_trips_via_json(self) -> None:
+        t = AgentTrajectory(
+            backend="claude",
+            tools=("Bash", "Read"),
+            skills=SkillTriggers(triggered=("develop",),
+                                 trigger_counts={"develop": 1},
+                                 available=("develop", "review")),
+            steps=(
+                TrajectoryStep(kind="tool_call", name="Bash", tool_id="t1",
+                               content={"command": "ls"}),
+                TrajectoryStep(kind="tool_result", tool_id="t1",
+                               content="out"),
+            ),
+            final_output="done",
+        )
+        encoded = json.dumps(t.to_dict(), sort_keys=True)
+        decoded = json.loads(encoded)
+        self.assertEqual(decoded["backend"], "claude")
+        self.assertEqual(decoded["tools"], ["Bash", "Read"])
+        self.assertEqual(decoded["system_prompt"], None)
+        self.assertEqual(decoded["final_output"], "done")
+        self.assertEqual(decoded["skills"]["triggered"], ["develop"])
+        self.assertEqual(decoded["skills"]["available"], ["develop", "review"])
+        self.assertEqual(len(decoded["steps"]), 2)
+        self.assertEqual(decoded["steps"][0]["name"], "Bash")
+        self.assertEqual(decoded["steps"][1]["kind"], "tool_result")
 
 
 if __name__ == "__main__":
