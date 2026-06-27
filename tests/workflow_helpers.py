@@ -104,6 +104,7 @@ class _PatchedWorkflowMixin:
         verify_result=None,
         authed_fetch_result=None,
         analytics_log_path=None,
+        trajectory_log_path=None,
     ):
         # `_run_agent_tracked` reads `analytics.ANALYTICS_LOG_PATH` at
         # call time and appends a JSONL record per tracked agent run.
@@ -115,6 +116,14 @@ class _PatchedWorkflowMixin:
         # the suite is hermetic; analytics-specific tests opt into a
         # temp path with the `analytics_log_path` kwarg below.
         analytics_path_target = analytics_log_path
+        # `_run_agent_tracked` -> `record_agent_exit` also writes the opt-in
+        # trajectory record to `analytics.TRAJECTORY_LOG_PATH`. It defaults
+        # off (unset env), but an operator who exported it would otherwise
+        # have every workflow stage test scribble redacted trajectories into
+        # their real path. Pin it to None (sink off) for the same hermeticity
+        # reason as `ANALYTICS_LOG_PATH`; trajectory tests opt in with the
+        # `trajectory_log_path` kwarg.
+        trajectory_path_target = trajectory_log_path
         rc_mock = _as_mock(run_agent)
         hnc_seq = has_new_commits if isinstance(has_new_commits, (list, tuple)) else None
         hnc_mock = MagicMock()
@@ -228,6 +237,11 @@ class _PatchedWorkflowMixin:
             stack.enter_context(
                 patch.object(
                     analytics, "ANALYTICS_LOG_PATH", analytics_path_target
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    analytics, "TRAJECTORY_LOG_PATH", trajectory_path_target
                 )
             )
             for attr, mock in workflow_mocks.items():

@@ -335,10 +335,18 @@ def _run_agent_tracked(
     omits the model name still records the configured model and an
     estimated cost when the SKU is in the price table. Prompts, raw
     stdout/stderr, secrets, and worktree contents are intentionally NOT
-    stored -- the sink is a foundation for usage / cost aggregation, not
-    a debugging mirror, and `result.stdout` may contain user-issue text.
-    A parser failure or a sink IO error is swallowed so an analytics
-    misconfiguration cannot stop the per-issue tick.
+    stored in this `agent_exit` record -- the analytics sink is a foundation
+    for usage / cost aggregation, not a debugging mirror, and `result.stdout`
+    may contain user-issue text. A parser failure or a sink IO error is
+    swallowed so an analytics misconfiguration cannot stop the per-issue tick.
+
+    The `prompt` is forwarded to `record_agent_exit` so it can land as the
+    redacted `user_input` of the separate, opt-in trajectory record -- and
+    ONLY when `TRAJECTORY_LOG_PATH` is enabled. With the trajectory sink off
+    (the default) the prompt is never stored and the `agent_exit` record
+    shape is unchanged. That trajectory parse / redact / write rides its own
+    fail-open guard inside `record_agent_exit`, so it never disturbs the
+    baseline record or the `skill_triggered` events below.
 
     When `TRACK_SKILL_TRIGGERS` is on, `record_agent_exit` returns the
     distinct skills the run triggered and one `skill_triggered` audit event
@@ -397,6 +405,7 @@ def _run_agent_tracked(
         review_round=review_round,
         retry_count=retry_count,
         fallback_model=_configured_model(backend, extra_args),
+        prompt=prompt,
     )
     # One `skill_triggered` audit event per distinct triggered skill, reusing
     # the list `record_agent_exit` already parsed (no second pass over stdout).
