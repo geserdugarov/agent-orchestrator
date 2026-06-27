@@ -1,9 +1,10 @@
 # Observability
 
-The orchestrator emits two independent JSONL sinks plus an optional Postgres aggregation target. None are read by the polling tick — workflow correctness keys off the pinned `<!--orchestrator-state ...-->` JSON comment on the issue (and the workflow label). Every observability surface here is observation-only and safe to truncate, rotate, or delete at any time.
+The orchestrator emits two independent JSONL sinks plus an optional Postgres aggregation target, and carries the scaffolding for a third (the opt-in trajectory sink, not yet wired to a producer). None are read by the polling tick — workflow correctness keys off the pinned `<!--orchestrator-state ...-->` JSON comment on the issue (and the workflow label). Every observability surface here is observation-only and safe to truncate, rotate, or delete at any time.
 
 - **Audit event log** (`EVENT_LOG_PATH`) — opt-in JSONL audit of workflow events, written through `GitHubClient.emit_event`.
 - **Analytics sink** (`ANALYTICS_LOG_PATH`) — project-local JSONL of raw metric records, owned by the `orchestrator/analytics/` package.
+- **Trajectory sink** (`TRAJECTORY_LOG_PATH`) — opt-in, default-off JSONL sink for per-run agent reasoning trajectories, a sibling of the analytics sink in the `orchestrator/analytics/` package. Its append / prune / retention mechanics ship today; no producer writes to it yet (the trajectory classifier in `orchestrator/usage.py` is not yet wired into `agent_exit`).
 - **Analytics database** (`analytics-db/`) — operator-deployed Postgres service that is the aggregation target for the analytics sink, with an operator-driven sync CLI and a Streamlit dashboard on top.
 - **Usage parser** (`orchestrator/usage.py`) — decoder for the agent CLI JSONL stdout that produces the token / cost detail the analytics `agent_exit` record carries.
 
@@ -46,7 +47,7 @@ An `OSError` during the append is caught and downgraded to a `log.warning` so a 
 
 Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`. Opts in or out independently via `ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` and the helpers in `orchestrator/analytics/`.
 
-**Settings ownership.** `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, and `ANALYTICS_DB_URL` are parsed at import inside `orchestrator/analytics/__init__.py` — *not* in `orchestrator/config.py` — and exposed as module attributes (`analytics.ANALYTICS_LOG_PATH`, etc.). Tests patch them directly via `patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`. The audit event log (`config.EVENT_LOG_PATH`) stays in `config` because `GitHubClient.emit_event` is a general-purpose audit surface.
+**Settings ownership.** `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, and `ANALYTICS_DB_URL` (and the sibling trajectory-sink knobs `TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS`) are parsed at import inside `orchestrator/analytics/__init__.py` — *not* in `orchestrator/config.py` — and exposed as module attributes (`analytics.ANALYTICS_LOG_PATH`, etc.). Tests patch them directly via `patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`. The audit event log (`config.EVENT_LOG_PATH`) stays in `config` because `GitHubClient.emit_event` is a general-purpose audit surface.
 
 **Filesystem only.** No PostgreSQL, Streamlit, or external services — the sink is one JSONL file under the project log area. Default path is `<LOG_DIR>/analytics.jsonl`, already covered by the `logs/` `.gitignore` rule. Set `ANALYTICS_LOG_PATH=` (empty) or to `off` / `disabled` / `none` to disable writes entirely; in that mode `append_record` and `prune_old_records` are silent no-ops and no file is opened.
 
@@ -84,6 +85,16 @@ The configured model is pulled out of the role's `extra_args` (via `_configured_
 Prompts, raw stdout / stderr, secrets, and worktree contents are deliberately NOT stored — the sink is a usage / cost surface, not a debugging mirror. A parser exception or sink IO failure is swallowed so an analytics misconfiguration cannot stop the per-issue tick.
 
 **Skill-trigger surfaces (shipped).** Both skill-trigger follow-ups (the audit event and the dashboard widget) have now landed. The per-invocation `skill_triggered` audit event on [`EVENT_LOG_PATH`](#audit-event-log-event_log_path) (see the [audit event-kinds table](#audit-event-log-event_log_path)) is gated on the same `TRACK_SKILL_TRIGGERS` switch and reuses the list `record_agent_exit` already parsed — `_run_agent_tracked` emits one event per distinct triggered skill. The skill-trigger-rate dashboard widget (`get_skill_trigger_rates` + the "Skill trigger rates" panel — see the [read model](#read-model-orchestratoranalyticsreadpy) and [dashboard](#dashboard-orchestratordashboardpy) sections below) is a pure read-side addition over `extras JSONB` with no schema change.
+
+## Trajectory sink (`TRAJECTORY_LOG_PATH`)
+
+A sibling, opt-in JSONL sink for agent *reasoning trajectories* — the ordered tool calls / results and final output a run produced — owned by the same `orchestrator/analytics/` package and parsed at import alongside the analytics knobs. It is kept deliberately **separate** from the analytics sink so the large free-text trajectory bodies never enter the numeric usage rollup, its Postgres aggregation, or the dashboard.
+
+**Storage mechanics only (today).** This surface currently ships just the sink plumbing: the `TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS` config knobs and the `append_trajectory_record` / `prune_trajectory_records` helpers. No producer is wired yet — the [trajectory classifier](#usage-parser-orchestratorusagepy) (`usage.parse_agent_trajectory`) is *not* connected to `record_agent_exit`, and `main._run_tick` does not call `prune_trajectory_records`. Until that wiring lands the sink stays inert: nothing is written and retention is operator-driven.
+
+**Opt-in, default off.** Unlike `ANALYTICS_LOG_PATH` (which defaults to `<LOG_DIR>/analytics.jsonl`), `TRAJECTORY_LOG_PATH` defaults *off*: unset, empty, or `off` / `disabled` / `none` (case-insensitive) all disable it; any other value is the explicit opt-in path. `TRAJECTORY_RETENTION_DAYS` defaults to `90` and mirrors `ANALYTICS_RETENTION_DAYS` (non-positive keeps trajectories indefinitely).
+
+**Append / prune discipline, dedicated lock.** `append_trajectory_record` reopens the file in append mode per record after `mkdir(parents=True, exist_ok=True)`, downgrading `OSError` to a `log.warning`; `prune_trajectory_records(*, now=None)` removes records older than `TRAJECTORY_RETENTION_DAYS` through a temp-file + `os.replace` rewrite, preserves malformed / unparseable lines verbatim, and no-ops when the sink is disabled, retention is non-positive, or the file is absent. Both reuse the analytics append / prune core but hold a **dedicated** `threading.Lock`, so the trajectory file serializes its own append-vs-prune race without ever blocking against — or touching — `ANALYTICS_LOG_PATH`, the analytics Postgres sync, or the dashboard. Filesystem-only and safe to truncate or delete at any time.
 
 ## Analytics database (`analytics-db/`)
 
