@@ -50,7 +50,12 @@ empty / `off` / `disabled` / `none` all disable it (unlike
 When enabled it gates an independent JSONL file for per-run reasoning
 trajectories, pruned by `TRAJECTORY_RETENTION_DAYS` with the same
 semantics as `ANALYTICS_RETENTION_DAYS` (default 90; non-positive keeps
-forever). `append_trajectory_record` / `prune_trajectory_records` share
+forever). Its producer is `record_agent_exit` (via
+`_maybe_record_trajectory`): when the sink is on it parses the run's
+trajectory from the same stdout, redacts and head/tail truncates every
+free-text field, and appends one `agent_trajectory` record -- all behind
+its own fail-open guard so it never disturbs the baseline `agent_exit`
+usage record. `append_trajectory_record` / `prune_trajectory_records` share
 the append/prune discipline of their analytics counterparts (reopen
 append per record, `mkdir -p` parents, `OSError` downgraded to a
 warning, malformed lines preserved on prune) but hold a dedicated file
@@ -374,6 +379,7 @@ def record_agent_exit(
     review_round: Optional[int],
     retry_count: Optional[int],
     fallback_model: Optional[str] = None,
+    prompt: Optional[str] = None,
 ) -> Optional[list[str]]:
     """Parse usage from agent stdout and append a single `agent_exit` record.
 
@@ -402,6 +408,18 @@ def record_agent_exit(
     fields," never a missing record. With the switch off the extractor
     never runs and the record stays byte-for-byte shape-compatible with
     today's.
+
+    `prompt` is the orchestrator-built agent prompt. It is stored only as
+    the redacted `user_input` of the opt-in trajectory record, and ONLY
+    when `TRAJECTORY_LOG_PATH` is enabled -- the baseline `agent_exit`
+    usage / cost record never carries it, so the default-install record
+    shape is unchanged. When the trajectory sink is on, the run's
+    trajectory is parsed from the same stdout, every free-text field is
+    redacted and head/tail truncated, and a single `agent_trajectory`
+    record is appended to the trajectory file. That work rides its OWN
+    inner fail-open guard (`_maybe_record_trajectory`): a parser, redactor,
+    or sink failure logs and is swallowed so it can never drop the baseline
+    record above or the caller's `skill_triggered` audit events.
 
     Returns the distinct triggered skill names (first-seen order) so the
     caller can emit per-skill audit events without reparsing stdout, or
@@ -466,7 +484,230 @@ def record_agent_exit(
             skills_available=skills_available,
         )
     )
+    _maybe_record_trajectory(
+        repo=repo,
+        issue=int(issue),
+        stage=stage,
+        agent_role=agent_role,
+        backend=backend,
+        result=result,
+        prompt=prompt,
+        review_round=review_round,
+        retry_count=retry_count,
+    )
     return skills_triggered
+
+
+# --- trajectory recording ---------------------------------------------------
+
+# Head/tail truncation caps for the opt-in trajectory record. Each free-text
+# field -- `user_input` (the orchestrator-built prompt), `system_prompt`,
+# every per-step `tool_call` input / `tool_result` content, and the final
+# `output` -- is redacted with `workflow_messages._redact_secrets` and then
+# truncated to its first `_TRAJECTORY_FIELD_HEAD` and last
+# `_TRAJECTORY_FIELD_TAIL` characters (the head carries the request, the tail
+# the result) with an elision marker in between. Redaction runs BEFORE
+# truncation so a secret straddling the elided middle cannot survive as two
+# halves. The whole record is additionally bounded: each step is charged its
+# full *serialized* size (the JSON metadata -- `kind` / `name` / `tool_id` --
+# plus its truncated content, not just `len(content)`), so even thousands of
+# empty- or metadata-only steps still consume the budget; once the running
+# total crosses `_TRAJECTORY_RECORD_BUDGET` bytes the remaining steps are
+# dropped and a `truncated` flag is set, so a single pathological run cannot
+# write an unbounded line.
+_TRAJECTORY_FIELD_HEAD = 2000
+_TRAJECTORY_FIELD_TAIL = 2000
+_TRAJECTORY_RECORD_BUDGET = 200_000
+
+
+def _truncate_head_tail(text: str, head: int, tail: int) -> str:
+    """Keep the first `head` + last `tail` chars of `text`, eliding the
+    middle with a marker recording how many chars were dropped. Returns
+    `text` unchanged when it already fits within `head + tail`."""
+    if len(text) <= head + tail:
+        return text
+    elided = len(text) - head - tail
+    return f"{text[:head]}\n...[{elided} chars elided]...\n{text[-tail:]}"
+
+
+def _redact_tree(value: Any, redact) -> Any:
+    """Recursively redact every string leaf of a tool payload.
+
+    Applied before JSON serialization so a multiline / control-character
+    secret in a tool input or result is masked on the raw leaf:
+    `json.dumps` would otherwise escape its newlines (a real `\\n` becomes
+    the two-character `\\n` escape), leaving `_redact_secrets`' literal
+    `str.replace` unable to match the raw env value -- and the secret would
+    survive into `steps[].content`. Dict keys are structural field names and
+    pass through unredacted; only values and list elements carry
+    agent-sourced content. Non-string scalars (numbers, bools, `None`) are
+    returned as-is.
+    """
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {k: _redact_tree(v, redact) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_tree(v, redact) for v in value]
+    return value
+
+
+def _redact_and_truncate(value: Any, redact) -> Optional[str]:
+    """Redact then per-field head/tail truncate one trajectory value.
+
+    String leaves are redacted with `_redact_secrets` BEFORE any JSON
+    serialization. A plain string is redacted directly; dict / list content
+    (claude tool inputs are dicts; `tool_result` content a list) is redacted
+    leaf-by-leaf via `_redact_tree` first, then serialized -- serializing
+    first would escape a multiline secret's newlines so the redactor's
+    literal `str.replace` could no longer match it. A final redact pass over
+    the serialized text is a cheap safety net for any leaf the walk could
+    not reach (e.g. a value stringified by `default=str`). Redaction precedes
+    truncation so a secret spanning the elided middle cannot leak as two
+    halves. Empty / `None` content yields `None` so `build_record` drops the
+    field rather than storing an empty string.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = redact(value)
+    else:
+        try:
+            text = json.dumps(
+                _redact_tree(value, redact), sort_keys=True, default=str,
+            )
+        except (TypeError, ValueError):
+            text = str(_redact_tree(value, redact))
+        text = redact(text)
+    if not text:
+        return None
+    return _truncate_head_tail(
+        text, _TRAJECTORY_FIELD_HEAD, _TRAJECTORY_FIELD_TAIL,
+    )
+
+
+def _build_trajectory_record(
+    *,
+    repo: str,
+    issue: int,
+    stage: str,
+    agent_role: str,
+    backend: str,
+    session_id: Optional[str],
+    prompt: Optional[str],
+    trajectory: usage.AgentTrajectory,
+    review_round: Optional[int],
+    retry_count: Optional[int],
+    redact,
+) -> dict:
+    """Assemble one redacted, truncated `agent_trajectory` record.
+
+    `prompt` becomes the redacted `user_input`; `system_prompt`, each
+    step's content, and the final `output` are redacted the same way.
+    Each step is charged its full *serialized* size -- the JSON metadata
+    (`kind` / `name` / `tool_id`) plus its truncated content, not merely
+    `len(content)` -- so steps with empty or tiny content still consume the
+    budget; once the running total crosses `_TRAJECTORY_RECORD_BUDGET` the
+    remainder is dropped and `truncated` is set. `build_record` drops every
+    `None`-valued field, so an absent prompt, empty system prompt, or
+    no-trigger skill set leaves its key off rather than storing a null.
+    """
+    user_input = _redact_and_truncate(prompt, redact)
+    system_prompt = _redact_and_truncate(trajectory.system_prompt, redact)
+    output = _redact_and_truncate(trajectory.final_output, redact)
+
+    used = len(user_input or "") + len(system_prompt or "") + len(output or "")
+    steps: list[dict[str, Any]] = []
+    truncated = False
+    for step in trajectory.steps:
+        step_dict = {
+            "kind": step.kind,
+            "name": step.name or None,
+            "tool_id": step.tool_id or None,
+            "content": _redact_and_truncate(step.content, redact),
+        }
+        # Charge the whole serialized step, not just its content: a run with
+        # thousands of empty- / metadata-only steps would otherwise evade a
+        # content-length-only budget and write an unbounded record.
+        used += len(json.dumps(step_dict, default=str))
+        if used > _TRAJECTORY_RECORD_BUDGET:
+            truncated = True
+            break
+        steps.append(step_dict)
+
+    skills = trajectory.skills
+    return build_record(
+        repo=repo,
+        issue=int(issue),
+        event="agent_trajectory",
+        stage=stage,
+        agent_role=agent_role,
+        backend=backend,
+        session_id=session_id,
+        review_round=review_round,
+        retry_count=retry_count,
+        user_input=user_input,
+        system_prompt=system_prompt,
+        tools=list(trajectory.tools) or None,
+        skills_triggered=list(skills.triggered) or None,
+        skills_available=list(skills.available) or None,
+        steps=steps,
+        output=output,
+        truncated=truncated or None,
+    )
+
+
+def _maybe_record_trajectory(
+    *,
+    repo: str,
+    issue: int,
+    stage: str,
+    agent_role: str,
+    backend: str,
+    result: AgentResult,
+    prompt: Optional[str],
+    review_round: Optional[int],
+    retry_count: Optional[int],
+) -> None:
+    """Parse, redact, truncate, and append one trajectory record -- gated on
+    the opt-in `TRAJECTORY_LOG_PATH` and wrapped in its own fail-open guard.
+
+    A no-op when the trajectory sink is disabled (the default), so the
+    orchestrator-built prompt (`user_input`) -- and the parse/redact work
+    itself -- happens ONLY when an operator turned the sink on. The whole
+    block rides a dedicated try/except: a parser bug, an unredactable
+    payload, or a sink IO failure logs and is swallowed so it can never drop
+    the baseline `agent_exit` usage / cost record or the `skill_triggered`
+    audit events, all of which were already produced before this runs.
+    `_redact_secrets` is imported at call time to avoid a
+    `github` -> `analytics` -> `workflow_messages` -> `github` import cycle.
+    """
+    if TRAJECTORY_LOG_PATH is None:
+        return
+    try:
+        from ..workflow_messages import _redact_secrets
+        trajectory = usage.parse_agent_trajectory(backend, result.stdout)
+        append_trajectory_record(
+            _build_trajectory_record(
+                repo=repo,
+                issue=int(issue),
+                stage=stage,
+                agent_role=agent_role,
+                backend=backend,
+                session_id=result.session_id,
+                prompt=prompt,
+                trajectory=trajectory,
+                review_round=review_round,
+                retry_count=retry_count,
+                redact=_redact_secrets,
+            )
+        )
+    except Exception:
+        log.exception(
+            "issue=#%d analytics: trajectory record(%s) failed; "
+            "baseline agent_exit record is unaffected",
+            issue, backend,
+        )
 
 
 def prune_with_retention_logging() -> None:

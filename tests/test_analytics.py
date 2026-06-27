@@ -1228,5 +1228,478 @@ class TrajectorySinkIndependenceTest(unittest.TestCase):
             self.assertEqual(t_path.read_text(encoding="utf-8"), t_before)
 
 
+def _claude_trajectory_stdout(
+    *,
+    tool_name: str = "Bash",
+    tool_input: dict | None = None,
+    tool_result: object = "tool result text",
+    final_output: str | None = "final answer",
+    offered_tools: tuple[str, ...] = ("Read", "Bash"),
+    input_tokens: int = 100,
+    output_tokens: int = 50,
+) -> str:
+    """A claude stream-json stdout with offered tools, one tool_use /
+    tool_result step, a usage block, and a terminal `result` answer -- the
+    full surface `parse_claude_trajectory` reconstructs."""
+    frames: list[dict] = [
+        {"type": "system", "subtype": "init", "tools": list(offered_tools)},
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "model": "claude-sonnet-4-6",
+                "content": [{
+                    "type": "tool_use",
+                    "name": tool_name,
+                    "id": "tu1",
+                    "input": tool_input or {"command": "ls"},
+                }],
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                },
+            },
+        },
+        {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "tu1",
+                "content": tool_result,
+            }]},
+        },
+    ]
+    result_frame: dict = {"type": "result", "num_turns": 1}
+    if final_output is not None:
+        result_frame["result"] = final_output
+    frames.append(result_frame)
+    return "\n".join(json.dumps(f) for f in frames)
+
+
+def _claude_multistep_stdout(*, n_steps: int, content: str) -> str:
+    """A claude stream with `n_steps` tool_use / tool_result pairs (so
+    `2 * n_steps` trajectory steps), each result carrying `content`. Used to
+    drive the total-record-budget truncation."""
+    frames: list[dict] = [
+        {"type": "system", "subtype": "init", "tools": ["Bash"]},
+    ]
+    for i in range(n_steps):
+        frames.append({
+            "type": "assistant",
+            "message": {
+                "id": f"m{i}", "model": "claude-sonnet-4-6",
+                "content": [{
+                    "type": "tool_use", "name": "Bash", "id": f"tu{i}",
+                    "input": {"command": "x"},
+                }],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        })
+        frames.append({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": f"tu{i}",
+                "content": content,
+            }]},
+        })
+    frames.append({"type": "result", "num_turns": n_steps})
+    return "\n".join(json.dumps(f) for f in frames)
+
+
+def _codex_trajectory_stdout(
+    *,
+    command: str = "ls -la",
+    output: str = "command output",
+    final: str | None = "codex done",
+    input_tokens: int = 200,
+    output_tokens: int = 80,
+) -> str:
+    """A codex --json stdout with one command_execution call + result and a
+    final agent_message -- the surface `parse_codex_trajectory` reads."""
+    frames: list[dict] = [
+        {"type": "item.started", "item": {
+            "id": "c1", "type": "command_execution", "command": command,
+        }},
+        {"type": "item.completed", "item": {
+            "id": "c1", "type": "command_execution", "command": command,
+            "aggregated_output": output,
+        }},
+    ]
+    if final is not None:
+        frames.append({"type": "item.completed", "item": {
+            "id": "a1", "type": "agent_message", "text": final,
+        }})
+    frames.append({"type": "turn_complete", "usage": {
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+    }})
+    return "\n".join(json.dumps(f) for f in frames)
+
+
+class RecordAgentExitTrajectoryTest(unittest.TestCase):
+    """`record_agent_exit` writes the opt-in trajectory record only when
+    `TRAJECTORY_LOG_PATH` is enabled, redacts every free-text field, applies
+    head/tail + total-size truncation caps, and never lets a trajectory
+    failure drop the baseline `agent_exit` usage record."""
+
+    def _emit(
+        self,
+        analytics,
+        *,
+        stdout,
+        prompt=None,
+        traj_path=None,
+        analytics_path=None,
+        backend="claude",
+        track=False,
+    ):
+        with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
+                patch.object(analytics, "TRAJECTORY_LOG_PATH", traj_path), \
+                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track):
+            return analytics.record_agent_exit(
+                repo="owner/repo",
+                issue=7,
+                stage="implementing",
+                agent_role="developer",
+                backend=backend,
+                agent_spec=backend,
+                resume_session_id=None,
+                result=analytics.AgentResult(
+                    session_id="sess-traj",
+                    last_message="",
+                    exit_code=0,
+                    timed_out=False,
+                    stdout=stdout,
+                    stderr="",
+                ),
+                duration_s=0.0,
+                review_round=2,
+                retry_count=1,
+                prompt=prompt,
+            )
+
+    def test_sink_off_writes_no_trajectory_and_no_user_input(self) -> None:
+        # Default off: a prompt is passed but, with the trajectory sink
+        # disabled, no trajectory file is created and the baseline
+        # `agent_exit` record never carries `user_input`.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            a_path = Path(td) / "analytics.jsonl"
+            self._emit(
+                analytics,
+                stdout=_claude_trajectory_stdout(),
+                prompt="please implement the feature",
+                traj_path=None,
+                analytics_path=a_path,
+            )
+            # Only the analytics file exists -- no trajectory file anywhere.
+            self.assertEqual(
+                sorted(p.name for p in Path(td).iterdir()),
+                ["analytics.jsonl"],
+            )
+            recs = _read_records(a_path)
+            self.assertEqual(len(recs), 1)
+            self.assertEqual(recs[0]["event"], "agent_exit")
+            self.assertNotIn("user_input", recs[0])
+
+    def test_sink_on_writes_redacted_trajectory_record(self) -> None:
+        # Sink on: a single `agent_trajectory` record carries the redacted
+        # user_input, the offered tools, the ordered steps with their
+        # tool_call input / tool_result content, and the final output --
+        # alongside (not replacing) the baseline `agent_exit` record.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            a_path = Path(td) / "analytics.jsonl"
+            t_path = Path(td) / "trajectory.jsonl"
+            self._emit(
+                analytics,
+                stdout=_claude_trajectory_stdout(
+                    tool_input={"command": "echo hi"},
+                    tool_result="hi",
+                    final_output="implemented",
+                ),
+                prompt="implement X",
+                traj_path=t_path,
+                analytics_path=a_path,
+            )
+            # Baseline agent_exit untouched.
+            base = _read_records(a_path)
+            self.assertEqual(len(base), 1)
+            self.assertEqual(base[0]["event"], "agent_exit")
+            self.assertEqual(base[0]["input_tokens"], 100)
+            self.assertNotIn("user_input", base[0])
+            # One trajectory record carrying the full surface.
+            traj = _read_records(t_path)
+            self.assertEqual(len(traj), 1)
+            rec = traj[0]
+            self.assertEqual(rec["event"], "agent_trajectory")
+            self.assertEqual(rec["repo"], "owner/repo")
+            self.assertEqual(rec["issue"], 7)
+            self.assertEqual(rec["stage"], "implementing")
+            self.assertEqual(rec["agent_role"], "developer")
+            self.assertEqual(rec["backend"], "claude")
+            self.assertEqual(rec["session_id"], "sess-traj")
+            self.assertEqual(rec["review_round"], 2)
+            self.assertEqual(rec["retry_count"], 1)
+            self.assertEqual(rec["user_input"], "implement X")
+            self.assertEqual(rec["tools"], ["Read", "Bash"])
+            self.assertEqual(rec["output"], "implemented")
+            kinds = [s["kind"] for s in rec["steps"]]
+            self.assertEqual(kinds, ["tool_call", "tool_result"])
+            call = rec["steps"][0]
+            self.assertEqual(call["name"], "Bash")
+            self.assertIn("echo hi", call["content"])
+            self.assertEqual(rec["steps"][1]["content"], "hi")
+            # Nothing was truncated for this small run.
+            self.assertNotIn("truncated", rec)
+
+    def test_codex_trajectory_record(self) -> None:
+        # The codex backend dispatches through the same path: command +
+        # aggregated_output become the tool_call / tool_result, and the
+        # last agent_message is the output.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            t_path = Path(td) / "trajectory.jsonl"
+            self._emit(
+                analytics,
+                stdout=_codex_trajectory_stdout(),
+                prompt="codex prompt",
+                traj_path=t_path,
+                analytics_path=Path(td) / "a.jsonl",
+                backend="codex",
+            )
+            rec = _read_records(t_path)[0]
+            self.assertEqual(rec["event"], "agent_trajectory")
+            self.assertEqual(rec["backend"], "codex")
+            self.assertEqual(rec["user_input"], "codex prompt")
+            self.assertEqual(rec["output"], "codex done")
+            self.assertEqual(
+                [s["kind"] for s in rec["steps"]],
+                ["tool_call", "tool_result"],
+            )
+            self.assertEqual(rec["steps"][0]["content"], "ls -la")
+            self.assertEqual(rec["steps"][1]["content"], "command output")
+            # codex exposes no offered-tools frame -> the field is dropped.
+            self.assertNotIn("tools", rec)
+
+    def test_secrets_redacted_in_every_field(self) -> None:
+        # The secret env value must not survive in user_input, the tool_call
+        # input, the tool_result content, or the output. `_redact_secrets`
+        # reads the live os.environ, so set a secret-shaped var around the
+        # call and assert it is masked everywhere.
+        _, analytics = _reload()
+        secret = "sk-ant-DEADBEEF-secret-value-0123456789"
+        with tempfile.TemporaryDirectory() as td, \
+                patch.dict(os.environ, {"ANTHROPIC_API_KEY": secret}):
+            t_path = Path(td) / "trajectory.jsonl"
+            self._emit(
+                analytics,
+                stdout=_claude_trajectory_stdout(
+                    tool_input={"command": f"echo {secret}"},
+                    tool_result=f"leaked {secret} here",
+                    final_output=f"the answer is {secret}",
+                ),
+                prompt=f"use token {secret}",
+                traj_path=t_path,
+                analytics_path=Path(td) / "a.jsonl",
+            )
+            rec = _read_records(t_path)[0]
+            blob = json.dumps(rec)
+            self.assertNotIn(secret, blob)
+            # The masking marker landed in each field that carried it.
+            self.assertIn("***", rec["user_input"])
+            self.assertIn("***", rec["output"])
+            self.assertIn("***", rec["steps"][0]["content"])
+            self.assertIn("***", rec["steps"][1]["content"])
+
+    def test_multiline_secret_in_tool_payload_redacted(self) -> None:
+        # Regression: dict / list tool payloads are redacted leaf-by-leaf
+        # BEFORE JSON serialization. A multiline secret env value would
+        # otherwise have its newlines escaped by `json.dumps` (`\n` -> the
+        # two-char escape), leaving `_redact_secrets`' literal `str.replace`
+        # unable to match the raw value -- so the secret would leak into
+        # `steps[].content`. Redacting raw leaves first keeps it masked, for
+        # both the dict tool_call input and the list tool_result content.
+        _, analytics = _reload()
+        secret = "topsecretvalue\nwith-newline-marker-0123456789"
+        with tempfile.TemporaryDirectory() as td, \
+                patch.dict(os.environ, {"MULTILINE_SECRET_KEY": secret}):
+            t_path = Path(td) / "trajectory.jsonl"
+            self._emit(
+                analytics,
+                stdout=_claude_trajectory_stdout(
+                    tool_input={"command": f"echo {secret}"},
+                    tool_result=[{"type": "text", "text": f"saw {secret}"}],
+                    final_output="done",
+                ),
+                prompt="p",
+                traj_path=t_path,
+                analytics_path=Path(td) / "a.jsonl",
+            )
+            rec = _read_records(t_path)[0]
+            blob = json.dumps(rec)
+            # Neither the raw value nor its distinctive post-newline marker
+            # survives anywhere in the record.
+            self.assertNotIn("with-newline-marker-0123456789", blob)
+            self.assertNotIn("topsecretvalue", blob)
+            # Both the dict input and the list content carry the mask.
+            self.assertIn("***", rec["steps"][0]["content"])
+            self.assertIn("***", rec["steps"][1]["content"])
+
+    def test_per_step_content_head_tail_truncated(self) -> None:
+        # A long field is redacted then truncated to head + tail chars with
+        # an elision marker, so a single huge tool output cannot bloat one
+        # step. Shrink the caps so the test stays small.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(analytics, "_TRAJECTORY_FIELD_HEAD", 5), \
+                patch.object(analytics, "_TRAJECTORY_FIELD_TAIL", 5):
+            t_path = Path(td) / "trajectory.jsonl"
+            self._emit(
+                analytics,
+                stdout=_claude_trajectory_stdout(
+                    tool_result="A" * 100, final_output="done",
+                ),
+                prompt="p",
+                traj_path=t_path,
+                analytics_path=Path(td) / "a.jsonl",
+            )
+            rec = _read_records(t_path)[0]
+            result_step = next(
+                s for s in rec["steps"] if s["kind"] == "tool_result"
+            )
+            content = result_step["content"]
+            self.assertLess(len(content), 100)
+            self.assertTrue(content.startswith("AAAAA"))
+            self.assertTrue(content.endswith("AAAAA"))
+            self.assertIn("chars elided", content)
+
+    def test_total_record_budget_drops_excess_steps(self) -> None:
+        # When the cumulative redacted content crosses the record budget the
+        # remaining steps are dropped and `truncated` is set, so one runaway
+        # run cannot write an unbounded JSONL line.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(analytics, "_TRAJECTORY_RECORD_BUDGET", 30):
+            t_path = Path(td) / "trajectory.jsonl"
+            self._emit(
+                analytics,
+                stdout=_claude_multistep_stdout(n_steps=5, content="0123456789"),
+                traj_path=t_path,
+                analytics_path=Path(td) / "a.jsonl",
+            )
+            rec = _read_records(t_path)[0]
+            self.assertTrue(rec["truncated"])
+            # 5 pairs => 10 steps emitted; the budget dropped the tail.
+            self.assertLess(len(rec["steps"]), 10)
+
+    def test_metadata_only_steps_respect_total_budget(self) -> None:
+        # Regression: the budget must count each step's serialized metadata,
+        # not just `len(content)`. A run of 10,000 empty-content steps -- each
+        # still ~80 bytes of `kind` / `name` / `tool_id` JSON -- would
+        # otherwise produce a multi-hundred-KB record with NO `truncated`
+        # flag, because the old content-length-only check never advanced.
+        _, analytics = _reload()
+        many = analytics.usage.AgentTrajectory(
+            backend="claude",
+            steps=tuple(
+                analytics.usage.TrajectoryStep(
+                    kind="tool_call",
+                    name="command_execution",
+                    tool_id=f"id{i}",
+                    content=None,
+                )
+                for i in range(10_000)
+            ),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            t_path = Path(td) / "trajectory.jsonl"
+            with patch.object(
+                analytics.usage, "parse_agent_trajectory", return_value=many,
+            ):
+                self._emit(
+                    analytics,
+                    stdout="",  # ignored: the trajectory parser is stubbed
+                    prompt="p",
+                    traj_path=t_path,
+                    analytics_path=Path(td) / "a.jsonl",
+                )
+            raw = t_path.read_text(encoding="utf-8")
+            rec = json.loads(raw)
+            self.assertTrue(rec["truncated"])
+            self.assertLess(len(rec["steps"]), 10_000)
+            # The on-disk line is bounded near the budget, not the ~749 KB an
+            # uncapped run produced -- one step of overshoot plus the envelope.
+            self.assertLess(len(raw), analytics._TRAJECTORY_RECORD_BUDGET * 2)
+
+    def test_parser_failure_keeps_baseline_and_returns_skills(self) -> None:
+        # The trajectory parse rides its own fail-open guard: a parser bug
+        # logs and is swallowed, leaving the baseline `agent_exit` record AND
+        # the skill-trigger return value (which drives the audit events)
+        # intact.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            a_path = Path(td) / "analytics.jsonl"
+            t_path = Path(td) / "trajectory.jsonl"
+            with patch.object(
+                analytics.usage, "parse_agent_trajectory",
+                side_effect=RuntimeError("boom"),
+            ), self.assertLogs(analytics.log, level="ERROR"):
+                returned = self._emit(
+                    analytics,
+                    stdout=_claude_stdout_with_skills(skills=("develop",)),
+                    prompt="p",
+                    traj_path=t_path,
+                    analytics_path=a_path,
+                    track=True,
+                )
+            # Skill return value (and thus audit emission) is unaffected.
+            self.assertEqual(returned, ["develop"])
+            # Baseline record survived...
+            base = _read_records(a_path)
+            self.assertEqual(len(base), 1)
+            self.assertEqual(base[0]["event"], "agent_exit")
+            self.assertEqual(base[0]["input_tokens"], 1000)
+            # ...and the broken trajectory wrote nothing.
+            self.assertFalse(t_path.exists())
+
+    def test_sink_failure_keeps_baseline_record(self) -> None:
+        # A non-OSError escaping the sink append (a programming error past
+        # the inner OSError swallow) must not drop the baseline record: the
+        # outer guard logs and falls through.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            a_path = Path(td) / "analytics.jsonl"
+            with patch.object(
+                analytics, "append_trajectory_record",
+                side_effect=RuntimeError("sink boom"),
+            ), self.assertLogs(analytics.log, level="ERROR"):
+                self._emit(
+                    analytics,
+                    stdout=_claude_trajectory_stdout(),
+                    prompt="p",
+                    traj_path=Path(td) / "trajectory.jsonl",
+                    analytics_path=a_path,
+                )
+            base = _read_records(a_path)
+            self.assertEqual(len(base), 1)
+            self.assertEqual(base[0]["event"], "agent_exit")
+
+    def test_absent_prompt_drops_user_input(self) -> None:
+        # No prompt passed -> `user_input` is dropped (not stored as null),
+        # while the rest of the trajectory still records.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            t_path = Path(td) / "trajectory.jsonl"
+            self._emit(
+                analytics,
+                stdout=_claude_trajectory_stdout(final_output="x"),
+                prompt=None,
+                traj_path=t_path,
+                analytics_path=Path(td) / "a.jsonl",
+            )
+            rec = _read_records(t_path)[0]
+            self.assertNotIn("user_input", rec)
+            self.assertEqual(rec["output"], "x")
+
+
 if __name__ == "__main__":
     unittest.main()

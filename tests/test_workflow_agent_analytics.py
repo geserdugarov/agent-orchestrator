@@ -498,6 +498,202 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(records[0]["models"], ["claude-sonnet-4-6"])
 
 
+def _claude_trajectory_stdout(
+    *,
+    tool_name: str = "Bash",
+    tool_input: dict | None = None,
+    tool_result: str = "result text",
+    final_output: str = "final answer",
+) -> str:
+    """A claude stream-json stdout with one tool_use / tool_result step, a
+    usage block, and a terminal `result` answer -- the surface the
+    trajectory classifier reconstructs."""
+    frames = [
+        {"type": "system", "subtype": "init", "tools": ["Read", "Bash"]},
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1", "model": "claude-sonnet-4-6",
+                "content": [{
+                    "type": "tool_use", "name": tool_name, "id": "tu1",
+                    "input": tool_input or {"command": "ls"},
+                }],
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        },
+        {
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "tu1",
+                "content": tool_result,
+            }]},
+        },
+        {"type": "result", "num_turns": 1, "result": final_output},
+    ]
+    return "\n".join(json.dumps(f) for f in frames)
+
+
+class TrajectoryRecordingTest(unittest.TestCase):
+    """`_run_agent_tracked` forwards its prompt to `record_agent_exit`, which
+    writes one redacted `agent_trajectory` record only when
+    `TRAJECTORY_LOG_PATH` is enabled -- never disturbing the baseline
+    `agent_exit` analytics record or the `skill_triggered` audit events."""
+
+    @staticmethod
+    def _records(path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def _run(
+        self,
+        *,
+        stdout: str,
+        prompt: str,
+        traj_path: Optional[Path],
+        analytics_path: Optional[Path] = None,
+        backend: str = "claude",
+        track: bool = False,
+    ) -> AgentResult:
+        gh = FakeGitHubClient()
+        with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
+                patch.object(analytics, "TRAJECTORY_LOG_PATH", traj_path), \
+                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track), \
+                patch.object(workflow, "run_agent") as run_mock:
+            run_mock.return_value = AgentResult(
+                session_id="sess-traj",
+                last_message="",
+                exit_code=0,
+                timed_out=False,
+                stdout=stdout,
+                stderr="",
+            )
+            return workflow._run_agent_tracked(
+                gh, 301,
+                agent_role="developer",
+                stage="implementing",
+                backend=backend,
+                prompt=prompt,
+                cwd=_FAKE_WT,
+                agent_spec=backend,
+                review_round=2,
+                retry_count=1,
+            )
+
+    def test_prompt_is_forwarded_to_record_agent_exit(self) -> None:
+        # The orchestrator-built prompt reaches `record_agent_exit` as the
+        # `prompt` kwarg -- the seam that lets it become `user_input`.
+        gh = FakeGitHubClient()
+        with patch.object(
+            analytics, "record_agent_exit", return_value=None,
+        ) as rec_mock, patch.object(workflow, "run_agent") as run_mock:
+            run_mock.return_value = AgentResult(
+                session_id="s", last_message="", exit_code=0,
+                timed_out=False, stdout="", stderr="",
+            )
+            workflow._run_agent_tracked(
+                gh, 302,
+                agent_role="developer",
+                stage="implementing",
+                backend="claude",
+                prompt="PROMPT-MARKER-XYZ",
+                cwd=_FAKE_WT,
+            )
+        self.assertEqual(rec_mock.call_count, 1)
+        self.assertEqual(rec_mock.call_args.kwargs["prompt"], "PROMPT-MARKER-XYZ")
+
+    def test_trajectory_written_with_redacted_user_input(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="traj-on-") as td:
+            t_path = Path(td) / "trajectory.jsonl"
+            a_path = Path(td) / "analytics.jsonl"
+            self._run(
+                stdout=_claude_trajectory_stdout(
+                    tool_result="hi", final_output="implemented",
+                ),
+                prompt="implement the widget",
+                traj_path=t_path,
+                analytics_path=a_path,
+            )
+            traj = self._records(t_path)
+            self.assertEqual(len(traj), 1)
+            rec = traj[0]
+            self.assertEqual(rec["event"], "agent_trajectory")
+            self.assertEqual(rec["issue"], 301)
+            self.assertEqual(rec["stage"], "implementing")
+            self.assertEqual(rec["agent_role"], "developer")
+            self.assertEqual(rec["user_input"], "implement the widget")
+            self.assertEqual(rec["output"], "implemented")
+            self.assertEqual(
+                [s["kind"] for s in rec["steps"]],
+                ["tool_call", "tool_result"],
+            )
+            # Baseline agent_exit analytics record still written, sans prompt.
+            base = self._records(a_path)
+            self.assertEqual(len(base), 1)
+            self.assertEqual(base[0]["event"], "agent_exit")
+            self.assertNotIn("user_input", base[0])
+
+    def test_no_trajectory_record_when_sink_off(self) -> None:
+        # Default off: a prompt is passed but no trajectory file is created;
+        # the baseline agent_exit record is still written.
+        with tempfile.TemporaryDirectory(prefix="traj-off-") as td:
+            a_path = Path(td) / "analytics.jsonl"
+            self._run(
+                stdout=_claude_trajectory_stdout(),
+                prompt="implement the widget",
+                traj_path=None,
+                analytics_path=a_path,
+            )
+            self.assertEqual(
+                sorted(p.name for p in Path(td).iterdir()),
+                ["analytics.jsonl"],
+            )
+            base = self._records(a_path)
+            self.assertEqual(len(base), 1)
+            self.assertNotIn("user_input", base[0])
+
+    def test_trajectory_failure_preserves_skill_events(self) -> None:
+        # A trajectory-parse failure must not cost the `skill_triggered`
+        # audit events: they are driven by the value `record_agent_exit`
+        # returns before the trajectory block runs.
+        gh = FakeGitHubClient()
+        with tempfile.TemporaryDirectory(prefix="traj-failopen-") as td:
+            t_path = Path(td) / "trajectory.jsonl"
+            with patch.object(analytics, "ANALYTICS_LOG_PATH", None), \
+                    patch.object(analytics, "TRAJECTORY_LOG_PATH", t_path), \
+                    patch.object(analytics, "TRACK_SKILL_TRIGGERS", True), \
+                    patch.object(
+                        analytics.usage, "parse_agent_trajectory",
+                        side_effect=RuntimeError("boom"),
+                    ), \
+                    patch.object(workflow, "run_agent") as run_mock, \
+                    self.assertLogs(analytics.log, level="ERROR"):
+                run_mock.return_value = AgentResult(
+                    session_id="sess-skill", last_message="", exit_code=0,
+                    timed_out=False,
+                    stdout=_claude_stdout_with_skills(skills=("develop",)),
+                    stderr="",
+                )
+                workflow._run_agent_tracked(
+                    gh, 303,
+                    agent_role="developer",
+                    stage="implementing",
+                    backend="claude",
+                    prompt="p",
+                    cwd=_FAKE_WT,
+                    agent_spec="claude",
+                )
+            skill_events = [
+                e for e in gh.recorded_events if e["event"] == "skill_triggered"
+            ]
+            self.assertEqual([e["skill"] for e in skill_events], ["develop"])
+            self.assertFalse(t_path.exists())
+
+
 class SkillTriggeredEventTest(unittest.TestCase):
     """`_run_agent_tracked` emits one `skill_triggered` audit event per
     distinct triggered skill, gated on `TRACK_SKILL_TRIGGERS` and reusing the
