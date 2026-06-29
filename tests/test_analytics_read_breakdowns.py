@@ -290,6 +290,221 @@ class SkillTriggerRatesTest(unittest.TestCase):
         self.assertIn("owner/repo", params)
 
 
+class SkillTriggerMatrixTest(unittest.TestCase):
+    """`get_skill_trigger_matrix` combines the `repo_skill_catalog`
+    records (the offered-skill universe) with the filtered `agent_exit`
+    rows (the runs that fired a skill) into a per-skill x
+    `(repo, agent_role, backend)` matrix, honoring the same
+    `agent_exit` event-filter contract as `get_skill_trigger_rates`."""
+
+    def test_unset_db_url_returns_empty(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        self.assertEqual(
+            analytics_read.get_skill_trigger_matrix(
+                connect=lambda url: _FakeConnection(),
+            ),
+            [],
+        )
+
+    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        rows = analytics_read.get_skill_trigger_matrix(
+            events=["stage_enter"], connect=_connector(conn),
+        )
+        self.assertEqual(rows, [])
+        # No DB round-trip at all -- not even the catalog query.
+        self.assertEqual(conn.executed, [])
+
+    def test_empty_events_short_circuits(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        rows = analytics_read.get_skill_trigger_matrix(
+            events=[], connect=_connector(conn),
+        )
+        self.assertEqual(rows, [])
+        self.assertEqual(conn.executed, [])
+
+    def test_observed_and_zero_cells_round_trip(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        # Catalog query -> `(repo, skills_available)`; runs query ->
+        # `(repo, role_label, backend_label, skills_triggered)`. psycopg
+        # adapts the JSONB arrays to Python lists, so the fixture mirrors
+        # that. The two queries pin distinct event kinds, so the fake
+        # cursor routes each to its own rows.
+        conn.rows_for = {
+            "event = 'repo_skill_catalog'": [
+                ("owner/repo", ["develop", "review"]),
+            ],
+            "event = 'agent_exit'": [
+                ("owner/repo", "developer", "claude", ["develop"]),
+                ("owner/repo", "developer", "claude", ["develop"]),
+                ("owner/repo", "reviewer", "codex", ["review"]),
+                # A tracked run that fired nothing still defines its
+                # cohort, so the cohort gets zero-padded catalog cells.
+                ("owner/repo", "developer", "claude", None),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
+        # Ordered by (repo, skill, agent_role, backend).
+        self.assertEqual(
+            [(r.skill, r.agent_role, r.backend, r.runs) for r in rows],
+            [
+                # `develop`: counted runs *containing* the skill (the two
+                # developer/claude rows = 2, not three invocations), and a
+                # zero cell for the reviewer/codex cohort.
+                ("develop", "developer", "claude", 2),
+                ("develop", "reviewer", "codex", 0),
+                # `review`: the offered-but-never-triggered developer/claude
+                # cell reads 0, the reviewer/codex cell reads its real run.
+                ("review", "developer", "claude", 0),
+                ("review", "reviewer", "codex", 1),
+            ],
+        )
+        self.assertEqual({r.repo for r in rows}, {"owner/repo"})
+        # Catalog query first, runs query second; both scan the base
+        # table for the JSONB arrays the rollup does not carry.
+        cat_sql, _ = conn.executed[0]
+        run_sql, _ = conn.executed[1]
+        self.assertIn("FROM analytics_events", cat_sql)
+        self.assertIn("event = 'repo_skill_catalog'", cat_sql)
+        self.assertIn("extras -> 'skills_available'", cat_sql)
+        self.assertIn("FROM analytics_events", run_sql)
+        self.assertIn("event = 'agent_exit'", run_sql)
+        self.assertIn("extras -> 'skills_triggered'", run_sql)
+        # Neither query touches the rollup / agent-runs view.
+        for sql in (cat_sql, run_sql):
+            self.assertNotIn("analytics_daily_rollup", sql)
+            self.assertNotIn("analytics_agent_runs", sql)
+
+    def test_developer_claude_review_is_zero(self) -> None:
+        # The headline zero-row case spelled out: a skill the repo
+        # offers that a running cohort never triggered surfaces as an
+        # explicit 0, not a missing row.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "event = 'repo_skill_catalog'": [
+                ("owner/repo", ["review"]),
+            ],
+            "event = 'agent_exit'": [
+                ("owner/repo", "developer", "claude", ["develop"]),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
+        by_cell = {
+            (r.skill, r.agent_role, r.backend): r.runs for r in rows
+        }
+        self.assertEqual(by_cell[("review", "developer", "claude")], 0)
+        # The triggered-but-uncatalogued skill is still reported, but it
+        # is not zero-padded (only catalog skills get zero cells).
+        self.assertEqual(by_cell[("develop", "developer", "claude")], 1)
+
+    def test_missing_catalog_falls_back_to_observed(self) -> None:
+        # No `repo_skill_catalog` rows match -> the catalog query returns
+        # nothing, so the matrix degrades to just the observed-trigger
+        # cells without inventing zero rows or raising.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "event = 'agent_exit'": [
+                ("owner/repo", "developer", "claude", ["develop"]),
+                # A cohort that triggered nothing contributes no cells
+                # at all when there is no catalog to pad against.
+                ("owner/repo", "reviewer", "codex", None),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
+        self.assertEqual(
+            [(r.skill, r.agent_role, r.backend, r.runs) for r in rows],
+            [("develop", "developer", "claude", 1)],
+        )
+        # Both queries still ran (catalog returned empty from the fake).
+        self.assertEqual(len(conn.executed), 2)
+
+    def test_null_role_and_backend_bucket_unknown(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "event = 'repo_skill_catalog'": [
+                ("owner/repo", ["develop"]),
+            ],
+            "event = 'agent_exit'": [
+                ("owner/repo", None, None, ["develop"]),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].agent_role, "unknown")
+        self.assertEqual(rows[0].backend, "unknown")
+        self.assertEqual(rows[0].runs, 1)
+        # COALESCE maps NULL -> 'unknown' in SQL too, so the reader and
+        # the query agree even before the Python-side guard runs.
+        run_sql, _ = conn.executed[1]
+        self.assertIn("COALESCE(agent_role, 'unknown')", run_sql)
+        self.assertIn("COALESCE(backend, 'unknown')", run_sql)
+
+    def test_window_and_repo_params_bound_on_both_queries(self) -> None:
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_skill_trigger_matrix(
+            start=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            end=datetime(2026, 6, 24, tzinfo=timezone.utc),
+            repo="owner/repo",
+            connect=_connector(conn),
+        )
+        # Date + repo narrow BOTH the catalog and the runs query.
+        for sql, params in conn.executed:
+            self.assertIn("ts >= %s", sql)
+            self.assertIn("ts < %s", sql)
+            self.assertIn("repo = %s", sql)
+            self.assertIn(datetime(2026, 6, 1, tzinfo=timezone.utc), params)
+            self.assertIn("owner/repo", params)
+
+    def test_issue_and_stage_filter_runs_only_not_catalog(self) -> None:
+        # The stage / issue filters narrow only the agent_exit runs;
+        # pushing them onto the repo-level catalog records (issue == 0,
+        # NULL stage) would drop every catalog row.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        analytics_read.get_skill_trigger_matrix(
+            issue=551, stages=["implementing"], connect=_connector(conn),
+        )
+        cat_sql, cat_params = conn.executed[0]
+        run_sql, run_params = conn.executed[1]
+        self.assertNotIn("issue = %s", cat_sql)
+        self.assertNotIn("stage IN", cat_sql)
+        # No window filter set that applies to the repo-level catalog,
+        # so its query binds no parameters (the fake records them as a
+        # tuple).
+        self.assertEqual(cat_params, ())
+        self.assertIn("issue = %s", run_sql)
+        self.assertIn("stage IN", run_sql)
+        self.assertIn(551, run_params)
+        self.assertIn("implementing", run_params)
+
+    def test_skill_names_coerced_from_json_text(self) -> None:
+        # Defensive: a driver / fixture that returns the JSONB arrays as
+        # raw JSON text (rather than adapted Python lists) still parses.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "event = 'repo_skill_catalog'": [
+                ("owner/repo", '["develop", "review"]'),
+            ],
+            "event = 'agent_exit'": [
+                ("owner/repo", "developer", "claude", '["develop"]'),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
+        by_cell = {
+            (r.skill, r.agent_role, r.backend): r.runs for r in rows
+        }
+        self.assertEqual(by_cell[("develop", "developer", "claude")], 1)
+        self.assertEqual(by_cell[("review", "developer", "claude")], 0)
+
+
 class RepoBreakdownTest(unittest.TestCase):
     """`get_repo_breakdown` reads the base table so the standard
     event/stage/date/repo/issue filter shape applies (no agent_runs

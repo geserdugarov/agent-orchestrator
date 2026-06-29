@@ -6,8 +6,10 @@ The chart-shaped breakdowns the redesigned dashboard renders that
 read `analytics_events` / `analytics_agent_runs` directly because
 they need row-level detail or columns the daily rollup does not
 carry: per-review-round development/review buckets (raw
-`review_round`), per-`(agent_role, backend)` skill-trigger rates
-(the `extras` JSONB the rollup omits), per-`cost_source` coverage,
+`review_round`), per-`(agent_role, backend)` skill-trigger rates and
+the per-skill `(repo, agent_role, backend)` trigger matrix (both off
+the `extras` JSONB the rollup omits, the matrix folding in the
+`repo_skill_catalog` records too), per-`cost_source` coverage,
 per-`(day, backend)` token totals, and the weekday x hour activity
 heatmap (hour-of-day precision the day-keyed rollup loses).
 
@@ -19,6 +21,7 @@ aggregates in `read_rollup`.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Callable, Optional, Sequence
 
@@ -35,8 +38,31 @@ from .read_models import (
     CostCoverageRow,
     HourlyHeatmapPoint,
     ReviewRoundBucketRow,
+    SkillTriggerMatrixRow,
     SkillTriggerRateRow,
 )
+
+
+def _as_skill_names(value: Any) -> list[str]:
+    """Coerce a JSONB skill-name array column into a list of strings.
+
+    psycopg adapts a `jsonb` array to a Python list, so the common path
+    is a passthrough; a driver / fixture that hands back the raw JSON
+    text is tolerated too. ``None`` (the absent-key result of
+    ``extras -> 'skills_...'``), a non-list payload, or a non-string
+    element collapses to an empty list / is skipped so a malformed
+    `extras` blob never raises mid-read.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [s for s in value if isinstance(s, str)]
 
 
 def get_review_round_breakdown(
@@ -283,6 +309,148 @@ def get_skill_trigger_rates(
                 runs=int(runs or 0),
                 skill_runs=int(skill_runs or 0),
                 total_triggers=int(total_triggers or 0),
+            )
+        )
+    return out
+
+
+def get_skill_trigger_matrix(
+    *,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    repo: Optional[str] = None,
+    events: Optional[Sequence[str]] = None,
+    stages: Optional[Sequence[str]] = None,
+    issue: Optional[int] = None,
+    db_url: Optional[str] = None,
+    connect: Optional[Callable[[str], Any]] = None,
+    conn: Any = None,
+) -> list[SkillTriggerMatrixRow]:
+    """Per-skill x `(repo, agent_role, backend)` trigger-run counts.
+
+    Combines the repo's `repo_skill_catalog` records (the universe of
+    skills a repo offers, via the `skills_available` array) with the
+    filtered `agent_exit` rows (the runs that actually fired a skill,
+    via the `skills_triggered` array) so the dashboard can render a
+    matrix of which skills each cohort reaches for. Both arrays live in
+    `analytics_events.extras` JSONB -- the daily rollup does not carry
+    them -- so the reader scans the base table directly: a pure
+    read-side addition with zero DDL, mirroring `get_skill_trigger_rates`.
+
+    Honors the same `agent_exit` event-filter contract as the other
+    skill / agent-run readers: short-circuits to empty (no DB round
+    trip at all, catalog included) when the events multiselect excludes
+    `agent_exit` or is cleared. The date / repo filters narrow *both*
+    the catalog and the run queries; the stage / issue filters narrow
+    only the runs because catalog records are repo-level (they carry
+    `issue = 0` and a NULL stage, so pushing those predicates down would
+    drop every catalog row).
+
+    `runs` counts runs *containing* a skill -- one per agent-exit row
+    per distinct name in its `skills_triggered` list -- rather than
+    total invocations, so a run that pulled `develop` three times still
+    weighs one. Every catalog skill is zero-padded across the
+    `(repo, agent_role, backend)` cohorts observed for that repo so the
+    matrix carries explicit `developer / claude / review = 0` cells for
+    offered-but-untriggered skills. NULL `agent_role` / `backend` bucket
+    under `"unknown"`. When no catalog records match the window the
+    matrix degrades cleanly to just the observed-trigger cells -- no
+    zero rows are invented. Rows are ordered by
+    `(repo, skill, agent_role, backend)`.
+    """
+    url = _resolve_db_url(db_url)
+    if conn is None and not url:
+        return []
+    if _agent_event_excluded(events):
+        return []
+    connect_fn = connect or _default_connect
+
+    # 1. Catalog universe. Catalog records are repo-level (issue == 0,
+    #    NULL stage), so only the date / repo filters apply -- pushing
+    #    the issue / stage filters down here would drop every row.
+    cat_where, cat_params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=None, stages=None, issue=None,
+    )
+    cat_clause = (
+        f"{cat_where} AND event = 'repo_skill_catalog'"
+        if cat_where
+        else " WHERE event = 'repo_skill_catalog'"
+    )
+    cat_sql = (
+        "SELECT repo, extras -> 'skills_available' AS skills_available "
+        f"FROM analytics_events{cat_clause}"
+    )
+    cat_rows = _query(connect_fn, url, cat_sql, cat_params, conn=conn)
+    catalog: dict[str, set[str]] = {}
+    for row in cat_rows:
+        if row[0] is None:
+            continue
+        c_repo = str(row[0])
+        names = _as_skill_names(row[1] if len(row) > 1 else None)
+        # `setdefault` even on an empty catalog so a "scanned, found
+        # none" record still registers the repo (it just contributes no
+        # zero rows).
+        catalog.setdefault(c_repo, set()).update(names)
+
+    # 2. Observed triggers. One `(repo, role, backend)` cohort per
+    #    agent-exit run plus the distinct skills it fired. `skills_triggered`
+    #    is already de-duplicated per run, but the per-row `set()` guards
+    #    against a malformed array so a name is never double-counted.
+    run_where, run_params = _build_window_where(
+        start=start, end=end, repo=repo,
+        events=None, stages=stages, issue=issue,
+    )
+    run_clause = (
+        f"{run_where} AND event = 'agent_exit'"
+        if run_where
+        else " WHERE event = 'agent_exit'"
+    )
+    run_sql = (
+        "SELECT repo, "
+        "COALESCE(agent_role, 'unknown') AS role_label, "
+        "COALESCE(backend, 'unknown') AS backend_label, "
+        "extras -> 'skills_triggered' AS skills_triggered "
+        f"FROM analytics_events{run_clause}"
+    )
+    run_rows = _query(connect_fn, url, run_sql, run_params, conn=conn)
+
+    cohorts: set[tuple[str, str, str]] = set()
+    counts: dict[tuple[str, str, str, str], int] = {}
+    for row in run_rows:
+        r_repo = str(row[0]) if row[0] is not None else "unknown"
+        role = (
+            str(row[1]) if len(row) > 1 and row[1] is not None else "unknown"
+        )
+        backend = (
+            str(row[2]) if len(row) > 2 and row[2] is not None else "unknown"
+        )
+        cohorts.add((r_repo, role, backend))
+        names = _as_skill_names(row[3] if len(row) > 3 else None)
+        for skill in set(names):
+            key = (r_repo, role, backend, skill)
+            counts[key] = counts.get(key, 0) + 1
+
+    # 3. Assemble the matrix: every observed cell carries its run count,
+    #    and every catalog skill is zero-padded across the cohorts seen
+    #    for that repo. `catalog.get(repo, ())` yields no skills when the
+    #    catalog is missing, so the fall-back path emits only the
+    #    observed-trigger cells.
+    keys: set[tuple[str, str, str, str]] = set(counts)
+    for (c_repo, role, backend) in cohorts:
+        for skill in catalog.get(c_repo, ()):
+            keys.add((c_repo, role, backend, skill))
+
+    out: list[SkillTriggerMatrixRow] = []
+    for key in sorted(keys, key=lambda k: (k[0], k[3], k[1], k[2])):
+        k_repo, role, backend, skill = key
+        out.append(
+            SkillTriggerMatrixRow(
+                repo=k_repo,
+                skill=skill,
+                agent_role=role,
+                backend=backend,
+                runs=counts.get(key, 0),
             )
         )
     return out

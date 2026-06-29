@@ -404,6 +404,41 @@ class SkillTriggerRateRow:
 
 
 @dataclass(frozen=True)
+class SkillTriggerMatrixRow:
+    """One `(repo, skill, agent_role, backend)` cell of the trigger matrix.
+
+    Powers the dashboard's opt-in per-skill trigger matrix.
+    `get_skill_trigger_matrix` combines the repo's `repo_skill_catalog`
+    records (the universe of skills a repo offers, from the
+    `skills_available` array) with the filtered `agent_exit` rows (the
+    runs that actually fired a skill, from the `skills_triggered` array)
+    -- both live in `analytics_events.extras` JSONB, so the reader scans
+    the base table with no DDL and no rollup change.
+
+    `runs` counts how many runs in the cell *contained* the skill (one
+    per run per distinct name in its `skills_triggered` list), not the
+    total number of invocations -- a run that pulled `develop` three
+    times still weighs one here. A cell with `runs == 0` is a real
+    "offered but never triggered" signal: the skill is in the repo's
+    catalog and the `(agent_role, backend)` cohort ran in the window,
+    but no such run reached for it (e.g. `developer / claude / review =
+    0`). When the catalog records are missing the matrix degrades to
+    just the observed-trigger cells -- no zero rows are invented.
+
+    `agent_role` / `backend` bucket NULLs under `"unknown"` so a cohort
+    is never silently dropped. The same `TRACK_SKILL_TRIGGERS`-off
+    caveat as `SkillTriggerRateRow` applies: a `0` cannot distinguish a
+    tracked-but-quiet run from one whose tracking was off.
+    """
+
+    repo: str
+    skill: str
+    agent_role: str
+    backend: str
+    runs: int = 0
+
+
+@dataclass(frozen=True)
 class BackendDailyTokensRow:
     """One `(day, backend, total_tokens)` cell of the per-backend daily
     token series.

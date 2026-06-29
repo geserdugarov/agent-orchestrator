@@ -34,8 +34,9 @@ split into focused sibling modules:
 - `read_dashboard` -- the redesigned-dashboard chart breakdowns the
   rollup cannot reconstruct (they need row-level detail or columns
   the rollup omits): `get_review_round_breakdown`,
-  `get_skill_trigger_rates`, `get_cost_coverage`,
-  `get_backend_daily_tokens`, `get_hourly_heatmap`.
+  `get_skill_trigger_rates`, `get_skill_trigger_matrix`,
+  `get_cost_coverage`, `get_backend_daily_tokens`,
+  `get_hourly_heatmap`.
 
 The supporting plumbing is split into further sibling modules and
 re-exported here as well:
@@ -113,6 +114,7 @@ from .read_dashboard import (
     get_cost_coverage as get_cost_coverage,
     get_hourly_heatmap as get_hourly_heatmap,
     get_review_round_breakdown as get_review_round_breakdown,
+    get_skill_trigger_matrix as get_skill_trigger_matrix,
     get_skill_trigger_rates as get_skill_trigger_rates,
 )
 from .read_models import (
@@ -128,6 +130,7 @@ from .read_models import (
     IssueSummaryRow as IssueSummaryRow,
     RepoBreakdownRow as RepoBreakdownRow,
     ReviewRoundBucketRow as ReviewRoundBucketRow,
+    SkillTriggerMatrixRow as SkillTriggerMatrixRow,
     SkillTriggerRateRow as SkillTriggerRateRow,
     StageBreakdown as StageBreakdown,
     Summary as Summary,
