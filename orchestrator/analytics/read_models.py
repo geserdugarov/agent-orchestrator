@@ -415,15 +415,22 @@ class SkillTriggerMatrixRow:
     -- both live in `analytics_events.extras` JSONB, so the reader scans
     the base table with no DDL and no rollup change.
 
-    `runs` counts how many runs in the cell *contained* the skill (one
-    per run per distinct name in its `skills_triggered` list), not the
-    total number of invocations -- a run that pulled `develop` three
-    times still weighs one here. A cell with `runs == 0` is a real
+    `skill_runs` counts how many runs in the cell *contained* the skill
+    (one per run per distinct name in its `skills_triggered` list), not
+    the total number of invocations -- a run that pulled `develop` three
+    times still weighs one here. A cell with `skill_runs == 0` is a real
     "offered but never triggered" signal: the skill is in the repo's
     catalog and the `(agent_role, backend)` cohort ran in the window,
     but no such run reached for it (e.g. `developer / claude / review =
     0`). When the catalog records are missing the matrix degrades to
     just the observed-trigger cells -- no zero rows are invented.
+
+    `runs` is the total number of `agent_exit` runs in the cell's
+    `(repo, agent_role, backend)` cohort (every run, whether or not it
+    fired this skill), so a low `skill_runs` reads against the cohort
+    size rather than in a vacuum. It is always `>= skill_runs` and,
+    because a cell only exists for a cohort that actually ran, always
+    `>= 1`. This mirrors `SkillTriggerRateRow.runs` / `.skill_runs`.
 
     `agent_role` / `backend` bucket NULLs under `"unknown"` so a cohort
     is never silently dropped. The same `TRACK_SKILL_TRIGGERS`-off
@@ -436,6 +443,7 @@ class SkillTriggerMatrixRow:
     agent_role: str
     backend: str
     runs: int = 0
+    skill_runs: int = 0
 
 
 @dataclass(frozen=True)

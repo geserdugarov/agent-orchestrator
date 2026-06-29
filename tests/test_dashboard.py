@@ -859,7 +859,7 @@ class SkillMatrixHtmlTest(unittest.TestCase):
     clear fallback notice when no catalog-backed matrix can be built.
     """
 
-    def _row(self, repo, skill, role, backend, runs):
+    def _row(self, repo, skill, role, backend, runs, skill_runs=None):
         from orchestrator.analytics.read import SkillTriggerMatrixRow
         return SkillTriggerMatrixRow(
             repo=repo,
@@ -867,6 +867,7 @@ class SkillMatrixHtmlTest(unittest.TestCase):
             agent_role=role,
             backend=backend,
             runs=runs,
+            skill_runs=runs if skill_runs is None else skill_runs,
         )
 
     def test_columns_match_issue_spec(self) -> None:
@@ -874,12 +875,16 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         rows = [self._row("owner/repo", "develop", "developer", "claude", 2)]
         html_out = dashboard._skill_matrix_html(rows)
         for header in ("Repo", "Role", "Backend", "Skill",
-                       "Runs with skill"):
+                       "Runs", "Runs with skill"):
             self.assertIn(f">{header}<", html_out)
 
     def test_cell_values_rendered(self) -> None:
         _, dashboard = _reload()
-        rows = [self._row("owner/repo", "develop", "developer", "claude", 3)]
+        # Distinct cohort total (Runs) and trigger count (Runs with skill)
+        # so both columns are exercised independently.
+        rows = [self._row(
+            "owner/repo", "develop", "developer", "claude", 5, skill_runs=3,
+        )]
         html_out = dashboard._skill_matrix_html(rows)
         # Full repo path (not just the trailing component) so two repos
         # that share a short name stay distinct in a cross-repo matrix.
@@ -887,17 +892,23 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         self.assertIn(">developer<", html_out)
         self.assertIn(">claude<", html_out)
         self.assertIn(">develop<", html_out)
+        self.assertIn(">5<", html_out)
         self.assertIn(">3<", html_out)
 
     def test_zero_count_row_renders_explicit_muted_zero(self) -> None:
         # An offered-but-never-triggered catalog cell is a real
-        # "offered but quiet" signal, not a dropped row: it renders as
-        # an explicit (muted) 0 rather than going missing.
+        # "offered but quiet" signal, not a dropped row: its "Runs with
+        # skill" renders as an explicit (muted) 0 rather than going
+        # missing, while the cohort `Runs` total stays a plain number.
         _, dashboard = _reload()
-        rows = [self._row("owner/repo", "review", "developer", "claude", 0)]
+        rows = [self._row(
+            "owner/repo", "review", "developer", "claude", 4, skill_runs=0,
+        )]
         html_out = dashboard._skill_matrix_html(rows)
         self.assertIn("orch-skillmatrix-zero", html_out)
         self.assertIn(">0<", html_out)
+        # The cohort total is not muted -- it is a plain right-aligned cell.
+        self.assertIn('<td class="r">4</td>', html_out)
 
     def test_repo_role_backend_skill_html_escaped(self) -> None:
         # Every free-text cell is HTML-escaped so a skill / repo / role
@@ -1583,6 +1594,19 @@ class SkillMatrixWiringTest(unittest.TestCase):
         matrix = src.index("_skill_matrix_html(skill_matrix_rows)")
         self.assertLess(branch, matrix)
         self.assertLess(matrix, else_branch)
+
+    def test_matrix_rendered_inside_collapsed_expander(self) -> None:
+        # The matrix folds into a collapsed expander (mirroring the
+        # "Recent agent runs" block) so it does not dominate the card by
+        # default. The `_skill_matrix_html` render must sit after an
+        # `st.expander(..., expanded=False)` opened for the matrix.
+        src = self._main_source()
+        expander = src.index('with st.expander(\n                "Per-skill')
+        matrix = src.index("_skill_matrix_html(skill_matrix_rows)")
+        self.assertLess(expander, matrix)
+        # The expander block carrying the matrix opens collapsed.
+        block = src[expander:matrix]
+        self.assertIn("expanded=False", block)
 
 
 class StaticMetadataCacheTest(unittest.TestCase):

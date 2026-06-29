@@ -410,15 +410,19 @@ SKILL_MATRIX_EMPTY_MESSAGE = (
 def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
     """Render the per-skill trigger matrix to inline HTML.
 
-    The second table under the "Skill trigger rates" panel: one row per
-    `(repo, agent_role, backend, skill)` cell from
+    The fold-out table under the "Skill trigger rates" panel: one row
+    per `(repo, agent_role, backend, skill)` cell from
     `get_skill_trigger_matrix`, with columns Repo / Role / Backend /
-    Skill / Runs with skill. Unlike the aggregate table above it, this
-    one folds in each repo's `repo_skill_catalog` so a skill the repo
-    offers but no cohort triggered surfaces as an explicit `0`
-    "Runs with skill" cell rather than a missing row; the zero cell is
+    Skill / Runs / Runs with skill. `Runs` is the total agent-exit runs
+    in the cell's cohort and `Runs with skill` the subset that fired
+    this skill, so a low/zero trigger count reads against the cohort
+    size instead of in a vacuum. Unlike the aggregate table above it,
+    this one folds in each repo's `repo_skill_catalog` so a skill the
+    repo offers but no cohort triggered surfaces as an explicit `0`
+    "Runs with skill" cell rather than a missing row; that zero cell is
     muted so the offered-but-quiet skills read distinctly from the ones
-    that actually fired.
+    that actually fired. The cohort `Runs` total is always `>= 1` (a
+    cell exists only for a cohort that ran), so it is never muted.
 
     When the read model returns no rows -- no catalog records matched the
     window and no run fired a skill -- there is no catalog-backed matrix
@@ -466,12 +470,15 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
         backend = r.backend or "unknown"
         skill = r.skill or "unknown"
         runs = int(r.runs)
-        # A `0` is an offered-but-never-triggered catalog cell -- mute it
-        # so the cells that actually fired stand out at a glance.
-        runs_html = (
+        skill_runs = int(r.skill_runs)
+        # A `0` "Runs with skill" is an offered-but-never-triggered
+        # catalog cell -- mute it so the cells that actually fired stand
+        # out at a glance. The cohort `Runs` total is never muted (it is
+        # always >= 1 for a cohort that ran).
+        skill_runs_html = (
             '<span class="orch-skillmatrix-zero">0</span>'
-            if runs == 0
-            else str(runs)
+            if skill_runs == 0
+            else str(skill_runs)
         )
         body.append(
             "<tr>"
@@ -479,7 +486,8 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
             f'<td>{html.escape(role)}</td>'
             f'<td>{html.escape(backend)}</td>'
             f'<td>{html.escape(skill)}</td>'
-            f'<td class="r">{runs_html}</td>'
+            f'<td class="r">{runs}</td>'
+            f'<td class="r">{skill_runs_html}</td>'
             "</tr>"
         )
     head = (
@@ -488,6 +496,7 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
         "<th>Role</th>"
         "<th>Backend</th>"
         "<th>Skill</th>"
+        '<th class="r">Runs</th>'
         '<th class="r">Runs with skill</th>'
         "</tr></thead>"
     )

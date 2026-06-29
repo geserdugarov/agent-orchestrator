@@ -347,19 +347,27 @@ class SkillTriggerMatrixTest(unittest.TestCase):
             ],
         }
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
-        # Ordered by (repo, skill, agent_role, backend).
+        # Ordered by skill_runs DESC, then cohort runs DESC, then the
+        # stable (repo, role, backend, skill) tiebreak. Each cell carries
+        # both its skill_runs (runs *containing* the skill) and the total
+        # runs of its (repo, role, backend) cohort -- developer/claude ran
+        # three times (two `develop`, one that fired nothing), reviewer/
+        # codex once.
         self.assertEqual(
-            [(r.skill, r.agent_role, r.backend, r.runs) for r in rows],
             [
-                # `develop`: counted runs *containing* the skill (the two
-                # developer/claude rows = 2, not three invocations), and a
-                # zero cell for the reviewer/codex cohort.
-                ("develop", "developer", "claude", 2),
-                ("develop", "reviewer", "codex", 0),
-                # `review`: the offered-but-never-triggered developer/claude
-                # cell reads 0, the reviewer/codex cell reads its real run.
-                ("review", "developer", "claude", 0),
-                ("review", "reviewer", "codex", 1),
+                (r.skill, r.agent_role, r.backend, r.runs, r.skill_runs)
+                for r in rows
+            ],
+            [
+                # skill_runs=2: `develop` for developer/claude (two of the
+                # three runs contained it, not three invocations).
+                ("develop", "developer", "claude", 3, 2),
+                # skill_runs=1: `review` for reviewer/codex.
+                ("review", "reviewer", "codex", 1, 1),
+                # skill_runs=0 tier, ordered by cohort runs DESC: the
+                # developer/claude cohort (3 runs) before reviewer/codex (1).
+                ("review", "developer", "claude", 3, 0),
+                ("develop", "reviewer", "codex", 1, 0),
             ],
         )
         self.assertEqual({r.repo for r in rows}, {"owner/repo"})
@@ -394,12 +402,19 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         }
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
         by_cell = {
-            (r.skill, r.agent_role, r.backend): r.runs for r in rows
+            (r.skill, r.agent_role, r.backend): r.skill_runs for r in rows
         }
         self.assertEqual(by_cell[("review", "developer", "claude")], 0)
         # The triggered-but-uncatalogued skill is still reported, but it
         # is not zero-padded (only catalog skills get zero cells).
         self.assertEqual(by_cell[("develop", "developer", "claude")], 1)
+        # The zero `skill_runs` cell still reads against its cohort size:
+        # the developer/claude cohort ran once, so both cells show runs=1.
+        cohort_runs = {
+            (r.skill, r.agent_role, r.backend): r.runs for r in rows
+        }
+        self.assertEqual(cohort_runs[("review", "developer", "claude")], 1)
+        self.assertEqual(cohort_runs[("develop", "developer", "claude")], 1)
 
     def test_missing_catalog_falls_back_to_observed(self) -> None:
         # No `repo_skill_catalog` rows match -> the catalog query returns
@@ -417,8 +432,11 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         }
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
         self.assertEqual(
-            [(r.skill, r.agent_role, r.backend, r.runs) for r in rows],
-            [("develop", "developer", "claude", 1)],
+            [
+                (r.skill, r.agent_role, r.backend, r.runs, r.skill_runs)
+                for r in rows
+            ],
+            [("develop", "developer", "claude", 1, 1)],
         )
         # Both queries still ran (catalog returned empty from the fake).
         self.assertEqual(len(conn.executed), 2)
@@ -439,6 +457,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         self.assertEqual(rows[0].agent_role, "unknown")
         self.assertEqual(rows[0].backend, "unknown")
         self.assertEqual(rows[0].runs, 1)
+        self.assertEqual(rows[0].skill_runs, 1)
         # COALESCE maps NULL -> 'unknown' in SQL too, so the reader and
         # the query agree even before the Python-side guard runs.
         run_sql, _ = conn.executed[1]
@@ -499,10 +518,137 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         }
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
         by_cell = {
-            (r.skill, r.agent_role, r.backend): r.runs for r in rows
+            (r.skill, r.agent_role, r.backend): r.skill_runs for r in rows
         }
         self.assertEqual(by_cell[("develop", "developer", "claude")], 1)
         self.assertEqual(by_cell[("review", "developer", "claude")], 0)
+
+    def test_runs_counts_every_cohort_run_not_just_skill_runs(self) -> None:
+        # `runs` is the cohort total: a cohort with four runs, only one
+        # of which fired the skill, reads runs=4 / skill_runs=1 so the low
+        # trigger count is legible against the cohort size.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "event = 'repo_skill_catalog'": [
+                ("owner/repo", ["develop"]),
+            ],
+            "event = 'agent_exit'": [
+                ("owner/repo", "developer", "claude", ["develop"]),
+                ("owner/repo", "developer", "claude", None),
+                ("owner/repo", "developer", "claude", []),
+                ("owner/repo", "developer", "claude", ["review"]),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
+        by_skill = {r.skill: r for r in rows}
+        self.assertEqual(by_skill["develop"].runs, 4)
+        self.assertEqual(by_skill["develop"].skill_runs, 1)
+        # The triggered-but-uncatalogued `review` skill shares the cohort
+        # total too -- the cohort ran four times for both cells.
+        self.assertEqual(by_skill["review"].runs, 4)
+        self.assertEqual(by_skill["review"].skill_runs, 1)
+
+    def test_sorted_by_skill_runs_then_cohort_runs_desc(self) -> None:
+        # Acceptance order: Runs-with-skill DESC, then cohort Runs DESC,
+        # then a stable repo/role/backend/skill tiebreak.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "event = 'repo_skill_catalog'": [
+                ("owner/repo", ["a", "b"]),
+            ],
+            "event = 'agent_exit'": [
+                # cohort developer/claude: 3 runs, `a` fired twice.
+                ("owner/repo", "developer", "claude", ["a"]),
+                ("owner/repo", "developer", "claude", ["a"]),
+                ("owner/repo", "developer", "claude", None),
+                # cohort reviewer/codex: 2 runs, `a` fired twice. Same
+                # skill_runs as developer/claude's `a` but a smaller
+                # cohort, so it sorts after on the Runs DESC tiebreak.
+                ("owner/repo", "reviewer", "codex", ["a"]),
+                ("owner/repo", "reviewer", "codex", ["a"]),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
+        self.assertEqual(
+            [
+                (r.skill, r.agent_role, r.backend, r.runs, r.skill_runs)
+                for r in rows
+            ],
+            [
+                # skill_runs=2, tied -> larger cohort first.
+                ("a", "developer", "claude", 3, 2),
+                ("a", "reviewer", "codex", 2, 2),
+                # skill_runs=0 catalog-padded `b`, larger cohort first.
+                ("b", "developer", "claude", 3, 0),
+                ("b", "reviewer", "codex", 2, 0),
+            ],
+        )
+
+    def test_row_count_capped_at_limit(self) -> None:
+        # The list is capped (default 100); a smaller `limit` keeps the
+        # highest-weight rows in the sorted order and drops the tail.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "event = 'repo_skill_catalog'": [
+                ("owner/repo", ["a", "b", "c"]),
+            ],
+            "event = 'agent_exit'": [
+                ("owner/repo", "developer", "claude", ["a"]),
+                ("owner/repo", "developer", "claude", ["b"]),
+                ("owner/repo", "developer", "claude", ["b"]),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_matrix(
+            limit=2, connect=_connector(conn),
+        )
+        # Three catalog cells exist (a=1, b=2, c=0) but only the top two
+        # by skill_runs survive: b (2) then a (1).
+        self.assertEqual(
+            [(r.skill, r.skill_runs) for r in rows],
+            [("b", 2), ("a", 1)],
+        )
+        # A non-positive limit disables the cap -- all three cells return.
+        all_rows = analytics_read.get_skill_trigger_matrix(
+            limit=0, connect=_connector(conn),
+        )
+        self.assertEqual(len(all_rows), 3)
+
+    def test_decomposer_and_question_cohorts_get_zero_rows(self) -> None:
+        # decomposer / question runs emit `agent_exit` just like
+        # developer / reviewer, so their cohorts must be zero-padded with
+        # the repo's catalog skills even when they trigger nothing.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        conn = _FakeConnection()
+        conn.rows_for = {
+            "event = 'repo_skill_catalog'": [
+                ("owner/repo", ["develop"]),
+            ],
+            "event = 'agent_exit'": [
+                ("owner/repo", "developer", "claude", ["develop"]),
+                # decomposer / question ran but fired no cataloged skill.
+                ("owner/repo", "decomposer", "claude", None),
+                ("owner/repo", "question", "codex", None),
+            ],
+        }
+        rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
+        by_cell = {
+            (r.skill, r.agent_role, r.backend): (r.runs, r.skill_runs)
+            for r in rows
+        }
+        # Both roles surface as catalog-backed zero rows (skill_runs=0)
+        # against their real cohort size, the same way developer does.
+        self.assertEqual(
+            by_cell[("develop", "decomposer", "claude")], (1, 0),
+        )
+        self.assertEqual(
+            by_cell[("develop", "question", "codex")], (1, 0),
+        )
+        self.assertEqual(
+            by_cell[("develop", "developer", "claude")], (1, 1),
+        )
 
 
 class RepoBreakdownTest(unittest.TestCase):

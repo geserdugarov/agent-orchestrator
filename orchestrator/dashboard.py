@@ -1245,18 +1245,20 @@ def main() -> None:
             # as an explicit `0` cell; `_skill_matrix_html` renders a
             # clear fallback notice in place of the table when the read
             # model returns no catalog-backed matrix (no catalog records
-            # matched and no run fired a skill).
-            st.markdown(
-                '<p class="orch-card-sub" style="margin-top:14px">'
-                'Per-skill trigger matrix · which skills each '
-                'repo × role × backend cohort reaches for'
-                '</p>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                _skill_matrix_html(skill_matrix_rows),
-                unsafe_allow_html=True,
-            )
+            # matched and no run fired a skill). Folded into an expander
+            # (collapsed by default, mirroring "Recent agent runs" below)
+            # so the matrix -- capped at 100 rows by the read model and
+            # sorted by Runs-with-skill DESC then Runs DESC -- does not
+            # dominate the card until the operator opens it.
+            with st.expander(
+                "Per-skill trigger matrix · which skills each "
+                "repo × role × backend cohort reaches for",
+                expanded=False,
+            ):
+                st.markdown(
+                    _skill_matrix_html(skill_matrix_rows),
+                    unsafe_allow_html=True,
+                )
         else:
             st.info("No `agent_exit` rows match the current filters.")
 

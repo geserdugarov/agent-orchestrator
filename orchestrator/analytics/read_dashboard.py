@@ -65,6 +65,13 @@ def _as_skill_names(value: Any) -> list[str]:
     return [s for s in value if isinstance(s, str)]
 
 
+# Default cap on the rows `get_skill_trigger_matrix` returns. The
+# dashboard renders the matrix in a fold-out expander; capping keeps an
+# expand from flooding the page when many repos x cohorts x catalog
+# skills multiply out. A non-positive `limit` disables the cap.
+SKILL_MATRIX_ROW_LIMIT = 100
+
+
 def get_review_round_breakdown(
     *,
     start: Optional[datetime] = None,
@@ -322,6 +329,7 @@ def get_skill_trigger_matrix(
     events: Optional[Sequence[str]] = None,
     stages: Optional[Sequence[str]] = None,
     issue: Optional[int] = None,
+    limit: int = SKILL_MATRIX_ROW_LIMIT,
     db_url: Optional[str] = None,
     connect: Optional[Callable[[str], Any]] = None,
     conn: Any = None,
@@ -346,17 +354,24 @@ def get_skill_trigger_matrix(
     `issue = 0` and a NULL stage, so pushing those predicates down would
     drop every catalog row).
 
-    `runs` counts runs *containing* a skill -- one per agent-exit row
-    per distinct name in its `skills_triggered` list -- rather than
-    total invocations, so a run that pulled `develop` three times still
-    weighs one. Every catalog skill is zero-padded across the
-    `(repo, agent_role, backend)` cohorts observed for that repo so the
-    matrix carries explicit `developer / claude / review = 0` cells for
-    offered-but-untriggered skills. NULL `agent_role` / `backend` bucket
-    under `"unknown"`. When no catalog records match the window the
-    matrix degrades cleanly to just the observed-trigger cells -- no
-    zero rows are invented. Rows are ordered by
-    `(repo, skill, agent_role, backend)`.
+    Each cell carries two counts. `skill_runs` counts runs *containing*
+    that skill -- one per agent-exit row per distinct name in its
+    `skills_triggered` list -- rather than total invocations, so a run
+    that pulled `develop` three times still weighs one. `runs` is the
+    total agent-exit runs in the cell's `(repo, agent_role, backend)`
+    cohort, so a low `skill_runs` reads against the cohort size. Every
+    catalog skill is zero-padded across the cohorts observed for that
+    repo so the matrix carries explicit `developer / claude / review =
+    0` (`skill_runs == 0`) cells for offered-but-untriggered skills.
+    NULL `agent_role` / `backend` bucket under `"unknown"`. When no
+    catalog records match the window the matrix degrades cleanly to just
+    the observed-trigger cells -- no zero rows are invented.
+
+    Rows are ordered by `skill_runs` DESC, then cohort `runs` DESC, then
+    a stable `(repo, agent_role, backend, skill)` tiebreak, and the list
+    is capped at `limit` rows (default `SKILL_MATRIX_ROW_LIMIT`; a
+    non-positive `limit` disables the cap) so the dashboard's fold-out
+    never floods the page.
     """
     url = _resolve_db_url(db_url)
     if conn is None and not url:
@@ -415,7 +430,7 @@ def get_skill_trigger_matrix(
     )
     run_rows = _query(connect_fn, url, run_sql, run_params, conn=conn)
 
-    cohorts: set[tuple[str, str, str]] = set()
+    cohort_runs: dict[tuple[str, str, str], int] = {}
     counts: dict[tuple[str, str, str, str], int] = {}
     for row in run_rows:
         r_repo = str(row[0]) if row[0] is not None else "unknown"
@@ -425,24 +440,40 @@ def get_skill_trigger_matrix(
         backend = (
             str(row[2]) if len(row) > 2 and row[2] is not None else "unknown"
         )
-        cohorts.add((r_repo, role, backend))
+        cohort = (r_repo, role, backend)
+        # One agent-exit row == one run in the cohort, regardless of how
+        # many (or whether any) skills it fired.
+        cohort_runs[cohort] = cohort_runs.get(cohort, 0) + 1
         names = _as_skill_names(row[3] if len(row) > 3 else None)
         for skill in set(names):
             key = (r_repo, role, backend, skill)
             counts[key] = counts.get(key, 0) + 1
 
-    # 3. Assemble the matrix: every observed cell carries its run count,
-    #    and every catalog skill is zero-padded across the cohorts seen
-    #    for that repo. `catalog.get(repo, ())` yields no skills when the
-    #    catalog is missing, so the fall-back path emits only the
+    # 3. Assemble the matrix: every observed cell carries its skill-run
+    #    count, and every catalog skill is zero-padded across the cohorts
+    #    seen for that repo. `catalog.get(repo, ())` yields no skills when
+    #    the catalog is missing, so the fall-back path emits only the
     #    observed-trigger cells.
     keys: set[tuple[str, str, str, str]] = set(counts)
-    for (c_repo, role, backend) in cohorts:
+    for (c_repo, role, backend) in cohort_runs:
         for skill in catalog.get(c_repo, ()):
             keys.add((c_repo, role, backend, skill))
 
+    def _order(key: tuple[str, str, str, str]) -> tuple:
+        k_repo, role, backend, skill = key
+        skill_runs = counts.get(key, 0)
+        total = cohort_runs.get((k_repo, role, backend), 0)
+        # Runs-with-skill DESC, then cohort runs DESC (negated for the
+        # ascending sort), then a stable repo / role / backend / skill
+        # tiebreak so equal-weight rows keep a deterministic order.
+        return (-skill_runs, -total, k_repo, role, backend, skill)
+
+    ordered = sorted(keys, key=_order)
+    if limit > 0:
+        ordered = ordered[:limit]
+
     out: list[SkillTriggerMatrixRow] = []
-    for key in sorted(keys, key=lambda k: (k[0], k[3], k[1], k[2])):
+    for key in ordered:
         k_repo, role, backend, skill = key
         out.append(
             SkillTriggerMatrixRow(
@@ -450,7 +481,8 @@ def get_skill_trigger_matrix(
                 skill=skill,
                 agent_role=role,
                 backend=backend,
-                runs=counts.get(key, 0),
+                runs=cohort_runs.get((k_repo, role, backend), 0),
+                skill_runs=counts.get(key, 0),
             )
         )
     return out
