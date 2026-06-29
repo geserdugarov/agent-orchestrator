@@ -148,7 +148,7 @@ The orchestrator (not the agent) pushes. The push is hardened against the agent-
 
 ## Observability
 
-Four independent observability surfaces — an opt-in audit event log, a project-local analytics JSONL sink, an opt-in (default-off) trajectory JSONL sink that `record_agent_exit` fills with redacted, head/tail-truncated per-run reasoning trajectories, and an operator-deployed Postgres aggregation target (with a Streamlit dashboard and the `orchestrator/usage.py` parser that feeds it). None of them feed back into dispatch: workflow correctness keys off the pinned state JSON and the workflow label, so every surface is observation-only and safe to truncate, rotate, or delete.
+Four independent observability surfaces — an opt-in audit event log, a project-local analytics JSONL sink, an opt-in (default-off) trajectory JSONL sink that `record_agent_exit` fills with redacted, head/tail-truncated per-run reasoning trajectories, and an operator-deployed Postgres aggregation target (with a Streamlit dashboard and the `orchestrator/usage.py` parser that feeds it). The trajectory sink has its own separate Streamlit page — the file-backed trajectory viewer (`orchestrator/trajectory_dashboard.py` over the pure `orchestrator/trajectory_reader.py`), which reads the JSONL directly and needs no Postgres. None of them feed back into dispatch: workflow correctness keys off the pinned state JSON and the workflow label, so every surface is observation-only and safe to truncate, rotate, or delete.
 
 For the per-sink schema, event-kind tables, append / retention / rotation semantics, the analytics-DB compose layout, the sync / read-model / dashboard wiring, and the usage parser's cost-precedence rules, see [`observability.md`](observability.md).
 

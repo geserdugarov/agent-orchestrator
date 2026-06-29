@@ -119,7 +119,14 @@ uv sync --group dashboard
 uv run streamlit run orchestrator/dashboard.py
 ```
 
-See [`docs/observability.md`](docs/observability.md) for the event schemas, retention behavior, database setup, and dashboard details.
+To browse per-run agent reasoning trajectories, enable the opt-in trajectory sink (`TRAJECTORY_LOG_PATH`) and launch its dedicated viewer — a separate Streamlit page that reads the JSONL file directly, so it needs no Postgres or sync:
+
+```sh
+uv sync --group dashboard
+uv run streamlit run orchestrator/trajectory_dashboard.py
+```
+
+See [`docs/observability.md`](docs/observability.md) for the event schemas, retention behavior, database setup, dashboard details, and the trajectory viewer.
 
 ## Managing multiple repositories
 
