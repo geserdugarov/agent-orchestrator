@@ -109,7 +109,7 @@ Apply the `question` label to any open issue to get a read-only answer instead o
 
 ## Observability
 
-The workflow state lives on GitHub, but local logs explain what happened between label transitions. `logs/orchestrator.log` records process and per-issue handler activity, while `logs/analytics.jsonl` records stage transitions, handler timing, agent exits, token use, and cost estimates by default. Set `EVENT_LOG_PATH` when you also want an operator-owned audit JSONL file outside the repo.
+The workflow state lives on GitHub, but local logs explain what happened between label transitions. `logs/orchestrator.log` records process and per-issue handler activity, while `logs/analytics.jsonl` records stage transitions, handler timing, agent exits, token use, cost estimates, and a per-tick snapshot of each target repo's skill catalog by default. Set `EVENT_LOG_PATH` when you also want an operator-owned audit JSONL file outside the repo.
 
 For dashboard views, point `ANALYTICS_DB_URL` at the optional Postgres service, sync the JSONL sink, then launch Streamlit:
 
