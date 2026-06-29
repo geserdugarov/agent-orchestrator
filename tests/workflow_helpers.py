@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 from orchestrator import analytics, config, workflow
 from orchestrator.agents import AgentResult
 
+from tests.fakes import FakeGitHubClient, FakePR, FakePRRef, make_issue
+
 
 def _iso_hours_ago(hours: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(
@@ -249,3 +251,104 @@ class _PatchedWorkflowMixin:
             callable_()
 
         return workflow_mocks
+
+
+class _ResolvingConflictMixin(_PatchedWorkflowMixin):
+    """Shared seed / merge-run / baseline-hash helpers for the
+    `_handle_resolving_conflict` scenario tests split across the focused
+    `tests/test_workflow_conflicts_*.py` modules. Every scenario drives issue
+    200 / PR 800 on branch `orchestrator/.../issue-200` with `_git`,
+    `_rebase_base_into_worktree`, and the push helper mocked so no shell-out
+    happens.
+    """
+
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-200"
+    PR_NUMBER = 800
+
+    def _seed(
+        self,
+        *,
+        merge_succeeded: bool = True,
+        conflicted_files=(),
+        head_shas=("before", "after"),
+        push_branch: bool = True,
+        run_agent_result=None,
+        pr_state: str = "open",
+        pr_merged: bool = False,
+        extra_state=None,
+    ):
+        gh = FakeGitHubClient()
+        issue = make_issue(200, label="resolving_conflict")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=False, check_state="success",
+            merged=pr_merged, state=pr_state,
+        )
+        gh.add_pr(pr)
+        state = dict(
+            pr_number=self.PR_NUMBER, branch=self.BRANCH,
+            dev_agent="claude", dev_session_id="dev-sess",
+            review_round=2,
+            conflict_round=0,
+        )
+        if extra_state:
+            state.update(extra_state)
+        gh.seed_state(200, **state)
+        return gh, issue, pr
+
+    def _run_with_merge(
+        self,
+        gh,
+        issue,
+        *,
+        merge_succeeded: bool,
+        conflicted_files=(),
+        head_shas=("before", "after"),
+        push_branch: bool = True,
+        run_agent_result=None,
+        fetch_returncode: int = 0,
+        dirty_files=(),
+        rebase_in_progress: bool = False,
+    ):
+        agent = run_agent_result or _agent(
+            session_id="dev-sess", last_message="resolved",
+        )
+        merge_mock = MagicMock(
+            return_value=(merge_succeeded, list(conflicted_files))
+        )
+        fetch_result = MagicMock(returncode=fetch_returncode, stdout="", stderr="")
+        # `_git_hardened` is what the fetch in `_handle_resolving_conflict`
+        # actually calls; `_git` covers the diff helper inside the merge
+        # wrapper. Both must be mocked or the real subprocess.run() fires
+        # on `_FAKE_WT`.
+        git_mock = MagicMock(return_value=fetch_result)
+        git_hardened_mock = MagicMock(return_value=fetch_result)
+        with patch.object(
+            workflow, "_rebase_base_into_worktree", merge_mock
+        ), patch.object(workflow, "_git", git_mock), patch.object(
+            workflow, "_git_hardened", git_hardened_mock,
+        ):
+            mocks = self._run(
+                lambda: workflow._handle_resolving_conflict(
+                    gh, _TEST_SPEC, issue,
+                ),
+                run_agent=agent,
+                push_branch=push_branch,
+                head_shas=head_shas,
+                dirty_files=dirty_files,
+                rebase_in_progress=rebase_in_progress,
+            )
+        return mocks, merge_mock, git_mock
+
+    def _seed_with_baseline_hash(self, gh, issue, **extra):
+        # Re-seed pinned state with a matching `user_content_hash` (plus any
+        # extra fields) so the drift detector's first-encounter persistence
+        # doesn't itself write -- these interrupted tests assert ZERO writes.
+        data = gh.pinned_data(200)
+        data.update(extra)
+        data["user_content_hash"] = workflow._compute_user_content_hash(
+            issue, set(),
+        )
+        gh.seed_state(200, **data)
