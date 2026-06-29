@@ -5,8 +5,9 @@
 The page renders several panels directly from HTML strings (rather
 than Plotly figures or `st.dataframe`) -- the topbar, filter meta,
 KPI strip, insight banners, the per-card header, the inline SVG
-sparkline / delta pill, the "Most expensive issues" table, and the
-"Skill trigger rates" table. Each builder takes read-model rows /
+sparkline / delta pill, the "Most expensive issues" table, the
+"Skill trigger rates" aggregate table, and the per-skill trigger
+matrix that sits under it. Each builder takes read-model rows /
 small dataclasses (plus, where a panel needs them, the formatter
 callables the caller passes from `dashboard_theme`) and returns a
 string the page drops into `st.markdown(..., unsafe_allow_html=True)`.
@@ -24,6 +25,7 @@ from typing import Optional, Sequence
 from orchestrator.analytics.read import (
     DataExtent,
     IssueSummaryRow,
+    SkillTriggerMatrixRow,
     SkillTriggerRateRow,
 )
 from orchestrator.dashboard_kpis import InsightBanner
@@ -385,6 +387,113 @@ def _skill_triggers_html(rows: Sequence[SkillTriggerRateRow]) -> str:
     return (
         css
         + '<table class="orch-skills">'
+        + head
+        + "<tbody>" + "".join(body) + "</tbody>"
+        + "</table>"
+    )
+
+
+# Shown in place of the matrix table when `get_skill_trigger_matrix`
+# returns no rows: no `repo_skill_catalog` records matched the window
+# AND no run fired a skill, so there is no catalog-backed matrix to
+# build. Names the `TRACK_SKILL_TRIGGERS` switch (the same caveat the
+# aggregate table carries) so a quiet panel is not mistaken for a bug.
+SKILL_MATRIX_EMPTY_MESSAGE = (
+    "No catalog-backed skill matrix for this window. The matrix pairs "
+    "each repo's offered-skill catalog with the skills its runs "
+    "triggered; it fills in once `TRACK_SKILL_TRIGGERS` (default off) "
+    "has recorded a repo skill catalog and at least one run's triggered "
+    "skills."
+)
+
+
+def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
+    """Render the per-skill trigger matrix to inline HTML.
+
+    The second table under the "Skill trigger rates" panel: one row per
+    `(repo, agent_role, backend, skill)` cell from
+    `get_skill_trigger_matrix`, with columns Repo / Role / Backend /
+    Skill / Runs with skill. Unlike the aggregate table above it, this
+    one folds in each repo's `repo_skill_catalog` so a skill the repo
+    offers but no cohort triggered surfaces as an explicit `0`
+    "Runs with skill" cell rather than a missing row; the zero cell is
+    muted so the offered-but-quiet skills read distinctly from the ones
+    that actually fired.
+
+    When the read model returns no rows -- no catalog records matched the
+    window and no run fired a skill -- there is no catalog-backed matrix
+    to build, so a clear fallback notice (`SKILL_MATRIX_EMPTY_MESSAGE`)
+    is rendered in place of the table. Rendered as inline HTML (matching
+    the aggregate table) so it reads cleanly even when every cell is `0`;
+    the local CSS sits inline next to the table and reuses the shared
+    `var(--orch-*)` theme tokens.
+    """
+    if not rows:
+        # Self-contained inline style so the notice still reads as muted
+        # body copy without the table's `<style>` block (skipped on this
+        # early-return path).
+        return (
+            '<div class="orch-skillmatrix-empty" '
+            'style="color:var(--orch-muted);font-size:12.5px;'
+            'padding:8px 2px">'
+            f"{html.escape(SKILL_MATRIX_EMPTY_MESSAGE)}"
+            "</div>"
+        )
+    css = """
+<style>
+  .orch-skillmatrix { width: 100%; border-collapse: collapse;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12.5px; }
+  .orch-skillmatrix thead th { color: var(--orch-muted);
+    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
+    text-transform: uppercase; text-align: left;
+    padding: 4px 6px 8px; border-bottom: 1px solid var(--orch-border); }
+  .orch-skillmatrix thead th.r { text-align: right; }
+  .orch-skillmatrix tbody td { padding: 8px 6px; vertical-align: middle;
+    border-bottom: 1px solid var(--orch-grid); }
+  .orch-skillmatrix tbody tr:last-child td { border-bottom: 0; }
+  .orch-skillmatrix td.r { text-align: right; font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums; color: var(--orch-ink); }
+  .orch-skillmatrix td.strong { font-weight: 600; color: var(--orch-ink); }
+  .orch-skillmatrix-zero { color: var(--orch-muted-soft); }
+</style>
+"""
+    body: list[str] = []
+    for r in rows:
+        repo = r.repo or "unknown"
+        role = r.agent_role or "unknown"
+        backend = r.backend or "unknown"
+        skill = r.skill or "unknown"
+        runs = int(r.runs)
+        # A `0` is an offered-but-never-triggered catalog cell -- mute it
+        # so the cells that actually fired stand out at a glance.
+        runs_html = (
+            '<span class="orch-skillmatrix-zero">0</span>'
+            if runs == 0
+            else str(runs)
+        )
+        body.append(
+            "<tr>"
+            f'<td class="strong">{html.escape(repo)}</td>'
+            f'<td>{html.escape(role)}</td>'
+            f'<td>{html.escape(backend)}</td>'
+            f'<td>{html.escape(skill)}</td>'
+            f'<td class="r">{runs_html}</td>'
+            "</tr>"
+        )
+    head = (
+        "<thead><tr>"
+        "<th>Repo</th>"
+        "<th>Role</th>"
+        "<th>Backend</th>"
+        "<th>Skill</th>"
+        '<th class="r">Runs with skill</th>'
+        "</tr></thead>"
+    )
+    return (
+        css
+        + '<table class="orch-skillmatrix">'
         + head
         + "<tbody>" + "".join(body) + "</tbody>"
         + "</table>"

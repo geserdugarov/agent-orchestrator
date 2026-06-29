@@ -849,6 +849,91 @@ class SkillTriggersHtmlTest(unittest.TestCase):
         self.assertNotIn("dev<&>", html_out)
 
 
+class SkillMatrixHtmlTest(unittest.TestCase):
+    """The per-skill trigger matrix is the second table under the
+    "Skill trigger rates" panel -- a hand-rolled HTML table over
+    `get_skill_trigger_matrix` with one row per
+    `(repo, agent_role, backend, skill)` cell. It folds each repo's
+    skill catalog into the observed triggers so an offered-but-never-
+    triggered skill renders as an explicit `0` cell, and degrades to a
+    clear fallback notice when no catalog-backed matrix can be built.
+    """
+
+    def _row(self, repo, skill, role, backend, runs):
+        from orchestrator.analytics.read import SkillTriggerMatrixRow
+        return SkillTriggerMatrixRow(
+            repo=repo,
+            skill=skill,
+            agent_role=role,
+            backend=backend,
+            runs=runs,
+        )
+
+    def test_columns_match_issue_spec(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("owner/repo", "develop", "developer", "claude", 2)]
+        html_out = dashboard._skill_matrix_html(rows)
+        for header in ("Repo", "Role", "Backend", "Skill",
+                       "Runs with skill"):
+            self.assertIn(f">{header}<", html_out)
+
+    def test_cell_values_rendered(self) -> None:
+        _, dashboard = _reload()
+        rows = [self._row("owner/repo", "develop", "developer", "claude", 3)]
+        html_out = dashboard._skill_matrix_html(rows)
+        # Full repo path (not just the trailing component) so two repos
+        # that share a short name stay distinct in a cross-repo matrix.
+        self.assertIn(">owner/repo<", html_out)
+        self.assertIn(">developer<", html_out)
+        self.assertIn(">claude<", html_out)
+        self.assertIn(">develop<", html_out)
+        self.assertIn(">3<", html_out)
+
+    def test_zero_count_row_renders_explicit_muted_zero(self) -> None:
+        # An offered-but-never-triggered catalog cell is a real
+        # "offered but quiet" signal, not a dropped row: it renders as
+        # an explicit (muted) 0 rather than going missing.
+        _, dashboard = _reload()
+        rows = [self._row("owner/repo", "review", "developer", "claude", 0)]
+        html_out = dashboard._skill_matrix_html(rows)
+        self.assertIn("orch-skillmatrix-zero", html_out)
+        self.assertIn(">0<", html_out)
+
+    def test_repo_role_backend_skill_html_escaped(self) -> None:
+        # Every free-text cell is HTML-escaped so a skill / repo / role
+        # name carrying markup cannot break out of the table.
+        _, dashboard = _reload()
+        rows = [self._row("o/<r&>", "sk<i>ll", "dev<&>", "back<end>", 1)]
+        html_out = dashboard._skill_matrix_html(rows)
+        self.assertIn("o/&lt;r&amp;&gt;", html_out)
+        self.assertIn("sk&lt;i&gt;ll", html_out)
+        self.assertIn("dev&lt;&amp;&gt;", html_out)
+        self.assertIn("back&lt;end&gt;", html_out)
+        self.assertNotIn("<r&>", html_out)
+        self.assertNotIn("dev<&>", html_out)
+
+    def test_empty_rows_render_fallback_not_table(self) -> None:
+        # No catalog records matched and no run fired a skill -> there
+        # is no catalog-backed matrix to build, so a clear fallback
+        # notice renders in place of the table.
+        _, dashboard = _reload()
+        html_out = dashboard._skill_matrix_html([])
+        self.assertIn("orch-skillmatrix-empty", html_out)
+        self.assertIn("No catalog-backed skill matrix", html_out)
+        # Names the opt-in switch so a quiet panel is not mistaken for a
+        # bug, mirroring the aggregate table's caption.
+        self.assertIn("TRACK_SKILL_TRIGGERS", html_out)
+        # The table markup itself is not emitted on the fallback path.
+        self.assertNotIn("<table", html_out)
+
+    def test_fallback_message_is_html_escaped(self) -> None:
+        # The fallback message is escaped before it lands in the div, so
+        # the apostrophe-carrying copy renders without breaking out.
+        _, dashboard = _reload()
+        html_out = dashboard._skill_matrix_html([])
+        self.assertIn("&#x27;", html_out)
+
+
 class DeltaPillTest(unittest.TestCase):
     """KPI delta pills must paint cost / token increases red and
     drops green. An earlier draft mapped `invert=True && value > 0`
@@ -1430,6 +1515,76 @@ class MainParallelFanOutWiringTest(unittest.TestCase):
         )
 
 
+class SkillMatrixWiringTest(unittest.TestCase):
+    """`main()` wires the per-skill trigger matrix through the same
+    cached / fan-out read pattern as every other widget and renders it
+    as the second table under the existing "Skill trigger rates"
+    aggregate. Streamlit is not installed for the default sync, so these
+    inspect `main()`'s source rather than driving it under Streamlit.
+    """
+
+    def _main_source(self) -> str:
+        import inspect
+        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        return inspect.getsource(dashboard.main)
+
+    def test_matrix_read_calls_matrix_read_model(self) -> None:
+        src = self._main_source()
+        self.assertIn("def _read_skill_trigger_matrix(", src)
+        self.assertIn("analytics_read.get_skill_trigger_matrix(", src)
+
+    def test_matrix_read_forwards_scoped_connection(self) -> None:
+        # Reuse the cached-read pattern: the scoped thread-local
+        # connection is forwarded to the read helper so the matrix read
+        # shares the open socket rather than opening its own.
+        src = self._main_source()
+        marker = "def _read_skill_trigger_matrix("
+        head = src.index(marker)
+        body = src[head:src.index("\n\n", head)]
+        self.assertIn("analytics_read.analytics_connection()", body)
+        self.assertIn("conn=conn", body)
+
+    def test_matrix_read_wrapper_takes_no_conn_in_cache_key(self) -> None:
+        # `conn` must not appear in the wrapper's parameter list -- it
+        # would land in the `st.cache_data` key and crash on the
+        # unhashable psycopg connection.
+        src = self._main_source()
+        marker = "def _read_skill_trigger_matrix("
+        head = src.index(marker)
+        tail = src.index("):", head)
+        self.assertNotIn(" conn", src[head:tail])
+
+    def test_matrix_dispatched_in_second_wave(self) -> None:
+        src = self._main_source()
+        self.assertIn(
+            '("skill_matrix_rows", '
+            "lambda: _read_skill_trigger_matrix(*key))",
+            src,
+        )
+
+    def test_matrix_rendered_as_second_table_under_aggregate(self) -> None:
+        # The matrix is the SECOND table: it renders after the aggregate
+        # `_skill_triggers_html(skill_rows)` table, inside the same card.
+        src = self._main_source()
+        agg = src.index("_skill_triggers_html(skill_rows)")
+        matrix = src.index("_skill_matrix_html(skill_matrix_rows)")
+        self.assertLess(agg, matrix)
+
+    def test_matrix_only_renders_when_aggregate_has_rows(self) -> None:
+        # The matrix render sits inside the `if skill_rows:` branch, so
+        # the empty-panel path still shows the single no-rows notice
+        # rather than a fallback for each table.
+        src = self._main_source()
+        branch = src.index("if skill_rows:")
+        else_branch = src.index(
+            'st.info("No `agent_exit` rows match the current filters.")',
+            branch,
+        )
+        matrix = src.index("_skill_matrix_html(skill_matrix_rows)")
+        self.assertLess(branch, matrix)
+        self.assertLess(matrix, else_branch)
+
+
 class StaticMetadataCacheTest(unittest.TestCase):
     """`get_data_extent` and `get_filter_options` (issue #379) carry
     no filter inputs and only change as `analytics.sync` ingests new
@@ -1551,13 +1706,13 @@ class StagedRenderTest(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertIn(f'"{name}"', wave)
-        # The remaining eight reads are NOT in the first wave -- they
+        # The remaining widget reads are NOT in the first wave -- they
         # would force the spinner to wait for the slowest widget read
         # before the KPI strip can paint.
         for name in (
             "stage_rows", "agent_exits", "issues_rows",
             "backend_rows", "repo_rows", "heatmap_rows",
-            "backend_daily_rows", "skill_rows",
+            "backend_daily_rows", "skill_rows", "skill_matrix_rows",
         ):
             with self.subTest(name=name):
                 self.assertNotIn(f'"{name}"', wave)
@@ -1568,7 +1723,7 @@ class StagedRenderTest(unittest.TestCase):
         for name in (
             "stage_rows", "agent_exits", "issues_rows",
             "backend_rows", "repo_rows", "heatmap_rows",
-            "backend_daily_rows", "skill_rows",
+            "backend_daily_rows", "skill_rows", "skill_matrix_rows",
         ):
             with self.subTest(name=name):
                 self.assertIn(f'"{name}"', wave)

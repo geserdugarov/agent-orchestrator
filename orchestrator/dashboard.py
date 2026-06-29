@@ -33,7 +33,8 @@ file stays the Streamlit orchestration layer:
   ordering, and the rework-share aggregation.
 - `orchestrator.dashboard_html` -- the inline-HTML builders for the
   topbar, filter meta, KPI strip, insight stack, per-card header,
-  sparkline / delta pill, and the issues / skill-trigger tables.
+  sparkline / delta pill, the issues / skill-trigger tables, and the
+  per-skill trigger matrix.
 
 Every helper is re-exported below under its original name so
 `streamlit run orchestrator/dashboard.py`, the historical
@@ -54,9 +55,10 @@ of blocking on every widget: the first wave covers `summary`,
 `prev_summary`, `ts_points`, `throughput_rows`, `review_round_rows`,
 and `cost_coverage_rows` (the only reads the topbar / filter meta
 / insight banners / KPI strip consume), and the second wave covers
-the eight remaining widget reads. Worker threads only return data
-back to the main render thread; every `st` / placeholder write
-runs on the main thread.
+the nine remaining widget reads (including the skill-trigger
+aggregate and the per-skill trigger matrix). Worker threads only
+return data back to the main render thread; every `st` / placeholder
+write runs on the main thread.
 
 Streamlit (and its transitive pandas), `plotly`, the chart builders
 in `orchestrator.dashboard_charts`, and the theme tokens in
@@ -105,6 +107,7 @@ from orchestrator.analytics.read import (  # noqa: E402
     CostCoverageRow as CostCoverageRow,
     DataExtent as DataExtent,
     IssueSummaryRow as IssueSummaryRow,
+    SkillTriggerMatrixRow as SkillTriggerMatrixRow,
     SkillTriggerRateRow as SkillTriggerRateRow,
     Summary as Summary,
 )
@@ -172,6 +175,7 @@ from orchestrator.dashboard_html import (  # noqa: E402
     _insights_html as _insights_html,
     _issues_table_html as _issues_table_html,
     _kpi_strip_html as _kpi_strip_html,
+    _skill_matrix_html as _skill_matrix_html,
     _skill_triggers_html as _skill_triggers_html,
     _sparkline_svg as _sparkline_svg,
     _topbar_html as _topbar_html,
@@ -620,6 +624,19 @@ def main() -> None:
                 conn=conn,
             )
 
+    @st.cache_data(show_spinner=False, ttl=60)
+    def _read_skill_trigger_matrix(
+        start, end, repo, events_t, stages_t, issue
+    ):
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_skill_trigger_matrix(
+                start=start, end=end, repo=repo,
+                events=list(events_t) if events_t is not None else None,
+                stages=list(stages_t) if stages_t is not None else None,
+                issue=issue,
+                conn=conn,
+            )
+
     # Read fan-out. Each entry is `(name, zero-arg callable)` so
     # `_fan_out_reads` can dispatch them across worker threads when
     # `DASHBOARD_PARALLEL_READS` is set; the sequential path stays in
@@ -633,7 +650,7 @@ def main() -> None:
     # carries the six reads those above-the-fold widgets consume
     # (`summary`, `prev_summary`, `ts_points`, `review_round_rows`,
     # `throughput_rows`, `cost_coverage_rows`); the second wave runs
-    # the eight remaining widget reads. Worker threads only return
+    # the nine remaining widget reads. Worker threads only return
     # data back to this render thread -- every `st.*` / placeholder
     # write happens on the main thread between waves.
     first_wave_readers: list[tuple[str, Callable[[], Any]]] = [
@@ -655,6 +672,7 @@ def main() -> None:
         )),
         ("backend_daily_rows", lambda: _read_backend_daily_tokens(*key)),
         ("skill_rows", lambda: _read_skill_trigger_rates(*key)),
+        ("skill_matrix_rows", lambda: _read_skill_trigger_matrix(*key)),
     ]
     total_reads = len(first_wave_readers) + len(second_wave_readers)
     parallel = dashboard_parallel_reads_enabled()
@@ -855,6 +873,7 @@ def main() -> None:
     heatmap_rows = results["heatmap_rows"]
     backend_daily_rows = results["backend_daily_rows"]
     skill_rows = results["skill_rows"]
+    skill_matrix_rows = results["skill_matrix_rows"]
 
     # ── Hero: Spend & token usage over time ──────────────────────
     with st.container(border=True):
@@ -1220,6 +1239,24 @@ def main() -> None:
                     "`record_agent_exit` records which skills each run "
                     "pulls."
                 )
+            # Second table: the per-skill x (repo, role, backend) trigger
+            # matrix. Folds each repo's skill catalog into the observed
+            # triggers so an offered-but-never-triggered skill surfaces
+            # as an explicit `0` cell; `_skill_matrix_html` renders a
+            # clear fallback notice in place of the table when the read
+            # model returns no catalog-backed matrix (no catalog records
+            # matched and no run fired a skill).
+            st.markdown(
+                '<p class="orch-card-sub" style="margin-top:14px">'
+                'Per-skill trigger matrix · which skills each '
+                'repo × role × backend cohort reaches for'
+                '</p>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                _skill_matrix_html(skill_matrix_rows),
+                unsafe_allow_html=True,
+            )
         else:
             st.info("No `agent_exit` rows match the current filters.")
 
