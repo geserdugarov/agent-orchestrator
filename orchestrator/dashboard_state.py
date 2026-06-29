@@ -46,7 +46,7 @@ PRESET_INLINE_LABELS: dict[str, str] = {
     PRESET_ALL: "All",
 }
 PRESET_DAYS: dict[str, int] = {PRESET_3D: 3, PRESET_7D: 7}
-DEFAULT_PRESET = PRESET_ALL
+DEFAULT_PRESET = PRESET_7D
 
 # UTC-offset selector for the "When agents run" heatmap and the
 # "Recent agent runs" table. `ts` is stored in UTC; the dashboard
