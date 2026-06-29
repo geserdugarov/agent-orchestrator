@@ -199,6 +199,8 @@ For an unattended deployment, drive the sync from `cron`. A typical entry runs h
 
 Thin, testable data-access layer over `analytics_events`, the `analytics_agent_runs` view, and the `analytics_daily_rollup` materialized view. The dashboard's window-bounded aggregates read from the rollup; per-row drill-downs and widgets the rollup cannot reconstruct exactly stay on the base table or the agent-run view. The module is Streamlit-free so the read path can be wired into any UI.
 
+The query helpers live in `read.py`; the supporting plumbing is split into focused sibling modules and re-exported through `read.py` so the public `orchestrator.analytics.read` import surface is unchanged — `read_models.py` (the frozen read-model dataclasses), `connection.py` (`AnalyticsReadError`, the deferred-psycopg connect factories, and the thread-local connection cache behind `analytics_connection` / `close_thread_local_connection`), `db_url.py` (`_resolve_db_url`), `query.py` (`_query`), and `predicates.py` (the window / filter `WHERE`-clause builders).
+
 | Function | Source | Returns |
 |---|---|---|
 | `get_summary` | rollup | date-bounded totals + per-event / per-stage breakdowns + token / cost sums, plus `total_agent_runs` / `failed_agent_runs` / `timed_out_agent_runs` scoped to `event='agent_exit'`. `distinct_issues` is `COUNT(DISTINCT (repo, issue))`. Single round-trip via `WITH win AS (...)` CTE with three `UNION ALL` branches tagged by a `kind` discriminator. |
