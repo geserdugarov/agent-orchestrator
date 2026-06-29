@@ -48,11 +48,21 @@ def _reload(env: dict[str, str] | None = None):
     `config` is popped too so the analytics package's
     `from .. import config` reloads against the patched env (it
     still reads `LOG_DIR` for the JSONL default).
+
+    The extracted helper modules (`dashboard_state` / `dashboard_kpis`
+    / `dashboard_html`) are popped alongside `dashboard` so the
+    re-imported facade re-binds them too -- otherwise a cached
+    `dashboard_state` would keep its pre-patch `from orchestrator
+    import analytics` reference and its module-import parse of
+    `DASHBOARD_PARALLEL_READS`, defeating the hermetic reload.
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
         sys.modules.pop("orchestrator.analytics.read", None)
         sys.modules.pop("orchestrator.analytics", None)
+        sys.modules.pop("orchestrator.dashboard_state", None)
+        sys.modules.pop("orchestrator.dashboard_kpis", None)
+        sys.modules.pop("orchestrator.dashboard_html", None)
         sys.modules.pop("orchestrator.dashboard", None)
         import orchestrator.analytics as analytics
         import orchestrator.dashboard as dashboard
@@ -1170,6 +1180,30 @@ class DashboardParallelReadsEnabledTest(unittest.TestCase):
             {"ANALYTICS_DB_URL": "", "DASHBOARD_PARALLEL_READS": "  on  "}
         )
         self.assertTrue(dashboard.dashboard_parallel_reads_enabled())
+
+
+class FacadeReExportCompatibilityTest(unittest.TestCase):
+    """The helper split moved the pure logic into `dashboard_state` /
+    `dashboard_kpis` / `dashboard_html`, but `orchestrator.dashboard`
+    must keep re-exporting every name that lived on it on `origin/main`
+    -- including the module-private `_parse_parallel_reads_flag` /
+    `_TRUTHY` the parallel-reads knob is parsed through -- so
+    `from orchestrator.dashboard import <helper>` keeps resolving
+    against the facade rather than raising `ImportError`.
+    """
+
+    def test_parallel_reads_internals_reexported_from_state(self) -> None:
+        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        import orchestrator.dashboard_state as state
+        # Each facade name is the very object the extracted module
+        # defines -- a genuine re-export, not a shadow copy.
+        self.assertIs(
+            dashboard._parse_parallel_reads_flag,
+            state._parse_parallel_reads_flag,
+        )
+        self.assertIs(dashboard._TRUTHY, state._TRUTHY)
+        # And the re-exported helper still works through the alias.
+        self.assertIsInstance(dashboard._parse_parallel_reads_flag(), bool)
 
 
 class FanOutReadsSequentialTest(unittest.TestCase):

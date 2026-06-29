@@ -1,6 +1,6 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Streamlit analytics dashboard.
+"""Streamlit analytics dashboard -- page orchestration.
 
 Renders the redesigned `Orchestrator Analytics` page (#341) over the
 read model populated by `orchestrator.analytics.sync`. The layout
@@ -20,6 +20,25 @@ mirrors the standalone HTML mock the issue ships:
   weekday-by-hour activity heatmap.
 - Per-issue drill-down at the bottom when an issue number is
   entered in the sidebar.
+
+The pure helpers behind this page live in focused modules so this
+file stays the Streamlit orchestration layer:
+
+- `orchestrator.dashboard_state` -- date / window math, preset and
+  timezone vocabulary, stage-filter / cache-key resolution, the
+  issue-number parser, the DB-config banner check, and the read
+  fan-out switch.
+- `orchestrator.dashboard_kpis` -- KPI delta math, the computed
+  insight banners, the reliability-tile triples, the top-cost issue
+  ordering, and the rework-share aggregation.
+- `orchestrator.dashboard_html` -- the inline-HTML builders for the
+  topbar, filter meta, KPI strip, insight stack, per-card header,
+  sparkline / delta pill, and the issues / skill-trigger tables.
+
+Every helper is re-exported below under its original name so
+`streamlit run orchestrator/dashboard.py`, the historical
+`orchestrator.dashboard.*` helper surface, and the existing dashboard
+tests keep working without touching the extracted modules.
 
 Reads go through `orchestrator.analytics.read` (which already
 handles unset DB, connection errors, and lazy psycopg import) and
@@ -46,9 +65,9 @@ so the polling tick's `orchestrator.*` import surface stays free of
 the dashboard's dependency footprint. The module loads without
 `streamlit` or `plotly` installed -- only `streamlit run
 orchestrator/dashboard.py` (or a direct `main()` call) materializes
-the imports. Tests for the pure helpers below do not need Streamlit
-installed; the lazy-import invariant is asserted by
-`tests/test_dashboard.py`.
+the imports. The extracted helper modules are import-light (stdlib
+plus `orchestrator.analytics`) so they preserve this invariant; it
+is asserted by `tests/test_dashboard.py`.
 
 Run:
     uv sync --group dashboard
@@ -58,10 +77,8 @@ from __future__ import annotations
 
 import html
 import logging
-import os
 import sys
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Optional, Sequence
@@ -74,7 +91,7 @@ from typing import Any, Callable, Optional, Sequence
 # no known parent package` before any Streamlit code can render and a
 # bare `from orchestrator import ...` would fail too. Adding the repo
 # root (parent of `orchestrator/`) to `sys.path` makes the absolute
-# import below work in both contexts: script-launched and package-
+# imports below work in both contexts: script-launched and package-
 # imported (`import orchestrator.dashboard`). The insert is idempotent
 # -- in the package case the entry is already present and the check
 # is a no-op.
@@ -82,21 +99,87 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from orchestrator import analytics  # noqa: E402
+from orchestrator import analytics as analytics  # noqa: E402
 from orchestrator.analytics import read as analytics_read  # noqa: E402
 from orchestrator.analytics.read import (  # noqa: E402
-    CostCoverageRow,
-    DataExtent,
-    IssueSummaryRow,
-    SkillTriggerRateRow,
-    Summary,
+    CostCoverageRow as CostCoverageRow,
+    DataExtent as DataExtent,
+    IssueSummaryRow as IssueSummaryRow,
+    SkillTriggerRateRow as SkillTriggerRateRow,
+    Summary as Summary,
+)
+
+# Compatibility re-exports. The pure helpers moved to the focused
+# `dashboard_state` / `dashboard_kpis` / `dashboard_html` modules; we
+# import each one back under its original name so `main()` calls them
+# as bare names, the historical `orchestrator.dashboard.*` surface
+# stays intact, and the existing tests (which reach the helpers via
+# `dashboard.<name>` and inspect `main()`'s source) keep working. The
+# redundant `as` alias marks each as an intentional re-export so ruff
+# does not flag the unused import; the E402 suppression covers the
+# post-`sys.path` placement the script-launch fix forces.
+from orchestrator.dashboard_state import (  # noqa: E402
+    DASHBOARD_PARALLEL_READS as DASHBOARD_PARALLEL_READS,
+    DEFAULT_PRESET as DEFAULT_PRESET,
+    DEFAULT_TZ_OFFSET_HOURS as DEFAULT_TZ_OFFSET_HOURS,
+    DEFAULT_WINDOW_DAYS as DEFAULT_WINDOW_DAYS,
+    DateWindow as DateWindow,
+    PARALLEL_READS_ENV as PARALLEL_READS_ENV,
+    PARALLEL_READS_MAX_WORKERS as PARALLEL_READS_MAX_WORKERS,
+    PRESET_3D as PRESET_3D,
+    PRESET_7D as PRESET_7D,
+    PRESET_ALL as PRESET_ALL,
+    PRESET_CUSTOM as PRESET_CUSTOM,
+    PRESET_DAYS as PRESET_DAYS,
+    PRESET_INLINE_LABELS as PRESET_INLINE_LABELS,
+    PRESET_LABELS as PRESET_LABELS,
+    PRESET_OPTIONS as PRESET_OPTIONS,
+    TZ_OFFSET_OPTIONS as TZ_OFFSET_OPTIONS,
+    UNCONFIGURED_DB_MESSAGE as UNCONFIGURED_DB_MESSAGE,
+    _TRUTHY as _TRUTHY,
+    _extent_dates as _extent_dates,
+    _fan_out_reads as _fan_out_reads,
+    _parse_parallel_reads_flag as _parse_parallel_reads_flag,
+    cache_key as cache_key,
+    dashboard_parallel_reads_enabled as dashboard_parallel_reads_enabled,
+    db_unconfigured_message as db_unconfigured_message,
+    default_date_range as default_date_range,
+    format_tz_offset as format_tz_offset,
+    parse_issue_number as parse_issue_number,
+    preset_window as preset_window,
+    previous_window as previous_window,
+    resolve_stage_filter as resolve_stage_filter,
+    shift_ts as shift_ts,
+    to_window as to_window,
+)
+from orchestrator.dashboard_kpis import (  # noqa: E402
+    DEFAULT_EXPENSIVE_LIMIT as DEFAULT_EXPENSIVE_LIMIT,
+    FAILURE_RATE_BANNER_THRESHOLD as FAILURE_RATE_BANNER_THRESHOLD,
+    REWORK_BUCKETS as REWORK_BUCKETS,
+    UNPRICED_COST_SOURCES as UNPRICED_COST_SOURCES,
+    UNPRICED_COVERAGE_THRESHOLD as UNPRICED_COVERAGE_THRESHOLD,
+    InsightBanner as InsightBanner,
+    compute_insights as compute_insights,
+    kpi_delta as kpi_delta,
+    reliability_tile_data as reliability_tile_data,
+    rework_totals as rework_totals,
+    top_expensive_issues as top_expensive_issues,
+)
+from orchestrator.dashboard_html import (  # noqa: E402
+    _card_header_html as _card_header_html,
+    _delta_pill as _delta_pill,
+    _filter_meta_html as _filter_meta_html,
+    _insights_html as _insights_html,
+    _issues_table_html as _issues_table_html,
+    _kpi_strip_html as _kpi_strip_html,
+    _skill_triggers_html as _skill_triggers_html,
+    _sparkline_svg as _sparkline_svg,
+    _topbar_html as _topbar_html,
 )
 
 log = logging.getLogger(__name__)
 
-DEFAULT_WINDOW_DAYS = 7
 DEFAULT_RECENT_AGENT_EXITS = 100
-DEFAULT_EXPENSIVE_LIMIT = 8
 
 # TTL for the data-extent / filter-option reads (`get_data_extent`,
 # `get_filter_options`). These reads carry no filter inputs and
@@ -115,77 +198,6 @@ LOADING_INDICATOR_MESSAGE = "Loading analytics…"
 # on hover for every chart on the page otherwise.
 PLOTLY_CONFIG: dict[str, Any] = {"displayModeBar": False}
 
-# Sidebar window presets. `Custom` keeps the two-date picker so the
-# operator can pin an arbitrary window inside the data extent. The
-# redesigned topbar exposes the presets inline (`3D` / `7D` / `All`)
-# matching the standalone mock; `Custom` stays available in the
-# sidebar so the existing per-issue drill-down workflow still works.
-PRESET_3D = "3d"
-PRESET_7D = "7d"
-PRESET_ALL = "All"
-PRESET_CUSTOM = "Custom"
-PRESET_OPTIONS: tuple[str, ...] = (PRESET_3D, PRESET_7D, PRESET_ALL, PRESET_CUSTOM)
-PRESET_LABELS: dict[str, str] = {
-    PRESET_3D: "Last 3 days",
-    PRESET_7D: "Last 7 days",
-    PRESET_ALL: "All time",
-    PRESET_CUSTOM: "Custom range",
-}
-PRESET_INLINE_LABELS: dict[str, str] = {
-    PRESET_3D: "3D",
-    PRESET_7D: "7D",
-    PRESET_ALL: "All",
-}
-PRESET_DAYS: dict[str, int] = {PRESET_3D: 3, PRESET_7D: 7}
-DEFAULT_PRESET = PRESET_ALL
-
-# UTC-offset selector for the "When agents run" heatmap and the
-# "Recent agent runs" table. `ts` is stored in UTC; the dashboard
-# applies the offset at read time (heatmap bucketing) and at
-# display time (recent-runs table). Range -12 .. +14 covers every
-# IANA-style fixed offset in use; default `+7` matches the
-# operator's home timezone.
-TZ_OFFSET_OPTIONS: tuple[int, ...] = tuple(range(-12, 15))
-DEFAULT_TZ_OFFSET_HOURS = 7
-
-# Insight thresholds.
-FAILURE_RATE_BANNER_THRESHOLD = 0.10
-UNPRICED_COVERAGE_THRESHOLD = 0.10
-UNPRICED_COST_SOURCES: frozenset[str] = frozenset({"unknown-price", "unknown"})
-# Bucket strings the review-round breakdown emits whose runs are
-# "rework" (i.e. happened after the initial pass). Used to compute the
-# rework share KPI. `get_review_round_breakdown` keeps rounds 3, 4 and
-# 5 separate (only 6+ is grouped), so every post-initial round is
-# listed explicitly here.
-REWORK_BUCKETS: frozenset[str] = frozenset(
-    {"1", "2", "3", "4", "5", "6+"}
-)
-
-# Parallel read fan-out for `main()`'s 14 independent widget reads.
-# Opt-in via `DASHBOARD_PARALLEL_READS` so the new path can be A/B'd
-# against the sequential baseline. Default off: the reads keep running
-# one-at-a-time on the Streamlit render thread unless the operator
-# flips this on. Truthy spellings follow the same vocabulary as other
-# boolean knobs in the codebase (`DECOMPOSE` etc.). Parsed at module
-# import like `ANALYTICS_DB_URL`, so a Streamlit restart picks up the
-# change without per-render env reads.
-PARALLEL_READS_ENV = "DASHBOARD_PARALLEL_READS"
-PARALLEL_READS_MAX_WORKERS = 8
-_TRUTHY = frozenset({"1", "true", "on", "yes"})
-
-
-def _parse_parallel_reads_flag() -> bool:
-    raw = os.environ.get(PARALLEL_READS_ENV, "").strip().lower()
-    return raw in _TRUTHY
-
-
-DASHBOARD_PARALLEL_READS: bool = _parse_parallel_reads_flag()
-
-UNCONFIGURED_DB_MESSAGE = (
-    "`ANALYTICS_DB_URL` is not configured. Set it in your environment "
-    "(see `.env.example.advanced` and `docs/configuration.md`) and "
-    "reload the dashboard to view analytics."
-)
 NO_DATA_MESSAGE = (
     "No analytics events have been recorded yet. Run "
     "`uv run python -m orchestrator.analytics.sync` after some "
@@ -195,800 +207,6 @@ EMPTY_WINDOW_MESSAGE = (
     "No analytics events match the current filters. Broaden the window "
     "or clear a filter to see activity."
 )
-
-
-@dataclass(frozen=True)
-class DateWindow:
-    """Inclusive-start, exclusive-end datetime window."""
-
-    start: datetime
-    end: datetime
-
-
-@dataclass(frozen=True)
-class InsightBanner:
-    """A single banner line displayed at the top of the page.
-
-    `severity` is one of `success` / `info` / `warning` / `error`;
-    the dashboard renders each through the matching coloured insight
-    block. Keeping severity a plain string (rather than an Enum)
-    means the helpers stay importable without Streamlit and the
-    tests can compare against string literals.
-    """
-
-    severity: str
-    message: str
-
-
-def default_date_range(
-    *,
-    today: Optional[date] = None,
-    days: int = DEFAULT_WINDOW_DAYS,
-) -> tuple[date, date]:
-    """Default `[start, end]` inclusive date range for the sidebar.
-
-    Kept for callers and tests that pre-dated the data-extent-bounded
-    preset selector. `today` injection keeps this testable; the
-    production path relies on `date.today()`. `days` is clamped at 1
-    so `days=0` (an explicit "today only" choice) still returns
-    `(today, today)` rather than a reversed range.
-    """
-    end = today or date.today()
-    start = end - timedelta(days=max(days - 1, 0))
-    return start, end
-
-
-def to_window(start_date: date, end_date: date) -> DateWindow:
-    """Convert inclusive `[start_date, end_date]` to a `DateWindow`."""
-    if end_date < start_date:
-        start_date, end_date = end_date, start_date
-    start_dt = datetime.combine(start_date, time.min, tzinfo=timezone.utc)
-    end_dt = datetime.combine(
-        end_date + timedelta(days=1), time.min, tzinfo=timezone.utc
-    )
-    return DateWindow(start=start_dt, end=end_dt)
-
-
-def _extent_dates(extent: DataExtent) -> Optional[tuple[date, date]]:
-    """`(min_date, max_date)` from a data extent, or `None` when empty."""
-    if extent.min_ts is None or extent.max_ts is None:
-        return None
-    return extent.min_ts.date(), extent.max_ts.date()
-
-
-def preset_window(
-    preset: str, extent: DataExtent
-) -> Optional[DateWindow]:
-    """Resolve a sidebar preset into a data-extent-bounded `DateWindow`.
-
-    The presets are anchored at the data extent's max date (not
-    today) so a freshly-deployed Postgres whose latest event is days
-    old still surfaces the last days of recorded activity. Returns
-    `None` when the extent is empty (no events yet) or `preset` is
-    `Custom` (the caller renders a date-range picker instead). An
-    unknown preset string also returns `None`.
-
-    For `3d` / `7d`, the start date is clamped to
-    `max(extent.min_date, max_date - (n - 1))` so short data histories
-    do not produce windows reaching before the first recorded event.
-    """
-    bounds = _extent_dates(extent)
-    if bounds is None:
-        return None
-    min_d, max_d = bounds
-    if preset == PRESET_ALL:
-        return to_window(min_d, max_d)
-    days = PRESET_DAYS.get(preset)
-    if days is None:
-        return None
-    start_d = max(max_d - timedelta(days=days - 1), min_d)
-    return to_window(start_d, max_d)
-
-
-def previous_window(window: DateWindow) -> DateWindow:
-    """Window of the same length ending at `window.start`."""
-    length = window.end - window.start
-    return DateWindow(start=window.start - length, end=window.start)
-
-
-def kpi_delta(
-    current: float, previous: float
-) -> Optional[float]:
-    """Relative change vs the previous window.
-
-    Returns `(current - previous) / previous` (e.g. `0.25` = +25%) or
-    `None` when `previous` is zero / negative so the dashboard hides
-    the delta indicator rather than rendering an infinity. Negative
-    `previous` values are not expected in this column set (counts,
-    spend, tokens are all non-negative) but the guard keeps the
-    helper safe to call from anywhere.
-    """
-    if previous <= 0:
-        return None
-    return (current - previous) / previous
-
-
-def format_tz_offset(hours: int) -> str:
-    """Render an integer UTC offset as `UTC` / `UTC+N` / `UTC-N`."""
-    if hours == 0:
-        return "UTC"
-    sign = "+" if hours > 0 else "-"
-    return f"UTC{sign}{abs(int(hours))}"
-
-
-def shift_ts(ts: Any, offset: timedelta) -> Any:
-    """Return `ts` shifted by `offset` so the displayed wall-clock
-    reflects the selected UTC offset; `None` passes through.
-
-    The orchestrator persists `ts` in UTC; the dashboard adds the
-    operator's selected offset before display so the "Recent agent
-    runs" table reads in the same timezone the heatmap was bucketed
-    in. Naive datetimes (no tzinfo) are shifted in place; aware
-    datetimes are converted via `astimezone(timezone(offset))` so the
-    rendered string still shows the wall-clock for the selected
-    offset rather than the original UTC reading.
-    """
-    if ts is None:
-        return None
-    if isinstance(ts, datetime):
-        if ts.tzinfo is None:
-            return ts + offset
-        return ts.astimezone(timezone(offset))
-    return ts
-
-
-def parse_issue_number(raw: str) -> Optional[int]:
-    """Lenient `#123` / `123` parser for the drill-down input."""
-    if not raw:
-        return None
-    s = raw.strip().lstrip("#").strip()
-    if not s:
-        return None
-    try:
-        n = int(s)
-    except ValueError:
-        return None
-    return n if n > 0 else None
-
-
-def db_unconfigured_message() -> Optional[str]:
-    """Single source of truth for the "no DB configured" banner."""
-    if not analytics.ANALYTICS_DB_URL:
-        return UNCONFIGURED_DB_MESSAGE
-    return None
-
-
-def dashboard_parallel_reads_enabled() -> bool:
-    """True when `DASHBOARD_PARALLEL_READS` is set to a truthy sentinel.
-
-    Default OFF -- the parallel fan-out is opt-in so operators can A/B
-    against the sequential baseline before flipping it on. Truthy
-    values: `1` / `true` / `on` / `yes` (case-insensitive). Anything
-    else (including empty / unset) keeps the sequential path. Reads
-    the module-level `DASHBOARD_PARALLEL_READS` so tests can patch the
-    attribute directly (mirrors how `analytics.ANALYTICS_DB_URL` is
-    exposed).
-    """
-    return DASHBOARD_PARALLEL_READS
-
-
-def _fan_out_reads(
-    readers: Sequence[tuple[str, Callable[[], Any]]],
-    *,
-    parallel: bool,
-    max_workers: int = PARALLEL_READS_MAX_WORKERS,
-) -> dict[str, Any]:
-    """Run each `(name, callable)` reader and return `{name: result}`.
-
-    `parallel=False` runs readers one-at-a-time in submission order on
-    the calling thread -- the sequential baseline. The thread-local
-    `analytics_connection` keeps the single psycopg socket warm across
-    all 14 reads.
-
-    `parallel=True` dispatches across a `ThreadPoolExecutor` capped at
-    `max_workers`. Each worker thread opens its own thread-local
-    analytics connection on first use and reuses it across whatever
-    subset of the readers lands on it -- `psycopg.Connection` is not
-    thread-safe for concurrent use, so sharing one socket across
-    workers would corrupt the wire protocol; the per-thread cache in
-    `analytics.read.analytics_connection` keeps each worker's socket
-    isolated. The wall-clock collapses to roughly the slowest reader
-    in a wave of `max_workers` plus a small executor overhead.
-
-    Any exception raised by a reader propagates verbatim from the
-    first failing future (matching the sequential path's "stop at the
-    first error" shape) so the caller can surface a single
-    user-friendly `AnalyticsReadError` message. Results are returned
-    in `readers` submission order so the call sites can unpack them
-    without caring about completion order.
-    """
-    if not parallel:
-        return {name: fn() for name, fn in readers}
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [(name, pool.submit(fn)) for name, fn in readers]
-        return {name: fut.result() for name, fut in futures}
-
-
-def resolve_stage_filter(
-    selected: Sequence[str],
-    available: Sequence[str],
-) -> Optional[list[str]]:
-    """Resolve the sidebar stage multiselect into a read-model filter.
-
-    See module docstring of `orchestrator.analytics.read` for the
-    tri-state contract (`None` = no filter, `[]` = FALSE, non-empty
-    = `IN (...)`). The default "all selected" must collapse to `None`
-    so NULL-stage rows are not silently excluded.
-    """
-    if not available:
-        return None
-    if set(selected) == set(available):
-        return None
-    return list(selected)
-
-
-def cache_key(
-    window: DateWindow,
-    repo: Optional[str],
-    events: Optional[Sequence[str]],
-    stages: Optional[Sequence[str]],
-    issue: Optional[int],
-) -> tuple:
-    """Hashable cache key for the dashboard's window-scoped reads."""
-    events_t = tuple(events) if events is not None else None
-    stages_t = tuple(stages) if stages is not None else None
-    return (window.start, window.end, repo, events_t, stages_t, issue)
-
-
-def compute_insights(
-    summary: Summary,
-    *,
-    cost_coverage_rows: Sequence[CostCoverageRow] = (),
-) -> list[InsightBanner]:
-    """Banner lines surfaced at the top of the redesigned page.
-
-    Each banner is a single observation the operator should act on:
-
-    - Failure rate exceeds `FAILURE_RATE_BANNER_THRESHOLD`: agent
-      runs are exiting non-zero more than 10 % of the time.
-    - Unpriced cost coverage exceeds `UNPRICED_COVERAGE_THRESHOLD`:
-      the pricing table in `orchestrator.usage` is missing SKUs the
-      parser is seeing in the wild.
-
-    The helper returns an empty list when nothing crosses a
-    threshold, so the caller can branch on `if banners:` for the
-    section header.
-    """
-    banners: list[InsightBanner] = []
-    if summary.total_agent_runs > 0:
-        rate = summary.failed_agent_runs / summary.total_agent_runs
-        if rate >= FAILURE_RATE_BANNER_THRESHOLD:
-            banners.append(
-                InsightBanner(
-                    severity="error",
-                    message=(
-                        f"{summary.failed_agent_runs} of "
-                        f"{summary.total_agent_runs} agent runs failed "
-                        f"({rate * 100:.0f}%)."
-                    ),
-                )
-            )
-    if cost_coverage_rows:
-        total_runs = sum(r.runs for r in cost_coverage_rows)
-        unpriced = sum(
-            r.runs
-            for r in cost_coverage_rows
-            if r.cost_source in UNPRICED_COST_SOURCES
-        )
-        if total_runs > 0:
-            ratio = unpriced / total_runs
-            if ratio >= UNPRICED_COVERAGE_THRESHOLD:
-                banners.append(
-                    InsightBanner(
-                        severity="warning",
-                        message=(
-                            f"{unpriced} of {total_runs} agent runs lack "
-                            f"a priced cost ({ratio * 100:.0f}%) -- check "
-                            "the pricing table in `orchestrator.usage` "
-                            "for missing SKUs."
-                        ),
-                    )
-                )
-    return banners
-
-
-def reliability_tile_data(
-    summary: Summary,
-    *,
-    resolved: int = 0,
-    rejected: int = 0,
-) -> list[tuple[int, str, str]]:
-    """`(value, label, tone)` triples for the six reliability tiles.
-
-    Extracted from `main()` so the wiring stays testable without a
-    live Streamlit run: every tile sources its number from a
-    full-window aggregate on `Summary` (`total_agent_runs`,
-    `failed_agent_runs`, `timed_out_agent_runs`) so a long window
-    with more than `DEFAULT_RECENT_AGENT_EXITS` rows never silently
-    undercounts the tile -- earlier drafts read timeouts off
-    `get_recent_agent_exits` and missed any timeout outside the
-    latest 100 rows.
-
-    `resolved` / `rejected` are the per-day rollups summed by the
-    caller from `get_throughput_breakdown`; they default to zero so
-    callers that only care about the agent-run tiles can ignore the
-    throughput axis.
-
-    Tones (`"good"` / `"warn"` / `"bad"` / `""`) drive the CSS class
-    applied to the tile; the caller never has to recompute them.
-    """
-    total_runs = int(summary.total_agent_runs or 0)
-    failed = int(summary.failed_agent_runs or 0)
-    timed_out = int(summary.timed_out_agent_runs or 0)
-    success_pct = (
-        (1.0 - failed / total_runs) * 100
-        if total_runs > 0 else 0.0
-    )
-    return [
-        (total_runs, "Agent runs", ""),
-        (f"{success_pct:.0f}%", "Success rate", "good"),
-        (int(resolved), "Resolved", "good"),
-        (int(rejected), "Rejected", "warn" if rejected else ""),
-        (failed, "Failures", "warn" if failed else ""),
-        (timed_out, "Timeouts", "bad" if timed_out else ""),
-    ]
-
-
-def top_expensive_issues(
-    rows: Sequence[IssueSummaryRow],
-    *,
-    limit: int = DEFAULT_EXPENSIVE_LIMIT,
-) -> list[IssueSummaryRow]:
-    """Issues sorted by total cost desc for the "where did spend go" table."""
-    if limit <= 0:
-        return []
-
-    def _key(r: IssueSummaryRow) -> tuple:
-        cost = r.total_cost_usd if r.total_cost_usd is not None else -1.0
-        return (-cost, -int(r.event_count), r.repo, int(r.issue))
-
-    return sorted(rows, key=_key)[:limit]
-
-
-def rework_totals(
-    rows: Sequence[Any],
-) -> tuple[float, float]:
-    """Return `(total_cost, rework_cost)` across review-round buckets.
-
-    `rework_cost` sums the cost of every row whose `bucket` is in
-    `REWORK_BUCKETS` (i.e. review round >= 1). `total_cost` sums
-    every row, including the initial pass. Cost defaults to `0.0`
-    when the row predates the `total_cost_usd` column.
-    """
-    total = sum(
-        float(getattr(r, "total_cost_usd", 0.0) or 0.0) for r in rows
-    )
-    rework = sum(
-        float(getattr(r, "total_cost_usd", 0.0) or 0.0)
-        for r in rows
-        if r.bucket in REWORK_BUCKETS
-    )
-    return total, rework
-
-
-def _sparkline_svg(
-    values: Sequence[float], *, color: str, w: int = 96, h: int = 26
-) -> str:
-    """Inline SVG sparkline for KPI cards.
-
-    Renders a filled curve under the polyline; rendering is HTML-only
-    so the dashboard can drop it inside `st.markdown(..., unsafe_allow_html=True)`
-    without a chart round-trip. Empty / flat data renders an empty SVG
-    so the layout slot stays consistent across KPIs.
-    """
-    nums = [float(v or 0) for v in values]
-    if not nums or max(nums) == min(nums) == 0:
-        return f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}"></svg>'
-    lo, hi = min(nums), max(nums)
-    span = max(hi - lo, 1e-9)
-    pad = 2
-    step = (w - pad * 2) / max(len(nums) - 1, 1)
-
-    def y(v: float) -> float:
-        return pad + (1 - (v - lo) / span) * (h - pad * 2)
-
-    points = [(pad + i * step, y(v)) for i, v in enumerate(nums)]
-    poly = " ".join(f"{x:.1f},{yv:.1f}" for x, yv in points)
-    area_path = (
-        "M" + f"{points[0][0]:.1f},{h - pad:.1f}"
-        + " L" + " L".join(f"{x:.1f},{yv:.1f}" for x, yv in points)
-        + f" L{points[-1][0]:.1f},{h - pad:.1f} Z"
-    )
-    return (
-        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
-        f'style="display:block">'
-        f'<path d="{area_path}" fill="{color}" fill-opacity="0.18" />'
-        f'<polyline points="{poly}" fill="none" stroke="{color}" '
-        f'stroke-width="1.6" stroke-linecap="round" '
-        f'stroke-linejoin="round" />'
-        "</svg>"
-    )
-
-
-def _delta_pill(value: Optional[float], *, invert: bool = False) -> str:
-    """Render a KPI delta pill (▲/▼ NN.N%) as inline HTML.
-
-    Color convention -- ``.orch-delta.up`` is red, ``.orch-delta.down``
-    is green. With ``invert=False`` (the default) a rising value paints
-    red and a falling value paints green: this is the right convention
-    for cost / token KPIs where "up is bad". ``invert=True`` swaps the
-    coloring so positive growth paints green -- use it for KPIs where
-    "up is good" (e.g. issues resolved, success rate). The arrow always
-    follows the value's sign so the direction is unambiguous even at a
-    glance.
-
-    ``None`` (no prior window to compare against) and an exactly-zero
-    delta render nothing: a grey placeholder pill in the card corner
-    reads like a (non-functional) minimize control, so the KPI top row
-    simply drops the indicator when there is no movement to show.
-    """
-    if value is None or value == 0:
-        return ""
-    pct_str = f"{abs(value) * 100:.1f}%"
-    if value > 0:
-        cls = "up" if not invert else "down"
-        arrow = "▲"
-    else:
-        cls = "down" if not invert else "up"
-        arrow = "▼"
-    return f'<span class="orch-delta {cls}">{arrow} {pct_str}</span>'
-
-
-def _topbar_html(
-    *,
-    extent: DataExtent,
-    distinct_repos: int,
-    total_events: int,
-    spend_in_range: float,
-    fmt_money_exact,
-    fmt_num,
-) -> str:
-    """Render the page topbar block.
-
-    Mirrors the standalone mock's brand mark + h1 + spend pill.
-    """
-    if extent.min_ts is None or extent.max_ts is None:
-        range_label = "no data recorded yet"
-    else:
-        range_label = (
-            f"{extent.min_ts.date().isoformat()} → "
-            f"{extent.max_ts.date().isoformat()} available"
-        )
-    sub = (
-        f"{html.escape(range_label)} · "
-        f"{distinct_repos} repo{'s' if distinct_repos != 1 else ''} · "
-        f"{fmt_num(total_events)} events"
-    )
-    return (
-        '<div class="orch-topbar">'
-        '<div class="orch-brand">'
-        '<span class="orch-brand-mark">OA</span>'
-        '<div>'
-        '<h1>Orchestrator Analytics</h1>'
-        f'<p class="orch-sub">{sub}</p>'
-        '</div></div>'
-        '<div class="orch-spend">'
-        '<span class="label">Spend in range</span>'
-        f'<span class="value">{html.escape(fmt_money_exact(spend_in_range))}</span>'
-        '</div></div>'
-    )
-
-
-def _filter_meta_html(
-    *,
-    from_d: date, to_d: date, days: int, runs: int, fmt_num
-) -> str:
-    return (
-        '<div class="orch-filter-meta">'
-        f'{from_d.isoformat()} → {to_d.isoformat()} · '
-        f'{days} day{"s" if days != 1 else ""} · '
-        f'{fmt_num(runs)} runs'
-        '</div>'
-    )
-
-
-def _kpi_strip_html(kpis: Sequence[dict]) -> str:
-    """Render the four-tile KPI strip.
-
-    Each KPI dict carries `label`, `value`, `delta`, `sub`,
-    optionally `spark` (list of floats) and `spark_color`.
-    """
-    cells = []
-    for k in kpis:
-        delta_html = _delta_pill(
-            k.get("delta"), invert=k.get("invert", False)
-        )
-        spark_html = ""
-        if k.get("spark") is not None:
-            spark_html = _sparkline_svg(
-                k["spark"], color=k.get("spark_color", "#5b54e0")
-            )
-        cells.append(
-            '<div class="orch-kpi">'
-            '<div class="kpi-top">'
-            f'<span class="kpi-label">{html.escape(k["label"])}</span>'
-            f'{delta_html}'
-            '</div>'
-            f'<div class="kpi-value">{html.escape(str(k["value"]))}</div>'
-            '<div class="kpi-foot">'
-            f'<span>{html.escape(str(k.get("sub", "")))}</span>'
-            f'{spark_html}'
-            '</div></div>'
-        )
-    return '<div class="orch-kpis">' + "".join(cells) + '</div>'
-
-
-def _issues_table_html(rows: Sequence[IssueSummaryRow]) -> str:
-    """Render the "Most expensive issues" table to inline HTML.
-
-    Matches the standalone mock's columns -- Issue / Cost / Runs /
-    Review rds / Retries / Status -- and adds two representational
-    details `st.dataframe` cannot express:
-
-    - **In-row cost bars.** Each Issue cell carries a thin bar
-      under the label whose width is the issue's cost relative to
-      the most expensive issue in the panel. Lets the operator
-      eyeball the spread without comparing numbers row by row.
-    - **Clean / fail status pills.** The Status cell renders as a
-      colored pill (`clean` is green, `N fail` is red) instead of
-      flat text, matching the mock's pill treatment.
-
-    Local CSS goes inline next to the table so the rules survive a
-    future tweak without having to touch `dashboard_theme.PAGE_CSS`
-    -- the issues table is the only consumer.
-    """
-    max_cost = max(
-        (float(r.total_cost_usd or 0.0) for r in rows),
-        default=0.0,
-    ) or 1.0
-    css = """
-<style>
-  .orch-issues { width: 100%; border-collapse: collapse;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 12.5px; }
-  .orch-issues thead th { color: var(--orch-muted);
-    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
-    text-transform: uppercase; text-align: left;
-    padding: 4px 6px 8px; border-bottom: 1px solid var(--orch-border); }
-  .orch-issues thead th.r { text-align: right; }
-  .orch-issues tbody td { padding: 8px 6px; vertical-align: middle;
-    border-bottom: 1px solid var(--orch-grid); }
-  .orch-issues tbody tr:last-child td { border-bottom: 0; }
-  .orch-issues td.r { text-align: right; font-family:
-    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-variant-numeric: tabular-nums; color: var(--orch-ink); }
-  .orch-issues td.strong { font-weight: 600; }
-  .orch-issue-cell { display: flex; flex-direction: column;
-    gap: 4px; }
-  .orch-issue-name { color: var(--orch-ink); font-weight: 500; }
-  .orch-issue-num { color: var(--orch-muted); font-weight: 400;
-    margin-left: 2px; }
-  .orch-issue-bar { display: block; height: 4px; border-radius: 2px;
-    background: var(--orch-grid); overflow: hidden; }
-  .orch-issue-bar > span { display: block; height: 100%;
-    background: var(--orch-accent); border-radius: 2px; }
-  .orch-pill { display: inline-block; padding: 2px 9px;
-    border-radius: 999px; font-size: 11.5px; font-weight: 500;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-  .orch-pill.ok { background: rgba(26, 163, 154, 0.14);
-    color: var(--orch-success); }
-  .orch-pill.bad { background: rgba(217, 83, 74, 0.14);
-    color: var(--orch-danger); }
-  .orch-badge-warn { color: var(--orch-warn); font-weight: 600; }
-</style>
-"""
-    body: list[str] = []
-    for r in rows:
-        short = r.repo.split("/")[-1] if "/" in r.repo else r.repo
-        cost = float(r.total_cost_usd or 0.0)
-        bar_pct = (cost / max_cost * 100.0) if max_cost > 0 else 0.0
-        cost_text = (
-            f"${r.total_cost_usd:,.2f}"
-            if r.total_cost_usd is not None
-            else "—"
-        )
-        review_rounds = (
-            int(r.max_review_round)
-            if r.max_review_round is not None
-            else 0
-        )
-        retries = (
-            int(r.max_retry_count)
-            if r.max_retry_count is not None
-            else 0
-        )
-        failed = int(r.failed_agent_runs or 0)
-        if failed:
-            pill = f'<span class="orch-pill bad">{failed} fail</span>'
-        else:
-            pill = '<span class="orch-pill ok">clean</span>'
-        # High review-round counts get a warning color so the
-        # operator can spot rework-heavy issues without reading the
-        # number.
-        review_html = (
-            f'<span class="orch-badge-warn">{review_rounds}</span>'
-            if review_rounds >= 3
-            else str(review_rounds)
-        )
-        body.append(
-            "<tr>"
-            "<td>"
-            '<div class="orch-issue-cell">'
-            f'<span><span class="orch-issue-name">{html.escape(short)}</span>'
-            f' <span class="orch-issue-num">#{int(r.issue)}</span></span>'
-            f'<span class="orch-issue-bar"><span style="width:{bar_pct:.1f}%">'
-            "</span></span>"
-            "</div>"
-            "</td>"
-            f'<td class="r strong">{html.escape(cost_text)}</td>'
-            f'<td class="r">{int(r.agent_exits or 0)}</td>'
-            f'<td class="r">{review_html}</td>'
-            f'<td class="r">{retries}</td>'
-            f'<td class="r">{pill}</td>'
-            "</tr>"
-        )
-    head = (
-        "<thead><tr>"
-        "<th>Issue</th>"
-        '<th class="r">Cost</th>'
-        '<th class="r">Runs</th>'
-        '<th class="r">Review rds</th>'
-        '<th class="r">Retries</th>'
-        '<th class="r">Status</th>'
-        "</tr></thead>"
-    )
-    return (
-        css
-        + '<table class="orch-issues">'
-        + head
-        + "<tbody>" + "".join(body) + "</tbody>"
-        + "</table>"
-    )
-
-
-def _skill_triggers_html(rows: Sequence[SkillTriggerRateRow]) -> str:
-    """Render the "Skill trigger rates" table to inline HTML.
-
-    One row per `(agent_role, backend)` group in the order the read
-    model returned them (skill-active groups first). Each Trigger-rate
-    cell carries a thin bar whose width is the group's rate relative to
-    the busiest group, so the operator can eyeball which roles actually
-    pull their skills without comparing percentages row by row.
-
-    Rendered as inline HTML (matching the backend-efficiency cards and
-    the cost-coverage bar) rather than a Plotly chart: the data is
-    small and categorical, and the panel has to read cleanly even when
-    every rate is `0%` (the `TRACK_SKILL_TRIGGERS=off` baseline). The
-    local CSS sits inline next to the table -- the skill panel is its
-    only consumer -- and reuses the shared `var(--orch-*)` theme tokens.
-    """
-    max_rate = max((r.rate for r in rows), default=0.0) or 1.0
-    css = """
-<style>
-  .orch-skills { width: 100%; border-collapse: collapse;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 12.5px; }
-  .orch-skills thead th { color: var(--orch-muted);
-    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
-    text-transform: uppercase; text-align: left;
-    padding: 4px 6px 8px; border-bottom: 1px solid var(--orch-border); }
-  .orch-skills thead th.r { text-align: right; }
-  .orch-skills tbody td { padding: 8px 6px; vertical-align: middle;
-    border-bottom: 1px solid var(--orch-grid); }
-  .orch-skills tbody tr:last-child td { border-bottom: 0; }
-  .orch-skills td.r { text-align: right; font-family:
-    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-variant-numeric: tabular-nums; color: var(--orch-ink); }
-  .orch-skills td.strong { font-weight: 600; color: var(--orch-ink); }
-  .orch-skill-rate { display: flex; align-items: center; gap: 8px;
-    justify-content: flex-end; }
-  .orch-skill-bar { display: block; height: 4px; width: 64px;
-    border-radius: 2px; background: var(--orch-grid); overflow: hidden; }
-  .orch-skill-bar > span { display: block; height: 100%;
-    background: var(--orch-accent); border-radius: 2px; }
-  .orch-skill-pct { min-width: 34px; color: var(--orch-ink); }
-</style>
-"""
-    body: list[str] = []
-    for r in rows:
-        role = r.agent_role or "unknown"
-        backend = r.backend or "unknown"
-        rate_pct = r.rate * 100.0
-        bar_pct = (r.rate / max_rate * 100.0) if max_rate > 0 else 0.0
-        body.append(
-            "<tr>"
-            f'<td class="strong">{html.escape(role)}</td>'
-            f'<td>{html.escape(backend)}</td>'
-            f'<td class="r">{int(r.runs)}</td>'
-            f'<td class="r">{int(r.skill_runs)}</td>'
-            '<td class="r"><span class="orch-skill-rate">'
-            '<span class="orch-skill-bar">'
-            f'<span style="width:{bar_pct:.1f}%"></span></span>'
-            f'<span class="orch-skill-pct">{rate_pct:.0f}%</span>'
-            "</span></td>"
-            f'<td class="r">{int(r.total_triggers)}</td>'
-            "</tr>"
-        )
-    head = (
-        "<thead><tr>"
-        "<th>Role</th>"
-        "<th>Backend</th>"
-        '<th class="r">Runs</th>'
-        '<th class="r">Skill runs</th>'
-        '<th class="r">Trigger rate</th>'
-        '<th class="r">Triggers</th>'
-        "</tr></thead>"
-    )
-    return (
-        css
-        + '<table class="orch-skills">'
-        + head
-        + "<tbody>" + "".join(body) + "</tbody>"
-        + "</table>"
-    )
-
-
-def _card_header_html(title: str, subtitle: str = "") -> str:
-    """Inline HTML for the title + subtitle at the top of a card.
-
-    Always rendered through `st.markdown(unsafe_allow_html=True)`
-    INSIDE a `st.container(border=True)` block -- a previous draft
-    opened a `<div class="orch-card">` in one `st.markdown` and
-    closed it in another, which leaves the chart / dataframe widget
-    as a sibling of the card in Streamlit's DOM rather than a child.
-    The card visual really has to come from a Streamlit container so
-    the inner widgets sit inside it.
-    """
-    sub_html = (
-        f'<p class="orch-card-sub">{html.escape(subtitle)}</p>'
-        if subtitle
-        else ""
-    )
-    # The hidden `.orch-cardmark` is the per-card sentinel the white-fill
-    # / equal-height rules in `dashboard_theme.PAGE_CSS` key off via
-    # `:has(> stElementContainer .orch-cardmark)`. Rendering it inside the
-    # header markdown keeps it the bordered container's first element.
-    return (
-        '<span class="orch-cardmark"></span>'
-        f'<p class="orch-card-title">{html.escape(title)}</p>{sub_html}'
-    )
-
-
-def _insights_html(
-    banners: Sequence[InsightBanner],
-) -> str:
-    """Render the computed-insight stack.
-
-    The colored icon (red `✕` / `!` for warning + error, neutral `›`
-    / `✓` for info + success) carries the severity, so the rendered
-    message no longer leads with a redundant `Warning.` / `Info.`
-    prefix -- the standalone mock leads each banner with a short
-    descriptive title and lets the icon paint the severity.
-    """
-    icon_for = {
-        "error": "✕", "warning": "!", "info": "›", "success": "✓",
-    }
-    rows = []
-    for b in banners:
-        icon = icon_for.get(b.severity, "›")
-        rows.append(
-            f'<div class="orch-insight {html.escape(b.severity)}">'
-            f'<span class="icon">{icon}</span>'
-            f'<span>{html.escape(b.message)}</span>'
-            '</div>'
-        )
-    return '<div class="orch-insights">' + "".join(rows) + '</div>'
 
 
 def main() -> None:
