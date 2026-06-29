@@ -28,6 +28,13 @@ Event kinds written today:
   agent's triggered skills (`skills_triggered` / `skills_triggered_count`
   / `skills_available`); with the switch off (the default) those keys are
   absent and the record shape is unchanged.
+- `repo_skill_catalog` -- one repo-level record per tick per spec,
+  written from `orchestrator.skill_catalog._emit_repo_skill_catalog`
+  (driven by `workflow.tick`). Enumerates the `SKILL.md` definitions the
+  target repo carries on its base ref and carries `base_branch`,
+  `remote_name`, `skills_available` (the deduped skill names), and the
+  optional `skill_paths` (name -> source paths). Not issue-scoped, so its
+  `issue` is the sentinel `0`.
 
 `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, the libpq URL
 for the analytics Postgres service (`ANALYTICS_DB_URL`), and the
@@ -125,6 +132,7 @@ __all__ = [
     "prune_trajectory_records",
     "prune_with_retention_logging",
     "record_agent_exit",
+    "record_repo_skill_catalog",
     "record_stage_enter",
     "record_stage_evaluation",
 ]
@@ -361,6 +369,41 @@ def record_stage_evaluation(
             stage=stage,
             duration_s=duration_s,
             result=result,
+        )
+    )
+
+
+def record_repo_skill_catalog(
+    *,
+    repo: str,
+    base_branch: str,
+    remote_name: str,
+    skills_available: list[str],
+    skill_paths: Optional[dict[str, list[str]]] = None,
+) -> None:
+    """Append one `repo_skill_catalog` analytics record for a spec.
+
+    Repo-level, not issue-scoped: `issue` is the sentinel `0` so the
+    record still satisfies the `ts` / `repo` / `issue` / `event` envelope
+    that both the JSONL sink and the Postgres `analytics_events` schema
+    require, with no DDL change -- `base_branch`, `remote_name`,
+    `skills_available`, and `skill_paths` all land in the `extras` JSONB
+    column. `skill_paths` is dropped when None (`build_record` drops None
+    extras), so an empty catalog records `skills_available: []` -- the
+    "scanned, found none" signal -- without an empty `skill_paths`.
+    Disabled-sink behavior is inherited from `append_record` (no-op when
+    the sink is off). Centralized here so the producer in
+    `orchestrator.skill_catalog` does not re-inline the record shape.
+    """
+    append_record(
+        build_record(
+            repo=repo,
+            issue=0,
+            event="repo_skill_catalog",
+            base_branch=base_branch,
+            remote_name=remote_name,
+            skills_available=skills_available,
+            skill_paths=skill_paths,
         )
     )
 

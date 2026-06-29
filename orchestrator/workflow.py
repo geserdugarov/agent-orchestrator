@@ -139,6 +139,7 @@ from .base_sync import _sync_worktree_with_base as _sync_worktree_with_base
 # TODO(remove after 2026-08-24): remove this compatibility re-export with
 # base_sync._merge_base_into_worktree.
 from .base_sync import _merge_base_into_worktree as _merge_base_into_worktree
+from .skill_catalog import _emit_repo_skill_catalog as _emit_repo_skill_catalog
 from .worktrees import _authed_fetch as _authed_fetch
 from .worktrees import _authed_target_fetch as _authed_target_fetch
 from .worktrees import _branch_ahead_behind as _branch_ahead_behind
@@ -585,6 +586,13 @@ def tick(
     # orchestrator have no pinned state to consult), so failures inside the
     # sweep are swallowed by the helper itself and cannot stop the tick.
     _sweep_community_contribution_prs(gh, spec)
+    # Per-tick: snapshot the target repo's skill catalog into analytics.
+    # Runs after the base refresh above has fetched
+    # `<remote_name>/<base_branch>` so the ls-tree reads the current base
+    # ref. Producer-side observability only and internally fail-open, so a
+    # missing clone / git error never stops the tick; placed before the
+    # scheduler/legacy split so it fires once per tick on both paths.
+    _emit_repo_skill_catalog(spec)
     if scheduler is not None:
         _dispatch_via_scheduler(gh, spec, scheduler)
         return

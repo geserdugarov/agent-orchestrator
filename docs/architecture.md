@@ -51,6 +51,9 @@ orchestrator/
                         route (clean rebases route directly to `validating`)
   worktrees.py          compatibility re-export hub for the five worktree-
                         subsystem modules above
+  skill_catalog.py      per-tick repo skill-catalog collection: enumerate
+                        SKILL.md definitions on the target base ref and
+                        append one `repo_skill_catalog` analytics record
   stages/
     decomposition.py    decomposing / ready / blocked / umbrella handlers and
                         the decomposer-session lifecycle

@@ -60,6 +60,7 @@ Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`.
 | `stage_enter` | `GitHubClient._emit_stage_enter` alongside the audit `stage_enter` | one record per workflow label transition; carries `stage` |
 | `stage_evaluation` | `workflow._process_issue` dispatcher (try/except/finally wrapper) | carries `stage`, `duration_s` (handler wall-clock), `result` (`"ok"` / `"error"`); omitted for `backlog`-skipped issues (no handler runs) |
 | `agent_exit` | `workflow._run_agent_tracked` | one record per tracked agent invocation; agent context + parsed token / model / cost details (see below) |
+| `repo_skill_catalog` | `orchestrator.skill_catalog._emit_repo_skill_catalog`, driven once per tick per spec by `workflow.tick` | repo-level (not issue-scoped, so `issue` is the sentinel `0`); carries `base_branch`, `remote_name`, `skills_available` (deduped `SKILL.md` skill names on the base ref), and optional `skill_paths` (name → source paths) — see below |
 
 **Append.** `analytics.append_record(record)` reopens the file in append mode for every record after `path.parent.mkdir(parents=True, exist_ok=True)`. An `OSError` is caught and downgraded to a `log.warning`.
 
@@ -85,6 +86,12 @@ The configured model is pulled out of the role's `extra_args` (via `_configured_
 Prompts, raw stdout / stderr, secrets, and worktree contents are deliberately NOT stored — the sink is a usage / cost surface, not a debugging mirror. A parser exception or sink IO failure is swallowed so an analytics misconfiguration cannot stop the per-issue tick.
 
 **Skill-trigger surfaces (shipped).** Both skill-trigger follow-ups (the audit event and the dashboard widget) have now landed. The per-invocation `skill_triggered` audit event on [`EVENT_LOG_PATH`](#audit-event-log-event_log_path) (see the [audit event-kinds table](#audit-event-log-event_log_path)) is gated on the same `TRACK_SKILL_TRIGGERS` switch and reuses the list `record_agent_exit` already parsed — `_run_agent_tracked` emits one event per distinct triggered skill. The skill-trigger-rate dashboard widget (`get_skill_trigger_rates` + the "Skill trigger rates" panel — see the [read model](#read-model-orchestratoranalyticsreadpy) and [dashboard](#dashboard-orchestratordashboardpy) sections below) is a pure read-side addition over `extras JSONB` with no schema change.
+
+### `repo_skill_catalog` records
+
+`orchestrator/skill_catalog.py` appends one repo-level `event="repo_skill_catalog"` analytics record per tick per spec, driven from `workflow.tick` after `_refresh_base_and_worktrees` has fetched `<remote_name>/<base_branch>`. It enumerates the `SKILL.md` definitions the *target repo* carries on its base ref via `git -C <target_root> ls-tree -r --name-only <remote_name>/<base_branch> .agents/skills .claude/skills`, keeps only direct `<root>/<name>/SKILL.md` definitions (a `SKILL.md` nested deeper — e.g. `.claude/skills/.system/<name>/SKILL.md` — is ignored, matching the names-only trigger anchor in `usage.py`), and dedupes by skill name across the two roots while preserving every source path. The catalog is read from the target repo's base ref, never the orchestrator's own working tree, so dashboard-local skill files are not scanned.
+
+Each record carries `base_branch`, `remote_name`, `skills_available` (the sorted deduped skill names), and the optional `skill_paths` (name → sorted source paths; dropped when empty). It is **not** issue-scoped, so its `issue` is the sentinel `0` — the record still satisfies the `ts` / `repo` / `issue` / `event` envelope the sink and the Postgres `analytics_events` schema require, and the four catalog fields all land in `extras JSONB` with **no DDL change**. The whole producer is fail-open: a missing clone, an unfetched ref, a git error, or a sink IO failure logs and is swallowed so catalog collection never disturbs the polling tick. An empty catalog still records `skills_available: []` (the "scanned, found none" signal).
 
 ## Trajectory sink (`TRAJECTORY_LOG_PATH`)
 
