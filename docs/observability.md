@@ -117,6 +117,126 @@ A sibling, opt-in JSONL sink for agent *reasoning trajectories* — the ordered 
 
 **Observation-only, like every surface here.** The polling tick never reads the trajectory file back and no dispatch decision keys off it; workflow state lives entirely in the pinned `<!--orchestrator-state ...-->` JSON comment and the workflow label. The file is therefore safe to truncate, rotate, or delete at any time without affecting workflow state or correctness.
 
+### Trajectory operator workflow
+
+There is no trajectory equivalent of `python -m orchestrator.analytics.sync`: trajectories are deliberately file-backed only, and the analytics Postgres schema does not ingest their free-text bodies. To browse trajectories on another host, mirror `TRAJECTORY_LOG_PATH` as a file and run the dedicated viewer on that host with `TRAJECTORY_LOG_PATH` pointing at the mirrored JSONL. Scope the remote path like source code or issue content: redaction masks secret-shaped values, not repository text or agent reasoning.
+
+For an unattended deployment, mirror the file with SSH-based tooling such as `rsync`. Use a dedicated receiver account whose key can only write into the trajectory directory. On an Ubuntu receiver, use a neutral shared directory such as `/srv/orchestrator` instead of landing the file in the receiver user's home. That keeps `/home/forsync` out of the dashboard read path and lets the Streamlit user read through a shared group:
+
+```sh
+# On the remote VPS.
+sudo adduser --system --group --shell /bin/bash --home /home/forsync forsync
+sudo groupadd -f orchestrator
+sudo usermod -aG orchestrator forsync
+sudo usermod -aG orchestrator <dashboard-user>
+sudo mkdir -p /srv/orchestrator
+sudo chown forsync:orchestrator /srv/orchestrator
+sudo chmod 2750 /srv/orchestrator
+sudo install -d -m 700 -o forsync -g forsync /home/forsync/.ssh
+
+# Confirm rrsync is available; on current Ubuntu it is shipped by rsync.
+command -v rrsync
+```
+
+Generate a dedicated cron key on the source host:
+
+```sh
+ssh-keygen -t ed25519 -f ~/.ssh/forsync_ed25519 -C "trajectory-sync" -N ""
+```
+
+Then install the public key on the remote account as one `authorized_keys` line. Pick the network restriction that matches the deployment:
+
+- **Private overlay / Tailscale available.** Use the exact source host tailnet IP in `from=` when possible; `100.64.0.0/10` is the broader Tailscale CGNAT range. A tailnet ACL that allows only the source device to reach SSH on the VPS is stronger, with `from=` as defense-in-depth.
+- **Public SSH / no Tailscale.** Use the source host's stable public egress IP or CIDR in `from=` instead. If the source IP is not stable, omit `from=` and restrict port 22 at the VPS firewall / cloud security group to the narrowest source range you can. Keep the forced `rrsync` command and `restrict` either way.
+
+```text
+command="/usr/bin/rrsync -wo -no-del /srv/orchestrator",restrict,from="<source-ip-or-cidr>" ssh-ed25519 AAAA... trajectory-sync
+```
+
+Lock the SSH account down further with `/etc/ssh/sshd_config.d/forsync.conf`:
+
+```sshconfig
+Match User forsync
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+    PermitTTY no
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
+    PermitTunnel no
+```
+
+Validate and reload SSH:
+
+```sh
+sudo sshd -t
+sudo systemctl reload ssh
+```
+
+A small source-side wrapper is easier to test than a heavily-quoted crontab line, lets cron fail fast when SSH would otherwise prompt, and uses the same lock name as trajectory maintenance jobs so sync and prune never overlap each other. With the `rrsync` root above, `DEST=forsync@<host>:trajectories.jsonl` lands at `/srv/orchestrator/trajectories.jsonl` on the receiver. `rrsync` rejects absolute destination paths; keep the destination relative to its configured root:
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+SRC=/path/to/agent-orchestrator/logs/trajectories.jsonl
+DEST=forsync@<host>:trajectories.jsonl
+LOCK=/tmp/agent-orchestrator-trajectory.lock
+KEY=/home/<local-user>/.ssh/forsync_ed25519
+
+SSH_CMD="ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new"
+
+echo "=== $(date -Is) trajectory sync start ==="
+if /usr/bin/flock -n -E 75 "$LOCK" \
+  /usr/bin/rsync -az --timeout=120 --chmod=F640 \
+    -e "$SSH_CMD" \
+    "$SRC" "$DEST"; then
+  echo "=== $(date -Is) trajectory sync done ==="
+else
+  rc=$?
+  if [ "$rc" -eq 75 ]; then
+    echo "=== $(date -Is) trajectory sync skipped: lock held ==="
+    exit 0
+  fi
+  exit "$rc"
+fi
+```
+
+Install it as executable before adding the cron entry:
+
+```sh
+chmod +x /path/to/agent-orchestrator/bin/sync-trajectories.sh
+```
+
+```cron
+10 * * * * /path/to/agent-orchestrator/bin/sync-trajectories.sh >> /path/to/agent-orchestrator/logs/trajectory-sync.cron.log 2>&1
+```
+
+- `rsync` is a file mirror, not an append-only archive. When local retention later rewrites or shrinks the JSONL, a later mirror run will make the remote file match.
+- The default `rsync` destination update path already writes a temporary file and renames it into place for this single-file mirror; avoid `--inplace`.
+- Do not use `--append` or `--append-verify` for this mirror: retention pruning can shrink or rewrite the source file, and append-mode transfer would leave stale remote tail data or give remote readers partial in-place writes.
+- `StrictHostKeyChecking=accept-new` is convenient on a trusted private network because the first cron-run pins the host key and later key changes still fail. The stricter alternative is to pre-seed once with `ssh-keyscan -H <host> >> ~/.ssh/known_hosts` and drop that option.
+- `--chmod=F640` makes the mirrored file readable by the receiver owner and the shared `orchestrator` group. The setgid bit on `/srv/orchestrator` (`2750`) keeps replaced files in that group, so the dashboard user can read them after a fresh login / restarted service picks up its new group membership.
+- If you migrate from an older `/home/forsync/...` landing path, move the existing file once (`sudo mv /home/forsync/agent-orchestrator/trajectories.jsonl /srv/orchestrator/`) and then apply `sudo chgrp orchestrator /srv/orchestrator/trajectories.jsonl && sudo chmod 640 /srv/orchestrator/trajectories.jsonl`.
+- Verify dashboard readability before launching Streamlit: `id` for the dashboard user must show `orchestrator`, and `sudo -u <dashboard-user> head /srv/orchestrator/trajectories.jsonl` should print JSONL.
+- If the remote host should keep a longer archive than the local machine, mirror to dated snapshots instead of one fixed destination path.
+- Treat the remote SSH key as sensitive. For a write-only receiver, constrain it in `authorized_keys` with a forced `rrsync` command, no PTY / forwarding, and either a `from=` source restriction or network-level SSH allowlist.
+- Rotate `trajectory-sync.cron.log`, or send the wrapper output to the journal with `logger`, so the cron log does not grow forever.
+
+The mirror cron does not lock the source file against the running orchestrator. A record that is fully appended before `rsync` reads the file is copied; a record appended during or after the transfer may be absent until the next mirror run. If `rsync` ever catches a final line mid-write, the remote file may briefly end with a malformed JSON line after the destination rename; the trajectory reader skips malformed lines, and the next mirror run repairs the fixed destination because this command mirrors the whole file rather than using `--append`.
+
+Decide whether the remote file is a **mirror** or an **archive** before enabling retention. A fixed destination path is a mirror: after local retention prunes old records, the next sync shrinks the remote file too. That is correct for a remote viewer that should show only the retained window, but wrong if the remote host is meant to preserve history before the local file is pruned. For an archive, use a different strategy, such as dated snapshots, a never-pruned local archive file, or a custom high-water-mark shipper.
+
+Because `prune_trajectory_records()` is not called by the polling loop, drive trajectory retention explicitly when you want `TRAJECTORY_RETENTION_DAYS` to affect the file. The value may live in `.env` like the other non-secret knobs; it is parsed when the prune process imports `orchestrator.analytics`. The cron entry below relies on `.env` for both `TRAJECTORY_LOG_PATH` and `TRAJECTORY_RETENTION_DAYS`, runs the prune helper, and logs how many records were removed:
+
+```cron
+25 0 * * * cd /path/to/agent-orchestrator && /usr/bin/flock -n -E 75 /tmp/agent-orchestrator-trajectory.lock /home/<user>/.local/bin/uv run python -c 'from orchestrator import analytics; print(f"trajectory prune removed {analytics.prune_trajectory_records()} record(s)")' >> /path/to/agent-orchestrator/logs/trajectory-prune.cron.log 2>&1
+```
+
+To make the same cron entry use a one-off retention window instead of `.env`, prefix the command with `env TRAJECTORY_LOG_PATH=/path/to/agent-orchestrator/logs/trajectories.jsonl TRAJECTORY_RETENTION_DAYS=30`.
+
+Only run this prune command while the orchestrator is stopped or otherwise guaranteed not to append trajectories. The shared `/tmp/agent-orchestrator-trajectory.lock` serializes operator cron jobs with each other, but not with the live orchestrator process: the append/prune lock in `orchestrator.analytics` is a process-local `threading.Lock`, not an interprocess file lock. An external prune process can race with the live polling process and lose a record appended to the old inode between the prune read and `os.replace`. Schedule pruning after at least one mirror run if the remote fixed-path mirror should receive records before they age out locally. The prune rewrites only the trajectory JSONL through the same temp-file + `os.replace` path described above; it never touches GitHub workflow state, `ANALYTICS_LOG_PATH`, Postgres, or the analytics dashboard.
+
 ### Trajectory viewer (`orchestrator/trajectory_dashboard.py`)
 
 A deliberately **separate** Streamlit page from the analytics dashboard, launched the same way (`uv run streamlit run orchestrator/trajectory_dashboard.py`, opt-in `dashboard` group). The two pages stay apart on purpose: the analytics dashboard reads the numeric usage / cost rollup from Postgres, while the viewer reads the JSONL trajectory file **directly** — the trajectory bodies are never in Postgres — so an operator can browse trajectories with nothing but the file on disk (no database, no `analytics.sync`).
