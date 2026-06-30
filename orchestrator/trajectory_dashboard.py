@@ -18,11 +18,16 @@ database, no sync -- and the cost dashboard never has to carry the
 trajectory bodies.
 
 The page is intentionally minimal-but-useful: a filterable list of the
-recorded runs and a per-run detail view that walks the redacted prompt,
-offered tools, triggered skills, the ordered tool-call / tool-result
-timeline, and the final output. The pure parsing / filtering / summary
-logic lives in the import-light `orchestrator.trajectory_reader`; this
-module owns only the Streamlit rendering.
+recorded runs and a per-run detail view that walks the run's normalised
+`timeline` -- the redacted prompt, then the interleaved assistant / user
+text turns and tool calls / results, then the final output, as one
+ordered sequence -- alongside the offered tools and triggered skills. A
+sidebar toggle hides the synthetic test-suite fixtures the reader's
+`is_fixture` marker flags (off by default; when shown they are tagged in
+the overview table and the run picker). The pure parsing / filtering /
+summary / timeline logic lives in the import-light
+`orchestrator.trajectory_reader`; this module owns only the Streamlit
+rendering.
 
 Streamlit is imported *lazily* inside `main()` so importing
 `orchestrator.trajectory_dashboard` from a test (or any non-dashboard
@@ -149,6 +154,27 @@ EXTRA_CSS = f"""
   .orch-traj-badge.result {{
     background: rgba(26,163,154,.14); color: var(--orch-cache);
   }}
+  .orch-traj-badge.prompt {{
+    background: rgba(86,93,114,.12); color: var(--orch-muted);
+  }}
+  .orch-traj-badge.assistant {{
+    background: rgba(224,145,58,.14); color: var(--orch-output);
+  }}
+  .orch-traj-badge.user {{
+    background: rgba(91,108,240,.12); color: var(--orch-input);
+  }}
+  .orch-traj-badge.output {{
+    background: rgba(47,158,107,.14); color: var(--orch-success);
+  }}
+  .orch-traj-fixture-tag {{
+    display: inline-block; margin-left: 6px;
+    background: rgba(224,145,58,.14); color: var(--orch-warn);
+    border: 1px solid rgba(224,145,58,.30); border-radius: 999px;
+    padding: 0 7px; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    font-family: {theme.MONO_FONT_FAMILY};
+  }}
+  .orch-traj-table tr.fixture td {{ color: var(--orch-muted-soft); }}
   .orch-traj-step-name {{
     color: var(--orch-ink); font-weight: 600; font-size: 13px;
     font-family: {theme.MONO_FONT_FAMILY};
@@ -280,10 +306,16 @@ def _runs_table_html(runs: Sequence[TrajectoryRun]) -> str:
     rows = []
     for r in runs:
         round_cell = "" if r.review_round is None else str(r.review_round)
+        row_class = ' class="fixture"' if r.is_fixture else ""
+        fixture_tag = (
+            '<span class="orch-traj-fixture-tag">fixture</span>'
+            if r.is_fixture
+            else ""
+        )
         rows.append(
-            "<tr>"
+            f"<tr{row_class}>"
             f'<td class="num">#{html.escape(str(r.issue))}</td>'
-            f"<td>{html.escape(r.repo)}</td>"
+            f"<td>{html.escape(r.repo)}{fixture_tag}</td>"
             f"<td>{html.escape(r.stage)}</td>"
             f"<td>{html.escape(r.agent_role)}</td>"
             f"<td>{html.escape(r.backend)}</td>"
@@ -301,31 +333,64 @@ def _runs_table_html(runs: Sequence[TrajectoryRun]) -> str:
     )
 
 
-def _step_header_html(step: trajectory_reader.TrajectoryStepView, index: int) -> str:
-    """One timeline row: index, a call/result badge, the tool, the id."""
-    if step.is_call:
-        badge_class, badge_text = "call", "tool call"
-    elif step.is_result:
-        badge_class, badge_text = "result", "tool result"
-    else:
-        badge_class, badge_text = "result", html.escape(step.kind or "step")
+# Maps a timeline entry's `kind` to its (CSS modifier, badge label).
+# `tool_call` / `tool_result` keep the call / result badges the
+# steps-only timeline used; the prompt / output brackets and the
+# assistant / user text turns each get their own so the operator can
+# tell the conversation's voices apart at a glance. Any unknown kind
+# falls through to the neutral result badge carrying the raw kind.
+_BADGE_BY_KIND: dict[str, tuple[str, str]] = {
+    trajectory_reader.TIMELINE_PROMPT: ("prompt", "prompt"),
+    trajectory_reader.TIMELINE_OUTPUT: ("output", "final output"),
+    "tool_call": ("call", "tool call"),
+    "tool_result": ("result", "tool result"),
+    "assistant_message": ("assistant", "assistant"),
+    "user_message": ("user", "user turn"),
+}
+
+# Picker-label prefix flagging a synthetic test fixture, so the operator
+# can tell the inherited test-suite records from real runs in the run
+# selector the same way the overview table's `fixture` tag does.
+_FIXTURE_LABEL_PREFIX = "[fixture] "
+
+
+def _timeline_entry_html(
+    entry: trajectory_reader.TimelineEntry, index: int
+) -> str:
+    """One timeline row: index, a per-kind badge, the tool name, the id.
+
+    Renders any `TimelineEntry` -- the prompt / output brackets, the
+    assistant / user text turns, and the tool calls / results -- by its
+    `kind`, so `_render_run` can walk a run's whole ordered timeline with
+    one builder instead of bracketing the steps by hand.
+    """
+    badge_class, badge_text = _BADGE_BY_KIND.get(
+        entry.kind, ("result", entry.kind or "step")
+    )
     name_html = (
-        f'<span class="orch-traj-step-name">{html.escape(step.name)}</span>'
-        if step.name
+        f'<span class="orch-traj-step-name">{html.escape(entry.name)}</span>'
+        if entry.name
         else ""
     )
     id_html = (
-        f'<span class="orch-traj-step-id">{html.escape(step.tool_id)}</span>'
-        if step.tool_id
+        f'<span class="orch-traj-step-id">{html.escape(entry.tool_id)}</span>'
+        if entry.tool_id
         else ""
     )
     return (
         '<div class="orch-traj-step">'
         f'<span class="orch-traj-step-idx">{index + 1}</span>'
-        f'<span class="orch-traj-badge {badge_class}">{badge_text}</span>'
+        f'<span class="orch-traj-badge {badge_class}">'
+        f'{html.escape(badge_text)}</span>'
         f'{name_html}{id_html}'
         '</div>'
     )
+
+
+def _run_picker_label(run: TrajectoryRun) -> str:
+    """The run's picker label, prefixed when it is a synthetic fixture."""
+    label = run.label()
+    return f"{_FIXTURE_LABEL_PREFIX}{label}" if run.is_fixture else label
 
 
 def _render_run(*, st: Any, run: TrajectoryRun) -> None:
@@ -335,10 +400,18 @@ def _render_run(*, st: Any, run: TrajectoryRun) -> None:
         st.markdown(
             _card_header_html(
                 f"Run #{run.issue} · {run.repo or 'unknown repo'}",
-                "Redacted prompt, tool-call timeline, and final output",
+                "Ordered timeline: prompt, text turns, tool calls, output",
             ),
             unsafe_allow_html=True,
         )
+        if run.is_fixture:
+            st.info(
+                "This run is flagged as a likely synthetic test fixture "
+                "(a sentinel `ignored` prompt, a `sess-*` session id, or a "
+                "Skill-only run). Such records can appear in a trajectory "
+                "file inherited from a run with the sink enabled during the "
+                "test suite."
+            )
         if run.truncated:
             st.warning(
                 "This trajectory was truncated by the sink's record budget; "
@@ -355,36 +428,33 @@ def _render_run(*, st: Any, run: TrajectoryRun) -> None:
             if chips:
                 st.markdown(chips, unsafe_allow_html=True)
 
-        if run.user_input:
-            with st.expander("User input (prompt)", expanded=False):
-                st.code(run.user_input)
         if run.system_prompt:
             with st.expander("System prompt", expanded=False):
                 st.code(run.system_prompt)
 
         st.markdown(
             '<p class="orch-card-sub" style="margin-top:14px">'
-            f'Step timeline · {run.step_count} steps · '
+            f'Trajectory timeline · {run.step_count} steps · '
             f'{run.tool_calls} tool calls</p>',
             unsafe_allow_html=True,
         )
-        if run.steps:
-            for i, step in enumerate(run.steps):
+        timeline = run.timeline
+        if timeline:
+            for i, entry in enumerate(timeline):
                 st.markdown(
-                    _step_header_html(step, i), unsafe_allow_html=True
+                    _timeline_entry_html(entry, i), unsafe_allow_html=True
                 )
-                if step.content:
-                    st.code(step.content)
+                if entry.content:
+                    # The final answer is markdown the agent authored;
+                    # render it rich. Every other entry -- the orchestrator
+                    # prompt, tool payloads, text turns -- is raw text shown
+                    # verbatim in a code block.
+                    if entry.is_output:
+                        st.markdown(entry.content)
+                    else:
+                        st.code(entry.content)
         else:
-            st.caption("No tool calls were recorded for this run.")
-
-        if run.output:
-            st.markdown(
-                '<p class="orch-card-sub" style="margin-top:14px">'
-                'Final output</p>',
-                unsafe_allow_html=True,
-            )
-            st.markdown(run.output)
+            st.caption("No timeline entries were recorded for this run.")
 
 
 def main() -> None:
@@ -449,6 +519,18 @@ def main() -> None:
                 "skill names."
             ),
         )
+        hide_fixtures = st.checkbox(
+            "Hide synthetic fixtures",
+            value=False,
+            help=(
+                "Drop records that look like test-suite fixtures -- a "
+                "sentinel `ignored` prompt, a `sess-*` session id, or a "
+                "Skill-only run. Leave off to keep them, flagged with a "
+                "`fixture` tag in the table and run picker."
+            ),
+        )
+
+    fixture_total = sum(1 for r in runs if r.is_fixture)
 
     shown = trajectory_reader.filter_runs(
         runs,
@@ -458,6 +540,7 @@ def main() -> None:
         stages=stage_choice or None,
         issue=dashboard_state.parse_issue_number(issue_input),
         query=query_input,
+        exclude_fixtures=hide_fixtures,
     )
     summary = trajectory_reader.summarize(shown)
 
@@ -493,9 +576,18 @@ def main() -> None:
                 f"{len(shown)} matching runs; the picker below lists all of "
                 "them. Narrow the filters to shorten the list."
             )
+        if fixture_total:
+            st.caption(
+                f"{fixture_total} synthetic fixture "
+                f"{'run' if fixture_total == 1 else 'runs'} hidden."
+                if hide_fixtures
+                else f"{fixture_total} synthetic fixture "
+                f"{'run' if fixture_total == 1 else 'runs'} flagged; "
+                "tick *Hide synthetic fixtures* in the sidebar to drop them."
+            )
 
     # ── Selected-run detail ──────────────────────────────────────
-    labels = [r.label() for r in shown]
+    labels = [_run_picker_label(r) for r in shown]
     selected = st.selectbox(
         "Inspect run",
         range(len(shown)),
