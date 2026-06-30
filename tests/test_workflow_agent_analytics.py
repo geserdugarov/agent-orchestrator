@@ -424,6 +424,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
         with tempfile.TemporaryDirectory(prefix="analytics-codex-fallback-") as td:
             path = Path(td) / "analytics.jsonl"
             with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
+                 patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
                  patch.object(workflow, "run_agent") as run_mock:
                 run_mock.return_value = AgentResult(
                     session_id="sess-codex",
@@ -471,6 +472,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
         with tempfile.TemporaryDirectory(prefix="analytics-claude-fallback-") as td:
             path = Path(td) / "analytics.jsonl"
             with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
+                 patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
                  patch.object(workflow, "run_agent") as run_mock:
                 run_mock.return_value = AgentResult(
                     session_id="sess-claude",
@@ -694,6 +696,82 @@ class TrajectoryRecordingTest(unittest.TestCase):
             self.assertFalse(t_path.exists())
 
 
+class TrajectorySinkHermeticityTest(unittest.TestCase):
+    """Regression guard for the hermetic test default: the global conftest
+    fixture pins `TRAJECTORY_LOG_PATH` to None so a workflow analytics path
+    can never write to an operator-configured trajectory sink -- even though
+    the same synthetic run writes one record when the sink is left on."""
+
+    def _drive(self, gh: FakeGitHubClient, *, analytics_path: Path) -> None:
+        with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
+                patch.object(workflow, "run_agent") as run_mock:
+            run_mock.return_value = AgentResult(
+                session_id="sess-traj-guard",
+                last_message="",
+                exit_code=0,
+                timed_out=False,
+                stdout=_claude_trajectory_stdout(
+                    tool_result="hi", final_output="done",
+                ),
+                stderr="",
+            )
+            workflow._run_agent_tracked(
+                gh, 562,
+                agent_role="developer",
+                stage="implementing",
+                backend="claude",
+                prompt="implement the widget",
+                cwd=_FAKE_WT,
+            )
+
+    def test_global_fixture_pins_trajectory_sink_off(self) -> None:
+        # The autouse conftest fixture neutralizes any operator-exported
+        # TRAJECTORY_LOG_PATH for the duration of every test.
+        self.assertIsNone(analytics.TRAJECTORY_LOG_PATH)
+
+    def test_configured_sink_is_not_written_when_pinned_off(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="traj-guard-") as td:
+            configured = Path(td) / "operator-trajectories.jsonl"
+            a_path = Path(td) / "analytics.jsonl"
+
+            # Stand up an operator-configured sink, live on the analytics
+            # module exactly as an exported TRAJECTORY_LOG_PATH resolves at
+            # import. It stays configured for the whole test so the suppressed
+            # run below is gated by the off-pin, not by an ambient None that a
+            # bare runner (no env var) would also exhibit.
+            with patch.object(analytics, "TRAJECTORY_LOG_PATH", configured):
+                # Control: the configured sink genuinely captures the synthetic
+                # run, so the suppression asserted below is a real effect.
+                self._drive(FakeGitHubClient(), analytics_path=a_path)
+                self.assertTrue(configured.exists())
+                configured.unlink()
+
+                # The documented "off" knob (None) -- the value the conftest
+                # autouse fixture installs for every test -- must suppress the
+                # write to that still-configured path. Cover both halves of
+                # "not created or appended", while the baseline agent_exit
+                # record is still produced.
+                with patch.object(analytics, "TRAJECTORY_LOG_PATH", None):
+                    # (a) not created: an absent sink stays absent.
+                    self._drive(FakeGitHubClient(), analytics_path=a_path)
+                    self.assertFalse(
+                        configured.exists(),
+                        "trajectory sink created the operator-configured "
+                        "path while pinned off",
+                    )
+                    # (b) not appended: a pre-existing sink is left byte-for-
+                    # byte unchanged.
+                    sentinel = '{"event": "pre-existing"}\n'
+                    configured.write_text(sentinel, encoding="utf-8")
+                    self._drive(FakeGitHubClient(), analytics_path=a_path)
+                    self.assertEqual(
+                        configured.read_text(encoding="utf-8"), sentinel,
+                        "trajectory sink appended to the operator-configured "
+                        "path while pinned off",
+                    )
+                self.assertTrue(a_path.exists())
+
+
 class SkillTriggeredEventTest(unittest.TestCase):
     """`_run_agent_tracked` emits one `skill_triggered` audit event per
     distinct triggered skill, gated on `TRACK_SKILL_TRIGGERS` and reusing the
@@ -714,9 +792,13 @@ class SkillTriggeredEventTest(unittest.TestCase):
         review_round: Optional[int] = 2,
         retry_count: Optional[int] = 1,
     ) -> AgentResult:
-        # Sink path None: the analytics record is a no-op, but the skill
-        # parse + return (which drives the audit emission) still runs.
+        # Both sinks pinned off: the analytics + trajectory records are
+        # no-ops, but the skill parse + return (which drives the audit
+        # emission) still runs. Pinning the trajectory sink here keeps the
+        # test hermetic even under `python -m unittest`, which never loads
+        # the conftest autouse fixture.
         with patch.object(analytics, "ANALYTICS_LOG_PATH", None), \
+                patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
                 patch.object(analytics, "TRACK_SKILL_TRIGGERS", track), \
                 patch.object(workflow, "run_agent") as run_mock:
             run_mock.return_value = AgentResult(
