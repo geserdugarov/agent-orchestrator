@@ -545,7 +545,8 @@ def record_agent_exit(
 
 # Head/tail truncation caps for the opt-in trajectory record. Each free-text
 # field -- `user_input` (the orchestrator-built prompt), `system_prompt`,
-# every per-step `tool_call` input / `tool_result` content, and the final
+# every per-step `content` (a `tool_call` input, a `tool_result` output, or an
+# `assistant_message` / `user_message` text turn), and the final
 # `output` -- is redacted with `workflow_messages._redact_secrets` and then
 # truncated to its first `_TRAJECTORY_FIELD_HEAD` and last
 # `_TRAJECTORY_FIELD_TAIL` characters (the head carries the request, the tail

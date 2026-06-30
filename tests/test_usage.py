@@ -1350,10 +1350,12 @@ class SkillDispatcherTest(unittest.TestCase):
 class ClaudeTrajectoryTest(unittest.TestCase):
     """``parse_claude_trajectory`` over synthetic ``stream-json`` runs.
 
-    The init frame's ``tools`` array is the offered-tools set; ``tool_use``
-    blocks in ``assistant`` messages are calls and ``tool_result`` blocks in
-    ``user`` messages are results (joined by ``tool_use_id``); the ``result``
-    frame's ``result`` string is the final output. Raw inputs / outputs ride
+    The init frame's ``tools`` array is the offered-tools set; in stream
+    order, ``text`` blocks in ``assistant`` messages are ``assistant_message``
+    turns and their ``tool_use`` blocks are calls, while ``text`` blocks in
+    ``user`` messages are ``user_message`` turns and their ``tool_result``
+    blocks are results (joined by ``tool_use_id``); the ``result`` frame's
+    ``result`` string is the final output. Raw inputs / outputs / text ride
     along verbatim -- this layer classifies, it does not redact.
     """
 
@@ -1402,23 +1404,77 @@ class ClaudeTrajectoryTest(unittest.TestCase):
         # Skills reuse the names-only extractor (offered + triggered).
         self.assertEqual(t.skills.available, ("develop", "review"))
         self.assertEqual(t.skills.triggered, ("develop",))
-        # Ordered: call -> result -> call.
-        self.assertEqual(len(t.steps), 3)
+        # Ordered timeline: assistant text -> call -> result -> call.
+        self.assertEqual(len(t.steps), 4)
         self.assertEqual(
             t.steps[0],
+            TrajectoryStep(kind="assistant_message", content="let me look"),
+        )
+        self.assertEqual(
+            t.steps[1],
             TrajectoryStep(kind="tool_call", name="Bash", tool_id="toolu_a",
                            content={"command": "ls"}),
         )
         self.assertEqual(
-            t.steps[1],
+            t.steps[2],
             TrajectoryStep(kind="tool_result", tool_id="toolu_a",
                            content="calc.py\n"),
         )
         self.assertEqual(
-            t.steps[2],
+            t.steps[3],
             TrajectoryStep(kind="tool_call", name="Skill", tool_id="toolu_b",
                            content={"skill": "develop"}),
         )
+
+    def test_captures_assistant_and_user_text_turns_in_stream_order(
+        self,
+    ) -> None:
+        # Full timeline: an assistant text turn, then a tool call + its
+        # result and a user text turn in the same user message, then a closing
+        # assistant text turn -- text turns are preserved inline with the tool
+        # steps, in stream order, alongside the unchanged final output.
+        stdout = _jsonl(
+            {"type": "assistant", "message": {"id": "m1", "content": [
+                {"type": "text", "text": "let me check"},
+                {"type": "tool_use", "id": "tu1", "name": "Read",
+                 "input": {"file_path": "x.py"}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "tu1",
+                 "content": "file body"},
+                {"type": "text", "text": "now fix it"}]}},
+            {"type": "assistant", "message": {"id": "m2", "content": [
+                {"type": "text", "text": "done"}]}},
+            {"type": "result", "result": "all set"},
+        )
+        t = parse_claude_trajectory(stdout)
+        self.assertEqual(
+            [(s.kind, s.content) for s in t.steps],
+            [
+                ("assistant_message", "let me check"),
+                ("tool_call", {"file_path": "x.py"}),
+                ("tool_result", "file body"),
+                ("user_message", "now fix it"),
+                ("assistant_message", "done"),
+            ],
+        )
+        # Text turns carry no tool name / id.
+        first = t.steps[0]
+        self.assertEqual(first.name, "")
+        self.assertEqual(first.tool_id, "")
+        self.assertEqual(t.final_output, "all set")
+
+    def test_empty_or_nonstring_text_blocks_are_skipped(self) -> None:
+        # An empty / missing / non-string text block does not create a
+        # message step -- only non-empty string text turns are captured.
+        stdout = _jsonl(
+            {"type": "assistant", "message": {"id": "m", "content": [
+                {"type": "text", "text": ""},
+                {"type": "text"},
+                {"type": "text", "text": 7}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "text", "text": ""}]}},
+        )
+        self.assertEqual(parse_claude_trajectory(stdout).steps, ())
 
     def test_partial_frames_dedup_calls_and_results(self) -> None:
         # Defensive: a tool_use / tool_result block repeated across frames
@@ -1455,12 +1511,11 @@ class ClaudeTrajectoryTest(unittest.TestCase):
                          ["tool_call", "tool_result"])
 
     def test_missing_fields_yield_empty_sections(self) -> None:
-        # No init frame, no tool blocks, no result frame: every section is
-        # empty / None, never an exception.
+        # No init frame, no capturable blocks, no result frame: every section
+        # is empty / None, never an exception.
         stdout = _jsonl(
             {"type": "assistant",
-             "message": {"id": "m", "content": [
-                 {"type": "text", "text": "thinking"}]}},
+             "message": {"id": "m", "content": []}},
         )
         t = parse_claude_trajectory(stdout)
         self.assertEqual(t.tools, ())
@@ -1496,9 +1551,11 @@ class CodexTrajectoryTest(unittest.TestCase):
 
     Codex's tool surface is the shell: each ``command_execution`` is one call
     (its ``command``) plus one result (its ``aggregated_output``), deduped by
-    the shared ``item.id`` across the started/completed pair. The last
-    ``agent_message`` ``text`` is the final output; ``tools`` /
-    ``system_prompt`` stay empty (no confirmed codex frame exposes them).
+    the shared ``item.id`` across the started/completed pair; each
+    ``agent_message`` is one ``assistant_message`` text turn (its ``text``),
+    captured in stream order. The last ``agent_message`` ``text`` is also the
+    final output; ``tools`` / ``system_prompt`` stay empty (no confirmed codex
+    frame exposes them).
     """
 
     def test_extracts_steps_skills_and_final_output(self) -> None:
@@ -1522,7 +1579,9 @@ class CodexTrajectoryTest(unittest.TestCase):
         self.assertEqual(t.final_output, "Approve.")
         # SKILL.md read surfaces in the names-only skills extractor.
         self.assertEqual(t.skills.triggered, ("develop",))
-        # started + completed for item_1 collapse to one call + one result.
+        # started + completed for item_1 collapse to one call + one result;
+        # the trailing agent_message rides along as an assistant_message turn
+        # (and is also the final output).
         self.assertEqual(
             t.steps,
             (
@@ -1540,8 +1599,60 @@ class CodexTrajectoryTest(unittest.TestCase):
                 TrajectoryStep(
                     kind="tool_result", tool_id="item_2",
                     content="diff --git ...\n"),
+                TrajectoryStep(
+                    kind="assistant_message", content="Approve."),
             ),
         )
+
+    def test_agent_messages_captured_as_assistant_turns_in_order(self) -> None:
+        # Each agent_message item becomes an assistant_message turn, kept in
+        # stream order relative to the command steps; the last one is still the
+        # final output.
+        stdout = _jsonl(
+            {"type": "item.completed", "item": {
+                "id": "a1", "type": "agent_message", "text": "starting"}},
+            _codex_cmd("c1", "/bin/bash -lc 'ls'", status="completed",
+                       exit_code=0, aggregated_output="out\n"),
+            {"type": "item.completed", "item": {
+                "id": "a2", "type": "agent_message", "text": "all done"}},
+        )
+        t = parse_codex_trajectory(stdout)
+        self.assertEqual(
+            [(s.kind, s.content) for s in t.steps],
+            [
+                ("assistant_message", "starting"),
+                ("tool_call", "/bin/bash -lc 'ls'"),
+                ("tool_result", "out\n"),
+                ("assistant_message", "all done"),
+            ],
+        )
+        self.assertEqual(t.final_output, "all done")
+
+    def test_agent_message_started_and_completed_collapse(self) -> None:
+        # A started + completed agent_message sharing an item.id is one turn
+        # (last text wins), mirroring the command started/completed collapse.
+        stdout = _jsonl(
+            {"type": "item.started", "item": {
+                "id": "a1", "type": "agent_message", "text": "partial"}},
+            {"type": "item.completed", "item": {
+                "id": "a1", "type": "agent_message", "text": "final text"}},
+        )
+        t = parse_codex_trajectory(stdout)
+        self.assertEqual(
+            t.steps,
+            (TrajectoryStep(kind="assistant_message", content="final text"),),
+        )
+        self.assertEqual(t.final_output, "final text")
+
+    def test_empty_or_nonstring_agent_message_is_skipped(self) -> None:
+        # An empty / non-string agent_message text creates no turn.
+        stdout = _jsonl(
+            {"type": "item.completed", "item": {
+                "id": "a1", "type": "agent_message", "text": ""}},
+            {"type": "item.completed", "item": {
+                "id": "a2", "type": "agent_message", "text": 7}},
+        )
+        self.assertEqual(parse_codex_trajectory(stdout).steps, ())
 
     def test_started_only_command_emits_call_without_result(self) -> None:
         # A command that never completes (no aggregated_output) is a call with

@@ -1453,8 +1453,9 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
 
     def test_codex_trajectory_record(self) -> None:
         # The codex backend dispatches through the same path: command +
-        # aggregated_output become the tool_call / tool_result, and the
-        # last agent_message is the output.
+        # aggregated_output become the tool_call / tool_result, the trailing
+        # agent_message rides along as an assistant_message turn, and that
+        # same last agent_message is the output.
         _, analytics = _reload()
         with tempfile.TemporaryDirectory() as td:
             t_path = Path(td) / "trajectory.jsonl"
@@ -1473,12 +1474,66 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self.assertEqual(rec["output"], "codex done")
             self.assertEqual(
                 [s["kind"] for s in rec["steps"]],
-                ["tool_call", "tool_result"],
+                ["tool_call", "tool_result", "assistant_message"],
             )
             self.assertEqual(rec["steps"][0]["content"], "ls -la")
             self.assertEqual(rec["steps"][1]["content"], "command output")
+            self.assertEqual(rec["steps"][2]["content"], "codex done")
+            # The text turn carries no tool name / id.
+            self.assertIsNone(rec["steps"][2]["name"])
+            self.assertIsNone(rec["steps"][2]["tool_id"])
             # codex exposes no offered-tools frame -> the field is dropped.
             self.assertNotIn("tools", rec)
+
+    def test_text_turns_redacted_truncated_and_recorded(self) -> None:
+        # New timeline items -- assistant / user text turns -- are stored as
+        # their own steps and get the same treatment as tool payloads: stream
+        # order preserved, secrets masked, over-long text head/tail truncated,
+        # and `name` / `tool_id` null (text turns carry no tool metadata).
+        _, analytics = _reload()
+        secret = "sk-ant-TEXTLEAK-0123456789"
+        with tempfile.TemporaryDirectory() as td, \
+                patch.dict(os.environ, {"ANTHROPIC_API_KEY": secret}), \
+                patch.object(analytics, "_TRAJECTORY_FIELD_HEAD", 5), \
+                patch.object(analytics, "_TRAJECTORY_FIELD_TAIL", 5):
+            t_path = Path(td) / "trajectory.jsonl"
+            frames = [
+                {"type": "system", "subtype": "init", "tools": ["Bash"]},
+                {"type": "assistant", "message": {"id": "m1", "content": [
+                    {"type": "text", "text": "B" * 100},
+                    {"type": "tool_use", "name": "Bash", "id": "tu1",
+                     "input": {"command": "ls"}}]}},
+                {"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "tu1",
+                     "content": "ok"},
+                    {"type": "text", "text": f"leak {secret}"}]}},
+                {"type": "result", "result": "done"},
+            ]
+            stdout = "\n".join(json.dumps(f) for f in frames)
+            self._emit(
+                analytics,
+                stdout=stdout,
+                prompt="p",
+                traj_path=t_path,
+                analytics_path=Path(td) / "a.jsonl",
+            )
+            rec = _read_records(t_path)[0]
+            self.assertEqual(
+                [s["kind"] for s in rec["steps"]],
+                ["assistant_message", "tool_call", "tool_result",
+                 "user_message"],
+            )
+            assistant_step = rec["steps"][0]
+            # Long assistant text head/tail truncated; no tool metadata.
+            self.assertLess(len(assistant_step["content"]), 100)
+            self.assertIn("chars elided", assistant_step["content"])
+            self.assertIsNone(assistant_step["name"])
+            self.assertIsNone(assistant_step["tool_id"])
+            # Secret masked in the user text turn and nowhere survives.
+            user_step = rec["steps"][3]
+            self.assertEqual(user_step["kind"], "user_message")
+            self.assertIn("***", user_step["content"])
+            self.assertNotIn(secret, json.dumps(rec))
 
     def test_secrets_redacted_in_every_field(self) -> None:
         # The secret env value must not survive in user_input, the tool_call

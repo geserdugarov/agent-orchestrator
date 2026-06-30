@@ -31,10 +31,11 @@ skill name -- never the ``Skill`` tool's ``args`` -- and is observation-only.
 A further sibling classifier (``parse_claude_trajectory`` /
 ``parse_codex_trajectory`` / ``parse_agent_trajectory``) reuses the same
 event iterator and resilience contract to reconstruct a run's *trajectory*:
-the offered tools, triggered skills, the ordered ``tool_call`` /
-``tool_result`` steps, and the final output. It classifies raw stream data
-only -- it neither writes files nor redacts/truncates content; a downstream
-writer owns that. ``system_prompt`` and ``tools`` stay best-effort and empty
+the offered tools, triggered skills, the ordered timeline of ``tool_call`` /
+``tool_result`` steps interleaved with ``assistant_message`` /
+``user_message`` text turns, and the final output. It classifies raw stream
+data only -- it neither writes files nor redacts/truncates content; a
+downstream writer owns that. ``system_prompt`` and ``tools`` stay best-effort and empty
 when a backend's stream does not expose them.
 """
 from __future__ import annotations
@@ -938,18 +939,22 @@ def parse_agent_skills(backend: str, stdout: str) -> SkillTriggers:
 
 @dataclass(frozen=True)
 class TrajectoryStep:
-    """One ordered step in an agent run: a tool call or its result.
+    """One ordered step in an agent run: a tool call, its result, or a
+    free-text message turn.
 
-    ``kind`` is ``"tool_call"`` or ``"tool_result"``. ``name`` carries the
-    tool name on a call (claude's ``tool_use.name``; codex's synthetic
-    ``"command_execution"``) and is empty on a result -- a result joins back
-    to its call through ``tool_id`` (claude's ``tool_use`` ``id`` /
-    ``tool_use_id``; codex's ``item.id``), which is ``""`` when the stream
-    omits it. ``content`` is the raw, un-redacted payload exactly as the
-    stream carried it: a call's input (claude input dict / codex command
-    string) or a result's output (claude result content / codex
-    ``aggregated_output``). Redaction and truncation are a downstream
-    writer's job, not this classifier's.
+    ``kind`` is ``"tool_call"``, ``"tool_result"``, ``"assistant_message"``
+    (an assistant text turn -- claude's ``text`` block / codex's
+    ``agent_message``) or ``"user_message"`` (a claude ``user`` text turn).
+    ``name`` carries the tool name on a call (claude's ``tool_use.name``;
+    codex's synthetic ``"command_execution"``) and is empty on results and
+    message turns -- a result joins back to its call through ``tool_id``
+    (claude's ``tool_use`` ``id`` / ``tool_use_id``; codex's ``item.id``),
+    which is ``""`` when the stream omits it and on message turns.
+    ``content`` is the raw, un-redacted payload exactly as the stream carried
+    it: a call's input (claude input dict / codex command string), a result's
+    output (claude result content / codex ``aggregated_output``), or a message
+    turn's text string. Redaction and truncation are a downstream writer's
+    job, not this classifier's.
     """
 
     kind: str
@@ -970,10 +975,11 @@ class TrajectoryStep:
 class AgentTrajectory:
     """Structured trajectory reconstructed from one agent run's JSONL stdout.
 
-    ``steps`` is the ordered ``tool_call`` / ``tool_result`` sequence;
-    ``final_output`` is the run's terminal answer (claude's ``result`` frame
-    ``result`` string / codex's last ``agent_message`` ``text``), ``None``
-    when the stream carries none. ``skills`` is the same names-only
+    ``steps`` is the ordered timeline -- ``tool_call`` / ``tool_result``
+    steps interleaved with ``assistant_message`` / ``user_message`` text
+    turns, in stream order; ``final_output`` is the run's terminal answer
+    (claude's ``result`` frame ``result`` string / codex's last
+    ``agent_message`` ``text``), ``None`` when the stream carries none. ``skills`` is the same names-only
     ``SkillTriggers`` the skill extractor produces. ``tools`` is the offered-
     tools set when a backend exposes one (claude's ``system``/``init``
     ``tools`` array) and empty otherwise; ``system_prompt`` stays ``None``
@@ -1055,15 +1061,21 @@ def _claude_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
 def _claude_trajectory_steps(
     events: Iterable[dict[str, Any]],
 ) -> tuple[TrajectoryStep, ...]:
-    """Reconstruct ordered tool_call / tool_result steps from a claude stream.
+    """Reconstruct the ordered timeline from a claude stream.
 
-    A ``tool_use`` block in an ``assistant`` message is a call; a
-    ``tool_result`` block in a ``user`` message is a result, joined to its
-    call by ``tool_use_id``. Steps follow stream order. Calls de-duplicate by
-    the ``tool_use`` block ``id`` and results by ``tool_use_id`` -- defensive
-    against ``--include-partial-messages`` re-emitting a block across frames,
-    the same discipline ``parse_claude_skills`` uses. The raw ``input`` /
-    ``content`` payload rides along verbatim (no redaction here).
+    An ``assistant`` message contributes its ``text`` blocks as
+    ``assistant_message`` turns and its ``tool_use`` blocks as ``tool_call``
+    steps; a ``user`` message contributes its ``text`` blocks as
+    ``user_message`` turns and its ``tool_result`` blocks as ``tool_result``
+    steps, joined to their call by ``tool_use_id``. Steps follow stream order.
+    Calls de-duplicate by the ``tool_use`` block ``id`` and results by
+    ``tool_use_id`` -- defensive against ``--include-partial-messages``
+    re-emitting a block across frames, the same discipline
+    ``parse_claude_skills`` uses. Text blocks carry no block ``id``; claude's
+    per-completed-block framing (the same capture ``parse_claude_skills``
+    relies on) emits each text block in exactly one frame, so they append in
+    order without an id de-dup. The raw ``input`` / ``content`` / ``text``
+    payload rides along verbatim (no redaction here).
     """
     steps: list[TrajectoryStep] = []
     seen_calls: set[str] = set()
@@ -1082,7 +1094,14 @@ def _claude_trajectory_steps(
             if not isinstance(block, dict):
                 continue
             btype = block.get("type")
-            if etype == "assistant" and btype == "tool_use":
+            if etype == "assistant" and btype == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    steps.append(TrajectoryStep(
+                        kind="assistant_message",
+                        content=text,
+                    ))
+            elif etype == "assistant" and btype == "tool_use":
                 name = block.get("name")
                 if not isinstance(name, str) or not name:
                     continue
@@ -1098,6 +1117,13 @@ def _claude_trajectory_steps(
                     tool_id=tool_id,
                     content=block.get("input"),
                 ))
+            elif etype == "user" and btype == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    steps.append(TrajectoryStep(
+                        kind="user_message",
+                        content=text,
+                    ))
             elif etype == "user" and btype == "tool_result":
                 rid = block.get("tool_use_id")
                 tool_id = rid if isinstance(rid, str) and rid else ""
@@ -1117,10 +1143,11 @@ def parse_claude_trajectory(stdout: str) -> AgentTrajectory:
     """Classify a ``claude -p --output-format stream-json`` run's trajectory.
 
     Reuses ``_iter_events`` and ``parse_claude_skills`` (names-only) and
-    reconstructs the offered tools, ordered tool_call / tool_result steps, and
-    final output. ``system_prompt`` stays ``None`` -- the stream-json shape
-    does not expose it -- and every section is empty rather than an error when
-    its source frame/field is absent.
+    reconstructs the offered tools, the ordered timeline (tool_call /
+    tool_result steps interleaved with assistant_message / user_message text
+    turns), and final output. ``system_prompt`` stays ``None`` -- the
+    stream-json shape does not expose it -- and every section is empty rather
+    than an error when its source frame/field is absent.
     """
     events = _iter_events(stdout)
     return AgentTrajectory(
@@ -1155,51 +1182,69 @@ def _codex_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
 def _codex_trajectory_steps(
     events: Iterable[dict[str, Any]],
 ) -> tuple[TrajectoryStep, ...]:
-    """Reconstruct ordered tool_call / tool_result steps from a codex stream.
+    """Reconstruct the ordered timeline from a codex stream.
 
     Codex's tool surface is the shell: each ``command_execution`` item is one
     call (its ``command``) and, once it completes, one result (its
-    ``aggregated_output``). Codex emits an ``item.started`` then an
-    ``item.completed`` for the same command sharing an ``item.id``; grouping
-    by that id keeps a single command one call + one result rather than two,
-    the same last-frame-wins discipline the usage / skill parsers use. Items
-    are emitted in first-seen id order (call then result); an item without an
-    id falls back to inline emission. Raw command / output text rides along
-    verbatim (no redaction here).
+    ``aggregated_output``); each ``agent_message`` item is one
+    ``assistant_message`` text turn (its ``text``) -- the same items
+    ``_codex_final_output`` reads, here also preserved in stream order. Codex
+    emits an ``item.started`` then an ``item.completed`` for the same item
+    sharing an ``item.id``; grouping by that id keeps a single item one step
+    (or one call + one result) rather than two, the same last-frame-wins
+    discipline the usage / skill parsers use. Items are emitted in first-seen
+    id order; an item without an id falls back to inline emission. Raw command
+    / output / message text rides along verbatim (no redaction here).
     """
     order: list[str] = []
     seen: set[str] = set()
     commands: dict[str, str] = {}
     outputs: dict[str, Any] = {}
+    messages: dict[str, str] = {}
     anon: list[TrajectoryStep] = []
     for ev in events:
         item = ev.get("item")
         if not isinstance(item, dict):
             continue
-        if item.get("type") != "command_execution":
-            continue
-        command = item.get("command")
-        has_output = "aggregated_output" in item
-        iid = item.get("id")
-        if isinstance(iid, str) and iid:
-            if iid not in seen:
-                seen.add(iid)
-                order.append(iid)
-            if isinstance(command, str):
-                commands[iid] = command
-            if has_output:
-                outputs[iid] = item.get("aggregated_output")
-        else:
-            if isinstance(command, str):
+        itype = item.get("type")
+        if itype == "command_execution":
+            command = item.get("command")
+            has_output = "aggregated_output" in item
+            iid = item.get("id")
+            if isinstance(iid, str) and iid:
+                if iid not in seen:
+                    seen.add(iid)
+                    order.append(iid)
+                if isinstance(command, str):
+                    commands[iid] = command
+                if has_output:
+                    outputs[iid] = item.get("aggregated_output")
+            else:
+                if isinstance(command, str):
+                    anon.append(TrajectoryStep(
+                        kind="tool_call",
+                        name="command_execution",
+                        content=command,
+                    ))
+                if has_output:
+                    anon.append(TrajectoryStep(
+                        kind="tool_result",
+                        content=item.get("aggregated_output"),
+                    ))
+        elif itype == "agent_message":
+            text = item.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+            iid = item.get("id")
+            if isinstance(iid, str) and iid:
+                if iid not in seen:
+                    seen.add(iid)
+                    order.append(iid)
+                messages[iid] = text
+            else:
                 anon.append(TrajectoryStep(
-                    kind="tool_call",
-                    name="command_execution",
-                    content=command,
-                ))
-            if has_output:
-                anon.append(TrajectoryStep(
-                    kind="tool_result",
-                    content=item.get("aggregated_output"),
+                    kind="assistant_message",
+                    content=text,
                 ))
     steps: list[TrajectoryStep] = []
     for iid in order:
@@ -1216,6 +1261,11 @@ def _codex_trajectory_steps(
                 tool_id=iid,
                 content=outputs[iid],
             ))
+        if iid in messages:
+            steps.append(TrajectoryStep(
+                kind="assistant_message",
+                content=messages[iid],
+            ))
     steps.extend(anon)
     return tuple(steps)
 
@@ -1224,10 +1274,12 @@ def parse_codex_trajectory(stdout: str) -> AgentTrajectory:
     """Classify a ``codex exec --json`` run's trajectory.
 
     Reuses ``_iter_events`` and ``parse_codex_skills`` (names-only) and
-    reconstructs the ordered command tool_call / tool_result steps and final
-    output. ``tools`` and ``system_prompt`` stay empty / ``None`` -- codex's
-    stream exposes no confirmed offered-tools or system-prompt frame -- and
-    every section is empty rather than an error when its source is absent.
+    reconstructs the ordered timeline (command tool_call / tool_result steps
+    interleaved with agent_message assistant_message turns) and final output;
+    the last ``agent_message`` is still the ``final_output``. ``tools`` and
+    ``system_prompt`` stay empty / ``None`` -- codex's stream exposes no
+    confirmed offered-tools or system-prompt frame -- and every section is
+    empty rather than an error when its source is absent.
     """
     events = _iter_events(stdout)
     return AgentTrajectory(
