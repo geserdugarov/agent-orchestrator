@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [project]
 name = "agent-orchestrator"
-version = "0.5.0"
+version = "0.6.0"
 description = "GitHub-Issue-driven AI agent workflow."
 requires-python = ">=3.12"
 license = "Apache-2.0"
