@@ -5,11 +5,11 @@
 The Streamlit import inside `trajectory_dashboard.main` is deliberately
 lazy so the orchestrator polling tick never pulls the optional
 `dashboard` group in. These tests exercise the pure inline-HTML builders
-(topbar, KPI strip, metadata grid, chips, run table, step header) and
-assert the same two invariants the analytics dashboard holds: the module
-loads without `streamlit` installed, and the
-`streamlit run orchestrator/trajectory_dashboard.py` script-launch
-`sys.path` shape resolves the absolute imports.
+(topbar, KPI strip, metadata grid, chips, run table, timeline entry,
+fixture-aware run picker label) and assert the same two invariants the
+analytics dashboard holds: the module loads without `streamlit`
+installed, and the `streamlit run orchestrator/trajectory_dashboard.py`
+script-launch `sys.path` shape resolves the absolute imports.
 """
 from __future__ import annotations
 
@@ -195,35 +195,99 @@ class RunsTableHtmlTest(unittest.TestCase):
         self.assertIn("o/&lt;r&amp;&gt;", out)
         self.assertNotIn("o/<r&>", out)
 
+    def test_fixture_row_flagged(self) -> None:
+        # `ignored` is the sentinel prompt that marks a synthetic fixture.
+        run = _run(user_input="ignored")
+        self.assertTrue(run.is_fixture)
+        out = _td()._runs_table_html([run])
+        self.assertIn('<tr class="fixture">', out)
+        self.assertIn("orch-traj-fixture-tag", out)
+        self.assertIn(">fixture</span>", out)
 
-class StepHeaderHtmlTest(unittest.TestCase):
+    def test_real_row_not_flagged(self) -> None:
+        run = _run()
+        self.assertFalse(run.is_fixture)
+        out = _td()._runs_table_html([run])
+        self.assertNotIn('class="fixture"', out)
+        self.assertNotIn("orch-traj-fixture-tag", out)
 
-    def test_call_badge_and_index(self) -> None:
+
+class TimelineEntryHtmlTest(unittest.TestCase):
+
+    def test_prompt_bracket_badge(self) -> None:
         import orchestrator.trajectory_reader as tr
-        step = tr.TrajectoryStepView(
-            kind="tool_call", name="Bash", tool_id="t1"
-        )
-        out = _td()._step_header_html(step, 0)
-        self.assertIn("orch-traj-badge call", out)
-        self.assertIn(">tool call<", out)
-        self.assertIn(">Bash</span>", out)
-        self.assertIn("t1", out)
+        entry = tr.TimelineEntry(kind=tr.TIMELINE_PROMPT, content="do x")
+        out = _td()._timeline_entry_html(entry, 0)
+        self.assertIn("orch-traj-badge prompt", out)
+        self.assertIn(">prompt</span>", out)
         # 0-based index renders 1-based for humans.
         self.assertIn(">1</span>", out)
 
-    def test_result_badge(self) -> None:
+    def test_output_bracket_badge(self) -> None:
         import orchestrator.trajectory_reader as tr
-        step = tr.TrajectoryStepView(kind="tool_result", tool_id="t1")
-        out = _td()._step_header_html(step, 1)
-        self.assertIn("orch-traj-badge result", out)
-        self.assertIn(">tool result<", out)
+        entry = tr.TimelineEntry(kind=tr.TIMELINE_OUTPUT, content="done")
+        out = _td()._timeline_entry_html(entry, 4)
+        self.assertIn("orch-traj-badge output", out)
+        self.assertIn(">final output</span>", out)
+        self.assertIn(">5</span>", out)
 
-    def test_step_name_escaped(self) -> None:
+    def test_tool_call_badge_name_and_id(self) -> None:
         import orchestrator.trajectory_reader as tr
-        step = tr.TrajectoryStepView(kind="tool_call", name="<x>")
-        out = _td()._step_header_html(step, 0)
+        entry = tr.TimelineEntry(kind="tool_call", name="Bash", tool_id="t1")
+        out = _td()._timeline_entry_html(entry, 1)
+        self.assertIn("orch-traj-badge call", out)
+        self.assertIn(">tool call</span>", out)
+        self.assertIn(">Bash</span>", out)
+        self.assertIn("t1", out)
+
+    def test_tool_result_badge(self) -> None:
+        import orchestrator.trajectory_reader as tr
+        entry = tr.TimelineEntry(kind="tool_result", tool_id="t1")
+        out = _td()._timeline_entry_html(entry, 2)
+        self.assertIn("orch-traj-badge result", out)
+        self.assertIn(">tool result</span>", out)
+
+    def test_assistant_turn_badge(self) -> None:
+        import orchestrator.trajectory_reader as tr
+        entry = tr.TimelineEntry(kind="assistant_message", content="hi")
+        out = _td()._timeline_entry_html(entry, 0)
+        self.assertIn("orch-traj-badge assistant", out)
+        self.assertIn(">assistant</span>", out)
+
+    def test_user_turn_badge(self) -> None:
+        import orchestrator.trajectory_reader as tr
+        entry = tr.TimelineEntry(kind="user_message", content="more")
+        out = _td()._timeline_entry_html(entry, 0)
+        self.assertIn("orch-traj-badge user", out)
+        self.assertIn(">user turn</span>", out)
+
+    def test_unknown_kind_falls_through(self) -> None:
+        import orchestrator.trajectory_reader as tr
+        entry = tr.TimelineEntry(kind="weird")
+        out = _td()._timeline_entry_html(entry, 0)
+        self.assertIn("orch-traj-badge result", out)
+        self.assertIn(">weird</span>", out)
+
+    def test_name_escaped(self) -> None:
+        import orchestrator.trajectory_reader as tr
+        entry = tr.TimelineEntry(kind="tool_call", name="<x>")
+        out = _td()._timeline_entry_html(entry, 0)
         self.assertIn("&lt;x&gt;", out)
         self.assertNotIn("<x></span>", out)
+
+
+class RunPickerLabelTest(unittest.TestCase):
+
+    def test_fixture_run_prefixed(self) -> None:
+        run = _run(session_id="sess-9")
+        self.assertTrue(run.is_fixture)
+        out = _td()._run_picker_label(run)
+        self.assertTrue(out.startswith("[fixture] "))
+        self.assertIn(run.label(), out)
+
+    def test_real_run_plain_label(self) -> None:
+        run = _run()
+        self.assertEqual(_td()._run_picker_label(run), run.label())
 
 
 class CardHeaderHtmlTest(unittest.TestCase):
