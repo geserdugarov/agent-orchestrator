@@ -283,11 +283,14 @@ class RunPickerLabelTest(unittest.TestCase):
         self.assertTrue(run.is_fixture)
         out = _td()._run_picker_label(run)
         self.assertTrue(out.startswith("[fixture] "))
-        self.assertIn(run.label(), out)
+        self.assertIn(run.detail_label(), out)
 
     def test_real_run_plain_label(self) -> None:
+        # The per-run picker drops repo / issue (chosen in the cascading
+        # selectors above it) and shows only the `detail_label` cohort.
         run = _run()
-        self.assertEqual(_td()._run_picker_label(run), run.label())
+        self.assertEqual(_td()._run_picker_label(run), run.detail_label())
+        self.assertNotIn(run.repo, _td()._run_picker_label(run))
 
 
 class CardHeaderHtmlTest(unittest.TestCase):

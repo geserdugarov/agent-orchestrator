@@ -418,6 +418,31 @@ class LabelTest(unittest.TestCase):
         run = tr.parse_record(_record(), seq=0)
         self.assertNotIn("round", run.label())
 
+    def test_detail_label_drops_issue_and_repo(self) -> None:
+        run = tr.parse_record(
+            _record(issue=42, repo="a/a", stage="documenting",
+                    agent_role="developer", backend="claude",
+                    review_round=0),
+            seq=0,
+        )
+        detail = run.detail_label()
+        self.assertIn("documenting/developer · claude · round 0", detail)
+        self.assertIn(run.ts, detail)
+        # The repo / issue are picked separately, so they are dropped here.
+        self.assertNotIn("#42", detail)
+        self.assertNotIn("a/a", detail)
+
+    def test_label_is_issue_repo_plus_detail_label(self) -> None:
+        run = tr.parse_record(
+            _record(issue=7, repo="a/a", stage="implementing",
+                    agent_role="developer", backend="claude",
+                    review_round=1),
+            seq=0,
+        )
+        self.assertEqual(
+            run.label(), f"#7 a/a · {run.detail_label()}"
+        )
+
 
 class TimelineTest(unittest.TestCase):
     """`TrajectoryRun.timeline` normalizes old and new records alike."""

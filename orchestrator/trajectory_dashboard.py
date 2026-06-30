@@ -17,14 +17,15 @@ the trajectory viewer with nothing but the JSONL file on disk -- no
 database, no sync -- and the cost dashboard never has to carry the
 trajectory bodies.
 
-The page is intentionally minimal-but-useful: a filterable list of the
-recorded runs and a per-run detail view that walks the run's normalised
-`timeline` -- the redacted prompt, then the interleaved assistant / user
-text turns and tool calls / results, then the final output, as one
-ordered sequence -- alongside the offered tools and triggered skills. A
-sidebar toggle hides the synthetic test-suite fixtures the reader's
-`is_fixture` marker flags (off by default; when shown they are tagged in
-the overview table and the run picker). The pure parsing / filtering /
+The page is intentionally minimal-but-useful: a foldable list of the
+recorded runs, a cascading repo -> issue -> run picker, and a per-run
+detail view that walks the run's normalised `timeline` -- the redacted
+prompt, then the interleaved assistant / user text turns and tool calls
+/ results, then the final output, as one ordered sequence -- alongside
+the offered tools and triggered skills. A sidebar toggle hides the
+synthetic test-suite fixtures the reader's `is_fixture` marker flags
+(off by default; when shown they are tagged in the overview table and
+the run picker). The pure parsing / filtering /
 summary / timeline logic lives in the import-light
 `orchestrator.trajectory_reader`; this module owns only the Streamlit
 rendering.
@@ -388,8 +389,14 @@ def _timeline_entry_html(
 
 
 def _run_picker_label(run: TrajectoryRun) -> str:
-    """The run's picker label, prefixed when it is a synthetic fixture."""
-    label = run.label()
+    """The run's per-run picker label (`detail_label`), prefixed when it
+    is a synthetic fixture.
+
+    The repo and issue live in their own cascading selectors above this
+    one, so the per-run picker shows only the `detail_label` cohort
+    (stage/role · backend · round · ts), not the full `label`.
+    """
+    label = run.detail_label()
     return f"{_FIXTURE_LABEL_PREFIX}{label}" if run.is_fixture else label
 
 
@@ -559,15 +566,11 @@ def main() -> None:
         return
 
     # ── Run list ─────────────────────────────────────────────────
-    with st.container(border=True):
-        st.markdown('<div class="orch-cardmark"></div>', unsafe_allow_html=True)
-        st.markdown(
-            _card_header_html(
-                "Recorded runs",
-                "Most recent first · pick a run below to inspect it",
-            ),
-            unsafe_allow_html=True,
-        )
+    # A native expander so the operator can fold the overview table away
+    # and focus on the inspected run; expanded by default to preserve the
+    # at-a-glance view.
+    with st.expander("Recorded runs", expanded=True):
+        st.caption("Most recent first · pick a run below to inspect it")
         table_runs = shown[:RUN_TABLE_LIMIT]
         st.markdown(_runs_table_html(table_runs), unsafe_allow_html=True)
         if len(shown) > RUN_TABLE_LIMIT:
@@ -587,13 +590,38 @@ def main() -> None:
             )
 
     # ── Selected-run detail ──────────────────────────────────────
-    labels = [_run_picker_label(r) for r in shown]
-    selected = st.selectbox(
-        "Inspect run",
-        range(len(shown)),
-        format_func=lambda i: labels[i],
+    # Three cascading pickers narrow `shown` to one run: repo, then the
+    # issue within that repo, then the specific run (by `detail_label`).
+    # Streamlit resets a downstream selectbox to its first option when an
+    # upstream pick makes its prior value no longer offered.
+    st.markdown(
+        '<p class="orch-card-sub" style="margin:14px 0 4px">'
+        'Inspect run</p>',
+        unsafe_allow_html=True,
     )
-    _render_run(st=st, run=shown[selected])
+    repo_col, issue_col, run_col = st.columns(3)
+    with repo_col:
+        inspect_repos = sorted({r.repo for r in shown})
+        picked_repo = st.selectbox("Repo", inspect_repos)
+    with issue_col:
+        inspect_issues = sorted(
+            {r.issue for r in shown if r.repo == picked_repo}
+        )
+        picked_issue = st.selectbox(
+            "Issue", inspect_issues, format_func=lambda i: f"#{i}"
+        )
+    with run_col:
+        candidates = [
+            r
+            for r in shown
+            if r.repo == picked_repo and r.issue == picked_issue
+        ]
+        selected = st.selectbox(
+            "Run",
+            range(len(candidates)),
+            format_func=lambda i: _run_picker_label(candidates[i]),
+        )
+    _render_run(st=st, run=candidates[selected])
 
     st.markdown(
         '<div class="orch-foot">'

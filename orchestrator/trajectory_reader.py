@@ -229,11 +229,13 @@ class TrajectoryRun:
             return True
         return False
 
-    def label(self) -> str:
-        """One-line label for the run picker.
+    def detail_label(self) -> str:
+        """The per-run half of `label()`: stage/role, backend, round, ts.
 
-        Leads with the issue / repo so the operator can scan by target,
-        then the stage / role / backend cohort and the timestamp.
+        The repo and issue are chosen separately in the viewer's
+        cascading run selector, so this drops them and keeps only the
+        cohort the operator picks between within one issue, e.g.
+        `documenting/developer · claude · round 0 · 2026-06-30T...`.
         """
         stage = self.stage or "—"
         role = self.agent_role or "—"
@@ -243,10 +245,15 @@ class TrajectoryRun:
             if self.review_round is not None
             else ""
         )
-        return (
-            f"#{self.issue} {self.repo} · {stage}/{role} · {backend}"
-            f"{round_suffix} · {self.ts}"
-        )
+        return f"{stage}/{role} · {backend}{round_suffix} · {self.ts}"
+
+    def label(self) -> str:
+        """One-line label for the run picker.
+
+        Leads with the issue / repo so the operator can scan by target,
+        then the `detail_label` cohort and the timestamp.
+        """
+        return f"#{self.issue} {self.repo} · {self.detail_label()}"
 
 
 @dataclass(frozen=True)
