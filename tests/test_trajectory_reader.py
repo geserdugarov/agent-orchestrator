@@ -308,10 +308,59 @@ class FilterRunsTest(unittest.TestCase):
         # Whitespace-only query is treated as no filter.
         self.assertEqual(len(tr.filter_runs(runs, query="   ")), 2)
 
+    def test_query_matches_message_turn_content(self) -> None:
+        # The newer `assistant_message` / `user_message` turns are steps
+        # too, so the free-text search reaches their content like any
+        # tool payload.
+        runs = [
+            tr.parse_record(
+                _record(issue=1, steps=[
+                    {"kind": "assistant_message",
+                     "content": "I will refactor the cache layer"}]),
+                seq=0,
+            ),
+            tr.parse_record(_record(issue=2), seq=1),
+        ]
+        self.assertEqual(
+            [r.issue for r in tr.filter_runs(runs, query="refactor")], [1]
+        )
+
     def test_filters_combine_conjunctively(self) -> None:
         runs = self._runs()
         self.assertEqual(
             tr.filter_runs(runs, repo="a/a", backends=["codex"]), []
+        )
+
+    def test_exclude_fixtures_default_off(self) -> None:
+        # Backward-compatible default: fixtures are kept unless asked to
+        # drop them.
+        runs = [
+            tr.parse_record(_record(issue=1, user_input="real work",
+                                    session_id="uuid-1"), seq=0),
+            tr.parse_record(_record(issue=2, user_input="ignored"), seq=1),
+        ]
+        self.assertEqual(len(tr.filter_runs(runs)), 2)
+
+    def test_exclude_fixtures_drops_every_tell(self) -> None:
+        runs = [
+            tr.parse_record(_record(issue=1, user_input="real work",
+                                    session_id="uuid-1"), seq=0),
+            tr.parse_record(_record(issue=2, user_input="ignored"), seq=1),
+            tr.parse_record(_record(issue=3, session_id="sess-7"), seq=2),
+            tr.parse_record(_record(issue=4, steps=[
+                {"kind": "tool_call", "name": "Skill",
+                 "content": "develop"}]), seq=3),
+        ]
+        kept = tr.filter_runs(runs, exclude_fixtures=True)
+        self.assertEqual([r.issue for r in kept], [1])
+
+    def test_exclude_fixtures_combines_with_other_filters(self) -> None:
+        # An issue filter that selects a fixture still drops it.
+        runs = [
+            tr.parse_record(_record(issue=2, user_input="ignored"), seq=0),
+        ]
+        self.assertEqual(
+            tr.filter_runs(runs, issue=2, exclude_fixtures=True), []
         )
 
 
@@ -368,6 +417,171 @@ class LabelTest(unittest.TestCase):
     def test_label_without_round_omits_it(self) -> None:
         run = tr.parse_record(_record(), seq=0)
         self.assertNotIn("round", run.label())
+
+
+class TimelineTest(unittest.TestCase):
+    """`TrajectoryRun.timeline` normalizes old and new records alike."""
+
+    def test_old_steps_only_record_brackets_prompt_and_output(self) -> None:
+        # A legacy record predates the text-turn timeline: its steps are
+        # only tool_call / tool_result. The normalized timeline still
+        # brackets them with the prompt and the final output, in order.
+        run = tr.parse_record(
+            _record(
+                user_input="do the thing",
+                output="all done",
+                steps=[
+                    {"kind": "tool_call", "name": "Bash",
+                     "tool_id": "t1", "content": "ls"},
+                    {"kind": "tool_result", "tool_id": "t1",
+                     "content": "calc.py"},
+                ],
+            ),
+            seq=0,
+        )
+        self.assertEqual(
+            [e.kind for e in run.timeline],
+            ["prompt", "tool_call", "tool_result", "output"],
+        )
+        self.assertTrue(run.timeline[0].is_prompt)
+        self.assertEqual(run.timeline[0].content, "do the thing")
+        self.assertTrue(run.timeline[-1].is_output)
+        self.assertEqual(run.timeline[-1].content, "all done")
+        # The middle tool_call keeps its name / id; the brackets carry none.
+        call = run.timeline[1]
+        self.assertEqual(call.name, "Bash")
+        self.assertEqual(call.tool_id, "t1")
+        self.assertEqual(run.timeline[0].name, "")
+        self.assertEqual(run.timeline[0].tool_id, "")
+
+    def test_new_mixed_timeline_preserves_interleaved_turns(self) -> None:
+        # A record written since the timeline feature interleaves
+        # assistant / user text turns with the tool steps; the normalized
+        # timeline keeps stream order and adds the prompt / output brackets.
+        run = tr.parse_record(
+            _record(
+                user_input="fix the parser",
+                output="fixed",
+                steps=[
+                    {"kind": "assistant_message", "content": "let me look"},
+                    {"kind": "tool_call", "name": "Read", "tool_id": "r1",
+                     "content": "open x.py"},
+                    {"kind": "tool_result", "tool_id": "r1",
+                     "content": "body"},
+                    {"kind": "user_message", "content": "now ship it"},
+                    {"kind": "assistant_message", "content": "done"},
+                ],
+            ),
+            seq=0,
+        )
+        self.assertEqual(
+            [e.kind for e in run.timeline],
+            ["prompt", "assistant_message", "tool_call", "tool_result",
+             "user_message", "assistant_message", "output"],
+        )
+
+    def test_tool_calls_count_excludes_message_turns(self) -> None:
+        # The message turns are steps but must not be counted as tool
+        # calls -- the tally stays correct across record vintages.
+        run = tr.parse_record(
+            _record(steps=[
+                {"kind": "assistant_message", "content": "thinking"},
+                {"kind": "tool_call", "name": "Bash", "content": "ls"},
+                {"kind": "tool_result", "tool_id": "t", "content": "out"},
+                {"kind": "user_message", "content": "go on"},
+                {"kind": "tool_call", "name": "Edit", "content": "patch"},
+            ]),
+            seq=0,
+        )
+        self.assertEqual(run.step_count, 5)
+        self.assertEqual(run.tool_calls, 2)
+
+    def test_brackets_omitted_when_field_empty(self) -> None:
+        # No prompt and no output: the timeline is exactly the steps.
+        run = tr.parse_record(
+            _record(user_input="", output="",
+                    steps=[{"kind": "tool_call", "name": "Bash"}]),
+            seq=0,
+        )
+        self.assertEqual([e.kind for e in run.timeline], ["tool_call"])
+
+    def test_prompt_only_record_is_single_bracket(self) -> None:
+        run = tr.parse_record(
+            _record(user_input="just a prompt", output=""), seq=0
+        )
+        timeline = run.timeline
+        self.assertEqual([e.kind for e in timeline], ["prompt"])
+        self.assertEqual(timeline[0].content, "just a prompt")
+
+    def test_empty_record_has_empty_timeline(self) -> None:
+        run = tr.parse_record(_record(user_input="", output=""), seq=0)
+        self.assertEqual(run.timeline, ())
+
+
+class FixtureIdentificationTest(unittest.TestCase):
+    """`TrajectoryRun.is_fixture` flags synthetic test-suite records."""
+
+    def test_ignored_prompt_is_fixture(self) -> None:
+        self.assertTrue(
+            tr.parse_record(_record(user_input="ignored"), seq=0).is_fixture
+        )
+        # Case and surrounding whitespace do not hide the sentinel.
+        self.assertTrue(
+            tr.parse_record(
+                _record(user_input="  IGNORED "), seq=0
+            ).is_fixture
+        )
+
+    def test_sess_session_id_is_fixture(self) -> None:
+        self.assertTrue(
+            tr.parse_record(_record(session_id="sess-dev"), seq=0).is_fixture
+        )
+        self.assertTrue(
+            tr.parse_record(_record(session_id="sess-1"), seq=0).is_fixture
+        )
+
+    def test_skill_only_run_is_fixture(self) -> None:
+        run = tr.parse_record(
+            _record(
+                user_input="real prompt",
+                session_id="uuid-9",
+                steps=[
+                    {"kind": "tool_call", "name": "Skill",
+                     "content": "develop"},
+                    {"kind": "tool_call", "name": "Skill",
+                     "content": "review"},
+                ],
+            ),
+            seq=0,
+        )
+        self.assertTrue(run.is_fixture)
+
+    def test_real_run_is_not_fixture(self) -> None:
+        # A real prompt, a uuid session id, and mixed real tool work
+        # (a Skill call among Bash / its result): no tell fires.
+        run = tr.parse_record(
+            _record(
+                user_input="please fix issue 7",
+                session_id="0f9a3c2e-1b4d-4a77-9c12-abcdef012345",
+                steps=[
+                    {"kind": "tool_call", "name": "Skill",
+                     "content": "develop"},
+                    {"kind": "tool_call", "name": "Bash",
+                     "content": "pytest"},
+                    {"kind": "tool_result", "tool_id": "t", "content": "ok"},
+                ],
+            ),
+            seq=0,
+        )
+        self.assertFalse(run.is_fixture)
+
+    def test_no_steps_run_is_not_skill_only(self) -> None:
+        # An empty step list must not be read as a Skill-only run; only
+        # the prompt / session tells can flag a stepless record.
+        run = tr.parse_record(
+            _record(user_input="real", session_id="abc123"), seq=0
+        )
+        self.assertFalse(run.is_fixture)
 
 
 if __name__ == "__main__":

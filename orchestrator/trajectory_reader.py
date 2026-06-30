@@ -12,8 +12,12 @@ trajectory sink is deliberately never replayed into Postgres (see
 Everything here is import-light -- only stdlib plus `orchestrator.analytics`
 (for the `TRAJECTORY_LOG_PATH` module attribute) -- so importing it never
 pulls Streamlit into the polling tick's import surface. The page module owns
-the Streamlit rendering; this module owns the parsing, filtering, and the
-filter-option / summary aggregation, all of which are pure and unit-tested.
+the Streamlit rendering; this module owns the parsing, filtering, the
+filter-option / summary aggregation, the normalized per-run timeline (which
+folds an old steps-only record and a new record with interleaved text turns
+into one ordered prompt -> steps -> output sequence), and the
+synthetic-fixture predicate (which flags the test-suite records an inherited
+file may carry) -- all of which are pure and unit-tested.
 
 Resilience contract mirrors the rest of the codebase: a missing file, a
 malformed line, a record that is not an `agent_trajectory`, or a renamed /
@@ -38,6 +42,24 @@ log = logging.getLogger(__name__)
 # event, but the reader filters on it defensively so a hand-edited or
 # concatenated file cannot smuggle a foreign record into the viewer.
 TRAJECTORY_EVENT = "agent_trajectory"
+
+# The two synthetic timeline-entry kinds that bracket a run's recorded
+# steps -- the leading orchestrator prompt and the trailing final answer.
+# Between them the step kinds ride through verbatim (`tool_call`,
+# `tool_result`, and -- on records written since the timeline feature --
+# `assistant_message` / `user_message` text turns). See
+# `TrajectoryRun.timeline`.
+TIMELINE_PROMPT = "prompt"
+TIMELINE_OUTPUT = "output"
+
+# Tells that mark a record as a synthetic test fixture rather than a real
+# run. The trajectory sink predates this viewer, so a file an operator
+# inherits can carry records the test suite wrote when it happened to run
+# with the sink enabled. Any one tell is enough -- see
+# `TrajectoryRun.is_fixture`.
+_FIXTURE_PROMPT = "ignored"          # the sentinel prompt fixtures pass
+_FIXTURE_SESSION_PREFIX = "sess-"    # synthetic ids; a real id is a uuid
+_FIXTURE_SKILL_TOOL = "Skill"        # a run whose every step is a Skill call
 
 UNCONFIGURED_LOG_MESSAGE = (
     "`TRAJECTORY_LOG_PATH` is not configured. The trajectory sink is "
@@ -75,6 +97,35 @@ class TrajectoryStepView:
 
 
 @dataclass(frozen=True)
+class TimelineEntry:
+    """One entry in a run's normalized, ordered timeline.
+
+    `TrajectoryRun.timeline` folds the record's leading prompt
+    (`user_input`), its ordered `steps[]`, and its trailing final
+    `output` into a single sequence so the viewer can walk an old
+    steps-only record and a new record whose steps interleave
+    `assistant_message` / `user_message` text turns the same way. `kind`
+    is `prompt` / `output` for the two synthetic brackets and otherwise
+    the underlying step's own kind. `name` / `tool_id` carry the tool
+    metadata on a `tool_call` (empty on results, message turns, and the
+    two brackets); `content` is the already-redacted body.
+    """
+
+    kind: str
+    content: str = ""
+    name: str = ""
+    tool_id: str = ""
+
+    @property
+    def is_prompt(self) -> bool:
+        return self.kind == TIMELINE_PROMPT
+
+    @property
+    def is_output(self) -> bool:
+        return self.kind == TIMELINE_OUTPUT
+
+
+@dataclass(frozen=True)
 class TrajectoryRun:
     """One `agent_trajectory` record, parsed and normalised for display.
 
@@ -106,11 +157,77 @@ class TrajectoryRun:
 
     @property
     def tool_calls(self) -> int:
+        # Only `tool_call` steps count -- `assistant_message` /
+        # `user_message` turns on newer records must not inflate the tally.
         return sum(1 for s in self.steps if s.is_call)
 
     @property
     def step_count(self) -> int:
         return len(self.steps)
+
+    @property
+    def timeline(self) -> tuple[TimelineEntry, ...]:
+        """The prompt, then the ordered steps, then the final output.
+
+        A normalized view across record vintages: an old record carrying
+        only `tool_call` / `tool_result` steps and a new record whose
+        steps interleave `assistant_message` / `user_message` turns both
+        yield one ordered sequence bracketed by the prompt and output. A
+        bracket is omitted when its field is empty, so a record that never
+        captured a prompt or produced an output simply starts or ends on
+        its steps. The step entries preserve `steps[]` order verbatim, so
+        the tool-call timeline a viewer renders is unchanged -- the
+        prompt and output are added around it, not woven into it.
+        """
+        entries: list[TimelineEntry] = []
+        if self.user_input:
+            entries.append(
+                TimelineEntry(kind=TIMELINE_PROMPT, content=self.user_input)
+            )
+        for s in self.steps:
+            entries.append(
+                TimelineEntry(
+                    kind=s.kind,
+                    content=s.content,
+                    name=s.name,
+                    tool_id=s.tool_id,
+                )
+            )
+        if self.output:
+            entries.append(
+                TimelineEntry(kind=TIMELINE_OUTPUT, content=self.output)
+            )
+        return tuple(entries)
+
+    @property
+    def is_fixture(self) -> bool:
+        """True when the record looks like a synthetic test fixture.
+
+        The trajectory file an operator inherits can carry records the
+        test suite wrote when it ran with the sink enabled. Three tells,
+        any one of which marks a run synthetic:
+
+        * the sentinel prompt `ignored` the fixtures pass when the prompt
+          text is irrelevant to the assertion;
+        * a `sess-*` session id (the fixtures' synthetic ids; a real
+          `result.session_id` is a uuid, never this prefix);
+        * a Skill-only run -- every recorded step is a `Skill` tool call,
+          with no real tool work -- the shape the skill-trigger fixtures
+          emit.
+
+        Surfaced as a marker so a viewer can flag these and consumed by
+        `filter_runs(exclude_fixtures=True)` so they can be dropped,
+        without anyone hand-curating the file.
+        """
+        if self.user_input.strip().lower() == _FIXTURE_PROMPT:
+            return True
+        if self.session_id.startswith(_FIXTURE_SESSION_PREFIX):
+            return True
+        if self.steps and all(
+            s.is_call and s.name == _FIXTURE_SKILL_TOOL for s in self.steps
+        ):
+            return True
+        return False
 
     def label(self) -> str:
         """One-line label for the run picker.
@@ -360,6 +477,7 @@ def filter_runs(
     stages: Optional[Sequence[str]] = None,
     issue: Optional[int] = None,
     query: Optional[str] = None,
+    exclude_fixtures: bool = False,
 ) -> list[TrajectoryRun]:
     """Return the subset of `runs` matching every supplied filter.
 
@@ -368,7 +486,9 @@ def filter_runs(
     viewer default, distinct from the analytics dashboard's tri-state
     multiselect. `repo` / `issue` are exact-match scalars; `query` is a
     case-insensitive substring matched across every free-text field.
-    Relative order is preserved.
+    `exclude_fixtures` (default off, so existing callers are unaffected)
+    drops the synthetic test-suite records `TrajectoryRun.is_fixture`
+    flags. Relative order is preserved.
     """
     backend_set = set(backends) if backends else None
     role_set = set(agent_roles) if agent_roles else None
@@ -377,6 +497,8 @@ def filter_runs(
 
     out: list[TrajectoryRun] = []
     for r in runs:
+        if exclude_fixtures and r.is_fixture:
+            continue
         if repo is not None and r.repo != repo:
             continue
         if issue is not None and r.issue != issue:
