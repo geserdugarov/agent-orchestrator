@@ -9,6 +9,7 @@ from orchestrator.usage import (
     AgentTrajectory,
     SkillTriggers,
     TrajectoryStep,
+    TurnUsage,
     UsageMetrics,
     parse_agent_skills,
     parse_agent_trajectory,
@@ -1404,16 +1405,19 @@ class ClaudeTrajectoryTest(unittest.TestCase):
         # Skills reuse the names-only extractor (offered + triggered).
         self.assertEqual(t.skills.available, ("develop", "review"))
         self.assertEqual(t.skills.triggered, ("develop",))
-        # Ordered timeline: assistant text -> call -> result -> call.
+        # Ordered timeline: assistant text -> call -> result -> call. The two
+        # msg_1 steps share turn 0; the msg_2 call is turn 1; the tool_result
+        # is a turn input and carries no turn index.
         self.assertEqual(len(t.steps), 4)
         self.assertEqual(
             t.steps[0],
-            TrajectoryStep(kind="assistant_message", content="let me look"),
+            TrajectoryStep(kind="assistant_message", turn=0,
+                           content="let me look"),
         )
         self.assertEqual(
             t.steps[1],
             TrajectoryStep(kind="tool_call", name="Bash", tool_id="toolu_a",
-                           content={"command": "ls"}),
+                           turn=0, content={"command": "ls"}),
         )
         self.assertEqual(
             t.steps[2],
@@ -1423,7 +1427,7 @@ class ClaudeTrajectoryTest(unittest.TestCase):
         self.assertEqual(
             t.steps[3],
             TrajectoryStep(kind="tool_call", name="Skill", tool_id="toolu_b",
-                           content={"skill": "develop"}),
+                           turn=1, content={"skill": "develop"}),
         )
 
     def test_captures_assistant_and_user_text_turns_in_stream_order(
@@ -1544,6 +1548,199 @@ class ClaudeTrajectoryTest(unittest.TestCase):
     def test_empty_stdout(self) -> None:
         self.assertEqual(parse_claude_trajectory(""),
                          AgentTrajectory(backend="claude"))
+
+
+class ClaudeTurnUsageTest(unittest.TestCase):
+    """Per-turn token usage from ``parse_claude_trajectory``.
+
+    Tokens are billed per assistant turn (one ``message.id``), not per timeline
+    step: a turn's ``text`` and ``tool_use`` blocks share one ``usage`` record,
+    so usage rides on ``AgentTrajectory.turns`` -- one ``TurnUsage`` per turn --
+    while every ``assistant_message`` / ``tool_call`` step carries the same
+    ``turn`` index. Per-turn cost is always an estimate from the shared price
+    path; ``tool_result`` / ``user_message`` steps are turn inputs (``turn``
+    ``None``).
+    """
+
+    def test_turn_indexes_span_multi_tool_turns_and_per_turn_model(
+        self,
+    ) -> None:
+        # A single assistant message with a text block and two tool_use blocks
+        # is one turn: all three steps share turn 0 and there is one TurnUsage
+        # for it, with the cache read/write split and a per-turn estimated cost
+        # priced from that turn's own model. A second message is turn 1, priced
+        # from its own (different) model; the interleaved tool_result steps are
+        # turn inputs and carry no index.
+        stdout = _jsonl(
+            {"type": "system", "subtype": "init", "tools": ["Bash", "Edit"]},
+            {"type": "assistant", "message": {
+                "id": "msg_0", "model": "claude-sonnet-4-6",
+                "content": [
+                    {"type": "text", "text": "working"},
+                    {"type": "tool_use", "id": "t1", "name": "Bash",
+                     "input": {"command": "ls"}},
+                    {"type": "tool_use", "id": "t2", "name": "Edit",
+                     "input": {"file_path": "a.py"}}],
+                "usage": {"input_tokens": 12,
+                          "cache_creation_input_tokens": 512,
+                          "cache_read_input_tokens": 18240,
+                          "output_tokens": 340}}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "o1"},
+                {"type": "tool_result", "tool_use_id": "t2", "content": "o2"}]}},
+            {"type": "assistant", "message": {
+                "id": "msg_1", "model": "claude-haiku-3-5",
+                "content": [{"type": "text", "text": "done"}],
+                "usage": {"input_tokens": 20, "output_tokens": 50}}},
+            {"type": "result", "result": "ok", "num_turns": 2},
+        )
+        t = parse_claude_trajectory(stdout)
+        self.assertEqual(
+            [(s.kind, s.turn) for s in t.steps],
+            [("assistant_message", 0), ("tool_call", 0), ("tool_call", 0),
+             ("tool_result", None), ("tool_result", None),
+             ("assistant_message", 1)],
+        )
+        self.assertEqual(len(t.turns), 2)
+        turn0, turn1 = t.turns
+        # sonnet: input=3, cw5m=3.75, cr=0.30, output=15 (per 1M).
+        expected0 = (12 * 3 + 512 * 3.75 + 18240 * 0.30 + 340 * 15) / 1_000_000
+        self.assertEqual(
+            turn0,
+            TurnUsage(turn=0, model="claude-sonnet-4-6", input_tokens=12,
+                      output_tokens=340, cache_read_tokens=18240,
+                      cache_write_tokens=512, cost_usd=turn0.cost_usd,
+                      cost_source="estimated"),
+        )
+        assert turn0.cost_usd is not None
+        self.assertAlmostEqual(turn0.cost_usd, expected0, places=12)
+        # haiku-3-5: input=0.80, output=4 (per 1M).
+        self.assertEqual(turn1.turn, 1)
+        self.assertEqual(turn1.model, "claude-haiku-3-5")
+        self.assertEqual(turn1.cache_read_tokens, 0)
+        self.assertEqual(turn1.cache_write_tokens, 0)
+        expected1 = (20 * 0.80 + 50 * 4) / 1_000_000
+        assert turn1.cost_usd is not None
+        self.assertAlmostEqual(turn1.cost_usd, expected1, places=12)
+
+    def test_structured_cache_creation_sums_into_cache_write(self) -> None:
+        # The structured 5m/1h cache-creation form sums into a single per-turn
+        # cache_write_tokens while both still price at their own rate.
+        stdout = _jsonl(
+            {"type": "assistant", "message": {
+                "id": "msg_0", "model": "claude-opus-4-7",
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": 0,
+                          "cache_creation": {
+                              "ephemeral_5m_input_tokens": 1000,
+                              "ephemeral_1h_input_tokens": 500},
+                          "cache_read_input_tokens": 0,
+                          "output_tokens": 100}}},
+        )
+        turn0 = parse_claude_trajectory(stdout).turns[0]
+        self.assertEqual(turn0.cache_write_tokens, 1500)
+        # opus-4-7: input=5, cw5m=6.25, cw1h=10, cr=0.50, output=25.
+        expected = (1000 * 6.25 + 500 * 10 + 100 * 25) / 1_000_000
+        assert turn0.cost_usd is not None
+        self.assertAlmostEqual(turn0.cost_usd, expected, places=12)
+
+    def test_partial_message_frames_are_one_turn_last_record_wins(self) -> None:
+        # Two frames sharing a message.id are one turn; the last usage record is
+        # authoritative (claude streams partial usage on intermediate frames).
+        # Both frames' steps carry the single turn 0.
+        stdout = _jsonl(
+            {"type": "assistant", "message": {
+                "id": "msg_0", "model": "claude-opus-4-7",
+                "content": [{"type": "text", "text": "partial"}],
+                "usage": {"input_tokens": 5, "output_tokens": 10,
+                          "cache_read_input_tokens": 100}}},
+            {"type": "assistant", "message": {
+                "id": "msg_0", "model": "claude-opus-4-7",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                             "input": {"command": "ls"}}],
+                "usage": {"input_tokens": 8, "output_tokens": 40,
+                          "cache_read_input_tokens": 200}}},
+        )
+        t = parse_claude_trajectory(stdout)
+        self.assertEqual([s.turn for s in t.steps], [0, 0])
+        self.assertEqual(len(t.turns), 1)
+        self.assertEqual(t.turns[0].input_tokens, 8)
+        self.assertEqual(t.turns[0].output_tokens, 40)
+        self.assertEqual(t.turns[0].cache_read_tokens, 200)
+
+    def test_unpriced_model_turn_is_unknown_price(self) -> None:
+        # A turn whose model has no first-party rate is unknown-price with a
+        # None cost -- never a silent zero -- while its token counts still land.
+        stdout = _jsonl(
+            {"type": "assistant", "message": {
+                "id": "msg_0", "model": "third-party-model-x",
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": 100, "output_tokens": 200}}},
+        )
+        turn0 = parse_claude_trajectory(stdout).turns[0]
+        self.assertEqual(turn0.cost_source, "unknown-price")
+        self.assertIsNone(turn0.cost_usd)
+        self.assertEqual(turn0.model, "third-party-model-x")
+        self.assertEqual(turn0.input_tokens, 100)
+        self.assertEqual(turn0.output_tokens, 200)
+
+    def test_per_turn_cost_is_estimated_even_when_run_reports_cost(
+        self,
+    ) -> None:
+        # total_cost_usd is a run-level terminal figure; per-turn cost is always
+        # an estimate and never inherits the reported source or value, even
+        # though the run aggregate still surfaces the authoritative total.
+        stdout = _jsonl(
+            {"type": "assistant", "message": {
+                "id": "msg_0", "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {"input_tokens": 100, "output_tokens": 200}}},
+            {"type": "result", "total_cost_usd": 9.99, "num_turns": 1},
+        )
+        turn0 = parse_claude_trajectory(stdout).turns[0]
+        self.assertEqual(turn0.cost_source, "estimated")
+        self.assertNotEqual(turn0.cost_usd, 9.99)
+        self.assertEqual(parse_claude_usage(stdout).cost_usd, 9.99)
+
+    def test_per_turn_estimates_sum_to_run_estimate(self) -> None:
+        # The shared _claude_estimate_cost feeds both the per-turn builder and
+        # the run aggregate; because pricing is linear in token counts, the
+        # per-turn estimates sum to the run-level estimated cost. Regression
+        # guard that factoring the estimator out left run totals unchanged and
+        # in lock-step with the per-turn numbers.
+        stdout = _jsonl(
+            {"type": "assistant", "message": {
+                "id": "msg_0", "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "a"}],
+                "usage": {"input_tokens": 100,
+                          "cache_creation_input_tokens": 200,
+                          "cache_read_input_tokens": 300,
+                          "output_tokens": 50}}},
+            {"type": "assistant", "message": {
+                "id": "msg_1", "model": "claude-haiku-3-5",
+                "content": [{"type": "text", "text": "b"}],
+                "usage": {"input_tokens": 400, "output_tokens": 20}}},
+        )
+        run = parse_claude_usage(stdout)
+        turns = parse_claude_trajectory(stdout).turns
+        self.assertEqual(run.cost_source, "estimated")
+        self.assertEqual(len(turns), 2)
+        total = sum(t.cost_usd for t in turns)
+        assert run.cost_usd is not None
+        self.assertAlmostEqual(run.cost_usd, total, places=12)
+
+    def test_no_usage_frames_yield_no_turns(self) -> None:
+        # A stream whose assistant frames carry no usage block produces no
+        # TurnUsage, and the steps it does emit fall back to turn 0 by
+        # first-seen message.id -- no exception.
+        stdout = _jsonl(
+            {"type": "assistant", "message": {
+                "id": "msg_0",
+                "content": [{"type": "text", "text": "hi"}]}},
+        )
+        t = parse_claude_trajectory(stdout)
+        self.assertEqual(t.turns, ())
+        self.assertEqual([s.turn for s in t.steps], [0])
 
 
 class CodexTrajectoryTest(unittest.TestCase):
@@ -1691,6 +1888,24 @@ class CodexTrajectoryTest(unittest.TestCase):
         self.assertEqual([s.kind for s in t.steps],
                          ["tool_call", "tool_result"])
 
+    def test_has_no_per_turn_usage(self) -> None:
+        # Codex usage frames are cumulative, not per-turn, so the per-turn
+        # section stays empty and no step is stamped with a turn index -- the
+        # run-level summary is codex's only usage surface (mirrors how tools /
+        # skills_available stay best-effort-empty for codex).
+        stdout = _jsonl(
+            _codex_cmd("item_1", "/bin/bash -lc 'ls'", status="completed",
+                       aggregated_output="out\n"),
+            {"type": "item.completed", "item": {
+                "id": "a1", "type": "agent_message", "text": "done"}},
+            {"type": "turn.completed", "usage": {"input_tokens": 10,
+                                                 "output_tokens": 5}},
+        )
+        t = parse_codex_trajectory(stdout)
+        self.assertEqual(t.turns, ())
+        self.assertTrue(t.steps)
+        self.assertTrue(all(s.turn is None for s in t.steps))
+
     def test_empty_stdout(self) -> None:
         self.assertEqual(parse_codex_trajectory(""),
                          AgentTrajectory(backend="codex"))
@@ -1720,11 +1935,17 @@ class AgentTrajectoryTest(unittest.TestCase):
                                  available=("develop", "review")),
             steps=(
                 TrajectoryStep(kind="tool_call", name="Bash", tool_id="t1",
-                               content={"command": "ls"}),
+                               turn=0, content={"command": "ls"}),
                 TrajectoryStep(kind="tool_result", tool_id="t1",
                                content="out"),
             ),
             final_output="done",
+            turns=(
+                TurnUsage(turn=0, model="claude-opus-4-8", input_tokens=12,
+                          output_tokens=340, cache_read_tokens=18240,
+                          cache_write_tokens=512, cost_usd=0.0123,
+                          cost_source="estimated"),
+            ),
         )
         encoded = json.dumps(t.to_dict(), sort_keys=True)
         decoded = json.loads(encoded)
@@ -1736,7 +1957,13 @@ class AgentTrajectoryTest(unittest.TestCase):
         self.assertEqual(decoded["skills"]["available"], ["develop", "review"])
         self.assertEqual(len(decoded["steps"]), 2)
         self.assertEqual(decoded["steps"][0]["name"], "Bash")
+        self.assertEqual(decoded["steps"][0]["turn"], 0)
         self.assertEqual(decoded["steps"][1]["kind"], "tool_result")
+        self.assertIsNone(decoded["steps"][1]["turn"])
+        self.assertEqual(len(decoded["turns"]), 1)
+        self.assertEqual(decoded["turns"][0]["model"], "claude-opus-4-8")
+        self.assertEqual(decoded["turns"][0]["cache_read_tokens"], 18240)
+        self.assertEqual(decoded["turns"][0]["cost_source"], "estimated")
 
 
 if __name__ == "__main__":
