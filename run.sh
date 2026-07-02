@@ -25,11 +25,21 @@ fi
 base_branch="${base_branch:-main}"
 
 self_update() {
+    # A non-base checkout or a non-fast-forward pull must never stop the wrapper:
+    # under the production systemd unit (Restart=always) an exit here degrades
+    # into a silent crash loop where the orchestrator never actually runs. Warn
+    # loudly and keep the existing working tree -- stale-but-running is strictly
+    # better than a restart loop, and the journal warning is the operator's
+    # signal to fix the checkout.
+    current_branch=$(git branch --show-current 2>/dev/null)
+    if [ "$current_branch" != "$base_branch" ]; then
+        echo "[$(date -Iseconds)] WARNING: self-update skipped -- running existing code. Checked-out branch '$current_branch' is not the expected base branch '$base_branch'. Restore the base checkout to resume self-update." >&2
+        return 0
+    fi
     git pull --ff-only origin "$base_branch" && return 0
     rc=$?
-    echo "[$(date -Iseconds)] self-update failed: git pull --ff-only origin $base_branch exited with code $rc; stopping wrapper." >&2
-    echo "Resolve the checkout state, then restart ./run.sh." >&2
-    exit "$rc"
+    echo "[$(date -Iseconds)] WARNING: self-update failed -- running existing code. 'git pull --ff-only origin $base_branch' exited with code $rc. Resolve the checkout state to resume self-update." >&2
+    return 0
 }
 
 self_update
