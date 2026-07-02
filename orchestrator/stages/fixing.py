@@ -11,7 +11,10 @@ label:
     is detected; the in_review handler deliberately leaves the in_review
     watermarks behind so this handler can read the triggering comments
     for its dev-resume prompt. This route records `pending_fix_at` +
-    per-namespace `pending_fix_*_max_id` bookmarks.
+    per-namespace `pending_fix_*_max_id` bookmarks plus the full
+    `pending_fix_*_ids` batch lists, so `_reconstruct_pending_fix_batch`
+    can rebuild the exact triggering batch even after the watermarks
+    advance past it.
   * `_handle_validating` flips it BEFORE spawning the dev on a
     `CHANGES_REQUESTED` verdict so the dev-fix subphase is observably
     labeled `fixing` (the active job is "fixing reviewer-requested
@@ -23,8 +26,9 @@ label:
     the awaiting-human cycle here.
 
 Each tick the handler rescans unread feedback from the existing watermarks
-(NOT the `pending_fix_*_max_id` bookmarks recorded by the route -- those
-remain in pinned state as forensic hints). Newer comments arriving while
+(NOT the `pending_fix_*` bookmarks recorded by the route -- those remain
+in pinned state as forensic hints and as the reconstruction source for
+`_reconstruct_pending_fix_batch`). Newer comments arriving while
 already labeled `fixing` are picked up by the same rescan and naturally
 extend the debounce window because the freshest comment's timestamp
 controls the wait. Once `IN_REVIEW_DEBOUNCE_SECONDS` has elapsed with no
@@ -704,6 +708,93 @@ def _clear_pending_fix_bookmarks(state) -> None:
     state.set("pending_fix_issue_max_id", None)
     state.set("pending_fix_review_max_id", None)
     state.set("pending_fix_review_summary_max_id", None)
+    state.set("pending_fix_issue_ids", None)
+    state.set("pending_fix_review_ids", None)
+    state.set("pending_fix_review_summary_ids", None)
+
+
+def _pending_fix_id_set(state, ids_key: str, max_id_key: str) -> set:
+    """Resolve the persisted batch ids for one feedback surface.
+
+    Prefers the full `pending_fix_*_ids` list the in_review route records.
+    Falls back -- conservatively -- to the single `pending_fix_*_max_id`
+    for issues parked before the id lists existed: the max id is the only
+    member a legacy bookmark can vouch for, so the reconstruction includes
+    just that one item rather than guessing a lower bound the advanced
+    watermark can no longer supply. `bool` is rejected explicitly because
+    it is an `int` subclass and a stray `True` must not read as id 1.
+    """
+    ids = state.get(ids_key)
+    if isinstance(ids, list) and ids:
+        return {int(i) for i in ids}
+    max_id = state.get(max_id_key)
+    if isinstance(max_id, int) and not isinstance(max_id, bool):
+        return {max_id}
+    return set()
+
+
+def _reconstruct_pending_fix_batch(gh, issue, pr, state) -> list:
+    """Rebuild the exact feedback batch that drove the `in_review` -> `fixing`
+    route from the pinned `pending_fix_*` metadata.
+
+    The per-tick rescan in `_handle_fixing` reads from the in_review
+    watermarks, which advance past the triggering feedback the moment a dev
+    resume consumes it -- so once a fix has been attempted the batch can no
+    longer be recovered by rescanning. This helper reconstructs it from the
+    persisted ids instead: it re-fetches every surface in full
+    (`after_id=None`) and keeps only the items whose id was recorded at
+    route time, returned in the same order the route built them --
+    issue-space (issue-thread + PR-conversation, one shared IssueComment id
+    space) then inline review comments then review summaries, each sorted by
+    id. Filtering by the recorded id set inherently drops the orchestrator's
+    own comments (their ids were never in the batch) and survives watermark
+    advancement because the fetch is unbounded.
+
+    Existing parked issues that carry only `pending_fix_*_max_id` (no id
+    lists) get the conservative single-item reconstruction from
+    `_pending_fix_id_set`. A batch item deleted on GitHub since the route
+    simply drops out -- it cannot be reconstructed and is not worth
+    special-casing.
+    """
+    issue_ids = _pending_fix_id_set(
+        state, "pending_fix_issue_ids", "pending_fix_issue_max_id",
+    )
+    review_ids = _pending_fix_id_set(
+        state, "pending_fix_review_ids", "pending_fix_review_max_id",
+    )
+    summary_ids = _pending_fix_id_set(
+        state,
+        "pending_fix_review_summary_ids",
+        "pending_fix_review_summary_max_id",
+    )
+
+    issue_space: list = []
+    if issue_ids:
+        for c in gh.comments_after(issue, None):
+            if c.id in issue_ids:
+                issue_space.append(c)
+        for c in gh.pr_conversation_comments_after(pr, None):
+            if c.id in issue_ids:
+                issue_space.append(c)
+        issue_space.sort(key=lambda c: c.id)
+
+    review_space: list = []
+    if review_ids:
+        review_space = [
+            c for c in gh.pr_inline_comments_after(pr, None)
+            if c.id in review_ids
+        ]
+        review_space.sort(key=lambda c: c.id)
+
+    review_summary: list = []
+    if summary_ids:
+        review_summary = [
+            r for r in gh.pr_reviews_after(pr, None)
+            if r.id in summary_ids
+        ]
+        review_summary.sort(key=lambda r: r.id)
+
+    return issue_space + review_space + review_summary
 
 
 def _advance_consumed_watermarks(

@@ -30,6 +30,11 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
+from orchestrator.stages.fixing import (
+    _clear_pending_fix_bookmarks,
+    _pending_fix_id_set,
+    _reconstruct_pending_fix_batch,
+)
 
 from tests.fakes import (
     FakeComment,
@@ -1830,3 +1835,160 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         data = gh.pinned_data(880)
         self.assertIsNone(data.get("pending_fix_at"))
         self.assertIsNone(data.get("pending_fix_issue_max_id"))
+
+
+class ReconstructPendingFixBatchTest(unittest.TestCase):
+    """`_reconstruct_pending_fix_batch` rebuilds the exact `in_review` ->
+    `fixing` feedback batch from the persisted `pending_fix_*` metadata,
+    working even after the in_review watermarks have advanced past the
+    triggering comments (the point of persisting the full id lists rather
+    than only the max ids). A conservative single-item fallback covers
+    issues parked before the id lists were recorded.
+    """
+
+    PR_NUMBER = 880
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-880"
+
+    def _pr_with_feedback(self):
+        # Issue-thread + PR-conversation comments share one IssueComment id
+        # space. Seed both plus inline comments and review summaries, and add
+        # NON-batch noise on every surface (an orchestrator comment and a
+        # later human comment) that reconstruction must exclude.
+        issue = make_issue(880, label="fixing")
+        issue.comments.extend([
+            FakeComment(id=2050, body="issue thread ask", user=FakeUser("carol")),
+            # Later, non-batch human comment (id above the batch): must not
+            # be pulled in even though a naive rescan-from-zero would see it.
+            FakeComment(id=9000, body="unrelated later note", user=FakeUser("dave")),
+        ])
+        pr = FakePR(
+            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            head=FakePRRef(sha="cafe1234"),
+            issue_comments=[
+                FakeComment(id=2100, body="pr conv ask", user=FakeUser("alice")),
+                # Orchestrator's own park comment: never in the batch.
+                FakeComment(id=2300, body="orchestrator note", user=FakeUser("orchestrator")),
+            ],
+            review_comments=[
+                FakeComment(id=40, body="inline ask one", user=FakeUser("alice")),
+                FakeComment(id=41, body="inline ask two", user=FakeUser("bob")),
+                FakeComment(id=99, body="inline non-batch", user=FakeUser("bob")),
+            ],
+            reviews=[
+                FakePRReview(id=7, body="please address", state="CHANGES_REQUESTED"),
+                FakePRReview(id=12, body="later review", state="COMMENTED"),
+            ],
+        )
+        gh = FakeGitHubClient()
+        gh.add_issue(issue)
+        gh.add_pr(pr)
+        return gh, issue, pr
+
+    def test_reconstructs_exact_batch_after_watermarks_advanced(self) -> None:
+        gh, issue, pr = self._pr_with_feedback()
+        # Watermarks advanced PAST the whole batch, as they would be after a
+        # dev resume consumed it: a rescan from these would find nothing.
+        gh.seed_state(
+            880,
+            pr_last_comment_id=8000,
+            pr_last_review_comment_id=50,
+            pr_last_review_summary_id=10,
+            pending_fix_issue_ids=[2050, 2100],
+            pending_fix_issue_max_id=2100,
+            pending_fix_review_ids=[40, 41],
+            pending_fix_review_max_id=41,
+            pending_fix_review_summary_ids=[7],
+            pending_fix_review_summary_max_id=7,
+        )
+        state = gh.read_pinned_state(issue)
+
+        batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
+
+        # Exact batch, ordered issue-space (2050, 2100) then inline (40, 41)
+        # then summaries (7) -- each surface sorted by id.
+        self.assertEqual([o.id for o in batch], [2050, 2100, 40, 41, 7])
+        # Non-batch noise on every surface is excluded.
+        ids = {o.id for o in batch}
+        self.assertNotIn(9000, ids)   # later issue-thread comment
+        self.assertNotIn(2300, ids)   # orchestrator comment
+        self.assertNotIn(99, ids)     # later inline comment
+        self.assertNotIn(12, ids)     # later review summary
+        # The reconstructed batch is directly consumable by the dev-resume
+        # prompt builder -- the whole point of rebuilding it.
+        prompt = workflow._build_pr_comment_followup(batch)
+        for body in ("issue thread ask", "pr conv ask", "inline ask one",
+                     "inline ask two", "please address"):
+            self.assertIn(body, prompt)
+
+    def test_legacy_max_id_only_reconstructs_conservative_single_item(self) -> None:
+        gh, issue, pr = self._pr_with_feedback()
+        # An issue parked before the id lists existed: only the max_id
+        # bookmarks survive. Reconstruction must include ONLY the max-id
+        # item per surface, never guessing at lower members it cannot vouch
+        # for.
+        gh.seed_state(
+            880,
+            pr_last_comment_id=8000,
+            pr_last_review_comment_id=50,
+            pr_last_review_summary_id=10,
+            pending_fix_issue_max_id=2100,
+            pending_fix_review_max_id=41,
+            pending_fix_review_summary_max_id=7,
+        )
+        state = gh.read_pinned_state(issue)
+
+        batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
+
+        # Only the single max-id item per surface -- 2050 and 40 are dropped
+        # because a legacy bookmark cannot prove they were in the batch.
+        self.assertEqual([o.id for o in batch], [2100, 41, 7])
+
+    def test_no_metadata_reconstructs_empty_batch(self) -> None:
+        gh, issue, pr = self._pr_with_feedback()
+        gh.seed_state(880, pr_last_comment_id=8000)
+        state = gh.read_pinned_state(issue)
+
+        self.assertEqual(_reconstruct_pending_fix_batch(gh, issue, pr, state), [])
+
+    def test_id_set_prefers_list_and_rejects_bool_max_id(self) -> None:
+        from orchestrator.github import PinnedState
+
+        # Full list present -> used verbatim (the max id is ignored).
+        s = PinnedState(data={"ids": [3, 1, 2], "max": 9})
+        self.assertEqual(_pending_fix_id_set(s, "ids", "max"), {1, 2, 3})
+        # Only the max id -> conservative single-item set.
+        s = PinnedState(data={"max": 9})
+        self.assertEqual(_pending_fix_id_set(s, "ids", "max"), {9})
+        # A stray bool must not read as id 1 (bool is an int subclass).
+        s = PinnedState(data={"max": True})
+        self.assertEqual(_pending_fix_id_set(s, "ids", "max"), set())
+        # Neither present -> empty.
+        self.assertEqual(
+            _pending_fix_id_set(PinnedState(data={}), "ids", "max"), set(),
+        )
+
+    def test_clear_bookmarks_clears_batch_id_lists(self) -> None:
+        from orchestrator.github import PinnedState
+
+        state = PinnedState(data={
+            "pending_fix_at": "2026-05-24T00:00:00+00:00",
+            "pending_fix_issue_max_id": 2100,
+            "pending_fix_review_max_id": 41,
+            "pending_fix_review_summary_max_id": 7,
+            "pending_fix_issue_ids": [2050, 2100],
+            "pending_fix_review_ids": [40, 41],
+            "pending_fix_review_summary_ids": [7],
+        })
+
+        _clear_pending_fix_bookmarks(state)
+
+        for key in (
+            "pending_fix_at",
+            "pending_fix_issue_max_id",
+            "pending_fix_review_max_id",
+            "pending_fix_review_summary_max_id",
+            "pending_fix_issue_ids",
+            "pending_fix_review_ids",
+            "pending_fix_review_summary_ids",
+        ):
+            self.assertIsNone(state.get(key))
