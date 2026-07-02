@@ -42,7 +42,7 @@ Shape of the block:
 
 Which prompts carry it:
 
-- **Embedded** in `_build_implement_prompt`, `_build_documentation_prompt`, `_build_review_prompt`, `_build_decompose_prompt`, `_build_question_prompt`, and `_build_fresh_respawn_preamble`. The fresh-respawn preamble matters because a transcript-less respawn (proactive `DEV_SESSION_MAX_RESUMES` rotation, the consecutive-silent-park fallback, or poisoned-session recovery) never saw the original spawn's block, so the re-grounding text must re-feed it alongside the issue body and conversation.
+- **Embedded** in `_build_implement_prompt`, `_build_documentation_prompt`, `_build_review_prompt`, `_build_decompose_prompt`, `_build_question_prompt`, and `_build_fresh_respawn_preamble`. The fresh-respawn preamble matters because a transcript-less respawn (proactive `DEV_SESSION_MAX_RESUMES` rotation, the consecutive-silent-park fallback, poisoned-session recovery, or an operator `/orchestrator continue` command that drops a session-failure park's poisoned dev session before replaying the preserved PR-feedback batch) never saw the original spawn's block, so the re-grounding text must re-feed it alongside the issue body and conversation.
 - **Omitted** from the bare resume / followup builders (`_build_fix_prompt`, `_build_conflict_resolution_prompt`, `_build_pr_comment_followup`, `_build_question_followup_prompt`): those text payloads resume a live session that already received the block at spawn time, so repeating it would only burn tokens.
 
 The default single-repo deployment (or any host with `EXPOSE_TRACKED_REPOS=off`) gets an empty string here — **zero added prompt tokens and zero behavior change**. See [`configuration.md#agent-roles`](configuration.md#agent-roles) for the env var.
