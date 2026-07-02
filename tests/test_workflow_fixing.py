@@ -32,6 +32,8 @@ os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 from orchestrator import config, workflow
 from orchestrator.stages.fixing import (
     _clear_pending_fix_bookmarks,
+    _is_bare_orchestrator_continue,
+    _parse_orchestrator_continue,
     _pending_fix_id_set,
     _reconstruct_pending_fix_batch,
 )
@@ -1992,3 +1994,309 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             "pending_fix_review_summary_ids",
         ):
             self.assertIsNone(state.get(key))
+
+
+class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
+    """`/orchestrator continue` retries a `fixing` park caused by a
+    session-limit / session-failure reason (`agent_silent` / `agent_timeout`).
+    On the in_review route it replays the PRESERVED review-feedback batch on a
+    FRESH dev session rather than resuming on the command text -- the
+    geserdugarov/lance-open-source#23 shape where a generic continue lost the
+    latest review feedback. On the validating route (no replayable batch) and
+    for parks that still need real human guidance, it is refused rather than
+    resumed on the command text. A comment mixing guidance with the command
+    line is left as ordinary feedback so its guidance is never dropped.
+    """
+
+    PR_NUMBER = 880
+    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-880"
+
+    def _seed_parked_with_batch(
+        self,
+        *,
+        park_reason,
+        command_body: str = "/orchestrator continue",
+        command_id: int = 9000,
+        command_on_pr_conversation: bool = False,
+        extra_issue_comments=(),
+        with_batch_ids: bool = True,
+        pending_fix_at="2026-05-24T00:00:00+00:00",
+        silent_park_count: int = 2,
+    ):
+        # Batch feedback spans all three surfaces and sits BELOW the advanced
+        # watermarks -- the shape after a poisoned/timed-out resume already
+        # advanced past it. `_reconstruct_pending_fix_batch` re-fetches it
+        # from the preserved `pending_fix_*_ids`. The `/orchestrator continue`
+        # comment sits ABOVE the issue watermark so the per-tick rescan
+        # surfaces it as fresh feedback. `pending_fix_at=None` +
+        # `with_batch_ids=False` models a validating-route park (no batch).
+        issue = make_issue(880, label="fixing")
+        issue.comments.append(
+            FakeComment(id=2050, body="fix the null check", user=FakeUser("carol")),
+        )
+        command = FakeComment(id=command_id, body=command_body, user=FakeUser("dave"))
+        if not command_on_pr_conversation:
+            issue.comments.append(command)
+        for c in extra_issue_comments:
+            issue.comments.append(c)
+        pr_conv = [
+            FakeComment(id=2100, body="handle the edge case", user=FakeUser("alice")),
+        ]
+        if command_on_pr_conversation:
+            pr_conv.append(command)
+        pr = FakePR(
+            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=True, check_state="success",
+            issue_comments=pr_conv,
+            review_comments=[
+                FakeComment(
+                    id=40, body="rename the temp var", user=FakeUser("bob"),
+                ),
+            ],
+            reviews=[
+                FakePRReview(
+                    id=7, body="please address the review",
+                    state="CHANGES_REQUESTED",
+                ),
+            ],
+        )
+        gh = FakeGitHubClient()
+        gh.add_issue(issue)
+        gh.add_pr(pr)
+        state = {
+            "pr_number": self.PR_NUMBER,
+            "branch": self.BRANCH,
+            "dev_agent": "claude",
+            "dev_session_id": "poisoned-sess",
+            "review_round": 1,
+            "awaiting_human": True,
+            "park_reason": park_reason,
+            "silent_park_count": silent_park_count,
+            # Watermarks advanced PAST the batch.
+            "pr_last_comment_id": 8000,
+            "pr_last_review_comment_id": 50,
+            "pr_last_review_summary_id": 10,
+        }
+        if pending_fix_at is not None:
+            state["pending_fix_at"] = pending_fix_at
+        if with_batch_ids:
+            state.update({
+                "pending_fix_issue_ids": [2050, 2100],
+                "pending_fix_issue_max_id": 2100,
+                "pending_fix_review_ids": [40],
+                "pending_fix_review_max_id": 40,
+                "pending_fix_review_summary_ids": [7],
+                "pending_fix_review_summary_max_id": 7,
+            })
+        gh.seed_state(880, **state)
+        return gh, issue, pr
+
+    _BATCH_BODIES = (
+        "fix the null check", "handle the edge case",
+        "rename the temp var", "please address the review",
+    )
+
+    def test_replays_preserved_batch_on_session_failure_park(self) -> None:
+        # Both session-failure reasons: the command drops the poisoned session
+        # and replays the FULL preserved batch on a fresh spawn, then the
+        # pushed fix routes back to `validating` with the round reset.
+        for reason in ("agent_silent", "agent_timeout"):
+            with self.subTest(reason=reason):
+                gh, issue, pr = self._seed_parked_with_batch(park_reason=reason)
+
+                mocks = self._run(
+                    lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                    run_agent=_agent(
+                        session_id="fresh-sess", last_message="pushed fix",
+                    ),
+                    head_shas=("sha-before", "sha-after"),
+                )
+
+                mocks["run_agent"].assert_called_once()
+                call = mocks["run_agent"].call_args
+                prompt = call.args[1]
+                # The PRESERVED batch is replayed -- every surface's feedback
+                # reaches the dev, NOT the bare "continue" command text.
+                for body in self._BATCH_BODIES:
+                    self.assertIn(body, prompt)
+                # The poisoned/timed-out session was dropped: the retry is a
+                # FRESH spawn (no resume id) and the new id is pinned.
+                self.assertIsNone(call.kwargs.get("resume_session_id"))
+                data = gh.pinned_data(880)
+                self.assertEqual(data.get("dev_session_id"), "fresh-sess")
+                # Pushed fix -> validating, round reset (in_review route),
+                # bookmarks cleared, command consumed, park cleared.
+                self.assertIn((880, "validating"), gh.label_history)
+                self.assertEqual(data.get("review_round"), 0)
+                self.assertIsNone(data.get("pending_fix_at"))
+                self.assertIsNone(data.get("pending_fix_issue_ids"))
+                self.assertEqual(data.get("pr_last_comment_id"), 9000)
+                self.assertFalse(data.get("awaiting_human"))
+                self.assertIsNone(data.get("park_reason"))
+
+    def test_refuses_continue_on_question_park(self) -> None:
+        # A real agent question / dirty worktree parks with `park_reason=None`.
+        # A generic continue carries none of the answer, so refuse: stay
+        # parked, consume the command so the refusal does not re-fire, and
+        # leave the preserved batch intact for a genuine human reply.
+        gh, issue, pr = self._seed_parked_with_batch(park_reason=None)
+
+        mocks = self._run(
+            lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        mocks["run_agent"].assert_not_called()
+        data = gh.pinned_data(880)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertNotIn((880, "validating"), gh.label_history)
+        self.assertEqual(data.get("pr_last_comment_id"), 9000)
+        self.assertEqual(data.get("pending_fix_issue_ids"), [2050, 2100])
+        self.assertTrue(any(
+            "/orchestrator continue" in body and "guidance" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_refuses_continue_when_no_preserved_batch(self) -> None:
+        # Eligible reason but nothing on file to replay (bookmarks gone). A
+        # bare continue would strand the review feedback, so refuse rather
+        # than resume on the command text.
+        gh, issue, pr = self._seed_parked_with_batch(
+            park_reason="agent_silent", with_batch_ids=False,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        mocks["run_agent"].assert_not_called()
+        data = gh.pinned_data(880)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertEqual(data.get("park_reason"), "agent_silent")
+        self.assertEqual(data.get("pr_last_comment_id"), 9000)
+        self.assertTrue(any(
+            "no preserved" in body for _, body in gh.posted_comments
+        ))
+
+    def test_continue_alongside_genuine_feedback_resumes_normally(self) -> None:
+        # A `/orchestrator continue` posted ALONGSIDE genuine guidance on an
+        # unsafe park is NOT intercepted: the other comment is the real answer
+        # the park was waiting on, so the normal awaiting-human resume runs on
+        # the live session.
+        genuine = FakeComment(
+            id=9001, body="use option B, not A", user=FakeUser("dave"),
+        )
+        gh, issue, pr = self._seed_parked_with_batch(
+            park_reason=None, extra_issue_comments=[genuine],
+            silent_park_count=0,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="poisoned-sess", last_message="pushed fix",
+            ),
+            head_shas=("sha-before", "sha-after"),
+        )
+
+        mocks["run_agent"].assert_called_once()
+        call = mocks["run_agent"].call_args
+        self.assertIn("use option B", call.args[1])
+        # Live session resumed (not dropped) -- this is a real dev question.
+        self.assertEqual(call.kwargs.get("resume_session_id"), "poisoned-sess")
+
+    def test_validating_route_session_failure_refuses_continue(self) -> None:
+        # A validating-route park (no `pending_fix_at`, no preserved batch) on
+        # a session-failure reason must NOT resume the dev on the bare command
+        # text. With nothing to replay it is refused: no agent spawn, command
+        # consumed, issue stays parked.
+        for reason in ("agent_silent", "agent_timeout"):
+            with self.subTest(reason=reason):
+                gh, issue, pr = self._seed_parked_with_batch(
+                    park_reason=reason,
+                    pending_fix_at=None, with_batch_ids=False,
+                )
+
+                mocks = self._run(
+                    lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                    run_agent=_agent(),
+                )
+
+                mocks["run_agent"].assert_not_called()
+                data = gh.pinned_data(880)
+                self.assertTrue(data.get("awaiting_human"))
+                self.assertEqual(data.get("park_reason"), reason)
+                self.assertNotIn((880, "validating"), gh.label_history)
+                self.assertEqual(data.get("pr_last_comment_id"), 9000)
+                self.assertTrue(any(
+                    "no preserved" in body for _, body in gh.posted_comments
+                ))
+
+    def test_command_mixed_with_guidance_is_not_swallowed(self) -> None:
+        # A PR-conversation comment mixing real guidance with a
+        # `/orchestrator continue` line IS the command (exact-line match), so
+        # on an eligible in_review park it REPLAYS the preserved batch on a
+        # fresh session -- and carries the accompanying guidance verbatim
+        # (reaching the dev directly, not just via the fresh-spawn preamble
+        # that omits PR-conversation comments), so nothing is dropped.
+        gh, issue, pr = self._seed_parked_with_batch(
+            park_reason="agent_silent",
+            command_body="please handle the PR conv case\n/orchestrator continue",
+            command_on_pr_conversation=True,
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="fresh-sess", last_message="pushed fix",
+            ),
+            head_shas=("sha-before", "sha-after"),
+        )
+
+        mocks["run_agent"].assert_called_once()
+        prompt = mocks["run_agent"].call_args.args[1]
+        # The accompanying guidance is NOT dropped ...
+        self.assertIn("please handle the PR conv case", prompt)
+        # ... AND the preserved batch is replayed (the issue requirement the
+        # bare-continue path would have missed).
+        for body in self._BATCH_BODIES:
+            self.assertIn(body, prompt)
+        # Replayed on a fresh session (poisoned one dropped), no refusal note.
+        self.assertIsNone(mocks["run_agent"].call_args.kwargs.get("resume_session_id"))
+        self.assertFalse(any(
+            "no preserved" in body or "needs your" in body
+            for _, body in gh.posted_comments
+        ))
+
+    def test_parse_orchestrator_continue_matches_exact_line(self) -> None:
+        cmd = FakeComment(id=1, body="/orchestrator continue")
+        cmd_ws = FakeComment(id=2, body="  /Orchestrator  Continue  ")
+        cmd_trailing = FakeComment(id=3, body="/orchestrator continue\n")
+        prose = FakeComment(id=4, body="please run `/orchestrator continue`")
+        mixed = FakeComment(id=5, body="please fix X\n/orchestrator continue")
+        trailing_prose = FakeComment(id=6, body="/orchestrator continue\nthanks")
+        other = FakeComment(id=7, body="/orchestrator add-review-rounds 2")
+
+        matched = _parse_orchestrator_continue(
+            [cmd, cmd_ws, cmd_trailing, prose, mixed, trailing_prose, other]
+        )
+
+        # Any comment carrying the command as an exact line matches -- including
+        # one that also carries guidance (5, 6) -- so the command still fires
+        # the replay. A prose mention in backticks (4) and a different command
+        # (7) do not.
+        self.assertEqual([c.id for c in matched], [1, 2, 3, 5, 6])
+
+    def test_is_bare_orchestrator_continue(self) -> None:
+        # `_is_bare_*` distinguishes a content-free nudge (whole body is the
+        # command, whitespace ignored) from a comment that also carries
+        # guidance -- the latter must not be refused/consumed as content-free.
+        for body in ("/orchestrator continue", "  /Orchestrator  Continue  ",
+                     "/orchestrator continue\n"):
+            self.assertTrue(_is_bare_orchestrator_continue(FakeComment(id=1, body=body)))
+        for body in ("please fix X\n/orchestrator continue",
+                     "/orchestrator continue\nthanks",
+                     "please run `/orchestrator continue`"):
+            self.assertFalse(_is_bare_orchestrator_continue(FakeComment(id=1, body=body)))
