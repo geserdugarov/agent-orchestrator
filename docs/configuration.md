@@ -268,7 +268,7 @@ The workflow declares `permissions: contents: read` so the run's `GITHUB_TOKEN` 
 
 ## Run modes
 
-- `./run.sh` — production. Continuous polling. `run.sh` does `git pull --ff-only origin "$ORCHESTRATOR_BASE_BRANCH"` (read from `.env`, default `main`) and re-launches the orchestrator after each clean exit, so a self-modifying merge picks up new code automatically. If the pull fails, the wrapper prints the failing command and exits non-zero instead of relaunching stale code.
+- `./run.sh` — production. Continuous polling. `run.sh` does `git pull --ff-only origin "$ORCHESTRATOR_BASE_BRANCH"` (read from `.env`, default `main`) and re-launches the orchestrator after each clean exit, so a self-modifying merge picks up new code automatically. If a non-base branch is checked out the pull is skipped, and if the fast-forward fails (diverged base, rebase in progress, network error) the wrapper logs a loud warning to stderr and launches the existing working tree anyway instead of exiting — under `Restart=always` a stale-but-running orchestrator beats a silent crash loop. See [`architecture.md#process-model`](architecture.md#process-model) for the full skip-and-warn contract.
 
   Ctrl+C (or `SIGTERM`) stops the wrapper: the orchestrator exits with `128 + signum` and `run.sh` skips the restart loop. A second Ctrl+C terminates immediately.
 - `python -m orchestrator.main --once` — single tick then exit. Useful for tests and debugging.
