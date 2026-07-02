@@ -197,6 +197,9 @@ from .stages.implementing import (
     _is_context_overflow_failure as _is_context_overflow_failure,
 )
 from .stages.implementing import (
+    _drop_poisoned_dev_session as _drop_poisoned_dev_session,
+)
+from .stages.implementing import (
     _is_poisoned_session_failure as _is_poisoned_session_failure,
 )
 from .stages.implementing import _on_dirty_worktree as _on_dirty_worktree

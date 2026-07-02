@@ -97,6 +97,28 @@ to the publish tail instead of relabeling, because the `in_review`
 return would clear the bookmarks, advance the watermarks, and present
 a PR head that is still missing the committed fix.
 
+A park on a session-limit / session-failure reason (`agent_silent` /
+`agent_timeout`) can be retried by an operator with an exact-line
+`/orchestrator continue` comment (`_handle_continue_command`; a comment
+that carries the command line AND real guidance still counts as the
+command). Rather than resuming the dev on the command text -- which would
+drop the review feedback the poisoned session never addressed -- the
+handler rechecks `park_reason`, and on the in_review route (the only route
+that preserves a replayable batch) drops the poisoned dev session so the
+retry re-grounds a fresh one on the committed branch and replays the
+PRESERVED feedback batch reconstructed from the `pending_fix_*` bookmarks,
+carrying ALL fresh feedback (the command comment and any guidance posted
+with or beside it) verbatim so nothing the operator wrote is dropped. The
+command is handled on BOTH routes so a validating-route session-failure
+park is never resumed on the bare command text either; with no batch to
+replay there, a content-free continue is refused while a continue that
+came WITH genuine guidance falls through to the normal resume so that
+guidance drives the dev. Parks that still need real human guidance -- a
+genuine agent question or a dirty worktree (both `park_reason=None`), or
+any eligible park with no reconstructable batch -- refuse a content-free
+continue: the command is consumed and a note is posted, and the issue
+stays parked.
+
 PR-state terminals (merged / closed-without-merge / open-PR-with-closed-issue)
 mirror the in_review arcs so an external manual merge or rejection while
 the issue is mid-fix still finalizes to `done` / `rejected` with branch
@@ -119,6 +141,7 @@ patch could not affect.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -128,6 +151,47 @@ from .. import config
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import BASE_SYNC_HOLD_LABEL, GitHubClient, issue_has_label
+
+
+# Park reasons `/orchestrator continue` may retry: a dev session that went
+# silent (`agent_silent`, a poisoned resume that produced no output) or timed
+# out (`agent_timeout`). Both are session-limit / session-failure conditions
+# whose recovery is "retry the fix on a fresh session", not "wait for a human
+# answer". Every other awaiting-human shape -- a real agent question or a
+# dirty worktree (both `park_reason=None`), a stuck push, a missing PR --
+# needs the human's actual guidance, so the command is refused there.
+_CONTINUE_PARK_REASONS = frozenset({"agent_silent", "agent_timeout"})
+
+# `/orchestrator continue` operator command, matched as an EXACT LINE
+# (anchored to line boundaries, mirrors `_ADD_REVIEW_ROUNDS_RE` in
+# `stages.validating`) so prose that mentions the command in backticks
+# cannot fire it. `search` detects the command line inside a larger comment
+# -- so a comment that carries the command AND real guidance still counts as
+# the command -- while `_is_bare_orchestrator_continue` (whole stripped body
+# == the line) tells a content-free nudge apart from a comment that also
+# carries guidance, which governs whether an un-replayable park is refused or
+# resumed on that guidance.
+_ORCHESTRATOR_CONTINUE_RE = re.compile(
+    r"^[ \t]*/orchestrator[ \t]+continue[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _parse_orchestrator_continue(comments: list) -> list:
+    """Return the comments whose body contains an exact-line
+    `/orchestrator continue` operator command."""
+    return [
+        c for c in comments if _ORCHESTRATOR_CONTINUE_RE.search(c.body or "")
+    ]
+
+
+def _is_bare_orchestrator_continue(comment) -> bool:
+    """True when the comment's ENTIRE body is the command line and nothing
+    else -- a content-free nudge whose consumption drops no guidance."""
+    return (
+        _ORCHESTRATOR_CONTINUE_RE.fullmatch((comment.body or "").strip())
+        is not None
+    )
 
 
 def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
@@ -298,6 +362,13 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # until a human comment arrives, matching the original behavior
     # (this code path had no transient recovery before -- the validating
     # handler held that responsibility for parks under `validating`).
+    #
+    # `replay_batch` is set only by an accepted `/orchestrator continue`
+    # command below: the PRESERVED PR-feedback batch (plus any genuinely new
+    # feedback that arrived with the command) to resume the fresh dev on,
+    # instead of the per-tick rescan. It skips the debounce and re-grounds a
+    # dropped session further down.
+    replay_batch: Optional[list] = None
     if state.get("awaiting_human"):
         park_reason = state.get("park_reason")
         # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
@@ -309,6 +380,37 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # outstanding fix.
         if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
             return
+
+        # `/orchestrator continue` operator command (exact line, so a comment
+        # carrying the command AND real guidance still counts). Handled on
+        # BOTH routes so a session-failure park (`agent_silent` /
+        # `agent_timeout`) never resumes the dev on the bare command text.
+        # `_handle_continue_command` decides:
+        #   * "replay" -- eligible park with a reconstructable batch (the
+        #     in_review route): the poisoned session is dropped and the park
+        #     cleared, and we resume the fresh dev on the preserved batch (see
+        #     below), skipping the debounce.
+        #   * "refuse" -- a content-free continue on a park it cannot retry
+        #     (an unsafe park needing real guidance, or an eligible park with
+        #     no batch, e.g. the validating route): command consumed + reason
+        #     posted; stay parked.
+        #   * "passthrough" -- the command arrived WITH genuine guidance on a
+        #     park with no replayable batch: fall through to the normal resume
+        #     so that guidance (not a bare continue) drives the dev.
+        continue_cmds = _parse_orchestrator_continue(issue_space_new)
+        if continue_cmds:
+            action, items = _handle_continue_command(
+                gh, issue, state, pr, park_reason, continue_cmds,
+                new_feedback, issue_space_new, review_space_new,
+                review_summary_new,
+            )
+            if action == "refuse":
+                gh.write_pinned_state(issue, state)
+                return
+            if action == "replay":
+                replay_batch = items
+            # "passthrough": fall through to the normal resume below.
+
         validating_routed = state.get("pending_fix_at") is None
         if (
             not new_feedback
@@ -384,7 +486,10 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # extends the wait because the freshest timestamp controls the
     # gate. Comments without a usable timestamp (older fakes,
     # PyGithub edge cases) do not block the resume; in production
-    # `created_at` / `submitted_at` are always set.
+    # `created_at` / `submitted_at` are always set. An accepted
+    # `/orchestrator continue` (`replay_batch` set) skips the wait
+    # entirely -- it is a deliberate operator signal, not chatter to
+    # debounce.
     now = datetime.now(timezone.utc)
     latest_ts: Optional[datetime] = None
     for c in new_feedback:
@@ -394,12 +499,19 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         if latest_ts is None or ts > latest_ts:
             latest_ts = ts
     if (
-        latest_ts is not None
+        replay_batch is None
+        and latest_ts is not None
         and (now - latest_ts).total_seconds() < config.IN_REVIEW_DEBOUNCE_SECONDS
     ):
         return
 
-    followup = _wf._build_pr_comment_followup(new_feedback)
+    # On an accepted `/orchestrator continue`, resume on the PRESERVED batch
+    # (plus any new feedback that came with the command), not the command
+    # text -- the whole point of the command is to not lose the review
+    # feedback the parked session never addressed.
+    followup = _wf._build_pr_comment_followup(
+        replay_batch if replay_batch is not None else new_feedback
+    )
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _wf._ensure_worktree(
@@ -838,3 +950,98 @@ def _advance_consumed_watermarks(
         if isinstance(cur_summary_wm, int):
             new_wm = max(new_wm, cur_summary_wm)
         state.set("pr_last_review_summary_id", new_wm)
+
+
+def _handle_continue_command(
+    gh,
+    issue,
+    state,
+    pr,
+    park_reason,
+    continue_cmds: list,
+    new_feedback: list,
+    issue_space_new: list,
+    review_space_new: list,
+    review_summary_new: list,
+) -> tuple:
+    """Dispatch a `/orchestrator continue` operator command on a parked
+    `fixing` issue.
+
+    `/orchestrator continue` is the operator's "retry this fix" signal for a
+    session-limit / session-failure park: a dev session that went silent
+    (`agent_silent`) or timed out (`agent_timeout`) and left the fix-loop
+    parked. The naive un-park resumes the dev on the command text alone,
+    dropping the PR review feedback the poisoned session never addressed --
+    the geserdugarov/lance-open-source#23 shape.
+
+    Returns `(action, items)`:
+
+      * ``("replay", batch)`` -- an eligible park WITH a reconstructable
+        batch (the in_review route). Drops the poisoned dev session (so the
+        retry re-grounds a FRESH session on the committed branch rather than
+        replaying the transcript that already failed) and clears the park, as
+        side effects; `batch` is the preserved PR-feedback batch
+        (`_reconstruct_pending_fix_batch`) followed by ALL fresh feedback
+        verbatim -- the command comment AND any guidance posted with or beside
+        it -- so nothing the operator wrote is dropped. Pinned state is NOT
+        written here (the caller's resume tail writes it).
+      * ``("refuse", None)`` -- a content-free continue (every fresh comment
+        is a bare command) on a park it cannot retry: an unsafe park that
+        still needs real human guidance, or an eligible park with no batch to
+        replay (the validating route, whose triggering reviewer verdict is
+        not preserved as a batch). Consumes the command comment (so the
+        refusal does not re-fire) and posts the reason; the caller writes
+        state and the issue stays parked.
+      * ``("passthrough", None)`` -- the command arrived alongside genuine
+        guidance on a park with no replayable batch. No side effect; the
+        caller runs the normal resume so that guidance (not a bare continue)
+        drives the dev.
+    """
+    from .. import workflow as _wf
+
+    batch = (
+        _reconstruct_pending_fix_batch(gh, issue, pr, state)
+        if park_reason in _CONTINUE_PARK_REASONS else []
+    )
+    if batch:
+        _wf._drop_poisoned_dev_session(state)
+        state.set("awaiting_human", False)
+        state.set("park_reason", None)
+        _wf.log.info(
+            "issue=#%s /orchestrator continue: replaying %d preserved feedback "
+            "item(s) on a fresh dev session (park_reason=%s)",
+            issue.number, len(batch), park_reason,
+        )
+        # Carry every fresh comment (command + any accompanying guidance)
+        # verbatim into the replay: the resume tail advances the watermarks
+        # past all of `new_feedback`, so anything omitted here would be
+        # consumed without the dev ever seeing it.
+        return "replay", batch + new_feedback
+
+    if all(_is_bare_orchestrator_continue(c) for c in new_feedback):
+        # Content-free continue with nothing else to act on. Consume only the
+        # command comment(s) (`new_feedback` is all bare commands here, so this
+        # covers them) so the refusal is not re-posted every tick, then stay
+        # parked with a reason.
+        _advance_consumed_watermarks(state, list(continue_cmds), [], [])
+        if park_reason in _CONTINUE_PARK_REASONS:
+            message = (
+                f"{config.HITL_MENTIONS} `/orchestrator continue`: no "
+                "preserved PR-feedback batch is on file to replay for this "
+                "park. Reply with the change to make, or relabel the issue, "
+                "to proceed."
+            )
+        else:
+            message = (
+                f"{config.HITL_MENTIONS} `/orchestrator continue` needs your "
+                "actual guidance here: this park is waiting on a real answer "
+                "(an agent question, or a worktree it could not finish), not "
+                "a generic continue. Reply with the specific change to make, "
+                "or relabel the issue, to proceed."
+            )
+        _wf._post_issue_comment(gh, issue, state, message)
+        return "refuse", None
+
+    # The command came WITH genuine guidance on a park with no replayable
+    # batch; let the normal resume feed that guidance to the dev.
+    return "passthrough", None
