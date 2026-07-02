@@ -33,6 +33,13 @@ The compatibility surface on `orchestrator/workflow.py` is load-bearing. Confirm
 - Stage modules access cross-module helpers via `from .. import workflow as _wf` **at call time**, not via top-level `from ..workflow import _foo` and not via direct imports from `workflow_drift` / `workflow_messages` / `worktrees`. The late-binding pattern preserves `patch.object(workflow, ...)` semantics in tests.
 - Test patches target the new module boundary after a move (or the facade alias, consistently). Flag tests that still patch the old location.
 
+## Test economy and assertion quality
+
+- Identify newly added tests that duplicate existing tests or each other; request merging into `pytest.mark.parametrize` cases or a small named loop when the only difference is fixture values or branch selection.
+- Verify each added test fails against the old behavior or directly protects a changed contract.
+- For resource-usage fixes (over-fetching, redundant API calls, retained state), reject tests that only assert the final result; require at least one assertion at the helper/producer level.
+- Prefer fewer tests with clear distinct coverage over many narrowly overlapping regression tests.
+
 ## Documentation drift
 
 After any handler or helper move, grep the PR for stale pointers and request fixes in:
@@ -44,6 +51,11 @@ After any handler or helper move, grep the PR for stale pointers and request fix
 - module docstrings at the top of `workflow.py`, `workflow_drift.py`, `workflow_messages.py`, `worktrees.py`, `orchestrator/stages/*.py`
 
 Treat blanket statements like "every helper is re-exported" with suspicion — verify literally against the code.
+
+## Comment hygiene
+
+- Flag diff-relative comments — "previously", "the old retry cap", "instead of a dict", "now uses" — in code and test docstrings alike. A comment must read correctly to someone who never saw the change; the before/after story belongs in the commit message or PR description.
+- Flag comments that paraphrase an already-readable line or the assert below them instead of stating a why (invariant, non-local consumer, prevented failure). Ask for the reason or for deletion. Do not flag plain-language summaries above genuinely dense code (tricky offset math, multi-step comprehension chains) — a comment that is faster to understand than the code it heads earns its place.
 
 ## Commit hygiene
 
