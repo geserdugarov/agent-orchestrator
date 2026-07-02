@@ -60,7 +60,9 @@ semantics as `ANALYTICS_RETENTION_DAYS` (default 90; non-positive keeps
 forever). Its producer is `record_agent_exit` (via
 `_maybe_record_trajectory`): when the sink is on it parses the run's
 trajectory from the same stdout, redacts and head/tail truncates every
-free-text field, and appends one `agent_trajectory` record -- all behind
+free-text field, denormalizes the `UsageMetrics` it already parsed for
+the baseline record into a `run_usage` summary (plus claude's per-turn
+`turns[]`), and appends one `agent_trajectory` record -- all behind
 its own fail-open guard so it never disturbs the baseline `agent_exit`
 usage record. `append_trajectory_record` / `prune_trajectory_records` share
 the append/prune discipline of their analytics counterparts (reopen
@@ -458,8 +460,10 @@ def record_agent_exit(
     usage / cost record never carries it, so the default-install record
     shape is unchanged. When the trajectory sink is on, the run's
     trajectory is parsed from the same stdout, every free-text field is
-    redacted and head/tail truncated, and a single `agent_trajectory`
-    record is appended to the trajectory file. That work rides its OWN
+    redacted and head/tail truncated, the `metrics` parsed above are
+    denormalized into a `run_usage` summary (with claude's per-turn
+    breakdown), and a single `agent_trajectory` record is appended to the
+    trajectory file. That work rides its OWN
     inner fail-open guard (`_maybe_record_trajectory`): a parser, redactor,
     or sink failure logs and is swallowed so it can never drop the baseline
     record above or the caller's `skill_triggered` audit events.
@@ -535,6 +539,7 @@ def record_agent_exit(
         backend=backend,
         result=result,
         prompt=prompt,
+        metrics=metrics,
         review_round=review_round,
         retry_count=retry_count,
     )
@@ -640,6 +645,7 @@ def _build_trajectory_record(
     session_id: Optional[str],
     prompt: Optional[str],
     trajectory: usage.AgentTrajectory,
+    metrics: usage.UsageMetrics,
     review_round: Optional[int],
     retry_count: Optional[int],
     redact,
@@ -648,28 +654,68 @@ def _build_trajectory_record(
 
     `prompt` becomes the redacted `user_input`; `system_prompt`, each
     step's content, and the final `output` are redacted the same way.
+    `metrics` (the same `UsageMetrics` the baseline `agent_exit` record
+    already carries) is denormalized into a `run_usage` summary so the
+    file-only viewer needs no re-parse; it is `UsageMetrics.to_dict()` minus
+    `backend` (already a record field). Its token counts / cost / model name
+    are not secret-shaped, so they skip redaction. The claude per-turn
+    breakdown rides along as `turns` (empty on codex, whose usage frames are
+    cumulative -- `build_record` then drops the key).
+
     Each step is charged its full *serialized* size -- the JSON metadata
-    (`kind` / `name` / `tool_id`) plus its truncated content, not merely
-    `len(content)` -- so steps with empty or tiny content still consume the
-    budget; once the running total crosses `_TRAJECTORY_RECORD_BUDGET` the
-    remainder is dropped and `truncated` is set. `build_record` drops every
-    `None`-valued field, so an absent prompt, empty system prompt, or
-    no-trigger skill set leaves its key off rather than storing a null.
+    (`kind` / `name` / `tool_id` / `turn`) plus its truncated content, not
+    merely `len(content)` -- so steps with empty or tiny content still consume
+    the budget. The per-turn `turns` array is charged and truncated the same
+    way (a run with thousands of turns and no steps would otherwise write the
+    whole array in full and blow the budget); it is drawn down before the
+    steps, so once the running total crosses `_TRAJECTORY_RECORD_BUDGET` the
+    remaining turns -- then steps -- are dropped and `truncated` is set. Only
+    the small fixed `run_usage` summary is always kept whole. `build_record`
+    drops every `None`-valued field, so an absent prompt, empty system prompt,
+    no-trigger skill set, or codex's empty per-turn array leaves its key off
+    rather than storing a null.
     """
     user_input = _redact_and_truncate(prompt, redact)
     system_prompt = _redact_and_truncate(trajectory.system_prompt, redact)
     output = _redact_and_truncate(trajectory.final_output, redact)
 
+    run_usage = {k: v for k, v in metrics.to_dict().items() if k != "backend"}
+
     used = len(user_input or "") + len(system_prompt or "") + len(output or "")
-    steps: list[dict[str, Any]] = []
+    used += len(json.dumps(run_usage, default=str))
     truncated = False
+
+    # The per-turn array is charged AND truncated under the record budget, not
+    # merely charged: a pathological claude run (thousands of turns) would
+    # otherwise write the whole array in full via `build_record` and blow the
+    # budget by its size. Turns are drawn down before steps, so `truncated` may
+    # already be set by the time the step loop runs. `run_usage` above is the
+    # small fixed run headline and stays whole.
+    turns: list[dict[str, Any]] = []
+    for turn in trajectory.turns:
+        turn_dict = turn.to_dict()
+        used += len(json.dumps(turn_dict, default=str))
+        if used > _TRAJECTORY_RECORD_BUDGET:
+            truncated = True
+            break
+        turns.append(turn_dict)
+
+    steps: list[dict[str, Any]] = []
     for step in trajectory.steps:
-        step_dict = {
+        if truncated:
+            break
+        step_dict: dict[str, Any] = {
             "kind": step.kind,
             "name": step.name or None,
             "tool_id": step.tool_id or None,
             "content": _redact_and_truncate(step.content, redact),
         }
+        # `turn` is the assistant turn that produced this step (claude only);
+        # `tool_result` / `user_message` steps are turn *inputs*, not billed
+        # output, so their `turn` is None and the key is omitted -- matching
+        # the design's "step.turn only when present".
+        if step.turn is not None:
+            step_dict["turn"] = step.turn
         # Charge the whole serialized step, not just its content: a run with
         # thousands of empty- / metadata-only steps would otherwise evade a
         # content-length-only budget and write an unbounded record.
@@ -695,6 +741,8 @@ def _build_trajectory_record(
         tools=list(trajectory.tools) or None,
         skills_triggered=list(skills.triggered) or None,
         skills_available=list(skills.available) or None,
+        run_usage=run_usage,
+        turns=turns or None,
         steps=steps,
         output=output,
         truncated=truncated or None,
@@ -710,6 +758,7 @@ def _maybe_record_trajectory(
     backend: str,
     result: AgentResult,
     prompt: Optional[str],
+    metrics: usage.UsageMetrics,
     review_round: Optional[int],
     retry_count: Optional[int],
 ) -> None:
@@ -718,7 +767,10 @@ def _maybe_record_trajectory(
 
     A no-op when the trajectory sink is disabled (the default), so the
     orchestrator-built prompt (`user_input`) -- and the parse/redact work
-    itself -- happens ONLY when an operator turned the sink on. The whole
+    itself -- happens ONLY when an operator turned the sink on. `metrics` is
+    the `UsageMetrics` `record_agent_exit` already parsed for the baseline
+    `agent_exit` record; it is threaded through (never re-parsed) so the
+    trajectory record can carry a denormalized `run_usage` summary. The whole
     block rides a dedicated try/except: a parser bug, an unredactable
     payload, or a sink IO failure logs and is swallowed so it can never drop
     the baseline `agent_exit` usage / cost record or the `skill_triggered`
@@ -741,6 +793,7 @@ def _maybe_record_trajectory(
                 session_id=result.session_id,
                 prompt=prompt,
                 trajectory=trajectory,
+                metrics=metrics,
                 review_round=review_round,
                 retry_count=retry_count,
                 redact=_redact_secrets,

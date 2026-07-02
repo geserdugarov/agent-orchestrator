@@ -1420,12 +1420,14 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 traj_path=t_path,
                 analytics_path=a_path,
             )
-            # Baseline agent_exit untouched.
+            # Baseline agent_exit untouched: it carries the flat usage fields
+            # but never the trajectory-only `run_usage` summary.
             base = _read_records(a_path)
             self.assertEqual(len(base), 1)
             self.assertEqual(base[0]["event"], "agent_exit")
             self.assertEqual(base[0]["input_tokens"], 100)
             self.assertNotIn("user_input", base[0])
+            self.assertNotIn("run_usage", base[0])
             # One trajectory record carrying the full surface.
             traj = _read_records(t_path)
             self.assertEqual(len(traj), 1)
@@ -1448,6 +1450,29 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self.assertEqual(call["name"], "Bash")
             self.assertIn("echo hi", call["content"])
             self.assertEqual(rec["steps"][1]["content"], "hi")
+            # run_usage is the denormalized UsageMetrics minus `backend`
+            # (already a record field) -- the run headline the file-only
+            # viewer reads without re-parsing.
+            run_usage = rec["run_usage"]
+            self.assertNotIn("backend", run_usage)
+            self.assertEqual(run_usage["input_tokens"], 100)
+            self.assertEqual(run_usage["output_tokens"], 50)
+            self.assertEqual(run_usage["models"], ["claude-sonnet-4-6"])
+            self.assertEqual(run_usage["turns"], 1)  # run-level turn count
+            self.assertEqual(run_usage["cost_source"], "estimated")
+            # The claude per-turn breakdown: one entry for the single turn,
+            # its 0-based index matching the billed steps' `turn`.
+            self.assertEqual(len(rec["turns"]), 1)
+            turn = rec["turns"][0]
+            self.assertEqual(turn["turn"], 0)
+            self.assertEqual(turn["model"], "claude-sonnet-4-6")
+            self.assertEqual(turn["input_tokens"], 100)
+            self.assertEqual(turn["output_tokens"], 50)
+            self.assertEqual(turn["cost_source"], "estimated")
+            # The billed tool_call carries its turn index; the tool_result is
+            # a turn *input*, not billed output, so it omits `turn`.
+            self.assertEqual(call["turn"], 0)
+            self.assertNotIn("turn", rec["steps"][1])
             # Nothing was truncated for this small run.
             self.assertNotIn("truncated", rec)
 
@@ -1484,6 +1509,19 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self.assertIsNone(rec["steps"][2]["tool_id"])
             # codex exposes no offered-tools frame -> the field is dropped.
             self.assertNotIn("tools", rec)
+            # run_usage is codex's only usage surface: the denormalized
+            # run-level totals, present even though per-turn detail is not.
+            run_usage = rec["run_usage"]
+            self.assertNotIn("backend", run_usage)
+            self.assertEqual(run_usage["input_tokens"], 200)
+            self.assertEqual(run_usage["output_tokens"], 80)
+            # No priced model in the stream -> unknown-price, no cost.
+            self.assertEqual(run_usage["cost_source"], "unknown-price")
+            self.assertIsNone(run_usage["cost_usd"])
+            # codex usage frames are cumulative, not per-turn: the per-turn
+            # array is dropped and no step carries a `turn` index.
+            self.assertNotIn("turns", rec)
+            self.assertTrue(all("turn" not in s for s in rec["steps"]))
 
     def test_text_turns_redacted_truncated_and_recorded(self) -> None:
         # New timeline items -- assistant / user text turns -- are stored as
@@ -1633,18 +1671,67 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
         # run cannot write an unbounded JSONL line.
         _, analytics = _reload()
         with tempfile.TemporaryDirectory() as td, \
-                patch.object(analytics, "_TRAJECTORY_RECORD_BUDGET", 30):
+                patch.object(analytics, "_TRAJECTORY_RECORD_BUDGET", 2000):
             t_path = Path(td) / "trajectory.jsonl"
             self._emit(
                 analytics,
-                stdout=_claude_multistep_stdout(n_steps=5, content="0123456789"),
+                stdout=_claude_multistep_stdout(
+                    n_steps=5, content="0123456789" * 20,
+                ),
                 traj_path=t_path,
                 analytics_path=Path(td) / "a.jsonl",
             )
             rec = _read_records(t_path)[0]
             self.assertTrue(rec["truncated"])
-            # 5 pairs => 10 steps emitted; the budget dropped the tail.
+            # 5 pairs => 10 steps emitted; the budget dropped the tail but
+            # kept a prefix.
+            self.assertGreater(len(rec["steps"]), 0)
             self.assertLess(len(rec["steps"]), 10)
+            # The 5 small per-turn entries fit under the budget (they are drawn
+            # down before the steps), so all are kept while the step tail is
+            # dropped; a turns array that itself overflows is truncated too
+            # (see test_turns_array_respects_total_budget).
+            self.assertEqual(len(rec["turns"]), 5)
+            self.assertIn("run_usage", rec)
+
+    def test_turns_array_respects_total_budget(self) -> None:
+        # Regression: the per-turn `turns[]` array is charged AND truncated
+        # under the record budget, not merely charged. A claude run with
+        # thousands of turns but no steps would otherwise write the whole
+        # array in full via `build_record` and overshoot the budget by its
+        # size -- the reviewer reproduced ~914 KB with zero steps kept.
+        _, analytics = _reload()
+        many = analytics.usage.AgentTrajectory(
+            backend="claude",
+            turns=tuple(
+                analytics.usage.TurnUsage(
+                    turn=i,
+                    model="claude-sonnet-4-6",
+                    input_tokens=1,
+                    output_tokens=1,
+                )
+                for i in range(5_000)
+            ),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            t_path = Path(td) / "trajectory.jsonl"
+            with patch.object(
+                analytics.usage, "parse_agent_trajectory", return_value=many,
+            ):
+                self._emit(
+                    analytics,
+                    stdout="",  # ignored: the trajectory parser is stubbed
+                    prompt="p",
+                    traj_path=t_path,
+                    analytics_path=Path(td) / "a.jsonl",
+                )
+            raw = t_path.read_text(encoding="utf-8")
+            rec = json.loads(raw)
+            self.assertTrue(rec["truncated"])
+            self.assertLess(len(rec["turns"]), 5_000)
+            # The on-disk line is bounded near the budget, not the ~914 KB an
+            # uncapped turns array produced.
+            self.assertLess(len(raw), analytics._TRAJECTORY_RECORD_BUDGET * 2)
 
     def test_metadata_only_steps_respect_total_budget(self) -> None:
         # Regression: the budget must count each step's serialized metadata,
