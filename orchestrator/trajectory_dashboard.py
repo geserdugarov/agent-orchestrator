@@ -22,7 +22,15 @@ recorded runs, a cascading repo -> issue -> run picker, and a per-run
 detail view that walks the run's normalised `timeline` -- the redacted
 prompt, then the interleaved assistant / user text turns and tool calls
 / results, then the final output, as one ordered sequence -- alongside
-the offered tools and triggered skills. A sidebar toggle hides the
+the offered tools and triggered skills. It also surfaces the run's token
+usage and cost: a run-level usage / cost summary in the detail card, a
+*Total cost* KPI tile, and -- for claude -- a compact per-turn usage
+strip (with cache-hit / read / write indicators) at each assistant-turn
+boundary in the timeline. The copy states the usage model's two honesty
+points: per-turn figures are claude-only estimates that need not sum to
+the run total, and the run cost is authoritative only when reported
+(codex has no per-turn detail, so it shows the run summary and a note).
+A sidebar toggle hides the
 synthetic test-suite fixtures the reader's `is_fixture` marker flags
 (off by default; when shown they are tagged in the overview table and
 the run picker). The pure parsing / filtering /
@@ -46,7 +54,7 @@ import html
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 # `streamlit run orchestrator/trajectory_dashboard.py` executes this file as
 # a top-level script via `runpy` with no parent package, prepending the
@@ -184,8 +192,45 @@ EXTRA_CSS = f"""
     color: var(--orch-muted-soft); font-size: 11px;
     font-family: {theme.MONO_FONT_FAMILY}; margin-left: auto;
   }}
+  /* Run-level usage summary + per-turn strip -------------------- */
+  /* The cost chip in the run-usage row is the headline number, so it
+     carries the accent border to read louder than the token chips. */
+  .orch-traj-chip.cost {{
+    border-color: var(--orch-accent); font-weight: 600;
+  }}
+  .orch-traj-usage-note {{
+    color: var(--orch-muted-soft); font-size: 11.5px;
+    margin: 0 0 12px; font-family: {theme.FONT_FAMILY};
+  }}
+  .orch-traj-turn {{
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    margin: 14px 0 2px; padding: 5px 11px;
+    border: 1px solid var(--orch-border); border-radius: 8px;
+    background: var(--orch-chip); color: var(--orch-muted);
+    font-size: 11.5px; font-family: {theme.MONO_FONT_FAMILY};
+  }}
+  .orch-traj-turn .orch-traj-turn-model {{
+    color: var(--orch-ink); font-weight: 600;
+  }}
+  .orch-traj-usage-sep {{ color: var(--orch-muted-soft); }}
+  .orch-traj-cache-hit {{
+    background: rgba(26,163,154,.14); color: var(--orch-cache);
+    border-radius: 999px; padding: 1px 8px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.02em;
+  }}
+  /* Five KPI tiles on this page (runs / issues / repos / tool calls /
+     total cost); re-declare the shared chrome's <=1080px two-column
+     reflow so the added tile does not force five across on a narrow
+     viewport. Both rules follow `PAGE_CSS`, so they win the cascade. */
+  .orch-kpis {{ grid-template-columns: repeat(5, 1fr); }}
+  @media (max-width: 1080px) {{
+    .orch-kpis {{ grid-template-columns: repeat(2, 1fr); }}
+  }}
 </style>
 """
+
+# Separator drawn between the segments of a per-turn usage strip.
+_USAGE_SEP = '<span class="orch-traj-usage-sep">·</span>'
 
 
 def _card_header_html(title: str, sub: str) -> str:
@@ -222,8 +267,25 @@ def _topbar_html(total_runs: int, shown_runs: int) -> str:
     )
 
 
+def _fmt_cost_usd(value: float, *, decimals: int = 2) -> str:
+    """Exact dollar figure for a usage cost.
+
+    The dashboard's compact `theme.fmt_money` drops the cents on any figure
+    at or above $10 and abbreviates thousands, which would misreport an
+    authoritative run or total cost (a $12.50 run must not read as `$12`).
+    Per-turn estimates pass `decimals=4` so a sub-cent turn is not floored
+    to `$0.00`.
+    """
+    return f"${value:,.{decimals}f}"
+
+
 def _kpi_strip_html(summary: trajectory_reader.TrajectorySummary) -> str:
-    """Four-tile KPI strip reusing the dashboard's `.orch-kpi` markup."""
+    """Five-tile KPI strip reusing the dashboard's `.orch-kpi` markup.
+
+    The *Total cost* tile sums the authoritative run cost over the filtered
+    runs that recorded one (a mix of reported and estimated figures, hence
+    the foot), read entirely from the file -- no Postgres.
+    """
     truncated_foot = (
         f"{theme.fmt_num(summary.truncated_runs)} truncated"
         if summary.truncated_runs
@@ -234,6 +296,7 @@ def _kpi_strip_html(summary: trajectory_reader.TrajectorySummary) -> str:
         ("Issues", theme.fmt_num(summary.distinct_issues), ""),
         ("Repos", theme.fmt_num(summary.distinct_repos), ""),
         ("Tool calls", theme.fmt_num(summary.total_tool_calls), ""),
+        ("Total cost", _fmt_cost_usd(summary.total_cost_usd), "reported + est."),
     ]
     cells = []
     for label, value, foot in tiles:
@@ -388,6 +451,141 @@ def _timeline_entry_html(
     )
 
 
+def _run_usage_html(run: TrajectoryRun) -> str:
+    """Run-level usage / cost summary as a labeled chip row, plus a note.
+
+    The run headline and codex's only usage surface: the model(s), the token
+    buckets, the turn count, and the *authoritative* run cost tagged with its
+    `cost_source` (`reported $0.83` / `estimated $0.79`, or the bare source
+    when the run was unpriced). A pre-usage record (`run_usage is None`)
+    renders nothing, so the detail card degrades to its pre-usage shape. The
+    trailing note carries the two honesty points: the run cost is
+    authoritative only when reported, and the per-turn strips are claude-only
+    estimates that need not sum to it -- or, when the run has no per-turn
+    detail (codex), that per-turn usage is unavailable for the backend.
+    """
+    usage = run.run_usage
+    if usage is None:
+        return ""
+
+    def chip(text: str, cls: str = "") -> str:
+        klass = f"orch-traj-chip {cls}".rstrip()
+        return f'<span class="{klass}">{html.escape(text)}</span>'
+
+    chips = [chip(m) for m in usage.models]
+    chips.append(chip(f"total {theme.fmt_num(usage.total_tokens)} tok"))
+    chips.append(chip(f"in {theme.fmt_num(usage.input_tokens)}"))
+    chips.append(chip(f"out {theme.fmt_num(usage.output_tokens)}"))
+    chips.append(chip(f"cache-read {theme.fmt_num(usage.cache_read_tokens)}"))
+    chips.append(chip(f"cache-write {theme.fmt_num(usage.cache_write_tokens)}"))
+    # `cached_tokens` is codex's only cache signal (it has no read/write
+    # split); it is 0 on claude, so the chip renders only when a run recorded
+    # it rather than adding an always-zero column to the claude row.
+    if usage.cached_tokens:
+        chips.append(chip(f"cached {theme.fmt_num(usage.cached_tokens)}"))
+    if usage.turns is not None:
+        chips.append(chip(f"{usage.turns} turns"))
+    source = run.cost_source or "unknown"
+    cost_label = (
+        source
+        if run.cost_usd is None
+        else f"{source} {_fmt_cost_usd(run.cost_usd)}"
+    )
+    chips.append(chip(cost_label, "cost"))
+
+    row = (
+        '<div class="orch-traj-chips">'
+        '<span class="lbl">Run usage</span>'
+        f'{"".join(chips)}'
+        '</div>'
+    )
+    if run.turns:
+        note = (
+            "Run cost is authoritative when reported. The per-turn strips in "
+            "the timeline are claude-only estimates and need not sum to it; "
+            "entries with no strip (tool results, user turns) are turn inputs, "
+            "billed on the next assistant turn."
+        )
+    else:
+        note = (
+            "Run cost is authoritative when reported. Per-turn usage is not "
+            "available for this backend, so the run-level summary is its only "
+            "usage surface."
+        )
+    return f'{row}<p class="orch-traj-usage-note">{html.escape(note)}</p>'
+
+
+def _turn_usage_html(usage: trajectory_reader.TurnUsageView) -> str:
+    """Compact per-turn usage strip drawn above the first entry of a turn.
+
+    `model · in N tok · out N tok · cache-read N · cache-write N · est. $X`,
+    with a *cache hit* chip when the turn read from cache -- the direct answer
+    to "was the cache used". The cost is always an estimate (the strip never
+    carries the authoritative run figure), so it is labelled `est.`; an
+    unpriced turn reads `est. n/a`.
+    """
+    segments = []
+    if usage.model:
+        segments.append(
+            '<span class="orch-traj-turn-model">'
+            f'{html.escape(usage.model)}</span>'
+        )
+    est_cost = (
+        "est. n/a"
+        if usage.cost_usd is None
+        else f"est. {_fmt_cost_usd(usage.cost_usd, decimals=4)}"
+    )
+    for text in (
+        f"in {theme.fmt_num(usage.input_tokens)} tok",
+        f"out {theme.fmt_num(usage.output_tokens)} tok",
+        f"cache-read {theme.fmt_num(usage.cache_read_tokens)}",
+        f"cache-write {theme.fmt_num(usage.cache_write_tokens)}",
+        est_cost,
+    ):
+        segments.append(f"<span>{text}</span>")
+    cache_hit = (
+        '<span class="orch-traj-cache-hit">cache hit</span>'
+        if usage.cache_read_tokens > 0
+        else ""
+    )
+    return (
+        '<div class="orch-traj-turn">'
+        f'{_USAGE_SEP.join(segments)}{cache_hit}'
+        '</div>'
+    )
+
+
+def _timeline_with_usage(
+    run: TrajectoryRun,
+) -> list[
+    tuple[Optional[trajectory_reader.TurnUsageView],
+          trajectory_reader.TimelineEntry]
+]:
+    """Pair each timeline entry with the per-turn usage strip to draw above it.
+
+    The strip belongs on the *first* entry of each assistant turn: a new turn
+    starts when an entry's `turn` differs from the last one seen, so that entry
+    pairs with the turn's usage while every later entry of the same turn -- and
+    every `turn=None` turn input (tool results, user turns) between turns --
+    pairs with `None`. A turn the sink's budget dropped from `turns[]` pairs
+    with `None` too, but still advances the boundary so its siblings do not
+    re-probe for it. A codex or pre-usage run has `turn=None` throughout, so
+    every entry pairs with `None` and no strip renders.
+    """
+    paired: list[
+        tuple[Optional[trajectory_reader.TurnUsageView],
+              trajectory_reader.TimelineEntry]
+    ] = []
+    prev_turn: Optional[int] = None
+    for entry in run.timeline:
+        strip = None
+        if entry.turn is not None and entry.turn != prev_turn:
+            strip = run.usage_for_turn(entry.turn)
+            prev_turn = entry.turn
+        paired.append((strip, entry))
+    return paired
+
+
 def _run_picker_label(run: TrajectoryRun) -> str:
     """The run's per-run picker label (`detail_label`), prefixed when it
     is a synthetic fixture.
@@ -426,6 +624,10 @@ def _render_run(*, st: Any, run: TrajectoryRun) -> None:
             )
         st.markdown(_meta_html(run), unsafe_allow_html=True)
 
+        usage_html = _run_usage_html(run)
+        if usage_html:
+            st.markdown(usage_html, unsafe_allow_html=True)
+
         for label, names in (
             ("Tools offered", run.tools),
             ("Skills triggered", run.skills_triggered),
@@ -447,7 +649,11 @@ def _render_run(*, st: Any, run: TrajectoryRun) -> None:
         )
         timeline = run.timeline
         if timeline:
-            for i, entry in enumerate(timeline):
+            for i, (strip, entry) in enumerate(_timeline_with_usage(run)):
+                if strip is not None:
+                    st.markdown(
+                        _turn_usage_html(strip), unsafe_allow_html=True
+                    )
                 st.markdown(
                     _timeline_entry_html(entry, i), unsafe_allow_html=True
                 )

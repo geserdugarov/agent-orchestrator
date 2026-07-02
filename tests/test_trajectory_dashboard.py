@@ -118,22 +118,26 @@ class TopbarHtmlTest(unittest.TestCase):
 
 class KpiStripHtmlTest(unittest.TestCase):
 
-    def test_four_tiles_and_truncated_foot(self) -> None:
+    def test_tiles_truncated_foot_and_cost(self) -> None:
         import orchestrator.trajectory_reader as tr
         summary = tr.TrajectorySummary(
             total_runs=5, distinct_issues=3, distinct_repos=2,
-            total_tool_calls=11, truncated_runs=1,
+            total_tool_calls=11, truncated_runs=1, total_cost_usd=12.5,
         )
         out = _td()._kpi_strip_html(summary)
         self.assertIn("orch-kpis", out)
-        for label in ("Runs", "Issues", "Repos", "Tool calls"):
+        for label in ("Runs", "Issues", "Repos", "Tool calls", "Total cost"):
             self.assertIn(f">{label}</span>", out)
         self.assertIn("1 truncated", out)
+        # Exact cents even above $10 -- the compact `fmt_money` would read
+        # `$12`, dropping the authoritative figure's cents.
+        self.assertIn(">$12.50</div>", out)
 
-    def test_no_truncated_reads_none(self) -> None:
+    def test_no_truncated_reads_none_and_zero_cost(self) -> None:
         import orchestrator.trajectory_reader as tr
         out = _td()._kpi_strip_html(tr.TrajectorySummary(total_runs=2))
         self.assertIn("none truncated", out)
+        self.assertIn(">$0.00</div>", out)
 
 
 class MetaHtmlTest(unittest.TestCase):
@@ -291,6 +295,165 @@ class RunPickerLabelTest(unittest.TestCase):
         run = _run()
         self.assertEqual(_td()._run_picker_label(run), run.detail_label())
         self.assertNotIn(run.repo, _td()._run_picker_label(run))
+
+
+_CLAUDE_RUN_USAGE = {
+    "models": ["claude-opus-4-8"],
+    "input_tokens": 41230, "output_tokens": 5120, "cached_tokens": 0,
+    "cache_read_tokens": 812440, "cache_write_tokens": 20110,
+    "turns": 9, "cost_usd": 0.83, "cost_source": "reported",
+}
+
+
+def _turn(**overrides):
+    import orchestrator.trajectory_reader as tr
+    base = dict(
+        turn=0, model="claude-opus-4-8", input_tokens=12, output_tokens=340,
+        cache_read_tokens=18240, cache_write_tokens=512,
+        cost_usd=0.0123, cost_source="estimated",
+    )
+    base.update(overrides)
+    return tr.TurnUsageView(**base)
+
+
+class RunUsageHtmlTest(unittest.TestCase):
+
+    def test_claude_summary_chips_and_estimate_note(self) -> None:
+        run = _run(
+            run_usage=_CLAUDE_RUN_USAGE,
+            turns=[{"turn": 0, "model": "claude-opus-4-8",
+                    "input_tokens": 12, "output_tokens": 340,
+                    "cache_read_tokens": 18240, "cache_write_tokens": 512,
+                    "cost_usd": 0.0123, "cost_source": "estimated"}],
+        )
+        out = _td()._run_usage_html(run)
+        self.assertIn(">Run usage</span>", out)
+        self.assertIn("claude-opus-4-8", out)
+        self.assertIn("9 turns", out)
+        self.assertIn("cache-read 812,440", out)
+        self.assertIn("cache-write 20,110", out)
+        # `cached_tokens` is 0 on claude -> no always-zero cached chip.
+        self.assertNotIn("cached ", out)
+        # Authoritative run cost with its source, exact to the cent.
+        self.assertIn("reported $0.83", out)
+        self.assertIn("orch-traj-chip cost", out)
+        # Note carries both honesty points for the claude (per-turn) path.
+        self.assertIn("authoritative when reported", out)
+        self.assertIn("claude-only estimates", out)
+        self.assertIn("need not sum to it", out)
+
+    def test_codex_summary_shows_not_available_note(self) -> None:
+        run = _run(
+            backend="codex",
+            run_usage={"models": ["gpt-5-codex"], "input_tokens": 1000,
+                       "output_tokens": 200, "cached_tokens": 500,
+                       "turns": 3, "cost_usd": 0.05,
+                       "cost_source": "estimated"},
+            turns=[],
+        )
+        out = _td()._run_usage_html(run)
+        self.assertIn("gpt-5-codex", out)
+        # Codex has no read/write split, so `cached_tokens` is its only cache
+        # signal and must reach the row.
+        self.assertIn("cached 500", out)
+        self.assertIn("estimated $0.05", out)
+        # Codex has no per-turn detail: it gets the run summary plus a note,
+        # and never the per-turn estimate caveat.
+        self.assertIn("not available for this backend", out)
+        self.assertNotIn("need not sum to it", out)
+
+    def test_pre_usage_record_renders_nothing(self) -> None:
+        self.assertEqual(_td()._run_usage_html(_run()), "")
+
+    def test_unpriced_run_names_source_without_dollars(self) -> None:
+        run = _run(run_usage={"models": [], "cost_source": "no-usage"})
+        out = _td()._run_usage_html(run)
+        # Unpriced -> the cost chip names the source, no dollar figure.
+        self.assertIn(">no-usage</span>", out)
+        self.assertNotIn("$", out)
+
+
+class TurnUsageHtmlTest(unittest.TestCase):
+
+    def test_strip_carries_model_tokens_and_est_cost(self) -> None:
+        out = _td()._turn_usage_html(_turn())
+        self.assertIn("orch-traj-turn", out)
+        self.assertIn("claude-opus-4-8", out)
+        self.assertIn("in 12 tok", out)
+        self.assertIn("out 340 tok", out)
+        self.assertIn("cache-read 18,240", out)
+        self.assertIn("cache-write 512", out)
+        # Sub-cent precision so a small estimate is not floored to `$0.00`.
+        self.assertIn("est. $0.0123", out)
+
+    def test_cache_hit_chip_only_when_cache_read(self) -> None:
+        self.assertIn("cache hit", _td()._turn_usage_html(_turn()))
+        self.assertNotIn(
+            "cache hit", _td()._turn_usage_html(_turn(cache_read_tokens=0))
+        )
+
+    def test_unpriced_turn_reads_est_na(self) -> None:
+        out = _td()._turn_usage_html(
+            _turn(cost_usd=None, cost_source="unknown-price")
+        )
+        self.assertIn("est. n/a", out)
+
+    def test_model_escaped(self) -> None:
+        out = _td()._turn_usage_html(_turn(model="<m>"))
+        self.assertIn("&lt;m&gt;", out)
+        self.assertNotIn("<m></span>", out)
+
+
+class TimelineUsageBoundaryTest(unittest.TestCase):
+    """`_timeline_with_usage` pairs each entry with the strip drawn above it:
+    a strip on the first entry of every assistant turn, `None` everywhere
+    else -- turn inputs and later entries of the same turn included.
+    """
+
+    def _run_with_turns(self):
+        return _run(
+            steps=[
+                {"kind": "assistant_message", "content": "a", "turn": 0},
+                {"kind": "tool_call", "name": "Edit", "tool_id": "t1",
+                 "turn": 0},
+                {"kind": "tool_result", "tool_id": "t1"},
+                {"kind": "assistant_message", "content": "b", "turn": 1},
+            ],
+            turns=[
+                {"turn": 0, "model": "m", "input_tokens": 1,
+                 "output_tokens": 2, "cache_read_tokens": 3,
+                 "cache_write_tokens": 4, "cost_usd": 0.01,
+                 "cost_source": "estimated"},
+                {"turn": 1, "model": "m", "input_tokens": 5,
+                 "output_tokens": 6, "cache_read_tokens": 0,
+                 "cache_write_tokens": 0, "cost_usd": 0.02,
+                 "cost_source": "estimated"},
+            ],
+        )
+
+    def test_strip_only_at_first_entry_of_each_turn(self) -> None:
+        paired = _td()._timeline_with_usage(self._run_with_turns())
+        strips = [s for s, _ in paired]
+        self.assertEqual(len(strips), 4)
+        self.assertIsNotNone(strips[0])
+        self.assertEqual(strips[0].turn, 0)
+        # Same turn's tool call and the turn-input result carry no strip.
+        self.assertIsNone(strips[1])
+        self.assertIsNone(strips[2])
+        self.assertIsNotNone(strips[3])
+        self.assertEqual(strips[3].turn, 1)
+
+    def test_no_strip_on_turn_none_entries(self) -> None:
+        for strip, entry in _td()._timeline_with_usage(self._run_with_turns()):
+            if entry.turn is None:
+                self.assertIsNone(strip)
+
+    def test_pre_usage_run_pairs_every_entry_with_none(self) -> None:
+        run = _run(steps=[{"kind": "tool_call", "name": "Bash"},
+                          {"kind": "tool_result", "tool_id": "t"}])
+        paired = _td()._timeline_with_usage(run)
+        self.assertTrue(paired)
+        self.assertTrue(all(strip is None for strip, _ in paired))
 
 
 class CardHeaderHtmlTest(unittest.TestCase):
