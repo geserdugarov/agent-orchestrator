@@ -33,10 +33,14 @@ A further sibling classifier (``parse_claude_trajectory`` /
 event iterator and resilience contract to reconstruct a run's *trajectory*:
 the offered tools, triggered skills, the ordered timeline of ``tool_call`` /
 ``tool_result`` steps interleaved with ``assistant_message`` /
-``user_message`` text turns, and the final output. It classifies raw stream
-data only -- it neither writes files nor redacts/truncates content; a
-downstream writer owns that. ``system_prompt`` and ``tools`` stay best-effort and empty
-when a backend's stream does not expose them.
+``user_message`` text turns, and the final output. For claude it also emits
+per-turn token usage (``TurnUsage``, one per assistant ``message.id``) and
+stamps each step with the ``turn`` index that produced it; codex leaves the
+per-turn section empty (its usage frames are cumulative, not per-turn). It
+classifies raw stream data only -- it neither writes files nor
+redacts/truncates content; a downstream writer owns that. ``system_prompt``
+and ``tools`` stay best-effort and empty when a backend's stream does not
+expose them.
 """
 from __future__ import annotations
 
@@ -131,6 +135,31 @@ def _claude_rates(model: str) -> Optional[dict[str, float]]:
         if pat.search(m):
             return rates
     return None
+
+
+def _claude_estimate_cost(
+    model: str, bucket: dict[str, int]
+) -> Optional[float]:
+    """Price one model's token bucket from the shared ``_CLAUDE_RATES`` table.
+
+    ``bucket`` is a ``_claude_usage_record``-shaped dict (``input`` /
+    ``cache_write_5m`` / ``cache_write_1h`` / ``cache_read`` / ``output``).
+    Returns ``None`` when the model has no known rate so a caller can tell
+    ``estimated`` from ``unknown-price``. Both the run aggregate
+    (``parse_claude_usage``) and the per-turn builder (``_claude_turn_usage``)
+    price through here, so a rate edit can never drift the run total apart from
+    the per-turn numbers.
+    """
+    rates = _claude_rates(model)
+    if rates is None:
+        return None
+    return (
+        bucket["input"] * rates["input"]
+        + bucket["cache_write_5m"] * rates["cache_write_5m"]
+        + bucket["cache_write_1h"] * rates["cache_write_1h"]
+        + bucket["cache_read"] * rates["cache_read"]
+        + bucket["output"] * rates["output"]
+    ) / 1_000_000
 
 
 # OpenAI rates are USD per 1M tokens for input / cached / output. ``cached``
@@ -426,20 +455,11 @@ def parse_claude_usage(stdout: str) -> UsageMetrics:
         parts: list[float] = []
         priced_all = True
         for model, bucket in per_model.items():
-            rates = _claude_rates(model)
-            if rates is None:
+            part = _claude_estimate_cost(model, bucket)
+            if part is None:
                 priced_all = False
                 break
-            parts.append(
-                (
-                    bucket["input"] * rates["input"]
-                    + bucket["cache_write_5m"] * rates["cache_write_5m"]
-                    + bucket["cache_write_1h"] * rates["cache_write_1h"]
-                    + bucket["cache_read"] * rates["cache_read"]
-                    + bucket["output"] * rates["output"]
-                )
-                / 1_000_000
-            )
+            parts.append(part)
         if priced_all:
             estimated = sum(parts)
 
@@ -950,6 +970,11 @@ class TrajectoryStep:
     message turns -- a result joins back to its call through ``tool_id``
     (claude's ``tool_use`` ``id`` / ``tool_use_id``; codex's ``item.id``),
     which is ``""`` when the stream omits it and on message turns.
+    ``turn`` is the 0-based index of the assistant turn that produced the step
+    (claude only): the ``assistant_message`` and ``tool_call`` steps of one
+    ``message.id`` share it, matching the ``TurnUsage`` that billed them.
+    ``tool_result`` / ``user_message`` steps are turn *inputs*, not billed
+    output, so ``turn`` is ``None``; it is also ``None`` for every codex step.
     ``content`` is the raw, un-redacted payload exactly as the stream carried
     it: a call's input (claude input dict / codex command string), a result's
     output (claude result content / codex ``aggregated_output``), or a message
@@ -960,6 +985,7 @@ class TrajectoryStep:
     kind: str
     name: str = ""
     tool_id: str = ""
+    turn: Optional[int] = None
     content: Any = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -967,7 +993,46 @@ class TrajectoryStep:
             "kind": self.kind,
             "name": self.name,
             "tool_id": self.tool_id,
+            "turn": self.turn,
             "content": self.content,
+        }
+
+
+@dataclass(frozen=True)
+class TurnUsage:
+    """Per-turn token usage for one claude assistant turn (one ``message.id``).
+
+    A turn is one LLM request: its ``text`` block plus any ``tool_use`` blocks
+    share a single ``message.usage`` record, so usage is attached once at the
+    turn boundary rather than copied onto every step the turn emitted. ``turn``
+    is the same 0-based index the sibling steps carry in
+    ``TrajectoryStep.turn``; ``cache_write_tokens`` sums the 5m and 1h cache-
+    creation buckets. ``cost_usd`` is always an *estimate* from the shared
+    price path -- ``total_cost_usd`` is a run-level terminal figure with no
+    per-turn breakdown -- so ``cost_source`` is only ever ``"estimated"`` or
+    ``"unknown-price"`` (the latter with ``cost_usd = None``). Codex has no
+    per-turn usage (its frames are cumulative), so it produces none of these.
+    """
+
+    turn: int
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_usd: Optional[float] = None
+    cost_source: str = "estimated"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "turn": self.turn,
+            "model": self.model,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "cost_usd": self.cost_usd,
+            "cost_source": self.cost_source,
         }
 
 
@@ -986,6 +1051,11 @@ class AgentTrajectory:
     until a backend's stream is confirmed to carry it -- both are best-effort
     and empty when the stream shape is unknown rather than an error.
 
+    ``turns`` is the per-turn token-usage breakdown -- one ``TurnUsage`` per
+    assistant turn, parallel to the ``tools`` / ``skills`` best-effort
+    sections. It is claude-only (codex's usage frames are cumulative, so it
+    stays empty), and every step's ``turn`` index refers into it.
+
     This is a *classifier*: it records raw stream data verbatim and never
     writes files or redacts/truncates. A missing or renamed field yields an
     empty section, never an exception -- the same resilience contract the
@@ -998,6 +1068,7 @@ class AgentTrajectory:
     skills: SkillTriggers = field(default_factory=SkillTriggers)
     steps: tuple[TrajectoryStep, ...] = ()
     final_output: Optional[str] = None
+    turns: tuple[TurnUsage, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1011,6 +1082,7 @@ class AgentTrajectory:
             },
             "steps": [s.to_dict() for s in self.steps],
             "final_output": self.final_output,
+            "turns": [t.to_dict() for t in self.turns],
         }
 
 
@@ -1058,6 +1130,26 @@ def _claude_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
     return final
 
 
+def _claude_turn_key(idx: int, event: dict[str, Any]) -> str:
+    """Turn-grouping key for an assistant frame: ``message.id``, else fallback.
+
+    Mirrors ``parse_claude_usage``'s per-id grouping so a run's turns line up
+    with its aggregate: partial-message frames sharing a ``message.id`` are one
+    turn, and a frame with neither ``message.id`` nor ``request_id`` falls back
+    to its stream position (each such frame its own turn). Computed identically
+    in ``_claude_trajectory_steps`` and ``_claude_turn_usage`` so a step's
+    ``turn`` index and its ``TurnUsage`` always agree.
+    """
+    msg = event.get("message")
+    mid = msg.get("id") if isinstance(msg, dict) else None
+    if isinstance(mid, str) and mid:
+        return mid
+    rid = event.get("request_id")
+    if isinstance(rid, str) and rid:
+        return rid
+    return str(idx)
+
+
 def _claude_trajectory_steps(
     events: Iterable[dict[str, Any]],
 ) -> tuple[TrajectoryStep, ...]:
@@ -1076,17 +1168,32 @@ def _claude_trajectory_steps(
     relies on) emits each text block in exactly one frame, so they append in
     order without an id de-dup. The raw ``input`` / ``content`` / ``text``
     payload rides along verbatim (no redaction here).
+
+    Each assistant frame is assigned a 0-based ``turn`` index by first-seen
+    ``message.id`` (``_claude_turn_key``); that index is stamped onto every
+    ``assistant_message`` / ``tool_call`` step the frame emits so it lines up
+    with the matching ``TurnUsage``. ``tool_result`` / ``user_message`` steps
+    are turn inputs, not billed output, and keep ``turn = None``. The index is
+    assigned right after the ``message`` check -- before the ``content`` check
+    and independent of usage presence -- so it stays in lock-step with
+    ``_claude_turn_usage``.
     """
     steps: list[TrajectoryStep] = []
     seen_calls: set[str] = set()
     seen_results: set[str] = set()
-    for ev in events:
+    turn_index: dict[str, int] = {}
+    for idx, ev in enumerate(events):
         etype = ev.get("type")
         if etype not in ("assistant", "user"):
             continue
         msg = ev.get("message")
         if not isinstance(msg, dict):
             continue
+        turn: Optional[int] = None
+        if etype == "assistant":
+            turn = turn_index.setdefault(
+                _claude_turn_key(idx, ev), len(turn_index)
+            )
         content = msg.get("content")
         if not isinstance(content, list):
             continue
@@ -1099,6 +1206,7 @@ def _claude_trajectory_steps(
                 if isinstance(text, str) and text:
                     steps.append(TrajectoryStep(
                         kind="assistant_message",
+                        turn=turn,
                         content=text,
                     ))
             elif etype == "assistant" and btype == "tool_use":
@@ -1115,6 +1223,7 @@ def _claude_trajectory_steps(
                     kind="tool_call",
                     name=name,
                     tool_id=tool_id,
+                    turn=turn,
                     content=block.get("input"),
                 ))
             elif etype == "user" and btype == "text":
@@ -1139,15 +1248,62 @@ def _claude_trajectory_steps(
     return tuple(steps)
 
 
+def _claude_turn_usage(
+    events: Iterable[dict[str, Any]],
+) -> tuple[TurnUsage, ...]:
+    """Build one ``TurnUsage`` per assistant ``message.id``, first-seen order.
+
+    Groups assistant frames by ``_claude_turn_key`` -- the same keying and
+    order ``_claude_trajectory_steps`` uses -- so each turn's 0-based index
+    matches the ``turn`` its steps carry. The last usage record per id wins
+    (claude streams partial usage on intermediate frames; the final frame is
+    authoritative), the same discipline ``parse_claude_usage`` applies. Per-
+    turn cost is always an estimate from the shared ``_claude_estimate_cost``
+    path -- ``estimated`` when the model is priced, ``unknown-price`` (with
+    ``cost_usd = None``) otherwise; ``total_cost_usd`` is run-level only and
+    never reaches a turn.
+    """
+    turn_index: dict[str, int] = {}
+    by_key: dict[str, tuple[int, str, dict[str, int]]] = {}
+    for idx, ev in enumerate(events):
+        if ev.get("type") != "assistant":
+            continue
+        msg = ev.get("message")
+        if not isinstance(msg, dict):
+            continue
+        key = _claude_turn_key(idx, ev)
+        turn = turn_index.setdefault(key, len(turn_index))
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        by_key[key] = (
+            turn, _claude_model_name(ev), _claude_usage_record(usage)
+        )
+    turns: list[TurnUsage] = []
+    for turn, model, rec in sorted(by_key.values(), key=lambda t: t[0]):
+        cost = _claude_estimate_cost(model, rec)
+        turns.append(TurnUsage(
+            turn=turn,
+            model=model,
+            input_tokens=rec["input"],
+            output_tokens=rec["output"],
+            cache_read_tokens=rec["cache_read"],
+            cache_write_tokens=rec["cache_write_5m"] + rec["cache_write_1h"],
+            cost_usd=cost,
+            cost_source="estimated" if cost is not None else "unknown-price",
+        ))
+    return tuple(turns)
+
+
 def parse_claude_trajectory(stdout: str) -> AgentTrajectory:
     """Classify a ``claude -p --output-format stream-json`` run's trajectory.
 
     Reuses ``_iter_events`` and ``parse_claude_skills`` (names-only) and
     reconstructs the offered tools, the ordered timeline (tool_call /
     tool_result steps interleaved with assistant_message / user_message text
-    turns), and final output. ``system_prompt`` stays ``None`` -- the
-    stream-json shape does not expose it -- and every section is empty rather
-    than an error when its source frame/field is absent.
+    turns), per-turn token usage, and final output. ``system_prompt`` stays
+    ``None`` -- the stream-json shape does not expose it -- and every section
+    is empty rather than an error when its source frame/field is absent.
     """
     events = _iter_events(stdout)
     return AgentTrajectory(
@@ -1156,6 +1312,7 @@ def parse_claude_trajectory(stdout: str) -> AgentTrajectory:
         skills=parse_claude_skills(stdout),
         steps=_claude_trajectory_steps(events),
         final_output=_claude_final_output(events),
+        turns=_claude_turn_usage(events),
     )
 
 
@@ -1278,8 +1435,10 @@ def parse_codex_trajectory(stdout: str) -> AgentTrajectory:
     interleaved with agent_message assistant_message turns) and final output;
     the last ``agent_message`` is still the ``final_output``. ``tools`` and
     ``system_prompt`` stay empty / ``None`` -- codex's stream exposes no
-    confirmed offered-tools or system-prompt frame -- and every section is
-    empty rather than an error when its source is absent.
+    confirmed offered-tools or system-prompt frame -- and ``turns`` stays empty
+    with every ``step.turn = None`` (codex usage frames are cumulative, not
+    per-turn). Every section is empty rather than an error when its source is
+    absent.
     """
     events = _iter_events(stdout)
     return AgentTrajectory(
