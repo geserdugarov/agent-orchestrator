@@ -104,6 +104,8 @@ class ParseRecordTest(unittest.TestCase):
         self.assertIsNone(run.retry_count)
         self.assertEqual(run.tools, ())
         self.assertEqual(run.steps, ())
+        self.assertIsNone(run.run_usage)
+        self.assertEqual(run.turns, ())
         self.assertFalse(run.truncated)
 
     def test_step_without_kind_is_dropped(self) -> None:
@@ -138,6 +140,185 @@ class ParseRecordTest(unittest.TestCase):
     def test_review_round_string_coerced(self) -> None:
         run = tr.parse_record(_record(review_round="3"), seq=0)
         self.assertEqual(run.review_round, 3)
+
+
+def _usage_record(**overrides):
+    """A claude record carrying run + per-turn usage and turn-stamped steps."""
+    rec = _record(
+        user_input="fix the parser",
+        output="done",
+        run_usage={
+            "models": ["claude-opus-4-8"],
+            "turns": 2,
+            "input_tokens": 12,
+            "output_tokens": 340,
+            "cached_tokens": 0,
+            "cache_read_tokens": 18240,
+            "cache_write_tokens": 512,
+            "cost_usd": 0.83,
+            "cost_source": "reported",
+        },
+        turns=[
+            {"turn": 0, "model": "claude-opus-4-8", "input_tokens": 12,
+             "output_tokens": 340, "cache_read_tokens": 18240,
+             "cache_write_tokens": 512, "cost_usd": 0.0123,
+             "cost_source": "estimated"},
+            {"turn": 1, "model": "claude-opus-4-8", "input_tokens": 5,
+             "output_tokens": 120, "cache_read_tokens": 900,
+             "cache_write_tokens": 0, "cost_usd": None,
+             "cost_source": "unknown-price"},
+        ],
+        steps=[
+            {"kind": "assistant_message", "turn": 0, "content": "let me look"},
+            {"kind": "tool_call", "name": "Edit", "tool_id": "e1",
+             "turn": 0, "content": "patch"},
+            {"kind": "tool_result", "tool_id": "e1", "content": "ok"},
+            {"kind": "assistant_message", "turn": 1, "content": "done"},
+        ],
+    )
+    rec.update(overrides)
+    return rec
+
+
+class UsageParsingTest(unittest.TestCase):
+    """The reader exposes run- and per-turn usage, tolerantly parsed."""
+
+    def test_full_usage_record_parses_and_exposes_helpers(self) -> None:
+        run = tr.parse_record(_usage_record(), seq=0)
+        assert run is not None and run.run_usage is not None
+        # Run summary round-trips.
+        self.assertEqual(run.run_usage.models, ("claude-opus-4-8",))
+        self.assertEqual(run.run_usage.input_tokens, 12)
+        self.assertEqual(run.run_usage.turns, 2)
+        self.assertEqual(run.run_usage.cost_source, "reported")
+        # Per-turn breakdown round-trips, including the unpriced turn.
+        self.assertEqual(len(run.turns), 2)
+        self.assertEqual(run.turns[0].turn, 0)
+        self.assertEqual(run.turns[0].cost_usd, 0.0123)
+        self.assertIsNone(run.turns[1].cost_usd)
+        self.assertEqual(run.turns[1].cost_source, "unknown-price")
+        # Convenience helpers read the authoritative run figures.
+        self.assertEqual(run.model, "claude-opus-4-8")
+        self.assertEqual(run.cost_usd, 0.83)
+        self.assertEqual(run.cost_source, "reported")
+        # total = input + output + cache_read + cache_write.
+        self.assertEqual(run.total_tokens, 12 + 340 + 18240 + 512)
+
+    def test_usage_for_turn_lookup(self) -> None:
+        run = tr.parse_record(_usage_record(), seq=0)
+        assert run is not None
+        self.assertEqual(run.usage_for_turn(0).cost_usd, 0.0123)
+        self.assertEqual(run.usage_for_turn(1).cost_source, "unknown-price")
+        # A turn input / bracket carries turn=None -> no usage.
+        self.assertIsNone(run.usage_for_turn(None))
+        # An index with no recorded turn (codex, a budget-dropped turn).
+        self.assertIsNone(run.usage_for_turn(9))
+
+    def test_step_and_timeline_turn_propagate(self) -> None:
+        run = tr.parse_record(_usage_record(), seq=0)
+        assert run is not None
+        # Billed steps carry their turn; the tool_result input stays None.
+        self.assertEqual(
+            [s.turn for s in run.steps], [0, 0, None, 1]
+        )
+        # The timeline mirrors the step turn so the page can render the
+        # per-turn strip at the boundary; the brackets carry no turn.
+        self.assertEqual(
+            [(e.kind, e.turn) for e in run.timeline],
+            [("prompt", None), ("assistant_message", 0), ("tool_call", 0),
+             ("tool_result", None), ("assistant_message", 1),
+             ("output", None)],
+        )
+
+    def test_pre_usage_record_is_compatible(self) -> None:
+        # A record written before the usage feature: no run_usage, no
+        # turns, no step.turn. It parses with empty defaults and renders
+        # exactly as before -- timeline and helpers all degrade cleanly.
+        run = tr.parse_record(
+            _record(
+                user_input="do the thing",
+                output="done",
+                steps=[{"kind": "tool_call", "name": "Bash",
+                        "tool_id": "t1", "content": "ls"}],
+            ),
+            seq=0,
+        )
+        assert run is not None
+        self.assertIsNone(run.run_usage)
+        self.assertEqual(run.turns, ())
+        self.assertEqual(run.model, "")
+        self.assertIsNone(run.cost_usd)
+        self.assertEqual(run.cost_source, "")
+        self.assertEqual(run.total_tokens, 0)
+        self.assertIsNone(run.usage_for_turn(0))
+        self.assertEqual(
+            [(e.kind, e.turn) for e in run.timeline],
+            [("prompt", None), ("tool_call", None), ("output", None)],
+        )
+
+    def test_malformed_usage_is_tolerated(self) -> None:
+        # run_usage not a dict -> None; a non-dict turns entry dropped; a
+        # non-numeric cost / turn index coerced away, never raising.
+        run = tr.parse_record(
+            _record(
+                run_usage="oops",
+                turns=[
+                    "not-a-dict",
+                    {"turn": "bad", "model": "claude-opus-4-8",
+                     "cost_usd": "free"},
+                ],
+                steps=[{"kind": "tool_call", "name": "Edit",
+                        "turn": "nope", "content": "x"}],
+            ),
+            seq=0,
+        )
+        assert run is not None
+        self.assertIsNone(run.run_usage)
+        # The non-dict entry is dropped; the malformed one survives with its
+        # bad fields coerced away, and is unreachable by index.
+        self.assertEqual(len(run.turns), 1)
+        self.assertIsNone(run.turns[0].turn)
+        self.assertIsNone(run.turns[0].cost_usd)
+        self.assertIsNone(run.usage_for_turn(0))
+        self.assertIsNone(run.steps[0].turn)
+        # Helpers still answer without a run_usage.
+        self.assertEqual(run.total_tokens, 0)
+        self.assertIsNone(run.cost_usd)
+
+    def test_non_list_array_fields_are_tolerated(self) -> None:
+        # A hand-edited record with a scalar where an array is expected
+        # (`"turns": 1`, `"steps": 1`) must yield an empty section, not a
+        # `TypeError` when the reader iterates it.
+        run = tr.parse_record(_record(turns=1, steps=1), seq=0)
+        assert run is not None
+        self.assertEqual(run.turns, ())
+        self.assertEqual(run.steps, ())
+        self.assertIsNone(run.usage_for_turn(0))
+
+    def test_codex_run_usage_without_per_turn_detail(self) -> None:
+        # Codex records the run summary but no per-turn breakdown: run_usage
+        # present, turns empty, every step.turn None. Its run_usage also
+        # omits the cache buckets, exercising the numeric-field 0 default.
+        run = tr.parse_record(
+            _record(
+                backend="codex",
+                run_usage={"models": ["gpt-5"], "input_tokens": 100,
+                           "output_tokens": 50, "cost_usd": 0.02,
+                           "cost_source": "estimated"},
+                steps=[{"kind": "tool_call", "name": "shell",
+                        "content": "ls"}],
+            ),
+            seq=0,
+        )
+        assert run is not None and run.run_usage is not None
+        self.assertEqual(run.turns, ())
+        self.assertEqual(run.model, "gpt-5")
+        self.assertEqual(run.run_usage.cache_read_tokens, 0)
+        # cached_tokens is a subset of input on codex, so the total is
+        # input + output with the (0) cache buckets.
+        self.assertEqual(run.total_tokens, 150)
+        self.assertIsNone(run.usage_for_turn(0))
+        self.assertIsNone(run.steps[0].turn)
 
 
 class ReadTrajectoriesTest(unittest.TestCase):
@@ -394,9 +575,30 @@ class SummarizeTest(unittest.TestCase):
         s = tr.summarize([])
         self.assertEqual(
             (s.total_runs, s.distinct_issues, s.distinct_repos,
-             s.total_tool_calls, s.truncated_runs),
-            (0, 0, 0, 0, 0),
+             s.total_tool_calls, s.truncated_runs, s.total_cost_usd),
+            (0, 0, 0, 0, 0, 0.0),
         )
+
+    def test_total_cost_sums_only_runs_that_recorded_one(self) -> None:
+        # The KPI sums the authoritative run cost; a run with no run_usage
+        # (pre-usage record) or an unpriced cost (None) contributes nothing
+        # rather than a spurious 0.
+        runs = [
+            tr.parse_record(_record(
+                issue=1,
+                run_usage={"cost_usd": 0.80, "cost_source": "reported"}),
+                seq=0),
+            tr.parse_record(_record(
+                issue=2,
+                run_usage={"cost_usd": 0.20, "cost_source": "estimated"}),
+                seq=1),
+            tr.parse_record(_record(issue=3), seq=2),
+            tr.parse_record(_record(
+                issue=4,
+                run_usage={"cost_usd": None, "cost_source": "unknown-price"}),
+                seq=3),
+        ]
+        self.assertAlmostEqual(tr.summarize(runs).total_cost_usd, 1.0)
 
 
 class LabelTest(unittest.TestCase):

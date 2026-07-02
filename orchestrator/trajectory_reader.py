@@ -15,9 +15,12 @@ pulls Streamlit into the polling tick's import surface. The page module owns
 the Streamlit rendering; this module owns the parsing, filtering, the
 filter-option / summary aggregation, the normalized per-run timeline (which
 folds an old steps-only record and a new record with interleaved text turns
-into one ordered prompt -> steps -> output sequence), and the
-synthetic-fixture predicate (which flags the test-suite records an inherited
-file may carry) -- all of which are pure and unit-tested.
+into one ordered prompt -> steps -> output sequence), the run- and per-turn
+usage views (the denormalized `run_usage` summary plus claude's per-turn
+`turns`, with `usage_for_turn` and the `cost_usd` / `total_tokens` / `model`
+convenience accessors), and the synthetic-fixture predicate (which flags the
+test-suite records an inherited file may carry) -- all of which are pure and
+unit-tested.
 
 Resilience contract mirrors the rest of the codebase: a missing file, a
 malformed line, a record that is not an `agent_trajectory`, or a renamed /
@@ -30,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -79,13 +83,18 @@ class TrajectoryStepView:
     is the tool name on a call (empty on a result), `tool_id` joins a
     result back to its call (empty when the stream omitted it), and
     `content` is the already-redacted-and-truncated payload (empty when
-    the sink stored `None` for an empty body).
+    the sink stored `None` for an empty body). `turn` is the 0-based index
+    of the assistant turn that produced the step (claude billed steps
+    only); a `tool_result` / `user_message` step is a turn *input*, not
+    billed output, so it stays `None`, as does every step on a codex or
+    pre-usage record.
     """
 
     kind: str
     name: str = ""
     tool_id: str = ""
     content: str = ""
+    turn: Optional[int] = None
 
     @property
     def is_call(self) -> bool:
@@ -108,13 +117,17 @@ class TimelineEntry:
     is `prompt` / `output` for the two synthetic brackets and otherwise
     the underlying step's own kind. `name` / `tool_id` carry the tool
     metadata on a `tool_call` (empty on results, message turns, and the
-    two brackets); `content` is the already-redacted body.
+    two brackets); `content` is the already-redacted body. `turn` carries
+    the step's assistant-turn index (see `TrajectoryStepView.turn`) so the
+    page can render the per-turn usage line at the boundary while walking
+    the timeline, and stays `None` on the two brackets and on turn inputs.
     """
 
     kind: str
     content: str = ""
     name: str = ""
     tool_id: str = ""
+    turn: Optional[int] = None
 
     @property
     def is_prompt(self) -> bool:
@@ -123,6 +136,78 @@ class TimelineEntry:
     @property
     def is_output(self) -> bool:
         return self.kind == TIMELINE_OUTPUT
+
+
+@dataclass(frozen=True)
+class TurnUsageView:
+    """Per-turn token usage for one claude assistant turn (`message.id`).
+
+    Mirrors one entry of the record's `turns[]` array. `turn` is the
+    0-based index the sibling `steps[].turn` refer to (`None` only when a
+    hand-edited record dropped it, which leaves the turn unreachable by
+    `usage_for_turn`). `cache_write_tokens` is the summed 5m + 1h cache-
+    creation bucket. `cost_usd` is always an *estimate* -- `cost_source`
+    is `estimated`, or `unknown-price` with `cost_usd=None` for an unpriced
+    model -- never the authoritative run figure. Codex records carry no
+    turns, so this view is claude-only today.
+    """
+
+    turn: Optional[int] = None
+    model: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_usd: Optional[float] = None
+    cost_source: str = ""
+
+    @property
+    def total_tokens(self) -> int:
+        # Claude's four buckets are disjoint (cache read / write are not part
+        # of `input_tokens`), so summing them is the true per-turn throughput.
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_read_tokens
+            + self.cache_write_tokens
+        )
+
+
+@dataclass(frozen=True)
+class RunUsageView:
+    """Run-level usage summary denormalized onto an `agent_trajectory` record.
+
+    Mirrors the record's `run_usage` object -- the run's `UsageMetrics`
+    minus `backend` (already a record field): `models` in first-seen order,
+    the token buckets, the derived `turns` count, and the *authoritative*
+    run `cost_usd` / `cost_source` (which, unlike a turn's, may be
+    `reported`). This is the run headline and codex's only usage surface
+    (codex has no per-turn detail). Every field is defensively coerced so a
+    hand-edited or pre-usage line never crashes the reader.
+    """
+
+    models: tuple[str, ...] = ()
+    turns: Optional[int] = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_usd: Optional[float] = None
+    cost_source: str = ""
+
+    @property
+    def total_tokens(self) -> int:
+        # Sum the claude cache buckets alongside input / output: they are
+        # disjoint from `input_tokens` on claude, and 0 on codex (whose
+        # `cached_tokens` is a subset of `input_tokens` and stays out of the
+        # sum), so the same expression is the true total for both backends.
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_read_tokens
+            + self.cache_write_tokens
+        )
 
 
 @dataclass(frozen=True)
@@ -153,6 +238,8 @@ class TrajectoryRun:
     skills_triggered: tuple[str, ...] = ()
     skills_available: tuple[str, ...] = ()
     steps: tuple[TrajectoryStepView, ...] = ()
+    run_usage: Optional[RunUsageView] = None
+    turns: tuple[TurnUsageView, ...] = ()
     truncated: bool = False
 
     @property
@@ -164,6 +251,64 @@ class TrajectoryRun:
     @property
     def step_count(self) -> int:
         return len(self.steps)
+
+    @property
+    def model(self) -> str:
+        """The primary model name -- first of `run_usage.models`, else empty.
+
+        Empty on a codex run that recorded no model and on a pre-usage
+        record (`run_usage is None`), so the viewer can print it unguarded.
+        """
+        if self.run_usage is None or not self.run_usage.models:
+            return ""
+        return self.run_usage.models[0]
+
+    @property
+    def cost_usd(self) -> Optional[float]:
+        """The authoritative run cost, or `None` when unpriced / pre-usage.
+
+        Reads the run summary (not the per-turn estimates, which need not
+        sum to it); `None` when `run_usage` is absent or its cost was
+        `no-usage` / `unknown-price`.
+        """
+        return self.run_usage.cost_usd if self.run_usage is not None else None
+
+    @property
+    def cost_source(self) -> str:
+        """The run cost's provenance (`reported` / `estimated` / ...).
+
+        Empty string on a pre-usage record so the viewer can print it
+        unguarded.
+        """
+        return self.run_usage.cost_source if self.run_usage is not None else ""
+
+    @property
+    def total_tokens(self) -> int:
+        """Run-total tokens across all buckets, 0 on a pre-usage record."""
+        return self.run_usage.total_tokens if self.run_usage is not None else 0
+
+    @cached_property
+    def _turn_map(self) -> dict[int, TurnUsageView]:
+        # Index turns by their 0-based `turn` for the O(1) `usage_for_turn`
+        # lookup the viewer does per turn boundary. Built once and cached on
+        # the instance's __dict__ (cached_property writes there directly, so
+        # it works on this frozen dataclass); turns with no index are skipped
+        # and a duplicate index keeps the last, mirroring the sink's
+        # last-record-per-id discipline.
+        return {t.turn: t for t in self.turns if t.turn is not None}
+
+    def usage_for_turn(self, turn: Optional[int]) -> Optional[TurnUsageView]:
+        """The per-turn usage for a 0-based `turn` index, or `None`.
+
+        Lets a timeline entry find the usage of the assistant turn that
+        produced it in O(1). Returns `None` for a `turn=None` input (a
+        `tool_result` / `user_message` step or a bracket) and for an index
+        with no recorded turn -- a codex run, a pre-usage record, or a turn
+        the sink's budget dropped from `turns[]`.
+        """
+        if turn is None:
+            return None
+        return self._turn_map.get(turn)
 
     @property
     def timeline(self) -> tuple[TimelineEntry, ...]:
@@ -191,6 +336,7 @@ class TrajectoryRun:
                     content=s.content,
                     name=s.name,
                     tool_id=s.tool_id,
+                    turn=s.turn,
                 )
             )
         if self.output:
@@ -275,6 +421,7 @@ class TrajectorySummary:
     distinct_repos: int = 0
     total_tool_calls: int = 0
     truncated_runs: int = 0
+    total_cost_usd: float = 0.0
 
 
 def resolve_log_path() -> Optional[Path]:
@@ -309,6 +456,26 @@ def _coerce_int(value: Any) -> Optional[int]:
     return None
 
 
+def _coerce_float(value: Any) -> Optional[float]:
+    """Best-effort float coercion; `None` on anything non-numeric.
+
+    Used for `cost_usd`, which the sink stores as a float or omits (`null`)
+    when the run was unpriced. `bool` is rejected (as in `_coerce_int`) and a
+    non-numeric string yields `None`, so a hand-edited line never crashes the
+    reader nor coerces an absent cost to `0.0`.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def _coerce_str(value: Any) -> str:
     """Normalise a possibly-absent scalar to a plain string."""
     if value is None:
@@ -325,6 +492,18 @@ def _coerce_str_tuple(value: Any) -> tuple[str, ...]:
     return tuple(_coerce_str(v) for v in value if v is not None)
 
 
+def _as_list(value: Any) -> list:
+    """Return `value` when it is a list, else `[]`.
+
+    Guards the array-shaped record fields (`steps`, `turns`) before the
+    parser iterates them: a hand-edited record carrying a scalar there
+    (`"turns": 1`) must yield an empty section, not a `TypeError` -- the
+    same never-crash contract `_coerce_str_tuple` already gives the
+    names fields.
+    """
+    return value if isinstance(value, list) else []
+
+
 def _parse_step(raw: Any) -> Optional[TrajectoryStepView]:
     """Parse one `steps[]` entry; `None` when it is not a usable dict."""
     if not isinstance(raw, dict):
@@ -337,6 +516,45 @@ def _parse_step(raw: Any) -> Optional[TrajectoryStepView]:
         name=_coerce_str(raw.get("name")),
         tool_id=_coerce_str(raw.get("tool_id")),
         content=_coerce_str(raw.get("content")),
+        turn=_coerce_int(raw.get("turn")),
+    )
+
+
+def _parse_run_usage(raw: Any) -> Optional[RunUsageView]:
+    """Parse the record's `run_usage` object; `None` when absent / malformed.
+
+    A pre-usage record has no `run_usage` key and a hand-edited one may carry
+    a non-dict there -- both yield `None` so the run's `cost_usd` / `model` /
+    `total_tokens` degrade to their empty defaults rather than raising.
+    """
+    if not isinstance(raw, dict):
+        return None
+    return RunUsageView(
+        models=_coerce_str_tuple(raw.get("models")),
+        turns=_coerce_int(raw.get("turns")),
+        input_tokens=_coerce_int(raw.get("input_tokens")) or 0,
+        output_tokens=_coerce_int(raw.get("output_tokens")) or 0,
+        cached_tokens=_coerce_int(raw.get("cached_tokens")) or 0,
+        cache_read_tokens=_coerce_int(raw.get("cache_read_tokens")) or 0,
+        cache_write_tokens=_coerce_int(raw.get("cache_write_tokens")) or 0,
+        cost_usd=_coerce_float(raw.get("cost_usd")),
+        cost_source=_coerce_str(raw.get("cost_source")),
+    )
+
+
+def _parse_turn(raw: Any) -> Optional[TurnUsageView]:
+    """Parse one `turns[]` entry; `None` when it is not a usable dict."""
+    if not isinstance(raw, dict):
+        return None
+    return TurnUsageView(
+        turn=_coerce_int(raw.get("turn")),
+        model=_coerce_str(raw.get("model")),
+        input_tokens=_coerce_int(raw.get("input_tokens")) or 0,
+        output_tokens=_coerce_int(raw.get("output_tokens")) or 0,
+        cache_read_tokens=_coerce_int(raw.get("cache_read_tokens")) or 0,
+        cache_write_tokens=_coerce_int(raw.get("cache_write_tokens")) or 0,
+        cost_usd=_coerce_float(raw.get("cost_usd")),
+        cost_source=_coerce_str(raw.get("cost_source")),
     )
 
 
@@ -355,8 +573,13 @@ def parse_record(obj: Any, *, seq: int) -> Optional[TrajectoryRun]:
         return None
     steps = tuple(
         step
-        for step in (_parse_step(s) for s in obj.get("steps", []) or [])
+        for step in (_parse_step(s) for s in _as_list(obj.get("steps")))
         if step is not None
+    )
+    turns = tuple(
+        turn
+        for turn in (_parse_turn(t) for t in _as_list(obj.get("turns")))
+        if turn is not None
     )
     return TrajectoryRun(
         seq=seq,
@@ -376,6 +599,8 @@ def parse_record(obj: Any, *, seq: int) -> Optional[TrajectoryRun]:
         skills_triggered=_coerce_str_tuple(obj.get("skills_triggered")),
         skills_available=_coerce_str_tuple(obj.get("skills_available")),
         steps=steps,
+        run_usage=_parse_run_usage(obj.get("run_usage")),
+        turns=turns,
         truncated=bool(obj.get("truncated")),
     )
 
@@ -523,11 +748,20 @@ def filter_runs(
 
 
 def summarize(runs: Sequence[TrajectoryRun]) -> TrajectorySummary:
-    """Headline counts for the (filtered) run set."""
+    """Headline counts for the (filtered) run set.
+
+    `total_cost_usd` sums the authoritative run cost over runs that carry
+    one -- a run with no `run_usage` (pre-usage record) or an unpriced cost
+    (`None`) contributes nothing rather than a spurious 0, so the KPI reads
+    the spend of the runs that actually recorded it.
+    """
     return TrajectorySummary(
         total_runs=len(runs),
         distinct_issues=len({(r.repo, r.issue) for r in runs}),
         distinct_repos=len({r.repo for r in runs if r.repo}),
         total_tool_calls=sum(r.tool_calls for r in runs),
         truncated_runs=sum(1 for r in runs if r.truncated),
+        total_cost_usd=sum(
+            r.cost_usd for r in runs if r.cost_usd is not None
+        ),
     )
