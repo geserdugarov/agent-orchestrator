@@ -25,6 +25,7 @@ from tests.fakes import (
     FakeGitHubClient,
     FakePR,
     FakePRRef,
+    FakePRReview,
     FakeUser,
     make_issue,
 )
@@ -119,6 +120,72 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         self.assertIn("pending_fix_at", data)
         # Watermark stays put so the fixing handler can rescan and reach
         # the triggering comment on its next tick.
+        self.assertEqual(data.get("pr_last_comment_id"), 1999)
+
+    def test_route_persists_full_batch_id_lists_all_surfaces(self) -> None:
+        # The route must persist the FULL per-surface id lists (not just the
+        # max ids) so a later fixing tick can reconstruct the exact batch
+        # after the watermarks advance past it. Seed feedback that spans all
+        # three id namespaces with more than one item per surface so a
+        # max-only bookmark would lose the lower members.
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        pr = FakePR(
+            number=self.PR_NUMBER, head_branch=self.BRANCH,
+            head=FakePRRef(sha="cafe1234"),
+            mergeable=True, check_state="success",
+            issue_comments=[
+                FakeComment(
+                    id=2100, body="pr conv one",
+                    user=FakeUser("alice"), created_at=old,
+                ),
+                FakeComment(
+                    id=2200, body="pr conv two",
+                    user=FakeUser("bob"), created_at=old,
+                ),
+            ],
+            review_comments=[
+                FakeComment(
+                    id=40, body="inline one",
+                    user=FakeUser("alice"), created_at=old,
+                ),
+                FakeComment(
+                    id=41, body="inline two",
+                    user=FakeUser("bob"), created_at=old,
+                ),
+            ],
+            reviews=[
+                FakePRReview(
+                    id=7, body="changes please",
+                    state="CHANGES_REQUESTED", submitted_at=old,
+                ),
+            ],
+        )
+        gh, issue, _ = self._seed_in_review_with_pr(pr=pr)
+        # Also seed a fresh issue-thread comment on the issue itself so the
+        # issue-space id list mixes issue-thread and PR-conversation ids.
+        issue.comments.append(FakeComment(
+            id=2050, body="issue thread note",
+            user=FakeUser("carol"), created_at=old,
+        ))
+
+        self._run(
+            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        data = gh.pinned_data(880)
+        self.assertIn((880, "fixing"), gh.label_history)
+        # Issue space combines issue-thread (2050) + PR-conversation
+        # (2100, 2200), sorted ascending.
+        self.assertEqual(
+            data.get("pending_fix_issue_ids"), [2050, 2100, 2200],
+        )
+        self.assertEqual(data.get("pending_fix_issue_max_id"), 2200)
+        self.assertEqual(data.get("pending_fix_review_ids"), [40, 41])
+        self.assertEqual(data.get("pending_fix_review_max_id"), 41)
+        self.assertEqual(data.get("pending_fix_review_summary_ids"), [7])
+        self.assertEqual(data.get("pending_fix_review_summary_max_id"), 7)
+        # Watermarks stay put so the fixing rescan can still reach them.
         self.assertEqual(data.get("pr_last_comment_id"), 1999)
 
     def test_no_fresh_feedback_pings_hitl_for_manual_merge(self) -> None:

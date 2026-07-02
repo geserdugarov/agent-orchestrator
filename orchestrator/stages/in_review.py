@@ -352,21 +352,42 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # so consuming them now would lose the triggering feedback. The
         # `pending_fix_*_max_id` keys are bookmarks (a hint for the future
         # handler / for observability), not watermarks.
+        #
+        # Alongside the max ids, persist the full per-surface id lists so a
+        # later fixing tick can reconstruct the EXACT triggering batch even
+        # after the in_review watermarks have advanced past it -- the max id
+        # alone loses the batch's lower members once a rescan can no longer
+        # reach them. `_reconstruct_pending_fix_batch` prefers the id lists;
+        # the max_id keys stay for the existing pinned-state contract and as
+        # the conservative reconstruction bound for issues parked before the
+        # lists were recorded. Each list is already sorted ascending by id
+        # (`issue_space_new` / `review_space_new` / `review_summary_new` were
+        # sorted at scan time).
         state.set("pending_fix_at", _wf._now_iso())
         if issue_space_new:
             state.set(
                 "pending_fix_issue_max_id",
                 max(c.id for c in issue_space_new),
             )
+            state.set(
+                "pending_fix_issue_ids", [c.id for c in issue_space_new],
+            )
         if review_space_new:
             state.set(
                 "pending_fix_review_max_id",
                 max(c.id for c in review_space_new),
             )
+            state.set(
+                "pending_fix_review_ids", [c.id for c in review_space_new],
+            )
         if review_summary_new:
             state.set(
                 "pending_fix_review_summary_max_id",
                 max(r.id for r in review_summary_new),
+            )
+            state.set(
+                "pending_fix_review_summary_ids",
+                [r.id for r in review_summary_new],
             )
         # Update `user_content_hash` so the user-content drift detection
         # below does NOT fire on the next tick for the same comment changes
