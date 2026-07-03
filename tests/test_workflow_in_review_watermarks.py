@@ -1,6 +1,7 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for in_review feedback watermark handling: the park-message watermark bump and the split issue / inline-review id namespaces."""
+"""Tests for in_review feedback watermark handling: the park-message
+watermark bump and the split issue / inline-review id namespaces."""
 from __future__ import annotations
 
 import os
