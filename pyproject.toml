@@ -28,7 +28,16 @@ dashboard = ["streamlit>=1.36", "plotly>=5.20"]
 # line that hides their `_SKIP_REASON` / `SkipTest` messages.
 addopts = ["-rs"]
 
+[tool.ruff]
+# Repository-wide line-length target. Ruff enforces it for Python (E501,
+# enabled below); `tests/test_line_length.py` reads this same value to
+# enforce it for tracked Markdown/text files, so 120 lives in one place.
+line-length = 120
+
 [tool.ruff.lint]
+# E501 (line too long) is not in Ruff's default rule set; opt into it so
+# the line-length target above is actually enforced.
+extend-select = ["E501"]
 # `l` is used pervasively as a loop variable over GitHub labels; banning it
 # would force noise-only renames across the codebase.
 ignore = ["E741"]
