@@ -2,7 +2,7 @@
 name: develop
 description: >-
   Project conventions and recurring gotchas for implementer agents working on
-  agent-orchestrator. Use before opening a PR for any change in orchestrator/,
+  agent-orchestrator. Use before committing any change in orchestrator/,
   tests/, or docs/.
 ---
 
