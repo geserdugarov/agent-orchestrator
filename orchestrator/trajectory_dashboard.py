@@ -771,7 +771,7 @@ def main() -> None:
         st.info(EMPTY_FILTER_MESSAGE)
         return
 
-    # ── Run list ─────────────────────────────────────────────────
+    # ── Run list ────────────────────────────────
     # A native expander so the operator can fold the overview table away
     # and focus on the inspected run; expanded by default to preserve the
     # at-a-glance view.
@@ -795,7 +795,7 @@ def main() -> None:
                 "tick *Hide synthetic fixtures* in the sidebar to drop them."
             )
 
-    # ── Selected-run detail ──────────────────────────────────────
+    # ── Selected-run detail ────────────────────────────
     # Three cascading pickers narrow `shown` to one run: repo, then the
     # issue within that repo, then the specific run (by `detail_label`).
     # Streamlit resets a downstream selectbox to its first option when an

@@ -1177,7 +1177,7 @@ def main() -> None:
                 config=PLOTLY_CONFIG,
             )
 
-    # ── When agents run (heatmap) ────────────────────────────────
+    # ── When agents run (heatmap) ──────────────────────────
     tz_label = format_tz_offset(int(tz_offset_choice))
     with st.container(border=True):
         st.markdown(
@@ -1211,7 +1211,7 @@ def main() -> None:
             config=PLOTLY_CONFIG,
         )
 
-    # ── Skill trigger rates ──────────────────────────────────────
+    # ── Skill trigger rates ────────────────────────────
     # Opt-in read-side widget over the `skills_triggered` /
     # `skills_triggered_count` fields `record_agent_exit` folds into
     # `extras` when `TRACK_SKILL_TRIGGERS` is on. A `0%` rate is a real
@@ -1262,7 +1262,7 @@ def main() -> None:
         else:
             st.info("No `agent_exit` rows match the current filters.")
 
-    # ── Recent agent runs expander ───────────────────────────────
+    # ── Recent agent runs expander ──────────────────────────
     with st.expander("Recent agent runs", expanded=False):
         if agent_exits:
             ts_offset = timedelta(hours=int(tz_offset_choice))
