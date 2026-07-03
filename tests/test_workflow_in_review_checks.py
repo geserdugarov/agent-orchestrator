@@ -1,6 +1,7 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the closed-in_review label sweep and the PR combined check-state surfaces (check-runs 403 scope hint, partial-read downgrade)."""
+"""Tests for the closed-in_review label sweep and the PR combined check-state
+surfaces (check-runs 403 scope hint, partial-read downgrade)."""
 from __future__ import annotations
 
 import os
