@@ -1,6 +1,8 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the core in_review routing: merged / closed-not-merged PRs, HITL ready-ping gates, PR-comment debounce, and the PR-review-summary surface."""
+"""Tests for the core in_review routing: merged / closed-not-merged PRs,
+HITL ready-ping gates, PR-comment debounce, and the PR-review-summary
+surface."""
 from __future__ import annotations
 
 import os
