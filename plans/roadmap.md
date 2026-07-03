@@ -64,7 +64,7 @@ linked docs.
 - **Typed state machine.** `WorkflowLabel` / `ControlLabel` enums in
   `orchestrator/state_machine.py`, with a typo guard and a configurable
   transition guard at the single label-write chokepoint. See
-  [`docs/state-machine.md#typed-states-and-the-transition-guard`](../docs/state-machine.md#typed-states-and-the-transition-guard).
+  [`docs/state-machine.md#typed-states-and-the-transition-guard`][typed-states].
 - **Multi-repo support.** `REPOS` drives per-repo fan-out across a
   `ThreadPoolExecutor` with per-repo exception isolation; worktrees are
   slug-namespaced. See
@@ -166,3 +166,5 @@ Short actionable entries; expand into design docs only when picked up.
   handler re-fetches the issue + pinned-state immediately before any
   transition; any comment newer than the recorded watermark drives the
   awaiting-human resume branch.
+
+[typed-states]: ../docs/state-machine.md#typed-states-and-the-transition-guard
