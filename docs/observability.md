@@ -915,15 +915,16 @@ futures, so every `st.*` write runs on the main thread). The second wave is skip
    total trigger count. Below it, the **per-skill trigger matrix** (`_skill_matrix_html` over
    `get_skill_trigger_matrix`) sits inside a collapsed `st.expander` (mirroring the "Recent agent runs" block) so it
    does not dominate the card until opened; it renders one row per `(repo, agent_role, backend, skill)` cell with
-   columns Repo / Role / Backend / Skill / Runs / Runs with skill, where `Runs` is the cohort's total agent-exit runs
-   and `Runs with skill` the subset that fired the skill. It folds each repo's `repo_skill_catalog` into the observed
-   triggers so a skill the repo offers but no cohort fired surfaces as an explicit (muted) `0` "Runs with skill" cell
-   rather than a missing row (the cohort `Runs` total is never muted). The read model sorts the rows by Runs-with-skill
-   DESC then Runs DESC and caps the list at 100, so the expander never floods the page. Both tables are opt-in: they
-   only carry signal when `TRACK_SKILL_TRIGGERS` is on. A window whose aggregate groups all show a `0%` rate renders a
-   caption naming the switch, an empty window renders the aggregate no-rows notice, and the matrix shows a clear
-   fallback notice in place of the table when no catalog-backed matrix can be built (no catalog records matched and no
-   run fired a skill).
+   columns Repo / Role / Backend / Skill / Runs / Runs with skill / Trigger rate, where `Runs` is the cohort's total
+   agent-exit runs, `Runs with skill` the subset that fired the skill, and `Trigger rate` the share of the two
+   (`skill_runs / runs`). It folds each repo's `repo_skill_catalog` into the observed triggers so a skill the repo
+   offers but no cohort fired surfaces as an explicit (muted) `0` "Runs with skill" cell (and a matching muted `0%`
+   trigger rate) rather than a missing row (the cohort `Runs` total is never muted). The read model sorts the rows by
+   Runs-with-skill DESC then Runs DESC and caps the list at 100, so the expander never floods the page. Both tables are
+   opt-in: they only carry signal when `TRACK_SKILL_TRIGGERS` is on. A window whose aggregate groups all show a `0%`
+   rate renders a caption naming the switch, an empty window renders the aggregate no-rows notice, and the matrix shows
+   a clear fallback notice in place of the table when no catalog-backed matrix can be built (no catalog records matched
+   and no run fired a skill).
 9. Recent agent-runs table as a collapsible expander; the `ts` column is shifted to the wall-clock of the selected UTC
    offset via `shift_ts`.
 10. Per-issue drill-down when a number is entered.

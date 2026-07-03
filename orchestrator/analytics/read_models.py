@@ -445,6 +445,18 @@ class SkillTriggerMatrixRow:
     runs: int = 0
     skill_runs: int = 0
 
+    @property
+    def rate(self) -> float:
+        """Share of the cell's cohort runs that fired this skill (0.0-1.0).
+
+        `skill_runs / runs`, guarded against a zero-run cell so callers
+        never divide by zero -- a cell only exists for a cohort that ran,
+        so the guard is defensive. Mirrors `SkillTriggerRateRow.rate`; a
+        `0.0` rate is the offered-but-never-triggered catalog signal and
+        carries the same `TRACK_SKILL_TRIGGERS`-off caveat.
+        """
+        return self.skill_runs / self.runs if self.runs else 0.0
+
 
 @dataclass(frozen=True)
 class BackendDailyTokensRow:

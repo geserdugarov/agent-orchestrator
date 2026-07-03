@@ -875,7 +875,7 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         rows = [self._row("owner/repo", "develop", "developer", "claude", 2)]
         html_out = dashboard._skill_matrix_html(rows)
         for header in ("Repo", "Role", "Backend", "Skill",
-                       "Runs", "Runs with skill"):
+                       "Runs", "Runs with skill", "Trigger rate"):
             self.assertIn(f">{header}<", html_out)
 
     def test_cell_values_rendered(self) -> None:
@@ -894,6 +894,9 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         self.assertIn(">develop<", html_out)
         self.assertIn(">5<", html_out)
         self.assertIn(">3<", html_out)
+        # Trigger rate is derived from the two counts (3/5) and rounds to
+        # a whole percent, matching the aggregate table's format.
+        self.assertIn(">60%<", html_out)
 
     def test_zero_count_row_renders_explicit_muted_zero(self) -> None:
         # An offered-but-never-triggered catalog cell is a real
@@ -907,6 +910,9 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         html_out = dashboard._skill_matrix_html(rows)
         self.assertIn("orch-skillmatrix-zero", html_out)
         self.assertIn(">0<", html_out)
+        # The derived trigger rate is `0%` and muted on the same signal,
+        # so an offered-but-quiet cell reads consistently across columns.
+        self.assertIn('<span class="orch-skillmatrix-zero">0%</span>', html_out)
         # The cohort total is not muted -- it is a plain right-aligned cell.
         self.assertIn('<td class="r">4</td>', html_out)
 

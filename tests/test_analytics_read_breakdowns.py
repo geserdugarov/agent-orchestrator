@@ -386,6 +386,27 @@ class SkillTriggerMatrixTest(unittest.TestCase):
             self.assertNotIn("analytics_daily_rollup", sql)
             self.assertNotIn("analytics_agent_runs", sql)
 
+    def test_rate_derives_from_counts_and_guards_zero_runs(self) -> None:
+        # `rate` is `skill_runs / runs` (the offered-but-quiet cell reads
+        # `0.0`), and a zero-run cell -- never emitted by the SQL -- still
+        # yields `0.0` rather than a ZeroDivisionError.
+        _, analytics_read = _reload({"ANALYTICS_DB_URL": ""})
+        fired = analytics_read.SkillTriggerMatrixRow(
+            repo="owner/repo", skill="develop", agent_role="developer",
+            backend="claude", runs=4, skill_runs=3,
+        )
+        self.assertEqual(fired.rate, 3 / 4)
+        quiet = analytics_read.SkillTriggerMatrixRow(
+            repo="owner/repo", skill="review", agent_role="developer",
+            backend="claude", runs=4, skill_runs=0,
+        )
+        self.assertEqual(quiet.rate, 0.0)
+        empty = analytics_read.SkillTriggerMatrixRow(
+            repo="owner/repo", skill="develop", agent_role="developer",
+            backend="claude", runs=0,
+        )
+        self.assertEqual(empty.rate, 0.0)
+
     def test_developer_claude_review_is_zero(self) -> None:
         # The headline zero-row case spelled out: a skill the repo
         # offers that a running cohort never triggered surfaces as an
