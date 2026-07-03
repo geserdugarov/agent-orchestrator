@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import html
 from datetime import date
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from orchestrator.analytics.read import (
     DataExtent,
@@ -406,8 +406,115 @@ SKILL_MATRIX_EMPTY_MESSAGE = (
     "skills."
 )
 
+# Column model for the per-skill trigger matrix. Each entry is
+# `(param key, header label, right-aligned?, sort-value function)`. The
+# key is the stable identifier a clickable header encodes into the
+# `mtx_sort` query param, and the sort function pulls exactly the value
+# the column shows so a header click sorts on what the operator sees.
+_SKILL_MATRIX_COLUMNS: tuple[
+    tuple[str, str, bool, Callable[[SkillTriggerMatrixRow], object]], ...
+] = (
+    ("repo", "Repo", False, lambda r: (r.repo or "").lower()),
+    ("role", "Role", False, lambda r: (r.agent_role or "").lower()),
+    ("backend", "Backend", False, lambda r: (r.backend or "").lower()),
+    ("skill", "Skill", False, lambda r: (r.skill or "").lower()),
+    ("runs", "Runs", True, lambda r: int(r.runs)),
+    ("skill_runs", "Runs with skill", True, lambda r: int(r.skill_runs)),
+    ("rate", "Trigger rate", True, lambda r: r.rate),
+)
 
-def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
+# Numeric columns default a first click to descending (largest first is
+# the interesting end for run / rate counts); text columns default to
+# ascending (A→Z). Re-clicking the active column flips its direction.
+_SKILL_MATRIX_NUMERIC_KEYS = frozenset({"runs", "skill_runs", "rate"})
+
+_SKILL_MATRIX_SORT_KEYS: dict[str, Callable[[SkillTriggerMatrixRow], object]] = {
+    key: fn for key, _label, _right, fn in _SKILL_MATRIX_COLUMNS
+}
+
+# Query-param names the clickable headers write and the dashboard reads
+# back via `parse_skill_matrix_sort`.
+SKILL_MATRIX_SORT_PARAM = "mtx_sort"
+SKILL_MATRIX_DIR_PARAM = "mtx_dir"
+
+
+def parse_skill_matrix_sort(params) -> tuple[Optional[str], bool]:
+    """Resolve the matrix sort column + direction from query params.
+
+    Reads the `mtx_sort` / `mtx_dir` params the clickable headers encode
+    and returns a `(column key, descending)` pair. An unknown or absent
+    `mtx_sort` degrades to `(None, False)` -- the read model's own order
+    -- instead of raising, so a stale or hand-edited URL never breaks the
+    render. `mtx_dir == "desc"` sorts descending; anything else ascending.
+    """
+    key = params.get(SKILL_MATRIX_SORT_PARAM)
+    if key not in _SKILL_MATRIX_SORT_KEYS:
+        return None, False
+    return key, params.get(SKILL_MATRIX_DIR_PARAM) == "desc"
+
+
+def _sort_skill_matrix_rows(
+    rows: Sequence[SkillTriggerMatrixRow],
+    sort_key: Optional[str],
+    descending: bool,
+) -> list[SkillTriggerMatrixRow]:
+    """Sort matrix rows by a column key; identity order when key is unknown.
+
+    Python's sort is stable, so rows sharing a sort value keep the read
+    model's order (Runs-with-skill DESC then Runs DESC then a stable
+    repo/role/backend/skill tiebreak) as the secondary ordering.
+    """
+    keyfn = _SKILL_MATRIX_SORT_KEYS.get(sort_key)
+    if keyfn is None:
+        return list(rows)
+    return sorted(rows, key=keyfn, reverse=descending)
+
+
+def _skill_matrix_header_html(active_key: Optional[str], descending: bool) -> str:
+    """Render the matrix `<thead>` with clickable, sortable column headers.
+
+    Each header is an anchor whose href writes the `mtx_sort` / `mtx_dir`
+    query params for that column: clicking the active column flips its
+    direction, clicking any other selects it at its default direction
+    (descending for numeric columns, ascending for text). The active
+    column carries a ▲ / ▼ indicator so the current sort is visible.
+    `target="_self"` keeps the navigation in-tab so Streamlit reruns in
+    place rather than opening a new window.
+    """
+    cells: list[str] = []
+    for key, label, right, _fn in _SKILL_MATRIX_COLUMNS:
+        if key == active_key:
+            next_desc = not descending
+            arrow = "▼" if descending else "▲"
+        else:
+            next_desc = key in _SKILL_MATRIX_NUMERIC_KEYS
+            arrow = ""
+        direction = "desc" if next_desc else "asc"
+        href = (
+            f"?{SKILL_MATRIX_SORT_PARAM}={key}"
+            f"&{SKILL_MATRIX_DIR_PARAM}={direction}"
+        )
+        cls = ' class="r"' if right else ""
+        arrow_html = (
+            f'<span class="orch-skillmatrix-sort">{arrow}</span>'
+            if arrow
+            else ""
+        )
+        cells.append(
+            f"<th{cls}>"
+            f'<a class="orch-skillmatrix-h" href="{href}" target="_self">'
+            f"{html.escape(label)}</a>{arrow_html}"
+            "</th>"
+        )
+    return "<thead><tr>" + "".join(cells) + "</tr></thead>"
+
+
+def _skill_matrix_html(
+    rows: Sequence[SkillTriggerMatrixRow],
+    *,
+    sort_key: Optional[str] = None,
+    descending: bool = False,
+) -> str:
     """Render the per-skill trigger matrix to inline HTML.
 
     The fold-out table under the "Skill trigger rates" panel: one row
@@ -425,6 +532,13 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
     distinctly from the ones that actually fired. The cohort `Runs` total
     is always `>= 1` (a cell exists only for a cohort that ran), so it is
     never muted.
+
+    The column headers are clickable sort controls: each is an anchor
+    that writes `mtx_sort` / `mtx_dir` query params, and the caller
+    passes the parsed `(sort_key, descending)` back in so the rows are
+    re-sorted on that column and the active header shows a ▲ / ▼
+    indicator. With no `sort_key` the rows render in the read model's
+    order (Runs-with-skill DESC then Runs DESC).
 
     When the read model returns no rows -- no catalog records matched the
     window and no run fired a skill -- there is no catalog-backed matrix
@@ -463,8 +577,14 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
     font-variant-numeric: tabular-nums; color: var(--orch-ink); }
   .orch-skillmatrix td.strong { font-weight: 600; color: var(--orch-ink); }
   .orch-skillmatrix-zero { color: var(--orch-muted-soft); }
+  .orch-skillmatrix thead th a.orch-skillmatrix-h { color: inherit;
+    text-decoration: none; cursor: pointer; }
+  .orch-skillmatrix thead th a.orch-skillmatrix-h:hover {
+    color: var(--orch-ink); text-decoration: underline; }
+  .orch-skillmatrix-sort { margin-left: 3px; color: var(--orch-accent); }
 </style>
 """
+    rows = _sort_skill_matrix_rows(rows, sort_key, descending)
     body: list[str] = []
     for r in rows:
         repo = r.repo or "unknown"
@@ -501,17 +621,7 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
             f'<td class="r">{rate_html}</td>'
             "</tr>"
         )
-    head = (
-        "<thead><tr>"
-        "<th>Repo</th>"
-        "<th>Role</th>"
-        "<th>Backend</th>"
-        "<th>Skill</th>"
-        '<th class="r">Runs</th>'
-        '<th class="r">Runs with skill</th>'
-        '<th class="r">Trigger rate</th>'
-        "</tr></thead>"
-    )
+    head = _skill_matrix_header_html(sort_key, descending)
     return (
         css
         + '<table class="orch-skillmatrix">'

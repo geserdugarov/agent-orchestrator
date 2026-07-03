@@ -951,6 +951,130 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         self.assertIn("&#x27;", html_out)
 
 
+class SkillMatrixSortTest(unittest.TestCase):
+    """The per-skill trigger matrix column headers are clickable sort
+    controls: each is an anchor writing `mtx_sort` / `mtx_dir` query
+    params, and the caller feeds the parsed `(column, direction)` back
+    into `_skill_matrix_html` so the rows re-sort on that column and the
+    active header shows a ▲ / ▼ indicator.
+    """
+
+    def _row(self, repo, skill, role, backend, runs, skill_runs=None):
+        from orchestrator.analytics.read import SkillTriggerMatrixRow
+        return SkillTriggerMatrixRow(
+            repo=repo,
+            skill=skill,
+            agent_role=role,
+            backend=backend,
+            runs=runs,
+            skill_runs=runs if skill_runs is None else skill_runs,
+        )
+
+    def _rows(self):
+        # Distinct repo / runs values per row so an ordering assertion can
+        # key off either without ambiguity.
+        return [
+            self._row("b/repo", "alpha", "developer", "claude", 2, 1),
+            self._row("a/repo", "beta", "reviewer", "codex", 9, 9),
+            self._row("c/repo", "gamma", "developer", "claude", 5, 0),
+        ]
+
+    def test_headers_are_clickable_self_targeting_sort_links(self) -> None:
+        _, dashboard = _reload()
+        html_out = dashboard._skill_matrix_html(self._rows())
+        # Every column is an in-tab anchor pointing at its own sort param.
+        for key in ("repo", "role", "backend", "skill",
+                    "runs", "skill_runs", "rate"):
+            self.assertIn(f"?mtx_sort={key}&mtx_dir=", html_out)
+        self.assertIn('target="_self"', html_out)
+        # Text columns default a first click to ascending, numeric ones to
+        # descending (largest first is the interesting end for counts).
+        self.assertIn("?mtx_sort=repo&mtx_dir=asc", html_out)
+        self.assertIn("?mtx_sort=runs&mtx_dir=desc", html_out)
+        # With no active sort no header carries a direction indicator (the
+        # class still appears in the CSS block, so match the span markup).
+        self.assertNotIn('<span class="orch-skillmatrix-sort">', html_out)
+
+    def test_active_descending_column_shows_down_arrow_and_flips(self) -> None:
+        _, dashboard = _reload()
+        html_out = dashboard._skill_matrix_html(
+            self._rows(), sort_key="runs", descending=True,
+        )
+        # Exactly one column is marked active, and it shows the ▼ arrow.
+        self.assertEqual(
+            html_out.count('<span class="orch-skillmatrix-sort">'), 1,
+        )
+        self.assertIn(
+            '<span class="orch-skillmatrix-sort">▼</span>', html_out,
+        )
+        # Re-clicking the active (descending) column flips it to ascending.
+        self.assertIn("?mtx_sort=runs&mtx_dir=asc", html_out)
+
+    def test_active_ascending_column_shows_up_arrow_and_flips(self) -> None:
+        _, dashboard = _reload()
+        html_out = dashboard._skill_matrix_html(
+            self._rows(), sort_key="repo", descending=False,
+        )
+        self.assertIn(
+            '<span class="orch-skillmatrix-sort">▲</span>', html_out,
+        )
+        self.assertIn("?mtx_sort=repo&mtx_dir=desc", html_out)
+
+    def test_rows_render_in_selected_column_order(self) -> None:
+        _, dashboard = _reload()
+        asc = dashboard._skill_matrix_html(
+            self._rows(), sort_key="runs", descending=False,
+        )
+        # runs 2 < 5 < 9 -> repos b, c, a in that order.
+        self.assertLess(asc.index(">b/repo<"), asc.index(">c/repo<"))
+        self.assertLess(asc.index(">c/repo<"), asc.index(">a/repo<"))
+        desc = dashboard._skill_matrix_html(
+            self._rows(), sort_key="runs", descending=True,
+        )
+        self.assertLess(desc.index(">a/repo<"), desc.index(">c/repo<"))
+        self.assertLess(desc.index(">c/repo<"), desc.index(">b/repo<"))
+
+    def test_unsorted_render_keeps_read_model_order(self) -> None:
+        # No sort key -> rows land in the order the read model returned
+        # them, so the default view still reflects Runs-with-skill DESC.
+        _, dashboard = _reload()
+        rows = self._rows()
+        html_out = dashboard._skill_matrix_html(rows)
+        self.assertLess(
+            html_out.index(">b/repo<"), html_out.index(">a/repo<"),
+        )
+        self.assertLess(
+            html_out.index(">a/repo<"), html_out.index(">c/repo<"),
+        )
+
+    def test_sort_helper_unknown_key_is_identity(self) -> None:
+        from orchestrator import dashboard_html
+        rows = self._rows()
+        out = dashboard_html._sort_skill_matrix_rows(rows, None, False)
+        self.assertEqual(out, rows)
+        out = dashboard_html._sort_skill_matrix_rows(rows, "bogus", True)
+        self.assertEqual(out, rows)
+
+    def test_parse_matrix_sort_from_query_params(self) -> None:
+        _, dashboard = _reload()
+        cases = [
+            ({}, (None, False)),
+            ({"mtx_sort": "runs"}, ("runs", False)),
+            ({"mtx_sort": "runs", "mtx_dir": "desc"}, ("runs", True)),
+            ({"mtx_sort": "runs", "mtx_dir": "asc"}, ("runs", False)),
+            ({"mtx_sort": "rate", "mtx_dir": "desc"}, ("rate", True)),
+            # An unknown / stale column degrades to the default order
+            # rather than raising.
+            ({"mtx_sort": "bogus", "mtx_dir": "desc"}, (None, False)),
+            ({"mtx_dir": "desc"}, (None, False)),
+        ]
+        for params, expected in cases:
+            with self.subTest(params=params):
+                self.assertEqual(
+                    dashboard.parse_skill_matrix_sort(params), expected,
+                )
+
+
 class DeltaPillTest(unittest.TestCase):
     """KPI delta pills must paint cost / token increases red and
     drops green. An earlier draft mapped `invert=True && value > 0`
@@ -1584,7 +1708,7 @@ class SkillMatrixWiringTest(unittest.TestCase):
         # `_skill_triggers_html(skill_rows)` table, inside the same card.
         src = self._main_source()
         agg = src.index("_skill_triggers_html(skill_rows)")
-        matrix = src.index("_skill_matrix_html(skill_matrix_rows)")
+        matrix = src.index("_skill_matrix_html(")
         self.assertLess(agg, matrix)
 
     def test_matrix_only_renders_when_aggregate_has_rows(self) -> None:
@@ -1597,7 +1721,7 @@ class SkillMatrixWiringTest(unittest.TestCase):
             'st.info("No `agent_exit` rows match the current filters.")',
             branch,
         )
-        matrix = src.index("_skill_matrix_html(skill_matrix_rows)")
+        matrix = src.index("_skill_matrix_html(")
         self.assertLess(branch, matrix)
         self.assertLess(matrix, else_branch)
 
@@ -1608,7 +1732,7 @@ class SkillMatrixWiringTest(unittest.TestCase):
         # `st.expander(..., expanded=False)` opened for the matrix.
         src = self._main_source()
         expander = src.index('with st.expander(\n                "Per-skill')
-        matrix = src.index("_skill_matrix_html(skill_matrix_rows)")
+        matrix = src.index("_skill_matrix_html(")
         self.assertLess(expander, matrix)
         # The expander block carrying the matrix opens collapsed.
         block = src[expander:matrix]
