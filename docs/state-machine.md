@@ -326,7 +326,9 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
   6. **Parse the manifest** via `_parse_manifest` (regex captures the fenced ` ```orchestrator-manifest ` block):
      - invalid manifest → park with the parse error.
      - no fenced block → treat as a question; park.
-     - `decision == "single"` → label `ready`, stamp `decomposed_at`.
+     - `decision == "single"` → post the collected-context comment (rationale plus the manifest's optional
+       `affected_files` / `notes`, built by `_build_single_decision_comment`) so the implementer inherits the
+       decomposer's groundwork via `_recent_comments_text`; label `ready`, stamp `decomposed_at`.
      - `decision == "split"` → for each child call `gh.create_child_issue(...)` with label `blocked` and seed the
        child's pinned state with `parent_number`; persist `children` / `dep_graph` / `umbrella` on the parent; activate
        no-dep children by flipping `blocked` → `ready` (best-effort, since `_handle_blocked` / `_handle_umbrella` also

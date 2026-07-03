@@ -85,6 +85,35 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             "fits in one context" in body for _, body in gh.posted_comments
         ))
 
+    def test_decompose_single_hands_off_collected_context(self) -> None:
+        # A single decision must carry the decomposer's gathered context
+        # (affected files + notes) into the issue thread so the implementer
+        # inherits it via `_recent_comments_text` at spawn.
+        gh = FakeGitHubClient()
+        issue = make_issue(73, label="decomposing")
+        gh.add_issue(issue)
+        manifest = _manifest(
+            '{"decision": "single", "rationale": "fits", '
+            '"affected_files": ["orchestrator/config.py", "tests/fakes.py"], '
+            '"notes": "Bump the default and cover it in fakes."}'
+        )
+
+        self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+        )
+
+        self.assertIn((73, "ready"), gh.label_history)
+        context_comment = next(
+            body for n, body in gh.posted_comments
+            if n == 73 and ":mag:" in body
+        )
+        self.assertIn("orchestrator/config.py", context_comment)
+        self.assertIn("tests/fakes.py", context_comment)
+        self.assertIn(
+            "Bump the default and cover it in fakes.", context_comment
+        )
+
     def test_decompose_decision_split_creates_children(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(12, label="decomposing")

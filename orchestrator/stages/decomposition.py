@@ -435,17 +435,15 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             return
 
         if parsed["decision"] == "single":
-            # `_parse_manifest` only checks the decision string for the
-            # single branch, so `rationale` may be any JSON value (or
-            # missing). Coerce non-strings to the placeholder rather than
-            # crashing the handler at `.strip()` after the agent already ran.
-            raw_rationale = parsed.get("rationale")
-            if not isinstance(raw_rationale, str):
-                raw_rationale = ""
-            rationale = raw_rationale.strip() or "(no rationale provided)"
+            # Surface the decomposer's rationale AND the context it already
+            # gathered (affected files, implementation notes) so the develop
+            # agent that picks this up in `implementing` starts from that
+            # groundwork instead of re-deriving it. The builder tolerates
+            # missing / malformed optional fields -- the single decision is
+            # already valid, so no cosmetic field should park it.
             _wf._post_issue_comment(
                 gh, issue, state,
-                f":mag: decomposer says this fits one context: {rationale}",
+                _wf._build_single_decision_comment(parsed),
             )
             state.set("decomposed_at", _wf._now_iso())
             gh.set_workflow_label(issue, WorkflowLabel.READY)
