@@ -179,6 +179,7 @@ from orchestrator.dashboard_html import (  # noqa: E402
     _skill_triggers_html as _skill_triggers_html,
     _sparkline_svg as _sparkline_svg,
     _topbar_html as _topbar_html,
+    parse_skill_matrix_sort as parse_skill_matrix_sort,
 )
 
 log = logging.getLogger(__name__)
@@ -1255,8 +1256,19 @@ def main() -> None:
                 "repo × role × backend cohort reaches for",
                 expanded=False,
             ):
+                # Clickable column headers re-sort the matrix: each header
+                # anchor writes `mtx_sort` / `mtx_dir` query params, which
+                # this parses back into a (column, direction) pair the
+                # render applies on top of the read model's default order.
+                matrix_sort_key, matrix_sort_desc = parse_skill_matrix_sort(
+                    st.query_params
+                )
                 st.markdown(
-                    _skill_matrix_html(skill_matrix_rows),
+                    _skill_matrix_html(
+                        skill_matrix_rows,
+                        sort_key=matrix_sort_key,
+                        descending=matrix_sort_desc,
+                    ),
                     unsafe_allow_html=True,
                 )
         else:

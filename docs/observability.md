@@ -920,7 +920,11 @@ futures, so every `st.*` write runs on the main thread). The second wave is skip
    (`skill_runs / runs`). It folds each repo's `repo_skill_catalog` into the observed triggers so a skill the repo
    offers but no cohort fired surfaces as an explicit (muted) `0` "Runs with skill" cell (and a matching muted `0%`
    trigger rate) rather than a missing row (the cohort `Runs` total is never muted). The read model sorts the rows by
-   Runs-with-skill DESC then Runs DESC and caps the list at 100, so the expander never floods the page. Both tables are
+   Runs-with-skill DESC then Runs DESC and caps the list at 100, so the expander never floods the page. Each column
+   header is a clickable sort control: it is an anchor that writes `mtx_sort` / `mtx_dir` query params (parsed back by
+   `parse_skill_matrix_sort`), so clicking a column re-sorts the matrix on it and clicking the active column flips the
+   direction (a ▲ / ▼ indicator marks the current sort); an unknown / absent param falls back to the read model's
+   default order. Both tables are
    opt-in: they only carry signal when `TRACK_SKILL_TRIGGERS` is on. A window whose aggregate groups all show a `0%`
    rate renders a caption naming the switch, an empty window renders the aggregate no-rows notice, and the matrix shows
    a clear fallback notice in place of the table when no catalog-backed matrix can be built (no catalog records matched
