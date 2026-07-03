@@ -413,16 +413,18 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
     The fold-out table under the "Skill trigger rates" panel: one row
     per `(repo, agent_role, backend, skill)` cell from
     `get_skill_trigger_matrix`, with columns Repo / Role / Backend /
-    Skill / Runs / Runs with skill. `Runs` is the total agent-exit runs
-    in the cell's cohort and `Runs with skill` the subset that fired
-    this skill, so a low/zero trigger count reads against the cohort
-    size instead of in a vacuum. Unlike the aggregate table above it,
+    Skill / Runs / Runs with skill / Trigger rate. `Runs` is the total
+    agent-exit runs in the cell's cohort, `Runs with skill` the subset
+    that fired this skill, and `Trigger rate` the share of the two
+    (`skill_runs / runs`), so a low/zero trigger count reads against the
+    cohort size instead of in a vacuum. Unlike the aggregate table above it,
     this one folds in each repo's `repo_skill_catalog` so a skill the
     repo offers but no cohort triggered surfaces as an explicit `0`
-    "Runs with skill" cell rather than a missing row; that zero cell is
-    muted so the offered-but-quiet skills read distinctly from the ones
-    that actually fired. The cohort `Runs` total is always `>= 1` (a
-    cell exists only for a cohort that ran), so it is never muted.
+    "Runs with skill" cell rather than a missing row; that zero cell and
+    its `0%` trigger rate are muted so the offered-but-quiet skills read
+    distinctly from the ones that actually fired. The cohort `Runs` total
+    is always `>= 1` (a cell exists only for a cohort that ran), so it is
+    never muted.
 
     When the read model returns no rows -- no catalog records matched the
     window and no run fired a skill -- there is no catalog-backed matrix
@@ -480,6 +482,14 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
             if skill_runs == 0
             else str(skill_runs)
         )
+        # The rate is derived from the two counts above, so mute it on the
+        # same offered-but-never-triggered signal that mutes `skill_runs`:
+        # a `0%` cell reads as quiet-but-offered, not as a live rate.
+        rate_html = (
+            '<span class="orch-skillmatrix-zero">0%</span>'
+            if skill_runs == 0
+            else f"{r.rate * 100.0:.0f}%"
+        )
         body.append(
             "<tr>"
             f'<td class="strong">{html.escape(repo)}</td>'
@@ -488,6 +498,7 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
             f'<td>{html.escape(skill)}</td>'
             f'<td class="r">{runs}</td>'
             f'<td class="r">{skill_runs_html}</td>'
+            f'<td class="r">{rate_html}</td>'
             "</tr>"
         )
     head = (
@@ -498,6 +509,7 @@ def _skill_matrix_html(rows: Sequence[SkillTriggerMatrixRow]) -> str:
         "<th>Skill</th>"
         '<th class="r">Runs</th>'
         '<th class="r">Runs with skill</th>'
+        '<th class="r">Trigger rate</th>'
         "</tr></thead>"
     )
     return (
