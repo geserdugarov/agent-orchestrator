@@ -435,6 +435,12 @@ internals, read-model split, dashboard layout, and the in-app empty / error bann
 `uv sync --locked`. Lint rules live in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; dev tools are
 declared in `[dependency-groups]`.
 
+Both steps enforce a repository-wide 120-column line-length target set once as `line-length` under `[tool.ruff]` in
+[`../pyproject.toml`](../pyproject.toml). Ruff applies it to Python via the opted-in `E501` rule; the first-party
+[`../tests/test_line_length.py`](../tests/test_line_length.py) reads the same value and applies it to tracked
+Markdown/text files, exempting fenced code blocks, single unbreakable tokens (e.g. long URLs), binary assets, the
+lockfile, and the verbatim `LICENSE`.
+
 The workflow declares `permissions: contents: read` so the run's `GITHUB_TOKEN` is read-only and cannot publish
 artifacts, push tags, or comment on PRs. The job uses no repository secrets, so PRs from forks run safely under the same
 scope.
