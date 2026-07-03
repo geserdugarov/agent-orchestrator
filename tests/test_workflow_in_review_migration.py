@@ -1,6 +1,8 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the legacy in_review watermark migration and the zero-watermark fallback that keeps a legacy '0' from being displaced by a higher last_action_comment_id."""
+"""Tests for the legacy in_review watermark migration and the zero-watermark
+fallback that keeps a legacy '0' from being displaced by a higher
+last_action_comment_id."""
 from __future__ import annotations
 
 import os

@@ -1,6 +1,8 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for parked-and-closed in_review behavior: awaiting-human parks, manually-closed issues with a still-open PR, and the stale-park-reason clear on the route to fixing."""
+"""Tests for parked-and-closed in_review behavior: awaiting-human parks,
+manually-closed issues with a still-open PR, and the stale-park-reason clear
+on the route to fixing."""
 from __future__ import annotations
 
 import os

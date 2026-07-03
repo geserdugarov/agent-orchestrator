@@ -1,6 +1,8 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the in_review drift / fresh-feedback routes: pushed and ACK exits to validating, park-on-failure, and the fresh-feedback scan that covers both the issue thread and the PR-conversation surface."""
+"""Tests for the in_review drift / fresh-feedback routes: pushed and ACK exits to
+validating, park-on-failure, and the fresh-feedback scan that covers both the
+issue thread and the PR-conversation surface."""
 from __future__ import annotations
 
 import os

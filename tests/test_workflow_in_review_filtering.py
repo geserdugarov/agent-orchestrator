@@ -1,6 +1,7 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the same-account human-comment filter and the cross-namespace filter on inline / review-summary feedback."""
+"""Tests for the same-account human-comment filter and the cross-namespace filter
+on inline / review-summary feedback."""
 from __future__ import annotations
 
 import os
