@@ -1,20 +1,26 @@
 # Configuration reference
 
-All settings load from `.env` (or the process environment). [`../.env.example`](../.env.example) holds the basic parameters needed for a first run; [`../.env.example.advanced`](../.env.example.advanced) carries common advanced overrides and illustrative examples for opt-in settings. This page is the source of truth — every setting and every default lives here, and both `.env.example*` files keep their inline comments terse and link back for the full rationale.
+All settings load from `.env` (or the process environment). [`../.env.example`](../.env.example) holds the basic
+parameters needed for a first run; [`../.env.example.advanced`](../.env.example.advanced) carries common advanced
+overrides and illustrative examples for opt-in settings. This page is the source of truth — every setting and every
+default lives here, and both `.env.example*` files keep their inline comments terse and link back for the full
+rationale.
 
-The orchestrator is deliberately stateless: every setting here selects backends and budgets at startup, or names files/paths outside the repo. Per-issue state lives in the issue's pinned JSON comment on GitHub.
+The orchestrator is deliberately stateless: every setting here selects backends and budgets at startup, or names
+files/paths outside the repo. Per-issue state lives in the issue's pinned JSON comment on GitHub.
 
 ## Required
 
-| Variable                  | Default                                       | Purpose                                                                 |
-| ------------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
-| `GITHUB_TOKEN`            | _(required, env-only — not read from `.env`)_ | fine-grained personal access token. Putting it in `.env` is rejected at startup. |
-| `ORCHESTRATOR_TOKEN_FILE` | `~/.config/<owner>/<repo>/token` (from `REPO`) | path to the personal access token file (used when `GITHUB_TOKEN` is not in env) |
-| `HITL_HANDLE`             | `geserdugarov`                                | comma-separated GitHub logins to @-mention when a human is needed      |
+- `GITHUB_TOKEN` — default _(required, env-only — not read from `.env`)_. fine-grained personal access token.
+  Putting it in `.env` is rejected at startup.
+- `ORCHESTRATOR_TOKEN_FILE` — default `~/.config/<owner>/<repo>/token` (from `REPO`). path to the personal access
+  token file (used when `GITHUB_TOKEN` is not in env)
+- `HITL_HANDLE` — default `geserdugarov`. comma-separated GitHub logins to @-mention when a human is needed
 
 ### GitHub Personal Access Token
 
-`GITHUB_TOKEN` is the fine-grained personal access token the orchestrator uses for every GitHub call. Required scopes on the target repository:
+`GITHUB_TOKEN` is the fine-grained personal access token the orchestrator uses for every GitHub call. Required scopes on
+the target repository:
 
 - **Contents** — read/write (worktree branches and squash commits)
 - **Issues** — read/write (label transitions, pinned-state comments, `HITL_HANDLE` @-mentions)
@@ -23,125 +29,205 @@ The orchestrator is deliberately stateless: every setting here selects backends 
 
 Create the personal access token at <https://github.com/settings/personal-access-tokens>.
 
-The token is deliberately NOT loaded from `.env`. The implementer agent runs in a sibling worktree with sandbox bypass, so anything readable inside `REPO_ROOT` (including `.env`) is recoverable by a prompt-injected agent via a relative-path read like `cat ../agent-orchestrator/.env`. `GITHUB_TOKEN` (and the aliases `GH_TOKEN`, `GITHUB_PAT`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_TOKEN`) found in `.env` is logged-and-skipped at startup.
+The token is deliberately NOT loaded from `.env`. The implementer agent runs in a sibling worktree with sandbox bypass,
+so anything readable inside `REPO_ROOT` (including `.env`) is recoverable by a prompt-injected agent via a relative-path
+read like `cat ../agent-orchestrator/.env`. `GITHUB_TOKEN` (and the aliases `GH_TOKEN`, `GITHUB_PAT`,
+`GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GIT_TOKEN`) found in `.env` is logged-and-skipped at startup.
 
 Token resolution order:
 
 1. `GITHUB_TOKEN` exported in the orchestrator's launch environment.
-2. The file at `~/.config/<owner>/<repo>/token` — path derived from `REPO`, override with `ORCHESTRATOR_TOKEN_FILE`. Pick a path the agent worktree cannot reach via known relatives, and `chmod 600` it.
+2. The file at `~/.config/<owner>/<repo>/token` — path derived from `REPO`, override with `ORCHESTRATOR_TOKEN_FILE`.
+   Pick a path the agent worktree cannot reach via known relatives, and `chmod 600` it.
 
 ## Target repository
 
-Use `REPO` for a single repo (the default), or `REPOS` to drive several from one process. When `REPOS` is set, the legacy single-repo quartet (`REPO` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`) is ignored.
+Use `REPO` for a single repo (the default), or `REPOS` to drive several from one process. When `REPOS` is set, the
+legacy single-repo quartet (`REPO` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`) is ignored.
 
-| Variable           | Default                                       | Purpose                                                                 |
-| ------------------ | --------------------------------------------- | ----------------------------------------------------------------------- |
-| `REPO`             | `geserdugarov/agent-orchestrator`             | `owner/name` of the single repo to manage (ignored when `REPOS` is set) |
-| `TARGET_REPO_ROOT` | `REPO_ROOT` (self-bootstrap)                  | path to the local clone of `REPO` — worktrees are `git worktree add`-ed from here |
-| `BASE_BRANCH`      | `main`                                        | branch PRs target                                                       |
-| `REMOTE_NAME`      | `origin`                                      | git remote in `TARGET_REPO_ROOT` that points at `REPO` on GitHub        |
-| `REPOS`            | _(unset)_                                     | multi-repo configuration, entries separated by newlines or `;`          |
+- `REPO` — default `geserdugarov/agent-orchestrator`. `owner/name` of the single repo to manage (ignored when `REPOS`
+  is set)
+- `TARGET_REPO_ROOT` — default `REPO_ROOT` (self-bootstrap). path to the local clone of `REPO` — worktrees are
+  `git worktree add`-ed from here
+- `BASE_BRANCH` — default `main`. branch PRs target
+- `REMOTE_NAME` — default `origin`. git remote in `TARGET_REPO_ROOT` that points at `REPO` on GitHub
+- `REPOS` — default _(unset)_. multi-repo configuration, entries separated by newlines or `;`
 
 ### Multi-repo `REPOS` syntax
 
 Each entry is `owner/name|target_root|base_branch`, with two optional trailing fields:
 
 - fourth `|remote_name` — defaults to `origin`;
-- fifth `|parallel_limit` — defaults to `MAX_PARALLEL_ISSUES_PER_REPO`. Positional: to override `parallel_limit` you must also write the `remote_name` (use `origin` explicitly to keep the default).
+- fifth `|parallel_limit` — defaults to `MAX_PARALLEL_ISSUES_PER_REPO`. Positional: to override `parallel_limit` you
+  must also write the `remote_name` (use `origin` explicitly to keep the default).
 
 ```dotenv
 REPOS=acme/api|/srv/clones/acme-api|main;acme/web|/srv/clones/acme-web|master|private|2
 ```
 
-Validation happens at import — a malformed entry, empty owner/name, empty base branch, empty `remote_name`, a non-integer or non-positive `parallel_limit`, or a duplicate slug aborts startup with a clear error. A `target_root` that does not exist on disk warns to stderr but does not block startup.
+Validation happens at import — a malformed entry, empty owner/name, empty base branch, empty `remote_name`, a
+non-integer or non-positive `parallel_limit`, or a duplicate slug aborts startup with a clear error. A `target_root`
+that does not exist on disk warns to stderr but does not block startup.
 
-Each repo can have its own personal access token at `~/.config/<owner>/<repo>/token`, or a single `GITHUB_TOKEN` covering every listed repo. Worktrees are namespaced `WORKTREES_DIR/<owner>__<name>/issue-N` and PR branches are namespaced `orchestrator/<owner>__<name>/issue-N`, so two repos with the same issue number cannot collide on disk or on the branch ref — important when several `REPOS` entries share a `target_root` (e.g. one local clone with multiple remotes), where git would otherwise refuse to check the same `orchestrator/issue-N` ref out in two worktrees. In-flight issues whose pinned `branch` was set before this change keep using the legacy `orchestrator/issue-N` name; fresh issues take the namespaced form.
+Each repo can have its own personal access token at `~/.config/<owner>/<repo>/token`, or a single `GITHUB_TOKEN`
+covering every listed repo. Worktrees are namespaced `WORKTREES_DIR/<owner>__<name>/issue-N` and PR branches are
+namespaced `orchestrator/<owner>__<name>/issue-N`, so two repos with the same issue number cannot collide on disk or on
+the branch ref — important when several `REPOS` entries share a `target_root` (e.g. one local clone with multiple
+remotes), where git would otherwise refuse to check the same `orchestrator/issue-N` ref out in two worktrees. In-flight
+issues whose pinned `branch` was set before this change keep using the legacy `orchestrator/issue-N` name; fresh issues
+take the namespaced form.
 
-Slugs whose repo name contains `.lock`, `..`, or a trailing `.` (all rejected by `git check-ref-format`) get an extra `__h<16-hex>` suffix on the branch segment so two distinct slugs that would otherwise collapse to the same form (e.g. `owner/foo.lock` and `owner/foo_lock`) stay on distinct branches. The worktree directory keeps the readable `<owner>__<name>` form because filesystems tolerate these characters; only the branch ref carries the hash.
+Slugs whose repo name contains `.lock`, `..`, or a trailing `.` (all rejected by `git check-ref-format`) get an extra
+`__h<16-hex>` suffix on the branch segment so two distinct slugs that would otherwise collapse to the same form (e.g.
+`owner/foo.lock` and `owner/foo_lock`) stay on distinct branches. The worktree directory keeps the readable
+`<owner>__<name>` form because filesystems tolerate these characters; only the branch ref carries the hash.
 
 ## Agent roles
 
-The first token of each role spec selects the backend (`codex` / `claude`); any remaining tokens are forwarded as backend-CLI args (model, reasoning effort, etc.). See [`workflow.md`](workflow.md) for the spec format, in-flight session lock, and full examples.
+The first token of each role spec selects the backend (`codex` / `claude`); any remaining tokens are forwarded as
+backend-CLI args (model, reasoning effort, etc.). See [`workflow.md`](workflow.md) for the spec format, in-flight
+session lock, and full examples.
 
-| Variable             | Default                | Purpose                                                                                                 |
-| -------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------- |
-| `DEV_AGENT`          | `claude`               | implementer command spec                                                                                |
-| `REVIEW_AGENT`       | `codex`                | reviewer command spec                                                                                   |
-| `DECOMPOSE_AGENT`    | `claude`               | decomposer command spec (validated even when `DECOMPOSE=off`); also drives the `question` stage         |
-| `DECOMPOSE`          | `on`                   | enable the `decomposing` stage; `off` reverts to the legacy "no label → implementing" pickup           |
-| `CODEX_BIN`          | `codex`                | executable launched when a role's first token is `codex`; override only if `codex` is not on `$PATH`   |
-| `CLAUDE_BIN`         | `claude`               | executable launched when a role's first token is `claude`; override only if `claude` is not on `$PATH` |
-| `ALLOWED_ISSUE_AUTHORS` | _(unset)_           | comma-separated GitHub logins; when set, only auto-pick-up unlabeled issues from those authors, and the per-tick sweep labels open PRs from anyone outside the list with `community_contribution` and @-mentions `HITL_HANDLE` once per PR (bot-authored PRs such as Dependabot are excluded via `user.type == "Bot"`) |
+- `DEV_AGENT` — default `claude`. implementer command spec
+- `REVIEW_AGENT` — default `codex`. reviewer command spec
+- `DECOMPOSE_AGENT` — default `claude`. decomposer command spec (validated even when `DECOMPOSE=off`); also drives the
+  `question` stage
+- `DECOMPOSE` — default `on`. enable the `decomposing` stage; `off` reverts to the legacy "no label → implementing"
+  pickup
+- `CODEX_BIN` — default `codex`. executable launched when a role's first token is `codex`; override only if `codex` is
+  not on `$PATH`
+- `CLAUDE_BIN` — default `claude`. executable launched when a role's first token is `claude`; override only if
+  `claude` is not on `$PATH`
+- `ALLOWED_ISSUE_AUTHORS` — default _(unset)_. comma-separated GitHub logins; when set, only auto-pick-up unlabeled
+  issues from those authors, and the per-tick sweep labels open PRs from anyone outside the list with
+  `community_contribution` and @-mentions `HITL_HANDLE` once per PR (bot-authored PRs such as Dependabot are excluded
+  via `user.type == "Bot"`)
 
 ## Cadence and budgets
 
-| Variable                   | Default     | Purpose                                                                                          |
-| -------------------------- | ----------- | ------------------------------------------------------------------------------------------------ |
-| `POLL_INTERVAL`            | `60`        | seconds between polling ticks                                                                    |
-| `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` | `1` | how many ticks apart the closed-issue recovery sweep runs (see [GitHub rate limits](#github-rate-limits) below). The sweep issues one `GET …/issues?state=closed&labels=<L>` per non-terminal workflow label **per repo**; across many repos at a short `POLL_INTERVAL` that fixed cost dominates request volume and is the main driver of GitHub *primary* rate-limit (5000 req/hour/PAT) exhaustion. `1` runs it every tick (unchanged behavior). Raise it (e.g. `4`–`5`) on multi-repo deployments; the only cost is that an externally-merged/closed issue may take up to `N-1` extra ticks to finalize to `done`. The latency-sensitive open-issue poll always runs every tick. |
-| `AGENT_TIMEOUT`            | `1800`      | wall-clock cap per agent invocation, seconds                                                     |
-| `REVIEW_TIMEOUT`           | (= `AGENT_TIMEOUT`) | wall-clock cap per reviewer invocation, seconds                                          |
-| `SHUTDOWN_GRACE_SECONDS`   | `30`        | seconds after SIGTERM/SIGINT before the loop force-terminates in-flight agent subprocesses and hard-exits (`128 + signum`). Keep below the systemd unit's `TimeoutStopSec` (90s) so `systemctl restart` sees a clean stop instead of escalating to SIGKILL — without it the drain waits on in-flight workers bounded only by `AGENT_TIMEOUT` (1800s) or a blocking GitHub retry/backoff, which overruns the stop deadline. |
-| `MAX_REVIEW_ROUNDS`        | `3`         | review/fix iterations before parking on `awaiting_human`                                         |
-| `MAX_CONFLICT_ROUNDS`      | `3`         | auto-conflict-resolution rounds before parking on `awaiting_human`                               |
-| `MAX_RETRIES_PER_DAY`      | `3`         | fresh implementer spawns per issue per 24h window (`0` = unbounded)                              |
-| `DEV_SESSION_MAX_RESUMES`  | `10`        | resumes of one dev session before it is retired and respawned fresh from durable state (issue body + recent comments + the committed branch), so a growing `--resume` transcript cannot creep into a `Prompt is too long` context overflow. `0` = resume forever. The reactive overflow handler still recovers a session that blows the window in fewer resumes. |
-| `ORCHESTRATOR_BASE_BRANCH` | `main`      | base branch of the orchestrator's own repo, used by the self-update path                          |
-| `SQUASH_ON_APPROVAL`       | `on`        | after the reviewer emits `VERDICT: APPROVED`, squash the dev's commits on the PR branch into a single subject-only commit and force-push with lease. The subject reuses the dev's first commit subject when it carries a reusable `<prefix>:` form (Conventional **or** repo-local such as `event:`/`career:`); otherwise it is synthesized with a prefix inferred from recent base-branch history. `off` leaves the per-step commit history intact (useful when downstream tooling depends on it). Parsed as a boolean: `1` / `true` / `on` / `yes` enable, anything else disables. |
-| `EXPOSE_TRACKED_REPOS`     | `on`        | tell working agents about the *other* repos this orchestrator tracks (slug, local `target_root`, base branch) for cross-repo reference. Inert for single-repo hosts — the awareness block is emitted only when more than one repo is configured, so a default deployment sees zero added prompt tokens. The disclosed data is operator-configured and non-secret (no tokens, no remote URLs), and write-containment is unchanged. `off` forces the disclosure off globally. Parsed as a boolean: `1` / `true` / `on` / `yes` enable, anything else disables. |
+- `POLL_INTERVAL` — default `60`. seconds between polling ticks
+- `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` — default `1`. how many ticks apart the closed-issue recovery sweep runs (see
+  [GitHub rate limits](#github-rate-limits) below). The sweep issues one `GET …/issues?state=closed&labels=<L>` per
+  non-terminal workflow label **per repo**; across many repos at a short `POLL_INTERVAL` that fixed cost dominates
+  request volume and is the main driver of GitHub *primary* rate-limit (5000 req/hour/PAT) exhaustion. `1` runs it every
+  tick (unchanged behavior). Raise it (e.g. `4`–`5`) on multi-repo deployments; the only cost is that an
+  externally-merged/closed issue may take up to `N-1` extra ticks to finalize to `done`. The latency-sensitive
+  open-issue poll always runs every tick.
+- `AGENT_TIMEOUT` — default `1800`. wall-clock cap per agent invocation, seconds
+- `REVIEW_TIMEOUT` — default (= `AGENT_TIMEOUT`). wall-clock cap per reviewer invocation, seconds
+- `SHUTDOWN_GRACE_SECONDS` — default `30`. seconds after SIGTERM/SIGINT before the loop force-terminates in-flight
+  agent subprocesses and hard-exits (`128 + signum`). Keep below the systemd unit's `TimeoutStopSec` (90s) so
+  `systemctl restart` sees a clean stop instead of escalating to SIGKILL — without it the drain waits on in-flight
+  workers bounded only by `AGENT_TIMEOUT` (1800s) or a blocking GitHub retry/backoff, which overruns the stop deadline.
+- `MAX_REVIEW_ROUNDS` — default `3`. review/fix iterations before parking on `awaiting_human`
+- `MAX_CONFLICT_ROUNDS` — default `3`. auto-conflict-resolution rounds before parking on `awaiting_human`
+- `MAX_RETRIES_PER_DAY` — default `3`. fresh implementer spawns per issue per 24h window (`0` = unbounded)
+- `DEV_SESSION_MAX_RESUMES` — default `10`. resumes of one dev session before it is retired and respawned fresh from
+  durable state (issue body + recent comments + the committed branch), so a growing `--resume` transcript cannot creep
+  into a `Prompt is too long` context overflow. `0` = resume forever. The reactive overflow handler still recovers a
+  session that blows the window in fewer resumes.
+- `ORCHESTRATOR_BASE_BRANCH` — default `main`. base branch of the orchestrator's own repo, used by the self-update
+  path
+- `SQUASH_ON_APPROVAL` — default `on`. after the reviewer emits `VERDICT: APPROVED`, squash the dev's commits on the
+  PR branch into a single subject-only commit and force-push with lease. The subject reuses the dev's first commit
+  subject when it carries a reusable `<prefix>:` form (Conventional **or** repo-local such as `event:`/`career:`);
+  otherwise it is synthesized with a prefix inferred from recent base-branch history. `off` leaves the per-step commit
+  history intact (useful when downstream tooling depends on it). Parsed as a boolean: `1` / `true` / `on` / `yes`
+  enable, anything else disables.
+- `EXPOSE_TRACKED_REPOS` — default `on`. tell working agents about the *other* repos this orchestrator tracks (slug,
+  local `target_root`, base branch) for cross-repo reference. Inert for single-repo hosts — the awareness block is
+  emitted only when more than one repo is configured, so a default deployment sees zero added prompt tokens. The
+  disclosed data is operator-configured and non-secret (no tokens, no remote URLs), and write-containment is unchanged.
+  `off` forces the disclosure off globally. Parsed as a boolean: `1` / `true` / `on` / `yes` enable, anything else
+  disables.
 
 ### GitHub rate limits
 
-A single fine-grained PAT gets **5000 REST requests/hour** (the GitHub *primary* rate limit). Each tick spends a roughly fixed number of `GET /repos/…` requests **per repo**, independent of how much real work the repo has:
+A single fine-grained PAT gets **5000 REST requests/hour** (the GitHub *primary* rate limit). Each tick spends a roughly
+fixed number of `GET /repos/…` requests **per repo**, independent of how much real work the repo has:
 
 - the open-issue poll (`list_pollable_issues`): 1+ requests,
-- the closed-issue recovery sweep: one `GET …/issues?state=closed&labels=<L>` per non-terminal workflow label (7 today), and
+- the closed-issue recovery sweep: one `GET …/issues?state=closed&labels=<L>` per non-terminal workflow label (7
+  today), and
 - the community-contribution PR sweep: 1 `GET …/pulls` request.
 
-With `R` repos at `POLL_INTERVAL` seconds, the floor is roughly `R × (9 + sweep) × 3600 / POLL_INTERVAL` requests/hour even when every repo is idle. Past ~5–6 repos at the 60s default this exceeds 5000/hour: the budget is spent partway into each hour, GitHub starts returning `403: Forbidden` with an `X-RateLimit-Reset` in the future, and PyGithub's `GithubRetry` sleeps (uninterruptibly) until the reset — typically a ~15–18 minute stall **every hour**, on the hour. The signature in `orchestrator.log` is repeated `github.GithubRetry: … failed with 403: Forbidden` followed by `Setting next backoff to <hundreds-to-1000+>s`.
+With `R` repos at `POLL_INTERVAL` seconds, the floor is roughly `R × (9 + sweep) × 3600 / POLL_INTERVAL` requests/hour
+even when every repo is idle. Past ~5–6 repos at the 60s default this exceeds 5000/hour: the budget is spent partway
+into each hour, GitHub starts returning `403: Forbidden` with an `X-RateLimit-Reset` in the future, and PyGithub's
+`GithubRetry` sleeps (uninterruptibly) until the reset — typically a ~15–18 minute stall **every hour**, on the
+hour. The signature in `orchestrator.log` is repeated `github.GithubRetry: … failed with 403: Forbidden` followed by
+`Setting next backoff to <hundreds-to-1000+>s`.
 
 Two built-in mitigations reduce the floor without touching `POLL_INTERVAL`:
 
-- **Workflow-label objects are cached** per repo client. They are immutable after `ensure_workflow_labels`, so the closed sweep no longer re-fetches them every tick — eliminating 7 `GET …/labels/<name>` requests per repo per tick automatically.
-- **`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`** batches the closed-issue recovery sweep to once every N ticks (see the table above). At `N=4`–`5` the seven closed-label queries are amortized down by the same factor while the open-issue poll stays every tick.
+- **Workflow-label objects are cached** per repo client. They are immutable after `ensure_workflow_labels`, so the
+  closed sweep no longer re-fetches them every tick — eliminating 7 `GET …/labels/<name>` requests per repo per tick
+  automatically.
+- **`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`** batches the closed-issue recovery sweep to once every N ticks (see the list
+  above). At `N=4`–`5` the seven closed-label queries are amortized down by the same factor while the open-issue poll
+  stays every tick.
 
-If you still approach the cap, the remaining levers are operator-side: raise `POLL_INTERVAL`, split repos across more than one PAT (one token file per slug under `~/.config/<owner>/<repo>/token`), or reduce the number of tracked repos. Check current consumption with `curl -H "Authorization: Bearer $TOKEN" https://api.github.com/rate_limit`.
+If you still approach the cap, the remaining levers are operator-side: raise `POLL_INTERVAL`, split repos across more
+than one PAT (one token file per slug under `~/.config/<owner>/<repo>/token`), or reduce the number of tracked repos.
+Check current consumption with `curl -H "Authorization: Bearer $TOKEN" https://api.github.com/rate_limit`.
 
 ## Local verification gate
 
-When the reviewer agent emits `VERDICT: APPROVED`, `_handle_validating` runs the configured `VERIFY_COMMANDS` in the per-issue worktree **before** posting the approval comment, squashing, seeding watermarks, or relabeling to `documenting`. A clean run advances the issue as usual; any failure parks the issue on `validating` with `awaiting_human=True` and a typed `park_reason`, so an operator can fix the breakage and resume.
+When the reviewer agent emits `VERDICT: APPROVED`, `_handle_validating` runs the configured `VERIFY_COMMANDS` in the
+per-issue worktree **before** posting the approval comment, squashing, seeding watermarks, or relabeling to
+`documenting`. A clean run advances the issue as usual; any failure parks the issue on `validating` with
+`awaiting_human=True` and a typed `park_reason`, so an operator can fix the breakage and resume.
 
-The verify gate is the first gate after the reviewer agent — it catches regressions locally so an obviously-broken branch never reaches `in_review`. GitHub CI still runs against the PR; the human merging the PR is the consumer of CI's verdict, since the orchestrator never merges from `in_review` itself.
+The verify gate is the first gate after the reviewer agent — it catches regressions locally so an obviously-broken
+branch never reaches `in_review`. GitHub CI still runs against the PR; the human merging the PR is the consumer of CI's
+verdict, since the orchestrator never merges from `in_review` itself.
 
 ### Secret stripping
 
-The verify shell shares the agent's environment filter (`agents._filter_agent_env`, called with `allow_provider_auth=False`). Stripped from the verify environment:
+The verify shell shares the agent's environment filter (`agents._filter_agent_env`, called with
+`allow_provider_auth=False`). Stripped from the verify environment:
 
 - GitHub-token aliases (`GITHUB_TOKEN`, `GH_TOKEN`, …).
-- Secret-shaped vars: anything matching `*_TOKEN` / `*_KEY` / `*_SECRET` / `*_PASSWORD` / `*_PAT` / `*_CREDENTIAL`, plus the bare names `TOKEN` / `KEY` / `SECRET` / `PASSWORD` / `PAT` / `CREDENTIAL`.
-- Credential-file locators: `*_TOKEN_FILE`, `*_KEY_FILE`, `*_SECRET_FILE`, `*_PASSWORD_FILE`, `*_CREDENTIAL_FILE`, `*_CREDENTIALS`, `*_CREDENTIALS_FILE`, plus bare `TOKEN_FILE` / `CREDENTIALS` / `CREDENTIALS_FILE`. Explicitly covers `ORCHESTRATOR_TOKEN_FILE`, `GOOGLE_APPLICATION_CREDENTIALS`, `AWS_SHARED_CREDENTIALS_FILE`.
+- Secret-shaped vars: anything matching `*_TOKEN` / `*_KEY` / `*_SECRET` / `*_PASSWORD` / `*_PAT` / `*_CREDENTIAL`, plus
+  the bare names `TOKEN` / `KEY` / `SECRET` / `PASSWORD` / `PAT` / `CREDENTIAL`.
+- Credential-file locators: `*_TOKEN_FILE`, `*_KEY_FILE`, `*_SECRET_FILE`, `*_PASSWORD_FILE`, `*_CREDENTIAL_FILE`,
+  `*_CREDENTIALS`, `*_CREDENTIALS_FILE`, plus bare `TOKEN_FILE` / `CREDENTIALS` / `CREDENTIALS_FILE`. Explicitly covers
+  `ORCHESTRATOR_TOKEN_FILE`, `GOOGLE_APPLICATION_CREDENTIALS`, `AWS_SHARED_CREDENTIALS_FILE`.
 - Write-credential locators: `SSH_AUTH_SOCK`, `SSH_ASKPASS`, `GIT_ASKPASS`, `GIT_SSH_COMMAND`.
-- The agent's own provider-auth keys: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY` (stricter than the agent-subprocess case — a verify command runs operator-configured shell against agent-produced code, and a hostile dependency reading `$ANTHROPIC_API_KEY` would gain billable access to the operator's model account).
+- The agent's own provider-auth keys: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`,
+  `OPENAI_API_KEY` (stricter than the agent-subprocess case — a verify command runs operator-configured shell against
+  agent-produced code, and a hostile dependency reading `$ANTHROPIC_API_KEY` would gain billable access to the
+  operator's model account).
 
-**Do not embed secret literals in `VERIFY_COMMANDS`.** Verify failures park `awaiting_human` with the offending command string published *verbatim* in the GitHub issue comment, so an inline `ANTHROPIC_API_KEY=sk-… pytest` entry would leak the literal secret on the first failure. If a verify command legitimately needs a secret-shaped var, load it from disk inside a wrapper script and reference the script from `VERIFY_COMMANDS` — `VERIFY_COMMANDS=./scripts/run-verify.sh` where the script reads the value from a file outside the worktree (`~/.config/<provider>/key`) and exports it before running tests.
+**Do not embed secret literals in `VERIFY_COMMANDS`.** Verify failures park `awaiting_human` with the offending command
+string published *verbatim* in the GitHub issue comment, so an inline `ANTHROPIC_API_KEY=sk-… pytest` entry would leak
+the literal secret on the first failure. If a verify command legitimately needs a secret-shaped var, load it from disk
+inside a wrapper script and reference the script from `VERIFY_COMMANDS` — `VERIFY_COMMANDS=./scripts/run-verify.sh`
+where the script reads the value from a file outside the worktree (`~/.config/<provider>/key`) and exports it before
+running tests.
 
 ### Settings
 
-| Variable          | Default | Purpose                                                                                                                |
-| ----------------- | ------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `VERIFY_COMMANDS` | _(empty — no verification)_ | Ordered shell commands run sequentially in the per-issue worktree on `VERDICT: APPROVED`. Entries are separated by `;` or newlines; blank lines and `#`-comment lines are skipped. Each entry runs via the shell so quoting, pipes, and `&&` work; stdout and stderr are merged into one captured block. |
-| `VERIFY_TIMEOUT`  | `600`   | Per-command wall-clock cap in seconds. A single slow command parks with `verify_timeout`. Ignored when `VERIFY_COMMANDS` is empty. |
+- `VERIFY_COMMANDS` — default _(empty — no verification)_. Ordered shell commands run sequentially in the per-issue
+  worktree on `VERDICT: APPROVED`. Entries are separated by `;` or newlines; blank lines and `#`-comment lines are
+  skipped. Each entry runs via the shell so quoting, pipes, and `&&` work; stdout and stderr are merged into one
+  captured block.
+- `VERIFY_TIMEOUT` — default `600`. Per-command wall-clock cap in seconds. A single slow command parks with
+  `verify_timeout`. Ignored when `VERIFY_COMMANDS` is empty.
 
 ### Failure modes and `park_reason` tokens
 
-The park comment names the failing command, its exit code (or timeout), and a redacted / truncated tail (last 4096 bytes) of the captured output. Output is redacted via `_redact_secrets` **before** truncation so a secret straddling the cut cannot leak a partial value. `park_reason` is set to one of:
+The park comment names the failing command, its exit code (or timeout), and a redacted / truncated tail (last 4096
+bytes) of the captured output. Output is redacted via `_redact_secrets` **before** truncation so a secret straddling the
+cut cannot leak a partial value. `park_reason` is set to one of:
 
-| `park_reason`           | Trigger                                                                                                                                            |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `verify_failed`         | Command exited non-zero.                                                                                                                            |
-| `verify_timeout`        | Command exceeded `VERIFY_TIMEOUT`.                                                                                                                  |
-| `verify_dirty`          | Command exited 0 but left uncommitted changes in the worktree (handing off a dirty tree would advertise the PR as ready for human merge with state the dev never committed). |
-| `verify_head_changed`   | Command exited 0, tree clean, but the command moved `HEAD` (e.g. ran `git commit` on its own). The subsequent squash + force-push would otherwise publish an unreviewed commit; the park comment surfaces the before / after SHAs. |
+- `verify_failed` — Command exited non-zero.
+- `verify_timeout` — Command exceeded `VERIFY_TIMEOUT`.
+- `verify_dirty` — Command exited 0 but left uncommitted changes in the worktree (handing off a dirty tree would
+  advertise the PR as ready for human merge with state the dev never committed).
+- `verify_head_changed` — Command exited 0, tree clean, but the command moved `HEAD` (e.g. ran `git commit` on its
+  own). The subsequent squash + force-push would otherwise publish an unreviewed commit; the park comment surfaces the
+  before / after SHAs.
 
 ### Examples
 
@@ -157,96 +243,178 @@ VERIFY_COMMANDS=python3 -m pytest -q;ruff check .
 VERIFY_TIMEOUT=1200
 ```
 
-When exporting in a shell instead of `.env`, prefer one command per line — the parser accepts both `;` and newlines as separators.
+When exporting in a shell instead of `.env`, prefer one command per line — the parser accepts both `;` and newlines as
+separators.
 
 ## Parallel processing
 
 Each polling tick advances issues concurrently along two axes:
 
-- **Across repos.** When `REPOS` lists more than one entry, `main._run_tick` fans the per-repo `workflow.tick(gh, spec)` calls out across a `ThreadPoolExecutor` (one worker per repo). The legacy single-repo mode (`REPOS` unset) stays in-thread.
-- **Within a repo.** Per-issue handlers are dispatched to a long-lived `IssueScheduler`. Fan-out issues (`ready` / `implementing` / `documenting` / `validating` / `in_review` / `fixing` / `resolving_conflict`) are submitted one callable per issue. Family-aware issues (`decomposing` / `blocked` / `umbrella` / unlabeled pickup) are folded into ONE bucket submit per repo that drains them sequentially.
+- **Across repos.** When `REPOS` lists more than one entry, `main._run_tick` fans the per-repo `workflow.tick(gh, spec)`
+  calls out across a `ThreadPoolExecutor` (one worker per repo). The legacy single-repo mode (`REPOS` unset) stays
+  in-thread.
+- **Within a repo.** Per-issue handlers are dispatched to a long-lived `IssueScheduler`. Fan-out issues (`ready` /
+  `implementing` / `documenting` / `validating` / `in_review` / `fixing` / `resolving_conflict`) are submitted one
+  callable per issue. Family-aware issues (`decomposing` / `blocked` / `umbrella` / unlabeled pickup) are folded into
+  ONE bucket submit per repo that drains them sequentially.
 
 The two caps below are the levers:
 
-| Variable                       | Default | Purpose                                                                                              |
-| ------------------------------ | ------- | ---------------------------------------------------------------------------------------------------- |
-| `MAX_PARALLEL_ISSUES_PER_REPO` | `1`     | per-repo cap on concurrent in-flight per-issue handlers. Each `REPOS` entry can override via its fifth pipe-separated field. Must be a positive integer. |
-| `MAX_PARALLEL_ISSUES_GLOBAL`   | `3`     | global cap across all configured repos. Must be a positive integer; raise only with the CPU / memory headroom to run that many agent CLIs at once. No-agent family buckets (`blocked` / `umbrella`) are cap-exempt and run on a dedicated executor. |
-| `WORKFLOW_TRANSITION_GUARD`    | `warn`  | governs the workflow-label transition-legality check in `set_workflow_label` against the declared `ALLOWED_TRANSITIONS` table (see [`state-machine.md`](state-machine.md#typed-states-and-the-transition-guard)). `warn` logs an illegal transition and proceeds; `enforce` raises; `off` disables it. The label *typo* guard is always strict regardless of this setting. Invalid values abort at startup. |
+- `MAX_PARALLEL_ISSUES_PER_REPO` — default `1`. per-repo cap on concurrent in-flight per-issue handlers. Each `REPOS`
+  entry can override via its fifth pipe-separated field. Must be a positive integer.
+- `MAX_PARALLEL_ISSUES_GLOBAL` — default `3`. global cap across all configured repos. Must be a positive integer;
+  raise only with the CPU / memory headroom to run that many agent CLIs at once. No-agent family buckets (`blocked` /
+  `umbrella`) are cap-exempt and run on a dedicated executor.
+- `WORKFLOW_TRANSITION_GUARD` — default `warn`. governs the workflow-label transition-legality check in
+  `set_workflow_label` against the declared `ALLOWED_TRANSITIONS` table (see
+  [`state-machine.md`](state-machine.md#typed-states-and-the-transition-guard)). `warn` logs an illegal transition and
+  proceeds; `enforce` raises; `off` disables it. The label *typo* guard is always strict regardless of this setting.
+  Invalid values abort at startup.
 
-Both caps are enforced by a single `IssueScheduler` (`orchestrator/scheduler.py`) built once at startup and threaded through every `workflow.tick` call. A submit is skipped this tick (and retried next pass) when:
+Both caps are enforced by a single `IssueScheduler` (`orchestrator/scheduler.py`) built once at startup and threaded
+through every `workflow.tick` call. A submit is skipped this tick (and retried next pass) when:
 
 - the `(repo_slug, issue_number)` pair is already in flight (duplicate-active gate),
 - the global or per-repo cap is reached,
 - another family worker on the same repo is already in flight (family mutex).
 
-**No-agent bucket exemption.** When every family-aware issue in this tick's bucket runs a no-agent handler — `blocked` or `umbrella`, both pure label / dep-graph walks — the dispatcher submits the bucket as cap-exempt: it does not consume cap slots and runs on a dedicated executor pool. This keeps a cheap-polling parent from being starved by ordinary implementation work; in particular a `blocked` parent waiting on its own children would otherwise deadlock those children for the only per-repo slot under the default `parallel_limit=1`. The family mutex still applies. A bucket containing `decomposing` (spawns the decomposer agent) or an unlabeled-pickup issue stays cap-counted.
+**No-agent bucket exemption.** When every family-aware issue in this tick's bucket runs a no-agent handler — `blocked`
+or `umbrella`, both pure label / dep-graph walks — the dispatcher submits the bucket as cap-exempt: it does not
+consume cap slots and runs on a dedicated executor pool. This keeps a cheap-polling parent from being starved by
+ordinary implementation work; in particular a `blocked` parent waiting on its own children would otherwise deadlock
+those children for the only per-repo slot under the default `parallel_limit=1`. The family mutex still applies. A bucket
+containing `decomposing` (spawns the decomposer agent) or an unlabeled-pickup issue stays cap-counted.
 
 **Family vs fan-out labels:**
 
-- **Family-aware** (`decomposing`, `blocked`, `umbrella`, unlabeled): read and write cross-issue state (parent ↔ child) and must never run two at a time on the same repo.
-- **Fan-out** (`ready`, `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`): only touch per-issue state; fan out concurrently up to the caps.
+- **Family-aware** (`decomposing`, `blocked`, `umbrella`, unlabeled): read and write cross-issue state (parent ↔
+  child) and must never run two at a time on the same repo.
+- **Fan-out** (`ready`, `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`,
+  `question`): only touch per-issue state; fan out concurrently up to the caps.
 
-The pre-tick base refresh (`_refresh_base_and_worktrees`) is scheduler-aware: per-issue worktrees whose handler is currently in flight are skipped this tick, so a base advance cannot rebase a pre-PR worktree under a still-running agent. The skip is conditional on active state.
+The pre-tick base refresh (`_refresh_base_and_worktrees`) is scheduler-aware: per-issue worktrees whose handler is
+currently in flight are skipped this tick, so a base advance cannot rebase a pre-PR worktree under a still-running
+agent. The skip is conditional on active state.
 
-`shutdown(wait=True)` runs on process exit (normal `--once` return, `SIGINT` / `SIGTERM`, or self-modifying-merge restart) so any in-flight workers complete cleanly. The signal handler also calls `scheduler.shutdown(wait=False)` synchronously the instant the signal lands, so the submit path is closed mid-tick.
+`shutdown(wait=True)` runs on process exit (normal `--once` return, `SIGINT` / `SIGTERM`, or self-modifying-merge
+restart) so any in-flight workers complete cleanly. The signal handler also calls `scheduler.shutdown(wait=False)`
+synchronously the instant the signal lands, so the submit path is closed mid-tick.
 
-`main._run_tick` calls `scheduler.reap()` exactly once per polling pass (right before `analytics.prune_with_retention_logging()`) so worker failure-completion records drain before the next iteration. `_dispatch_via_scheduler` deliberately does NOT reap.
+`main._run_tick` calls `scheduler.reap()` exactly once per polling pass (right before
+`analytics.prune_with_retention_logging()`) so worker failure-completion records drain before the next iteration.
+`_dispatch_via_scheduler` deliberately does NOT reap.
 
-Non-positive or non-integer values for either cap (or for a per-entry `parallel_limit`) abort startup with a clear error.
+Non-positive or non-integer values for either cap (or for a per-entry `parallel_limit`) abort startup with a clear
+error.
 
 ## Workspace and agent identity
 
-| Variable           | Default                                       | Purpose                                                                                                       |
-| ------------------ | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `WORKTREES_DIR`    | `../wt-orchestrator`                          | where per-issue git worktrees are created; layout is `WORKTREES_DIR/<owner>__<name>/issue-N`                  |
-| `LOG_DIR`          | `<REPO_ROOT>/logs`                            | directory `main.py` attaches its `FileHandler` under (`orchestrator.log`, rotated ~10 MiB × 5). Also the default parent for `ANALYTICS_LOG_PATH` (`LOG_DIR/analytics.jsonl`). Already covered by the `*.log` `.gitignore` rule. |
-| `AGENT_GIT_NAME`   | `agent-orchestrator`                          | `GIT_AUTHOR_NAME`/`GIT_COMMITTER_NAME` injected into agent spawns                                             |
-| `AGENT_GIT_EMAIL`  | `agent-orchestrator@users.noreply.github.com` | `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL` injected into agent spawns                                           |
+- `WORKTREES_DIR` — default `../wt-orchestrator`. where per-issue git worktrees are created; layout is
+  `WORKTREES_DIR/<owner>__<name>/issue-N`
+- `LOG_DIR` — default `<REPO_ROOT>/logs`. directory `main.py` attaches its `FileHandler` under (`orchestrator.log`,
+  rotated ~10 MiB × 5). Also the default parent for `ANALYTICS_LOG_PATH` (`LOG_DIR/analytics.jsonl`). Already covered
+  by the `*.log` `.gitignore` rule.
+- `AGENT_GIT_NAME` — default `agent-orchestrator`. `GIT_AUTHOR_NAME`/`GIT_COMMITTER_NAME` injected into agent spawns
+- `AGENT_GIT_EMAIL` — default `agent-orchestrator@users.noreply.github.com`. `GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL`
+  injected into agent spawns
 
 ## In-review behavior
 
-The orchestrator is permanently manual-merge-only: humans click Merge. `_handle_in_review` routes fresh PR feedback to `fixing`, pings the HITL handles once per head SHA when the PR is mergeable and the current head completed the reviewer-approved final-docs handoff (or carries a real GitHub APPROVED review), and parks awaiting human attention for an unmergeable PR.
+The orchestrator is permanently manual-merge-only: humans click Merge. `_handle_in_review` routes fresh PR feedback to
+`fixing`, pings the HITL handles once per head SHA when the PR is mergeable and the current head completed the
+reviewer-approved final-docs handoff (or carries a real GitHub APPROVED review), and parks awaiting human attention for
+an unmergeable PR.
 
-| Variable                     | Default | Purpose                                                                                              |
-| ---------------------------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `IN_REVIEW_DEBOUNCE_SECONDS` | `600`   | quiet window the `fixing` stage honours before resuming the dev on PR feedback. Newer comments arriving while already labeled `fixing` reset the window. `_handle_in_review` itself routes fresh feedback to `fixing` immediately and does NOT apply the debounce. |
+- `IN_REVIEW_DEBOUNCE_SECONDS` — default `600`. quiet window the `fixing` stage honours before resuming the dev on PR
+  feedback. Newer comments arriving while already labeled `fixing` reset the window. `_handle_in_review` itself routes
+  fresh feedback to `fixing` immediately and does NOT apply the debounce.
 
 ## Observability
 
-| Variable                   | Default                          | Purpose                                                                                                                       |
-| -------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `EVENT_LOG_PATH`           | _(unset)_                        | optional JSONL audit sink, one event per line, no built-in rotation. See [`observability.md#audit-event-log`](observability.md#audit-event-log-event_log_path). |
-| `ANALYTICS_LOG_PATH`       | `LOG_DIR/analytics.jsonl`        | project-local analytics JSONL sink. Records `stage_enter`, `stage_evaluation`, and `agent_exit` events. Set to empty / `off` / `disabled` / `none` to disable. See [`observability.md#analytics-sink`](observability.md#analytics-sink-analytics_log_path). |
-| `ANALYTICS_RETENTION_DAYS` | `90`                             | retention window for `ANALYTICS_LOG_PATH`. The polling loop calls `analytics.prune_with_retention_logging()` once per tick. Set to `0` (or any non-positive value) to keep raw data indefinitely. |
-| `ANALYTICS_DB_URL`         | _(unset)_                        | libpq connection string for the analytics Postgres service in [`../analytics-db/compose.yml`](../analytics-db/compose.yml). NOT read by the polling loop — orchestrator correctness does not depend on database availability. Empty / `off` / `disabled` / `none` disables both the sync CLI and dashboard reads. See [`observability.md#analytics-database`](observability.md#analytics-database-analytics-db). |
-| `TRAJECTORY_LOG_PATH`      | _(unset, off)_                   | opt-in path switch for the trajectory sink — an independent JSONL file for per-run agent reasoning trajectories, separate from `ANALYTICS_LOG_PATH`. Defaults off: unset / empty / `off` / `disabled` / `none` (case-insensitive) all disable it; any other value is the explicit opt-in path. When enabled, `record_agent_exit` writes one redacted, head/tail-truncated `agent_trajectory` record per tracked run (the orchestrator prompt lands as `user_input`); when off, no trajectory work runs and the `agent_exit` record is unchanged. Never touches `ANALYTICS_LOG_PATH`, the analytics Postgres sync, or the analytics dashboard. Local filesystem only and observation-only — the polling loop never reads it back, so the file is safe to delete without affecting workflow state. A dedicated Streamlit viewer (`orchestrator/trajectory_dashboard.py`, launched with `uv run streamlit run orchestrator/trajectory_dashboard.py`) reads this JSONL file directly — no Postgres or sync — when you want to browse the recorded trajectories. **Privacy:** redaction masks only secret-shaped env values (and the GitHub token), **not** issue/repo content, so an enabled trajectory file can carry issue titles/bodies, quoted source, and agent reasoning in cleartext; scope its permissions accordingly. See [`observability.md#trajectory-sink`](observability.md#trajectory-sink-trajectory_log_path). |
-| `TRAJECTORY_RETENTION_DAYS`| `90`                             | retention window for `TRAJECTORY_LOG_PATH`, same semantics as `ANALYTICS_RETENTION_DAYS`: `prune_trajectory_records()` removes older records and `0` (or any non-positive value) keeps trajectories indefinitely. Parsed from `.env`, but not yet called from the polling loop, so it affects the file only when an operator-driven prune process runs; do not overlap an external prune with live trajectory appends. See the trajectory cron examples in [`observability.md`](observability.md#trajectory-operator-workflow). |
-| `TRACK_SKILL_TRIGGERS`     | _(unset, off)_                   | opt-in switch for skill-trigger tracking. `1` / `true` / `on` / `yes` (case-insensitive) makes `record_agent_exit` parse the agent's triggered skills and fold `skills_triggered` / `skills_triggered_count` / `skills_available` into each `agent_exit` record. It also makes `_run_agent_tracked` emit one `skill_triggered` audit event per distinct triggered skill to `EVENT_LOG_PATH` (when that sink is set). Default off so a default install's records and audit log stay shape-compatible with today's, and needs no Postgres DDL — the `extras JSONB` column absorbs the new fields. Both backends' triggered-skill shapes are now pinned against captured streams (claude `Skill` tool-use blocks; codex `skills/<name>/SKILL.md` reads, a heuristic file-open signal — see [`observability.md`](observability.md#usage-parser-orchestratorusagepy)). The offered-skills set (`skills_available`) is now read from claude's `system`/`init` frame `skills` array (confirmed against a real stream capture); on codex it stays best-effort until its source is captured. Once on, the dashboard's "Skill trigger rates" panel surfaces the per-role/backend trigger rate (`analytics.read.get_skill_trigger_rates`) and, below it, a per-skill trigger matrix (`analytics.read.get_skill_trigger_matrix`) pairing each repo's offered-skill catalog with the skills its runs triggered, over the accumulated fields. See [`observability.md#agent_exit-records`](observability.md#agent_exit-records) and the [audit event log](observability.md#audit-event-log-event_log_path). |
-| `DASHBOARD_PARALLEL_READS` | _(unset, off)_                   | opt-in switch for the Streamlit dashboard's parallel read fan-out. `1` / `true` / `on` / `yes` (case-insensitive) flips the dashboard's widget reads from sequential to a `ThreadPoolExecutor` (eight workers). Parsed at dashboard import; the polling loop never reads it. |
+- `EVENT_LOG_PATH` — default _(unset)_. optional JSONL audit sink, one event per line, no built-in rotation. See
+  [`observability.md#audit-event-log`](observability.md#audit-event-log-event_log_path).
+- `ANALYTICS_LOG_PATH` — default `LOG_DIR/analytics.jsonl`. project-local analytics JSONL sink. Records `stage_enter`,
+  `stage_evaluation`, and `agent_exit` events. Set to empty / `off` / `disabled` / `none` to disable. See
+  [`observability.md#analytics-sink`](observability.md#analytics-sink-analytics_log_path).
+- `ANALYTICS_RETENTION_DAYS` — default `90`. retention window for `ANALYTICS_LOG_PATH`. The polling loop calls
+  `analytics.prune_with_retention_logging()` once per tick. Set to `0` (or any non-positive value) to keep raw data
+  indefinitely.
+- `ANALYTICS_DB_URL` — default _(unset)_. libpq connection string for the analytics Postgres service in
+  [`../analytics-db/compose.yml`](../analytics-db/compose.yml). NOT read by the polling loop — orchestrator
+  correctness does not depend on database availability. Empty / `off` / `disabled` / `none` disables both the sync CLI
+  and dashboard reads. See [`observability.md#analytics-database`](observability.md#analytics-database-analytics-db).
+- `TRAJECTORY_LOG_PATH` — default _(unset, off)_. opt-in path switch for the trajectory sink — an independent JSONL
+  file for per-run agent reasoning trajectories, separate from `ANALYTICS_LOG_PATH`. Defaults off: unset / empty / `off`
+  / `disabled` / `none` (case-insensitive) all disable it; any other value is the explicit opt-in path. When enabled,
+  `record_agent_exit` writes one redacted, head/tail-truncated `agent_trajectory` record per tracked run (the
+  orchestrator prompt lands as `user_input`); when off, no trajectory work runs and the `agent_exit` record is
+  unchanged. Never touches `ANALYTICS_LOG_PATH`, the analytics Postgres sync, or the analytics dashboard. Local
+  filesystem only and observation-only — the polling loop never reads it back, so the file is safe to delete without
+  affecting workflow state. A dedicated Streamlit viewer (`orchestrator/trajectory_dashboard.py`, launched with
+  `uv run streamlit run orchestrator/trajectory_dashboard.py`) reads this JSONL file directly — no Postgres or sync
+  — when you want to browse the recorded trajectories. **Privacy:** redaction masks only secret-shaped env values (and
+  the GitHub token), **not** issue/repo content, so an enabled trajectory file can carry issue titles/bodies, quoted
+  source, and agent reasoning in cleartext; scope its permissions accordingly. See
+  [`observability.md#trajectory-sink`](observability.md#trajectory-sink-trajectory_log_path).
+- `TRAJECTORY_RETENTION_DAYS` — default `90`. retention window for `TRAJECTORY_LOG_PATH`, same semantics as
+  `ANALYTICS_RETENTION_DAYS`: `prune_trajectory_records()` removes older records and `0` (or any non-positive value)
+  keeps trajectories indefinitely. Parsed from `.env`, but not yet called from the polling loop, so it affects the file
+  only when an operator-driven prune process runs; do not overlap an external prune with live trajectory appends. See
+  the trajectory cron examples in [`observability.md`](observability.md#trajectory-operator-workflow).
+- `TRACK_SKILL_TRIGGERS` — default _(unset, off)_. opt-in switch for skill-trigger tracking. `1` / `true` / `on` /
+  `yes` (case-insensitive) makes `record_agent_exit` parse the agent's triggered skills and fold `skills_triggered` /
+  `skills_triggered_count` / `skills_available` into each `agent_exit` record. It also makes `_run_agent_tracked` emit
+  one `skill_triggered` audit event per distinct triggered skill to `EVENT_LOG_PATH` (when that sink is set). Default
+  off so a default install's records and audit log stay shape-compatible with today's, and needs no Postgres DDL — the
+  `extras JSONB` column absorbs the new fields. Both backends' triggered-skill shapes are now pinned against captured
+  streams (claude `Skill` tool-use blocks; codex `skills/<name>/SKILL.md` reads, a heuristic file-open signal — see
+  [`observability.md`](observability.md#usage-parser-orchestratorusagepy)). The offered-skills set (`skills_available`)
+  is now read from claude's `system`/`init` frame `skills` array (confirmed against a real stream capture); on codex it
+  stays best-effort until its source is captured. Once on, the dashboard's "Skill trigger rates" panel surfaces the
+  per-role/backend trigger rate (`analytics.read.get_skill_trigger_rates`) and, below it, a per-skill trigger matrix
+  (`analytics.read.get_skill_trigger_matrix`) pairing each repo's offered-skill catalog with the skills its runs
+  triggered, over the accumulated fields. See
+  [`observability.md#agent_exit-records`](observability.md#agent_exit-records) and the
+  [audit event log](observability.md#audit-event-log-event_log_path).
+- `DASHBOARD_PARALLEL_READS` — default _(unset, off)_. opt-in switch for the Streamlit dashboard's parallel read
+  fan-out. `1` / `true` / `on` / `yes` (case-insensitive) flips the dashboard's widget reads from sequential to a
+  `ThreadPoolExecutor` (eight workers). Parsed at dashboard import; the polling loop never reads it.
 
-`ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `ANALYTICS_DB_URL`, `TRACK_SKILL_TRIGGERS`, `TRAJECTORY_LOG_PATH`, and `TRAJECTORY_RETENTION_DAYS` are parsed at import inside `orchestrator/analytics/__init__.py` (the package owns its own configuration surface). `EVENT_LOG_PATH` is parsed in `orchestrator/config.py` because the audit event log is a general-purpose audit surface rather than analytics-specific.
+`ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `ANALYTICS_DB_URL`, `TRACK_SKILL_TRIGGERS`, `TRAJECTORY_LOG_PATH`, and
+`TRAJECTORY_RETENTION_DAYS` are parsed at import inside `orchestrator/analytics/__init__.py` (the package owns its own
+configuration surface). `EVENT_LOG_PATH` is parsed in `orchestrator/config.py` because the audit event log is a
+general-purpose audit surface rather than analytics-specific.
 
 ### Analytics dashboard quickstart
 
-The pipeline is opt-in and layered: the orchestrator writes JSONL (`ANALYTICS_LOG_PATH`), a local Postgres aggregates it (`ANALYTICS_DB_URL`), and Streamlit reads from Postgres. Each layer is independent — the polling loop never touches Postgres or Streamlit, so deferring or disabling the dashboard never affects workflow correctness.
+The pipeline is opt-in and layered: the orchestrator writes JSONL (`ANALYTICS_LOG_PATH`), a local Postgres aggregates it
+(`ANALYTICS_DB_URL`), and Streamlit reads from Postgres. Each layer is independent — the polling loop never touches
+Postgres or Streamlit, so deferring or disabling the dashboard never affects workflow correctness.
 
-1. **Confirm the JSONL sink is producing records.** `ANALYTICS_LOG_PATH` defaults to `logs/analytics.jsonl`. `wc -l logs/analytics.jsonl` and `tail -1 logs/analytics.jsonl | python -m json.tool` sanity-check it.
-2. **Start the local Postgres service.** From `analytics-db/`, run `docker compose up -d`. The init script ([`../analytics-db/init/01-schema.sql`](../analytics-db/init/01-schema.sql)) creates the `analytics_events` table on first start; the data volume lives at `analytics-db/data/` (gitignored). The port binding is pinned to `127.0.0.1` and credentials default to `orchestrator` / `orchestrator`; override `POSTGRES_PASSWORD` (and any other field) in `analytics-db/.env` before exposing the port off-host or storing real data.
+1. **Confirm the JSONL sink is producing records.** `ANALYTICS_LOG_PATH` defaults to `logs/analytics.jsonl`.
+   `wc -l logs/analytics.jsonl` and `tail -1 logs/analytics.jsonl | python -m json.tool` sanity-check it.
+2. **Start the local Postgres service.** From `analytics-db/`, run `docker compose up -d`. The init script
+   ([`../analytics-db/init/01-schema.sql`](../analytics-db/init/01-schema.sql)) creates the `analytics_events` table on
+   first start; the data volume lives at `analytics-db/data/` (gitignored). The port binding is pinned to `127.0.0.1`
+   and credentials default to `orchestrator` / `orchestrator`; override `POSTGRES_PASSWORD` (and any other field) in
+   `analytics-db/.env` before exposing the port off-host or storing real data.
 3. **Point the orchestrator at the database.** Set `ANALYTICS_DB_URL` in `.env`:
 
    ```sh
    ANALYTICS_DB_URL=postgresql://orchestrator:orchestrator@127.0.0.1:5432/orchestrator_analytics
    ```
 
-   Putting the database password in `.env` is acceptable — the URL is the only credential, it is scoped to local-only Postgres, and never grants write access to GitHub. The polling loop does not re-read this setting.
+   Putting the database password in `.env` is acceptable — the URL is the only credential, it is scoped to local-only
+   Postgres, and never grants write access to GitHub. The polling loop does not re-read this setting.
 4. **Populate Postgres from JSONL.** Run the sync on demand:
 
    ```sh
    uv run python -m orchestrator.analytics.sync
    ```
 
-   Inserts dedupe by `content_hash`, so re-running is idempotent. No-op when `ANALYTICS_DB_URL` is unset/disabled, `ANALYTICS_LOG_PATH` is explicitly disabled, or the JSONL file is absent. Schedule on whatever cadence you prefer; see [`observability.md#operator-workflow`](observability.md#operator-workflow) for a sample `cron` entry.
+   Inserts dedupe by `content_hash`, so re-running is idempotent. No-op when `ANALYTICS_DB_URL` is unset/disabled,
+   `ANALYTICS_LOG_PATH` is explicitly disabled, or the JSONL file is absent. Schedule on whatever cadence you prefer;
+   see [`observability.md#operator-workflow`](observability.md#operator-workflow) for a sample `cron` entry.
 5. **Launch the dashboard.** Install the optional `dashboard` group once, then run Streamlit:
 
    ```sh
@@ -254,33 +422,55 @@ The pipeline is opt-in and layered: the orchestrator writes JSONL (`ANALYTICS_LO
    uv run streamlit run orchestrator/dashboard.py
    ```
 
-   Streamlit prints a `http://localhost:8501` URL. The dashboard is independent of the polling tick and can be killed and relaunched without affecting workflow progress. Re-run step 4 to pick up new records.
+   Streamlit prints a `http://localhost:8501` URL. The dashboard is independent of the polling tick and can be killed
+   and relaunched without affecting workflow progress. Re-run step 4 to pick up new records.
 
-See [`observability.md#analytics-database`](observability.md#analytics-database-analytics-db) for the schema, sync internals, read-model split, dashboard layout, and the in-app empty / error banners.
+See [`observability.md#analytics-database`](observability.md#analytics-database-analytics-db) for the schema, sync
+internals, read-model split, dashboard layout, and the in-app empty / error banners.
 
 ## Continuous integration
 
-[`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `ruff check orchestrator tests` and `pytest` on Python 3.12 for every push to `main` and every pull request, installing from the committed [`../uv.lock`](../uv.lock) via `uv sync --locked`. Lint rules live in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; dev tools are declared in `[dependency-groups]`.
+[`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `ruff check orchestrator tests` and `pytest` on Python
+3.12 for every push to `main` and every pull request, installing from the committed [`../uv.lock`](../uv.lock) via
+`uv sync --locked`. Lint rules live in [`../pyproject.toml`](../pyproject.toml) under `[tool.ruff.lint]`; dev tools are
+declared in `[dependency-groups]`.
 
-The workflow declares `permissions: contents: read` so the run's `GITHUB_TOKEN` is read-only and cannot publish artifacts, push tags, or comment on PRs. The job uses no repository secrets, so PRs from forks run safely under the same scope.
+The workflow declares `permissions: contents: read` so the run's `GITHUB_TOKEN` is read-only and cannot publish
+artifacts, push tags, or comment on PRs. The job uses no repository secrets, so PRs from forks run safely under the same
+scope.
 
-[`../.github/dependabot.yml`](../.github/dependabot.yml) opens weekly update PRs for the `github-actions` and `uv` (Python `pyproject.toml` + `uv.lock`) ecosystems with a 30-day `cooldown.default-days` window. [`../.github/workflows/dependency-review.yml`](../.github/workflows/dependency-review.yml) runs `actions/dependency-review-action` on every PR and fails the check when a PR introduces a vulnerable or non-compliant dependency.
+[`../.github/dependabot.yml`](../.github/dependabot.yml) opens weekly update PRs for the `github-actions` and `uv`
+(Python `pyproject.toml` + `uv.lock`) ecosystems with a 30-day `cooldown.default-days` window.
+[`../.github/workflows/dependency-review.yml`](../.github/workflows/dependency-review.yml) runs
+`actions/dependency-review-action` on every PR and fails the check when a PR introduces a vulnerable or non-compliant
+dependency.
 
 ## Run modes
 
-- `./run.sh` — production. Continuous polling. `run.sh` does `git pull --ff-only origin "$ORCHESTRATOR_BASE_BRANCH"` (read from `.env`, default `main`) and re-launches the orchestrator after each clean exit, so a self-modifying merge picks up new code automatically. If a non-base branch is checked out the pull is skipped, and if the fast-forward fails (diverged base, rebase in progress, network error) the wrapper logs a loud warning to stderr and launches the existing working tree anyway instead of exiting — under `Restart=always` a stale-but-running orchestrator beats a silent crash loop. See [`architecture.md#process-model`](architecture.md#process-model) for the full skip-and-warn contract.
+- `./run.sh` — production. Continuous polling. `run.sh` does `git pull --ff-only origin "$ORCHESTRATOR_BASE_BRANCH"`
+  (read from `.env`, default `main`) and re-launches the orchestrator after each clean exit, so a self-modifying merge
+  picks up new code automatically. If a non-base branch is checked out the pull is skipped, and if the fast-forward
+  fails (diverged base, rebase in progress, network error) the wrapper logs a loud warning to stderr and launches the
+  existing working tree anyway instead of exiting — under `Restart=always` a stale-but-running orchestrator beats a
+  silent crash loop. See [`architecture.md#process-model`](architecture.md#process-model) for the full skip-and-warn
+  contract.
 
-  Ctrl+C (or `SIGTERM`) stops the wrapper: the orchestrator exits with `128 + signum` and `run.sh` skips the restart loop. A second Ctrl+C terminates immediately.
+  Ctrl+C (or `SIGTERM`) stops the wrapper: the orchestrator exits with `128 + signum` and `run.sh` skips the restart
+  loop. A second Ctrl+C terminates immediately.
 - `python -m orchestrator.main --once` — single tick then exit. Useful for tests and debugging.
 - `python -m orchestrator.main --log-level DEBUG` — verbose logs.
 
-On first start the orchestrator creates the workflow labels and the `hold_base_sync` / `backlog` / `community_contribution` control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
+On first start the orchestrator creates the workflow labels and the `hold_base_sync` / `backlog` /
+`community_contribution` control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
 
 ## Running under systemd (user service)
 
-`run.sh` does not survive a reboot, a `tty` logout, or the user manager being torn down. The recommended production deployment is a systemd **user** service that supervises `run.sh` directly.
+`run.sh` does not survive a reboot, a `tty` logout, or the user manager being torn down. The recommended production
+deployment is a systemd **user** service that supervises `run.sh` directly.
 
-A detached `screen` / `tmux` session wrapped in a `Type=forking` unit looks similar but is the wrong shape: systemd ends up supervising `screen`, not the orchestrator; `ExecStop` races the screen session's own lifecycle; logs split; and the unit silently does nothing at boot unless linger is enabled. Keep `screen` / `tmux` for interactive debugging.
+A detached `screen` / `tmux` session wrapped in a `Type=forking` unit looks similar but is the wrong shape: systemd ends
+up supervising `screen`, not the orchestrator; `ExecStop` races the screen session's own lifecycle; logs split; and the
+unit silently does nothing at boot unless linger is enabled. Keep `screen` / `tmux` for interactive debugging.
 
 ### Unit file
 
@@ -303,9 +493,13 @@ Environment=PATH=/home/<user>/.local/bin:/usr/local/bin:/usr/bin:/bin
 WantedBy=default.target
 ```
 
-- `Type=simple` because `run.sh` stays in the foreground — systemd tracks the wrapper PID, and `SIGTERM` from `systemctl stop` propagates to the wrapper, then to the orchestrator (exit `143`, no restart loop).
-- `Restart=always` covers machine-level events (reboot, OOM, host crash). Application-level self-restart after a self-modifying merge is still handled inside `run.sh`.
-- A non-interactive systemd service does not inherit your shell's `PATH`. If `codex` or `claude` lives under `~/.local/bin`, add it to `Environment=PATH=…`, or set `CODEX_BIN` / `CLAUDE_BIN` to absolute paths via additional `Environment=` lines.
+- `Type=simple` because `run.sh` stays in the foreground — systemd tracks the wrapper PID, and `SIGTERM` from
+  `systemctl stop` propagates to the wrapper, then to the orchestrator (exit `143`, no restart loop).
+- `Restart=always` covers machine-level events (reboot, OOM, host crash). Application-level self-restart after a
+  self-modifying merge is still handled inside `run.sh`.
+- A non-interactive systemd service does not inherit your shell's `PATH`. If `codex` or `claude` lives under
+  `~/.local/bin`, add it to `Environment=PATH=…`, or set `CODEX_BIN` / `CLAUDE_BIN` to absolute paths via additional
+  `Environment=` lines.
 
 ### Enabling
 
@@ -315,7 +509,8 @@ systemctl --user enable --now agent.service
 loginctl enable-linger <user>
 ```
 
-`enable-linger` is **required for boot-time start**: without it the per-user systemd manager only runs while the user has an active login session.
+`enable-linger` is **required for boot-time start**: without it the per-user systemd manager only runs while the user
+has an active login session.
 
 ### Operating
 
@@ -326,24 +521,44 @@ systemctl --user stop agent.service          # SIGTERM the wrapper (exits 143, n
 journalctl --user-unit agent.service -f      # tail the wrapper's stdout/stderr
 ```
 
-systemd's journal captures `run.sh` and orchestrator stdout/stderr (process lifecycle, exit codes, restart messages). The orchestrator's own structured log lives at `logs/orchestrator.log` under `WorkingDirectory` (rotated, ~10 MiB × 5). Check the journal first for "did it start / did it die", then `logs/orchestrator.log` for per-issue handler detail.
+systemd's journal captures `run.sh` and orchestrator stdout/stderr (process lifecycle, exit codes, restart messages).
+The orchestrator's own structured log lives at `logs/orchestrator.log` under `WorkingDirectory` (rotated, ~10 MiB × 5).
+Check the journal first for "did it start / did it die", then `logs/orchestrator.log` for per-issue handler detail.
 
 ## Applying `.env` changes
 
-`.env` is read once, when `python -m orchestrator.main` starts. The orchestrator process never reloads it, so most edits take effect on the **next fresh Python start** — there is no signal to make a running process re-read configuration. `run.sh` is the usual restart mechanism: each loop iteration launches a new Python process (and `git pull --ff-only`s the orchestrator checkout to `ORCHESTRATOR_BASE_BRANCH` along the way).
+`.env` is read once, when `python -m orchestrator.main` starts. The orchestrator process never reloads it, so most edits
+take effect on the **next fresh Python start** — there is no signal to make a running process re-read configuration.
+`run.sh` is the usual restart mechanism: each loop iteration launches a new Python process (and `git pull --ff-only`s
+the orchestrator checkout to `ORCHESTRATOR_BASE_BRANCH` along the way).
 
 ### What survives a restart
 
-Per-issue progress lives in the issue's pinned JSON comment on GitHub and in the per-issue worktree on disk. Restarting between ticks loses nothing — the next tick picks each issue back up from its label and pinned state. Two restart-time hazards are worth knowing:
+Per-issue progress lives in the issue's pinned JSON comment on GitHub and in the per-issue worktree on disk. Restarting
+between ticks loses nothing — the next tick picks each issue back up from its label and pinned state. Two restart-time
+hazards are worth knowing:
 
-- **A live `codex` / `claude` child.** Stage handlers spawn agent subprocesses that may run for as long as `AGENT_TIMEOUT`. On a SIGTERM/SIGINT stop the loop terminates in-flight agent process groups up front (and, as a hard backstop, the shutdown watchdog force-terminates them after `SHUTDOWN_GRACE_SECONDS` and exits), so the process leaves within the grace window instead of holding open for up to `AGENT_TIMEOUT` and being SIGKILLed at the systemd stop deadline. The interrupted child is still killed mid-session. The runner flags such a run `interrupted` (distinct from `timed_out`), and every dev-resume stage handler (`implementing`, `validating`, `fixing`, `documenting`, `in_review`, `resolving_conflict`) short-circuits on it — they ignore the partial result and leave durable GitHub state untouched, so the next process retries the resume from scratch rather than parking on `awaiting_human` or routing through timeout recovery. A dirty worktree may still remain on disk for the next tick to reconcile.
-- **In-flight agent spec is pinned.** When a `codex` / `claude` session starts, the orchestrator writes the full `DEV_AGENT` / `DECOMPOSE_AGENT` spec into pinned state and re-parses it (not the current `.env`) on every resume. Flipping `DEV_AGENT` or `DECOMPOSE_AGENT` after a session is locked does nothing for that issue until it reaches `done` or `rejected`. The question stage seeds from `DECOMPOSE_AGENT` on first spawn and pins to `question_agent` for the rest of the Q&A. `REVIEW_AGENT` is not pinned — the reviewer spawns fresh each round.
+- **A live `codex` / `claude` child.** Stage handlers spawn agent subprocesses that may run for as long as
+  `AGENT_TIMEOUT`. On a SIGTERM/SIGINT stop the loop terminates in-flight agent process groups up front (and, as a hard
+  backstop, the shutdown watchdog force-terminates them after `SHUTDOWN_GRACE_SECONDS` and exits), so the process leaves
+  within the grace window instead of holding open for up to `AGENT_TIMEOUT` and being SIGKILLed at the systemd stop
+  deadline. The interrupted child is still killed mid-session. The runner flags such a run `interrupted` (distinct from
+  `timed_out`), and every dev-resume stage handler (`implementing`, `validating`, `fixing`, `documenting`, `in_review`,
+  `resolving_conflict`) short-circuits on it — they ignore the partial result and leave durable GitHub state
+  untouched, so the next process retries the resume from scratch rather than parking on `awaiting_human` or routing
+  through timeout recovery. A dirty worktree may still remain on disk for the next tick to reconcile.
+- **In-flight agent spec is pinned.** When a `codex` / `claude` session starts, the orchestrator writes the full
+  `DEV_AGENT` / `DECOMPOSE_AGENT` spec into pinned state and re-parses it (not the current `.env`) on every resume.
+  Flipping `DEV_AGENT` or `DECOMPOSE_AGENT` after a session is locked does nothing for that issue until it reaches
+  `done` or `rejected`. The question stage seeds from `DECOMPOSE_AGENT` on first spawn and pins to `question_agent` for
+  the rest of the Q&A. `REVIEW_AGENT` is not pinned — the reviewer spawns fresh each round.
 
 ### Safe restart guidance
 
 - **Idle / between ticks — safe.** Restart freely; the next tick resumes from GitHub state.
 - **Issue mid-stage with no agent child — generally safe.** Workflow state is on GitHub and in the worktree.
-- **Live `codex` / `claude` child — avoid.** Wait for the agent to exit. Forcing a restart can park the issue or leave a dirty worktree behind.
+- **Live `codex` / `claude` child — avoid.** Wait for the agent to exit. Forcing a restart can park the issue or leave
+  a dirty worktree behind.
 
 Useful inspection commands:
 
@@ -374,11 +589,14 @@ A second Ctrl+C while `run.sh` is mid-shutdown terminates immediately.
 **systemd user service.**
 
 1. Edit `.env` in the unit's `WorkingDirectory=`.
-2. **Skip `systemctl --user daemon-reload`** unless the `.service` unit file itself changed — `daemon-reload` reloads unit definitions, not `.env`.
+2. **Skip `systemctl --user daemon-reload`** unless the `.service` unit file itself changed — `daemon-reload` reloads
+   unit definitions, not `.env`.
 3. When safe (no live agent child), `systemctl --user restart agent.service`.
 4. Tail logs: `journalctl --user -u agent.service -f`.
 
-When `GITHUB_TOKEN` is supplied via the unit's `EnvironmentFile=`, edit that file and restart the service. When the token is hard-coded in an inline `Environment=` line, changing the value requires editing the unit *and* a `daemon-reload` before the restart.
+When `GITHUB_TOKEN` is supplied via the unit's `EnvironmentFile=`, edit that file and restart the service. When the
+token is hard-coded in an inline `Environment=` line, changing the value requires editing the unit *and* a
+`daemon-reload` before the restart.
 
 **Direct `python -m orchestrator.main --once`.**
 
@@ -386,21 +604,35 @@ Each `--once` invocation is a fresh Python process and reads the current `.env` 
 
 ### Setting-by-setting expectations
 
-| Setting | When the change takes effect |
-| ------- | ---------------------------- |
-| `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `SHUTDOWN_GRACE_SECONDS`, `MAX_REVIEW_ROUNDS`, `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `DEV_SESSION_MAX_RESUMES`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`, `SQUASH_ON_APPROVAL`, `EXPOSE_TRACKED_REPOS`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `LOG_DIR`, `EVENT_LOG_PATH`, `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `TRACK_SKILL_TRIGGERS`, `TRAJECTORY_LOG_PATH`, `TRAJECTORY_RETENTION_DAYS`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`, `ALLOWED_ISSUE_AUTHORS` | next Python start |
-| `ANALYTICS_DB_URL` | next `python -m orchestrator.analytics.sync` invocation, and next `streamlit run orchestrator/dashboard.py` start (the dashboard reads it from the imported analytics module, so a browser reload is not enough — relaunch Streamlit). The polling loop does not read this setting. |
-| `DASHBOARD_PARALLEL_READS` | next `streamlit run orchestrator/dashboard.py` start. Parsed at dashboard import. |
-| `MAX_PARALLEL_ISSUES_PER_REPO`, `MAX_PARALLEL_ISSUES_GLOBAL` | next Python start. Per-`REPOS` `parallel_limit` overrides take precedence over `MAX_PARALLEL_ISSUES_PER_REPO`. |
-| `WORKFLOW_TRANSITION_GUARD` | next Python start (parsed at config import). |
-| `DEV_AGENT`, `DECOMPOSE_AGENT` | next Python start, **except** for issues whose pinned state already names a `dev_agent` / `decomposer_agent` / `question_agent` — those keep the pinned spec until the issue reaches `done` or `rejected` |
-| `REVIEW_AGENT` | next reviewer spawn after the next Python start (not pinned per issue) |
-| `GITHUB_TOKEN` | not loaded from `.env`. Update the process environment or rewrite the file at `ORCHESTRATOR_TOKEN_FILE` (default `~/.config/<owner>/<repo>/token`) before the next start |
-| `ORCHESTRATOR_BASE_BRANCH` | `run.sh` captures this once before its restart loop, so editing it only takes effect after `run.sh` itself is restarted. The Python process picks it up on the same next start. |
+When each setting's change takes effect:
+
+- `POLL_INTERVAL`, `AGENT_TIMEOUT`, `REVIEW_TIMEOUT`, `SHUTDOWN_GRACE_SECONDS`, `MAX_REVIEW_ROUNDS`,
+  `MAX_CONFLICT_ROUNDS`, `MAX_RETRIES_PER_DAY`, `DEV_SESSION_MAX_RESUMES`, `IN_REVIEW_DEBOUNCE_SECONDS`, `DECOMPOSE`,
+  `SQUASH_ON_APPROVAL`, `EXPOSE_TRACKED_REPOS`, `VERIFY_COMMANDS`, `VERIFY_TIMEOUT`, `LOG_DIR`, `EVENT_LOG_PATH`,
+  `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, `TRACK_SKILL_TRIGGERS`, `TRAJECTORY_LOG_PATH`,
+  `TRAJECTORY_RETENTION_DAYS`, `REPO` / `REPOS` / `TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME`, `HITL_HANDLE`,
+  `ALLOWED_ISSUE_AUTHORS` — next Python start
+- `ANALYTICS_DB_URL` — next `python -m orchestrator.analytics.sync` invocation, and next
+  `streamlit run orchestrator/dashboard.py` start (the dashboard reads it from the imported analytics module, so a
+  browser reload is not enough — relaunch Streamlit). The polling loop does not read this setting.
+- `DASHBOARD_PARALLEL_READS` — next `streamlit run orchestrator/dashboard.py` start. Parsed at dashboard import.
+- `MAX_PARALLEL_ISSUES_PER_REPO`, `MAX_PARALLEL_ISSUES_GLOBAL` — next Python start. Per-`REPOS` `parallel_limit`
+  overrides take precedence over `MAX_PARALLEL_ISSUES_PER_REPO`.
+- `WORKFLOW_TRANSITION_GUARD` — next Python start (parsed at config import).
+- `DEV_AGENT`, `DECOMPOSE_AGENT` — next Python start, **except** for issues whose pinned state already names a
+  `dev_agent` / `decomposer_agent` / `question_agent` — those keep the pinned spec until the issue reaches `done` or
+  `rejected`
+- `REVIEW_AGENT` — next reviewer spawn after the next Python start (not pinned per issue)
+- `GITHUB_TOKEN` — not loaded from `.env`. Update the process environment or rewrite the file at
+  `ORCHESTRATOR_TOKEN_FILE` (default `~/.config/<owner>/<repo>/token`) before the next start
+- `ORCHESTRATOR_BASE_BRANCH` — `run.sh` captures this once before its restart loop, so editing it only takes effect
+  after `run.sh` itself is restarted. The Python process picks it up on the same next start.
 
 ## Control labels
 
-| Label | Purpose |
-| ----- | ------- |
-| `hold_base_sync` | Apply to an issue to pause per-tick base rebases (pre-PR worktrees rebase onto `origin/<base>` directly; PR-having worktrees are rebased + pushed in the refresh itself, only relabelling to `resolving_conflict` when the rebase leaves conflicted files), the `in_review` HITL ping / unmergeable park, and `resolving_conflict` base rebases. Remove it when prerequisite PRs have landed; the next tick performs the accumulated base sync once. |
-| `backlog` | Apply to an issue (typically at creation) to keep the orchestrator from picking it up. The dispatcher skips the issue entirely while the label is present; remove the label to release the issue for processing. |
+- `hold_base_sync` — Apply to an issue to pause per-tick base rebases (pre-PR worktrees rebase onto `origin/<base>`
+  directly; PR-having worktrees are rebased + pushed in the refresh itself, only relabelling to `resolving_conflict`
+  when the rebase leaves conflicted files), the `in_review` HITL ping / unmergeable park, and `resolving_conflict` base
+  rebases. Remove it when prerequisite PRs have landed; the next tick performs the accumulated base sync once.
+- `backlog` — Apply to an issue (typically at creation) to keep the orchestrator from picking it up. The dispatcher
+  skips the issue entirely while the label is present; remove the label to release the issue for processing.
