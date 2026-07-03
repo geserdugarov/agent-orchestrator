@@ -1,6 +1,8 @@
 ---
 name: review
-description: Review checklist for reviewer agents on agent-orchestrator PRs. Use when evaluating a developer-produced branch before approval or change-requests.
+description: >-
+  Review checklist for reviewer agents on agent-orchestrator PRs. Use when
+  evaluating a developer-produced branch before approval or change-requests.
 ---
 
 # Reviewer skill — agent-orchestrator
@@ -10,34 +12,53 @@ description: Review checklist for reviewer agents on agent-orchestrator PRs. Use
 Reject (or request fixes) if any of these are red:
 
 - `ruff check orchestrator tests`. Common offenders to look for explicitly:
-  - **F401** — unused import on the facade. If the import is intended as a re-export from `workflow.py`, it must be aliased `from X import Y as Y`. A bare import will not survive ruff.
+  - **F401** — unused import on the facade. If the import is intended as a re-export from
+    `workflow.py`, it must be aliased `from X import Y as Y`. A bare import will not survive ruff.
   - **F541** — f-strings without placeholders, typically in newly-added test files.
   - **F841** — unused local in tests.
   - **E402** — import after non-import code.
-- `git diff --check origin/main...HEAD` — trailing whitespace and blank lines at EOF. Check it even if everything else looks clean.
-- Full `pytest` run is referenced in the PR description and passes end-to-end. Reject "known failure" hand-waves; if the PR claims a baseline failure, the description must include a reproduction on `origin/main` at the branch point. Otherwise the developer must fix it.
+- `git diff --check origin/main...HEAD` — trailing whitespace and blank lines at EOF. Check it even
+  if everything else looks clean.
+- Full `pytest` run is referenced in the PR description and passes end-to-end. Reject "known failure"
+  hand-waves; if the PR claims a baseline failure, the description must include a reproduction on
+  `origin/main` at the branch point. Otherwise the developer must fix it.
 
 ## Behavior preservation
 
 For any refactor:
 
-- Workflow labels, pinned-state JSON keys, comment marker text, watermark fields, and event-emission shape must match `main` exactly. Issues already in flight depend on these — a rename is a migration, not a refactor.
-- Spot-check that moved code still routes through the same auth / fetch / push / retry helpers. A refactor is not allowed to silently change side effects.
-- Squash-on-approval, the in_review HITL ready-ping gates (mergeable + approved + no standing CHANGES_REQUESTED), retry budgets, and stale-session detection are easy to break by accident during a move; verify their call paths survive intact.
+- Workflow labels, pinned-state JSON keys, comment marker text, watermark fields, and event-emission
+  shape must match `main` exactly. Issues already in flight depend on these — a rename is a migration,
+  not a refactor.
+- Spot-check that moved code still routes through the same auth / fetch / push / retry helpers. A
+  refactor is not allowed to silently change side effects.
+- Squash-on-approval, the in_review HITL ready-ping gates (mergeable + approved + no standing
+  CHANGES_REQUESTED), retry budgets, and stale-session detection are easy to break by accident during
+  a move; verify their call paths survive intact.
 
 ## Facade and module boundaries
 
 The compatibility surface on `orchestrator/workflow.py` is load-bearing. Confirm:
 
-- New stage helpers that another stage module reaches for are re-exported from `workflow.py`, each aliased `... as <name>`. Stage-private helpers (only used inside one stage module — `_bump_in_review_watermarks`, `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`, etc.) should **not** be re-exported.
-- Stage modules access cross-module helpers via `from .. import workflow as _wf` **at call time**, not via top-level `from ..workflow import _foo` and not via direct imports from `workflow_drift` / `workflow_messages` / `worktrees`. The late-binding pattern preserves `patch.object(workflow, ...)` semantics in tests.
-- Test patches target the new module boundary after a move (or the facade alias, consistently). Flag tests that still patch the old location.
+- New stage helpers that another stage module reaches for are re-exported from `workflow.py`, each
+  aliased `... as <name>`. Stage-private helpers (only used inside one stage module —
+  `_bump_in_review_watermarks`, `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`,
+  etc.) should **not** be re-exported.
+- Stage modules access cross-module helpers via `from .. import workflow as _wf` **at call time**,
+  not via top-level `from ..workflow import _foo` and not via direct imports from `workflow_drift` /
+  `workflow_messages` / `worktrees`. The late-binding pattern preserves `patch.object(workflow, ...)`
+  semantics in tests.
+- Test patches target the new module boundary after a move (or the facade alias, consistently). Flag
+  tests that still patch the old location.
 
 ## Test economy and assertion quality
 
-- Identify newly added tests that duplicate existing tests or each other; request merging into `pytest.mark.parametrize` cases or a small named loop when the only difference is fixture values or branch selection.
+- Identify newly added tests that duplicate existing tests or each other; request merging into
+  `pytest.mark.parametrize` cases or a small named loop when the only difference is fixture values or
+  branch selection.
 - Verify each added test fails against the old behavior or directly protects a changed contract.
-- For resource-usage fixes (over-fetching, redundant API calls, retained state), reject tests that only assert the final result; require at least one assertion at the helper/producer level.
+- For resource-usage fixes (over-fetching, redundant API calls, retained state), reject tests that
+  only assert the final result; require at least one assertion at the helper/producer level.
 - Prefer fewer tests with clear distinct coverage over many narrowly overlapping regression tests.
 
 ## Documentation drift
@@ -48,18 +69,27 @@ After any handler or helper move, grep the PR for stale pointers and request fix
 - `docs/architecture.md`
 - `docs/state-machine.md`
 - `docs/workflow.md`
-- module docstrings at the top of `workflow.py`, `workflow_drift.py`, `workflow_messages.py`, `worktrees.py`, `orchestrator/stages/*.py`
+- module docstrings at the top of `workflow.py`, `workflow_drift.py`, `workflow_messages.py`,
+  `worktrees.py`, `orchestrator/stages/*.py`
 
 Treat blanket statements like "every helper is re-exported" with suspicion — verify literally against the code.
 
 ## Comment hygiene
 
-- Flag diff-relative comments — "previously", "the old retry cap", "instead of a dict", "now uses" — in code and test docstrings alike. A comment must read correctly to someone who never saw the change; the before/after story belongs in the commit message or PR description.
-- Flag comments that paraphrase an already-readable line or the assert below them instead of stating a why (invariant, non-local consumer, prevented failure). Ask for the reason or for deletion. Do not flag plain-language summaries above genuinely dense code (tricky offset math, multi-step comprehension chains) — a comment that is faster to understand than the code it heads earns its place.
+- Flag diff-relative comments — "previously", "the old retry cap", "instead of a dict", "now uses" —
+  in code and test docstrings alike. A comment must read correctly to someone who never saw the
+  change; the before/after story belongs in the commit message or PR description.
+- Flag comments that paraphrase an already-readable line or the assert below them instead of stating
+  a why (invariant, non-local consumer, prevented failure). Ask for the reason or for deletion. Do
+  not flag plain-language summaries above genuinely dense code (tricky offset math, multi-step
+  comprehension chains) — a comment that is faster to understand than the code it heads earns its
+  place.
 
 ## Commit hygiene
 
-- Conventional Commits: `<type>: <subject>` only. Reject any commit with a body, a `Co-Authored-By` trailer, or a non-imperative subject. Type must be one of `feat`, `fix`, `chore`, `docs`, `refactor`, `test`.
+- Conventional Commits: `<type>: <subject>` only. Reject any commit with a body, a `Co-Authored-By`
+  trailer, or a non-imperative subject. Type must be one of `feat`, `fix`, `chore`, `docs`,
+  `refactor`, `test`.
 
 ## Out of scope — push back
 
