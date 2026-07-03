@@ -113,11 +113,12 @@ happens in several places (`_cleanup_decompose_worktree`,
 every transient decomposer / question teardown is more surface than
 the use case justifies.
 
-| Hook | Path | When | Failure |
-|---|---|---|---|
-| `after_create` | `<target_root>/.agent-orchestrator/hooks/after_create.sh` | First time a per-issue worktree is created | Park run |
-| `before_run` | `…/hooks/before_run.sh` | Start of every agent invocation inside the worktree — implementer, reviewer, decomposer, question, docs, fixing, and the conflict-resolution dev run | Park with `park_reason=hook_before_run_failed` |
-| `after_run` | `…/hooks/after_run.sh` | Agent exits, regardless of success | Log only |
+- **`after_create`** (`<target_root>/.agent-orchestrator/hooks/after_create.sh`) — first time a
+  per-issue worktree is created. Failure: park run.
+- **`before_run`** (`…/hooks/before_run.sh`) — start of every agent invocation inside the
+  worktree — implementer, reviewer, decomposer, question, docs, fixing, and the
+  conflict-resolution dev run. Failure: park with `park_reason=hook_before_run_failed`.
+- **`after_run`** (`…/hooks/after_run.sh`) — agent exits, regardless of success. Failure: log only.
 
 Timeout: single `[hooks].timeout_seconds` key in `policy.toml`,
 default 60s. Per-hook overrides can come later.
