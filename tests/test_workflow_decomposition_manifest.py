@@ -244,3 +244,68 @@ class ParseManifestTest(unittest.TestCase):
             error, f"displayed example failed to parse: {error}"
         )
         self.assertIsNotNone(data)
+
+
+class BuildSingleDecisionCommentTest(unittest.TestCase):
+    """The `single`-decision comment carries the context the decomposer
+    gathered (affected files + notes) into the implementer, and tolerates
+    any missing / malformed optional field without dropping the rationale.
+    """
+
+    def test_renders_rationale_files_and_notes(self) -> None:
+        comment = workflow._build_single_decision_comment({
+            "decision": "single",
+            "rationale": "one small change",
+            "affected_files": ["orchestrator/config.py", "tests/fakes.py"],
+            "notes": "Bump the default and cover it in fakes.",
+        })
+        self.assertIn(
+            ":mag: decomposer says this fits one context: one small change",
+            comment,
+        )
+        self.assertIn("**Affected files:**", comment)
+        self.assertIn("- `orchestrator/config.py`", comment)
+        self.assertIn("- `tests/fakes.py`", comment)
+        self.assertIn("**Implementation notes:**", comment)
+        self.assertIn("Bump the default and cover it in fakes.", comment)
+
+    def test_omits_absent_optional_sections(self) -> None:
+        comment = workflow._build_single_decision_comment({
+            "decision": "single",
+            "rationale": "trivial",
+        })
+        self.assertEqual(
+            comment,
+            ":mag: decomposer says this fits one context: trivial",
+        )
+
+    def test_missing_rationale_falls_back_to_placeholder(self) -> None:
+        # `_parse_manifest` does not validate single-branch fields, so a
+        # non-string / absent rationale must not crash rendering.
+        comment = workflow._build_single_decision_comment(
+            {"decision": "single", "rationale": [1, 2, 3]}
+        )
+        self.assertIn("(no rationale provided)", comment)
+
+    def test_drops_malformed_files_and_notes(self) -> None:
+        # Non-list files, non-string entries, and non-string notes are
+        # sanitized away rather than rendered or raised on.
+        comment = workflow._build_single_decision_comment({
+            "decision": "single",
+            "rationale": "ok",
+            "affected_files": ["good.py", "", 42, "  spaced.py  "],
+            "notes": {"not": "a string"},
+        })
+        self.assertIn("- `good.py`", comment)
+        self.assertIn("- `spaced.py`", comment)
+        self.assertNotIn("- `42`", comment)
+        self.assertNotIn("- ``", comment)
+        self.assertNotIn("**Implementation notes:**", comment)
+
+    def test_non_list_affected_files_omits_section(self) -> None:
+        comment = workflow._build_single_decision_comment({
+            "decision": "single",
+            "rationale": "ok",
+            "affected_files": "orchestrator/config.py",
+        })
+        self.assertNotIn("**Affected files:**", comment)

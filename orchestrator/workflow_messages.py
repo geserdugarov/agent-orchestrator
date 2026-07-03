@@ -465,7 +465,10 @@ def _parse_manifest(
     Returns `(manifest, error_reason)`:
       * `(dict, None)` -- a valid manifest. `decision` is `"single"` or
         `"split"`; for `"split"`, `children` is non-empty and each entry has
-        `title`/`body` and a structurally-valid `depends_on` index list.
+        `title`/`body` and a structurally-valid `depends_on` index list. On
+        `"single"` only `decision` is validated -- the optional context
+        fields (`rationale`, `affected_files`, `notes`) pass through
+        unvalidated and are sanitized where rendered.
       * `(None, error)` -- a fence was present but the payload was invalid.
         `error` is a short human-readable reason (used in the HITL park
         message).
@@ -806,7 +809,12 @@ def _build_decompose_prompt(
         "The block must be valid JSON parseable by `json.loads`. The "
         "`decision` value must be exactly the string `\"single\"` or "
         "`\"split\"` (no other values, no union syntax). On `\"single\"`, "
-        "omit the `children` field entirely.\n\n"
+        "omit the `children` field and instead hand off the context you "
+        "already gathered so the implementer does not re-derive it: add "
+        "`\"affected_files\"` (a list of repo-relative paths you found "
+        "relevant) and `\"notes\"` (<= 3 sentences of concrete "
+        "implementation guidance). Both are optional but strongly "
+        "encouraged on `\"single\"`.\n\n"
         "Rules for the children list (omit entirely on 'single'):\n"
         f"- At most {_MAX_CHILDREN} children.\n"
         "- `depends_on` is a list of 0-based indexes into THIS children "
@@ -822,6 +830,48 @@ def _build_decompose_prompt(
         "the children land. An umbrella parent auto-resolves to `done` once "
         "every child resolves; a non-umbrella parent re-enters implementation."
     )
+
+
+def _build_single_decision_comment(manifest: dict) -> str:
+    """Compose the `single`-decision comment posted on the parent issue.
+
+    Beyond the decomposer's rationale, this surfaces the context the
+    decomposer already gathered while sizing the issue -- the affected
+    files and any implementation notes -- so the develop agent that picks
+    the issue up in `implementing` starts from that groundwork instead of
+    re-deriving it. The implementer reads the issue thread via
+    `_recent_comments_text` at spawn, so anything included here reaches it.
+    A comment (not a body edit) is deliberate: rewriting the issue body
+    would shift the user-content hash and trip `_detect_user_content_change`
+    into re-decomposing the issue on the next tick.
+
+    Every field beyond `decision` is best-effort. `_parse_manifest` only
+    validates the decision string for the single branch, so `rationale` /
+    `affected_files` / `notes` may be any JSON value or missing; coerce
+    non-strings / non-lists to empty rather than parking a valid single
+    decision after the agent already ran.
+    """
+    raw_rationale = manifest.get("rationale")
+    if not isinstance(raw_rationale, str):
+        raw_rationale = ""
+    rationale = raw_rationale.strip() or "(no rationale provided)"
+    lines = [f":mag: decomposer says this fits one context: {rationale}"]
+
+    raw_files = manifest.get("affected_files")
+    files = (
+        [f.strip() for f in raw_files if isinstance(f, str) and f.strip()]
+        if isinstance(raw_files, list) else []
+    )
+    if files:
+        rendered = "\n".join(f"- `{f}`" for f in files)
+        lines.append(f"**Affected files:**\n{rendered}")
+
+    raw_notes = manifest.get("notes")
+    notes = raw_notes.strip() if isinstance(raw_notes, str) else ""
+    if notes:
+        lines.append(f"**Implementation notes:**\n{notes}")
+
+    return "\n\n".join(lines)
 
 
 def _build_conflict_resolution_prompt(
