@@ -95,6 +95,7 @@ import logging
 import os
 import tempfile
 import threading
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -425,6 +426,7 @@ def record_agent_exit(
     retry_count: Optional[int],
     fallback_model: Optional[str] = None,
     prompt: Optional[str] = None,
+    cwd: Optional[Path] = None,
 ) -> Optional[list[str]]:
     """Parse usage from agent stdout and append a single `agent_exit` record.
 
@@ -453,6 +455,18 @@ def record_agent_exit(
     fields," never a missing record. With the switch off the extractor
     never runs and the record stays byte-for-byte shape-compatible with
     today's.
+
+    `cwd` is the run's worktree. Codex's `--json` stream carries neither an
+    offered-skills nor an offered-tools catalog (claude reads both from its
+    `system`/`init` frame), so for a codex run they are discovered out-of-band
+    instead: `skills_available` from the filesystem
+    (`skill_catalog.discover_local_skills`, needing `cwd`), filling both this
+    record (behind `TRACK_SKILL_TRIGGERS`) and the trajectory record (behind
+    `TRAJECTORY_LOG_PATH`); and the trajectory-only `tools` from
+    `skill_catalog.discover_codex_tools`, a best-effort baseline. The claude
+    offered sets still come from its stream; the discovery runs only for codex
+    and never overrides a non-empty stream-parsed set. Its own guard keeps a
+    discovery failure from disturbing the baseline record.
 
     `prompt` is the orchestrator-built agent prompt. It is stored only as
     the redacted `user_input` of the opt-in trajectory record, and ONLY
@@ -484,6 +498,33 @@ def record_agent_exit(
             issue, backend,
         )
         return None
+    # Codex exposes neither an offered-skills nor an offered-tools catalog in
+    # its stream, so discover both out-of-band (mirroring claude's `system`/
+    # `init` frame). `codex_available` (skills) needs the worktree `cwd` and
+    # feeds both the `agent_exit` skill block below and the trajectory record;
+    # `codex_tools` is a static baseline that feeds only the trajectory record.
+    # Computed only when a sink that carries them is on, under one guard so a
+    # discovery failure never touches the baseline usage record. Claude keeps
+    # its stream-parsed sets.
+    codex_available: Optional[list[str]] = None
+    codex_tools: Optional[list[str]] = None
+    if backend == "codex":
+        try:
+            from .. import skill_catalog
+            if cwd is not None and (
+                TRACK_SKILL_TRIGGERS or TRAJECTORY_LOG_PATH is not None
+            ):
+                codex_available = (
+                    list(skill_catalog.discover_local_skills(cwd)) or None
+                )
+            if TRAJECTORY_LOG_PATH is not None:
+                codex_tools = list(skill_catalog.discover_codex_tools()) or None
+        except Exception:
+            log.exception(
+                "issue=#%d analytics: codex out-of-band discovery failed; "
+                "leaving skills_available / tools empty",
+                issue,
+            )
     skills_triggered: Optional[list[str]] = None
     skills_triggered_count: Optional[int] = None
     skills_available: Optional[list[str]] = None
@@ -493,8 +534,12 @@ def record_agent_exit(
             if skills.triggered:
                 skills_triggered = list(skills.triggered)
                 skills_triggered_count = sum(skills.trigger_counts.values())
-            if skills.available:
-                skills_available = list(skills.available)
+            # Prefer the stream-parsed offered set (claude); fall back to the
+            # out-of-band codex discovery, which fills the offered set for
+            # codex runs whose stream carries none.
+            available = list(skills.available) or codex_available
+            if available:
+                skills_available = available
         except Exception:
             log.exception(
                 "issue=#%d analytics: parse_agent_skills(%s) failed; "
@@ -542,6 +587,8 @@ def record_agent_exit(
         metrics=metrics,
         review_round=review_round,
         retry_count=retry_count,
+        codex_available_skills=codex_available,
+        codex_tools=codex_tools,
     )
     return skills_triggered
 
@@ -761,6 +808,8 @@ def _maybe_record_trajectory(
     metrics: usage.UsageMetrics,
     review_round: Optional[int],
     retry_count: Optional[int],
+    codex_available_skills: Optional[list[str]] = None,
+    codex_tools: Optional[list[str]] = None,
 ) -> None:
     """Parse, redact, truncate, and append one trajectory record -- gated on
     the opt-in `TRAJECTORY_LOG_PATH` and wrapped in its own fail-open guard.
@@ -777,12 +826,31 @@ def _maybe_record_trajectory(
     audit events, all of which were already produced before this runs.
     `_redact_secrets` is imported at call time to avoid a
     `github` -> `analytics` -> `workflow_messages` -> `github` import cycle.
+
+    `codex_available_skills` / `codex_tools` are the out-of-band offered-skills
+    and offered-tools sets `record_agent_exit` discovered for a codex run
+    (empty / `None` for claude, whose offered sets already ride its stream).
+    When present they backfill the codex trajectory's otherwise-empty
+    `skills.available` / `tools` so the trajectory viewer's "Skills available"
+    and "Tools offered" chips match a claude run's; a non-empty stream-parsed
+    set is never overridden.
     """
     if TRAJECTORY_LOG_PATH is None:
         return
     try:
         from ..workflow_messages import _redact_secrets
         trajectory = usage.parse_agent_trajectory(backend, result.stdout)
+        if backend == "codex":
+            changes: dict[str, Any] = {}
+            if codex_available_skills and not trajectory.skills.available:
+                changes["skills"] = replace(
+                    trajectory.skills,
+                    available=tuple(codex_available_skills),
+                )
+            if codex_tools and not trajectory.tools:
+                changes["tools"] = tuple(codex_tools)
+            if changes:
+                trajectory = replace(trajectory, **changes)
         append_trajectory_record(
             _build_trajectory_record(
                 repo=repo,

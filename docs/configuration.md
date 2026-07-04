@@ -369,8 +369,10 @@ an unmergeable PR.
   `extras JSONB` column absorbs the new fields. Both backends' triggered-skill shapes are now pinned against captured
   streams (claude `Skill` tool-use blocks; codex `skills/<name>/SKILL.md` reads, a heuristic file-open signal — see
   [`observability.md`](observability.md#usage-parser-orchestratorusagepy)). The offered-skills set (`skills_available`)
-  is now read from claude's `system`/`init` frame `skills` array (confirmed against a real stream capture); on codex it
-  stays best-effort until its source is captured. Once on, the dashboard's "Skill trigger rates" panel surfaces the
+  is read from claude's `system`/`init` frame `skills` array (confirmed against a real stream capture); codex's stream
+  carries no such frame, so it is backfilled out-of-band from the filesystem via
+  `skill_catalog.discover_local_skills(cwd)` (a scan of the run's worktree `.agents/skills` / `.claude/skills` roots
+  plus the global `$CODEX_HOME/skills`). Once on, the dashboard's "Skill trigger rates" panel surfaces the
   per-role/backend trigger rate (`analytics.read.get_skill_trigger_rates`) and, below it, a per-skill trigger matrix
   (`analytics.read.get_skill_trigger_matrix`) pairing each repo's offered-skill catalog with the skills its runs
   triggered, over the accumulated fields. See

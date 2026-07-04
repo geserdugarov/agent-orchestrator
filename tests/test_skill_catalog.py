@@ -330,5 +330,111 @@ class TickEmitsRepoSkillCatalogTest(unittest.TestCase):
         emit.assert_called_once_with(_TEST_SPEC)
 
 
+def _make_skill(root: Path, name: str) -> None:
+    """Create a `<root>/<name>/SKILL.md` skill definition under `root`."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+
+
+class DiscoverLocalSkillsTest(unittest.TestCase):
+    """`discover_local_skills` scans the worktree repo roots (direct children)
+    plus the global `$CODEX_HOME/skills` root -- there also descending the
+    `.system` container of codex's built-in skills -- deduped across roots,
+    fail-open on missing roots."""
+
+    def test_scans_both_repo_roots_and_dedups(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td)
+            _make_skill(cwd / ".agents/skills", "develop")
+            _make_skill(cwd / ".agents/skills", "review")
+            # A name defined in the second repo root appears once.
+            _make_skill(cwd / ".claude/skills", "develop")
+            _make_skill(cwd / ".claude/skills", "extra")
+            with patch.dict(os.environ, {"CODEX_HOME": str(cwd / "no-home")}):
+                names = skill_catalog.discover_local_skills(cwd)
+        # Sorted within each root, roots in order (`.agents/skills` then
+        # `.claude/skills`), deduped first-seen: `develop`/`review` from the
+        # first root, then `extra` from the second (`develop` already seen).
+        self.assertEqual(names, ("develop", "review", "extra"))
+
+    def test_includes_codex_home_global_skills(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "wt"
+            home = Path(td) / "codexhome"
+            _make_skill(cwd / ".agents/skills", "review")
+            _make_skill(home / "skills", "global-skill")
+            # codex's built-ins live under the global root's `.system` container.
+            _make_skill(home / "skills" / ".system", "imagegen")
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+                names = skill_catalog.discover_local_skills(cwd)
+        # Repo-local first (its scan runs before the global root), then the
+        # global root's direct + `.system` skills sorted together.
+        self.assertEqual(names, ("review", "global-skill", "imagegen"))
+
+    def test_global_system_builtins_surface_by_name(self) -> None:
+        # codex auto-loads its built-in skills from the global root's `.system`
+        # container even with no user skills placed directly under the root, so
+        # they surface under their own `<name>` (imagegen, openai-docs, ...).
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "wt"
+            home = Path(td) / "codexhome"
+            for name in ("imagegen", "openai-docs", "skill-installer"):
+                _make_skill(home / "skills" / ".system", name)
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+                names = skill_catalog.discover_local_skills(cwd)
+        self.assertEqual(names, ("imagegen", "openai-docs", "skill-installer"))
+
+    def test_repo_local_wins_position_over_global_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "wt"
+            home = Path(td) / "codexhome"
+            _make_skill(cwd / ".agents/skills", "review")
+            _make_skill(home / "skills", "review")
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+                names = skill_catalog.discover_local_skills(cwd)
+        self.assertEqual(names, ("review",))
+
+    def test_only_direct_children_with_skill_md_count(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td)
+            root = cwd / ".agents/skills"
+            _make_skill(root, "develop")
+            # A dir without a SKILL.md is not a skill.
+            (root / "empty").mkdir(parents=True, exist_ok=True)
+            # A `.system` container under a *repo* root is not descended: only
+            # the global codex root loads its `.system` built-ins, so a repo's
+            # `.system/imagegen/SKILL.md` does not surface here.
+            deep = root / ".system" / "imagegen"
+            deep.mkdir(parents=True, exist_ok=True)
+            (deep / "SKILL.md").write_text("x", encoding="utf-8")
+            with patch.dict(os.environ, {"CODEX_HOME": str(cwd / "no-home")}):
+                names = skill_catalog.discover_local_skills(cwd)
+        self.assertEqual(names, ("develop",))
+
+    def test_missing_roots_yield_empty_not_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "does-not-exist"
+            with patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "nope")}):
+                self.assertEqual(skill_catalog.discover_local_skills(cwd), ())
+
+
+class DiscoverCodexToolsTest(unittest.TestCase):
+    """`discover_codex_tools` returns the best-effort offered-tools baseline
+    used to backfill codex trajectory records (codex's stream exposes no
+    offered-tools frame)."""
+
+    def test_returns_nonempty_baseline(self) -> None:
+        tools = skill_catalog.discover_codex_tools()
+        self.assertIsInstance(tools, tuple)
+        self.assertEqual(tools, skill_catalog._CODEX_OFFERED_TOOLS)
+        # Anchors on tools captured from a real codex exec request payload.
+        self.assertIn("exec_command", tools)
+        self.assertIn("web_search", tools)
+        # De-duplicated, non-empty names only.
+        self.assertTrue(all(isinstance(t, str) and t for t in tools))
+        self.assertEqual(len(tools), len(set(tools)))
+
+
 if __name__ == "__main__":
     unittest.main()

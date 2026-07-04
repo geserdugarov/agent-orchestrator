@@ -355,6 +355,11 @@ def _run_agent_tracked(
     fail-open guard inside `record_agent_exit`, so it never disturbs the
     baseline record or the `skill_triggered` events below.
 
+    The worktree `cwd` is also forwarded so `record_agent_exit` can discover
+    a codex run's offered skills out-of-band from the filesystem -- codex's
+    stream carries no offered-skills catalog the way claude's `system`/`init`
+    frame does, so this backfills `skills_available` for codex records.
+
     When `TRACK_SKILL_TRIGGERS` is on, `record_agent_exit` returns the
     distinct skills the run triggered and one `skill_triggered` audit event
     is emitted per skill (carrying `agent`, `agent_role`, `review_round`,
@@ -413,6 +418,7 @@ def _run_agent_tracked(
         retry_count=retry_count,
         fallback_model=_configured_model(backend, extra_args),
         prompt=prompt,
+        cwd=cwd,
     )
     # One `skill_triggered` audit event per distinct triggered skill, reusing
     # the list `record_agent_exit` already parsed (no second pass over stdout).
