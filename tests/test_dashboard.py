@@ -1034,17 +1034,25 @@ class SkillMatrixSortTest(unittest.TestCase):
         self.assertLess(desc.index(">a/repo<"), desc.index(">c/repo<"))
         self.assertLess(desc.index(">c/repo<"), desc.index(">b/repo<"))
 
-    def test_unsorted_render_keeps_read_model_order(self) -> None:
-        # No sort key -> rows land in the order the read model returned
-        # them, so the default view still reflects Runs-with-skill DESC.
+    def test_unsorted_render_defaults_repo_asc_then_rate_desc(self) -> None:
+        # No sort key -> the default view orders rows by repo ascending,
+        # then trigger rate descending within each repo, so each repo's
+        # hottest skills lead. Two rows share a repo with different rates
+        # so both keys are exercised (skills identify the rows uniquely).
         _, dashboard = _reload()
-        rows = self._rows()
+        rows = [
+            self._row("b/repo", "alpha", "developer", "claude", 4, 1),
+            self._row("a/repo", "beta", "developer", "claude", 4, 1),
+            self._row("a/repo", "gamma", "reviewer", "codex", 4, 3),
+        ]
         html_out = dashboard._skill_matrix_html(rows)
+        # Within a/repo, rate descending: gamma (75%) precedes beta (25%).
         self.assertLess(
-            html_out.index(">b/repo<"), html_out.index(">a/repo<"),
+            html_out.index(">gamma<"), html_out.index(">beta<"),
         )
+        # Repo ascending: the a/repo rows precede the b/repo row.
         self.assertLess(
-            html_out.index(">a/repo<"), html_out.index(">c/repo<"),
+            html_out.index(">beta<"), html_out.index(">alpha<"),
         )
 
     def test_sort_helper_unknown_key_is_identity(self) -> None:

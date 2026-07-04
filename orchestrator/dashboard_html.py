@@ -443,9 +443,10 @@ def parse_skill_matrix_sort(params) -> tuple[Optional[str], bool]:
 
     Reads the `mtx_sort` / `mtx_dir` params the clickable headers encode
     and returns a `(column key, descending)` pair. An unknown or absent
-    `mtx_sort` degrades to `(None, False)` -- the read model's own order
-    -- instead of raising, so a stale or hand-edited URL never breaks the
-    render. `mtx_dir == "desc"` sorts descending; anything else ascending.
+    `mtx_sort` degrades to `(None, False)` -- the default view (repo
+    ascending, then trigger rate descending) -- instead of raising, so a
+    stale or hand-edited URL never breaks the render. `mtx_dir == "desc"`
+    sorts descending; anything else ascending.
     """
     key = params.get(SKILL_MATRIX_SORT_PARAM)
     if key not in _SKILL_MATRIX_SORT_KEYS:
@@ -468,6 +469,19 @@ def _sort_skill_matrix_rows(
     if keyfn is None:
         return list(rows)
     return sorted(rows, key=keyfn, reverse=descending)
+
+
+def _default_sort_skill_matrix_rows(
+    rows: Sequence[SkillTriggerMatrixRow],
+) -> list[SkillTriggerMatrixRow]:
+    """Order the matrix for its default view (no header column selected).
+
+    Repo ascending (A→Z), then trigger rate descending within each repo,
+    so each repo's hottest skills lead. Python's sort is stable, so rows
+    tying on both keys keep the read model's order (Runs-with-skill DESC
+    then Runs DESC then a stable repo/role/backend/skill tiebreak).
+    """
+    return sorted(rows, key=lambda r: ((r.repo or "").lower(), -r.rate))
 
 
 def _skill_matrix_header_html(active_key: Optional[str], descending: bool) -> str:
@@ -537,8 +551,8 @@ def _skill_matrix_html(
     that writes `mtx_sort` / `mtx_dir` query params, and the caller
     passes the parsed `(sort_key, descending)` back in so the rows are
     re-sorted on that column and the active header shows a ▲ / ▼
-    indicator. With no `sort_key` the rows render in the read model's
-    order (Runs-with-skill DESC then Runs DESC).
+    indicator. With no `sort_key` the rows default to repo ascending,
+    then trigger rate descending within each repo.
 
     When the read model returns no rows -- no catalog records matched the
     window and no run fired a skill -- there is no catalog-backed matrix
@@ -584,7 +598,11 @@ def _skill_matrix_html(
   .orch-skillmatrix-sort { margin-left: 3px; color: var(--orch-accent); }
 </style>
 """
-    rows = _sort_skill_matrix_rows(rows, sort_key, descending)
+    rows = (
+        _sort_skill_matrix_rows(rows, sort_key, descending)
+        if sort_key is not None
+        else _default_sort_skill_matrix_rows(rows)
+    )
     body: list[str] = []
     for r in rows:
         repo = r.repo or "unknown"
