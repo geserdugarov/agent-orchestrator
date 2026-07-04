@@ -1248,8 +1248,9 @@ def main() -> None:
             # model returns no catalog-backed matrix (no catalog records
             # matched and no run fired a skill). Folded into an expander
             # (collapsed by default, mirroring "Recent agent runs" below)
-            # so the matrix -- capped at 100 rows by the read model and
-            # sorted by Runs-with-skill DESC then Runs DESC -- does not
+            # so the matrix -- capped at 100 rows by the read model
+            # (Runs-with-skill DESC then Runs DESC) and shown by default
+            # repo-ascending then trigger-rate-descending -- does not
             # dominate the card until the operator opens it.
             with st.expander(
                 "Per-skill trigger matrix · which skills each "
