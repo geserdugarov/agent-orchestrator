@@ -190,7 +190,12 @@ carries:
   the list carries `develop` once), and `skills_available` (the offered-skills set). On **claude** the offered set is
   read from the dedicated `skills` array in the `system`/`init` stream frame — confirmed against a real captured
   `--output-format stream-json` run — so `skills_available` is populated for tracked claude runs independently of what
-  they triggered. On **codex** it stays best-effort and empty until that stream's offered-set field is captured. Each
+  they triggered. Codex's `codex exec --json` stream carries no such offered-skills catalog, so for **codex** the set is
+  instead discovered out-of-band from the filesystem by `skill_catalog.discover_local_skills(cwd)` — a scan of the repo
+  skill roots (`.agents/skills` / `.claude/skills`) under the run's worktree plus the global `$CODEX_HOME/skills` codex
+  loads, including the built-in skills under that global root's `.system` container (`imagegen`, `openai-docs`, …). It
+  runs only for codex, never overrides the claude stream-parsed set, and is fail-open (a missing root leaves the field
+  empty). Each
   field is dropped (its key absent) when empty, so a claude run that was offered skills but triggered none records
   `skills_available` while the two triggered keys drop — the "offered but unused" vs "never available" signal — and
   a run with nothing to report keeps the record shape identical to the switch-off case. Parsed via
@@ -257,8 +262,12 @@ call `prune_trajectory_records`, so trajectory retention stays operator-driven f
 
 **Record shape.** One `agent_trajectory` record per tracked run carries the standard envelope (`ts`, `repo`, `issue`,
 `event`, `stage`) plus correlation context (`agent_role`, `backend`, `session_id`, `review_round`, `retry_count`) and
-the redacted trajectory: `user_input` (the orchestrator prompt), `system_prompt`, `tools` (the offered-tools set, claude
-only today), `skills_triggered` / `skills_available` (names-only), a `run_usage` summary, a claude-only per-turn `turns`
+the redacted trajectory: `user_input` (the orchestrator prompt), `system_prompt`, `tools` (the offered-tools set — read
+from claude's stream, and for codex backfilled with the best-effort `skill_catalog.discover_codex_tools()` baseline
+since its stream carries no offered-tools frame), `skills_triggered` / `skills_available` (names-only — for codex the
+`skills_available` set is backfilled from the out-of-band `skill_catalog.discover_local_skills(cwd)` filesystem scan,
+since its stream carries no
+offered-skills catalog), a `run_usage` summary, a claude-only per-turn `turns`
 array, an ordered `steps` array (each `{kind, name, tool_id, content}` plus a `turn` index on the billed steps, where
 `kind` is `tool_call` / `tool_result` / `assistant_message` / `user_message` and `content` is the redacted tool input,
 tool result, or text turn — `name` / `tool_id` are `null` on the message turns), and the final `output`. `run_usage`
@@ -1070,7 +1079,9 @@ project-local `.agents/skills/` reads match. Started/completed echo the same com
 reason (e.g. reviewing a PR that edits one) would also register. `parse_agent_skills(backend, stdout)` dispatches by
 backend exactly as `parse_agent_usage` does. The offered-skills set (`SkillTriggers.available`) is **confirmed on
 claude** — read from the dedicated `skills` array in the `system`/`init` frame, captured against a real stream — and
-remains **best-effort/empty on codex** until a captured codex stream confirms its field; the *triggered* set does not
+stays **empty on codex** at the parser layer: a captured `codex exec --json` stream (v0.142.5) carries no offered-skills
+frame at all, so `record_agent_exit` backfills the codex offered set out-of-band from the filesystem via
+`skill_catalog.discover_local_skills(cwd)` instead. The *triggered* set does not
 depend on it either way. As with the usage parsers, malformed JSONL lines are skipped and a missing / renamed field
 yields an empty result rather than an exception. Only the skill *name* is ever read — never the `Skill` tool's `args`
 (Privacy).
@@ -1100,8 +1111,9 @@ item as one `assistant_message` turn (its `text`), collapsing each item's starte
 `item.id`, and reads the final answer from the last `agent_message` `text`; it leaves `turns` empty with every
 `step.turn` `None`, since codex usage frames are cumulative across the session rather than per-turn. Both reuse the
 matching skill extractor for the `skills` field. `parse_agent_trajectory(backend, stdout)` dispatches by backend exactly
-as the usage / skill dispatchers do. `system_prompt` stays `None` and `tools` stays empty whenever a backend's stream
-does not expose them (codex exposes neither today); malformed JSONL lines are skipped and a missing / renamed field
+as the usage / skill dispatchers do. `system_prompt` stays `None` and `tools` stays empty in the classifier whenever a
+backend's stream does not expose them (codex exposes neither); the analytics writer backfills codex `tools` out-of-band
+from `skill_catalog.discover_codex_tools()`. Malformed JSONL lines are skipped and a missing / renamed field
 yields an empty section rather than an exception. Unlike the skill extractor, this classifier records the **raw** stream
 payload — tool inputs, tool outputs, and the final text — verbatim: it deliberately does **not** redact, truncate,
 or write any file. Those concerns belong to its downstream writer, `analytics._maybe_record_trajectory` (called from

@@ -1507,8 +1507,12 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             # The text turn carries no tool name / id.
             self.assertIsNone(rec["steps"][2]["name"])
             self.assertIsNone(rec["steps"][2]["tool_id"])
-            # codex exposes no offered-tools frame -> the field is dropped.
-            self.assertNotIn("tools", rec)
+            # codex exposes no offered-tools frame, so the trajectory record
+            # backfills the best-effort baseline out-of-band.
+            from orchestrator import skill_catalog
+            self.assertEqual(
+                rec["tools"], list(skill_catalog.discover_codex_tools()),
+            )
             # run_usage is codex's only usage surface: the denormalized
             # run-level totals, present even though per-turn detail is not.
             run_usage = rec["run_usage"]
@@ -1841,6 +1845,130 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             rec = _read_records(t_path)[0]
             self.assertNotIn("user_input", rec)
             self.assertEqual(rec["output"], "x")
+
+
+def _mk_skill(root: Path, name: str) -> None:
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+
+
+class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
+    """Codex has no offered-skills stream frame, so `record_agent_exit`
+    backfills `skills_available` out-of-band from the worktree / `$CODEX_HOME`
+    skill roots (via `skill_catalog.discover_local_skills`) -- into both the
+    `agent_exit` record (behind `TRACK_SKILL_TRIGGERS`) and the trajectory
+    record (behind `TRAJECTORY_LOG_PATH`). Claude is untouched (its offered
+    set rides the stream), and a run with no worktree stays empty."""
+
+    def _emit(
+        self, analytics, *, backend, cwd, td, track=False, traj=False,
+    ) -> tuple[list[dict], list[dict]]:
+        a_path = Path(td) / "a.jsonl"
+        t_path = Path(td) / "t.jsonl" if traj else None
+        with patch.object(analytics, "ANALYTICS_LOG_PATH", a_path), \
+                patch.object(analytics, "TRAJECTORY_LOG_PATH", t_path), \
+                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track):
+            analytics.record_agent_exit(
+                repo="owner/repo",
+                issue=7,
+                stage="validating",
+                agent_role="reviewer",
+                backend=backend,
+                agent_spec=backend,
+                resume_session_id=None,
+                result=analytics.AgentResult(
+                    session_id="sess",
+                    last_message="",
+                    exit_code=0,
+                    timed_out=False,
+                    stdout=_codex_trajectory_stdout(),
+                    stderr="",
+                ),
+                duration_s=0.0,
+                review_round=1,
+                retry_count=0,
+                prompt="review this",
+                cwd=cwd,
+            )
+        traj_recs = _read_records(t_path) if t_path else []
+        return _read_records(a_path), traj_recs
+
+    def test_codex_agent_exit_records_discovered_available(self) -> None:
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "wt"
+            _mk_skill(cwd / ".agents/skills", "develop")
+            _mk_skill(cwd / ".agents/skills", "review")
+            with patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "none")}):
+                base, _ = self._emit(
+                    analytics, backend="codex", cwd=cwd, td=td, track=True,
+                )
+        rec = base[0]
+        self.assertEqual(rec["event"], "agent_exit")
+        # No SKILL.md read in the stream -> nothing triggered, but the offered
+        # set is filled from the filesystem scan.
+        self.assertEqual(rec["skills_available"], ["develop", "review"])
+        self.assertNotIn("skills_triggered", rec)
+
+    def test_codex_trajectory_records_discovered_available(self) -> None:
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "wt"
+            _mk_skill(cwd / ".claude/skills", "review")
+            with patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "none")}):
+                _, traj = self._emit(
+                    analytics, backend="codex", cwd=cwd, td=td, traj=True,
+                )
+        rec = traj[0]
+        self.assertEqual(rec["event"], "agent_trajectory")
+        self.assertEqual(rec["backend"], "codex")
+        self.assertEqual(rec["skills_available"], ["review"])
+        # The offered-tools baseline is backfilled onto the same record.
+        from orchestrator import skill_catalog
+        self.assertEqual(rec["tools"], list(skill_catalog.discover_codex_tools()))
+
+    def test_no_worktree_leaves_codex_available_empty(self) -> None:
+        # No worktree -> no skill discovery; the offered-tools baseline needs
+        # no worktree, so the trajectory record still carries `tools`.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "none")}):
+                base, traj = self._emit(
+                    analytics, backend="codex", cwd=None, td=td,
+                    track=True, traj=True,
+                )
+        self.assertNotIn("skills_available", base[0])
+        self.assertNotIn("skills_available", traj[0])
+        from orchestrator import skill_catalog
+        self.assertEqual(traj[0]["tools"], list(skill_catalog.discover_codex_tools()))
+
+    def test_claude_offered_set_not_from_discovery(self) -> None:
+        # Discovery is codex-only: a claude run in a worktree full of skill
+        # dirs still takes its offered set from the stream (here: none), never
+        # from the filesystem, so a stray scan can't invent a claude field.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td) / "wt"
+            _mk_skill(cwd / ".agents/skills", "develop")
+            a_path = Path(td) / "a.jsonl"
+            with patch.dict(os.environ, {"CODEX_HOME": str(Path(td) / "none")}), \
+                    patch.object(analytics, "ANALYTICS_LOG_PATH", a_path), \
+                    patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
+                    patch.object(analytics, "TRACK_SKILL_TRIGGERS", True):
+                analytics.record_agent_exit(
+                    repo="owner/repo", issue=7, stage="implementing",
+                    agent_role="developer", backend="claude",
+                    agent_spec="claude", resume_session_id=None,
+                    result=analytics.AgentResult(
+                        session_id="s", last_message="", exit_code=0,
+                        timed_out=False,
+                        stdout=_claude_stdout_with_skills(skills=()),
+                        stderr="",
+                    ),
+                    duration_s=0.0, review_round=0, retry_count=0, cwd=cwd,
+                )
+            self.assertNotIn("skills_available", _read_records(a_path)[0])
 
 
 if __name__ == "__main__":

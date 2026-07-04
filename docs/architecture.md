@@ -69,7 +69,9 @@ orchestrator/
                         subsystem modules above
   skill_catalog.py      per-tick repo skill-catalog collection: enumerate
                         SKILL.md definitions on the target base ref and
-                        append one `repo_skill_catalog` analytics record
+                        append one `repo_skill_catalog` analytics record;
+                        also the per-run `discover_local_skills` filesystem
+                        scan that backfills a codex run's offered skills
   stages/
     decomposition.py    decomposing / ready / blocked / umbrella handlers and
                         the decomposer-session lifecycle

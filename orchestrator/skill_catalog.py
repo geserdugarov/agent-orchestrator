@@ -24,10 +24,26 @@ catalog collection never disturbs the polling tick. `workflow.tick`
 re-exports `_emit_repo_skill_catalog` and calls it once per tick per spec
 after `_refresh_base_and_worktrees` has refreshed
 `<remote_name>/<base_branch>`.
+
+Two per-run collectors (`discover_local_skills`, `discover_codex_tools`) serve
+the analytics trajectory record rather than the per-tick catalog. Codex's
+`codex exec --json` stream -- unlike claude's `system`/`init` frame -- carries
+no offered-skills or offered-tools catalog, so a codex run's `skills_available`
+/ `tools` would stay empty. As an out-of-band workaround `discover_local_skills`
+scans, directly on the filesystem, the same repo skill roots this catalog uses
+(`.agents/skills` / `.claude/skills`) under the run's worktree plus the global
+`$CODEX_HOME/skills` codex loads -- including the built-in skills under that
+global root's `.system` container. It is fail-open (a missing root contributes
+nothing) and reads only skill *names*, never `SKILL.md` contents.
+`discover_codex_tools` returns a best-effort static baseline of codex exec's
+offered tools (codex's stream, unlike its skill files, exposes no filesystem
+source for these).
 """
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Iterable, Optional
 
 from . import analytics
@@ -157,3 +173,109 @@ def _emit_repo_skill_catalog(spec: RepoSpec) -> None:
         log.exception(
             "repo=%s skill catalog collection failed; continuing", spec.slug,
         )
+
+
+# --- per-run local skill discovery (out-of-band codex workaround) -----------
+
+
+# codex ships its built-in skills under a `.system` container inside the global
+# skills root (`$CODEX_HOME/skills/.system/<name>/SKILL.md`) and auto-loads them
+# every session. It is descended only for that global root: repo skill roots do
+# not carry `.system`, and the per-tick catalog deliberately ignores it there.
+_SYSTEM_SKILL_DIR = ".system"
+
+
+def _direct_skill_names(root: Path) -> list[str]:
+    """Return the direct `<root>/<name>/SKILL.md` skill names under `root`.
+
+    A skill is a direct child directory of `root` that contains a `SKILL.md`
+    file, matching `_skill_name_from_path`'s "direct child only" rule. Names
+    are sorted for deterministic output (the filesystem scan order is not).
+    Dot-prefixed entries (e.g. codex's `.system` container) are not skills
+    themselves -- a caller descends into them explicitly when relevant. Any
+    `OSError` (missing root, permission) yields the names gathered so far and
+    never raises, so a caller can fold several roots without guarding each one.
+    """
+    names: list[str] = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return names
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        try:
+            if entry.is_dir() and (Path(entry.path) / _SKILL_FILE).is_file():
+                names.append(entry.name)
+        except OSError:
+            continue
+    return sorted(names)
+
+
+def discover_local_skills(cwd: Path) -> tuple[str, ...]:
+    """Enumerate the skill names available to a codex run rooted at `cwd`.
+
+    Out-of-band workaround for codex's `--json` stream carrying no
+    offered-skills catalog (see the module docstring): scan the repo skill
+    roots (`_SKILL_ROOTS`: `.agents/skills` / `.claude/skills`) under the run's
+    worktree `cwd`, then the global `$CODEX_HOME/skills` (falling back to
+    `~/.codex/skills`) codex loads. Repo roots contribute their direct
+    `<root>/<name>/SKILL.md` definitions; the global root additionally
+    contributes the built-in skills codex auto-loads from its `.system`
+    container (`$CODEX_HOME/skills/.system/<name>/SKILL.md` -- imagegen,
+    openai-docs, skill-installer, ...), so the offered set mirrors what codex
+    actually loads rather than only user-placed skills. Names are deduped in
+    first-seen order (repo-local before global, so a name defined in both keeps
+    its repo-local position). Fail-open: a missing root or filesystem error
+    contributes nothing rather than raising, so the caller degrades to an empty
+    available set. Reads only skill names, never `SKILL.md` contents.
+    """
+    seen: dict[str, None] = {}
+    for root in _SKILL_ROOTS:
+        for name in _direct_skill_names(cwd / root):
+            seen.setdefault(name, None)
+    codex_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    global_root = Path(codex_home) / "skills"
+    global_names = sorted(set(
+        _direct_skill_names(global_root)
+        + _direct_skill_names(global_root / _SYSTEM_SKILL_DIR)
+    ))
+    for name in global_names:
+        seen.setdefault(name, None)
+    return tuple(seen)
+
+
+# codex exec's default offered-tools surface, captured from a real codex-cli
+# 0.142.5 request payload (the `codex exec --json` stream itself carries no
+# offered-tools frame the way claude's `system`/`init` frame does -- the
+# upstream codex feature request tracks adding one). Kept as codex's own tool
+# identifiers so it reads as what codex actually offers. Best-effort by nature:
+# codex assembles the real per-run set from its version, feature flags, model,
+# and MCP config, none of which is observable out-of-band, so this baseline can
+# drift -- the trade-off the workaround accepts. MCP-server tools are not
+# enumerated (that needs live negotiation).
+_CODEX_OFFERED_TOOLS: tuple[str, ...] = (
+    "exec_command",
+    "write_stdin",
+    "update_plan",
+    "request_user_input",
+    "view_image",
+    "multi_agent_v1",
+    "get_goal",
+    "create_goal",
+    "update_goal",
+    "web_search",
+)
+
+
+def discover_codex_tools() -> tuple[str, ...]:
+    """Return codex's best-effort offered-tools set for a trajectory record.
+
+    Out-of-band workaround mirroring `discover_local_skills`: codex's `codex
+    exec --json` stream carries no offered-tools frame, so a codex trajectory's
+    "Tools offered" chip would otherwise stay empty. Returns the
+    `_CODEX_OFFERED_TOOLS` baseline (see its comment for the drift caveat and
+    provenance). A function rather than a bare constant so the analytics
+    backfill has a single seam that can later grow config awareness.
+    """
+    return _CODEX_OFFERED_TOOLS

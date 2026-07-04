@@ -1046,10 +1046,12 @@ class AgentTrajectory:
     (claude's ``result`` frame ``result`` string / codex's last
     ``agent_message`` ``text``), ``None`` when the stream carries none. ``skills`` is the same names-only
     ``SkillTriggers`` the skill extractor produces. ``tools`` is the offered-
-    tools set when a backend exposes one (claude's ``system``/``init``
-    ``tools`` array) and empty otherwise; ``system_prompt`` stays ``None``
-    until a backend's stream is confirmed to carry it -- both are best-effort
-    and empty when the stream shape is unknown rather than an error.
+    tools set when a backend exposes one in its stream (claude's
+    ``system``/``init`` ``tools`` array) and empty otherwise -- codex exposes
+    none, so a downstream writer backfills it out-of-band; ``system_prompt``
+    stays ``None`` until a backend's stream is confirmed to carry it -- both
+    are best-effort and empty when the stream shape is unknown rather than an
+    error.
 
     ``turns`` is the per-turn token-usage breakdown -- one ``TurnUsage`` per
     assistant turn, parallel to the ``tools`` / ``skills`` best-effort
@@ -1434,11 +1436,13 @@ def parse_codex_trajectory(stdout: str) -> AgentTrajectory:
     reconstructs the ordered timeline (command tool_call / tool_result steps
     interleaved with agent_message assistant_message turns) and final output;
     the last ``agent_message`` is still the ``final_output``. ``tools`` and
-    ``system_prompt`` stay empty / ``None`` -- codex's stream exposes no
-    confirmed offered-tools or system-prompt frame -- and ``turns`` stays empty
-    with every ``step.turn = None`` (codex usage frames are cumulative, not
-    per-turn). Every section is empty rather than an error when its source is
-    absent.
+    ``system_prompt`` stay empty / ``None`` here -- codex's stream exposes no
+    offered-tools or system-prompt frame -- so a downstream writer backfills
+    ``tools`` out-of-band (see ``analytics._maybe_record_trajectory`` /
+    ``skill_catalog.discover_codex_tools``); this stdout-only classifier does
+    not. ``turns`` stays empty with every ``step.turn = None`` (codex usage
+    frames are cumulative, not per-turn). Every section is empty rather than an
+    error when its source is absent.
     """
     events = _iter_events(stdout)
     return AgentTrajectory(
