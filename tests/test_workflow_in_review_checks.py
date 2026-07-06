@@ -22,7 +22,7 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
     mocked Repository to verify the call passes a Label object.
     """
 
-    def test_closed_sweep_uses_label_object_from_get_label(self) -> None:
+    def test_closed_sweep_uses_label_object(self) -> None:
         from unittest.mock import MagicMock
         from orchestrator.github import GitHubClient
 
@@ -63,7 +63,7 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         # because the GitHub Issues API treats `labels` as AND, not OR --
         # a single query for "any of these labels" is impossible).
         looked_up = [
-            ca.args[0] for ca in client.repo.get_label.call_args_list
+            call.args[0] for call in client.repo.get_label.call_args_list
         ]
         self.assertIn("implementing", looked_up)
         self.assertIn("documenting", looked_up)
@@ -74,11 +74,11 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         self.assertIn("question", looked_up)
         # The closed sweeps were invoked with Label OBJECTS, not strings.
         closed_calls = [
-            ca for ca in client.repo.get_issues.call_args_list
-            if ca.kwargs.get("state") == "closed"
+            call for call in client.repo.get_issues.call_args_list
+            if call.kwargs.get("state") == "closed"
         ]
         self.assertEqual(len(closed_calls), 7)
-        labels_passed = [ca.kwargs["labels"] for ca in closed_calls]
+        labels_passed = [call.kwargs["labels"] for call in closed_calls]
         self.assertIn([implementing_label], labels_passed)
         self.assertIn([documenting_label], labels_passed)
         self.assertIn([validating_label], labels_passed)
@@ -110,8 +110,8 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         self.assertEqual(out, [])
         # Only the open sweep was invoked.
         states = [
-            ca.kwargs.get("state")
-            for ca in client.repo.get_issues.call_args_list
+            call.kwargs.get("state")
+            for call in client.repo.get_issues.call_args_list
         ]
         self.assertEqual(states, ["open"])
 
@@ -145,11 +145,11 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
         pr = MagicMock()
         pr.head.sha = "deadbeef"
 
-        with self.assertLogs("orchestrator.github", level="ERROR") as cm:
+        with self.assertLogs("orchestrator.github", level="ERROR") as logs:
             state = client.pr_combined_check_state(pr)
 
         self.assertEqual(state, "none")
-        joined = "\n".join(cm.output)
+        joined = "\n".join(logs.output)
         self.assertIn("403", joined)
         self.assertIn("Checks: read", joined)
         self.assertIn("check_state", joined)
@@ -174,14 +174,14 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
         pr = MagicMock()
         pr.head.sha = "deadbeef"
 
-        with self.assertLogs("orchestrator.github", level="WARNING") as cm:
+        with self.assertLogs("orchestrator.github", level="WARNING") as logs:
             client.pr_combined_check_state(pr)
 
         # Filter to only WARNING records (assertLogs catches WARNING and above).
-        warning_only = [r for r in cm.records if r.levelname == "WARNING"]
+        warning_only = [record for record in logs.records if record.levelname == "WARNING"]
         self.assertTrue(warning_only, "should log a warning for non-403 errors")
         # No ERROR for non-403 failures.
-        error_records = [r for r in cm.records if r.levelname == "ERROR"]
+        error_records = [record for record in logs.records if record.levelname == "ERROR"]
         self.assertEqual(error_records, [])
 
 
@@ -248,7 +248,7 @@ class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):
             state = client.pr_combined_check_state(pr)
         self.assertEqual(state, "pending")
 
-    def test_no_combined_signal_with_check_runs_403_still_returns_none(self) -> None:
+    def test_no_combined_with_check_runs_403_returns_none(self) -> None:
         # Edge case: combined-status returned no usable signal AND
         # check-runs raised. We have NO signal at all; preserve the
         # existing 'none' return so the workflow's failed_checks branch

@@ -79,11 +79,11 @@ class HandleInReviewResumeOnHashChangeTest(
             "issue body changed" in body
             for _, body in gh.posted_pr_comments
         ))
-        data = gh.pinned_data(80)
+        state = gh.pinned_data(80)
         # New hash persisted.
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
         # review_round reset because this is a new diff.
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertEqual(state.get("review_round"), 0)
 
     def test_body_drift_ack_bounces_directly_to_validating(self) -> None:
         # A drift ACK reply (no commit, explicit `ACK:` marker) is an
@@ -129,9 +129,9 @@ class HandleInReviewResumeOnHashChangeTest(
         # `in_review`).
         self.assertIn((81, "validating"), gh.label_history)
         self.assertNotIn((81, "documenting"), gh.label_history)
-        data = gh.pinned_data(81)
+        state = gh.pinned_data(81)
         # `review_round` reset so the reviewer round cap counts fresh.
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertEqual(state.get("review_round"), 0)
         # ACK was surfaced as an FYI on the issue thread (matches the
         # `_post_user_content_change_result` ack branch).
         self.assertTrue(any(
@@ -173,8 +173,8 @@ class HandleInReviewResumeOnHashChangeTest(
         # in `in_review`.
         self.assertNotIn((82, "documenting"), gh.label_history)
         self.assertNotIn((82, "validating"), gh.label_history)
-        data = gh.pinned_data(82)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(82)
+        self.assertTrue(state.get("awaiting_human"))
 
     def test_body_drift_interrupted_resume_is_ignored(self) -> None:
         # A shutdown-killed (interrupted) drift resume must be ignored
@@ -216,10 +216,10 @@ class HandleInReviewResumeOnHashChangeTest(
         self.assertEqual(gh.write_state_calls, 0)
         self.assertNotIn((83, "validating"), gh.label_history)
         self.assertNotIn((83, "documenting"), gh.label_history)
-        data = gh.pinned_data(83)
+        state = gh.pinned_data(83)
         # Drift NOT consumed: the stale hash stands so the next tick fires.
-        self.assertEqual(data.get("user_content_hash"), "stale-hash")
-        self.assertFalse(data.get("awaiting_human"))
+        self.assertEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertFalse(state.get("awaiting_human"))
 
     def test_body_drift_no_commit_publishes_stranded_fix(self) -> None:
         # A no-commit drift resume that finds a committed-but-unpublished
@@ -284,9 +284,7 @@ class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
     fixing route preserves both comments for the (future real) fix
     handler."""
 
-    def test_concurrent_issue_thread_and_pr_conv_both_bookmarked(
-        self,
-    ) -> None:
+    def test_concurrent_issue_and_pr_conv_both_bookmarked(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
             1300, label="in_review", body="updated body",
@@ -329,12 +327,12 @@ class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
         # IssueComment id space).
         mocks["run_agent"].assert_not_called()
         self.assertIn((1300, "fixing"), gh.label_history)
-        data = gh.pinned_data(1300)
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 200)
+        state = gh.pinned_data(1300)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), 200)
         # Watermark stays at the seeded value so the future real fix
         # handler can re-scan both surfaces from there and find both
         # comments.
-        self.assertEqual(data.get("pr_last_comment_id"), 100)
+        self.assertEqual(state.get("pr_last_comment_id"), 100)
 
     def test_pr_conv_comment_above_issue_max_also_bookmarked(
         self,
@@ -372,5 +370,5 @@ class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
 
         mocks["run_agent"].assert_not_called()
         self.assertIn((1310, "fixing"), gh.label_history)
-        data = gh.pinned_data(1310)
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 600)
+        state = gh.pinned_data(1310)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), 600)
