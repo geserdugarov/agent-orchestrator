@@ -220,6 +220,8 @@ The schema is defined by `read_pinned_state` / `write_pinned_state` (see `github
   `unknown-price` runs add nothing); `issue_cost_sources` is the sorted distinct `cost_source` set a terminal verdict
   reads to mark `(est.)` (any `estimated`) or unpriced `unknown` (any `unknown-price`). The increment rides the
   handler's existing single `write_pinned_state`, so an `interrupted` run that returns without writing never accrues.
+  The read-only decomposer / question stages additionally skip the fold for `interrupted` runs, so even their
+  dirty/commits inspection park (which does write pinned state) records no counter.
 
 The legacy `codex_session_id` key (written before `dev_agent` existed) is still honored on read by `_read_dev_session`:
 it round-trips to `spec="codex"` with no args so an older orchestrator's pin keeps running on codex.
