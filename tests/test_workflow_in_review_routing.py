@@ -118,7 +118,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-30",
         )
 
-    def test_in_review_mergeable_final_docs_handoff_pings_human(self) -> None:
+    def test_in_review_mergeable_final_docs_pings_human(self) -> None:
         # PR mergeable: post a one-shot HITL ping so the human knows the
         # PR is ready, but stay open (no merge, no label flip, no
         # awaiting_human). The orchestrator is manual-merge-only -- it
@@ -153,20 +153,20 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("@alice", ping_comments[0])
         self.assertIn("@bob", ping_comments[0])
         self.assertIn(f"PR #{self.PR_NUMBER}", ping_comments[0])
-        data = gh.pinned_data(30)
+        state = gh.pinned_data(30)
         # De-dup key is the head SHA we pinged for.
-        self.assertEqual(data.get("ready_ping_sha"), "cafe1234")
+        self.assertEqual(state.get("ready_ping_sha"), "cafe1234")
         # Not parked: subsequent ticks must still react to comments / state.
-        self.assertFalse(data.get("awaiting_human"))
+        self.assertFalse(state.get("awaiting_human"))
         # Ping is recorded in orchestrator_comment_ids so the next tick's
         # `comments_after` filter excludes it as bot noise without needing
         # the watermark to move (which would risk swallowing a human
         # comment that landed between the earlier scan and the ping).
         ping_id = gh.latest_comment_id(issue)
         self.assertIsNotNone(ping_id)
-        self.assertIn(ping_id, data.get("orchestrator_comment_ids", []))
+        self.assertIn(ping_id, state.get("orchestrator_comment_ids", []))
 
-    def test_in_review_mergeable_without_approval_signal_does_not_ping(self) -> None:
+    def test_in_review_mergeable_without_approval_does_not_ping(self) -> None:
         # The ping advertises the PR as ready for review/merge; firing it
         # on a mergeable PR with neither a current final-docs handoff nor
         # a formal GitHub approval would invite a manual merge over a
@@ -182,9 +182,9 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.merge_calls, [])
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(30)
-        self.assertIsNone(data.get("ready_ping_sha"))
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(30)
+        self.assertIsNone(state.get("ready_ping_sha"))
+        self.assertFalse(state.get("awaiting_human"))
 
     def test_in_review_mergeable_changes_requested_does_not_ping(self) -> None:
         # A standing human CHANGES_REQUESTED on the current head vetoes
@@ -210,8 +210,8 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(gh.merge_calls, [])
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(30)
-        self.assertIsNone(data.get("ready_ping_sha"))
+        state = gh.pinned_data(30)
+        self.assertIsNone(state.get("ready_ping_sha"))
 
     def test_in_review_mergeable_dedups_same_head(self) -> None:
         # Second tick on the same head SHA must NOT re-ping; the ping is
@@ -261,7 +261,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(len(pings_total), 2)
         self.assertEqual(gh.pinned_data(30).get("ready_ping_sha"), "beefcafe")
 
-    def test_in_review_stale_final_docs_head_does_not_ping_new_head(self) -> None:
+    def test_in_review_stale_final_docs_does_not_ping_new_head(self) -> None:
         # The final-docs marker is a head-SHA approval signal. If another
         # commit lands after documenting, the old marker must not ping the
         # new head; the issue needs another validating/documenting pass.
@@ -301,7 +301,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # so the next id allocated by `_post_issue_comment` will be the
         # one after this). We splice the comment in mid-handler via a
         # patch on `_post_issue_comment` so it lands AFTER the scan.
-        human = FakeComment(
+        human_comment = FakeComment(
             id=1600, body="please hold off, doing one more pass",
             user=FakeUser("alice"), created_at=long_ago,
         )
@@ -311,7 +311,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         def post_with_race(gh_arg, issue_arg, state_arg, body_arg):
             # Simulate a human comment landing right before our ping.
             if "ready for review/merge" in body_arg:
-                issue_arg.comments.append(human)
+                issue_arg.comments.append(human_comment)
             return real_post(gh_arg, issue_arg, state_arg, body_arg)
 
         with _patch_mock.object(workflow, "_post_issue_comment", post_with_race):
@@ -321,15 +321,15 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         # Watermark must NOT have advanced past the human comment.
-        data = gh.pinned_data(30)
-        self.assertLess(data.get("pr_last_comment_id"), human.id)
+        state = gh.pinned_data(30)
+        self.assertLess(state.get("pr_last_comment_id"), human_comment.id)
 
         # Second tick: the human comment surfaces. The fresh-feedback
         # scan now runs BEFORE the drift check, so the human comment
         # routes the issue to `fixing` (the dev is not spawned by
         # `_handle_in_review` here). The ping itself is filtered as
         # orchestrator-authored, so the route is driven by the (real,
-        # human-authored) `human` comment.
+        # human-authored) `human_comment`.
         mocks = self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
             run_agent=_agent(),
@@ -337,7 +337,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_not_called()
         self.assertIn((30, "fixing"), gh.label_history)
         self.assertEqual(
-            gh.pinned_data(30).get("pending_fix_issue_max_id"), human.id,
+            gh.pinned_data(30).get("pending_fix_issue_max_id"), human_comment.id,
         )
 
     def test_in_review_hold_base_sync_pauses_hitl_ping(self) -> None:
@@ -376,14 +376,14 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.merge_calls, [])
         # Must NOT route to resolving_conflict.
         self.assertNotIn((30, "resolving_conflict"), gh.label_history)
-        data = gh.pinned_data(30)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "unmergeable")
+        state = gh.pinned_data(30)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "unmergeable")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("not mergeable", last_comment)
         # No conflict_round seeded -- the orchestrator never enters the
         # auto-resolution route from here.
-        self.assertNotIn("conflict_round", data)
+        self.assertNotIn("conflict_round", state)
 
     def test_in_review_hold_base_sync_skips_unmergeable_park(self) -> None:
         pr = self._open_pr(approved=True, mergeable=False, check_state="success")
@@ -399,9 +399,9 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.merge_calls, [])
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.label_history, [])
-        data = gh.pinned_data(30)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(30)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
 
     def test_in_review_mergeable_pending(self) -> None:
         # mergeable=None means GitHub is still computing. Don't ping,
@@ -452,12 +452,12 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
         self.assertIn((30, "fixing"), gh.label_history)
-        data = gh.pinned_data(30)
-        self.assertIn("pending_fix_at", data)
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
+        state = gh.pinned_data(30)
+        self.assertIn("pending_fix_at", state)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), 2000)
         # Watermarks deliberately NOT bumped: the fixing handler needs the
         # triggering comments to build its dev-resume prompt.
-        self.assertEqual(data.get("pr_last_comment_id"), 1999)
+        self.assertEqual(state.get("pr_last_comment_id"), 1999)
 
     def test_in_review_pr_comment_past_debounce_flips_to_fixing(self) -> None:
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -488,9 +488,9 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_not_called()
         self.assertIn((30, "fixing"), gh.label_history)
         self.assertNotIn((30, "validating"), gh.label_history)
-        data = gh.pinned_data(30)
-        self.assertIn("pending_fix_at", data)
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
+        state = gh.pinned_data(30)
+        self.assertIn("pending_fix_at", state)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), 2000)
 
     def test_in_review_pr_number_missing(self) -> None:
         # Manually-relabeled in_review without a pinned PR -- park once.
@@ -605,11 +605,11 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn((90, "fixing"), gh.label_history)
         self.assertNotIn((90, "validating"), gh.label_history)
         self.assertEqual(gh.merge_calls, [])
-        data = gh.pinned_data(90)
-        self.assertEqual(data.get("pending_fix_review_summary_max_id"), 4242)
+        state = gh.pinned_data(90)
+        self.assertEqual(state.get("pending_fix_review_summary_max_id"), 4242)
         # Watermark stays put so the fixing handler can read the review
         # body when it builds its dev-resume prompt.
-        self.assertEqual(data.get("pr_last_review_summary_id"), 0)
+        self.assertEqual(state.get("pr_last_review_summary_id"), 0)
 
     def test_commented_review_with_body_routes_to_fixing(self) -> None:
         # A "Comment" review (state=COMMENTED) needs to surface as fresh

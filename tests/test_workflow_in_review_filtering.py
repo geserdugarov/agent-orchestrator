@@ -103,7 +103,7 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(100).get("pending_fix_issue_max_id"), 3000,
         )
 
-    def test_same_account_human_issue_comment_at_handoff_is_preserved(self) -> None:
+    def test_same_account_human_issue_comment_at_handoff_preserved(self) -> None:
         # Validating-handoff variant: a human posts a review comment on the
         # issue thread (under the same account that owns the PAT) while
         # validating is still running. Without the id-based filter, the
@@ -152,18 +152,18 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
         )
-        wm = gh.pinned_data(101).get("pr_last_comment_id")
-        self.assertIsNotNone(wm)
+        last_comment_id = gh.pinned_data(101).get("pr_last_comment_id")
+        self.assertIsNotNone(last_comment_id)
         self.assertLess(
-            wm, 950,
+            last_comment_id, 950,
             f"watermark must stop before same-account human comment id=950 "
-            f"(got {wm})",
+            f"(got {last_comment_id})",
         )
 
         # Step 2: in_review tick. Human comment is still past the watermark
         # and the in_review handler hands it off to `fixing` (no inline
         # dev resume).
-        if not any(l.name == "in_review" for l in issue.labels):
+        if not any(label.name == "in_review" for label in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
             mocks = self._run(
@@ -192,9 +192,7 @@ class OrchestratorMarkerFeedbackFilterTest(
     must not route a marked bot comment to `fixing`.
     """
 
-    def test_marked_pr_comment_missing_recorded_id_does_not_route_to_fixing(
-        self,
-    ) -> None:
+    def test_marked_pr_comment_missing_id_does_not_route_to_fixing(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(120, label="in_review")
         gh.add_issue(issue)
@@ -278,19 +276,19 @@ class OrchestratorMarkerFeedbackFilterTest(
         ]
         untracked_ids = [2001, 2002, 2003]
         pr_issue_comments = []
-        for cid in tracked_ids:
+        for comment_id in tracked_ids:
             pr_issue_comments.append(FakeComment(
-                id=cid,
-                body=f":books: orchestrator post {cid}.\n\n{marker}",
+                id=comment_id,
+                body=f":books: orchestrator post {comment_id}.\n\n{marker}",
                 user=FakeUser("orchestrator"),
                 created_at=long_ago,
             ))
-        for cid in untracked_ids:
+        for comment_id in untracked_ids:
             pr_issue_comments.append(FakeComment(
-                id=cid,
+                id=comment_id,
                 body=(
                     f":eyes: codex review (round 1/10) requested changes "
-                    f"(comment {cid}).\n\n{marker}"
+                    f"(comment {comment_id}).\n\n{marker}"
                 ),
                 user=FakeUser("orchestrator"),
                 created_at=long_ago,

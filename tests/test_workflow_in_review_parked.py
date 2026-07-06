@@ -64,9 +64,7 @@ class AwaitingHumanParkStaysParkedTest(
         )
         return gh, issue, pr
 
-    def test_auto_rebase_park_ignores_new_comment_as_fresh_feedback(
-        self,
-    ) -> None:
+    def test_auto_rebase_park_ignores_new_comment(self) -> None:
         # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
         # `_sync_pr_worktree_to_base`'s retry loop. The human's new
         # comment is the operator's "retry the rebase" signal, NOT
@@ -97,16 +95,14 @@ class AwaitingHumanParkStaysParkedTest(
         self.assertEqual(gh.posted_comments, [])
         # Park preserved verbatim so the refresh's next tick still sees
         # the comment + park combo and can drive the retry.
-        data = gh.pinned_data(170)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(170)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"), "auto_base_rebase_push_failed",
         )
-        self.assertIsNone(data.get("pending_fix_at"))
+        self.assertIsNone(state.get("pending_fix_at"))
 
-    def test_unmergeable_park_stays_parked_when_pr_becomes_mergeable(
-        self,
-    ) -> None:
+    def test_unmergeable_stays_parked_when_pr_becomes_mergeable(self) -> None:
         # Even if the PR silently becomes mergeable (rebase resolved a
         # conflict, branch protection dropped), the handler does NOT
         # auto-recover -- the orchestrator never merges from in_review.
@@ -127,9 +123,9 @@ class AwaitingHumanParkStaysParkedTest(
         # No new park comment posted on this tick.
         self.assertEqual(gh.posted_comments, [])
         # Park flags preserved.
-        data = gh.pinned_data(170)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "unmergeable")
+        state = gh.pinned_data(170)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "unmergeable")
 
 
 class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -186,9 +182,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         # that, or it fires once the PR itself is closed.
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
-    def test_manually_closed_then_pr_closed_later_requires_manual_cleanup(
-        self,
-    ) -> None:
+    def test_manually_closed_then_pr_closed_requires_manual_cleanup(self) -> None:
         # Documents the known caveat: once the orchestrator flips the
         # closed-issue to `rejected`, the issue falls outside the
         # closed-issue sweep (`list_pollable_issues` only sweeps closed
@@ -208,7 +202,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         # rejected, so the polling sweep does not include it on the next
         # tick -- the handler never runs and cleanup never fires.
         pr.state = "closed"
-        pollable_numbers = {i.number for i in gh.list_pollable_issues()}
+        pollable_numbers = {pollable.number for pollable in gh.list_pollable_issues()}
         self.assertNotIn(
             250, pollable_numbers,
             "rejected closed issues are not swept, so the orchestrator "
@@ -237,7 +231,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_not_called()
         self.assertIn((250, "rejected"), gh.label_history)
 
-    def test_external_merge_with_closed_issue_still_finalizes_done(self) -> None:
+    def test_external_merge_with_closed_issue_finalizes_done(self) -> None:
         # The original closed-issue sweep purpose: a Resolves #N footer
         # auto-closes the issue when the PR merges. Issue closed AND PR
         # merged must still flip to `done`, not `rejected`.
@@ -316,16 +310,16 @@ class StaleParkReasonClearedOnFixingRouteTest(
 
         mocks["run_agent"].assert_not_called()
         self.assertIn((700, "fixing"), gh.label_history)
-        data = gh.pinned_data(700)
+        state = gh.pinned_data(700)
         self.assertFalse(
-            data.get("awaiting_human"),
+            state.get("awaiting_human"),
             "the route to fixing consumes the human signal and clears the "
             "stale awaiting_human flag",
         )
         self.assertIsNone(
-            data.get("park_reason"),
+            state.get("park_reason"),
             "stale 'unmergeable' park reason must be cleared by the route "
             "to fixing",
         )
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 3000)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), 3000)
         self.assertEqual(gh.merge_calls, [])
