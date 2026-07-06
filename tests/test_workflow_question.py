@@ -1254,6 +1254,130 @@ class HandleQuestionSessionPersistenceTest(
         )
 
 
+class HandleQuestionRunUsageAccumulationTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """`_handle_question` folds each real question-agent exit into the
+    per-issue usage counters, at both the fresh-spawn and awaiting-human
+    resume sites, and leaves them unpersisted when the run was interrupted
+    (empty stdout parses to a `no-usage` metric: a counted run with zero
+    tokens).
+    """
+
+    def test_fresh_run_persists_one_run(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(610, label="question", body="Where does X live?")
+        gh.add_issue(issue)
+
+        self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="q-sess", last_message="X is in x.py."),
+        )
+
+        data = gh.pinned_data(610)
+        self.assertEqual(data["issue_agent_runs"], 1)
+        self.assertEqual(data["issue_total_tokens"], 0)
+        self.assertEqual(data["issue_cost_sources"], ["no-usage"])
+
+    def test_resume_counts_one_exit(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(611, label="question")
+        issue.comments.append(FakeComment(id=12000, body="please clarify"))
+        gh.add_issue(issue)
+        gh.seed_state(
+            611,
+            awaiting_human=True,
+            last_action_comment_id=11000,
+            question_agent="claude",
+            question_session_id="q-sess-prior",
+            park_reason="question_answer",
+        )
+
+        self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="q-sess-prior", last_message="here you go",
+            ),
+        )
+
+        # Exactly one real resume exit folded.
+        self.assertEqual(gh.pinned_data(611)["issue_agent_runs"], 1)
+
+    def test_no_new_comment_resume_leaves_counters_untouched(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(612, label="question")
+        gh.add_issue(issue)
+        gh.seed_state(
+            612,
+            awaiting_human=True,
+            last_action_comment_id=9999,
+            question_agent="claude",
+            question_session_id="q-sess-prior",
+            park_reason="question_answer",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        # No reply -> the resume returns before spawning, so no run is
+        # counted and no counter key is created.
+        mocks["run_agent"].assert_not_called()
+        data = gh.pinned_data(612)
+        self.assertNotIn("issue_agent_runs", data)
+        self.assertNotIn("issue_total_tokens", data)
+
+    def test_interrupted_run_does_not_persist_counters(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(613, label="question")
+        gh.add_issue(issue)
+
+        self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="", last_message="", exit_code=1, interrupted=True,
+            ),
+        )
+
+        # A shutdown-killed question agent returns before
+        # `write_pinned_state`, so neither the folded counters nor a silent
+        # park reach GitHub.
+        data = gh.pinned_data(613)
+        self.assertNotIn("issue_agent_runs", data)
+        self.assertNotIn("issue_total_tokens", data)
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertNotEqual(data.get("park_reason"), "question_silent")
+        self.assertEqual(gh.posted_comments, [])
+
+    def test_interrupted_but_committed_run_parks_without_counters(self) -> None:
+        # A killed question agent that ALSO left commits still hits the
+        # read-only `question_commits` park (which writes pinned state and
+        # keeps the worktree for inspection). Because that write path fires,
+        # the usage fold must be skipped for the interrupted run or a counter
+        # would persist despite the run being killed.
+        gh = FakeGitHubClient()
+        issue = make_issue(614, label="question")
+        gh.add_issue(issue)
+
+        mocks = self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="q-sess", last_message="", interrupted=True,
+            ),
+            has_new_commits=True,
+        )
+
+        data = gh.pinned_data(614)
+        self.assertEqual(data.get("park_reason"), "question_commits")
+        # Worktree kept for inspection (the commits park's contract).
+        mocks["_cleanup_question_worktree"].assert_not_called()
+        # The park wrote pinned state, but the killed run's usage was NOT
+        # folded, so no counter accrued.
+        self.assertNotIn("issue_agent_runs", data)
+        self.assertNotIn("issue_total_tokens", data)
+
+
 def _git_env() -> dict:
     """Hermetic git env: detached from the operator's global / system
     config and with a deterministic author/committer so the test does

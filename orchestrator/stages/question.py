@@ -288,6 +288,18 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 state.set("question_session_id", result.session_id)
 
         state.set("last_question_at", _wf._now_iso())
+        # Fold this run's usage into the per-issue counters at the convergence
+        # of the fresh-spawn and awaiting-human resume branches, so a real
+        # resume exit is counted exactly once and the no-new-comment resume
+        # (which returned above without running the agent) never touches the
+        # counters. Interrupted runs are excluded entirely: the read-only
+        # commits/dirty parks below still write pinned state (to preserve the
+        # inspection worktree), so folding a killed run's usage first would
+        # persist a counter the interrupted contract says must not accrue. The
+        # clean-interrupted case is additionally short-circuited by the
+        # `_ignore_if_interrupted` guard below.
+        if not result.interrupted:
+            _wf._accumulate_issue_usage(state, result.usage)
 
         if result.timed_out:
             # Keep the worktree: the timeout killed the agent mid-run
@@ -338,6 +350,17 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 reason="question_dirty",
             )
             gh.write_pinned_state(issue, state)
+            return
+
+        # Shutdown-sweep interruption: a killed question run has no trustworthy
+        # answer. Its empty/partial output would otherwise fall through to the
+        # silent park below and persist the session / `last_question_at`
+        # mutations. Ignore it and return WITHOUT writing so the next process
+        # re-runs from durable state (a resume replays the still-unconsumed
+        # reply). Placed AFTER the read-only commits/dirty parks so an
+        # interrupted run that left changes still parks for inspection, and
+        # BEFORE the silent/answer parks so no partial `last_message` is posted.
+        if _wf._ignore_if_interrupted(issue, result):
             return
 
         raw = (result.last_message or "").strip()

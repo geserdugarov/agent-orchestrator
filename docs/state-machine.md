@@ -212,8 +212,9 @@ The schema is defined by `read_pinned_state` / `write_pinned_state` (see `github
   budget; once it reaches `DEV_SESSION_MAX_RESUMES` the session is retired and respawned fresh from durable state, reset
   to 0 on every fresh spawn), `merged_at` / `closed_without_merge_at` terminal stamps.
 - **Usage meter.** `issue_agent_runs` + `issue_total_tokens` + `issue_total_cost_usd` + `issue_cost_sources` are
-  per-issue cumulative counters folded in by `_accumulate_issue_usage` at each developer (implementing) and reviewer
-  (validating) run site from the `UsageMetrics` that `_run_agent_tracked` parses. `issue_total_tokens` sums input +
+  per-issue cumulative counters folded in by `_accumulate_issue_usage` at each developer (implementing), reviewer
+  (validating), decomposer (decomposing), and question run site from the `UsageMetrics` that `_run_agent_tracked`
+  parses. `issue_total_tokens` sums input +
   output + cache-read + cache-write (codex `cached_tokens` is excluded — it is already part of `input_tokens`, so
   summing it would double-count); `issue_total_cost_usd` sums each run's `cost_usd` (`None` costs from `no-usage` /
   `unknown-price` runs add nothing); `issue_cost_sources` is the sorted distinct `cost_source` set a terminal verdict
