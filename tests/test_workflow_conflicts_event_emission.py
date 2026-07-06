@@ -94,14 +94,14 @@ class ResolvingConflictEventEmissionTest(
         )
         attempts = self._events_of(gh, "merge_attempt")
         self.assertEqual(len(attempts), 1)
-        ev = attempts[0]
-        self.assertEqual(ev["stage"], "resolving_conflict")
-        self.assertEqual(ev["pr_number"], self.PR_NUMBER)
-        self.assertEqual(ev["method"], "base_rebase")
-        self.assertEqual(ev["result"], "success")
-        self.assertEqual(ev["conflict_round"], 0)
+        event = attempts[0]
+        self.assertEqual(event["stage"], "resolving_conflict")
+        self.assertEqual(event["pr_number"], self.PR_NUMBER)
+        self.assertEqual(event["method"], "base_rebase")
+        self.assertEqual(event["result"], "success")
+        self.assertEqual(event["conflict_round"], 0)
 
-    def test_merge_attempt_conflict_when_base_rebase_leaves_unmerged_paths(self) -> None:
+    def test_merge_attempt_conflict_on_unmerged_paths(self) -> None:
         gh, issue, pr = self._seed()
         self._run_with_merge(
             gh, issue, merge_succeeded=False,
@@ -156,7 +156,7 @@ class ResolvingConflictEventEmissionTest(
         self.assertEqual(len(rounds), 1)
         self.assertEqual(rounds[0]["outcome"], "agent_resolved")
 
-    def test_pr_merged_event_on_resolving_conflict_external_merge(self) -> None:
+    def test_pr_merged_event_on_external_merge(self) -> None:
         gh, issue, pr = self._seed(pr_state="closed", pr_merged=True)
         self._run_with_merge(gh, issue)
         merged = self._events_of(gh, "pr_merged")
@@ -166,7 +166,7 @@ class ResolvingConflictEventEmissionTest(
         # No base rebase attempted on the terminal path.
         self.assertEqual(self._events_of(gh, "merge_attempt"), [])
 
-    def test_pr_closed_without_merge_event_on_resolving_conflict_closed(self) -> None:
+    def test_pr_closed_without_merge_event(self) -> None:
         gh, issue, pr = self._seed(pr_state="closed", pr_merged=False)
         self._run_with_merge(gh, issue)
         closed = self._events_of(gh, "pr_closed_without_merge")
