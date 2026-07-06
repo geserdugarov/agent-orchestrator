@@ -74,8 +74,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
     ):
         gh = FakeGitHubClient()
         issue = make_issue(issue_number, label="fixing")
-        for c in issue_comments:
-            issue.comments.append(c)
+        for comment in issue_comments:
+            issue.comments.append(comment)
         gh.add_issue(issue)
         if pr is not None:
             gh.add_pr(pr)
@@ -317,7 +317,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data.get("pending_fix_issue_max_id"), 2000)
         self.assertFalse(data.get("awaiting_human"))
 
-    def test_no_ack_in_review_park_stays_parked_on_next_tick(self) -> None:
+    def test_no_ack_in_review_park_stays_parked(self) -> None:
         # Regression: a no-commit no-ACK reply parks via `_on_question`
         # (park_reason=None) on the first tick AND leaves the worktree
         # matching the PR head. The next tick must keep the issue parked
@@ -398,9 +398,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- comments arriving while already labeled fixing -------------------
 
-    def test_fresh_comment_during_fixing_is_picked_up_on_next_tick(
-        self,
-    ) -> None:
+    def test_fresh_comment_during_fixing_is_picked_up(self) -> None:
         # Tick 1 (in_review handoff already done; we simulate that state):
         # the triggering comment id=2000 sits past the watermark with the
         # bookmark recorded. Before tick 2 fires, a SECOND human comment
@@ -658,7 +656,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             data.get("user_content_hash"), "stale-hash-pre-comment",
         )
 
-    def test_pushed_fix_bump_does_not_swallow_concurrent_human_comment(
+    def test_pushed_fix_bump_does_not_swallow_concurrent_comment(
         self,
     ) -> None:
         # Race window: a human posts an issue-thread comment AFTER the
@@ -715,7 +713,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertGreaterEqual(data.get("pr_last_comment_id"), 2000)
         self.assertLess(data.get("pr_last_comment_id"), 2500)
 
-    def test_failed_fix_bump_does_not_swallow_concurrent_human_comment(
+    def test_failed_fix_bump_does_not_swallow_concurrent_comment(
         self,
     ) -> None:
         # Symmetric guard for the failure path: a human posts an
@@ -1073,7 +1071,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data.get("review_round"), 2)
         self.assertIn((880, "validating"), gh.label_history)
 
-    def test_in_review_routed_agent_timeout_park_does_not_silently_recover(
+    def test_in_review_routed_agent_timeout_park_not_recovered(
         self,
     ) -> None:
         # Regression: the transient recovery branch must NOT fire on
@@ -1129,7 +1127,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             data.get("pending_fix_at"), "2026-05-24T00:00:00+00:00",
         )
 
-    def test_in_review_routed_push_failed_park_does_not_silently_recover(
+    def test_in_review_routed_push_failed_park_not_recovered(
         self,
     ) -> None:
         # Same gate, push_failed flavor: on the in_review route a
@@ -1674,7 +1672,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data.get("park_reason"), "push_failed")
         self.assertNotIn((880, "validating"), gh.label_history)
 
-    def test_ack_with_stranded_fix_publishes_instead_of_in_review(self) -> None:
+    def test_ack_stranded_fix_publishes_instead_of_in_review(self) -> None:
         # in_review route (`pending_fix_at` set): the dev ACKs a no-commit
         # resume, but the clean worktree HEAD is strictly ahead of the
         # remote PR branch -- a fix a prior parked run committed that
@@ -1717,7 +1715,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Watermark advanced past the consumed feedback.
         self.assertGreaterEqual(data.get("pr_last_comment_id"), 2000)
 
-    def test_ack_stranded_check_behind_remote_keeps_in_review_return(self) -> None:
+    def test_ack_stranded_behind_remote_keeps_in_review(self) -> None:
         # The remote PR branch moved past the local view (behind > 0):
         # `_stranded_fix_unpushed` is conservative and reports False
         # rather than racing a head we have not reconciled, so the ACK
@@ -1956,14 +1954,14 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         from orchestrator.github import PinnedState
 
         # Full list present -> used verbatim (the max id is ignored).
-        s = PinnedState(data={"ids": [3, 1, 2], "max": 9})
-        self.assertEqual(_pending_fix_id_set(s, "ids", "max"), {1, 2, 3})
+        state = PinnedState(data={"ids": [3, 1, 2], "max": 9})
+        self.assertEqual(_pending_fix_id_set(state, "ids", "max"), {1, 2, 3})
         # Only the max id -> conservative single-item set.
-        s = PinnedState(data={"max": 9})
-        self.assertEqual(_pending_fix_id_set(s, "ids", "max"), {9})
+        state = PinnedState(data={"max": 9})
+        self.assertEqual(_pending_fix_id_set(state, "ids", "max"), {9})
         # A stray bool must not read as id 1 (bool is an int subclass).
-        s = PinnedState(data={"max": True})
-        self.assertEqual(_pending_fix_id_set(s, "ids", "max"), set())
+        state = PinnedState(data={"max": True})
+        self.assertEqual(_pending_fix_id_set(state, "ids", "max"), set())
         # Neither present -> empty.
         self.assertEqual(
             _pending_fix_id_set(PinnedState(data={}), "ids", "max"), set(),
@@ -2037,8 +2035,8 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         command = FakeComment(id=command_id, body=command_body, user=FakeUser("dave"))
         if not command_on_pr_conversation:
             issue.comments.append(command)
-        for c in extra_issue_comments:
-            issue.comments.append(c)
+        for comment in extra_issue_comments:
+            issue.comments.append(comment)
         pr_conv = [
             FakeComment(id=2100, body="handle the edge case", user=FakeUser("alice")),
         ]
@@ -2287,7 +2285,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         # one that also carries guidance (5, 6) -- so the command still fires
         # the replay. A prose mention in backticks (4) and a different command
         # (7) do not.
-        self.assertEqual([c.id for c in matched], [1, 2, 3, 5, 6])
+        self.assertEqual([comment.id for comment in matched], [1, 2, 3, 5, 6])
 
     def test_is_bare_orchestrator_continue(self) -> None:
         # `_is_bare_*` distinguishes a content-free nudge (whole body is the

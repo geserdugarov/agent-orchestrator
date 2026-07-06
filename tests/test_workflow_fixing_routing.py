@@ -130,9 +130,9 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # field stays None (callers that need a transient/recoverable
         # tag re-set it explicitly -- this park is HITL-only).
         events_for_issue = [
-            e for e in gh.recorded_events
-            if e.get("issue") == 702
-            and e.get("event") == "park_awaiting_human"
+            event for event in gh.recorded_events
+            if event.get("issue") == 702
+            and event.get("event") == "park_awaiting_human"
         ]
         self.assertEqual(len(events_for_issue), 1)
         self.assertEqual(events_for_issue[0].get("reason"), "missing_pr_number")
@@ -242,10 +242,10 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         open_impl = make_issue(710, label="implementing")
         closed_fixing = make_issue(711, label="fixing")
         closed_fixing.closed = True
-        for i in (open_impl, closed_fixing):
-            gh.add_issue(i)
+        for issue in (open_impl, closed_fixing):
+            gh.add_issue(issue)
 
-        numbers = {i.number for i in gh.list_pollable_issues()}
+        numbers = {issue.number for issue in gh.list_pollable_issues()}
         self.assertEqual(numbers, {710, 711})
 
     def test_auto_merge_does_not_fire_while_label_is_fixing(self) -> None:
@@ -518,10 +518,10 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         self.assertEqual(data.get("pr_last_comment_id"), 5000)
         self.post.assert_called_once()
         entered = [
-            e for e in gh.recorded_events
-            if e.get("issue") == number
-            and e.get("event") == "conflict_round"
-            and e.get("action") == "entered"
+            event for event in gh.recorded_events
+            if event.get("issue") == number
+            and event.get("event") == "conflict_round"
+            and event.get("action") == "entered"
         ]
         self.assertEqual(len(entered), 1)
         self.assertEqual(entered[0].get("stage"), "fixing")
