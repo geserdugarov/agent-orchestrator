@@ -19,10 +19,10 @@ class WorktreePathSlugNamespaceTest(unittest.TestCase):
     (no `/`, no leading `.`) since it becomes a directory name.
     """
 
-    def _spec(self, slug: str) -> config.RepoSpec:
+    def _spec(self, repo_slug: str) -> config.RepoSpec:
         return config.RepoSpec(
-            slug=slug,
-            target_root=Path(f"/tmp/{workflow._sanitize_slug(slug)}-target"),
+            slug=repo_slug,
+            target_root=Path(f"/tmp/{workflow._sanitize_slug(repo_slug)}-target"),
             base_branch="main",
         )
 
@@ -145,15 +145,15 @@ class BranchNameSlugNamespaceTest(unittest.TestCase):
     def test_branch_name_keeps_orchestrator_prefix(self) -> None:
         # `_cleanup_terminal_branch` relies on the `orchestrator/` prefix
         # to constrain what branches it is willing to delete.
-        for slug in ("alice/repo", "bob/repo", "weird name/x"):
+        for repo_slug in ("alice/repo", "bob/repo", "weird name/x"):
             spec = config.RepoSpec(
-                slug=slug,
+                slug=repo_slug,
                 target_root=Path("/tmp/x"),
                 base_branch="main",
             )
             self.assertTrue(
                 workflow._branch_name(spec, 42).startswith("orchestrator/"),
-                slug,
+                repo_slug,
             )
 
 
@@ -168,9 +168,9 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
     `git worktree add -b ...` before any PR could be created.
     """
 
-    def _branch(self, slug: str, n: int = 1) -> str:
+    def _branch(self, repo_slug: str, n: int = 1) -> str:
         spec = config.RepoSpec(
-            slug=slug, target_root=Path("/tmp/x"), base_branch="main",
+            slug=repo_slug, target_root=Path("/tmp/x"), base_branch="main",
         )
         return workflow._branch_name(spec, n)
 
@@ -205,15 +205,15 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         # branch and the worktree path stay readable in tandem. No
         # injectivity suffix is appended because the filesystem-safe
         # form is already git-ref-safe.
-        for slug in (
+        for repo_slug in (
             "geserdugarov/agent-orchestrator",
             "alice/repo",
             "acme/widget-private",
         ):
             self.assertEqual(
-                workflow._sanitize_branch_segment(slug),
-                workflow._sanitize_slug(slug),
-                slug,
+                workflow._sanitize_branch_segment(repo_slug),
+                workflow._sanitize_slug(repo_slug),
+                repo_slug,
             )
 
     def test_distinct_slugs_produce_distinct_branches(self) -> None:
@@ -243,10 +243,10 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         # always produces the same branch -- a stage handler must be
         # able to recompute the branch on every tick without needing
         # to read prior state.
-        slug = "owner/foo.lock"
+        repo_slug = "owner/foo.lock"
         self.assertEqual(
-            workflow._sanitize_branch_segment(slug),
-            workflow._sanitize_branch_segment(slug),
+            workflow._sanitize_branch_segment(repo_slug),
+            workflow._sanitize_branch_segment(repo_slug),
         )
 
     def test_check_ref_format_accepts_branch_for_pathological_slugs(
@@ -273,15 +273,15 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
             "owner/foo_bar",
             "owner/foo_",
         ]
-        for slug in pathological:
-            branch = self._branch(slug, 1)
+        for repo_slug in pathological:
+            branch = self._branch(repo_slug, 1)
             r = subprocess.run(
                 ["git", "check-ref-format", "--branch", branch],
                 capture_output=True, text=True,
             )
             self.assertEqual(
                 r.returncode, 0,
-                f"slug={slug!r} produced invalid branch "
+                f"slug={repo_slug!r} produced invalid branch "
                 f"{branch!r}: stderr={r.stderr!r}",
             )
 

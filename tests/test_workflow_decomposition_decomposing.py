@@ -76,10 +76,10 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn((11, "ready"), gh.label_history)
         # No children created.
         self.assertEqual(gh.created_child_issues, [])
-        data = gh.pinned_data(11)
-        self.assertEqual(data.get("decomposer_agent"), config.DECOMPOSE_AGENT)
-        self.assertEqual(data.get("decomposer_session_id"), "dec-sess")
-        self.assertIn("decomposed_at", data)
+        state = gh.pinned_data(11)
+        self.assertEqual(state.get("decomposer_agent"), config.DECOMPOSE_AGENT)
+        self.assertEqual(state.get("decomposer_session_id"), "dec-sess")
+        self.assertIn("decomposed_at", state)
         # Rationale surfaced in a comment.
         self.assertTrue(any(
             "fits in one context" in body for _, body in gh.posted_comments
@@ -143,13 +143,13 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
             self.assertIn(f"Parent: #{12}", child.body)
 
-        data = gh.pinned_data(12)
+        state = gh.pinned_data(12)
         self.assertEqual(
-            data.get("children"),
+            state.get("children"),
             [c.number for c in gh.created_child_issues],
         )
         # No deps -> dep_graph not persisted.
-        self.assertNotIn("dep_graph", data)
+        self.assertNotIn("dep_graph", state)
         # Summary comment lists both child numbers.
         last_comment = next(
             body for n, body in gh.posted_comments if n == 12
@@ -255,8 +255,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual([l.name for l in children[0].labels], ["ready"])
         self.assertEqual([l.name for l in children[1].labels], ["blocked"])
 
-        data = gh.pinned_data(13)
-        self.assertEqual(data.get("dep_graph"), {"1": [0]})
+        state = gh.pinned_data(13)
+        self.assertEqual(state.get("dep_graph"), {"1": [0]})
         # Each child's pinned state records the parent so the polling
         # loop's blocked-issue dispatch can recognize it as a child
         # rather than as an unattributed `blocked` parent.
@@ -282,8 +282,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             has_new_commits=True,
         )
 
-        data = gh.pinned_data(40)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(40)
+        self.assertTrue(state.get("awaiting_human"))
         # Did NOT advance to ready -- the operator must clean up first.
         self.assertNotIn((40, "ready"), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
@@ -301,8 +301,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             dirty_files=("foo.py",),
         )
 
-        data = gh.pinned_data(41)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(41)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((41, "ready"), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("read-only", last_comment)
@@ -318,8 +318,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(session_id="dec-sess", last_message=bad),
         )
 
-        data = gh.pinned_data(14)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(14)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("manifest invalid", last_comment)
         # Last decomposer message quoted into the HITL ping so the human
@@ -327,7 +327,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("not really json", last_comment)
         # Decomposer session recorded so the resume on human reply uses
         # the right backend even if DECOMPOSE_AGENT flips between ticks.
-        self.assertEqual(data.get("decomposer_session_id"), "dec-sess")
+        self.assertEqual(state.get("decomposer_session_id"), "dec-sess")
 
     def test_decompose_no_manifest_question_parks(self) -> None:
         gh = FakeGitHubClient()
@@ -343,8 +343,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             ),
         )
 
-        data = gh.pinned_data(15)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(15)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("needs your input", last_comment)
         self.assertIn("--json flag", last_comment)
@@ -504,9 +504,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertIn((19, "implementing"), gh.label_history)
         self.assertEqual(gh.created_child_issues, [])
-        data = gh.pinned_data(19)
-        self.assertNotIn("decomposer_agent", data)
-        self.assertNotIn("decomposer_session_id", data)
+        state = gh.pinned_data(19)
+        self.assertNotIn("decomposer_agent", state)
+        self.assertNotIn("decomposer_session_id", state)
 
     def test_decompose_off_routes_decomposing_label_to_implementing(
         self,
@@ -557,9 +557,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Decomposer-side park state cleared so `_handle_implementing`'s
         # awaiting_human resume branch doesn't fire on stale state.
-        data = gh.pinned_data(20)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(20)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
 
         # Routing comment posted; no children created.
         self.assertTrue(any(
@@ -613,8 +613,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 push_branch=True,
             )
 
-        data = gh.pinned_data(21)
-        last_action = data.get("last_action_comment_id")
+        state = gh.pinned_data(21)
+        last_action = state.get("last_action_comment_id")
         # Must be past the highest decomposing-era comment so the
         # in_review watermark seed treats them as already-consumed.
         self.assertIsInstance(last_action, int)
@@ -772,8 +772,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.created_child_issues, [])
         self.assertIn((50, "blocked"), gh.label_history)
         # Children + decomposed_at preserved.
-        data = gh.pinned_data(50)
-        self.assertEqual(data.get("children"), [101, 102])
+        state = gh.pinned_data(50)
+        self.assertEqual(state.get("children"), [101, 102])
 
     def test_half_finished_recovery_with_awaiting_human_holds(self) -> None:
         # If the prior tick parked awaiting_human after partial child
@@ -829,8 +829,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.created_child_issues, [])
         # Parked, not finalized to blocked.
         self.assertNotIn((52, "blocked"), gh.label_history)
-        data = gh.pinned_data(52)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(52)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("crashed mid-way", last_comment)
         self.assertIn("1 of 3", last_comment)
@@ -864,8 +864,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.created_child_issues, [])
         self.assertNotIn((53, "blocked"), gh.label_history)
-        data = gh.pinned_data(53)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(53)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("crashed mid-way", last_comment)
         self.assertIn("0 of 2", last_comment)
@@ -1117,10 +1117,10 @@ class DecomposerRunUsageAccumulationTest(
             run_agent=_agent(session_id="dec-sess", last_message=manifest),
         )
 
-        data = gh.pinned_data(620)
-        self.assertEqual(data["issue_agent_runs"], 1)
-        self.assertEqual(data["issue_total_tokens"], 0)
-        self.assertEqual(data["issue_cost_sources"], ["no-usage"])
+        state = gh.pinned_data(620)
+        self.assertEqual(state["issue_agent_runs"], 1)
+        self.assertEqual(state["issue_total_tokens"], 0)
+        self.assertEqual(state["issue_cost_sources"], ["no-usage"])
 
     def test_resume_counts_one_exit(self) -> None:
         gh = FakeGitHubClient()
@@ -1171,9 +1171,9 @@ class DecomposerRunUsageAccumulationTest(
         # No reply -> the resume returns before spawning, so no run is
         # counted and no counter key is created.
         mocks["run_agent"].assert_not_called()
-        data = gh.pinned_data(622)
-        self.assertNotIn("issue_agent_runs", data)
-        self.assertNotIn("issue_total_tokens", data)
+        state = gh.pinned_data(622)
+        self.assertNotIn("issue_agent_runs", state)
+        self.assertNotIn("issue_total_tokens", state)
 
     def test_interrupted_run_does_not_persist_counters(self) -> None:
         gh = FakeGitHubClient()
@@ -1197,10 +1197,10 @@ class DecomposerRunUsageAccumulationTest(
         # A shutdown-killed decomposer returns before `write_pinned_state`,
         # so neither the folded counters nor a silent/invalid park reach
         # GitHub.
-        data = gh.pinned_data(623)
-        self.assertNotIn("issue_agent_runs", data)
-        self.assertNotIn("issue_total_tokens", data)
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(623)
+        self.assertNotIn("issue_agent_runs", state)
+        self.assertNotIn("issue_total_tokens", state)
+        self.assertFalse(state.get("awaiting_human"))
 
     def test_interrupted_but_dirty_run_parks_without_persisting_counters(
         self,
@@ -1224,12 +1224,12 @@ class DecomposerRunUsageAccumulationTest(
             has_new_commits=True,
         )
 
-        data = gh.pinned_data(624)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(624)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertIn("read-only", gh.posted_comments[-1][1])
         # Worktree kept for inspection (the dirty park's contract).
         mocks["_cleanup_decompose_worktree"].assert_not_called()
         # The park wrote pinned state, but the killed run's usage was NOT
         # folded, so no counter accrued.
-        self.assertNotIn("issue_agent_runs", data)
-        self.assertNotIn("issue_total_tokens", data)
+        self.assertNotIn("issue_agent_runs", state)
+        self.assertNotIn("issue_total_tokens", state)
