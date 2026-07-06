@@ -122,7 +122,7 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.opened_prs, [])
         self.assertEqual(gh.label_history, [])
 
-    def test_timeout_parks_with_question_timeout_reason(self) -> None:
+    def test_timeout_parks_with_question_timeout(self) -> None:
         gh, issue = self._seeded()
         mocks = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
@@ -135,7 +135,7 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn(config.HITL_MENTIONS, gh.posted_comments[-1][1])
         self.assertIn("timed out", gh.posted_comments[-1][1])
 
-    def test_silent_run_parks_with_question_silent_reason(self) -> None:
+    def test_silent_run_parks_with_question_silent(self) -> None:
         # No commit AND no final message -- distinct from a real
         # clarifying question; see the implementer's `_on_question`
         # silent branch for the parallel.
@@ -287,7 +287,8 @@ class HandleQuestionAwaitingHumanResumeTest(
         # out of `comments_after` by its marker, so the relevant id to
         # compare against is the answer comment, not the latest overall.
         answer_comments = [
-            c for c in issue.comments if "round-1 answer" in (c.body or "")
+            comment for comment in issue.comments
+            if "round-1 answer" in (comment.body or "")
         ]
         self.assertEqual(len(answer_comments), 1)
         self.assertGreaterEqual(wm_after_r1, answer_comments[0].id)
@@ -360,13 +361,13 @@ class HandleQuestionAwaitingHumanResumeTest(
         # rounds; the no-reply tick in between did not spawn it.
         answer_bodies = [body for _, body in gh.posted_comments]
         self.assertEqual(
-            sum(1 for b in answer_bodies if "round-1 answer" in b), 1,
+            sum(1 for body in answer_bodies if "round-1 answer" in body), 1,
         )
         self.assertEqual(
-            sum(1 for b in answer_bodies if "round-2 answer" in b), 1,
+            sum(1 for body in answer_bodies if "round-2 answer" in body), 1,
         )
         self.assertEqual(
-            sum(1 for b in answer_bodies if "round-3 answer" in b), 1,
+            sum(1 for body in answer_bodies if "round-3 answer" in body), 1,
         )
 
 
@@ -503,7 +504,8 @@ class HandleQuestionClosedIssueTerminalTest(
             "this issue: 4 agent runs · 8,800 tokens · $0.19", receipts[0],
         )
         receipt_comment = next(
-            c for c in issue.comments if c.body.startswith(":receipt:")
+            comment for comment in issue.comments
+            if comment.body.startswith(":receipt:")
         )
         self.assertIn(
             receipt_comment.id,

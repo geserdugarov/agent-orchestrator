@@ -60,28 +60,28 @@ class ReviewVerdictEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_approved_verdict_emits_event(self) -> None:
         gh, issue, pr, last = self._seeded("LGTM\n\nVERDICT: APPROVED")
         self._run_validating(gh, issue, pr, last)
-        verdicts = [e for e in gh.recorded_events if e["event"] == "review_verdict"]
+        verdicts = [event for event in gh.recorded_events if event["event"] == "review_verdict"]
         self.assertEqual(len(verdicts), 1)
-        v = verdicts[0]
-        self.assertEqual(v["verdict"], "approved")
-        self.assertEqual(v["stage"], "validating")
-        self.assertEqual(v["review_round"], 0)
-        self.assertEqual(v["pr_number"], 99)
-        self.assertEqual(v["session_id"], "sess-review")
+        verdict = verdicts[0]
+        self.assertEqual(verdict["verdict"], "approved")
+        self.assertEqual(verdict["stage"], "validating")
+        self.assertEqual(verdict["review_round"], 0)
+        self.assertEqual(verdict["pr_number"], 99)
+        self.assertEqual(verdict["session_id"], "sess-review")
 
     def test_changes_requested_verdict_emits_event(self) -> None:
         gh, issue, pr, last = self._seeded(
             "1. Add a test\n\nVERDICT: CHANGES_REQUESTED",
         )
         self._run_validating(gh, issue, pr, last)
-        verdicts = [e for e in gh.recorded_events if e["event"] == "review_verdict"]
+        verdicts = [event for event in gh.recorded_events if event["event"] == "review_verdict"]
         self.assertEqual(len(verdicts), 1)
         self.assertEqual(verdicts[0]["verdict"], "changes_requested")
 
     def test_unknown_verdict_emits_event(self) -> None:
         gh, issue, pr, last = self._seeded("no marker here")
         self._run_validating(gh, issue, pr, last)
-        verdicts = [e for e in gh.recorded_events if e["event"] == "review_verdict"]
+        verdicts = [event for event in gh.recorded_events if event["event"] == "review_verdict"]
         self.assertEqual(len(verdicts), 1)
         self.assertEqual(verdicts[0]["verdict"], "unknown")
 
@@ -96,9 +96,9 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
 
     @staticmethod
     def _parks(gh) -> list[dict]:
-        return [e for e in gh.recorded_events if e["event"] == "park_awaiting_human"]
+        return [event for event in gh.recorded_events if event["event"] == "park_awaiting_human"]
 
-    def test_agent_question_emits_park_event_with_reason_and_stage(self) -> None:
+    def test_agent_question_park_carries_reason_and_stage(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(6, label="implementing")
         gh.add_issue(issue)
@@ -112,7 +112,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
         self.assertEqual(parks[0]["stage"], "implementing")
         self.assertEqual(parks[0]["reason"], "agent_question")
 
-    def test_agent_silent_emits_park_event_with_reason(self) -> None:
+    def test_agent_silent_park_carries_reason(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(7, label="implementing")
         gh.add_issue(issue)
@@ -125,7 +125,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
         self.assertEqual(len(parks), 1)
         self.assertEqual(parks[0]["reason"], "agent_silent")
 
-    def test_reviewer_timeout_emits_park_event_with_reason(self) -> None:
+    def test_reviewer_timeout_park_carries_reason(self) -> None:
         # Reviewer agent timeout during validating routes through
         # `_park_awaiting_human(reason="reviewer_timeout")` directly.
         gh = FakeGitHubClient()
@@ -237,7 +237,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     @staticmethod
     def _events_of(gh, event_name: str) -> list[dict]:
-        return [e for e in gh.recorded_events if e["event"] == event_name]
+        return [event for event in gh.recorded_events if event["event"] == event_name]
 
     def _open_pr(self, **kwargs):
         defaults = dict(
@@ -267,7 +267,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(issue_number, **state)
         return gh, issue
 
-    def test_pr_opened_event_on_fresh_pr_open(self) -> None:
+    def test_pr_opened_on_fresh_open(self) -> None:
         # _handle_implementing -> _on_commits opens a new PR and emits
         # `pr_opened` with the pr number and branch.
         gh = FakeGitHubClient()
@@ -284,16 +284,16 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         opened = self._events_of(gh, "pr_opened")
         self.assertEqual(len(opened), 1)
-        ev = opened[0]
-        self.assertEqual(ev["stage"], "implementing")
-        self.assertEqual(ev["issue"], 50)
-        self.assertEqual(ev["pr_number"], gh.opened_prs[0].number)
-        self.assertEqual(ev["branch"], "orchestrator/geserdugarov__agent-orchestrator/issue-50")
+        event = opened[0]
+        self.assertEqual(event["stage"], "implementing")
+        self.assertEqual(event["issue"], 50)
+        self.assertEqual(event["pr_number"], gh.opened_prs[0].number)
+        self.assertEqual(event["branch"], "orchestrator/geserdugarov__agent-orchestrator/issue-50")
         # `sha` carries the PR head sha from `pr.head.sha` so the audit
         # sink can correlate the open event with later merge / review IDs.
-        self.assertEqual(ev["sha"], gh.opened_prs[0].head.sha)
+        self.assertEqual(event["sha"], gh.opened_prs[0].head.sha)
 
-    def test_pr_opened_not_emitted_when_reusing_existing_pr(self) -> None:
+    def test_pr_opened_not_emitted_when_reusing_pr(self) -> None:
         # Recovery path: an existing open PR is reused rather than opened
         # again. The PR was already announced on its earlier tick, so no
         # `pr_opened` event should fire here.
@@ -353,7 +353,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # emits `merge_attempt` from in_review.
         self.assertEqual(self._events_of(gh, "merge_attempt"), [])
 
-    def test_pr_closed_without_merge_event_on_terminal(self) -> None:
+    def test_pr_closed_without_merge_on_terminal(self) -> None:
         pr = self._open_pr(merged=False, state="closed")
         gh, issue = self._seed_in_review(pr=pr)
         self._run(
@@ -407,7 +407,7 @@ class EventEmissionDisabledTest(unittest.TestCase, _PatchedWorkflowMixin):
             # and the various lifecycle events captured in-memory.
             self.assertEqual(len(gh.posted_comments), 1)
             self.assertTrue(gh.pinned_data(20).get("awaiting_human"))
-            event_names = {e["event"] for e in gh.recorded_events}
+            event_names = {event["event"] for event in gh.recorded_events}
             self.assertIn("agent_spawn", event_names)
             self.assertIn("agent_exit", event_names)
             self.assertIn("park_awaiting_human", event_names)
