@@ -41,7 +41,7 @@ class HandleImplementingTimeoutDispositionTest(
         gh.add_issue(issue)
         return gh, issue
 
-    def test_timeout_no_commit_parks_with_agent_timeout_reason(self) -> None:
+    def test_timeout_no_commit_parks_with_agent_timeout(self) -> None:
         # HEAD did not advance past the pre-agent SHA: the timeout produced no
         # commit. Park awaiting human, no push, no PR -- but tag the park
         # `agent_timeout` and persist `pre_implement_sha` for next-tick
@@ -64,7 +64,7 @@ class HandleImplementingTimeoutDispositionTest(
         self.assertIn("agent timed out", last_comment)
         self.assertNotIn((1, "validating"), gh.label_history)
 
-    def test_timeout_clean_commit_pushes_opens_pr_and_flips_label(self) -> None:
+    def test_timeout_clean_commit_pushes_opens_pr(self) -> None:
         # HEAD advanced and the tree is clean: the agent committed clean work
         # before the timeout killed it. Publish exactly like a normal
         # completion -- push, open PR, route to validating.
@@ -137,7 +137,7 @@ class HandleImplementingTimeoutRecoveryTest(
         gh.seed_state(4, **state)
         return gh, issue
 
-    def test_parked_timeout_recovers_clean_commit_without_human(self) -> None:
+    def test_parked_timeout_recovers_clean_commit(self) -> None:
         # A descendant finished a clean commit after the timeout was recorded
         # (the #77 shape). With no human comment, the next tick must publish
         # the recovered commit and clear the park rather than wait forever.
@@ -161,7 +161,7 @@ class HandleImplementingTimeoutRecoveryTest(
         self.assertIsNone(data.get("park_reason"))
         self.assertIsNone(data.get("pre_implement_sha"))
 
-    def test_parked_timeout_no_commit_stays_parked_silently(self) -> None:
+    def test_parked_timeout_no_commit_stays_parked(self) -> None:
         # HEAD is unchanged from the pre-timeout SHA: nothing recoverable.
         # Stay parked with zero churn -- no push, no PR, no relabel, and no
         # second park comment.

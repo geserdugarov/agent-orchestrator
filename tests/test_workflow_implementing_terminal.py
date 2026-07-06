@@ -75,7 +75,7 @@ class HandleImplementingClosedIssueTest(
     after the external-merge finalize returns False.
     """
 
-    def test_closed_implementing_with_no_pr_flips_to_rejected(self) -> None:
+    def test_closed_implementing_no_pr_flips_to_rejected(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(151, label="implementing")
         issue.closed = True
@@ -93,7 +93,7 @@ class HandleImplementingClosedIssueTest(
         # No PR → no branch cleanup (no remote ref to delete).
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
-    def test_closed_implementing_with_open_pr_skips_cleanup(self) -> None:
+    def test_closed_implementing_open_pr_skips_cleanup(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(152, label="implementing")
         issue.closed = True
@@ -123,7 +123,7 @@ class HandleImplementingClosedIssueTest(
         # can salvage / reopen the PR.
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
-    def test_closed_implementing_with_closed_pr_runs_cleanup(self) -> None:
+    def test_closed_implementing_closed_pr_runs_cleanup(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(153, label="implementing")
         issue.closed = True
@@ -155,7 +155,7 @@ class HandleImplementingClosedIssueTest(
         )
         # `pr_closed_without_merge` event emitted only when the PR
         # itself is closed (mirrors in_review / fixing semantics).
-        kinds = [e["event"] for e in gh.recorded_events]
+        kinds = [event["event"] for event in gh.recorded_events]
         self.assertIn("pr_closed_without_merge", kinds)
 
     def test_closed_implementing_defers_when_pr_fetch_fails(self) -> None:
@@ -298,14 +298,15 @@ class FinalizeIfIssueClosedUsageVerdictTest(
             "this issue: 2 agent runs · 3,400 tokens · $0.31", receipts[0],
         )
         receipt_comment = next(
-            c for c in issue.comments if c.body.startswith(":receipt:")
+            comment for comment in issue.comments
+            if comment.body.startswith(":receipt:")
         )
         self.assertIn(
             receipt_comment.id,
             gh.pinned_data(156).get("orchestrator_comment_ids", []),
         )
 
-    def test_rejected_finalize_without_counters_posts_no_verdict(self) -> None:
+    def test_rejected_finalize_no_counters_posts_no_verdict(self) -> None:
         from orchestrator.github import PinnedState
 
         gh = FakeGitHubClient()
@@ -325,7 +326,7 @@ class FinalizeIfIssueClosedUsageVerdictTest(
 
         self.assertIn((157, "rejected"), gh.label_history)
         self.assertEqual(
-            [b for n, b in gh.posted_comments
-             if n == 157 and b.startswith(":receipt:")],
+            [body for n, body in gh.posted_comments
+             if n == 157 and body.startswith(":receipt:")],
             [],
         )
