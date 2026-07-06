@@ -28,9 +28,7 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
     def _pr(self, sha):
         return FakePR(number=1, head_branch="b", head=FakePRRef(sha=sha))
 
-    def test_pr_head_orchestrator_produced_recognizes_docs_checked_sha(
-        self,
-    ) -> None:
+    def test_pr_head_recognizes_docs_checked_sha(self) -> None:
         # `docs_checked_sha` is the only key production code persists for
         # an orchestrator-produced PR head (set by `_handle_documenting`'s
         # success exits). PR heads from earlier in the lifecycle (the
@@ -41,16 +39,16 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
         issue = make_issue(1, label="resolving_conflict")
         gh.add_issue(issue)
         gh.seed_state(1, docs_checked_sha="abc")
-        st = gh.read_pinned_state(issue)
+        state = gh.read_pinned_state(issue)
         self.assertTrue(
-            conflicts._pr_head_orchestrator_produced(st, self._pr("abc")),
+            conflicts._pr_head_orchestrator_produced(state, self._pr("abc")),
         )
         self.assertFalse(
-            conflicts._pr_head_orchestrator_produced(st, self._pr("xyz")),
+            conflicts._pr_head_orchestrator_produced(state, self._pr("xyz")),
         )
         # An empty/missing head never matches.
         self.assertFalse(
-            conflicts._pr_head_orchestrator_produced(st, self._pr("")),
+            conflicts._pr_head_orchestrator_produced(state, self._pr("")),
         )
         # No `docs_checked_sha` recorded -- e.g. a pre-docs validating
         # PR head -- must NOT match an empty-string lookup either.
@@ -58,12 +56,12 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
         issue2 = make_issue(2, label="resolving_conflict")
         gh2.add_issue(issue2)
         gh2.seed_state(2, dev_agent="claude")
-        st2 = gh2.read_pinned_state(issue2)
+        state2 = gh2.read_pinned_state(issue2)
         self.assertFalse(
-            conflicts._pr_head_orchestrator_produced(st2, self._pr("abc")),
+            conflicts._pr_head_orchestrator_produced(state2, self._pr("abc")),
         )
 
-    def test_already_rebased_onto_base_reads_rev_list_count(self) -> None:
+    def test_already_rebased_reads_rev_list_count(self) -> None:
         fetch_ok = MagicMock(return_value=MagicMock(returncode=0))
         with patch.object(workflow, "_authed_fetch", fetch_ok), \
              patch.object(
@@ -82,9 +80,7 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
                 conflicts._already_rebased_onto_base(_TEST_SPEC, Path("/tmp/x")),
             )
 
-    def test_already_rebased_onto_base_fails_closed_on_fetch_failure(
-        self,
-    ) -> None:
+    def test_already_rebased_fails_closed_on_fetch_failure(self) -> None:
         # Without proving HEAD is on the CURRENT base tip, we cannot
         # let the force-publish path enable. A stale
         # `<remote>/<base>` ref would let `rev-list HEAD..<remote>/<base>`

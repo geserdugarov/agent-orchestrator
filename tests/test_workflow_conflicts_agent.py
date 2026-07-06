@@ -23,9 +23,7 @@ class ResolvingConflictAgentExecutionTest(
     out, fails to push, or is interrupted mid-flight.
     """
 
-    def test_conflict_resolved_by_agent_pushes_and_flips_to_validating(
-        self,
-    ) -> None:
+    def test_conflict_resolved_pushes_and_flips_to_validating(self) -> None:
         # Agent-resolved conflict push pushes the resolved branch and
         # hands straight back to `validating`. Docs do not run here --
         # the single docs pass runs after reviewer approval before
@@ -97,7 +95,7 @@ class ResolvingConflictAgentExecutionTest(
         # No label flip -- still resolving_conflict.
         self.assertNotIn((200, "validating"), gh.label_history)
 
-    def test_conflict_resolution_interrupted_leaves_state_untouched(self) -> None:
+    def test_interrupted_resolution_leaves_state_untouched(self) -> None:
         # A dev run spawned to resolve the rebase conflict, but the shutdown
         # sweep killed it mid-flight. The partial result must be ignored:
         # `_post_conflict_resolution_result` returns WITHOUT writing pinned

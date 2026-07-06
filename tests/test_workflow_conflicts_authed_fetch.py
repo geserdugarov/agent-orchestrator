@@ -21,7 +21,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
     carries url-rewrite rules.
     """
 
-    def test_env_includes_askpass_token_and_blocks_inherited_config(self) -> None:
+    def test_askpass_token_and_blocks_inherited_config(self) -> None:
         from unittest.mock import patch as mock_patch, MagicMock
 
         # First subprocess.run call is the rewrite-rule probe (returncode=1
@@ -99,7 +99,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
                  workflow.config, "_resolve_github_token",
                  return_value="fake-token-xyz",
              ):
-            r = workflow._authed_fetch(
+            fetch = workflow._authed_fetch(
                 _TEST_SPEC,
                 "+refs/heads/main:refs/remotes/origin/main",
                 cwd=Path("/tmp"),
@@ -107,7 +107,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
 
         # Only the rewrite probe ran -- the fetch was refused.
         self.assertEqual(len(runs), 1)
-        self.assertNotEqual(r.returncode, 0)
+        self.assertNotEqual(fetch.returncode, 0)
 
     def test_no_token_returns_failure_without_subprocess(self) -> None:
         from unittest.mock import patch as mock_patch, MagicMock
@@ -122,14 +122,14 @@ class AuthedFetchHardeningTest(unittest.TestCase):
              mock_patch.object(
                  workflow.config, "_resolve_github_token", return_value=""
              ):
-            r = workflow._authed_fetch(
+            fetch = workflow._authed_fetch(
                 _TEST_SPEC, "refs/heads/main:refs/remotes/origin/main",
                 cwd=Path("/tmp"),
             )
 
         # No subprocess at all when the token is missing.
         self.assertEqual(runs, [])
-        self.assertNotEqual(r.returncode, 0)
+        self.assertNotEqual(fetch.returncode, 0)
 
     def test_uses_per_spec_token_for_git_fetch(self) -> None:
         # Multi-repo regression guard: `_authed_fetch` must resolve the token
@@ -160,7 +160,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
             # `config.GITHUB_TOKEN` would surface in GIT_TOKEN below.
             return f"ghp-token-for-{slug.replace('/', '-')}"
 
-        other_spec = config.RepoSpec(
+        repo = config.RepoSpec(
             slug="acme/widgets",
             target_root=Path("/tmp/orchestrator-test-target-root"),
             base_branch="main",
@@ -169,12 +169,12 @@ class AuthedFetchHardeningTest(unittest.TestCase):
              mock_patch.object(
                  workflow.config, "_resolve_github_token", fake_resolve
              ):
-            r = workflow._authed_fetch(
-                other_spec,
+            fetch = workflow._authed_fetch(
+                repo,
                 "+refs/heads/main:refs/remotes/origin/main",
                 cwd=Path("/tmp"),
             )
-        self.assertEqual(r.returncode, 0)
+        self.assertEqual(fetch.returncode, 0)
         # Token resolved exactly once, for the spec's slug -- not for
         # `config.REPO`.
         self.assertEqual(resolved, ["acme/widgets"])
@@ -200,7 +200,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
             runs.append(args)
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        other_spec = config.RepoSpec(
+        repo = config.RepoSpec(
             slug="acme/widgets",
             target_root=Path("/tmp/orchestrator-test-target-root"),
             base_branch="main",
@@ -209,14 +209,14 @@ class AuthedFetchHardeningTest(unittest.TestCase):
              mock_patch.object(
                  workflow.config, "_resolve_github_token", return_value=""
              ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
-            r = workflow._authed_fetch(
-                other_spec,
+            fetch = workflow._authed_fetch(
+                repo,
                 "+refs/heads/main:refs/remotes/origin/main",
                 cwd=Path("/tmp"),
             )
         # Fetch aborted before any subprocess ran.
         self.assertEqual(runs, [])
-        self.assertNotEqual(r.returncode, 0)
+        self.assertNotEqual(fetch.returncode, 0)
         self.assertTrue(
             any("acme/widgets" in line for line in cm.output),
             f"expected slug 'acme/widgets' in log output, got {cm.output!r}",
