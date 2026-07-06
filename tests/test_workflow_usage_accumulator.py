@@ -1,10 +1,12 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
-"""Per-issue cumulative usage meter: the `_accumulate_issue_usage` fold and
-its wiring into the developer (implementing) and reviewer (validating) run
-sites. Covers the token formula (codex `cached_tokens` excluded), the cost /
-cost-source aggregates, and the single-writer discipline that leaves an
-interrupted run's counters unpersisted."""
+"""Per-issue cumulative usage meter: the `_accumulate_issue_usage` fold, the
+`_format_issue_usage_verdict` reader that renders the terminal receipt line,
+and their wiring into the developer (implementing) and reviewer (validating)
+run sites. Covers the token formula (codex `cached_tokens` excluded), the cost
+/ cost-source aggregates, the `(est.)` / `unknown` verdict slots, and the
+single-writer discipline that leaves an interrupted run's counters
+unpersisted."""
 from __future__ import annotations
 
 import os
@@ -102,6 +104,65 @@ class AccumulateIssueUsageHelperTest(unittest.TestCase):
         workflow._accumulate_issue_usage(seeded, None)
         self.assertEqual(seeded.get("issue_agent_runs"), 2)
         self.assertEqual(seeded.get("issue_total_tokens"), 9)
+
+
+class FormatIssueUsageVerdictTest(unittest.TestCase):
+    """The pure reader: `_format_issue_usage_verdict` renders the counters
+    into the terminal receipt line, marking `(est.)` / `unknown` off the
+    cost-source set and collapsing to None when nothing was counted."""
+
+    def test_zero_runs_returns_none(self) -> None:
+        # An empty state and an explicit zero both skip the line so a
+        # terminal with no counted run posts no receipt.
+        self.assertIsNone(workflow._format_issue_usage_verdict(PinnedState()))
+        self.assertIsNone(
+            workflow._format_issue_usage_verdict(
+                PinnedState(data={"issue_agent_runs": 0}),
+            )
+        )
+
+    def test_verdict_slots_by_cost_source(self) -> None:
+        cases = [
+            # (sources, cost_usd) -> expected trailing cost slot
+            (["reported"], 0.87, "$0.87"),
+            (["estimated"], 0.87, "$0.87 (est.)"),
+            (["estimated", "reported"], 1.5, "$1.50 (est.)"),
+            # An unpriced run collapses the whole figure to `unknown`, and
+            # that dominates a co-present estimate (an unknown total is not
+            # an estimate).
+            (["unknown-price"], None, "unknown"),
+            (["estimated", "unknown-price"], 0.87, "unknown"),
+            # A `no-usage` run priced nothing but blocks neither slot.
+            (["no-usage"], None, "$0.00"),
+        ]
+        for sources, cost, expected_cost in cases:
+            with self.subTest(sources=sources):
+                data = {
+                    "issue_agent_runs": 3,
+                    "issue_total_tokens": 45200,
+                    "issue_cost_sources": sources,
+                }
+                if cost is not None:
+                    data["issue_total_cost_usd"] = cost
+                self.assertEqual(
+                    workflow._format_issue_usage_verdict(PinnedState(data=data)),
+                    f":receipt: this issue: 3 agent runs · "
+                    f"45,200 tokens · {expected_cost}",
+                )
+
+    def test_tokens_are_thousands_separated(self) -> None:
+        line = workflow._format_issue_usage_verdict(
+            PinnedState(data={
+                "issue_agent_runs": 1,
+                "issue_total_tokens": 1234567,
+                "issue_total_cost_usd": 12.3,
+                "issue_cost_sources": ["reported"],
+            })
+        )
+        self.assertEqual(
+            line,
+            ":receipt: this issue: 1 agent runs · 1,234,567 tokens · $12.30",
+        )
 
 
 class DeveloperRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin):

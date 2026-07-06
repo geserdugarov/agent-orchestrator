@@ -1061,6 +1061,16 @@ bad line never invalidates the rest of the stream. `workflow._run_agent_tracked`
 tracked agent run and appends the parsed counts to the [analytics sink](#analytics-sink-analytics_log_path) under
 `event="agent_exit"`; a parser exception is caught and downgraded to a `log.exception`.
 
+**Terminal verdict surface.** Beyond the analytics sink, `workflow._accumulate_issue_usage` folds each run's
+`UsageMetrics` into per-issue counters on the pinned state (`issue_agent_runs` / `issue_total_tokens` /
+`issue_total_cost_usd` / `issue_cost_sources`; see [state-machine.md](state-machine.md#pinned-state)). When an
+issue reaches a terminal, `workflow._format_issue_usage_verdict` renders those counters into one visible receipt line
+posted on the issue thread — `:receipt: this issue: N agent runs · T tokens · $X.XX`, with `(est.)` appended when any
+run's cost was `estimated` and the figure collapsed to `unknown` when an `unknown-price` run leaves the total
+incomplete. The PR merged / rejected finalizers and the closed-`question` terminal post it as a standalone tracked
+comment; the `umbrella` close comment appends it. It is a read-only summary — nothing gates on the figure — and it is
+skipped when no run was ever counted.
+
 **Skill-trigger extractor (opt-in).** A sibling trio mirrors the usage parsers' two-parsers-one-dispatcher shape and
 resilience contract to record which agent *skills* a run triggered, gated behind `TRACK_SKILL_TRIGGERS` (default off;
 see [`agent_exit` records](#agent_exit-records)). `parse_claude_skills(stdout)` reads the firm signal — `tool_use`

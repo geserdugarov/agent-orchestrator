@@ -6,7 +6,8 @@ finalize-to-done with event + cleanup, closed-without-merge
 finalize-to-rejected with event + cleanup, the open-PR + manually-
 closed-issue rejection without cleanup, the resolving_conflict
 `conflict_round` coercion contract, the in_review missing-counter
-contract, and the already-closed-issue merged arc."""
+contract, the already-closed-issue merged arc, and the terminal
+usage-verdict receipt each arc posts before its pinned-state write."""
 from __future__ import annotations
 
 import os
@@ -391,6 +392,63 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         ]
         self.assertEqual(len(merged_events), 1)
         self.assertEqual(merged_events[0]["stage"], "fixing")
+
+    def test_each_terminal_arc_posts_tracked_usage_verdict(self) -> None:
+        # All three terminal arcs -- merged -> done, closed -> rejected, and
+        # the open-PR + manually-closed-issue -> rejected path -- surface the
+        # cumulative usage verdict as a tracked comment posted BEFORE the
+        # arc's `write_pinned_state`, so its id rides the persisted state.
+        cases = [
+            # (issue, pr, merged, pr_state, issue_closed, stage)
+            (320, 32000, True, "closed", False, "in_review"),
+            (321, 32100, False, "closed", False, "fixing"),
+            (322, 32200, False, "open", True, "resolving_conflict"),
+        ]
+        for n, prn, merged, pr_state, issue_closed, stage in cases:
+            with self.subTest(stage=stage):
+                gh = FakeGitHubClient()
+                issue = make_issue(n, label=stage)
+                issue.closed = issue_closed
+                gh.add_issue(issue)
+                pr = FakePR(
+                    number=prn,
+                    head_branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{n}",
+                    head=FakePRRef(sha="cafe1234"),
+                    merged=merged, state=pr_state,
+                )
+                gh.add_pr(pr)
+                state = self._state_with_pr_number(
+                    gh, n, prn, conflict_round=0,
+                    issue_agent_runs=2, issue_total_tokens=1000,
+                    issue_total_cost_usd=0.5, issue_cost_sources=["reported"],
+                )
+
+                self._run(
+                    lambda: self.assertTrue(
+                        workflow._drain_review_pr_terminals(
+                            gh, _TEST_SPEC, issue, state, pr, stage=stage,
+                        )
+                    ),
+                    run_agent=_agent(),
+                )
+
+                receipts = [
+                    body for m, body in gh.posted_comments
+                    if m == n and body.startswith(":receipt:")
+                ]
+                self.assertEqual(len(receipts), 1)
+                self.assertIn(
+                    "this issue: 2 agent runs · 1,000 tokens · $0.50",
+                    receipts[0],
+                )
+                receipt_comment = next(
+                    c for c in issue.comments
+                    if c.body.startswith(":receipt:")
+                )
+                self.assertIn(
+                    receipt_comment.id,
+                    gh.pinned_data(n).get("orchestrator_comment_ids", []),
+                )
 
 
 if __name__ == "__main__":

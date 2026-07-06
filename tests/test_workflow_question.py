@@ -471,6 +471,45 @@ class HandleQuestionClosedIssueTerminalTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-52",
         )
 
+    def test_closed_issue_with_counters_posts_tracked_usage_verdict(
+        self,
+    ) -> None:
+        # A Q&A thread that ran the question agent accrued usage counters;
+        # the terminal close surfaces the cumulative verdict as a tracked
+        # comment posted before the single `write_pinned_state`.
+        gh = FakeGitHubClient()
+        issue = make_issue(53, label="question")
+        issue.closed = True
+        gh.add_issue(issue)
+        gh.seed_state(
+            53,
+            question_agent=config.DECOMPOSE_AGENT_SPEC,
+            question_session_id="q-sess-prior",
+            issue_agent_runs=4, issue_total_tokens=8800,
+            issue_total_cost_usd=0.19, issue_cost_sources=["reported"],
+        )
+        mocks = self._run(
+            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
+            run_agent=_agent(last_message="should not run"),
+        )
+        mocks["run_agent"].assert_not_called()
+        self.assertEqual(gh.label_history, [(53, "done")])
+        receipts = [
+            body for n, body in gh.posted_comments
+            if n == 53 and body.startswith(":receipt:")
+        ]
+        self.assertEqual(len(receipts), 1)
+        self.assertIn(
+            "this issue: 4 agent runs · 8,800 tokens · $0.19", receipts[0],
+        )
+        receipt_comment = next(
+            c for c in issue.comments if c.body.startswith(":receipt:")
+        )
+        self.assertIn(
+            receipt_comment.id,
+            gh.pinned_data(53).get("orchestrator_comment_ids", []),
+        )
+
 
 class HandleQuestionWorktreeCleanupTest(
     unittest.TestCase, _PatchedWorkflowMixin,
