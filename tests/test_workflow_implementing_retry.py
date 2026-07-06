@@ -44,7 +44,7 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.seed_state(8, **state)
         return gh, issue
 
-    def test_fourth_fresh_attempt_in_window_is_parked_before_codex(self) -> None:
+    def test_fourth_fresh_attempt_parks_before_codex(self) -> None:
         # Run three fresh attempts that each park as a question, then assert
         # the fourth tick parks before run_agent is called. Pin the cap at 3
         # so the test is hermetic against a `MAX_RETRIES_PER_DAY` env
@@ -166,7 +166,7 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
     so a config flip mid-flight does not break a resumable session.
     """
 
-    def test_fresh_implementing_spawn_uses_dev_agent_config(self) -> None:
+    def test_fresh_spawn_uses_dev_agent_config(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(20, label="implementing")
         gh.add_issue(issue)
@@ -213,7 +213,7 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data["review_agent"], "codex")
         self.assertEqual(data["last_review_session_id"], "rev-sess")
 
-    def test_dev_fix_uses_recorded_dev_backend_not_current_config(self) -> None:
+    def test_dev_fix_uses_recorded_backend_not_config(self) -> None:
         # Issue locked to codex via pinned state; even if config flips to
         # claude, the validating dev-fix call must stay on codex.
         gh = FakeGitHubClient()
@@ -336,7 +336,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(state.get("dev_session_id"), "poisoned-sess")
         self.assertEqual(state.get("silent_park_count"), 1)
 
-    def test_at_threshold_drops_session_and_persists_fresh_one(self) -> None:
+    def test_at_threshold_drops_session_and_persists_fresh(self) -> None:
         # `_SILENT_PARKS_BEFORE_FRESH_SESSION` consecutive silent parks ==
         # session is poisoned. The resume must call `run_agent` with
         # `resume_session_id=None`, persist the new session id from the
@@ -369,7 +369,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         # immediately.
         self.assertEqual(state.get("silent_park_count"), 0)
 
-    def test_fresh_spawn_with_empty_session_id_still_clears_pinned(self) -> None:
+    def test_fresh_spawn_empty_session_id_still_clears_pinned(self) -> None:
         # If the fresh spawn comes back without a `session_id` (agent
         # backend hiccup, missing file, etc.), the poisoned id must STILL
         # be removed from pinned state. Otherwise `_read_dev_session` on
@@ -532,7 +532,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
         # re-drop the new session.
         self.assertEqual(state.get("silent_park_count"), 0)
 
-    def test_stale_session_retry_clears_pinned_even_if_retry_empty(self) -> None:
+    def test_stale_session_retry_clears_pinned_if_retry_empty(self) -> None:
         # If the fresh-spawn retry returns no session id (CLI hiccup), the
         # poisoned id must still be cleared from pinned state -- otherwise
         # the next tick's `_read_dev_session` resurrects it.
@@ -557,7 +557,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
             "returns no session id",
         )
 
-    def test_stale_session_retry_does_not_loop_when_retry_also_stale(self) -> None:
+    def test_stale_session_retry_does_not_loop_if_retry_stale(self) -> None:
         # If the fresh spawn ALSO trips a stale-session marker something
         # deeper is broken (e.g. a misconfigured CLI). Surface that result
         # to the caller instead of looping infinitely.
@@ -586,7 +586,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `_on_question` will handle the agent_silent park.
         self.assertEqual(result.stderr, self.STALE_STDERR)
 
-    def test_codex_stale_stderr_does_not_trigger_immediate_retry(self) -> None:
+    def test_codex_stale_stderr_no_immediate_retry(self) -> None:
         # Codex falls back to the silent-park-count path. A first resume
         # whose stderr happens to contain the marker must NOT retry
         # immediately for the codex backend.
@@ -735,7 +735,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
         )
         self.assertEqual(state.get("silent_park_count"), 0)
 
-    def test_overflow_retry_clears_pinned_even_if_retry_empty(self) -> None:
+    def test_overflow_retry_clears_pinned_if_retry_empty(self) -> None:
         # If the fresh-spawn retry returns no session id, the poisoned id must
         # still be cleared so the next tick's `_read_dev_session` cannot
         # resurrect the overflowed session.
@@ -753,7 +753,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
 
         self.assertIsNone(state.get("dev_session_id"))
 
-    def test_overflow_retry_does_not_loop_when_fresh_spawn_also_overflows(self) -> None:
+    def test_overflow_retry_does_not_loop_if_spawn_overflows(self) -> None:
         # A fresh spawn that ALSO overflows (issue body so large even a small
         # prompt exceeds the window) is bounded to a single retry; the still-
         # failing result is surfaced so the caller's `_on_question` parks it
@@ -779,7 +779,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
         )
         self.assertEqual(result.last_message, self.OVERFLOW_MSG)
 
-    def test_codex_overflow_does_not_trigger_immediate_retry(self) -> None:
+    def test_codex_overflow_no_immediate_retry(self) -> None:
         # Codex has no analogous stable marker; a codex resume whose message
         # happens to share the text must not trip the claude-only retry.
         gh, issue = self._seeded_issue(dev_agent="codex")
@@ -944,7 +944,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
             "the overflow-recovery fresh spawn must be re-grounded",
         )
 
-    def test_preamble_builder_includes_requirements_and_branch_pointer(self) -> None:
+    def test_preamble_builder_includes_requirements_and_branch(self) -> None:
         issue = make_issue(963, body="do the work", title="My Issue")
         text = workflow._build_fresh_respawn_preamble(
             _TEST_SPEC, issue, "@alice: please add tests", [_TEST_SPEC])

@@ -91,7 +91,7 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # State stays pinned to the legacy branch.
         self.assertEqual(gh.pinned_data(4).get("branch"), LEGACY)
 
-    def test_on_commits_persists_branch_for_branchless_resume_state(self) -> None:
+    def test_on_commits_persists_branch_for_branchless_resume(self) -> None:
         # Regression: a state that lacks `branch` going into `_on_commits`
         # (the awaiting-human resume path skips the fresh-spawn
         # `state.set("branch", ...)` block) would, before this fix, leave
@@ -204,7 +204,7 @@ class OnCommitsBodyTruncationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     _GITHUB_BODY_LIMIT = 65536
 
-    def test_long_agent_message_body_is_capped_and_marked(self) -> None:
+    def test_long_agent_message_body_capped_and_marked(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(60, label="implementing", title="add a thing")
         gh.add_issue(issue)
@@ -227,7 +227,7 @@ class OnCommitsBodyTruncationTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn(implementing._PR_BODY_TRUNCATION_MARKER, body)
         self.assertLessEqual(len(body), self._GITHUB_BODY_LIMIT)
 
-    def test_short_agent_message_body_has_no_marker(self) -> None:
+    def test_short_agent_message_body_no_marker(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(61, label="implementing", title="add a thing")
         gh.add_issue(issue)
@@ -387,7 +387,7 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(gh.opened_prs[0].title, "fix(api)!: drop legacy endpoint")
 
-    def test_pr_title_falls_back_to_feat_for_unconventional_commit(self) -> None:
+    def test_pr_title_falls_back_to_feat_for_unconventional(self) -> None:
         gh, issue = self._seeded(issue_number=32)
 
         self._run(
@@ -419,7 +419,7 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Bug label tips the fallback to `fix:`.
         self.assertEqual(gh.opened_prs[0].title, "fix: add a sparkly thing")
 
-    def test_pr_title_fallback_when_no_commit_subject_available(self) -> None:
+    def test_pr_title_fallback_when_no_commit_subject(self) -> None:
         gh, issue = self._seeded(issue_number=34)
 
         self._run(
@@ -453,7 +453,7 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(gh.opened_prs[0].title, "docs: clarify the README")
 
-    def test_pr_title_preserves_custom_repo_prefix_first_commit(self) -> None:
+    def test_pr_title_preserves_custom_repo_prefix(self) -> None:
         # A repo-local prefix that is NOT a Conventional type (e.g. an
         # events repo's `event:`) must be preserved verbatim, not replaced
         # with a synthesized `feat:`.
@@ -577,11 +577,11 @@ class InferSubjectPrefixTest(unittest.TestCase):
 
         def fake_git(*args, cwd):
             captured.append((args, cwd))
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = stdout
-            r.stderr = ""
-            return r
+            run = MagicMock()
+            run.returncode = 0
+            run.stdout = stdout
+            run.stderr = ""
+            return run
 
         return fake_git, captured
 
@@ -615,7 +615,7 @@ class InferSubjectPrefixTest(unittest.TestCase):
         # the bug/feat heuristic rather than echoing the history prefix.
         self.assertEqual(self._infer("feat: a\nfix: b\nfeat: c\n"), "feat")
 
-    def test_conventional_history_with_bug_label_uses_fix(self) -> None:
+    def test_conventional_history_bug_label_uses_fix(self) -> None:
         self.assertEqual(self._infer("feat: a\nfeat: b\n", bug=True), "fix")
 
     def test_empty_history_falls_back_to_feat(self) -> None:
@@ -629,11 +629,11 @@ class InferSubjectPrefixTest(unittest.TestCase):
         from unittest.mock import MagicMock
 
         def failing_git(*args, cwd):
-            r = MagicMock()
-            r.returncode = 1
-            r.stdout = ""
-            r.stderr = "fatal: bad revision"
-            return r
+            run = MagicMock()
+            run.returncode = 1
+            run.stdout = ""
+            run.stderr = "fatal: bad revision"
+            return run
 
         issue = make_issue(51, title="do a thing")
         with patch.object(branch_publication, "_git", failing_git):
@@ -673,11 +673,11 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
 
         def fake_git(*args, cwd):
             captured.append((args, cwd))
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = stdout
-            r.stderr = ""
-            return r
+            run = MagicMock()
+            run.returncode = 0
+            run.stdout = stdout
+            run.stderr = ""
+            return run
 
         return fake_git, captured
 
@@ -741,11 +741,11 @@ class HasNewCommitsRemoteNameTest(unittest.TestCase):
 
         def fake_git(*args, cwd):
             captured.append((args, cwd))
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = "0\n"
-            r.stderr = ""
-            return r
+            run = MagicMock()
+            run.returncode = 0
+            run.stdout = "0\n"
+            run.stderr = ""
+            return run
 
         private_spec = config.RepoSpec(
             slug="acme/widget",

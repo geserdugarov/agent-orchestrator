@@ -260,7 +260,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(state.get("dev_agent"), self._CODEX_SPEC)
         self.assertEqual(state.get("dev_session_id"), "fresh-67005")
 
-    def test_poisoned_legacy_codex_session_pins_to_codex_before_clearing(self) -> None:
+    def test_poisoned_legacy_session_pins_codex_before_clearing(self) -> None:
         # Legacy schema (only `codex_session_id`): a poisoned-session drop
         # must pin `dev_agent="codex"` before clearing the legacy field,
         # so a subsequent env flip to claude cannot retroactively switch
@@ -335,7 +335,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data["review_agent"], self._CODEX_SPEC)
         self.assertEqual(data["last_review_session_id"], "rev-67010")
 
-    def test_reviewer_pr_comments_use_configured_backend_name(self) -> None:
+    def test_reviewer_pr_comments_use_configured_backend(self) -> None:
         # Issue #67: reviewer trace/comments must not hardcode `codex` --
         # when the operator configures claude as the reviewer, the PR
         # comments must say so. We test both approval and CHANGES_REQUESTED
@@ -400,7 +400,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         bodies = [body for (_, body) in gh.posted_pr_comments]
-        review_bodies = [b for b in bodies if "review (round" in b]
+        review_bodies = [body for body in bodies if "review (round" in body]
         self.assertEqual(len(review_bodies), 1, review_bodies)
         self.assertIn("claude review (round", review_bodies[0])
         self.assertNotIn("codex review (round", review_bodies[0])
@@ -525,7 +525,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(args, self._CODEX_ARGS)
         self.assertEqual(sid, "sid-y")
 
-    def test_read_dev_session_legacy_codex_session_id_path(self) -> None:
+    def test_read_dev_session_legacy_codex_session_id(self) -> None:
         # Even with a custom DEV_AGENT_SPEC in config, a legacy
         # codex_session_id-only state must yield codex with no args.
         self._enter(self._patch_dev_config(
@@ -541,7 +541,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(args, ())
         self.assertEqual(sid, "legacy-sid")
 
-    def test_read_dev_session_unseeded_falls_back_to_current_config(self) -> None:
+    def test_read_dev_session_unseeded_falls_back_to_config(self) -> None:
         self._enter(self._patch_dev_config(
             self._CLAUDE_SPEC, "claude", self._CLAUDE_ARGS,
         ))
@@ -553,7 +553,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- no-session-id regression (reviewer-flagged) ----------------------
 
-    def test_dev_spec_pinned_even_when_spawn_returns_no_session_id(self) -> None:
+    def test_dev_spec_pinned_when_spawn_returns_no_session_id(self) -> None:
         # A fresh dev spawn that produces commits but no session id (a
         # codex `-o` file the agent left empty, an unparseable claude
         # JSONL line, etc.) MUST still pin `dev_agent` to the full
@@ -586,7 +586,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # session_id was empty, so the legacy field stays absent.
         self.assertNotIn("dev_session_id", data)
 
-    def test_dev_no_session_id_then_config_flip_resumes_recorded_spec(self) -> None:
+    def test_dev_no_session_then_flip_resumes_recorded_spec(self) -> None:
         # Reviewer-requested scenario: spawn returns no session id but
         # commits/parks land. Operator then flips `DEV_AGENT` between
         # ticks. The next resume MUST stick with the spec that was
@@ -651,7 +651,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             "stored codex args must survive across the config flip",
         )
 
-    def test_decomposer_spec_pinned_even_when_spawn_returns_no_session_id(self) -> None:
+    def test_decomposer_spec_pinned_when_spawn_returns_no_session_id(self) -> None:
         # Same reviewer concern, decomposer side: a fresh decomposer
         # that emits a manifest without surfacing a session id (or
         # parks awaiting human after a question) must still pin
