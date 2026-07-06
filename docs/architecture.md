@@ -198,7 +198,11 @@ shutdown sweep (`terminate_all_running`) produces when it kills an in-flight age
 from `timed_out` (the orchestrator's own `AGENT_TIMEOUT` firing). `usage` (default `None`) is the parsed
 `usage.UsageMetrics` `analytics.record_agent_exit` attaches during a tracked run so callers can read token /
 cost metrics off the result without re-parsing stdout; it stays `None` for a result that never flowed through
-`_run_agent_tracked` or whose usage parse failed (fail-open). `CodexResult` is kept as a transitional alias.
+`_run_agent_tracked` or whose usage parse failed (fail-open). The developer (implementing) and reviewer
+(validating) handlers are its first consumers: `workflow._accumulate_issue_usage` folds each run's `usage` into the
+per-issue `issue_agent_runs` / `issue_total_tokens` / `issue_total_cost_usd` / `issue_cost_sources` counters on the
+pinned state ([`state-machine.md#pinned-state`](state-machine.md#pinned-state)). `CodexResult` is kept as a
+transitional alias.
 
 The role command specs (`DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT`), their parsing, the durable per-issue session
 lock, and the resume mechanic are documented in [`workflow.md`](workflow.md). What follows is the subprocess shape only.
