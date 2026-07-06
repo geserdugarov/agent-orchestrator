@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator import analytics, config, workflow
+from orchestrator import analytics, config, usage, workflow
 from orchestrator.agents import AgentResult
 
 from tests.fakes import FakeGitHubClient, FakePR, make_issue
@@ -498,6 +498,164 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             records = self._exit_records(path)
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["models"], ["claude-sonnet-4-6"])
+
+
+class RunUsageSurfacedTest(unittest.TestCase):
+    """Proposal 2 plumbing: `_run_agent_tracked` returns an `AgentResult`
+    whose `usage` field carries the same `UsageMetrics` `record_agent_exit`
+    parsed for the analytics record -- surfaced even when the sink is off,
+    left `None` when the usage parse fails (fail-open), and never disturbing
+    the analytics record or the `skill_triggered` audit events."""
+
+    @staticmethod
+    def _records(path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def _run(
+        self,
+        *,
+        stdout: str,
+        backend: str = "claude",
+        track: bool = False,
+        analytics_path: Optional[Path] = None,
+        extra_args: tuple[str, ...] = (),
+    ) -> tuple[FakeGitHubClient, AgentResult]:
+        gh = FakeGitHubClient()
+        with patch.object(analytics, "ANALYTICS_LOG_PATH", analytics_path), \
+                patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
+                patch.object(analytics, "TRACK_SKILL_TRIGGERS", track), \
+                patch.object(workflow, "run_agent") as run_mock:
+            run_mock.return_value = AgentResult(
+                session_id="sess-usage",
+                last_message="",
+                exit_code=0,
+                timed_out=False,
+                stdout=stdout,
+                stderr="",
+            )
+            result = workflow._run_agent_tracked(
+                gh, 401,
+                agent_role="developer",
+                stage="implementing",
+                backend=backend,
+                prompt="ignored",
+                cwd=_FAKE_WT,
+                agent_spec=backend,
+                extra_args=extra_args,
+                review_round=2,
+                retry_count=1,
+            )
+        return gh, result
+
+    def test_agent_result_usage_defaults_to_none(self) -> None:
+        # The new field is defaulted so every existing construction stays
+        # valid without passing it; an untracked result carries no usage.
+        result = AgentResult(
+            session_id="s", last_message="", exit_code=0,
+            timed_out=False, stdout="", stderr="",
+        )
+        self.assertIsNone(result.usage)
+
+    def test_returned_result_carries_parsed_usage_without_sink(self) -> None:
+        # Sink OFF: the parsed metrics still reach the caller off `.usage`,
+        # proving the plumbing is independent of the observability sink.
+        gh, result = self._run(
+            stdout=_claude_stdout(total_cost_usd=0.0123),
+            analytics_path=None,
+        )
+        self.assertIsInstance(result.usage, usage.UsageMetrics)
+        self.assertEqual(result.usage.backend, "claude")
+        self.assertEqual(result.usage.input_tokens, 1234)
+        self.assertEqual(result.usage.output_tokens, 567)
+        self.assertEqual(result.usage.cache_read_tokens, 100)
+        self.assertEqual(result.usage.cache_write_tokens, 80)
+        self.assertEqual(list(result.usage.models), ["claude-sonnet-4-6"])
+        self.assertEqual(result.usage.turns, 2)
+        self.assertEqual(result.usage.cost_source, "reported")
+        self.assertAlmostEqual(result.usage.cost_usd, 0.0123)
+        # The lifecycle audit still fired even with the sink disabled.
+        self.assertIn(
+            "agent_exit", {e["event"] for e in gh.recorded_events},
+        )
+
+    def test_usage_reflects_spec_fallback_model(self) -> None:
+        # The surfaced metrics are the SAME object the record used, so the
+        # codex spec-fallback model path (extra_args -> `_configured_model`
+        # -> `fallback_model`) is visible on `.usage` too.
+        _, result = self._run(
+            stdout=_codex_stdout_no_model(),
+            backend="codex",
+            extra_args=("-m", "gpt-5-codex"),
+        )
+        self.assertIsNotNone(result.usage)
+        self.assertEqual(list(result.usage.models), ["gpt-5-codex"])
+        self.assertEqual(result.usage.cost_source, "estimated")
+
+    def test_usage_parse_failure_leaves_usage_none_fail_open(self) -> None:
+        # A raising usage parser must NOT propagate: `record_agent_exit`
+        # returns early, no analytics record is written, `.usage` stays None,
+        # and the wrapper still returns the AgentResult with its lifecycle
+        # audit events intact.
+        with tempfile.TemporaryDirectory(prefix="usage-failopen-") as td:
+            path = Path(td) / "analytics.jsonl"
+            with patch.object(
+                analytics.usage, "parse_agent_usage",
+                side_effect=RuntimeError("boom"),
+            ), self.assertLogs(analytics.log, level="ERROR"):
+                gh, result = self._run(
+                    stdout=_claude_stdout(),
+                    analytics_path=path,
+                )
+            self.assertEqual(result.session_id, "sess-usage")
+            self.assertIsNone(result.usage)
+            # Parse failure drops the whole record, so nothing is written.
+            self.assertEqual(self._records(path), [])
+            # Lifecycle audit events fired before the analytics parse ran.
+            self.assertIn(
+                "agent_exit", {e["event"] for e in gh.recorded_events},
+            )
+
+    def test_analytics_and_skill_events_unchanged_with_usage_surfaced(
+        self,
+    ) -> None:
+        # Surfacing usage must not perturb the analytics record or the
+        # skill-trigger audit events: with both enabled, exactly one
+        # agent_exit record lands (carrying the usual token fields and no
+        # extra `usage` key), the skill events fire, AND the returned result
+        # carries the same metrics.
+        with tempfile.TemporaryDirectory(prefix="usage-unchanged-") as td:
+            path = Path(td) / "analytics.jsonl"
+            gh, result = self._run(
+                stdout=_claude_stdout_with_skills(skills=("develop", "review")),
+                track=True,
+                analytics_path=path,
+            )
+            records = self._records(path)
+            self.assertEqual(len(records), 1)
+            rec = records[0]
+            self.assertEqual(rec["event"], "agent_exit")
+            self.assertEqual(rec["input_tokens"], 1000)
+            self.assertEqual(rec["output_tokens"], 500)
+            # The record shape is unchanged -- the surfaced field name must
+            # not leak into the JSONL record.
+            self.assertNotIn("usage", rec)
+            # The same numbers are visible on the surfaced metrics object.
+            self.assertEqual(result.usage.input_tokens, 1000)
+            self.assertEqual(result.usage.output_tokens, 500)
+            # Skill-trigger audit events are unaffected.
+            skill_events = [
+                e for e in gh.recorded_events
+                if e["event"] == "skill_triggered"
+            ]
+            self.assertEqual(
+                [e["skill"] for e in skill_events], ["develop", "review"],
+            )
 
 
 def _claude_trajectory_stdout(

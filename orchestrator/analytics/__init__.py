@@ -482,6 +482,12 @@ def record_agent_exit(
     or sink failure logs and is swallowed so it can never drop the baseline
     record above or the caller's `skill_triggered` audit events.
 
+    As a side effect it attaches the parsed `UsageMetrics` onto `result.usage`
+    so a tracked run can surface structured usage to workflow callers without a
+    second parse. That assignment runs on any successful parse, independent of
+    whether the sink is enabled; a usage-parse failure returns before it, leaving
+    `result.usage` at its `None` default (fail-open).
+
     Returns the distinct triggered skill names (first-seen order) so the
     caller can emit per-skill audit events without reparsing stdout, or
     `None` when nothing fired, the switch is off, the skill parse failed,
@@ -498,6 +504,13 @@ def record_agent_exit(
             issue, backend,
         )
         return None
+    # Surface the parsed usage back onto the result so the tracked-run wrapper
+    # (`workflow._run_agent_tracked`) can hand structured metrics to its callers
+    # without re-parsing stdout. Set only after a successful parse -- a parse
+    # failure returns above with `result.usage` left at its `None` default, so
+    # the plumbing is fail-open -- and independent of the sink state below, so
+    # callers see usage even when `ANALYTICS_LOG_PATH` is disabled.
+    result.usage = metrics
     # Codex exposes neither an offered-skills nor an offered-tools catalog in
     # its stream, so discover both out-of-band (mirroring claude's `system`/
     # `init` frame). `codex_available` (skills) needs the worktree `cwd` and
