@@ -1,6 +1,6 @@
 # Agent Orchestrator — Roadmap
 
-## Status as of 2026-06-05
+## Status as of 2026-07-06
 
 The full label lifecycle is wired end-to-end: pickup → `decomposing` →
 `ready` / `blocked` / `umbrella` → `implementing` → `validating` →
@@ -18,6 +18,13 @@ comment), so the loop stays stateless and progress is observable on
 github.com. Per-repo ticks fan out concurrently; per-issue handlers
 within each repo run in parallel up to configurable caps.
 
+The observability stack is also in place: audit events, analytics JSONL
+with Postgres rollups, skill-trigger tracking, repo skill catalogs, the
+Streamlit analytics dashboard, and an opt-in file-backed trajectory sink
+and viewer for redacted agent run timelines. Agent token / cost usage is
+captured both as run-level analytics and as per-issue pinned counters
+that produce a terminal receipt comment.
+
 For the authoritative behavior, see:
 
 - [`docs/architecture.md`](../docs/architecture.md) — design, module
@@ -28,7 +35,8 @@ For the authoritative behavior, see:
 - [`docs/workflow.md`](../docs/workflow.md) — agent roles, command
   specs, session lifecycles.
 - [`docs/observability.md`](../docs/observability.md) — audit event
-  log, analytics sink, database, dashboard, usage parser.
+  log, analytics and trajectory sinks, database, dashboards, usage
+  parser.
 - [`docs/configuration.md`](../docs/configuration.md) — env vars and
   knobs.
 - [`docs/security.md`](../docs/security.md) — operator-owned controls.
@@ -58,7 +66,8 @@ linked docs.
   handoff, manual-merge-only HITL ping, the two `fixing` routes
   (in_review→fixing PR-feedback and validating→fixing
   CHANGES_REQUESTED), the conflict-only `resolving_conflict` route,
-  and the read-only `question` side branch all live under
+  the `/orchestrator continue` replay / refusal flow for parked fixing
+  sessions, and the read-only `question` side branch all live under
   `orchestrator/stages/`. See
   [`docs/state-machine.md#stage-handlers`](../docs/state-machine.md#stage-handlers).
 - **Typed state machine.** `WorkflowLabel` / `ControlLabel` enums in
@@ -93,22 +102,43 @@ linked docs.
   helpers in `tests/workflow_helpers.py`, in-memory fakes in
   `tests/fakes.py`. See [`CLAUDE.md`](../CLAUDE.md).
 - **Project CI.** GitHub Actions runs `ruff` and `pytest` on PRs under
-  read-only token scope; Dependabot opens weekly updates with a
+  read-only token scope; the 120-column repository line-length limit is
+  enforced by Ruff E501 for Python and `tests/test_line_length.py` for
+  tracked Markdown / text; Dependabot opens weekly updates with a
   30-day cooldown; `dependency-review` blocks vulnerable PRs.
 - **Audit event log.** Optional opt-in JSONL sink at `EVENT_LOG_PATH`,
-  one record per workflow event. See
+  one record per workflow event, including opt-in `skill_triggered`
+  events when `TRACK_SKILL_TRIGGERS` is enabled. See
   [`docs/observability.md#audit-event-log-event_log_path`](../docs/observability.md#audit-event-log-event_log_path).
 - **Analytics sink, database, and dashboard.** JSONL sink at
   `ANALYTICS_LOG_PATH` plus an operator-deployed Postgres aggregation
   target (`analytics-db/`), an operator-driven sync CLI
   (`python -m orchestrator.analytics.sync`), a read model
   (`orchestrator/analytics/read.py`), and a Streamlit dashboard
-  (`orchestrator/dashboard.py`) over the redesigned standalone analytics
-  view. See [`docs/observability.md`](../docs/observability.md).
+  (`orchestrator/dashboard.py`) over the standalone analytics view.
+  Records include stage evaluations, agent exits, repo skill catalogs,
+  opt-in skill-trigger fields, skill-trigger-rate rollups, and the
+  per-skill trigger matrix. See
+  [`docs/observability.md`](../docs/observability.md).
+- **Trajectory sink and viewer.** Opt-in `TRAJECTORY_LOG_PATH` records
+  redacted, head/tail-truncated `agent_trajectory` JSONL records for
+  tracked agent runs; `orchestrator/trajectory_reader.py` and
+  `orchestrator/trajectory_dashboard.py` render the file directly,
+  separate from Postgres and the analytics dashboard. See
+  [`docs/observability.md#trajectory-sink-trajectory_log_path`][trajectory-sink].
 - **Agent usage / cost parser.** `orchestrator/usage.py` decodes JSONL
   agent stdout into a `UsageMetrics` dataclass; CLI-reported cost wins,
   otherwise a baked-in price table estimates and unknown SKUs yield
-  `unknown-price`. See
+  `unknown-price`. The same module parses triggered skills and agent
+  trajectories for the opt-in observability surfaces above. See
+  [`docs/observability.md#usage-parser-orchestratorusagepy`](../docs/observability.md#usage-parser-orchestratorusagepy).
+- **Per-issue usage receipts.** Developer, reviewer, decomposer, and
+  question runs fold parsed `UsageMetrics` into pinned-state
+  `issue_agent_runs` / `issue_total_tokens` / `issue_total_cost_usd` /
+  `issue_cost_sources` counters; terminal done / rejected / closed
+  routes surface those counters as a visible receipt comment. See
+  [`docs/state-machine.md#pinned-state-schema`](../docs/state-machine.md#pinned-state-schema)
+  and
   [`docs/observability.md#usage-parser-orchestratorusagepy`](../docs/observability.md#usage-parser-orchestratorusagepy).
 
 ## Future work
@@ -168,3 +198,4 @@ Short actionable entries; expand into design docs only when picked up.
   awaiting-human resume branch.
 
 [typed-states]: ../docs/state-machine.md#typed-states-and-the-transition-guard
+[trajectory-sink]: ../docs/observability.md#trajectory-sink-trajectory_log_path
