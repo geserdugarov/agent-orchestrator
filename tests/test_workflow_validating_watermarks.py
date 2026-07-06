@@ -94,11 +94,11 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
         # final-docs hop); the watermark must already be seeded past the
         # human's pre-handoff PR comment by the time the docs pass runs.
         self.assertIn((15, "documenting"), gh.label_history)
-        wm = gh.pinned_data(15).get("pr_last_comment_id")
-        self.assertIsNotNone(wm)
+        watermark = gh.pinned_data(15).get("pr_last_comment_id")
+        self.assertIsNotNone(watermark)
         self.assertLess(
-            wm, 950,
-            f"watermark must stop before human comment id=950 (got {wm})",
+            watermark, 950,
+            f"watermark must stop before human comment id=950 (got {watermark})",
         )
 
         # Step 2: in_review tick. The human comment is visible past the
@@ -183,12 +183,12 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
             head_shas=("cafe1234",),
         )
-        wm = gh.pinned_data(20).get("pr_last_comment_id")
-        self.assertIsNotNone(wm, "watermark must be seeded past pre-pickup")
+        watermark = gh.pinned_data(20).get("pr_last_comment_id")
+        self.assertIsNotNone(watermark, "watermark must be seeded past pre-pickup")
         self.assertGreaterEqual(
-            wm, 901,
+            watermark, 901,
             f"watermark must advance past pre-pickup chatter and self-run; "
-            f"got {wm}",
+            f"got {watermark}",
         )
 
         # Backdate the approval comment too so debounce wouldn't filter it
@@ -295,11 +295,11 @@ class ValidatingHandoffSeedsAllWatermarksTest(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
         )
-        data = gh.pinned_data(200)
-        self.assertIn("pr_last_review_summary_id", data)
+        state = gh.pinned_data(200)
+        self.assertIn("pr_last_review_summary_id", state)
         # Seeded to 0 (or any value below the review id) -- not None and not
         # past the review.
-        self.assertLess(data["pr_last_review_summary_id"], 4242)
+        self.assertLess(state["pr_last_review_summary_id"], 4242)
 
         # Step 2: in_review tick. The summary surfaces and the handler
         # routes the issue to `fixing` (the fixing handler owns the dev
@@ -338,9 +338,9 @@ class ValidatingHandoffSeedsAllWatermarksTest(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
         )
-        data = gh.pinned_data(200)
-        self.assertIn("pr_last_review_comment_id", data)
-        self.assertLess(data["pr_last_review_comment_id"], 77)
+        state = gh.pinned_data(200)
+        self.assertIn("pr_last_review_comment_id", state)
+        self.assertLess(state["pr_last_review_comment_id"], 77)
 
         if not any(l.name == "in_review" for l in issue.labels):
             issue.labels = [FakeLabel("in_review")]
@@ -410,9 +410,9 @@ class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
         )
-        data = gh.pinned_data(300)
+        state = gh.pinned_data(300)
         self.assertLess(
-            data.get("pr_last_review_comment_id"), 4242,
+            state.get("pr_last_review_comment_id"), 4242,
             "id collision must not advance the inline-review watermark",
         )
 
@@ -504,12 +504,12 @@ class HandoffWithoutPickupIdLegacyStateTest(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
         )
-        wm = gh.pinned_data(500).get("pr_last_comment_id")
-        self.assertIsNotNone(wm)
+        watermark = gh.pinned_data(500).get("pr_last_comment_id")
+        self.assertIsNotNone(watermark)
         self.assertLess(
-            wm, 950,
+            watermark, 950,
             f"watermark must not consume legacy human feedback at id 950 "
-            f"(got {wm})",
+            f"(got {watermark})",
         )
 
         # Step 2: in_review tick. Every gate passes -- the only thing
@@ -624,12 +624,12 @@ class HandoffWalkerHonorsOrchestratorMarkerTest(
         # to id 903 (the latest tracked orchestrator comment on either
         # surface). The exact value is not part of the contract, but it
         # must NOT be stuck at <=901.
-        wm = gh.pinned_data(300).get("pr_last_comment_id")
-        self.assertIsNotNone(wm)
+        watermark = gh.pinned_data(300).get("pr_last_comment_id")
+        self.assertIsNotNone(watermark)
         self.assertGreaterEqual(
-            wm, 902,
+            watermark, 902,
             f"walker must advance past marker-only bot comment id=902; "
-            f"got {wm}",
+            f"got {watermark}",
         )
 
 
@@ -697,11 +697,11 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
             head_shas=("cafe1234",),
         )
-        wm = gh.pinned_data(900).get("pr_last_comment_id")
-        self.assertIsNotNone(wm)
+        watermark = gh.pinned_data(900).get("pr_last_comment_id")
+        self.assertIsNotNone(watermark)
         self.assertGreaterEqual(
-            wm, 930,
-            f"watermark must advance past consumed reply (id 920); got {wm}",
+            watermark, 930,
+            f"watermark must advance past consumed reply (id 920); got {watermark}",
         )
 
         # Step 2: in_review tick. Comment 920 must NOT surface and the
@@ -834,12 +834,12 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
             head_shas=("cafe1234",),
         )
         self.assertIn((800, "documenting"), gh.label_history)
-        wm = gh.pinned_data(800).get("pr_last_comment_id")
-        self.assertIsNotNone(wm)
+        watermark = gh.pinned_data(800).get("pr_last_comment_id")
+        self.assertIsNotNone(watermark)
         self.assertLess(
-            wm, 915,
+            watermark, 915,
             "watermark must stop before unread PR-conv comment id=915 "
-            f"(consumed_through=920 must NOT apply across surfaces); got {wm}",
+            f"(consumed_through=920 must NOT apply across surfaces); got {watermark}",
         )
 
         # Step 2: simulate the documenting no-change exit (final docs
@@ -868,8 +868,8 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.merge_calls, [])
         self.assertIn((800, "fixing"), gh.label_history)
-        data = gh.pinned_data(800)
-        self.assertGreaterEqual(data.get("pending_fix_issue_max_id"), 915)
+        state = gh.pinned_data(800)
+        self.assertGreaterEqual(state.get("pending_fix_issue_max_id"), 915)
         # The watermark stays put so the fixing handler can re-scan and
         # see id 915.
-        self.assertLess(data.get("pr_last_comment_id"), 915)
+        self.assertLess(state.get("pr_last_comment_id"), 915)

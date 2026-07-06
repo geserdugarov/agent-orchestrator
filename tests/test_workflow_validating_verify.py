@@ -75,11 +75,11 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(config.VERIFY_COMMANDS, ())
         # Handoff completed normally through the final-docs hop.
         self.assertIn((7, "documenting"), gh.label_history)
-        data = gh.pinned_data(7)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(7)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
 
-    def test_config_parses_semicolon_and_newline_separated_commands(self) -> None:
+    def test_config_parses_semicolon_and_newline_commands(self) -> None:
         # `_parse_verify_commands` accepts both `;` and `\n` separators so
         # the value fits on one line in a `.env` file. Blank lines and
         # `#`-commented lines are skipped.
@@ -99,7 +99,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
             ("pytest -q",),
         )
 
-    def test_verify_success_keeps_existing_approval_flow(self) -> None:
+    def test_verify_success_keeps_approval_flow(self) -> None:
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
         with patch.object(config, "VERIFY_COMMANDS", ("pytest -q",)):
@@ -118,13 +118,13 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
             for _, body in gh.posted_pr_comments
         ))
         self.assertIn((7, "documenting"), gh.label_history)
-        data = gh.pinned_data(7)
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(7)
+        self.assertFalse(state.get("awaiting_human"))
 
-    def test_verify_failed_parks_with_verify_failed_reason(self) -> None:
+    def test_verify_failed_parks(self) -> None:
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
-        verify = VerifyResult(
+        run = VerifyResult(
             status="failed",
             command="pytest -q",
             exit_code=2,
@@ -135,12 +135,12 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
                 run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
                 head_shas=("rev-sha",),
-                verify_result=verify,
+                verify_result=run,
             )
 
-        data = gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "verify_failed")
+        state = gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "verify_failed")
         # No in_review or documenting handoff -- the verify gate fires
         # BEFORE the approval / squash / final-docs route is reached.
         self.assertNotIn((7, "in_review"), gh.label_history)
@@ -156,10 +156,10 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("exited with code 2", last_comment)
         self.assertIn("TAIL_MARKER", last_comment)
 
-    def test_verify_timeout_parks_with_verify_timeout_reason(self) -> None:
+    def test_verify_timeout_parks(self) -> None:
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
-        verify = VerifyResult(
+        run = VerifyResult(
             status="timeout",
             command="pytest --slow",
             exit_code=None,
@@ -171,19 +171,19 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
                 run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
                 head_shas=("rev-sha",),
-                verify_result=verify,
+                verify_result=run,
             )
 
-        data = gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "verify_timeout")
+        state = gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "verify_timeout")
         self.assertNotIn((7, "in_review"), gh.label_history)
         self.assertNotIn((7, "documenting"), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("pytest --slow", last_comment)
         self.assertIn("timed out after 123s", last_comment)
 
-    def test_verify_head_changed_parks_with_verify_head_changed_reason(self) -> None:
+    def test_verify_head_changed_parks(self) -> None:
         # End-to-end: a verify command that moved HEAD must NOT flow
         # through to `in_review` -- otherwise squash-on-approval would
         # push the unreviewed commit. The handler parks the issue with a
@@ -191,7 +191,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         # adjudicate whether the auto-commit belongs in the PR.
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
-        verify = VerifyResult(
+        run = VerifyResult(
             status="head_changed",
             command="sh -c 'git commit -am autofix'",
             exit_code=0,
@@ -204,12 +204,12 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
                 run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
                 head_shas=("rev-sha",),
-                verify_result=verify,
+                verify_result=run,
             )
 
-        data = gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "verify_head_changed")
+        state = gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "verify_head_changed")
         # No in_review / documenting handoff and no approval / squash
         # side effects.
         self.assertNotIn((7, "in_review"), gh.label_history)
@@ -227,7 +227,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_verify_dirty_worktree_parks(self) -> None:
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
-        verify = VerifyResult(
+        run = VerifyResult(
             status="dirty",
             command="pytest -q",
             exit_code=0,
@@ -238,12 +238,12 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
                 run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
                 head_shas=("rev-sha",),
-                verify_result=verify,
+                verify_result=run,
             )
 
-        data = gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "verify_dirty")
+        state = gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "verify_dirty")
         self.assertNotIn((7, "in_review"), gh.label_history)
         self.assertNotIn((7, "documenting"), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
@@ -276,8 +276,8 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Standard CHANGES_REQUESTED handling: PR review comment + dev resume.
         self.assertEqual(mocks["run_agent"].call_count, 2)
         self.assertEqual(gh.pinned_data(7).get("review_round"), 1)
-        data = gh.pinned_data(7)
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(7)
+        self.assertFalse(state.get("awaiting_human"))
 
     def test_unknown_verdict_does_not_run_verify(self) -> None:
         gh, issue = self._seeded()
@@ -295,13 +295,13 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks["_run_verify_commands"].assert_not_called()
-        data = gh.pinned_data(7)
+        state = gh.pinned_data(7)
         # Park comes from the unknown-verdict path, NOT the verify gate;
         # confirm by checking the comment text (the unknown-verdict park
         # does not persist `park_reason` to pinned state for the
         # non-silent-crash case).
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertNotIn(data.get("park_reason"), ("verify_failed", "verify_timeout", "verify_dirty"))
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertNotIn(state.get("park_reason"), ("verify_failed", "verify_timeout", "verify_dirty"))
         self.assertIn("did not emit a VERDICT line", gh.posted_comments[-1][1])
 
 
@@ -336,35 +336,35 @@ class RunVerifyCommandsTest(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_empty_commands_short_circuits_to_ok(self) -> None:
-        r = workflow._run_verify_commands(self.tmp, (), 60)
-        self.assertEqual(r.status, "ok")
-        self.assertIsNone(r.command)
+        run = workflow._run_verify_commands(self.tmp, (), 60)
+        self.assertEqual(run.status, "ok")
+        self.assertIsNone(run.command)
 
     def test_all_commands_pass_returns_ok(self) -> None:
-        r = workflow._run_verify_commands(
+        run = workflow._run_verify_commands(
             self.tmp, ("true", "echo hello"), 60,
         )
-        self.assertEqual(r.status, "ok")
+        self.assertEqual(run.status, "ok")
 
-    def test_non_zero_exit_returns_failed_with_first_failing_command(self) -> None:
-        r = workflow._run_verify_commands(
+    def test_non_zero_exit_names_first_failing_command(self) -> None:
+        run = workflow._run_verify_commands(
             self.tmp,
             ("true", "sh -c 'echo boom 1>&2; exit 3'", "true"),
             60,
         )
-        self.assertEqual(r.status, "failed")
-        self.assertEqual(r.command, "sh -c 'echo boom 1>&2; exit 3'")
-        self.assertEqual(r.exit_code, 3)
-        self.assertIn("boom", r.output)
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.command, "sh -c 'echo boom 1>&2; exit 3'")
+        self.assertEqual(run.exit_code, 3)
+        self.assertIn("boom", run.output)
 
     def test_timeout_returns_timeout_with_partial_output(self) -> None:
         # `sleep 5` against a 1s timeout fires `TimeoutExpired`.
-        r = workflow._run_verify_commands(
+        run = workflow._run_verify_commands(
             self.tmp, ("sleep 5",), timeout=1,
         )
-        self.assertEqual(r.status, "timeout")
-        self.assertEqual(r.command, "sleep 5")
-        self.assertIsNone(r.exit_code)
+        self.assertEqual(run.status, "timeout")
+        self.assertEqual(run.command, "sleep 5")
+        self.assertIsNone(run.exit_code)
 
     def test_timeout_kills_full_process_group(self) -> None:
         # Regression: `subprocess.run(..., shell=True, timeout=...)`
@@ -386,8 +386,8 @@ class RunVerifyCommandsTest(unittest.TestCase):
         cmd = (
             f"(sleep 2 && touch {marker}) & sleep 10"
         )
-        r = workflow._run_verify_commands(self.tmp, (cmd,), timeout=1)
-        self.assertEqual(r.status, "timeout")
+        run = workflow._run_verify_commands(self.tmp, (cmd,), timeout=1)
+        self.assertEqual(run.status, "timeout")
         # Wait well past when the background touch would have fired.
         # 3s gives the background its full 2s + 1s of slack.
         import time
@@ -399,23 +399,23 @@ class RunVerifyCommandsTest(unittest.TestCase):
 
     def test_dirty_tree_after_success_returns_dirty(self) -> None:
         # Command exits 0 but leaves an untracked file behind.
-        r = workflow._run_verify_commands(
+        run = workflow._run_verify_commands(
             self.tmp, ("sh -c 'echo leak > leftover.txt'",), 60,
         )
-        self.assertEqual(r.status, "dirty")
-        self.assertIn("leftover.txt", r.dirty_files)
+        self.assertEqual(run.status, "dirty")
+        self.assertIn("leftover.txt", run.dirty_files)
 
     def test_output_truncated_to_budget(self) -> None:
         big = "X" * 10000 + "TAIL"
-        r = workflow._run_verify_commands(
+        run = workflow._run_verify_commands(
             self.tmp,
             (f"sh -c 'printf %s {shutil_quote(big)}; exit 1'",),
             60,
         )
-        self.assertEqual(r.status, "failed")
+        self.assertEqual(run.status, "failed")
         # Tail preserved, leading bulk trimmed.
-        self.assertIn("TAIL", r.output)
-        self.assertLessEqual(len(r.output), 4096)
+        self.assertIn("TAIL", run.output)
+        self.assertLessEqual(len(run.output), 4096)
 
     def test_secret_straddling_truncation_boundary_is_fully_redacted(self) -> None:
         # Regression: `_redact_secrets` does `str.replace(value, "***")`
@@ -445,21 +445,21 @@ class RunVerifyCommandsTest(unittest.TestCase):
         import shlex
         cmd = f"sh -c 'printf %s {shlex.quote(payload)}; exit 1'"
         with patch.dict(_os.environ, {"VERIFY_TEST_API_KEY": secret}):
-            r = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(r.status, "failed")
+            run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
+        self.assertEqual(run.status, "failed")
         # The full secret must be gone -- baseline check.
-        self.assertNotIn(secret, r.output)
+        self.assertNotIn(secret, run.output)
         # And no 8+ char substring of the secret survives either.
         # Length 8 matches `_REDACT_MIN_VALUE_LEN`: shorter accidental
         # collisions are below the redaction threshold and tolerable.
         for start in range(len(secret) - 7):
             self.assertNotIn(
-                secret[start:start + 8], r.output,
+                secret[start:start + 8], run.output,
                 f"partial secret substring leaked: {secret[start:start + 8]!r}",
             )
         # And the redaction marker is present (proves the runner
         # actually saw and replaced the secret).
-        self.assertIn("***", r.output)
+        self.assertIn("***", run.output)
 
     def test_github_token_stripped_from_verify_environment(self) -> None:
         # Regression: verify commands run in the per-issue worktree
@@ -474,7 +474,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             # the child env and exits 0; if unset, it prints nothing and
             # exits 1. We pipe both branches through `exit 1` so the
             # runner reports the verify as failed and we can inspect
-            # `r.output` either way.
+            # `run.output` either way.
             "sh -c 'echo TOKEN_PRESENT=$([ -n \"$GITHUB_TOKEN\" ] && "
             "echo YES || echo NO); exit 1'"
         )
@@ -482,16 +482,16 @@ class RunVerifyCommandsTest(unittest.TestCase):
             os.environ,
             {"GITHUB_TOKEN": "ghp_ORCHESTRATOR_PAT_SHOULD_NOT_LEAK"},
         ):
-            r = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(r.status, "failed")
+            run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
+        self.assertEqual(run.status, "failed")
         # The verify environment must NOT carry GITHUB_TOKEN through.
-        self.assertIn("TOKEN_PRESENT=NO", r.output)
+        self.assertIn("TOKEN_PRESENT=NO", run.output)
         # And the original token value must not appear verbatim. (This
         # also catches a regression where redaction were doing the heavy
         # lifting instead of env stripping -- redaction would mask the
         # value with `***`, but the variable would still have been
         # exposed to the verify command.)
-        self.assertNotIn("ghp_ORCHESTRATOR_PAT_SHOULD_NOT_LEAK", r.output)
+        self.assertNotIn("ghp_ORCHESTRATOR_PAT_SHOULD_NOT_LEAK", run.output)
 
     def test_write_credential_locators_stripped_from_verify_environment(self) -> None:
         # Issue #213 review: SSH-agent socket, askpass binaries, and
@@ -517,15 +517,15 @@ class RunVerifyCommandsTest(unittest.TestCase):
                 "GIT_SSH_COMMAND": "ssh -i /home/op/.ssh/deploy-key",
             },
         ):
-            r = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(r.status, "failed")
-        self.assertIn("SSH_AUTH=NO", r.output)
-        self.assertIn("SSH_ASK=NO", r.output)
-        self.assertIn("GIT_ASK=NO", r.output)
-        self.assertIn("GIT_SSH=NO", r.output)
+            run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
+        self.assertEqual(run.status, "failed")
+        self.assertIn("SSH_AUTH=NO", run.output)
+        self.assertIn("SSH_ASK=NO", run.output)
+        self.assertIn("GIT_ASK=NO", run.output)
+        self.assertIn("GIT_SSH=NO", run.output)
         # The locator values must not survive verbatim anywhere.
-        self.assertNotIn("/tmp/ssh-test/agent.42", r.output)
-        self.assertNotIn("/home/op/.ssh/deploy-key", r.output)
+        self.assertNotIn("/tmp/ssh-test/agent.42", run.output)
+        self.assertNotIn("/home/op/.ssh/deploy-key", run.output)
 
     def test_credential_file_locators_stripped_from_verify_environment(self) -> None:
         # Issue #213 review: credential-file LOCATORS (env vars whose
@@ -555,16 +555,16 @@ class RunVerifyCommandsTest(unittest.TestCase):
                 "AWS_SHARED_CREDENTIALS_FILE": "/etc/secrets/aws-creds",
             },
         ):
-            r = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(r.status, "failed")
-        self.assertIn("ORCH_TF=NO", r.output)
-        self.assertIn("GAC=NO", r.output)
-        self.assertIn("AWS_SCF=NO", r.output)
+            run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
+        self.assertEqual(run.status, "failed")
+        self.assertIn("ORCH_TF=NO", run.output)
+        self.assertIn("GAC=NO", run.output)
+        self.assertIn("AWS_SCF=NO", run.output)
         # And the locator path itself must not survive verbatim either
         # (env strip, not redaction-only).
-        self.assertNotIn("/etc/secrets/orch-token-path", r.output)
-        self.assertNotIn("/etc/secrets/gcp.json", r.output)
-        self.assertNotIn("/etc/secrets/aws-creds", r.output)
+        self.assertNotIn("/etc/secrets/orch-token-path", run.output)
+        self.assertNotIn("/etc/secrets/gcp.json", run.output)
+        self.assertNotIn("/etc/secrets/aws-creds", run.output)
 
     def test_production_secret_shapes_stripped_from_verify_environment(self) -> None:
         # Issue #213: GitHub-token aliases are not the only credential
@@ -599,24 +599,24 @@ class RunVerifyCommandsTest(unittest.TestCase):
                 "OPENAI_API_KEY": "sk-oai-SHOULD_NOT_LEAK_TO_VERIFY",
             },
         ):
-            r = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(r.status, "failed")
-        self.assertIn("STRIPE_PRESENT=NO", r.output)
-        self.assertIn("DBPW_PRESENT=NO", r.output)
-        self.assertIn("DEPLOY_PRESENT=NO", r.output)
+            run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
+        self.assertEqual(run.status, "failed")
+        self.assertIn("STRIPE_PRESENT=NO", run.output)
+        self.assertIn("DBPW_PRESENT=NO", run.output)
+        self.assertIn("DEPLOY_PRESENT=NO", run.output)
         # Provider auth is stripped from the verify env -- stricter
         # than the agent-subprocess case. An operator who legitimately
         # wants to drive the agent from a verify command sets the key
         # inline (`ANTHROPIC_API_KEY=... pytest ...`).
-        self.assertIn("ANTH_PRESENT=NO", r.output)
-        self.assertIn("OPENAI_PRESENT=NO", r.output)
+        self.assertIn("ANTH_PRESENT=NO", run.output)
+        self.assertIn("OPENAI_PRESENT=NO", run.output)
         # The stripped secret values must not appear verbatim anywhere
         # in the captured output (env strip, not redaction-only).
-        self.assertNotIn("sk_live_VERY_SECRET_SHOULD_NOT_LEAK", r.output)
-        self.assertNotIn("hunter2_should_not_leak", r.output)
-        self.assertNotIn("deploytok_should_not_leak", r.output)
-        self.assertNotIn("sk-ant-SHOULD_NOT_LEAK_TO_VERIFY", r.output)
-        self.assertNotIn("sk-oai-SHOULD_NOT_LEAK_TO_VERIFY", r.output)
+        self.assertNotIn("sk_live_VERY_SECRET_SHOULD_NOT_LEAK", run.output)
+        self.assertNotIn("hunter2_should_not_leak", run.output)
+        self.assertNotIn("deploytok_should_not_leak", run.output)
+        self.assertNotIn("sk-ant-SHOULD_NOT_LEAK_TO_VERIFY", run.output)
+        self.assertNotIn("sk-oai-SHOULD_NOT_LEAK_TO_VERIFY", run.output)
 
     def test_command_that_commits_is_caught_as_head_changed(self) -> None:
         # Regression: a verify command that runs `git commit` leaves
@@ -639,13 +639,13 @@ class RunVerifyCommandsTest(unittest.TestCase):
             "git add autofix.txt && "
             "git commit -q -m \"chore: verify-time auto-fix\"'"
         )
-        r = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(r.status, "head_changed")
-        self.assertEqual(r.command, cmd)
-        self.assertEqual(r.head_before, head_before)
-        self.assertNotEqual(r.head_after, head_before)
+        run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
+        self.assertEqual(run.status, "head_changed")
+        self.assertEqual(run.command, cmd)
+        self.assertEqual(run.head_before, head_before)
+        self.assertNotEqual(run.head_after, head_before)
         # And the worktree was clean on detection (not the dirty branch).
-        self.assertEqual(r.dirty_files, ())
+        self.assertEqual(run.dirty_files, ())
 
     def test_dirty_attribution_names_responsible_command_and_keeps_output(self) -> None:
         # Regression: previously the dirty check ran once at the end of
@@ -659,17 +659,17 @@ class RunVerifyCommandsTest(unittest.TestCase):
             "sh -c 'echo BUILD_LOG_LINE; touch leftover.txt'",   # leaves untracked file
             "true",                                              # should never run
         )
-        r = workflow._run_verify_commands(self.tmp, cmds, 60)
-        self.assertEqual(r.status, "dirty")
+        run = workflow._run_verify_commands(self.tmp, cmds, 60)
+        self.assertEqual(run.status, "dirty")
         # Named command is the SECOND command (the one that left the
         # tree dirty), NOT `commands[-1]`.
-        self.assertEqual(r.command, cmds[1])
-        self.assertEqual(r.exit_code, 0)
+        self.assertEqual(run.command, cmds[1])
+        self.assertEqual(run.exit_code, 0)
         # The dirty file lands in `dirty_files`.
-        self.assertIn("leftover.txt", r.dirty_files)
+        self.assertIn("leftover.txt", run.dirty_files)
         # The command's stdout is preserved for the park comment so the
         # operator can triage what the command actually did.
-        self.assertIn("BUILD_LOG_LINE", r.output)
+        self.assertIn("BUILD_LOG_LINE", run.output)
 
     def test_running_command_registered_for_shutdown_sweep(self) -> None:
         # The shutdown sweep (`agents.terminate_all_running`) only reaches
@@ -694,9 +694,9 @@ class RunVerifyCommandsTest(unittest.TestCase):
         with patch.object(verify.subprocess, "Popen", return_value=proc), \
              patch.object(verify, "_worktree_dirty_files", return_value=[]), \
              patch.object(verify, "_head_sha", return_value="sha"):
-            r = verify._run_verify_commands(self.tmp, ("true",), 60)
+            run = verify._run_verify_commands(self.tmp, ("true",), 60)
 
-        self.assertEqual(r.status, "ok")
+        self.assertEqual(run.status, "ok")
         self.assertTrue(
             seen.get("during"), "verify child not registered during the run",
         )
