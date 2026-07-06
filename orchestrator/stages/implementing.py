@@ -395,6 +395,7 @@ def _resume_dev_with_text(
         review_round=state.get("review_round", 0),
         retry_count=state.get("retry_count"),
     )
+    _wf._accumulate_issue_usage(state, result.usage)
 
     # Deterministic poisoned-session recovery: if we resumed with a session
     # id and Claude reported either a stale session ("no conversation found")
@@ -432,6 +433,10 @@ def _resume_dev_with_text(
             review_round=state.get("review_round", 0),
             retry_count=state.get("retry_count"),
         )
+        # The poisoned resume above already burned a real agent exit and was
+        # folded once; this fresh-spawn retry is a second real exit, so it is
+        # counted too -- both consumed tokens on this issue.
+        _wf._accumulate_issue_usage(state, result.usage)
 
     if fresh_spawn:
         # Fresh spawn produced a session id -- record it so subsequent resumes
@@ -962,6 +967,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 review_round=state.get("review_round", 0),
                 retry_count=state.get("retry_count"),
             )
+            _wf._accumulate_issue_usage(state, result.usage)
             if result.session_id:
                 state.set("dev_session_id", result.session_id)
                 # Fresh session -> its resume budget starts from zero, even

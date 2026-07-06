@@ -47,6 +47,7 @@ from github.Issue import Issue
 from . import analytics, config
 from .agents import AgentResult, run_agent
 from .config import RepoSpec
+from .usage import UsageMetrics
 from .state_machine import WorkflowLabel
 from .github import (
     BACKLOG_LABEL,
@@ -481,6 +482,65 @@ def _configured_model(
             value = tok[len(eq_prefix):].strip()
             return value or None
     return None
+
+
+def _accumulate_issue_usage(
+    state: PinnedState, usage: Optional[UsageMetrics]
+) -> None:
+    """Fold one agent run's parsed usage into the per-issue running totals.
+
+    Called by the developer (implementing) and reviewer (validating) run
+    sites right after `_run_agent_tracked` returns, mutating the SAME
+    `PinnedState` the handler persists later -- never a second writer. The
+    runner deliberately does not write pinned state itself, so an
+    `interrupted` run whose handler returns without `write_pinned_state`
+    (the shutdown-sweep contract) simply never persists these counters: a
+    slight, accepted undercount on killed runs, with the analytics sink
+    still holding ground truth.
+
+    Keys folded (all new to the pinned-state schema):
+      * ``issue_agent_runs``     -- +1 per real agent exit.
+      * ``issue_total_tokens``   -- input + output + cache-read + cache-write.
+        codex's ``cached_tokens`` is intentionally excluded: it is the
+        portion of ``input_tokens`` already served from cache, so summing it
+        would double-count part of the input.
+      * ``issue_total_cost_usd`` -- sum of each run's ``cost_usd``; ``None``
+        costs (``no-usage`` / ``unknown-price``) contribute nothing.
+      * ``issue_cost_sources``   -- sorted distinct ``cost_source`` tags seen.
+        The minimal aggregate a terminal verdict needs to mark ``(est.)``
+        (any ``estimated``) or an unpriced ``unknown`` (any ``unknown-price``)
+        without re-reading the analytics sink.
+
+    A ``None`` usage -- the fail-open case where the parse itself failed --
+    is a no-op: with no parsed metrics there is nothing to fold and the run
+    is not counted.
+    """
+    if usage is None:
+        return
+
+    state.set("issue_agent_runs", int(state.get("issue_agent_runs") or 0) + 1)
+
+    tokens = (
+        usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_read_tokens
+        + usage.cache_write_tokens
+    )
+    state.set(
+        "issue_total_tokens",
+        int(state.get("issue_total_tokens") or 0) + tokens,
+    )
+
+    if usage.cost_usd is not None:
+        state.set(
+            "issue_total_cost_usd",
+            float(state.get("issue_total_cost_usd") or 0.0) + usage.cost_usd,
+        )
+
+    prior_sources = state.get("issue_cost_sources")
+    seen = set(prior_sources) if isinstance(prior_sources, list) else set()
+    seen.add(usage.cost_source)
+    state.set("issue_cost_sources", sorted(seen))
 
 
 def _sweep_community_contribution_prs(
