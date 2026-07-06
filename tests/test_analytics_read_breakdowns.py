@@ -60,7 +60,7 @@ class BackendDailyTokensTest(unittest.TestCase):
             connect=_connector(conn),
         )
         self.assertEqual(
-            [(r.day, r.backend, r.total_tokens) for r in rows],
+            [(row.day, row.backend, row.total_tokens) for row in rows],
             [
                 (date(2026, 5, 1), "claude", 12_000),
                 (date(2026, 5, 1), "codex", 4_500),
@@ -140,7 +140,7 @@ class BackendEfficiencyTest(unittest.TestCase):
             ],
         }
         rows = analytics_read.get_backend_efficiency(connect=_connector(conn))
-        self.assertEqual([r.backend for r in rows], ["claude", "codex", "unknown"])
+        self.assertEqual([row.backend for row in rows], ["claude", "codex", "unknown"])
         self.assertEqual(rows[0].runs, 20)
         self.assertEqual(rows[0].failed, 1)
         self.assertEqual(rows[0].avg_duration_s, 35.0)
@@ -222,7 +222,7 @@ class SkillTriggerRatesTest(unittest.TestCase):
         }
         rows = analytics_read.get_skill_trigger_rates(connect=_connector(conn))
         self.assertEqual(
-            [(r.agent_role, r.backend) for r in rows],
+            [(row.agent_role, row.backend) for row in rows],
             [
                 ("developer", "claude"),
                 ("reviewer", "codex"),
@@ -355,8 +355,8 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         # codex once.
         self.assertEqual(
             [
-                (r.skill, r.agent_role, r.backend, r.runs, r.skill_runs)
-                for r in rows
+                (row.skill, row.agent_role, row.backend, row.runs, row.skill_runs)
+                for row in rows
             ],
             [
                 # skill_runs=2: `develop` for developer/claude (two of the
@@ -370,7 +370,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
                 ("develop", "reviewer", "codex", 1, 0),
             ],
         )
-        self.assertEqual({r.repo for r in rows}, {"owner/repo"})
+        self.assertEqual({row.repo for row in rows}, {"owner/repo"})
         # Catalog query first, runs query second; both scan the base
         # table for the JSONB arrays the rollup does not carry.
         cat_sql, _ = conn.executed[0]
@@ -423,7 +423,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         }
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
         by_cell = {
-            (r.skill, r.agent_role, r.backend): r.skill_runs for r in rows
+            (row.skill, row.agent_role, row.backend): row.skill_runs for row in rows
         }
         self.assertEqual(by_cell[("review", "developer", "claude")], 0)
         # The triggered-but-uncatalogued skill is still reported, but it
@@ -432,7 +432,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         # The zero `skill_runs` cell still reads against its cohort size:
         # the developer/claude cohort ran once, so both cells show runs=1.
         cohort_runs = {
-            (r.skill, r.agent_role, r.backend): r.runs for r in rows
+            (row.skill, row.agent_role, row.backend): row.runs for row in rows
         }
         self.assertEqual(cohort_runs[("review", "developer", "claude")], 1)
         self.assertEqual(cohort_runs[("develop", "developer", "claude")], 1)
@@ -454,8 +454,8 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
         self.assertEqual(
             [
-                (r.skill, r.agent_role, r.backend, r.runs, r.skill_runs)
-                for r in rows
+                (row.skill, row.agent_role, row.backend, row.runs, row.skill_runs)
+                for row in rows
             ],
             [("develop", "developer", "claude", 1, 1)],
         )
@@ -539,7 +539,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         }
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
         by_cell = {
-            (r.skill, r.agent_role, r.backend): r.skill_runs for r in rows
+            (row.skill, row.agent_role, row.backend): row.skill_runs for row in rows
         }
         self.assertEqual(by_cell[("develop", "developer", "claude")], 1)
         self.assertEqual(by_cell[("review", "developer", "claude")], 0)
@@ -562,7 +562,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
             ],
         }
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
-        by_skill = {r.skill: r for r in rows}
+        by_skill = {row.skill: row for row in rows}
         self.assertEqual(by_skill["develop"].runs, 4)
         self.assertEqual(by_skill["develop"].skill_runs, 1)
         # The triggered-but-uncatalogued `review` skill shares the cohort
@@ -594,8 +594,8 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
         self.assertEqual(
             [
-                (r.skill, r.agent_role, r.backend, r.runs, r.skill_runs)
-                for r in rows
+                (row.skill, row.agent_role, row.backend, row.runs, row.skill_runs)
+                for row in rows
             ],
             [
                 # skill_runs=2, tied -> larger cohort first.
@@ -628,7 +628,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         # Three catalog cells exist (a=1, b=2, c=0) but only the top two
         # by skill_runs survive: b (2) then a (1).
         self.assertEqual(
-            [(r.skill, r.skill_runs) for r in rows],
+            [(row.skill, row.skill_runs) for row in rows],
             [("b", 2), ("a", 1)],
         )
         # A non-positive limit disables the cap -- all three cells return.
@@ -656,8 +656,8 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         }
         rows = analytics_read.get_skill_trigger_matrix(connect=_connector(conn))
         by_cell = {
-            (r.skill, r.agent_role, r.backend): (r.runs, r.skill_runs)
-            for r in rows
+            (row.skill, row.agent_role, row.backend): (row.runs, row.skill_runs)
+            for row in rows
         }
         # Both roles surface as catalog-backed zero rows (skill_runs=0)
         # against their real cohort size, the same way developer does.
@@ -763,17 +763,17 @@ class CostCoverageTest(unittest.TestCase):
             ],
         }
         rows = analytics_read.get_cost_coverage(connect=_connector(conn))
-        labels = [r.cost_source for r in rows]
+        labels = [row.cost_source for row in rows]
         self.assertIn("unknown-price", labels)
         # Make sure we did not silently fold it into "unknown".
         self.assertEqual(
-            sum(1 for r in rows if r.cost_source == "unknown-price"), 1,
+            sum(1 for row in rows if row.cost_source == "unknown-price"), 1,
         )
         self.assertEqual(
-            sum(1 for r in rows if r.cost_source == "unknown"), 1,
+            sum(1 for row in rows if row.cost_source == "unknown"), 1,
         )
         # Per-source token volume rolls up alongside the run count.
-        by_source = {r.cost_source: r for r in rows}
+        by_source = {row.cost_source: row for row in rows}
         self.assertEqual(by_source["reported"].total_tokens, 800_000)
         self.assertEqual(by_source["unknown-price"].total_tokens, 60_000)
         sql, _ = conn.executed[0]
@@ -852,42 +852,42 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         rows = analytics_read.get_review_round_breakdown(
             connect=_connector(conn),
         )
-        self.assertEqual([r.bucket for r in rows], ["0", "1", "3-5", "unknown"])
-        self.assertEqual([r.runs for r in rows], [12, 8, 4, 1])
-        self.assertEqual([r.failed for r in rows], [1, 2, 4, 0])
+        self.assertEqual([row.bucket for row in rows], ["0", "1", "3-5", "unknown"])
+        self.assertEqual([row.runs for row in rows], [12, 8, 4, 1])
+        self.assertEqual([row.failed for row in rows], [1, 2, 4, 0])
         # `total_cost_usd` powers the redesigned "Cost by review round"
         # chart in `orchestrator.dashboard_charts.cost_by_review_round`
         # and the "Rework share" KPI tile.
         self.assertEqual(
-            [r.total_cost_usd for r in rows],
+            [row.total_cost_usd for row in rows],
             [40.0, 25.0, 18.0, 0.0],
         )
-        self.assertEqual([r.developer_runs for r in rows], [7, 4, 1, 1])
-        self.assertEqual([r.reviewer_runs for r in rows], [5, 4, 3, 0])
+        self.assertEqual([row.developer_runs for row in rows], [7, 4, 1, 1])
+        self.assertEqual([row.reviewer_runs for row in rows], [5, 4, 3, 0])
         self.assertEqual(
-            [r.developer_cost_usd for r in rows],
+            [row.developer_cost_usd for row in rows],
             [28.0, 10.0, 5.0, 0.0],
         )
         self.assertEqual(
-            [r.reviewer_cost_usd for r in rows],
+            [row.reviewer_cost_usd for row in rows],
             [12.0, 15.0, 13.0, 0.0],
         )
         # Cache vs no-cache split per role -- the chart stacks these
         # so cache_cost + no_cache_cost must equal the role's total.
         self.assertEqual(
-            [r.developer_cache_cost_usd for r in rows],
+            [row.developer_cache_cost_usd for row in rows],
             [20.0, 7.0, 5.0, 0.0],
         )
         self.assertEqual(
-            [r.developer_no_cache_cost_usd for r in rows],
+            [row.developer_no_cache_cost_usd for row in rows],
             [8.0, 3.0, 0.0, 0.0],
         )
         self.assertEqual(
-            [r.reviewer_cache_cost_usd for r in rows],
+            [row.reviewer_cache_cost_usd for row in rows],
             [9.0, 11.0, 13.0, 0.0],
         )
         self.assertEqual(
-            [r.reviewer_no_cache_cost_usd for r in rows],
+            [row.reviewer_no_cache_cost_usd for row in rows],
             [3.0, 4.0, 0.0, 0.0],
         )
         sql, _ = conn.executed[0]

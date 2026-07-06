@@ -94,7 +94,7 @@ def _claude_stdout_with_skills(
         frames.insert(
             0, {"type": "system", "subtype": "init", "skills": list(offered)}
         )
-    return "\n".join(json.dumps(f) for f in frames)
+    return "\n".join(json.dumps(frame) for frame in frames)
 
 
 class AnalyticsConfigTest(unittest.TestCase):
@@ -523,7 +523,7 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
                 json.loads(line)
                 for line in path.read_text(encoding="utf-8").splitlines()
             ]
-            issues = sorted(r["issue"] for r in remaining)
+            issues = sorted(record["issue"] for record in remaining)
             # The old record (issue=1) is gone. Both the kept record
             # (issue=2) and the concurrent append (issue=99) survive.
             self.assertEqual(issues, [2, 99])
@@ -990,7 +990,7 @@ class TrajectoryAppendTest(unittest.TestCase):
             for n in range(5):
                 analytics.append_trajectory_record({"n": n})
             lines = path.read_text(encoding="utf-8").splitlines()
-            self.assertEqual([json.loads(x)["n"] for x in lines], list(range(5)))
+            self.assertEqual([json.loads(line)["n"] for line in lines], list(range(5)))
 
     def test_oserror_is_downgraded_to_warning(self) -> None:
         # A path whose parent is a regular file makes `mkdir(parents=True)`
@@ -1043,7 +1043,7 @@ class TrajectoryPruneTest(unittest.TestCase):
                 json.loads(line)
                 for line in path.read_text(encoding="utf-8").splitlines()
             ]
-            self.assertEqual([r["session_id"] for r in remaining], ["2"])
+            self.assertEqual([record["session_id"] for record in remaining], ["2"])
 
     def test_zero_retention_is_no_op(self) -> None:
         now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
@@ -1272,7 +1272,7 @@ def _claude_trajectory_stdout(
     if final_output is not None:
         result_frame["result"] = final_output
     frames.append(result_frame)
-    return "\n".join(json.dumps(f) for f in frames)
+    return "\n".join(json.dumps(frame) for frame in frames)
 
 
 def _claude_multistep_stdout(*, n_steps: int, content: str) -> str:
@@ -1302,7 +1302,7 @@ def _claude_multistep_stdout(*, n_steps: int, content: str) -> str:
             }]},
         })
     frames.append({"type": "result", "num_turns": n_steps})
-    return "\n".join(json.dumps(f) for f in frames)
+    return "\n".join(json.dumps(frame) for frame in frames)
 
 
 def _codex_trajectory_stdout(
@@ -1331,7 +1331,7 @@ def _codex_trajectory_stdout(
     frames.append({"type": "turn_complete", "usage": {
         "input_tokens": input_tokens, "output_tokens": output_tokens,
     }})
-    return "\n".join(json.dumps(f) for f in frames)
+    return "\n".join(json.dumps(frame) for frame in frames)
 
 
 class RecordAgentExitTrajectoryTest(unittest.TestCase):
@@ -1444,7 +1444,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self.assertEqual(rec["user_input"], "implement X")
             self.assertEqual(rec["tools"], ["Read", "Bash"])
             self.assertEqual(rec["output"], "implemented")
-            kinds = [s["kind"] for s in rec["steps"]]
+            kinds = [step["kind"] for step in rec["steps"]]
             self.assertEqual(kinds, ["tool_call", "tool_result"])
             call = rec["steps"][0]
             self.assertEqual(call["name"], "Bash")
@@ -1498,7 +1498,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self.assertEqual(rec["user_input"], "codex prompt")
             self.assertEqual(rec["output"], "codex done")
             self.assertEqual(
-                [s["kind"] for s in rec["steps"]],
+                [step["kind"] for step in rec["steps"]],
                 ["tool_call", "tool_result", "assistant_message"],
             )
             self.assertEqual(rec["steps"][0]["content"], "ls -la")
@@ -1525,7 +1525,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             # codex usage frames are cumulative, not per-turn: the per-turn
             # array is dropped and no step carries a `turn` index.
             self.assertNotIn("turns", rec)
-            self.assertTrue(all("turn" not in s for s in rec["steps"]))
+            self.assertTrue(all("turn" not in step for step in rec["steps"]))
 
     def test_text_turns_redacted_truncated_and_recorded(self) -> None:
         # New timeline items -- assistant / user text turns -- are stored as
@@ -1551,7 +1551,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                     {"type": "text", "text": f"leak {secret}"}]}},
                 {"type": "result", "result": "done"},
             ]
-            stdout = "\n".join(json.dumps(f) for f in frames)
+            stdout = "\n".join(json.dumps(frame) for frame in frames)
             self._emit(
                 analytics,
                 stdout=stdout,
@@ -1561,7 +1561,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             )
             rec = _read_records(t_path)[0]
             self.assertEqual(
-                [s["kind"] for s in rec["steps"]],
+                [step["kind"] for step in rec["steps"]],
                 ["assistant_message", "tool_call", "tool_result",
                  "user_message"],
             )
@@ -1661,7 +1661,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             )
             rec = _read_records(t_path)[0]
             result_step = next(
-                s for s in rec["steps"] if s["kind"] == "tool_result"
+                step for step in rec["steps"] if step["kind"] == "tool_result"
             )
             content = result_step["content"]
             self.assertLess(len(content), 100)
