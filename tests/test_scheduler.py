@@ -28,7 +28,7 @@ def _worker(start: threading.Event, release: threading.Event) -> None:
 
 
 class DuplicateActiveIssueSkipTest(unittest.TestCase):
-    def test_second_submit_for_same_key_is_skipped_while_first_in_flight(self) -> None:
+    def test_same_key_skipped_while_first_in_flight(self) -> None:
         sched = IssueScheduler(global_cap=4, per_repo_cap=4)
         self.addCleanup(sched.shutdown)
         start = threading.Event()
@@ -61,7 +61,7 @@ class DuplicateActiveIssueSkipTest(unittest.TestCase):
 
 
 class CompletionClearingTest(unittest.TestCase):
-    def test_completion_clears_marker_so_same_key_can_resubmit(self) -> None:
+    def test_completion_clears_marker_for_resubmit(self) -> None:
         sched = IssueScheduler(global_cap=4, per_repo_cap=4)
         self.addCleanup(sched.shutdown)
         done = threading.Event()
@@ -125,12 +125,12 @@ class CompletionClearingTest(unittest.TestCase):
             timer.cancel()
         self.assertFalse(sched.is_active("owner/repo", 9))
 
-        with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as cm:
+        with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
             count = sched.reap()
         self.assertGreaterEqual(count, 1)
         self.assertTrue(
-            any("worker exploded" in msg for msg in cm.output),
-            cm.output,
+            any("worker exploded" in msg for msg in logs.output),
+            logs.output,
         )
 
 
@@ -143,16 +143,16 @@ class GlobalCapEnforcementTest(unittest.TestCase):
         try:
             self.assertTrue(
                 sched.submit(
-                    "owner/a", 1, lambda s=starts[0]: _worker(s, release)
+                    "owner/a", 1, lambda start=starts[0]: _worker(start, release)
                 )
             )
             self.assertTrue(
                 sched.submit(
-                    "owner/b", 2, lambda s=starts[1]: _worker(s, release)
+                    "owner/b", 2, lambda start=starts[1]: _worker(start, release)
                 )
             )
-            for s in starts:
-                self.assertTrue(s.wait(timeout=2.0))
+            for start in starts:
+                self.assertTrue(start.wait(timeout=2.0))
             self.assertEqual(sched.active_count(), 2)
 
             # Third submit on a fresh repo still exceeds the global cap.
@@ -179,16 +179,16 @@ class PerRepoCapEnforcementTest(unittest.TestCase):
         try:
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 1, lambda s=starts[0]: _worker(s, release)
+                    "owner/repo", 1, lambda start=starts[0]: _worker(start, release)
                 )
             )
             self.assertTrue(
                 sched.submit(
-                    "owner/repo", 2, lambda s=starts[1]: _worker(s, release)
+                    "owner/repo", 2, lambda start=starts[1]: _worker(start, release)
                 )
             )
-            for s in starts:
-                self.assertTrue(s.wait(timeout=2.0))
+            for start in starts:
+                self.assertTrue(start.wait(timeout=2.0))
             self.assertEqual(sched.active_count("owner/repo"), 2)
 
             # A third issue on the same repo is rejected even though
@@ -345,7 +345,7 @@ class ShutdownDrainRaceTest(unittest.TestCase):
     accepted submit's failure ends up in the log.
     """
 
-    def test_shutdown_blocks_until_callback_registration_completes(self) -> None:
+    def test_shutdown_blocks_until_callback_registered(self) -> None:
         """Deterministic race: gate ``Future.add_done_callback`` on a
         barrier so it cannot finish registering until we release it.
         While submit is blocked inside its lock-held critical section,
@@ -371,7 +371,7 @@ class ShutdownDrainRaceTest(unittest.TestCase):
             raise RuntimeError("worker exploded")
 
         with patch.object(Future, "add_done_callback", gated_add):
-            with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as cm:
+            with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
                 submit_done = threading.Event()
 
                 def _do_submit() -> None:
@@ -413,12 +413,12 @@ class ShutdownDrainRaceTest(unittest.TestCase):
                 self.assertFalse(shutter.is_alive())
 
             self.assertTrue(
-                any("worker exploded" in m for m in cm.output),
-                cm.output,
+                any("worker exploded" in msg for msg in logs.output),
+                logs.output,
             )
             self.assertEqual(sched.active_count(), 0)
 
-    def test_every_accepted_submit_failure_is_logged_under_shutdown_race(self) -> None:
+    def test_every_accepted_failure_logged_under_shutdown_race(self) -> None:
         for trial in range(5):
             sched = IssueScheduler(global_cap=8, per_repo_cap=8)
             accepted = 0
@@ -433,7 +433,7 @@ class ShutdownDrainRaceTest(unittest.TestCase):
             # accepts zero submits would render the assertLogs guard
             # vacuously satisfied and hide a real regression.
             head_start = 20
-            with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as cm:
+            with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
                 for i in range(head_start):
                     if sched.submit(f"owner/repo-{trial}", i, _failing):
                         accepted += 1
@@ -445,7 +445,7 @@ class ShutdownDrainRaceTest(unittest.TestCase):
                 shutdown_thread.join(timeout=10.0)
                 self.assertFalse(shutdown_thread.is_alive())
 
-            logged = sum(1 for m in cm.output if "worker exploded" in m)
+            logged = sum(1 for msg in logs.output if "worker exploded" in msg)
             self.assertGreater(
                 accepted, 0,
                 f"trial {trial}: no submits were accepted before shutdown ran",
@@ -466,7 +466,7 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
     catches any completion that landed between the two shutdowns.
     """
 
-    def test_wait_true_after_wait_false_blocks_until_workers_exit(self) -> None:
+    def test_wait_true_after_wait_false_blocks_until_exit(self) -> None:
         sched = IssueScheduler(global_cap=2, per_repo_cap=2)
         start = threading.Event()
         release = threading.Event()
@@ -504,7 +504,7 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
         finally:
             release.set()
 
-    def test_wait_true_after_wait_false_drains_completion_in_between(self) -> None:
+    def test_wait_true_after_wait_false_drains_completion(self) -> None:
         # A worker that finishes between the two shutdown calls must
         # still have its failure logged by the second call's reap.
         sched = IssueScheduler(global_cap=2, per_repo_cap=2)
@@ -521,14 +521,14 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
             self.assertTrue(start.wait(timeout=2.0))
             sched.shutdown(wait=False)
 
-            with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as cm:
+            with self.assertLogs("orchestrator.scheduler", level=logging.ERROR) as logs:
                 release.set()
                 # The wait=True call must block until the worker exits
                 # and then drain its failure via reap.
                 sched.shutdown(wait=True)
             self.assertTrue(
-                any("late worker exploded" in m for m in cm.output),
-                cm.output,
+                any("late worker exploded" in msg for msg in logs.output),
+                logs.output,
             )
         finally:
             release.set()
@@ -559,7 +559,7 @@ class SubmitSkipLoggingTest(unittest.TestCase):
 
             with self.assertLogs(
                 "orchestrator.scheduler", level=logging.INFO,
-            ) as cm:
+            ) as logs:
                 self.assertFalse(
                     sched.submit(
                         "owner/repo", 101,
@@ -569,11 +569,11 @@ class SubmitSkipLoggingTest(unittest.TestCase):
                 )
             self.assertTrue(
                 any(
-                    "scheduler skip" in m and "family_slot_held" in m
-                    and "#101" in m
-                    for m in cm.output
+                    "scheduler skip" in msg and "family_slot_held" in msg
+                    and "#101" in msg
+                    for msg in logs.output
                 ),
-                cm.output,
+                logs.output,
             )
         finally:
             release.set()
@@ -595,7 +595,7 @@ class SubmitSkipLoggingTest(unittest.TestCase):
 
             with self.assertLogs(
                 "orchestrator.scheduler", level=logging.INFO,
-            ) as cm:
+            ) as logs:
                 self.assertFalse(
                     sched.submit(
                         "owner/repo", 2,
@@ -605,10 +605,10 @@ class SubmitSkipLoggingTest(unittest.TestCase):
                 )
             self.assertTrue(
                 any(
-                    "scheduler skip" in m and "per_repo_cap" in m
-                    for m in cm.output
+                    "scheduler skip" in msg and "per_repo_cap" in msg
+                    for msg in logs.output
                 ),
-                cm.output,
+                logs.output,
             )
         finally:
             release.set()
@@ -631,7 +631,7 @@ class SubmitSkipLoggingTest(unittest.TestCase):
 
             with self.assertLogs(
                 "orchestrator.scheduler", level=logging.DEBUG,
-            ) as cm:
+            ) as logs:
                 self.assertFalse(
                     sched.submit(
                         "owner/repo", 1,
@@ -640,10 +640,10 @@ class SubmitSkipLoggingTest(unittest.TestCase):
                 )
             self.assertTrue(
                 any(
-                    "scheduler skip" in m and "duplicate_active" in m
-                    for m in cm.output
+                    "scheduler skip" in msg and "duplicate_active" in msg
+                    for msg in logs.output
                 ),
-                cm.output,
+                logs.output,
             )
         finally:
             release.set()
@@ -728,7 +728,7 @@ class TrackActiveContextManagerTest(unittest.TestCase):
         finally:
             release_bucket.set()
 
-    def test_duplicate_claim_returns_false_and_does_not_steal_marker(
+    def test_duplicate_claim_returns_false_without_stealing_marker(
         self,
     ) -> None:
         # The drain must skip `_process_issue` when `claimed` is False;
@@ -758,7 +758,7 @@ class TrackActiveContextManagerTest(unittest.TestCase):
         finally:
             release.set()
 
-    def test_submit_rejects_fanout_for_a_tracked_issue(self) -> None:
+    def test_submit_rejects_fanout_for_tracked_issue(self) -> None:
         # A fanout submit for an issue currently held by track_active
         # must be skipped via the duplicate-active gate -- otherwise a
         # cross-tick relabel could let two workers run the same handler

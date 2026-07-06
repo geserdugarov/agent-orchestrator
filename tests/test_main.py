@@ -76,10 +76,10 @@ class PollingLoopFanOutTest(unittest.TestCase):
             clients_by_slug: dict[str, MagicMock] = {}
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                clients_by_slug[repo_spec.slug] = m
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                clients_by_slug[repo_spec.slug] = client
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
@@ -120,9 +120,9 @@ class PollingLoopFanOutTest(unittest.TestCase):
                     raise RuntimeError("simulated alpha failure")
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
@@ -155,9 +155,9 @@ class PollingLoopFanOutTest(unittest.TestCase):
                 tick_threads.append(threading.get_ident())
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
@@ -195,9 +195,9 @@ class PollingLoopFanOutTest(unittest.TestCase):
                     completed.append(spec.slug)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
@@ -209,7 +209,7 @@ class PollingLoopFanOutTest(unittest.TestCase):
                 {"alpha/one", "beta/two", "gamma/three"},
             )
 
-    def test_label_initialization_happens_once_per_spec_at_startup(self) -> None:
+    def test_label_initialization_happens_once_per_spec(self) -> None:
         # `ensure_workflow_labels` must run exactly once per configured
         # repo at startup -- not on every tick. Re-running the label
         # bootstrap on each tick would burn API calls on a no-op and
@@ -223,10 +223,10 @@ class PollingLoopFanOutTest(unittest.TestCase):
             clients_by_slug: dict[str, MagicMock] = {}
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                clients_by_slug[repo_spec.slug] = m
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                clients_by_slug[repo_spec.slug] = client
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick"):
@@ -249,7 +249,7 @@ class SchedulerWiringTest(unittest.TestCase):
     self-modifying-merge restart).
     """
 
-    def test_main_builds_one_scheduler_and_passes_it_to_every_tick(
+    def test_main_builds_one_scheduler_for_every_tick(
         self,
     ) -> None:
         # The polling loop must build one IssueScheduler at startup
@@ -274,9 +274,9 @@ class SchedulerWiringTest(unittest.TestCase):
                     received.append(scheduler)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
@@ -293,7 +293,7 @@ class SchedulerWiringTest(unittest.TestCase):
             self.assertEqual(sched.global_cap, 4)
             self.assertEqual(sched.per_repo_cap, 3)
 
-    def test_main_uses_same_scheduler_across_legacy_single_repo_path(
+    def test_main_uses_scheduler_across_legacy_path(
         self,
     ) -> None:
         # The legacy single-repo path must also receive a real scheduler
@@ -311,9 +311,9 @@ class SchedulerWiringTest(unittest.TestCase):
                 received.append(scheduler)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
@@ -341,9 +341,9 @@ class SchedulerWiringTest(unittest.TestCase):
                 captured.append(scheduler)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             real_scheduler_init = main_mod.IssueScheduler.__init__
             built: list[object] = []
@@ -388,9 +388,9 @@ class SchedulerWiringTest(unittest.TestCase):
                 main_mod._shutdown(signal.SIGINT, None)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod.IssueScheduler, "__init__", tracking_init), \
                  patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
@@ -404,7 +404,7 @@ class SchedulerWiringTest(unittest.TestCase):
                 "scheduler not shut down on signal-induced exit",
             )
 
-    def test_signal_during_active_tick_closes_scheduler_submit_path(
+    def test_signal_during_active_tick_closes_submit_path(
         self,
     ) -> None:
         # Regression for issue #316 review feedback: `_running=False`
@@ -446,9 +446,9 @@ class SchedulerWiringTest(unittest.TestCase):
                 )
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(
                 main_mod, "GitHubClient", side_effect=fake_client,
@@ -508,9 +508,9 @@ class SchedulerWiringTest(unittest.TestCase):
                     beta_submit_after_signal.append(result)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(
                 main_mod, "GitHubClient", side_effect=fake_client,
@@ -522,7 +522,7 @@ class SchedulerWiringTest(unittest.TestCase):
             self.assertEqual(rc, 128 + signal.SIGINT)
             self.assertEqual(beta_submit_after_signal, [False])
 
-    def test_scheduler_global_cap_bounds_concurrent_workers_across_repos(
+    def test_scheduler_global_cap_bounds_workers_across_repos(
         self,
     ) -> None:
         # End-to-end coverage that the scheduler main built actually
@@ -576,9 +576,9 @@ class SchedulerWiringTest(unittest.TestCase):
                 release.set()
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             releaser = threading.Thread(target=release_when_two_admitted)
             releaser.start()
@@ -593,7 +593,7 @@ class SchedulerWiringTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             # All three repos saw the SAME scheduler instance.
             self.assertEqual(len(received), 3)
-            self.assertEqual(len({id(s) for s in received}), 1)
+            self.assertEqual(len({id(sched) for sched in received}), 1)
             # Cap is 2: even though three repos submitted, never more
             # than 2 workers ran concurrently.
             self.assertEqual(max_in_flight, 2)
@@ -630,9 +630,9 @@ class SignalHandlingTest(unittest.TestCase):
                     main_mod._shutdown(signal.SIGINT, None)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
@@ -658,9 +658,9 @@ class SignalHandlingTest(unittest.TestCase):
                 ticked.append(spec.slug)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             # Pre-set the shutdown flag so the `--once` tick observes
             # `_running=False` immediately when `_run_tick` is entered.
@@ -685,9 +685,9 @@ class SignalHandlingTest(unittest.TestCase):
                 main_mod._shutdown(signal.SIGTERM, None)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):
@@ -717,9 +717,9 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
                 pass
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick), \
@@ -746,9 +746,9 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
                 pass
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick), \
@@ -796,7 +796,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             clients.append((spec, gh))
         return clients
 
-    def test_long_running_handler_does_not_block_next_poll_for_other_repo(
+    def test_long_running_handler_does_not_block_next_poll(
         self,
     ) -> None:
         # Pass 1 submits a blocking worker for repo alpha; the tick
@@ -876,7 +876,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             finally:
                 alpha_release.set()
 
-    def test_same_issue_not_launched_twice_concurrently_across_polls(
+    def test_same_issue_not_launched_twice_across_polls(
         self,
     ) -> None:
         # Pass 1 submits a blocking worker for issue #7. Pass 2 sees the
@@ -931,7 +931,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             with run_lock:
                 self.assertEqual(run_count["n"], 1)
 
-    def test_worker_completion_clears_in_flight_marker_for_next_poll(
+    def test_worker_completion_clears_in_flight_marker(
         self,
     ) -> None:
         # Pass 1 dispatches a worker that finishes promptly. The
@@ -1046,7 +1046,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             # One reap for the whole polling pass, not per repo.
             self.assertEqual(reap.call_count, 1)
 
-    def test_reap_called_once_across_real_workflow_dispatch_multi_repo(
+    def test_reap_called_once_across_real_dispatch_multi_repo(
         self,
     ) -> None:
         # Regression for the multi-repo reap-cadence violation: the
@@ -1194,9 +1194,9 @@ class ShutdownWatchdogTest(unittest.TestCase):
                 main_mod._shutdown(signal.SIGTERM, None)
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(main_mod, "_arm_shutdown_watchdog"), \
                  patch.object(
@@ -1223,9 +1223,9 @@ class ShutdownWatchdogTest(unittest.TestCase):
                 pass
 
             def fake_client(*, repo_spec):
-                m = MagicMock()
-                m.slug = repo_spec.slug
-                return m
+                client = MagicMock()
+                client.slug = repo_spec.slug
+                return client
 
             with patch.object(
                 main_mod.agents, "terminate_all_running",

@@ -190,7 +190,7 @@ class TickViaSchedulerTest(unittest.TestCase):
 
         self.assertEqual(sorted(passed), [1, 2, 3])
 
-    def test_per_repo_cap_skips_overflow_until_a_slot_frees(self) -> None:
+    def test_per_repo_cap_skips_overflow_until_slot_frees(self) -> None:
         # With `parallel_limit=2` and three eligible non-family issues,
         # the first two are accepted and the third is skipped this
         # tick. After one of the in-flight workers exits, a follow-up
@@ -428,14 +428,14 @@ class TickViaSchedulerTest(unittest.TestCase):
                 # it with the count of pending family issues.
                 with self.assertLogs(
                     "orchestrator.workflow", level=logging.INFO,
-                ) as cm:
+                ) as logs:
                     workflow.tick(gh, self._spec(), scheduler=sched)
                 self.assertTrue(
                     any(
                         "family bucket" in msg and "not submitted" in msg
-                        for msg in cm.output
+                        for msg in logs.output
                     ),
-                    cm.output,
+                    logs.output,
                 )
         finally:
             release.set()
@@ -521,7 +521,7 @@ class TickViaSchedulerTest(unittest.TestCase):
 
             with self.assertLogs(
                 "orchestrator.workflow", level=logging.INFO,
-            ) as cm, \
+            ) as logs, \
                  patch.object(workflow, "_refresh_base_and_worktrees"), \
                  patch.object(workflow, "_process_issue", side_effect=fake_process):
                 workflow.tick(gh, self._spec(), scheduler=sched)
@@ -530,11 +530,11 @@ class TickViaSchedulerTest(unittest.TestCase):
                 skipped = False
                 while time.monotonic() < deadline and not skipped:
                     skipped = any(
-                        "already in flight" in m and "#50" in m
-                        for m in cm.output
+                        "already in flight" in msg and "#50" in msg
+                        for msg in logs.output
                     )
                     time.sleep(0.01)
-                self.assertTrue(skipped, cm.output)
+                self.assertTrue(skipped, logs.output)
             # The fanout worker is the ONLY one that processed #50;
             # the drain refused to enter a second concurrent handler.
             with process_lock:
@@ -772,7 +772,7 @@ class TickViaSchedulerTest(unittest.TestCase):
         finally:
             release.set()
 
-    def test_scheduler_path_uses_per_worker_client_and_refetches_issue(
+    def test_scheduler_path_uses_per_worker_client_and_refetches(
         self,
     ) -> None:
         # The scheduler dispatch must mirror the legacy parallel path:
@@ -850,7 +850,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
             timer.cancel()
         self.assertEqual(sched.active_count(repo_slug), 0)
 
-    def test_umbrella_only_bucket_runs_when_per_repo_cap_is_saturated(self) -> None:
+    def test_umbrella_only_bucket_runs_when_cap_saturated(self) -> None:
         # Per-repo cap is 1 and a fanout `implementing` issue already
         # holds the slot. A pure umbrella bucket on the same repo must
         # still run this tick: the dispatcher submits it cap-exempt so
@@ -896,7 +896,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
                 ev.set()
         self._wait_idle(sched, "acme/widget")
 
-    def test_umbrella_only_bucket_does_not_inflate_cap_counters(self) -> None:
+    def test_umbrella_only_bucket_does_not_inflate_counters(self) -> None:
         # While an umbrella-only bucket is in flight, the scheduler's
         # `active_count` must report ZERO cap-counted workers: the
         # bucket sentinel lives in the cap-exempt tracked set. Without
@@ -986,7 +986,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
                 ev.set()
         self._wait_idle(sched, "acme/widget")
 
-    def test_blocked_only_bucket_runs_when_per_repo_cap_is_saturated(self) -> None:
+    def test_blocked_only_bucket_runs_when_cap_saturated(self) -> None:
         # Regression for the blocked-parent deadlock: `_handle_blocked` is
         # a pure child-poll / dep-graph walk -- no agent, no worktree --
         # exactly like umbrella. With per-repo cap 1 and a fanout child
@@ -1036,7 +1036,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
                 ev.set()
         self._wait_idle(sched, "acme/widget")
 
-    def test_blocked_only_bucket_does_not_inflate_cap_counters(self) -> None:
+    def test_blocked_only_bucket_does_not_inflate_counters(self) -> None:
         # A `blocked`-only bucket is in flight but the scheduler's
         # cap counters must read ZERO: the bucket sentinel lives in the
         # cap-exempt tracked set, so a follow-up fanout submit on a
@@ -1298,7 +1298,7 @@ class ClosedFanoutCapExemptionTest(unittest.TestCase):
             timer.cancel()
         self.assertEqual(sched.active_count(repo_slug), 0)
 
-    def test_closed_fanout_runs_when_per_repo_cap_is_saturated(self) -> None:
+    def test_closed_fanout_runs_when_cap_saturated(self) -> None:
         # Per-repo cap is 1 and an open `validating` fanout issue holds the
         # slot. A CLOSED `in_review` issue on the same repo must still run
         # this tick: it is submitted cap-exempt so its terminal finalize
@@ -1342,7 +1342,7 @@ class ClosedFanoutCapExemptionTest(unittest.TestCase):
                 ev.set()
         self._wait_idle(sched, "acme/widget")
 
-    def test_closed_fanout_does_not_inflate_cap_counters(self) -> None:
+    def test_closed_fanout_does_not_inflate_counters(self) -> None:
         # While a closed fan-out finalize is in flight, the scheduler's
         # cap counters stay at zero (its worker lives in the cap-exempt
         # tracked set), so a concurrent open fan-out submit is not skipped.
