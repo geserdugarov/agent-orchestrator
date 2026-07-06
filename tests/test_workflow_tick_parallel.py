@@ -63,7 +63,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             parallel_limit=parallel_limit,
         )
 
-    def test_limit_one_processes_sequentially_in_caller_thread(self) -> None:
+    def test_limit_one_processes_sequentially(self) -> None:
         # parallel_limit=1 must keep the legacy in-thread iteration: no
         # overlap, declared issue order preserved, and the call happens on
         # the same thread `tick` was invoked on (no ThreadPoolExecutor).
@@ -228,7 +228,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # completed BEFORE any `_process_issue` started.
         self.assertEqual(refresh_seen_by_worker, [1, 1])
 
-    def test_family_aware_stages_never_overlap_with_each_other(self) -> None:
+    def test_family_aware_stages_never_overlap(self) -> None:
         # Family-aware labels (decomposing, blocked, umbrella, and unlabeled
         # pickup) write across parent/child boundaries -- the parent's
         # `_handle_decomposing` recovery seeds `parent_number` on each
@@ -474,15 +474,15 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
                     "family handler; family bucket likely consumed "
                     "multiple slots",
                 )
-            except BaseException as e:  # noqa: BLE001 -- re-raised below
-                releaser_error.append(e)
+            except BaseException as exc:  # noqa: BLE001 -- re-raised below
+                releaser_error.append(exc)
             finally:
                 # Always release so the test thread can join cleanly
                 # even when the releaser's assertions fire.
                 slow_family_release.set()
 
-        t = threading.Thread(target=releaser)
-        t.start()
+        releaser_thread = threading.Thread(target=releaser)
+        releaser_thread.start()
         try:
             # parallel_limit=2 + 3 submissions total. Family bucket =
             # one drain task = one slot. Fanout = one task = one slot.
@@ -494,7 +494,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
                 workflow.tick(gh, self._spec(parallel_limit=2))
         finally:
             slow_family_release.set()
-            t.join(timeout=5.0)
+            releaser_thread.join(timeout=5.0)
 
         if releaser_error:
             raise releaser_error[0]
@@ -565,15 +565,15 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
                 time.sleep(0.01)
             family_release.set()
 
-        t = threading.Thread(target=releaser)
-        t.start()
+        releaser_thread = threading.Thread(target=releaser)
+        releaser_thread.start()
         try:
             with patch.object(workflow, "_refresh_base_and_worktrees"), \
                  patch.object(workflow, "_process_issue", side_effect=fake_process):
                 workflow.tick(gh, self._spec(parallel_limit=4))
         finally:
             family_release.set()
-            t.join(timeout=5.0)
+            releaser_thread.join(timeout=5.0)
 
         # All three fanout issues completed while the family handler
         # was still inside `_process_issue` -- exactly the property the
@@ -622,26 +622,26 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
                 # Parent's repair branch: read each recorded child,
                 # set parent_number, clear park flags, write back.
                 state = client.read_pinned_state(issue)
-                for child_n in state.get("children") or []:
-                    child = client.get_issue(int(child_n))
-                    cs = client.read_pinned_state(child)
-                    if not cs.get("parent_number"):
-                        cs.set("parent_number", issue.number)
-                        cs.set("awaiting_human", False)
-                        cs.set("park_reason", None)
-                        client.write_pinned_state(child, cs)
+                for child_number in state.get("children") or []:
+                    child = client.get_issue(int(child_number))
+                    child_state = client.read_pinned_state(child)
+                    if not child_state.get("parent_number"):
+                        child_state.set("parent_number", issue.number)
+                        child_state.set("awaiting_human", False)
+                        child_state.set("park_reason", None)
+                        client.write_pinned_state(child, child_state)
                 client.set_workflow_label(issue, "blocked")
                 client.write_pinned_state(issue, state)
                 return
             if issue.number == 20:
-                cs = client.read_pinned_state(issue)
-                if cs.get("parent_number"):
+                child_state = client.read_pinned_state(issue)
+                if child_state.get("parent_number"):
                     return
-                if cs.get("awaiting_human"):
+                if child_state.get("awaiting_human"):
                     return
-                cs.set("awaiting_human", True)
-                cs.set("park_reason", "blocked_no_children")
-                client.write_pinned_state(issue, cs)
+                child_state.set("awaiting_human", True)
+                child_state.set("park_reason", "blocked_no_children")
+                client.write_pinned_state(issue, child_state)
                 return
 
         with patch.object(workflow, "_refresh_base_and_worktrees"), \
@@ -755,7 +755,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
 
         self.assertEqual(max_in_flight, 1)
 
-    def test_parallel_path_uses_per_worker_clients_and_refetches_issues(
+    def test_parallel_path_uses_per_worker_clients_and_refetches(
         self,
     ) -> None:
         # PyGithub's `Requester` is not documented thread-safe; sharing a

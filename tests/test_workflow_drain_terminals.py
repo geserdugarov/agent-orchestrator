@@ -104,7 +104,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         result["_cleanup_terminal_branch"].assert_not_called()
         self.assertEqual(gh.recorded_events, [])
 
-    def test_merged_pr_finalizes_to_done_with_event_and_cleanup(self) -> None:
+    def test_merged_pr_finalizes_to_done(self) -> None:
         # The merged arc: stamp `merged_at`, flip to `done`, emit
         # `pr_merged` with `merge_method="external"` and the supplied
         # stage, close the issue if still open, and run branch cleanup.
@@ -139,17 +139,17 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-312",
         )
         merged_events = [
-            e for e in gh.recorded_events if e["event"] == "pr_merged"
+            event for event in gh.recorded_events if event["event"] == "pr_merged"
         ]
         self.assertEqual(len(merged_events), 1)
-        ev = merged_events[0]
-        self.assertEqual(ev["stage"], "fixing")
-        self.assertEqual(ev["pr_number"], 31200)
-        self.assertEqual(ev["merge_method"], "external")
-        self.assertEqual(ev["sha"], "cafe1234")
-        self.assertEqual(ev["review_round"], 2)
+        event = merged_events[0]
+        self.assertEqual(event["stage"], "fixing")
+        self.assertEqual(event["pr_number"], 31200)
+        self.assertEqual(event["merge_method"], "external")
+        self.assertEqual(event["sha"], "cafe1234")
+        self.assertEqual(event["review_round"], 2)
 
-    def test_closed_unmerged_pr_finalizes_to_rejected_with_event_and_cleanup(
+    def test_closed_unmerged_pr_finalizes_to_rejected(
         self,
     ) -> None:
         # The closed-PR arc: stamp `closed_without_merge_at`, flip to
@@ -189,18 +189,18 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-313",
         )
         closed_events = [
-            e for e in gh.recorded_events
-            if e["event"] == "pr_closed_without_merge"
+            event for event in gh.recorded_events
+            if event["event"] == "pr_closed_without_merge"
         ]
         self.assertEqual(len(closed_events), 1)
-        ev = closed_events[0]
-        self.assertEqual(ev["stage"], "resolving_conflict")
-        self.assertEqual(ev["pr_number"], 31300)
-        self.assertEqual(ev["sha"], "dead0001")
-        self.assertEqual(ev["review_round"], 3)
-        self.assertEqual(ev["conflict_round"], 2)
+        event = closed_events[0]
+        self.assertEqual(event["stage"], "resolving_conflict")
+        self.assertEqual(event["pr_number"], 31300)
+        self.assertEqual(event["sha"], "dead0001")
+        self.assertEqual(event["review_round"], 3)
+        self.assertEqual(event["conflict_round"], 2)
 
-    def test_open_pr_with_manually_closed_issue_rejects_without_cleanup(
+    def test_open_pr_closed_issue_rejects_without_cleanup(
         self,
     ) -> None:
         # Open PR + manually closed issue is a human stop signal: flip
@@ -238,16 +238,16 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         result["_cleanup_terminal_branch"].assert_not_called()
         # No `pr_closed_without_merge` emit for the open-PR case.
         self.assertEqual(
-            [e for e in gh.recorded_events
-             if e["event"] == "pr_closed_without_merge"],
+            [event for event in gh.recorded_events
+             if event["event"] == "pr_closed_without_merge"],
             [],
         )
         self.assertEqual(
-            [e for e in gh.recorded_events if e["event"] == "pr_merged"],
+            [event for event in gh.recorded_events if event["event"] == "pr_merged"],
             [],
         )
 
-    def test_resolving_conflict_terminal_preserves_zero_conflict_round(
+    def test_resolving_conflict_preserves_zero_conflict_round(
         self,
     ) -> None:
         # Legacy / manually-relabelled `resolving_conflict` states may
@@ -283,15 +283,15 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         merged_events = [
-            e for e in gh.recorded_events if e["event"] == "pr_merged"
+            event for event in gh.recorded_events if event["event"] == "pr_merged"
         ]
         self.assertEqual(len(merged_events), 1)
-        ev = merged_events[0]
-        self.assertEqual(ev["stage"], "resolving_conflict")
+        merged_event = merged_events[0]
+        self.assertEqual(merged_event["stage"], "resolving_conflict")
         # Field must be present (build_event_record drops None), and
         # the coerced default must be 0.
-        self.assertIn("conflict_round", ev)
-        self.assertEqual(ev["conflict_round"], 0)
+        self.assertIn("conflict_round", merged_event)
+        self.assertEqual(merged_event["conflict_round"], 0)
 
         # Same coercion for the closed-without-merge arc.
         issue2 = make_issue(317, label="resolving_conflict")
@@ -315,13 +315,13 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         closed_events = [
-            e for e in gh.recorded_events
-            if e["event"] == "pr_closed_without_merge"
+            event for event in gh.recorded_events
+            if event["event"] == "pr_closed_without_merge"
         ]
         self.assertEqual(len(closed_events), 1)
-        ev2 = closed_events[0]
-        self.assertIn("conflict_round", ev2)
-        self.assertEqual(ev2["conflict_round"], 0)
+        closed_event = closed_events[0]
+        self.assertIn("conflict_round", closed_event)
+        self.assertEqual(closed_event["conflict_round"], 0)
 
     def test_in_review_terminal_omits_missing_conflict_round(self) -> None:
         # The other two stages have always passed the raw
@@ -351,12 +351,12 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         merged_events = [
-            e for e in gh.recorded_events if e["event"] == "pr_merged"
+            event for event in gh.recorded_events if event["event"] == "pr_merged"
         ]
         self.assertEqual(len(merged_events), 1)
         self.assertNotIn("conflict_round", merged_events[0])
 
-    def test_merged_arc_handles_already_closed_issue_without_re_closing(
+    def test_merged_arc_handles_already_closed_issue(
         self,
     ) -> None:
         # A `Resolves #N` footer auto-closes the issue the moment the PR
@@ -388,7 +388,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn((315, "done"), gh.label_history)
         self.assertTrue(issue.closed)
         merged_events = [
-            e for e in gh.recorded_events if e["event"] == "pr_merged"
+            event for event in gh.recorded_events if event["event"] == "pr_merged"
         ]
         self.assertEqual(len(merged_events), 1)
         self.assertEqual(merged_events[0]["stage"], "fixing")
@@ -433,8 +433,8 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 )
 
                 receipts = [
-                    body for m, body in gh.posted_comments
-                    if m == n and body.startswith(":receipt:")
+                    body for posted_n, body in gh.posted_comments
+                    if posted_n == n and body.startswith(":receipt:")
                 ]
                 self.assertEqual(len(receipts), 1)
                 self.assertIn(
@@ -442,8 +442,8 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
                     receipts[0],
                 )
                 receipt_comment = next(
-                    c for c in issue.comments
-                    if c.body.startswith(":receipt:")
+                    comment for comment in issue.comments
+                    if comment.body.startswith(":receipt:")
                 )
                 self.assertIn(
                     receipt_comment.id,
