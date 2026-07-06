@@ -228,7 +228,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.gh.add_pr(pr)
         return pr
 
-    def test_pr_having_in_review_clean_rebase_routes_to_validating(
+    def test_pr_in_review_clean_rebase_routes_to_validating(
         self,
     ) -> None:
         # A clean base rebase on an open PR branch must NOT be relabeled
@@ -269,10 +269,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(self.gh.posted_pr_comments[0][0], 42)
         self.assertIn("validating", self.gh.posted_pr_comments[0][1])
         # `review_round` was reset to 0 so the reviewer re-runs.
-        data = self.gh.pinned_data(7)
-        self.assertEqual(data.get("review_round"), 0)
+        state = self.gh.pinned_data(7)
+        self.assertEqual(state.get("review_round"), 0)
         # `conflict_round` was NOT seeded -- this is no longer a conflict path.
-        self.assertIsNone(data.get("conflict_round"))
+        self.assertIsNone(state.get("conflict_round"))
         # A `base_rebased` audit event was emitted carrying the new head SHA.
         rebased = [e for e in self.gh.recorded_events if e.get("event") == "base_rebased"]
         self.assertEqual(len(rebased), 1)
@@ -284,7 +284,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         ]
         self.assertEqual(conflict_rounds, [])
 
-    def test_pr_having_conflicting_rebase_routes_to_resolving_conflict(
+    def test_pr_conflicting_rebase_routes_to_resolving_conflict(
         self,
     ) -> None:
         # When the local base rebase leaves conflicted files, the refresh
@@ -333,8 +333,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(len(self.gh.posted_pr_comments), 1)
         self.assertIn("conflicted file(s)", self.gh.posted_pr_comments[0][1])
         # `conflict_round` initialized to 0 (the cap counter).
-        data = self.gh.pinned_data(7)
-        self.assertEqual(data.get("conflict_round"), 0)
+        state = self.gh.pinned_data(7)
+        self.assertEqual(state.get("conflict_round"), 0)
         # A `conflict_round` "entered" audit event was emitted and
         # carries the remote PR head SHA in its `sha` field. The
         # field is preserved here because consumers of the event log
@@ -350,7 +350,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(entered[0].get("stage"), "in_review")
         self.assertEqual(entered[0].get("sha"), "cafef00dcafef00d")
 
-    def test_pr_having_validating_clean_rebase_routes_to_validating(self) -> None:
+    def test_pr_validating_clean_rebase_routes_to_validating(self) -> None:
         # Validating + clean rebase: stays validating (label flip is a
         # no-op semantically but is still emitted so the reviewer
         # restarts on the new head). The test asserts the resolving_conflict
@@ -373,7 +373,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertNotIn((7, "resolving_conflict"), self.gh.label_history)
         push.assert_called_once()
 
-    def test_pr_having_documenting_clean_rebase_routes_to_validating(self) -> None:
+    def test_pr_documenting_clean_rebase_routes_to_validating(self) -> None:
         # `documenting` is the brief final-docs hop between reviewer
         # approval and `in_review`. The handler only checks ahead/behind
         # against the PR branch, not the base, so a sibling-PR merge
@@ -430,8 +430,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # lease rejected before any relabel happens.
         self.assertEqual(self.gh.label_history, [])
         # review_round was NOT reset since we did not flip the label.
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("review_round"))
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("review_round"))
         # Critical: local HEAD was reset back to the pre-rebase SHA so
         # the next tick's behind check still reports behind > 0 and
         # the validating reviewer / in_review handler do not read a
@@ -449,16 +449,16 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # `_handle_validating`'s transient-park recovery branch does
         # NOT auto-clear the park (it only clears `push_failed` /
         # `agent_timeout` / `reviewer_timeout` / `reviewer_failed`).
-        self.assertTrue(data.get("awaiting_human"))
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"), "auto_base_rebase_push_failed",
         )
         # HITL message posted on the issue thread (NOT the PR thread):
         # `_park_awaiting_human` writes to the issue, which is where
         # the resume-on-human-reply comment scan reads from.
         self.assertEqual(len(self.gh.posted_comments), 1)
-        body = self.gh.posted_comments[0][1]
-        self.assertIn("force-with-lease", body)
+        comment = self.gh.posted_comments[0][1]
+        self.assertIn("force-with-lease", comment)
         # The auto-rebase rejection path does NOT post on the PR thread
         # too -- that would spam every diverged PR with duplicate notices.
         self.assertEqual(self.gh.posted_pr_comments, [])
@@ -488,8 +488,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         in_review_calls: list[bool] = []
 
         def fake_in_review(gh, spec, issue):
-            data = gh.pinned_data(issue.number)
-            in_review_calls.append(bool(data.get("awaiting_human")))
+            state = gh.pinned_data(issue.number)
+            in_review_calls.append(bool(state.get("awaiting_human")))
 
         with patch.object(base_sync, "_worktree_dirty_files", return_value=[]), \
              patch.object(base_sync, "_rebase_base_into_worktree", merge), \
@@ -565,9 +565,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         ]
         self.assertEqual(len(clean_calls), 1, hardened.call_args_list)
         # Parked awaiting human with the auto-rebase dirty reason.
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "auto_base_rebase_dirty")
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "auto_base_rebase_dirty")
         # HITL message landed on the issue thread.
         self.assertEqual(len(self.gh.posted_comments), 1)
         self.assertIn("uncommitted change", self.gh.posted_comments[0][1])
@@ -606,9 +606,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         push.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
         # Parked awaiting human with the rebase-failed reason.
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "auto_base_rebase_failed")
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "auto_base_rebase_failed")
         # HITL message on the issue thread.
         self.assertEqual(len(self.gh.posted_comments), 1)
         self.assertIn("non-conflict reason", self.gh.posted_comments[0][1])
@@ -646,16 +646,16 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
         # Recovery cleared the park flags and the watermark advanced
         # past the consumed human comment.
-        data = self.gh.pinned_data(7)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
-        self.assertEqual(data.get("last_action_comment_id"), 200)
+        state = self.gh.pinned_data(7)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
+        self.assertEqual(state.get("last_action_comment_id"), 200)
         # Clean rebase + push succeeded; issue routed to validating.
         merge.assert_called_once()
         push.assert_called_once()
         self.assertIn((7, "validating"), self.gh.label_history)
         # `review_round` reset for the reviewer's next pass.
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertEqual(state.get("review_round"), 0)
 
     def test_pr_auto_rebase_park_survives_early_exit_when_dirty(self) -> None:
         # Regression: the awaiting_human-clear + watermark-advance for
@@ -699,12 +699,12 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # CRITICAL: park survives on disk, watermark NOT advanced.
         # The operator's "retry" comment is still ahead of the
         # watermark so the next refresh tick rediscovers it.
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"), "auto_base_rebase_push_failed",
         )
-        self.assertEqual(data.get("last_action_comment_id"), 99)
+        self.assertEqual(state.get("last_action_comment_id"), 99)
 
     def test_pr_auto_rebase_park_survives_early_exit_when_pr_fetch_fails(
         self,
@@ -735,12 +735,12 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge.assert_not_called()
         push.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"), "auto_base_rebase_push_failed",
         )
-        self.assertEqual(data.get("last_action_comment_id"), 99)
+        self.assertEqual(state.get("last_action_comment_id"), 99)
 
     def test_pr_auto_rebase_park_survives_early_exit_when_hold_added(
         self,
@@ -774,12 +774,12 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge.assert_not_called()
         push.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"), "auto_base_rebase_push_failed",
         )
-        self.assertEqual(data.get("last_action_comment_id"), 99)
+        self.assertEqual(state.get("last_action_comment_id"), 99)
 
     def test_pr_auto_rebase_park_stays_parked_without_new_comment(self) -> None:
         # No new human comment after the park's watermark -- the human
@@ -809,10 +809,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge.assert_not_called()
         push.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"), "auto_base_rebase_push_failed",
         )
 
     def test_pr_non_auto_rebase_park_still_skips(self) -> None:
@@ -846,10 +846,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge.assert_not_called()
         push.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "unmergeable")
-        self.assertEqual(data.get("last_action_comment_id"), 99)
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "unmergeable")
+        self.assertEqual(state.get("last_action_comment_id"), 99)
 
     def test_pr_crash_recovery_pushes_unpushed_rebase(self) -> None:
         # Scenario 1: a prior tick set `pending_auto_base_rebase_push_sha`
@@ -905,9 +905,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Label flipped to `validating`, anchor cleared, review_round
         # reset.
         self.assertIn((7, "validating"), self.gh.label_history)
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
-        self.assertEqual(data.get("review_round"), 0)
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
+        self.assertEqual(state.get("review_round"), 0)
         # `base_rebased` audit event records the crash-recovery method.
         rebased = [e for e in self.gh.recorded_events if e.get("event") == "base_rebased"]
         self.assertEqual(len(rebased), 1)
@@ -958,9 +958,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Label finalized to `validating`, anchor cleared, review_round
         # reset (was 3, now 0).
         self.assertIn((7, "validating"), self.gh.label_history)
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
-        self.assertEqual(data.get("review_round"), 0)
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
+        self.assertEqual(state.get("review_round"), 0)
         rebased = [e for e in self.gh.recorded_events if e.get("event") == "base_rebased"]
         self.assertEqual(len(rebased), 1)
         self.assertEqual(
@@ -1006,8 +1006,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge.assert_called_once()
         push.assert_called_once()
         # Anchor cleared and label flipped to `validating`.
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
         self.assertIn((7, "validating"), self.gh.label_history)
         # Normal-flow rebase event, NOT a crash-recovery one.
         rebased = [e for e in self.gh.recorded_events if e.get("event") == "base_rebased"]
@@ -1100,13 +1100,13 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         push_mock.assert_not_called()
         merge_mock.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
-        data = self.gh.pinned_data(7)
+        state = self.gh.pinned_data(7)
         # Anchor cleared (reset put HEAD back at it).
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
         # Same-tick handler dispatch will short-circuit on this park.
-        self.assertTrue(data.get("awaiting_human"))
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"), "auto_base_rebase_push_failed",
         )
         # No `base_rebased` event -- we did NOT route to validating.
         rebased = [
@@ -1115,7 +1115,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         ]
         self.assertEqual(rebased, [])
 
-    def test_pr_crash_recovery_aborts_with_park_on_fetch_failure(
+    def test_pr_crash_recovery_parks_on_fetch_failure(
         self,
     ) -> None:
         # Regression: the `_authed_fetch` failure path used to
@@ -1131,7 +1131,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             hardened_mock, push_mock, merge_mock,
         )
 
-    def test_pr_crash_recovery_aborts_with_park_on_rev_parse_failure(
+    def test_pr_crash_recovery_parks_on_rev_parse_failure(
         self,
     ) -> None:
         # Same regression for the `rev-parse` failure path. Without
@@ -1145,7 +1145,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             hardened_mock, push_mock, merge_mock,
         )
 
-    def test_pr_crash_recovery_aborts_with_park_on_empty_remote_sha(
+    def test_pr_crash_recovery_parks_on_empty_remote_sha(
         self,
     ) -> None:
         # `rev-parse` returncode 0 but empty stdout -- same threat
@@ -1157,7 +1157,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             hardened_mock, push_mock, merge_mock,
         )
 
-    def test_pr_crash_recovery_aborts_with_park_on_sha_mismatch_with_zero_ahead_behind(
+    def test_pr_crash_recovery_parks_on_sha_mismatch_zero_ahead_behind(
         self,
     ) -> None:
         # The fourth cannot-verify path: rev-parse returns a DIFFERENT
@@ -1174,7 +1174,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             hardened_mock, push_mock, merge_mock,
         )
 
-    def test_pr_crash_recovery_case_2_with_behind_falls_through_to_normal_rebase(
+    def test_pr_crash_recovery_case_2_behind_falls_through(
         self,
     ) -> None:
         # Regression: case 2 (HEAD == remote PR head; push landed on
@@ -1231,9 +1231,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Final label is `validating`, anchor cleared, review_round
         # reset (was 3, now 0).
         self.assertIn((7, "validating"), self.gh.label_history)
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
-        self.assertEqual(data.get("review_round"), 0)
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
+        self.assertEqual(state.get("review_round"), 0)
         # Two `base_rebased` events: one for the case-2 finalize-
         # without-relabel and one for the normal-flow rebase + push.
         rebased = [e for e in self.gh.recorded_events if e.get("event") == "base_rebased"]
@@ -1245,7 +1245,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Final head SHA on the audit trail is the freshly-rebased one.
         self.assertEqual(rebased[1].get("sha"), "new-rebased-sha")
 
-    def test_pr_crash_recovery_case_3_with_behind_falls_through_to_normal_rebase(
+    def test_pr_crash_recovery_case_3_behind_falls_through(
         self,
     ) -> None:
         # Same regression for case 3 (HEAD ahead of remote PR head;
@@ -1301,9 +1301,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge.assert_called_once()
         # Final label is `validating`, anchor cleared.
         self.assertIn((7, "validating"), self.gh.label_history)
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
-        self.assertEqual(data.get("review_round"), 0)
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
+        self.assertEqual(state.get("review_round"), 0)
         # Two `base_rebased` events: recovery + normal flow.
         rebased = [e for e in self.gh.recorded_events if e.get("event") == "base_rebased"]
         self.assertEqual(len(rebased), 2)
@@ -1359,11 +1359,11 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         push.assert_not_called()
         merge.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
-        self.assertTrue(data.get("awaiting_human"))
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"), "auto_base_rebase_push_failed",
         )
 
     def test_pr_normal_rebase_sets_then_clears_recovery_anchor(self) -> None:
@@ -1415,8 +1415,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             f"call; saw {anchor_seen_at_rebase!r}",
         )
         # Final pinned state has the anchor cleared by the success path.
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
 
     def test_pr_normal_rebase_clears_anchor_on_push_failure(self) -> None:
         # The push-failure park path must clear the anchor before
@@ -1439,10 +1439,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
              patch.object(base_sync, "_git", git_mock), \
              patch.object(base_sync, "_git_hardened", hardened):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_push_failed",
+            state.get("park_reason"), "auto_base_rebase_push_failed",
         )
 
     def test_pr_unreadable_pre_rebase_head_parks_without_rebasing(
@@ -1477,14 +1477,14 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # No label flip; the issue is parked for the operator to
         # investigate why `git rev-parse HEAD` fails on the worktree.
         self.assertEqual(self.gh.label_history, [])
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_failed",
+            state.get("park_reason"), "auto_base_rebase_failed",
         )
         # The crash-recovery anchor is NOT set: there is no rebased
         # SHA to recover from.
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
         # HITL message names the underlying failure.
         self.assertEqual(len(self.gh.posted_comments), 1)
         self.assertIn("HEAD", self.gh.posted_comments[0][1])
@@ -1523,12 +1523,12 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(len(reset_calls), 1, hardened.call_args_list)
         push.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "auto_base_rebase_failed",
+            state.get("park_reason"), "auto_base_rebase_failed",
         )
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
 
     def test_pr_dirty_after_crashed_rebase_reaches_recovery_branch(
         self,
@@ -1591,10 +1591,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Issue parked with the dirty park reason; the anchor is
         # cleared so the next refresh starts fresh on the operator's
         # human-comment reply.
-        data = self.gh.pinned_data(7)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "auto_base_rebase_dirty")
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
+        state = self.gh.pinned_data(7)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "auto_base_rebase_dirty")
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
 
     def test_pr_stale_anchor_cleared_when_label_left_refresh_set(
         self,
@@ -1644,8 +1644,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         ahead_behind.assert_not_called()
         # Critical: anchor cleared so a later return to `validating`
         # does NOT trigger bogus recovery against the stale SHA.
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
 
     def test_pr_stale_anchor_cleared_when_pr_terminal(self) -> None:
         # Same cleanup contract for the terminal-PR early return: a
@@ -1672,8 +1672,8 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         push.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
         # Anchor cleared.
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("pending_auto_base_rebase_push_sha"))
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("pending_auto_base_rebase_push_sha"))
 
     def test_hold_base_sync_label_skips_pr_refresh_detour(self) -> None:
         from unittest.mock import MagicMock
@@ -1744,7 +1744,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge.assert_not_called()
         self.assertEqual(self.gh.label_history, [])
 
-    def test_pr_having_resolving_conflict_label_does_not_re_route(self) -> None:
+    def test_pr_resolving_conflict_label_does_not_re_route(self) -> None:
         # The handler runs this tick anyway and will do the rebase -- a
         # second label flip is pointless and would re-post the PR notice.
         from unittest.mock import MagicMock
@@ -1761,7 +1761,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # No duplicate PR notice.
         self.assertEqual(self.gh.posted_pr_comments, [])
 
-    def test_pr_having_up_to_date_does_not_route(self) -> None:
+    def test_pr_up_to_date_does_not_route(self) -> None:
         # behind = 0 short-circuits: nothing to refresh, no detour.
         from unittest.mock import MagicMock
         self.gh.add_issue(make_issue(7, label="in_review"))
@@ -1797,9 +1797,9 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
              patch.object(base_sync, "_git", git_mock), \
              patch.object(base_sync, "_git_hardened", hardened):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
-        data = self.gh.pinned_data(7)
+        state = self.gh.pinned_data(7)
         # Existing counter (2) preserved, not reset to 0.
-        self.assertEqual(data.get("conflict_round"), 2)
+        self.assertEqual(state.get("conflict_round"), 2)
         # The conflict path still flips to resolving_conflict.
         self.assertIn((7, "resolving_conflict"), self.gh.label_history)
 
@@ -1888,10 +1888,10 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
              patch.object(base_sync, "_head_sha", head_sha), \
              patch.object(base_sync, "_git", git_mock):
             workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, 7)
-        data = self.gh.pinned_data(7)
+        state = self.gh.pinned_data(7)
         # Watermark stayed at 100 -- the unread human comment at id=500 is
         # still ahead of it and the next in_review scan will pick it up.
-        self.assertEqual(data.get("pr_last_comment_id"), 100)
+        self.assertEqual(state.get("pr_last_comment_id"), 100)
 
     def test_pr_route_skips_when_awaiting_human(self) -> None:
         # Regression: a parked PR (`awaiting_human=True`) must not be

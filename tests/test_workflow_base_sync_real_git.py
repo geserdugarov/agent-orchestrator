@@ -193,7 +193,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertTrue((self.wt / "scratch.py").exists())
         self.assertFalse((self.wt / "extra.txt").exists())
 
-    def test_pr_open_clean_base_advance_rebases_and_routes_to_validating(
+    def test_pr_open_clean_base_advance_routes_to_validating(
         self,
     ) -> None:
         # The #402-style case: an open PR branch is merely behind base
@@ -261,10 +261,10 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertIn((7, "validating"), self.gh.label_history)
         self.assertNotIn((7, "resolving_conflict"), self.gh.label_history)
         # `review_round` reset so the reviewer re-runs against the new head.
-        data = self.gh.pinned_data(7)
-        self.assertEqual(data.get("review_round"), 0)
+        state = self.gh.pinned_data(7)
+        self.assertEqual(state.get("review_round"), 0)
         # No `conflict_round` seeded -- this was not a conflict path.
-        self.assertIsNone(data.get("conflict_round"))
+        self.assertIsNone(state.get("conflict_round"))
 
     def test_pr_open_clean_rebase_push_failure_resets_local_head(self) -> None:
         # Regression for issue #413 review: a clean local rebase whose
@@ -318,8 +318,8 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # transient push failure does not spam the PR thread.
         self.assertEqual(self.gh.posted_pr_comments, [])
         # `review_round` was NOT reset since we did not flip the label.
-        data = self.gh.pinned_data(7)
-        self.assertIsNone(data.get("review_round"))
+        state = self.gh.pinned_data(7)
+        self.assertIsNone(state.get("review_round"))
 
     def test_pr_open_conflicting_base_advance_relabels_resolving_conflict(
         self,
@@ -354,8 +354,8 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # Label flipped to `resolving_conflict`.
         self.assertIn((7, "resolving_conflict"), self.gh.label_history)
         # `conflict_round` initialized to 0.
-        data = self.gh.pinned_data(7)
-        self.assertEqual(data.get("conflict_round"), 0)
+        state = self.gh.pinned_data(7)
+        self.assertEqual(state.get("conflict_round"), 0)
 
 
 if __name__ == "__main__":

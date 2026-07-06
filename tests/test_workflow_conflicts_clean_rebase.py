@@ -135,12 +135,12 @@ class ResolvingConflictCleanRebaseTest(
         )
         self.assertIn((200, "validating"), gh.label_history)
         self.assertNotIn((200, "documenting"), gh.label_history)
-        data = gh.pinned_data(200)
-        self.assertEqual(data.get("review_round"), 0)
-        self.assertEqual(data.get("conflict_round"), 1)
-        self.assertIn("last_conflict_resolved_at", data)
+        state = gh.pinned_data(200)
+        self.assertEqual(state.get("review_round"), 0)
+        self.assertEqual(state.get("conflict_round"), 1)
+        self.assertIn("last_conflict_resolved_at", state)
 
-    def test_hold_base_sync_label_pauses_resolving_conflict(self) -> None:
+    def test_hold_base_sync_label_pauses(self) -> None:
         gh, issue, pr = self._seed()
         issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
         mocks, merge_mock, git_mock = self._run_with_merge(
@@ -154,11 +154,11 @@ class ResolvingConflictCleanRebaseTest(
         merge_mock.assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.label_history, [])
-        data = gh.pinned_data(200)
-        self.assertEqual(data.get("conflict_round"), 0)
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertEqual(state.get("conflict_round"), 0)
+        self.assertFalse(state.get("awaiting_human"))
 
-    def test_clean_rebase_already_up_to_date_skips_push_and_ticks_round(
+    def test_clean_rebase_up_to_date_skips_push_and_ticks_round(
         self,
     ) -> None:
         # When the base hasn't moved (e.g. unmergeability is purely due to
@@ -182,9 +182,9 @@ class ResolvingConflictCleanRebaseTest(
         mocks["_push_branch"].assert_not_called()
         self.assertIn((200, "validating"), gh.label_history)
         self.assertNotIn((200, "documenting"), gh.label_history)
-        data = gh.pinned_data(200)
-        self.assertEqual(data.get("review_round"), 0)
-        self.assertEqual(data.get("conflict_round"), 1)
+        state = gh.pinned_data(200)
+        self.assertEqual(state.get("review_round"), 0)
+        self.assertEqual(state.get("conflict_round"), 1)
 
     def test_no_op_rebase_loops_until_cap_fires(self) -> None:
         # A PR stuck unmergeable purely due to branch protection would
@@ -223,15 +223,15 @@ class ResolvingConflictCleanRebaseTest(
         # Neither merge nor agent runs on the cap branch.
         merge_mock.assert_not_called()
         mocks["run_agent"].assert_not_called()
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
         # Label stays on `resolving_conflict` -- no flip.
         self.assertNotIn((200, "validating"), gh.label_history)
         self.assertNotIn((200, "done"), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("MAX_CONFLICT_ROUNDS", last_comment)
 
-    def test_pr_already_merged_externally_finalizes_to_done(self) -> None:
+    def test_pr_merged_externally_finalizes_to_done(self) -> None:
         # Mirror the in_review terminal: a human merged the PR (perhaps
         # after manually resolving conflicts) while we were resolving.
         gh, issue, pr = self._seed(pr_merged=True, pr_state="closed")
@@ -264,7 +264,7 @@ class ResolvingConflictCleanRebaseTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-200",
         )
 
-    def test_manually_closed_with_open_pr_marks_rejected_without_cleanup(
+    def test_manually_closed_open_pr_marks_rejected_without_cleanup(
         self,
     ) -> None:
         # Mirror the in_review counterpart: closing the issue while the

@@ -28,7 +28,7 @@ class ResolvingConflictAwaitingHumanResumeTest(
     stale Claude session, and discards an interrupted resume.
     """
 
-    def test_awaiting_human_no_new_comments_is_quiet(self) -> None:
+    def test_no_new_comments_is_quiet(self) -> None:
         # Once parked, ticks without a new human reply must not retry --
         # otherwise the cap is meaningless and a poisoned rebase would
         # burn tokens. The parked state stays put.
@@ -60,7 +60,7 @@ class ResolvingConflictAwaitingHumanResumeTest(
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.label_history, [])
 
-    def test_awaiting_human_with_new_comment_resumes_dev(self) -> None:
+    def test_new_comment_resumes_dev(self) -> None:
         # `_on_question` / `_on_dirty_worktree` parks tell the human
         # "reply with guidance and the orchestrator will resume the
         # session". Honor that contract: a fresh comment past the
@@ -109,15 +109,15 @@ class ResolvingConflictAwaitingHumanResumeTest(
             self.BRANCH,
             force_with_lease=None,
         )
-        data = gh.pinned_data(200)
-        self.assertEqual(data.get("review_round"), 0)
-        self.assertEqual(data.get("conflict_round"), 2)
+        state = gh.pinned_data(200)
+        self.assertEqual(state.get("review_round"), 0)
+        self.assertEqual(state.get("conflict_round"), 2)
         self.assertIn((200, "validating"), gh.label_history)
         self.assertNotIn((200, "documenting"), gh.label_history)
         # Watermark advanced past the consumed comment.
-        self.assertEqual(data.get("last_action_comment_id"), 2000)
+        self.assertEqual(state.get("last_action_comment_id"), 2000)
 
-    def test_awaiting_human_resume_interrupted_does_not_consume_reply(
+    def test_resume_interrupted_does_not_consume_reply(
         self,
     ) -> None:
         gh, issue, pr = self._seed(
@@ -154,15 +154,15 @@ class ResolvingConflictAwaitingHumanResumeTest(
         mocks["run_agent"].assert_called_once()
         merge_mock.assert_not_called()
         self.assertEqual(gh.write_state_calls, before_writes)
-        data = gh.pinned_data(200)
+        state = gh.pinned_data(200)
         # Park not consumed, reply watermark not advanced -- the next process
         # re-resumes on the same comment.
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("last_action_comment_id"), 1000)
-        self.assertEqual(data.get("conflict_round"), 1)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("last_action_comment_id"), 1000)
+        self.assertEqual(state.get("conflict_round"), 1)
         self.assertNotIn((200, "validating"), gh.label_history)
 
-    def test_awaiting_human_resume_recovers_from_stale_claude_session(self) -> None:
+    def test_resume_recovers_from_stale_claude_session(self) -> None:
         # Regression: a `resolving_conflict` issue parked awaiting human
         # whose pinned `dev_session_id` references a Claude transcript that
         # no longer exists. The first `--resume <sid>` call comes back with
@@ -230,16 +230,16 @@ class ResolvingConflictAwaitingHumanResumeTest(
         mocks["_push_branch"].assert_called_once()
         self.assertIn((200, "validating"), gh.label_history)
         self.assertNotIn((200, "documenting"), gh.label_history)
-        data = gh.pinned_data(200)
+        state = gh.pinned_data(200)
         self.assertFalse(
-            data.get("awaiting_human"),
+            state.get("awaiting_human"),
             "awaiting_human must be cleared on a recovered resume",
         )
-        self.assertNotEqual(data.get("park_reason"), "agent_silent")
-        self.assertEqual(data.get("conflict_round"), 2)
-        self.assertEqual(data.get("dev_session_id"), "fresh-sess")
+        self.assertNotEqual(state.get("park_reason"), "agent_silent")
+        self.assertEqual(state.get("conflict_round"), 2)
+        self.assertEqual(state.get("dev_session_id"), "fresh-sess")
 
-    def test_awaiting_human_resume_with_question_parks_again(self) -> None:
+    def test_resume_with_question_parks_again(self) -> None:
         # Resumed agent that produces no new commit (asks another
         # question) must re-park rather than push or flip the label.
         gh, issue, pr = self._seed(
@@ -271,11 +271,11 @@ class ResolvingConflictAwaitingHumanResumeTest(
         mocks["run_agent"].assert_called_once()
         merge_mock.assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(200)
+        state = gh.pinned_data(200)
         # Re-parked: counter unchanged, no label flip.
-        self.assertEqual(data.get("conflict_round"), 1)
+        self.assertEqual(state.get("conflict_round"), 1)
         self.assertNotIn((200, "validating"), gh.label_history)
-        self.assertTrue(data.get("awaiting_human"))
+        self.assertTrue(state.get("awaiting_human"))
 
 
 if __name__ == "__main__":
