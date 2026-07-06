@@ -180,6 +180,47 @@ class TransitionTableTest(unittest.TestCase):
         self.assertTrue(emitted, "scan found no set_workflow_label targets")
         self.assertLessEqual(emitted, reachable, emitted - reachable)
 
+    def test_every_state_reachable_from_entry(self) -> None:
+        # Global forward-reachability BFS from the real entry frontier -- the
+        # invariant `test_every_emitted_target_is_reachable` cannot enforce.
+        # That check is 1-hop set membership: a target passes as long as it is
+        # *somebody's* target, so an orphaned island (e.g. a future `{X -> Y,
+        # Y -> X}` neither of which the entry can reach) still passes because
+        # each is the other's target. A true BFS from the entry rejects it.
+        # `question` is operator-applied only and has no inbound edge (see
+        # `test_question_has_no_inbound_edge`), so it is seeded as already-seen;
+        # every other state must be reached from the `None` unlabeled entry.
+        seen = {WorkflowLabel.QUESTION}
+        frontier: list[WorkflowLabel | None] = [None, WorkflowLabel.QUESTION]
+        while frontier:
+            state = frontier.pop()
+            for target in ALLOWED_TRANSITIONS.get(state, frozenset()):
+                if target not in seen:
+                    seen.add(target)
+                    frontier.append(target)
+        self.assertEqual(set(WorkflowLabel) - seen, set())
+
+    def test_every_nonterminal_reaches_a_terminal(self) -> None:
+        # Terminal-liveness BFS on the reversed graph from the terminals: every
+        # non-terminal must have a path to `done`/`rejected`, so no edit can
+        # introduce a non-terminal sink or an exit-less cycle an issue could
+        # enter and never leave toward a terminal. The `None` pseudo-entry is
+        # not a real state, so it is skipped rather than required to co-reach.
+        terminals = {WorkflowLabel.DONE, WorkflowLabel.REJECTED}
+        reverse: dict[WorkflowLabel, set[WorkflowLabel | None]] = {}
+        for src, targets in ALLOWED_TRANSITIONS.items():
+            for target in targets:
+                reverse.setdefault(target, set()).add(src)
+        seen = set(terminals)
+        frontier = list(terminals)
+        while frontier:
+            state = frontier.pop()
+            for pred in reverse.get(state, set()):
+                if pred is not None and pred not in seen:
+                    seen.add(pred)
+                    frontier.append(pred)
+        self.assertEqual(set(WorkflowLabel) - seen, set())
+
 
 class IsAllowedTransitionTest(unittest.TestCase):
     def test_spine_edges_allowed(self) -> None:
