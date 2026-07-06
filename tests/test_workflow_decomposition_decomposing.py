@@ -1094,3 +1094,142 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             if n == 72 and ":mag:" in body
         )
         self.assertIn("(no rationale provided)", rationale_comment)
+
+
+class DecomposerRunUsageAccumulationTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """`_handle_decomposing` folds each real decomposer exit into the
+    per-issue usage counters, at both the fresh-spawn and awaiting-human
+    resume sites, and leaves them unpersisted when the run was interrupted
+    (empty stdout parses to a `no-usage` metric: a counted run with zero
+    tokens).
+    """
+
+    def test_fresh_run_persists_one_run(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(620, label="decomposing")
+        gh.add_issue(issue)
+        manifest = _manifest('{"decision": "single", "rationale": "fits"}')
+
+        self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+        )
+
+        data = gh.pinned_data(620)
+        self.assertEqual(data["issue_agent_runs"], 1)
+        self.assertEqual(data["issue_total_tokens"], 0)
+        self.assertEqual(data["issue_cost_sources"], ["no-usage"])
+
+    def test_resume_counts_one_exit(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(621, label="decomposing")
+        issue.comments.append(FakeComment(
+            id=1100, body="please split", user=FakeUser("alice"),
+        ))
+        gh.add_issue(issue)
+        gh.seed_state(
+            621,
+            awaiting_human=True,
+            last_action_comment_id=900,
+            decomposer_agent="claude",
+            decomposer_session_id="dec-sess",
+        )
+
+        self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dec-sess",
+                last_message=_manifest(
+                    '{"decision": "single", "rationale": "fits"}'
+                ),
+            ),
+        )
+
+        # Exactly one real resume exit folded.
+        self.assertEqual(gh.pinned_data(621)["issue_agent_runs"], 1)
+
+    def test_no_new_comment_resume_leaves_counters_untouched(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(622, label="decomposing")
+        gh.add_issue(issue)
+        gh.seed_state(
+            622,
+            awaiting_human=True,
+            last_action_comment_id=900,
+            decomposer_agent="claude",
+            decomposer_session_id="dec-sess",
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        # No reply -> the resume returns before spawning, so no run is
+        # counted and no counter key is created.
+        mocks["run_agent"].assert_not_called()
+        data = gh.pinned_data(622)
+        self.assertNotIn("issue_agent_runs", data)
+        self.assertNotIn("issue_total_tokens", data)
+
+    def test_interrupted_run_does_not_persist_counters(self) -> None:
+        gh = FakeGitHubClient()
+        issue = make_issue(623, label="decomposing")
+        gh.add_issue(issue)
+        gh.seed_state(
+            623,
+            # Seed the drift baseline so `_detect_user_content_change` does
+            # not itself write on first encounter -- this test asserts the
+            # handler writes NOTHING once the run is interrupted.
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
+        )
+
+        self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="", last_message="", exit_code=1, interrupted=True,
+            ),
+        )
+
+        # A shutdown-killed decomposer returns before `write_pinned_state`,
+        # so neither the folded counters nor a silent/invalid park reach
+        # GitHub.
+        data = gh.pinned_data(623)
+        self.assertNotIn("issue_agent_runs", data)
+        self.assertNotIn("issue_total_tokens", data)
+        self.assertFalse(data.get("awaiting_human"))
+
+    def test_interrupted_but_dirty_run_parks_without_persisting_counters(
+        self,
+    ) -> None:
+        # An interrupted decomposer that nonetheless left changes in the
+        # worktree must still hit the read-only dirty park -- the interrupted
+        # guard sits AFTER that park precisely so a killed misbehaving run
+        # does not slip through and lose the inspection worktree. That park
+        # DOES write pinned state, so the usage fold must be skipped for the
+        # interrupted run or a counter would persist despite the run being
+        # killed.
+        gh = FakeGitHubClient()
+        issue = make_issue(624, label="decomposing")
+        gh.add_issue(issue)
+
+        mocks = self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id="dec-sess", last_message="", interrupted=True,
+            ),
+            has_new_commits=True,
+        )
+
+        data = gh.pinned_data(624)
+        self.assertTrue(data.get("awaiting_human"))
+        self.assertIn("read-only", gh.posted_comments[-1][1])
+        # Worktree kept for inspection (the dirty park's contract).
+        mocks["_cleanup_decompose_worktree"].assert_not_called()
+        # The park wrote pinned state, but the killed run's usage was NOT
+        # folded, so no counter accrued.
+        self.assertNotIn("issue_agent_runs", data)
+        self.assertNotIn("issue_total_tokens", data)

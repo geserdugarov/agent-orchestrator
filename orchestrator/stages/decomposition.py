@@ -362,6 +362,18 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 state.set("decomposer_session_id", result.session_id)
 
         state.set("last_agent_action_at", _wf._now_iso())
+        # Fold this run's usage into the per-issue counters at the convergence
+        # of the fresh-spawn and awaiting-human resume branches, so a real
+        # resume exit is counted exactly once and the no-new-comment resume
+        # (which returned above without running the agent) never touches the
+        # counters. Interrupted runs are excluded entirely: the read-only
+        # dirty/commits park below still writes pinned state (to preserve the
+        # inspection worktree), so folding a killed run's usage first would
+        # persist a counter the interrupted contract says must not accrue. The
+        # clean-interrupted case is additionally short-circuited by the
+        # `_ignore_if_interrupted` guard below.
+        if not result.interrupted:
+            _wf._accumulate_issue_usage(state, result.usage)
 
         if result.timed_out:
             _wf._park_awaiting_human(
@@ -389,6 +401,18 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 reason="decomposer_dirty",
             )
             gh.write_pinned_state(issue, state)
+            return
+
+        # Shutdown-sweep interruption: a killed decomposer run has no
+        # trustworthy manifest. Its empty/partial output would otherwise fall
+        # through to the silent/invalid park below and persist the session /
+        # `last_agent_action_at` mutations. Ignore it and return WITHOUT
+        # writing so the next process re-runs from durable state. Placed AFTER
+        # the read-only dirty/commits park so an interrupted run that still
+        # left changes parks for inspection (preserving the read-only
+        # semantics), and BEFORE the manifest parse so no partial
+        # `last_message` is read.
+        if _wf._ignore_if_interrupted(issue, result):
             return
 
         last_msg = result.last_message or ""
