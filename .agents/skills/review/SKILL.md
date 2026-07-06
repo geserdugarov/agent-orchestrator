@@ -85,6 +85,15 @@ Treat blanket statements like "every helper is re-exported" with suspicion — v
   comprehension chains) — a comment that is faster to understand than the code it heads earns its
   place.
 
+## `plans/` references
+
+- `plans/` holds human working notes, not spec. Flag any code, comment, docstring, or test that cites
+  a `plans/` document — or a numbered "Proposal N" from one — as authoritative; the change must stand
+  on its own once that note is revised or deleted. Ask for the reference to be reworded to describe the
+  behavior directly.
+- A developer should not edit or remove files under `plans/` unless the issue explicitly asked. Flag
+  unrequested `plans/` changes.
+
 ## Commit hygiene
 
 - Conventional Commits: `<type>: <subject>` only. Reject any commit with a body, a `Co-Authored-By`

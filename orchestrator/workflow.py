@@ -544,7 +544,7 @@ def _accumulate_issue_usage(
 
 
 def _format_issue_usage_verdict(state: PinnedState) -> Optional[str]:
-    """Render the cumulative Proposal 2 usage verdict for a terminal surface.
+    """Render the cumulative per-issue usage verdict for a terminal surface.
 
     Reads the counters `_accumulate_issue_usage` folds onto pinned state and
     returns a single visible line:
