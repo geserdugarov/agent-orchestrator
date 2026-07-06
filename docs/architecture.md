@@ -202,7 +202,9 @@ cost metrics off the result without re-parsing stdout; it stays `None` for a res
 (validating), decomposer (decomposing), and question handlers consume it: `workflow._accumulate_issue_usage` folds
 each run's `usage` into the per-issue `issue_agent_runs` / `issue_total_tokens` / `issue_total_cost_usd` /
 `issue_cost_sources` counters on the pinned state
-([`state-machine.md#pinned-state`](state-machine.md#pinned-state)). `CodexResult` is kept as a
+([`state-machine.md#pinned-state`](state-machine.md#pinned-state)); at each terminal (PR merge / reject, umbrella
+close, closed question) `workflow._format_issue_usage_verdict` reads those counters back into one visible receipt
+comment — the sole read-side consumer, and nothing gates on the figure. `CodexResult` is kept as a
 transitional alias.
 
 The role command specs (`DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT`), their parsing, the durable per-issue session
