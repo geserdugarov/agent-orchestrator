@@ -49,7 +49,7 @@ class AuthedTargetFetchTest(unittest.TestCase):
             resolved.append(slug)
             return f"ghp-token-for-{slug.replace('/', '-')}"
 
-        private_spec = config.RepoSpec(
+        repo = config.RepoSpec(
             slug="geserdugarov/lance-private",
             target_root=Path("/tmp/orchestrator-test-shared-clone"),
             base_branch="cache-branch",
@@ -59,9 +59,9 @@ class AuthedTargetFetchTest(unittest.TestCase):
              mock_patch.object(
                  workflow.config, "_resolve_github_token", fake_resolve,
              ):
-            r = workflow._authed_target_fetch(private_spec, "cache-branch")
+            fetch = workflow._authed_target_fetch(repo, "cache-branch")
 
-        self.assertEqual(r.returncode, 0)
+        self.assertEqual(fetch.returncode, 0)
         # Token resolved exactly once -- for the spec's slug, NOT the
         # `remote_name` (which is just a local namespace label).
         self.assertEqual(resolved, ["geserdugarov/lance-private"])
@@ -82,7 +82,7 @@ class AuthedTargetFetchTest(unittest.TestCase):
             captured["args"],
         )
         # And the fetch runs in `spec.target_root` (the shared local clone).
-        self.assertEqual(captured["cwd"], str(private_spec.target_root))
+        self.assertEqual(captured["cwd"], str(repo.target_root))
 
     def test_token_is_delivered_via_askpass_not_argv(self) -> None:
         # Same hardening as `_push_branch` / `_authed_fetch`: token in
@@ -150,12 +150,12 @@ class AuthedTargetFetchTest(unittest.TestCase):
                  workflow.config, "_resolve_github_token",
                  return_value="super-secret-token",
              ):
-            r = workflow._authed_target_fetch(_TEST_SPEC, "main")
+            fetch = workflow._authed_target_fetch(_TEST_SPEC, "main")
 
         # Only the rewrite probe ran; the token-bearing fetch did NOT.
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0][:3], ["git", "config", "--local"])
-        self.assertNotEqual(r.returncode, 0)
+        self.assertNotEqual(fetch.returncode, 0)
         # And the token NEVER reached the (skipped) fetch subprocess env.
         for arg in runs[0]:
             self.assertNotIn("super-secret-token", str(arg))
@@ -173,7 +173,7 @@ class AuthedTargetFetchTest(unittest.TestCase):
             runs.append(args)
             return MagicMock(returncode=0, stdout="", stderr="")
 
-        private_spec = config.RepoSpec(
+        repo = config.RepoSpec(
             slug="geserdugarov/lance-private",
             target_root=Path("/tmp/orchestrator-test-shared-clone"),
             base_branch="cache-branch",
@@ -183,11 +183,11 @@ class AuthedTargetFetchTest(unittest.TestCase):
              mock_patch.object(
                  workflow.config, "_resolve_github_token", return_value="",
              ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
-            r = workflow._authed_target_fetch(private_spec, "cache-branch")
+            fetch = workflow._authed_target_fetch(repo, "cache-branch")
 
         # Failed without ever shelling out.
         self.assertEqual(runs, [])
-        self.assertNotEqual(r.returncode, 0)
+        self.assertNotEqual(fetch.returncode, 0)
         # Slug is in the log so the operator knows which token file to fix.
         self.assertTrue(
             any("geserdugarov/lance-private" in line for line in cm.output),
