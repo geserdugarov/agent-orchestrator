@@ -986,9 +986,21 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         review_round=round_n,
         retry_count=state.get("retry_count"),
     )
+    _wf._accumulate_issue_usage(state, review.usage)
     if review.session_id:
         state.set("last_review_session_id", review.session_id)
     state.set("last_review_at", _wf._now_iso())
+
+    # Shutdown-sweep interruption: a reviewer run the orchestrator killed
+    # mid-flight has no trustworthy verdict. Its empty output would otherwise
+    # fall through to the `unknown` -> `reviewer_failed` park below and, on
+    # the ensuing `write_pinned_state`, persist the usage counters just folded
+    # above (and the session / `last_review_at` mutations). Ignore it and
+    # return WITHOUT writing so those in-memory mutations are discarded and the
+    # next process re-spawns the reviewer. Must precede the timeout/verdict
+    # branches.
+    if _wf._ignore_if_interrupted(issue, review):
+        return
 
     if review.timed_out:
         _wf._park_awaiting_human(
