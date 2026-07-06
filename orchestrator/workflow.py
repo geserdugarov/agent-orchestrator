@@ -347,6 +347,13 @@ def _run_agent_tracked(
     may contain user-issue text. A parser failure or a sink IO error is
     swallowed so an analytics misconfiguration cannot stop the per-issue tick.
 
+    The returned `AgentResult` additionally carries the parsed run usage on its
+    `usage` field -- `record_agent_exit` attaches the `UsageMetrics` it parsed
+    from the same stdout, independent of whether the sink is enabled -- so
+    callers can read token / cost metrics off the result without re-parsing.
+    It is `None` when the usage parse failed (fail-open); this is best-effort
+    observability plumbing and does not touch the pinned state.
+
     The `prompt` is forwarded to `record_agent_exit` so it can land as the
     redacted `user_input` of the separate, opt-in trajectory record -- and
     ONLY when `TRAJECTORY_LOG_PATH` is enabled. With the trajectory sink off

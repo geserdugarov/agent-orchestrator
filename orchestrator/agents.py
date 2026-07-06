@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import config
+from .usage import UsageMetrics
 
 log = logging.getLogger(__name__)
 
@@ -307,6 +308,12 @@ class AgentResult:
     # Shutdown-killed / signal-terminated mid-run (distinct from `timed_out`).
     # Defaulted so existing constructions stay valid without the field.
     interrupted: bool = False
+    # Parsed run usage, populated by `analytics.record_agent_exit` from
+    # `stdout` during a tracked run. Defaulted so existing constructions stay
+    # valid without the field; stays `None` for any result that did not flow
+    # through `_run_agent_tracked` or whose usage parse failed (fail-open), so
+    # callers must treat it as best-effort.
+    usage: Optional[UsageMetrics] = None
 
 
 # Transitional alias for one release so external imports (debugging scripts,
