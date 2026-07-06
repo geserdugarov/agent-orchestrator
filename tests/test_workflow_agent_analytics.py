@@ -501,7 +501,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
 
 
 class RunUsageSurfacedTest(unittest.TestCase):
-    """Proposal 2 plumbing: `_run_agent_tracked` returns an `AgentResult`
+    """Per-issue usage plumbing: `_run_agent_tracked` returns an `AgentResult`
     whose `usage` field carries the same `UsageMetrics` `record_agent_exit`
     parsed for the analytics record -- surfaced even when the sink is off,
     left `None` when the usage parse fails (fail-open), and never disturbing
