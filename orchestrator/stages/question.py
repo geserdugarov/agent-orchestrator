@@ -208,6 +208,10 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     if getattr(issue, "state", "open") == "closed":
         state.set("question_closed_at", _wf._now_iso())
         gh.set_workflow_label(issue, WorkflowLabel.DONE)
+        # Surface the terminal usage verdict on the closed Q&A thread when
+        # any question run accrued counters; posted before the single
+        # write so its comment id is tracked in the same persisted state.
+        _wf._post_issue_usage_verdict(gh, issue, state)
         gh.write_pinned_state(issue, state)
         _wf._cleanup_question_worktree(
             spec, issue.number,

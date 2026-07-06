@@ -1,8 +1,9 @@
 # Copyright 2026 Geser Dugarov
 # SPDX-License-Identifier: Apache-2.0
 """Direct coverage of the cross-stage `_finalize_if_pr_merged` helper:
-the no-`pr_number` / open-PR / closed-without-merge negative cases and
-the merged-PR finalize on an open vs. already-closed issue."""
+the no-`pr_number` / open-PR / closed-without-merge negative cases, the
+merged-PR finalize on an open vs. already-closed issue, and the terminal
+usage-verdict receipt it posts (tracked before the pinned-state write)."""
 from __future__ import annotations
 
 import os
@@ -182,6 +183,77 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertIn((204, "done"), gh.label_history)
         self.assertTrue(issue.closed)
+
+    def test_merged_finalize_posts_tracked_usage_verdict(self) -> None:
+        # The terminal finalize surfaces the cumulative usage verdict as a
+        # tracked comment posted BEFORE `write_pinned_state`, so its id is
+        # persisted in `orchestrator_comment_ids` alongside the merge stamp.
+        gh = FakeGitHubClient()
+        issue = make_issue(205, label="implementing")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=20500, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-205",
+            head=FakePRRef(sha="cafe1234"),
+            merged=True, state="closed",
+        )
+        gh.add_pr(pr)
+        state = self._state_with_pr_number(
+            gh, 205, 20500,
+            issue_agent_runs=3, issue_total_tokens=45200,
+            issue_total_cost_usd=0.87, issue_cost_sources=["estimated"],
+        )
+
+        self._run(
+            lambda: workflow._finalize_if_pr_merged(
+                gh, _TEST_SPEC, issue, state
+            ),
+            run_agent=_agent(),
+        )
+
+        receipts = [
+            body for n, body in gh.posted_comments
+            if n == 205 and body.startswith(":receipt:")
+        ]
+        self.assertEqual(len(receipts), 1)
+        self.assertIn(
+            "this issue: 3 agent runs · 45,200 tokens · $0.87 (est.)",
+            receipts[0],
+        )
+        # Posted before the write, so its id rode the same persisted state.
+        receipt_comment = next(
+            c for c in issue.comments if c.body.startswith(":receipt:")
+        )
+        self.assertIn(
+            receipt_comment.id,
+            gh.pinned_data(205).get("orchestrator_comment_ids", []),
+        )
+
+    def test_merged_finalize_without_counters_posts_no_verdict(self) -> None:
+        # No agent ever ran against this issue (external-merge of a
+        # never-worked issue): the finalize skips the zero receipt.
+        gh = FakeGitHubClient()
+        issue = make_issue(206, label="implementing")
+        gh.add_issue(issue)
+        pr = FakePR(
+            number=20600, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-206",
+            head=FakePRRef(sha="cafe1234"),
+            merged=True, state="closed",
+        )
+        gh.add_pr(pr)
+        state = self._state_with_pr_number(gh, 206, 20600)
+
+        self._run(
+            lambda: workflow._finalize_if_pr_merged(
+                gh, _TEST_SPEC, issue, state
+            ),
+            run_agent=_agent(),
+        )
+
+        self.assertEqual(
+            [b for n, b in gh.posted_comments
+             if n == 206 and b.startswith(":receipt:")],
+            [],
+        )
 
 
 if __name__ == "__main__":

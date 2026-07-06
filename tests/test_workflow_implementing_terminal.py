@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Terminal handling for `_handle_implementing`: external-merge short-circuit
 to `done` and the closed-issue sweep that flips to `rejected` (with safe
-deferrals for transient PR-fetch failures)."""
+deferrals for transient PR-fetch failures), plus direct coverage of the
+terminal usage receipt the shared `_finalize_if_issue_closed` helper posts
+before its pinned-state write."""
 from __future__ import annotations
 
 import os
@@ -248,3 +250,82 @@ class HandleImplementingClosedIssueTest(
         self.assertNotIn("merged_at", gh.pinned_data(155))
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_terminal_branch"].assert_not_called()
+
+
+class FinalizeIfIssueClosedUsageVerdictTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """The closed-issue counterpart to `_finalize_if_pr_merged` posts the
+    terminal usage receipt as a tracked comment BEFORE its single
+    `write_pinned_state`, and skips it when no run was ever counted.
+    Exercised directly so the receipt is pinned independently of any
+    caller (the closed-issue sweep seeds no counters, so an integration
+    test alone would stay green if the receipt call were removed)."""
+
+    def test_rejected_finalize_posts_tracked_usage_verdict(self) -> None:
+        from orchestrator.github import PinnedState
+
+        gh = FakeGitHubClient()
+        issue = make_issue(156, label="implementing")
+        issue.closed = True
+        gh.add_issue(issue)
+        # No linked PR: the closed issue flips straight to `rejected`; the
+        # receipt still surfaces the cumulative verdict, tracked before the
+        # single write.
+        seed = dict(
+            issue_agent_runs=2, issue_total_tokens=3400,
+            issue_total_cost_usd=0.31, issue_cost_sources=["reported"],
+        )
+        gh.seed_state(156, **seed)
+        state = PinnedState(comment_id=None, data=dict(seed))
+
+        self._run(
+            lambda: self.assertTrue(
+                workflow._finalize_if_issue_closed(
+                    gh, _TEST_SPEC, issue, state,
+                )
+            ),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((156, "rejected"), gh.label_history)
+        receipts = [
+            body for n, body in gh.posted_comments
+            if n == 156 and body.startswith(":receipt:")
+        ]
+        self.assertEqual(len(receipts), 1)
+        self.assertIn(
+            "this issue: 2 agent runs · 3,400 tokens · $0.31", receipts[0],
+        )
+        receipt_comment = next(
+            c for c in issue.comments if c.body.startswith(":receipt:")
+        )
+        self.assertIn(
+            receipt_comment.id,
+            gh.pinned_data(156).get("orchestrator_comment_ids", []),
+        )
+
+    def test_rejected_finalize_without_counters_posts_no_verdict(self) -> None:
+        from orchestrator.github import PinnedState
+
+        gh = FakeGitHubClient()
+        issue = make_issue(157, label="implementing")
+        issue.closed = True
+        gh.add_issue(issue)
+        gh.seed_state(157)
+
+        self._run(
+            lambda: self.assertTrue(
+                workflow._finalize_if_issue_closed(
+                    gh, _TEST_SPEC, issue, PinnedState(comment_id=None, data={}),
+                )
+            ),
+            run_agent=_agent(),
+        )
+
+        self.assertIn((157, "rejected"), gh.label_history)
+        self.assertEqual(
+            [b for n, b in gh.posted_comments
+             if n == 157 and b.startswith(":receipt:")],
+            [],
+        )

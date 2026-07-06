@@ -543,6 +543,59 @@ def _accumulate_issue_usage(
     state.set("issue_cost_sources", sorted(seen))
 
 
+def _format_issue_usage_verdict(state: PinnedState) -> Optional[str]:
+    """Render the cumulative Proposal 2 usage verdict for a terminal surface.
+
+    Reads the counters `_accumulate_issue_usage` folds onto pinned state and
+    returns a single visible line:
+
+        :receipt: this issue: 3 agent runs · 45,200 tokens · $0.87
+
+    The cost slot follows `issue_cost_sources`: `(est.)` is appended when any
+    run's cost was `estimated` from the price table, and the whole figure
+    collapses to `unknown` when any `unknown-price` run leaves the priced
+    total incomplete (that dominates -- an unknown total cannot also be an
+    estimate). A `no-usage` run contributes nothing and marks neither.
+
+    Returns None when no agent run was ever counted (`issue_agent_runs` is
+    0 / absent) so a terminal with nothing to report skips the line instead
+    of posting a zero receipt.
+    """
+    runs = int(state.get("issue_agent_runs") or 0)
+    if runs <= 0:
+        return None
+    tokens = int(state.get("issue_total_tokens") or 0)
+    prior_sources = state.get("issue_cost_sources")
+    sources = set(prior_sources) if isinstance(prior_sources, list) else set()
+    if "unknown-price" in sources:
+        cost = "unknown"
+    else:
+        cost = f"${float(state.get('issue_total_cost_usd') or 0.0):.2f}"
+        if "estimated" in sources:
+            cost = f"{cost} (est.)"
+    return (
+        f":receipt: this issue: {runs} agent runs · "
+        f"{tokens:,} tokens · {cost}"
+    )
+
+
+def _post_issue_usage_verdict(
+    gh: GitHubClient, issue: Issue, state: PinnedState
+) -> None:
+    """Post the terminal usage verdict as its own tracked issue comment.
+
+    Thin wrapper over `_format_issue_usage_verdict` + `_post_issue_comment`
+    for the PR merged / rejected finalizers, which otherwise post no comment
+    of their own. Must run BEFORE the finalizer's `write_pinned_state` so the
+    comment id lands in the same persisted state and a later drift/watermark
+    tick recognizes it as orchestrator-authored. A no-op when there is
+    nothing to report (no counted agent run).
+    """
+    verdict = _format_issue_usage_verdict(state)
+    if verdict:
+        _post_issue_comment(gh, issue, state, verdict)
+
+
 def _sweep_community_contribution_prs(
     gh: GitHubClient, spec: RepoSpec
 ) -> None:
@@ -1344,6 +1397,7 @@ def _finalize_if_pr_merged(
     stage = gh.workflow_label(issue)
     state.set("merged_at", _now_iso())
     gh.set_workflow_label(issue, WorkflowLabel.DONE)
+    _post_issue_usage_verdict(gh, issue, state)
     gh.write_pinned_state(issue, state)
     gh.emit_event(
         "pr_merged",
@@ -1427,6 +1481,7 @@ def _drain_review_pr_terminals(
     if pr_status == "merged":
         state.set("merged_at", _now_iso())
         gh.set_workflow_label(issue, WorkflowLabel.DONE)
+        _post_issue_usage_verdict(gh, issue, state)
         gh.write_pinned_state(issue, state)
         gh.emit_event(
             "pr_merged",
@@ -1453,6 +1508,7 @@ def _drain_review_pr_terminals(
     if pr_status == "closed":
         state.set("closed_without_merge_at", _now_iso())
         gh.set_workflow_label(issue, WorkflowLabel.REJECTED)
+        _post_issue_usage_verdict(gh, issue, state)
         gh.write_pinned_state(issue, state)
         gh.emit_event(
             "pr_closed_without_merge",
@@ -1478,6 +1534,7 @@ def _drain_review_pr_terminals(
     if getattr(issue, "state", "open") == "closed":
         state.set("closed_without_merge_at", _now_iso())
         gh.set_workflow_label(issue, WorkflowLabel.REJECTED)
+        _post_issue_usage_verdict(gh, issue, state)
         gh.write_pinned_state(issue, state)
         return True
     return False
@@ -1553,6 +1610,7 @@ def _finalize_if_issue_closed(
     stage = gh.workflow_label(issue)
     state.set("closed_without_merge_at", _now_iso())
     gh.set_workflow_label(issue, WorkflowLabel.REJECTED)
+    _post_issue_usage_verdict(gh, issue, state)
     gh.write_pinned_state(issue, state)
     if pr is None:
         return True

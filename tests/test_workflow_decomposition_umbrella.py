@@ -35,6 +35,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         parent_number: int,
         child_labels: list[Optional[str]],
         dep_graph: Optional[dict] = None,
+        **extra_state,
     ) -> tuple[FakeGitHubClient, FakeIssue, list[FakeIssue]]:
         gh = FakeGitHubClient()
         parent = make_issue(parent_number, label="umbrella")
@@ -50,6 +51,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         }
         if dep_graph is not None:
             seed["dep_graph"] = dep_graph
+        seed.update(extra_state)
         gh.seed_state(parent_number, **seed)
         return gh, parent, children
 
@@ -84,6 +86,52 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
             "all children resolved" in body and "closing umbrella" in body
             for n, body in gh.posted_comments if n == 61
         ))
+
+    def test_umbrella_close_comment_appends_usage_verdict(self) -> None:
+        # The decomposer runs accrue on the umbrella parent, so its close
+        # comment carries the cumulative verdict appended to the existing
+        # "all children resolved" line (one comment, not two).
+        gh, parent, children = self._seed_umbrella_with_children(
+            parent_number=63, child_labels=["done", "done"],
+            issue_agent_runs=2, issue_total_tokens=12000,
+            issue_total_cost_usd=0.42, issue_cost_sources=["estimated"],
+        )
+
+        self._run(
+            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
+            run_agent=_agent(),
+        )
+
+        close_comments = [
+            body for n, body in gh.posted_comments
+            if n == 63 and "closing umbrella" in body
+        ]
+        self.assertEqual(len(close_comments), 1)
+        body = close_comments[0]
+        self.assertIn("all children resolved", body)
+        self.assertIn(
+            ":receipt: this issue: 2 agent runs · 12,000 tokens · $0.42 (est.)",
+            body,
+        )
+
+    def test_umbrella_close_comment_omits_verdict_without_counters(self) -> None:
+        # An umbrella that never accrued a counted run closes with the bare
+        # resolution line -- no zero receipt appended.
+        gh, parent, children = self._seed_umbrella_with_children(
+            parent_number=64, child_labels=["done", "done"],
+        )
+
+        self._run(
+            lambda: workflow._handle_umbrella(gh, _TEST_SPEC, parent),
+            run_agent=_agent(),
+        )
+
+        close_comments = [
+            body for n, body in gh.posted_comments
+            if n == 64 and "closing umbrella" in body
+        ]
+        self.assertEqual(len(close_comments), 1)
+        self.assertNotIn(":receipt:", close_comments[0])
 
     def test_some_children_in_progress_no_op(self) -> None:
         gh, parent, children = self._seed_umbrella_with_children(

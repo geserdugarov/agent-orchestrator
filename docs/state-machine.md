@@ -222,6 +222,16 @@ The schema is defined by `read_pinned_state` / `write_pinned_state` (see `github
   handler's existing single `write_pinned_state`, so an `interrupted` run that returns without writing never accrues.
   The read-only decomposer / question stages additionally skip the fold for `interrupted` runs, so even their
   dirty/commits inspection park (which does write pinned state) records no counter.
+- **Terminal usage verdict.** `_format_issue_usage_verdict` renders those counters into one visible receipt line
+  (`:receipt: this issue: N agent runs · T tokens · $X.XX`, `(est.)` appended when any `estimated` contributed,
+  `unknown` in place of the figure when an `unknown-price` run leaves the total incomplete). It returns nothing when
+  no run was counted, so a terminal with an empty meter posts no receipt. Every terminal surface renders it before its
+  single `write_pinned_state`: the PR merged / rejected finalizers (`_finalize_if_pr_merged`,
+  `_drain_review_pr_terminals` — all three arcs, including the open-PR/manually-closed-issue rejection — and
+  `_finalize_if_issue_closed`) post it as a standalone `_post_issue_usage_verdict` comment, the `umbrella`
+  all-children-done branch appends it to its close comment, and the closed-`question` terminal posts it when
+  question-stage counters accrued. Reusing `_post_issue_comment` keeps the receipt's comment id tracked in
+  `orchestrator_comment_ids`. This is a read-only verdict — no budget breaker or control behavior gates on it.
 
 The legacy `codex_session_id` key (written before `dev_agent` existed) is still honored on read by `_read_dev_session`:
 it round-trips to `spec="codex"` with no args so an older orchestrator's pin keeps running on codex.

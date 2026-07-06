@@ -996,10 +996,13 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         return
 
     if all(lbl == "done" for lbl in child_labels.values()):
-        _wf._post_issue_comment(
-            gh, issue, state,
-            ":white_check_mark: all children resolved; closing umbrella issue.",
+        close_body = (
+            ":white_check_mark: all children resolved; closing umbrella issue."
         )
+        verdict = _wf._format_issue_usage_verdict(state)
+        if verdict:
+            close_body = f"{close_body}\n\n{verdict}"
+        _wf._post_issue_comment(gh, issue, state, close_body)
         state.set("awaiting_human", False)
         state.set("park_reason", None)
         state.set("umbrella_resolved_at", _wf._now_iso())
