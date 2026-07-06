@@ -193,17 +193,17 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(timed_out=True),
         )
 
-        data = gh.pinned_data(5)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(5)
+        self.assertTrue(state.get("awaiting_human"))
         # Tagged transient so the next tick re-spawns the reviewer instead
         # of waiting for a human comment that the timeout itself does not
         # produce.
-        self.assertEqual(data.get("park_reason"), "reviewer_timeout")
+        self.assertEqual(state.get("park_reason"), "reviewer_timeout")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("reviewer timed out", last_comment)
         self.assertNotIn((5, "in_review"), gh.label_history)
 
-    def test_reviewer_silent_crash_parks_with_reviewer_failed_reason(self) -> None:
+    def test_reviewer_silent_crash_parks_reviewer_failed(self) -> None:
         # The reviewer agent crashed (e.g. codex returned `Error: No such
         # file or directory (os error 2)`): empty last_message + non-zero
         # exit code. Tag the park as `reviewer_failed` so the next tick's
@@ -215,9 +215,9 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(last_message="", stderr="boom", exit_code=2),
         )
 
-        data = gh.pinned_data(5)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "reviewer_failed")
+        state = gh.pinned_data(5)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "reviewer_failed")
 
     def test_reviewer_unknown_verdict_with_text_does_not_tag_failed(self) -> None:
         # When the reviewer DID emit text but no VERDICT line, the park
@@ -231,9 +231,9 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             ),
         )
 
-        data = gh.pinned_data(5)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(5)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
 
     def test_reviewer_empty_message_with_zero_exit_does_not_tag_failed(self) -> None:
         # Defensive: empty last_message but exit_code == 0 is not a
@@ -246,9 +246,9 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(last_message="", stderr="", exit_code=0),
         )
 
-        data = gh.pinned_data(5)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(5)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
 
 
 class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -272,7 +272,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
             last_message="1. Fix typo\n\nVERDICT: CHANGES_REQUESTED",
         )
 
-    def test_dev_fix_timeout_parks_with_agent_timeout_reason(self) -> None:
+    def test_dev_fix_timeout_parks_agent_timeout(self) -> None:
         # The dev agent timed out mid-fix. The park must be tagged so the
         # next tick's recovery branch can rerun the reviewer instead of
         # waiting for a human comment that the timeout itself cannot
@@ -292,12 +292,12 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
             head_shas=["aaa"],
         )
 
-        data = gh.pinned_data(6)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "agent_timeout")
+        state = gh.pinned_data(6)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "agent_timeout")
         # `head_shas` are consumed in order: before_sha is "aaa", which
         # is what gets persisted.
-        self.assertEqual(data.get("pre_dev_fix_sha"), "aaa")
+        self.assertEqual(state.get("pre_dev_fix_sha"), "aaa")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("agent timed out", last_comment)
         # CHANGES_REQUESTED flips the label to `fixing` BEFORE the dev
@@ -367,13 +367,13 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
             head_shas=["aaa", "bbb"],
         )
 
-        data = gh.pinned_data(6)
-        self.assertEqual(data.get("review_round"), 0)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(6)
+        self.assertEqual(state.get("review_round"), 0)
+        self.assertTrue(state.get("awaiting_human"))
         # The transient `push_failed` tag is what lets the next tick's
         # recovery branch silently retry the push without needing a human
         # comment to unstick the issue.
-        self.assertEqual(data.get("park_reason"), "push_failed")
+        self.assertEqual(state.get("park_reason"), "push_failed")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("git push failed", last_comment)
         self.assertIn((6, "fixing"), gh.label_history)
@@ -460,12 +460,12 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # tick (that happens on a later tick after a clean re-review).
         self.assertIn((6, "fixing"), gh.label_history)
         self.assertNotIn((6, "validating"), gh.label_history)
-        data = gh.pinned_data(6)
+        state = gh.pinned_data(6)
         # Post-spawn write skipped: the resume-budget charge from
         # `_resume_dev_with_text` never persisted.
-        self.assertIsNone(data.get("dev_resume_count"))
+        self.assertIsNone(state.get("dev_resume_count"))
         # Interrupted is not a question / timeout / dirty park.
-        self.assertFalse(data.get("awaiting_human"))
+        self.assertFalse(state.get("awaiting_human"))
 
 
 class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -503,9 +503,9 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
         self.assertIn("use sqlite please", followup)
 
         mocks["_push_branch"].assert_called_once()
-        data = gh.pinned_data(7)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertEqual(data.get("review_round"), 2)
+        state = gh.pinned_data(7)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertEqual(state.get("review_round"), 2)
         # A successful awaiting-human resume stays on `validating` (no
         # documenting hop) so the reviewer re-runs against the new head
         # on the next tick.
@@ -547,9 +547,9 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
             head_shas=["aaa", "bbb"],
         )
 
-        data = gh.pinned_data(70)
+        state = gh.pinned_data(70)
         self.assertEqual(
-            data.get("silent_park_count"), 0,
+            state.get("silent_park_count"), 0,
             "a successful dev fix must reset the silent-park streak so a "
             "later transient empty result doesn't drop a healthy session",
         )
@@ -607,16 +607,16 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             head_shas=["aaa"],
         )
 
-        data = gh.pinned_data(80)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(80)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
         self.assertEqual(
-            data.get("review_round"),
+            state.get("review_round"),
             config.MAX_REVIEW_ROUNDS - 1,
         )
         # Watermark advanced past the operator's command comment so the
         # next tick doesn't re-fire the same command.
-        self.assertEqual(data.get("last_action_comment_id"), 1100)
+        self.assertEqual(state.get("last_action_comment_id"), 1100)
         # Reviewer ran THIS tick (parity with reviewer_timeout fall-through).
         self.assertEqual(mocks["run_agent"].call_count, 1)
         reviewer_spawns = [
@@ -699,16 +699,16 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
 
         # No agent ran: the error path stays parked, doesn't fall through.
         mocks["run_agent"].assert_not_called()
-        data = gh.pinned_data(80)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "review_cap")
+        state = gh.pinned_data(80)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "review_cap")
         # Round is unchanged.
         self.assertEqual(
-            data.get("review_round"), config.MAX_REVIEW_ROUNDS,
+            state.get("review_round"), config.MAX_REVIEW_ROUNDS,
         )
         # Watermark advanced so the operator can post a corrected command
         # in a new comment without re-tripping the same rejection.
-        self.assertEqual(data.get("last_action_comment_id"), 1100)
+        self.assertEqual(state.get("last_action_comment_id"), 1100)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("ignored", last_comment)
         self.assertIn("positive integer", last_comment)
@@ -727,12 +727,12 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         )
 
         mocks["run_agent"].assert_not_called()
-        data = gh.pinned_data(80)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "review_cap")
+        state = gh.pinned_data(80)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "review_cap")
         # Watermark NOT advanced -- the operator may still post the
         # command later in a follow-up comment, and we need to see it.
-        self.assertEqual(data.get("last_action_comment_id"), 950)
+        self.assertEqual(state.get("last_action_comment_id"), 950)
 
     def test_command_only_fires_on_review_cap_park(self) -> None:
         # A command posted under a different park reason (here: a
@@ -752,9 +752,9 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             push_branch=True,
         )
 
-        data = gh.pinned_data(80)
+        state = gh.pinned_data(80)
         # Dev resume bumped the round; no cap-reset semantics applied.
-        self.assertEqual(data.get("review_round"), 2)
+        self.assertEqual(state.get("review_round"), 2)
         # No reset confirmation comment was posted.
         self.assertFalse(any(
             "review-cap reset" in body
@@ -777,11 +777,11 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         )
 
         mocks["run_agent"].assert_not_called()
-        data = gh.pinned_data(80)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "review_cap")
+        state = gh.pinned_data(80)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "review_cap")
         self.assertEqual(
-            data.get("review_round"), config.MAX_REVIEW_ROUNDS,
+            state.get("review_round"), config.MAX_REVIEW_ROUNDS,
         )
 
     def test_review_cap_park_message_advertises_command(self) -> None:
@@ -828,9 +828,9 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(82)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "review_cap")
+        state = gh.pinned_data(82)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "review_cap")
 
     def test_command_fires_after_real_cap_park_two_ticks(self) -> None:
         # End-to-end regression for the original bug: the FIRST tick must
@@ -1028,9 +1028,9 @@ class ValidatingInterruptedResumeHandlerTest(
         # the next tick re-detects the drift and retries the resume.
         self.assertEqual(gh.write_state_calls, 0)
         self.assertEqual(gh.label_history, [])
-        data = gh.pinned_data(8)
-        self.assertEqual(data.get("user_content_hash"), "stale-hash-forces-drift")
-        self.assertEqual(data.get("last_action_comment_id"), 900)
+        state = gh.pinned_data(8)
+        self.assertEqual(state.get("user_content_hash"), "stale-hash-forces-drift")
+        self.assertEqual(state.get("last_action_comment_id"), 900)
 
     def test_awaiting_human_interrupted_resume_does_not_persist(self) -> None:
         gh = FakeGitHubClient()
@@ -1070,6 +1070,6 @@ class ValidatingInterruptedResumeHandlerTest(
         # Nothing persisted: the park stays put and the human reply is
         # re-consumed next tick against a fresh dev session.
         self.assertEqual(gh.write_state_calls, 0)
-        data = gh.pinned_data(9)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("last_action_comment_id"), 1000)
+        state = gh.pinned_data(9)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("last_action_comment_id"), 1000)

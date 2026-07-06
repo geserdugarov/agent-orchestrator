@@ -79,10 +79,10 @@ class ValidatingTransientParkRecoveryTest(
         # Push retried and succeeded: park flags cleared, review_round
         # incremented so the next reviewer run starts a fresh round.
         mocks["_push_branch"].assert_called_once()
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
-        self.assertEqual(data.get("review_round"), 2)
+        state = gh.pinned_data(170)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
+        self.assertEqual(state.get("review_round"), 2)
         # Stays on `validating` (no documenting hop) so the reviewer
         # re-evaluates the recovered head on the next tick.
         self.assertEqual(gh.label_history, [])
@@ -106,11 +106,11 @@ class ValidatingTransientParkRecoveryTest(
         # No new park comment posted on this tick.
         self.assertEqual(gh.posted_comments, [])
         # Park flags preserved for the next recovery attempt.
-        data = gh.pinned_data(170)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "push_failed")
+        state = gh.pinned_data(170)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "push_failed")
         # review_round NOT bumped while still stuck.
-        self.assertEqual(data.get("review_round"), 1)
+        self.assertEqual(state.get("review_round"), 1)
 
     def test_push_failed_park_stays_parked_when_worktree_is_gone(self) -> None:
         # If the worktree was reaped between the original park and the
@@ -129,11 +129,11 @@ class ValidatingTransientParkRecoveryTest(
 
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(170)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "push_failed")
+        state = gh.pinned_data(170)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "push_failed")
 
-    def test_non_transient_park_stays_parked_with_no_new_comments(self) -> None:
+    def test_non_transient_park_stays_parked_no_new_comments(self) -> None:
         # A park whose reason is not in the validating transient set (e.g.
         # a question or dirty-tree park) must NOT auto-recover. The
         # _resume_developer_on_human_reply path (no new comments) returns
@@ -150,9 +150,9 @@ class ValidatingTransientParkRecoveryTest(
 
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(170)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("review_round"), 1)
+        state = gh.pinned_data(170)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("review_round"), 1)
 
     def test_reviewer_timeout_park_recovers_silently(self) -> None:
         # A previous tick parked because the reviewer agent timed out.
@@ -175,12 +175,12 @@ class ValidatingTransientParkRecoveryTest(
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(170)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
         # review_round MUST NOT advance: a timeout produced no fix, so
         # bumping would burn through MAX_REVIEW_ROUNDS without progress.
-        self.assertEqual(data.get("review_round"), 1)
+        self.assertEqual(state.get("review_round"), 1)
 
     def test_reviewer_failed_park_recovers_silently(self) -> None:
         # The reviewer crashed with empty stdout + non-zero exit on the
@@ -200,14 +200,14 @@ class ValidatingTransientParkRecoveryTest(
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(170)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
         # No fix landed; a reviewer crash produces no commit, so the
         # round must stay flat (mirrors the reviewer_timeout branch).
-        self.assertEqual(data.get("review_round"), 1)
+        self.assertEqual(state.get("review_round"), 1)
 
-    def test_reviewer_failed_park_with_new_comment_routes_to_reviewer(self) -> None:
+    def test_reviewer_failed_park_new_comment_routes_to_reviewer(self) -> None:
         # A human "Retry" / "Continue" nudge after a reviewer-side park
         # must wake the REVIEWER, not the dev. Pre-fix this branch fed
         # the comment to `_resume_developer_on_human_reply`, which woke
@@ -240,12 +240,12 @@ class ValidatingTransientParkRecoveryTest(
         self.assertNotIn("resume_session_id", call.kwargs)
         # Park flags cleared and the human's comment is consumed so it
         # cannot replay on the next tick.
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
-        self.assertEqual(data.get("last_action_comment_id"), 10_500)
+        state = gh.pinned_data(170)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
+        self.assertEqual(state.get("last_action_comment_id"), 10_500)
 
-    def test_reviewer_timeout_park_with_new_comment_routes_to_reviewer(self) -> None:
+    def test_reviewer_timeout_park_new_comment_routes_to_reviewer(self) -> None:
         # Same routing rule for the reviewer_timeout park reason: a
         # human nudge must reach the reviewer, not the dev session.
         gh, issue = self._parked_issue(park_reason="reviewer_timeout")
@@ -271,11 +271,11 @@ class ValidatingTransientParkRecoveryTest(
         call = mocks["run_agent"].call_args
         self.assertEqual(call.args[0], config.REVIEW_AGENT)
         self.assertNotIn("resume_session_id", call.kwargs)
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(170)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
 
-    def test_agent_timeout_park_with_new_comment_still_routes_to_dev(self) -> None:
+    def test_agent_timeout_park_new_comment_routes_to_dev(self) -> None:
         # Regression: dev-side park reasons (agent_timeout) must keep
         # routing to the dev session on a human comment. Only
         # reviewer-side reasons get the new fall-through.
@@ -330,12 +330,12 @@ class ValidatingTransientParkRecoveryTest(
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
-        self.assertEqual(data.get("review_round"), 1)
+        state = gh.pinned_data(170)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
+        self.assertEqual(state.get("review_round"), 1)
         # Watermark cleared so a future timeout cycle starts fresh.
-        self.assertIsNone(data.get("pre_dev_fix_sha"))
+        self.assertIsNone(state.get("pre_dev_fix_sha"))
 
     def test_agent_timeout_existing_pr_commits_no_new_commit(self) -> None:
         # Regression: a normal PR worktree is always ahead of
@@ -366,13 +366,13 @@ class ValidatingTransientParkRecoveryTest(
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(170)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
         # MUST NOT bump: nothing landed.
-        self.assertEqual(data.get("review_round"), 1)
+        self.assertEqual(state.get("review_round"), 1)
 
-    def test_agent_timeout_with_unpushed_commits_pushes_and_bumps(self) -> None:
+    def test_agent_timeout_unpushed_commits_pushes_and_bumps(self) -> None:
         # The dev committed the fix locally but the timeout killed it
         # before the push. Recovery must finish that push -- otherwise
         # the next tick's reviewer would inspect a SHA that is not on
@@ -395,17 +395,17 @@ class ValidatingTransientParkRecoveryTest(
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_called_once()
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(170)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
         # Bumped: a real fix landed.
-        self.assertEqual(data.get("review_round"), 2)
-        self.assertIsNone(data.get("pre_dev_fix_sha"))
+        self.assertEqual(state.get("review_round"), 2)
+        self.assertIsNone(state.get("pre_dev_fix_sha"))
         # Stays on `validating` (no documenting hop) so the reviewer
         # re-evaluates the recovered head on the next tick.
         self.assertNotIn((170, "documenting"), gh.label_history)
 
-    def test_agent_timeout_with_unpushed_commits_push_fails_stays_parked(
+    def test_agent_timeout_unpushed_commits_push_fails_stays_parked(
         self,
     ) -> None:
         gh, issue = self._parked_issue(
@@ -424,14 +424,14 @@ class ValidatingTransientParkRecoveryTest(
 
         mocks["_push_branch"].assert_called_once()
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(170)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "agent_timeout")
+        state = gh.pinned_data(170)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "agent_timeout")
         # NOT bumped while still stuck; watermark preserved for next try.
-        self.assertEqual(data.get("review_round"), 1)
-        self.assertEqual(data.get("pre_dev_fix_sha"), "cafe1234")
+        self.assertEqual(state.get("review_round"), 1)
+        self.assertEqual(state.get("pre_dev_fix_sha"), "cafe1234")
 
-    def test_agent_timeout_with_dirty_worktree_stays_parked(self) -> None:
+    def test_agent_timeout_dirty_worktree_stays_parked(self) -> None:
         # The dev edited files without committing before timing out.
         # Recovery refuses to silently push (would publish an incomplete
         # branch) or to clear flags (the next reviewer would inspect
@@ -455,10 +455,10 @@ class ValidatingTransientParkRecoveryTest(
         # No new comment posted on this tick -- the original park
         # message still describes the situation.
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(170)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "agent_timeout")
-        self.assertEqual(data.get("review_round"), 1)
+        state = gh.pinned_data(170)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "agent_timeout")
+        self.assertEqual(state.get("review_round"), 1)
 
     def test_agent_timeout_without_watermark_stays_parked(self) -> None:
         # Defensive: if the timeout park ran in foreign code that did
@@ -478,11 +478,11 @@ class ValidatingTransientParkRecoveryTest(
 
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(170)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "agent_timeout")
+        state = gh.pinned_data(170)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "agent_timeout")
 
-    def test_transient_park_with_new_comment_takes_resume_path(self) -> None:
+    def test_transient_park_new_comment_takes_resume_path(self) -> None:
         # A transient park is preempted by a fresh human comment: the
         # comment-driven resume path wins, the dev is spawned with the
         # human's feedback, and the recovery branch does not silently
@@ -509,8 +509,8 @@ class ValidatingTransientParkRecoveryTest(
         mocks["run_agent"].assert_called_once()
         followup = mocks["run_agent"].call_args.args[1]
         self.assertIn("please rebase first", followup)
-        data = gh.pinned_data(170)
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(170)
+        self.assertFalse(state.get("awaiting_human"))
 
 
 class HandleValidatingResumeOnHashChangeTest(
@@ -559,8 +559,8 @@ class HandleValidatingResumeOnHashChangeTest(
             for _, body in gh.posted_comments
         ))
         # review_round incremented so the validating cap stays accurate.
-        data = gh.pinned_data(70)
-        self.assertEqual(data.get("review_round"), 1)
+        state = gh.pinned_data(70)
+        self.assertEqual(state.get("review_round"), 1)
 
 
 class ValidatingDriftDefersToReviewerRecoveryTest(
@@ -632,10 +632,10 @@ class ValidatingDriftDefersToReviewerRecoveryTest(
         ))
         # The reviewer recovery consumed the human comment and cleared
         # the park flags.
-        data = gh.pinned_data(1000)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(1000)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
         # The new hash baseline was persisted so the next tick doesn't
         # loop on the same drift.
         new_hash = workflow._compute_user_content_hash(issue, set())
-        self.assertEqual(data.get("user_content_hash"), new_hash)
+        self.assertEqual(state.get("user_content_hash"), new_hash)

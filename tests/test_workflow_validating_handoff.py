@@ -82,8 +82,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
             head_shas=["aaa", "bbb"],
         )
 
-        data = gh.pinned_data(301)
-        self.assertEqual(data.get("review_round"), 2)
+        state = gh.pinned_data(301)
+        self.assertEqual(state.get("review_round"), 2)
         self.assertNotIn((301, "documenting"), gh.label_history)
         self.assertNotIn((301, "in_review"), gh.label_history)
 
@@ -107,9 +107,9 @@ class ValidatingPushedFixesStayOnValidatingTest(
             head_shas=["aaa", "aaa"],
         )
 
-        data = gh.pinned_data(302)
-        self.assertEqual(data.get("review_round"), 1)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(302)
+        self.assertEqual(state.get("review_round"), 1)
+        self.assertTrue(state.get("awaiting_human"))
         # Stays on validating: no documenting handoff because nothing
         # was pushed.
         self.assertNotIn((302, "documenting"), gh.label_history)
@@ -137,9 +137,9 @@ class ValidatingPushedFixesStayOnValidatingTest(
             head_shas=["aaa", "bbb"],
         )
 
-        data = gh.pinned_data(303)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertEqual(data.get("review_round"), 2)
+        state = gh.pinned_data(303)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertEqual(state.get("review_round"), 2)
         self.assertNotIn((303, "documenting"), gh.label_history)
 
     def test_drift_pushed_fix_stays_on_validating(self) -> None:
@@ -158,8 +158,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
             head_shas=["before-sha", "after-sha"],
         )
 
-        data = gh.pinned_data(304)
-        self.assertEqual(data.get("review_round"), 2)
+        state = gh.pinned_data(304)
+        self.assertEqual(state.get("review_round"), 2)
         self.assertNotIn((304, "documenting"), gh.label_history)
         self.assertNotIn((304, "in_review"), gh.label_history)
 
@@ -187,9 +187,9 @@ class ValidatingPushedFixesStayOnValidatingTest(
             head_shas=["same-sha", "same-sha"],
         )
 
-        data = gh.pinned_data(305)
+        state = gh.pinned_data(305)
         # Round is NOT bumped on an ACK.
-        self.assertEqual(data.get("review_round"), 1)
+        self.assertEqual(state.get("review_round"), 1)
         self.assertNotIn((305, "documenting"), gh.label_history)
         self.assertNotIn((305, "in_review"), gh.label_history)
         # ACK reply was surfaced as an FYI on the issue thread.
@@ -217,11 +217,11 @@ class ValidatingPushedFixesStayOnValidatingTest(
                 push_branch=True,
             )
 
-        data = gh.pinned_data(306)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(306)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
         # No fix landed -- stays on validating.
-        self.assertEqual(data.get("review_round"), 1)
+        self.assertEqual(state.get("review_round"), 1)
         self.assertNotIn((306, "documenting"), gh.label_history)
 
     def test_agent_timeout_clean_recovery_keeps_validating_label(self) -> None:
@@ -246,9 +246,9 @@ class ValidatingPushedFixesStayOnValidatingTest(
                 head_shas=("cafe1234",),  # HEAD == pre-agent SHA: no commit.
             )
 
-        data = gh.pinned_data(307)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertEqual(data.get("review_round"), 1)
+        state = gh.pinned_data(307)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertEqual(state.get("review_round"), 1)
         self.assertNotIn((307, "documenting"), gh.label_history)
 
     def test_agent_timeout_pushed_recovery_stays_on_validating(self) -> None:
@@ -274,8 +274,8 @@ class ValidatingPushedFixesStayOnValidatingTest(
                 head_shas=("beef5678",),  # HEAD moved past pre-agent SHA.
             )
 
-        data = gh.pinned_data(308)
-        self.assertEqual(data.get("review_round"), 2)
+        state = gh.pinned_data(308)
+        self.assertEqual(state.get("review_round"), 2)
         self.assertNotIn((308, "documenting"), gh.label_history)
 
 
@@ -325,7 +325,7 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_in_review_after_approval_does_not_replay_existing_comments(self) -> None:
+    def test_in_review_after_approval_does_not_replay_comments(self) -> None:
         # End-to-end: validating approves -> in_review tick pings HITL
         # without resuming the dev on the orchestrator's own automated
         # comments. This is the concrete bug guarded by the watermark
@@ -438,10 +438,10 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Approval relabels to `documenting` (the final-docs hop); the
         # ratcheted watermark must persist across the hop.
         self.assertIn((99, "documenting"), gh.label_history)
-        data = gh.pinned_data(99)
-        wm = data.get("pr_last_comment_id")
+        state = gh.pinned_data(99)
+        watermark = state.get("pr_last_comment_id")
         self.assertGreaterEqual(
-            wm, 2000,
-            f"watermark must not regress past consumed PR feedback (got {wm})",
+            watermark, 2000,
+            f"watermark must not regress past consumed PR feedback (got {watermark})",
         )
-        self.assertEqual(data.get("pr_last_review_comment_id"), 4242)
+        self.assertEqual(state.get("pr_last_review_comment_id"), 4242)
