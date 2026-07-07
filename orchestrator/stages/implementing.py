@@ -79,6 +79,31 @@ _CLAUDE_CONTEXT_OVERFLOW_MARKERS: Tuple[str, ...] = (
     "input length and `max_tokens` exceed context limit",
 )
 
+# Substrings Claude's CLI emits as its FINAL result message when the account's
+# rolling session / usage quota is exhausted -- e.g. "You've hit your session
+# limit · resets 7pm (Asia/Novosibirsk)". Unlike a stale session or a context
+# overflow this is NOT a poisoned transcript: the session is healthy and the
+# only recovery is to wait for the quota to reset and retry, which is exactly
+# what an operator's `/orchestrator continue` after the reset drives. So it is
+# parked as a RETRYABLE session-failure (`agent_silent`), not misread as a real
+# agent question that would demand human guidance before it can resume.
+#
+# Matched as a PREFIX of the stripped, lowercased last agent message (the quota
+# notice is the whole message, never a mid-answer aside) so a dev reply that
+# merely mentions a "session limit" while discussing code is not misclassified.
+# The apostrophe in "You've" is normalized to a straight `'` before matching so
+# a curly rendering still hits. The empty-`last_message` case is already parked
+# `agent_silent` by `_on_question`'s silent-failure branch, so only the
+# non-empty message is inspected here.
+_CLAUDE_SESSION_LIMIT_MESSAGE_MARKERS: Tuple[str, ...] = (
+    "you've hit your session limit",
+    "you've hit your usage limit",
+    "you've reached your session limit",
+    "you've reached your usage limit",
+    "claude usage limit reached",
+    "claude ai usage limit reached",
+)
+
 
 def _read_dev_session(
     state: PinnedState,
@@ -160,6 +185,23 @@ def _is_context_overflow_failure(backend: str, result: AgentResult) -> bool:
         return True
     stderr = (result.stderr or "").lower()
     return any(marker in stderr for marker in _CLAUDE_CONTEXT_OVERFLOW_MARKERS)
+
+
+def _is_session_limit_message(result: AgentResult) -> bool:
+    """True iff `result.last_message` is a Claude session/usage-quota notice.
+
+    A non-empty quota notice ("You've hit your session limit ...") is not a
+    real agent question: the session is healthy and the only recovery is to
+    wait for the reset and retry. Matched as a PREFIX of the normalized last
+    agent message so a dev reply that merely mentions a session limit
+    mid-answer is not caught. Backend-agnostic on purpose -- the phrasings are
+    distinctive enough that a non-Claude backend echoing them would still be a
+    quota stop, and `_on_question` (the sole caller) has no backend in hand.
+    """
+    msg = (result.last_message or "").strip().lower().replace("’", "'")
+    return any(
+        msg.startswith(marker) for marker in _CLAUDE_SESSION_LIMIT_MESSAGE_MARKERS
+    )
 
 
 def _is_poisoned_session_failure(backend: str, result: AgentResult) -> bool:
@@ -1171,7 +1213,36 @@ def _on_question(
     from .. import workflow as _wf
 
     raw = result.last_message.strip()
-    if raw:
+    if raw and _is_session_limit_message(result):
+        # A known session/usage-quota notice ("You've hit your session limit
+        # ...") is non-empty but is NOT a real agent question: the session is
+        # healthy, the account quota is exhausted, and the only recovery is to
+        # wait for the reset and retry. Parking it as a RETRYABLE session-
+        # failure (`agent_silent`, the same reason a silent poisoned resume
+        # uses) lets an operator's `/orchestrator continue` after the reset
+        # drop the session and re-ground a fresh one. Classifying it as a real
+        # question (`park_reason=None`) instead would refuse that continue as
+        # "needs your actual guidance". Increment the silent-park streak so a
+        # session that keeps returning the quota notice is eventually rotated,
+        # mirroring the empty-message branch below.
+        quoted = "> " + raw.replace("\n", "\n> ")
+        _wf._post_issue_comment(
+            gh, issue, state,
+            f"{config.HITL_MENTIONS} agent hit a session/usage limit and "
+            "stopped; retry with `/orchestrator continue` once it "
+            f"resets:\n\n{quoted}",
+        )
+        state.set("awaiting_human", True)
+        state.set("park_reason", "agent_silent")
+        state.set(
+            "silent_park_count",
+            int(state.get("silent_park_count") or 0) + 1,
+        )
+        # Distinct EVENT reason for observability -- the pinned `park_reason`
+        # stays `agent_silent` (the control field `/orchestrator continue`
+        # keys off), while the telemetry records why the park actually fired.
+        park_reason = "agent_session_limit"
+    elif raw:
         quoted = "> " + raw.replace("\n", "\n> ")
         _wf._post_issue_comment(
             gh, issue, state,

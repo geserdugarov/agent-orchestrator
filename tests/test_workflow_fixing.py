@@ -1850,6 +1850,80 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             int(data.get("silent_park_count") or 0), 1,
         )
 
+    def test_session_limit_message_parks_retryable_then_continue_retries(
+        self,
+    ) -> None:
+        # #705 regression, #699 shape: a Claude session-limit notice arrives
+        # as a normal FINAL message (non-empty `last_message`) during a fixing
+        # dev-resume. It must park as a RETRYABLE session-failure
+        # (`agent_silent`), NOT a real agent question (`park_reason=None`) --
+        # otherwise a later bare `/orchestrator continue` after the reset is
+        # refused as "needs your actual guidance" instead of retrying.
+        long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        trigger = FakeComment(
+            id=TRIGGER_ID, body="please fix the flaky test",
+            user=FakeUser(ALICE), created_at=long_ago,
+        )
+        pr = self._open_pr()
+        gh, issue = self._seed(pr=pr, issue_comments=[trigger])
+        session_limit = (
+            "You've hit your session limit · resets 7pm (Asia/Novosibirsk)"
+        )
+
+        # --- Tick 1: the session-limit resume parks retryably -------------
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
+            self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id=DEV_SESSION, last_message=session_limit,
+                ),
+                head_shas=(SHA_BEFORE, SHA_BEFORE),
+            )
+
+        data = gh.pinned_data(ISSUE)
+        self.assertTrue(data.get(AWAITING_HUMAN))
+        # The retryable reason -- NOT None -- is the crux of the fix.
+        self.assertEqual(data.get(PARK_REASON), PARK_AGENT_SILENT)
+        self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
+        # The HITL note names the limit + retry command instead of
+        # impersonating an "agent needs your input" question.
+        joined = "\n".join(b for _, b in gh.posted_comments)
+        self.assertIn("session/usage limit", joined)
+        self.assertIn("/orchestrator continue", joined)
+        self.assertNotIn("needs your input to proceed", joined)
+
+        # --- Tick 2: `/orchestrator continue` retries, does not refuse ----
+        issue.comments.append(
+            FakeComment(
+                id=9000, body="/orchestrator continue", user=FakeUser(DAVE),
+            ),
+        )
+        with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
+            mocks = self._run(
+                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(
+                    session_id=FRESH_SESSION, last_message="pushed fix",
+                ),
+                head_shas=(SHA_BEFORE, SHA_AFTER),
+            )
+
+        # The continue is retried, not refused: the poisoned session is
+        # dropped (fresh spawn, no resume id) and the PRESERVED feedback batch
+        # is replayed rather than the bare command text.
+        mocks[RUN_AGENT].assert_called_once()
+        call = mocks[RUN_AGENT].call_args
+        self.assertIsNone(call.kwargs.get("resume_session_id"))
+        self.assertIn("please fix the flaky test", call.args[1])
+        self.assertFalse(any(
+            "needs your actual guidance" in body
+            for _, body in gh.posted_comments
+        ))
+        # Pushed fix -> back to `validating`, park cleared.
+        self.assertIn((ISSUE, VALIDATING), gh.label_history)
+        final = gh.pinned_data(ISSUE)
+        self.assertFalse(final.get(AWAITING_HUMAN))
+        self.assertIsNone(final.get(PARK_REASON))
+
     def test_restart_with_pending_feedback_resumes_from_watermarks(
         self,
     ) -> None:
