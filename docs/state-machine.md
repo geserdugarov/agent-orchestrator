@@ -31,12 +31,15 @@ Four non-workflow **control labels** modify behavior without occupying the workf
 - `paused` is the same hard skip as `backlog` at every point (dispatch, scheduler routing, `_process_issue`, and base
   sync), differing only in intent: `backlog` is a "not yet" hold on a fresh issue, `paused` freezes an already
   in-flight one without discarding its state. Removing it resumes processing on the next tick. Because those skip points
-  read the issue's labels at tick start, every stage that resumes a dev agent (`implementing`, `in_review`, `fixing`,
-  `resolving_conflict`) additionally re-checks a freshly fetched issue right after the run returns
-  (`_paused_during_agent_run`, alongside each stage's `interrupted` short-circuit): a `paused` applied mid-run stops
-  before a PR opens, the label flips, a HITL park or ACK comment posts, watermarks advance, or pinned state advances, so
-  the committed work stays on the branch and republishes through the normal recovered-worktree / stranded-fix path once
-  the label is removed.
+  read the issue's labels at tick start, every stage that runs an agent additionally re-checks a freshly fetched issue
+  right after the run returns (`_paused_during_agent_run`, alongside each stage's `interrupted` short-circuit): the
+  dev-agent stages that resume committed work (`implementing`, `in_review`, `fixing`, `resolving_conflict`) and the
+  read-only agent stages (the decomposer run in `decomposing`, fresh spawn and awaiting-human resume; the reviewer run
+  in `validating`; and the question run, fresh spawn and awaiting-human resume) all consult it. A `paused` applied
+  mid-run stops before a PR opens, the label flips, a HITL park or ACK comment posts, usage counters fold, child issues
+  are created, watermarks advance, or pinned state advances, so a dev stage's committed work stays on the branch and
+  republishes through the normal recovered-worktree / stranded-fix path once the label is removed, while the read-only
+  decomposer / reviewer / question runs simply re-run from durable state on the next tick.
 - `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open
   PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR. Bot-authored PRs
   (Dependabot, Renovate, CI bots) are skipped via GitHub's `user.type == "Bot"` flag — they open PRs structurally and
