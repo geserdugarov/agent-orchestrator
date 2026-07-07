@@ -200,6 +200,9 @@ from .stages.implementing import (
     _is_context_overflow_failure as _is_context_overflow_failure,
 )
 from .stages.implementing import (
+    _is_session_limit_message as _is_session_limit_message,
+)
+from .stages.implementing import (
     _drop_poisoned_dev_session as _drop_poisoned_dev_session,
 )
 from .stages.implementing import (
@@ -314,6 +317,7 @@ __all__ = [
     "_is_conventional_subject",
     "_is_poisoned_session_failure",
     "_is_prefixed_subject",
+    "_is_session_limit_message",
     "_is_stale_session_failure",
     "_issue_is_closed",
     "_latest_pr_comment_ids",
