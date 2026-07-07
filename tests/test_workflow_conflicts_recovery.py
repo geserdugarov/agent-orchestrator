@@ -68,10 +68,10 @@ class ResolvingConflictRecoveryPushTest(
         # stamped exactly as on the happy-path resolve. The recovered
         # push hands straight back to `validating`; the single docs
         # pass is deferred to the post-approval hop.
-        data = gh.pinned_data(200)
-        self.assertEqual(data.get("review_round"), 0)
-        self.assertEqual(data.get("conflict_round"), 1)
-        self.assertIn("last_conflict_resolved_at", data)
+        state = gh.pinned_data(200)
+        self.assertEqual(state.get("review_round"), 0)
+        self.assertEqual(state.get("conflict_round"), 1)
+        self.assertIn("last_conflict_resolved_at", state)
         self.assertIn((200, "validating"), gh.label_history)
         self.assertNotIn((200, "documenting"), gh.label_history)
 
@@ -94,11 +94,11 @@ class ResolvingConflictRecoveryPushTest(
             )
         mocks["_push_branch"].assert_called_once()
         merge_mock.assert_not_called()
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((200, "validating"), gh.label_history)
 
-    def test_recovered_push_with_stale_base_falls_through_to_rebase(self) -> None:
+    def test_recovered_push_stale_base_falls_through_to_rebase(self) -> None:
         # The `fixing` drift router
         # (`_reconcile_parked_fixing`) reroutes here
         # when a stuck `push_failed` / `agent_timeout` park has
@@ -149,16 +149,16 @@ class ResolvingConflictRecoveryPushTest(
         mocks["run_agent"].assert_not_called()
         # Single conflict_round increment for the combined push+rebase
         # reconciliation, NOT one per push.
-        data = gh.pinned_data(200)
-        self.assertEqual(data.get("conflict_round"), 1)
-        self.assertEqual(data.get("review_round"), 0)
-        self.assertIn("last_conflict_resolved_at", data)
+        state = gh.pinned_data(200)
+        self.assertEqual(state.get("conflict_round"), 1)
+        self.assertEqual(state.get("review_round"), 0)
+        self.assertIn("last_conflict_resolved_at", state)
         # The combined round outcome is the rebase path's
         # `base_rebased_clean`, not the fast-path `recovered_push`.
         rounds = [
-            e for e in gh.recorded_events
-            if e.get("event") == "conflict_round"
-            and e.get("action") == "incremented"
+            event for event in gh.recorded_events
+            if event.get("event") == "conflict_round"
+            and event.get("action") == "incremented"
         ]
         self.assertEqual(len(rounds), 1)
         self.assertEqual(rounds[0].get("outcome"), "base_rebased_clean")

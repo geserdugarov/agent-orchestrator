@@ -414,13 +414,13 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
         }
         points = analytics_read.get_time_series(connect=_connector(conn))
         self.assertEqual(len(points), 1)
-        p = points[0]
-        self.assertEqual(p.count, 3)
-        self.assertEqual(p.cost_usd, 0.42)
-        self.assertEqual(p.input_tokens, 1000)
-        self.assertEqual(p.output_tokens, 500)
-        self.assertEqual(p.cache_read_tokens, 200)
-        self.assertEqual(p.cache_write_tokens, 100)
+        point = points[0]
+        self.assertEqual(point.count, 3)
+        self.assertEqual(point.cost_usd, 0.42)
+        self.assertEqual(point.input_tokens, 1000)
+        self.assertEqual(point.output_tokens, 500)
+        self.assertEqual(point.cache_read_tokens, 200)
+        self.assertEqual(point.cache_write_tokens, 100)
         sql, _ = conn.executed[0]
         self.assertIn("SUM(total_cost_usd)", sql)
         self.assertIn("SUM(total_input_tokens)", sql)
@@ -439,6 +439,6 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
                 (date(2026, 5, 25), "agent_exit", 3, 0.42, 1000, 500),
             ],
         }
-        p = analytics_read.get_time_series(connect=_connector(conn))[0]
-        self.assertEqual(p.cache_read_tokens, 0)
-        self.assertEqual(p.cache_write_tokens, 0)
+        point = analytics_read.get_time_series(connect=_connector(conn))[0]
+        self.assertEqual(point.cache_read_tokens, 0)
+        self.assertEqual(point.cache_write_tokens, 0)

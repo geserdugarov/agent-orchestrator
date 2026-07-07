@@ -149,10 +149,11 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         # An `external`-merge audit event is emitted with the
         # entry-stage label.
-        kinds = [e["event"] for e in gh.recorded_events]
+        kinds = [event["event"] for event in gh.recorded_events]
         self.assertIn("pr_merged", kinds)
         merged_event = next(
-            e for e in gh.recorded_events if e["event"] == "pr_merged"
+            event for event in gh.recorded_events
+            if event["event"] == "pr_merged"
         )
         self.assertEqual(merged_event.get("merge_method"), "external")
         self.assertEqual(merged_event.get("stage"), "implementing")
@@ -211,8 +212,8 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         receipts = [
-            body for n, body in gh.posted_comments
-            if n == 205 and body.startswith(":receipt:")
+            body for number, body in gh.posted_comments
+            if number == 205 and body.startswith(":receipt:")
         ]
         self.assertEqual(len(receipts), 1)
         self.assertIn(
@@ -221,7 +222,8 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         # Posted before the write, so its id rode the same persisted state.
         receipt_comment = next(
-            c for c in issue.comments if c.body.startswith(":receipt:")
+            comment for comment in issue.comments
+            if comment.body.startswith(":receipt:")
         )
         self.assertIn(
             receipt_comment.id,
@@ -250,8 +252,8 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         self.assertEqual(
-            [b for n, b in gh.posted_comments
-             if n == 206 and b.startswith(":receipt:")],
+            [body for number, body in gh.posted_comments
+             if number == 206 and body.startswith(":receipt:")],
             [],
         )
 

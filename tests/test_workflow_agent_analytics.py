@@ -287,7 +287,8 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
 
             records = self._exit_records(path)
             reviewer = [
-                r for r in records if r.get("agent_role") == "reviewer"
+                record for record in records
+                if record.get("agent_role") == "reviewer"
             ]
             self.assertEqual(len(reviewer), 1)
             rec = reviewer[0]
@@ -367,10 +368,12 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
             spawns = [
-                e for e in gh.recorded_events if e["event"] == "agent_spawn"
+                event for event in gh.recorded_events
+                if event["event"] == "agent_spawn"
             ]
             exits = [
-                e for e in gh.recorded_events if e["event"] == "agent_exit"
+                event for event in gh.recorded_events
+                if event["event"] == "agent_exit"
             ]
             self.assertEqual(len(spawns), 1)
             self.assertEqual(len(exits), 1)
@@ -409,7 +412,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             # Audit events are still captured in memory.
             self.assertIn(
                 "agent_exit",
-                {e["event"] for e in gh.recorded_events},
+                {event["event"] for event in gh.recorded_events},
             )
 
     def test_codex_stream_without_model_uses_spec_fallback(self) -> None:
@@ -581,7 +584,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
         self.assertAlmostEqual(result.usage.cost_usd, 0.0123)
         # The lifecycle audit still fired even with the sink disabled.
         self.assertIn(
-            "agent_exit", {e["event"] for e in gh.recorded_events},
+            "agent_exit", {event["event"] for event in gh.recorded_events},
         )
 
     def test_usage_reflects_spec_fallback_model(self) -> None:
@@ -618,7 +621,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
             self.assertEqual(self._records(path), [])
             # Lifecycle audit events fired before the analytics parse ran.
             self.assertIn(
-                "agent_exit", {e["event"] for e in gh.recorded_events},
+                "agent_exit", {event["event"] for event in gh.recorded_events},
             )
 
     def test_analytics_and_skill_events_unchanged_with_usage_surfaced(
@@ -650,11 +653,11 @@ class RunUsageSurfacedTest(unittest.TestCase):
             self.assertEqual(result.usage.output_tokens, 500)
             # Skill-trigger audit events are unaffected.
             skill_events = [
-                e for e in gh.recorded_events
-                if e["event"] == "skill_triggered"
+                event for event in gh.recorded_events
+                if event["event"] == "skill_triggered"
             ]
             self.assertEqual(
-                [e["skill"] for e in skill_events], ["develop", "review"],
+                [event["skill"] for event in skill_events], ["develop", "review"],
             )
 
 
@@ -690,7 +693,7 @@ def _claude_trajectory_stdout(
         },
         {"type": "result", "num_turns": 1, "result": final_output},
     ]
-    return "\n".join(json.dumps(f) for f in frames)
+    return "\n".join(json.dumps(frame) for frame in frames)
 
 
 class TrajectoryRecordingTest(unittest.TestCase):
@@ -788,7 +791,7 @@ class TrajectoryRecordingTest(unittest.TestCase):
             self.assertEqual(rec["user_input"], "implement the widget")
             self.assertEqual(rec["output"], "implemented")
             self.assertEqual(
-                [s["kind"] for s in rec["steps"]],
+                [step["kind"] for step in rec["steps"]],
                 ["tool_call", "tool_result"],
             )
             # Baseline agent_exit analytics record still written, sans prompt.
@@ -848,9 +851,9 @@ class TrajectoryRecordingTest(unittest.TestCase):
                     agent_spec="claude",
                 )
             skill_events = [
-                e for e in gh.recorded_events if e["event"] == "skill_triggered"
+                event for event in gh.recorded_events if event["event"] == "skill_triggered"
             ]
-            self.assertEqual([e["skill"] for e in skill_events], ["develop"])
+            self.assertEqual([event["skill"] for event in skill_events], ["develop"])
             self.assertFalse(t_path.exists())
 
 
@@ -938,7 +941,7 @@ class SkillTriggeredEventTest(unittest.TestCase):
 
     @staticmethod
     def _skill_events(gh: FakeGitHubClient) -> list[dict]:
-        return [e for e in gh.recorded_events if e["event"] == "skill_triggered"]
+        return [event for event in gh.recorded_events if event["event"] == "skill_triggered"]
 
     def _run(
         self,
@@ -991,15 +994,15 @@ class SkillTriggeredEventTest(unittest.TestCase):
             track=True,
         )
         events = self._skill_events(gh)
-        self.assertEqual([e["skill"] for e in events], ["develop", "review"])
-        for ev in events:
-            self.assertEqual(ev["agent"], "claude")
-            self.assertEqual(ev["agent_role"], "developer")
-            self.assertEqual(ev["stage"], "implementing")
-            self.assertEqual(ev["review_round"], 2)
-            self.assertEqual(ev["retry_count"], 1)
+        self.assertEqual([event["skill"] for event in events], ["develop", "review"])
+        for event in events:
+            self.assertEqual(event["agent"], "claude")
+            self.assertEqual(event["agent_role"], "developer")
+            self.assertEqual(event["stage"], "implementing")
+            self.assertEqual(event["review_round"], 2)
+            self.assertEqual(event["retry_count"], 1)
         # The baseline audit lifecycle events still fire alongside.
-        kinds = {e["event"] for e in gh.recorded_events}
+        kinds = {event["event"] for event in gh.recorded_events}
         self.assertIn("agent_spawn", kinds)
         self.assertIn("agent_exit", kinds)
 
@@ -1015,7 +1018,7 @@ class SkillTriggeredEventTest(unittest.TestCase):
         )
         self.assertEqual(self._skill_events(gh), [])
         self.assertIn(
-            "agent_exit", {e["event"] for e in gh.recorded_events},
+            "agent_exit", {event["event"] for event in gh.recorded_events},
         )
 
     def test_no_triggers_emits_no_skill_events(self) -> None:
@@ -1036,7 +1039,7 @@ class SkillTriggeredEventTest(unittest.TestCase):
             track=True,
         )
         events = self._skill_events(gh)
-        self.assertEqual([e["skill"] for e in events], ["develop"])
+        self.assertEqual([event["skill"] for event in events], ["develop"])
         blob = json.dumps(events)
         self.assertNotIn(marker, blob)
         self.assertNotIn("args", blob)
@@ -1064,7 +1067,8 @@ class SkillTriggeredEventTest(unittest.TestCase):
                 cwd=_FAKE_WT,
             )
         self.assertEqual(
-            [e["skill"] for e in self._skill_events(gh)], ["alpha", "beta"],
+            [event["skill"] for event in self._skill_events(gh)],
+            ["alpha", "beta"],
         )
 
     def test_emission_is_fail_open(self) -> None:
@@ -1088,4 +1092,4 @@ class SkillTriggeredEventTest(unittest.TestCase):
         # The raising path emitted no skill event, but the lifecycle events
         # (which do not raise) still landed.
         self.assertEqual(self._skill_events(gh), [])
-        self.assertIn("agent_exit", {e["event"] for e in gh.recorded_events})
+        self.assertIn("agent_exit", {event["event"] for event in gh.recorded_events})

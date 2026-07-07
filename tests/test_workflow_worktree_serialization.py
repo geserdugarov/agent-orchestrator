@@ -92,11 +92,11 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
             # Mimic `subprocess.CompletedProcess` enough for the helper:
             # returncode=0 for everything, plus `.stderr=""` /
             # `.stdout=""` defaults via MagicMock auto-attrs.
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = ""
-            r.stderr = ""
-            return r
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
 
         def fake_authed_fetch(spec, branch):
             # The base-branch fetch also runs under the lock; count it
@@ -109,11 +109,11 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
             time.sleep(0.02)
             with lock:
                 in_flight -= 1
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = ""
-            r.stderr = ""
-            return r
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
 
         def fake_has_new_commits(*_a, **_kw) -> bool:
             return False  # force the "(re)create" branch every time.
@@ -133,11 +133,11 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
                 threading.Thread(target=call_ensure, args=(n,))
                 for n in (1, 2, 3, 4)
             ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=10.0)
-                self.assertFalse(t.is_alive(), "worker timed out")
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10.0)
+                self.assertFalse(thread.is_alive(), "worker timed out")
 
         # Every `_git` invocation against this target_root was serialized:
         # the per-target_root lock kept max-in-flight at 1 despite four
@@ -181,10 +181,10 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # outside the target_root lock on the worktree's own config).
         def fake_subprocess_run(args, **_kw) -> MagicMock:
             nonlocal in_flight, max_in_flight
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = ""
-            r.stderr = ""
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
             if len(args) >= 2 and args[-2:] != ["fetch", "--quiet"]:
                 # The fetch invocation is `[git_prefix..., "fetch",
                 # "--quiet", auth_url, refspec]`. Match on "fetch" being
@@ -197,7 +197,7 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
                 time.sleep(0.02)
                 with lock:
                     in_flight -= 1
-            return r
+            return result
 
         # `_resolve_github_token` must return non-empty so `_authed_fetch`
         # does not short-circuit before the lock.
@@ -214,11 +214,11 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
                 )
                 for i in range(4)
             ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join(timeout=10.0)
-                self.assertFalse(t.is_alive())
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10.0)
+                self.assertFalse(thread.is_alive())
 
         self.assertEqual(
             max_in_flight, 1,
@@ -261,11 +261,11 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
             barrier.wait()
             with lock:
                 in_flight -= 1
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = ""
-            r.stderr = ""
-            return r
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
 
         def fake_authed_fetch(spec, branch) -> MagicMock:
             # `_ensure_worktree` calls the authed fetch first; route it
@@ -278,11 +278,11 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
             barrier.wait()
             with lock:
                 in_flight -= 1
-            r = MagicMock()
-            r.returncode = 0
-            r.stdout = ""
-            r.stderr = ""
-            return r
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
 
         def fake_has_new_commits(*_a, **_kw) -> bool:
             return False
@@ -328,11 +328,11 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
         env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         if env_extra:
             env.update(env_extra)
-        r = subprocess.run(
+        result = subprocess.run(
             ["git", *args], cwd=str(cwd),
             capture_output=True, text=True, env=env, check=True,
         )
-        return r.stdout
+        return result.stdout
 
     def setUp(self) -> None:
         # Fresh lock dict per test so a leftover entry pointing at a
@@ -417,12 +417,12 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
             threading.Thread(target=call_ensure, args=(n,))
             for n in issue_numbers
         ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=30.0)
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30.0)
             self.assertFalse(
-                t.is_alive(), "worker timed out (possible lock contention)",
+                thread.is_alive(), "worker timed out (possible lock contention)",
             )
 
         # No worker raised; every requested worktree path exists on disk.

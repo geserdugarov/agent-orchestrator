@@ -320,9 +320,9 @@ class FilterAgentEnvTest(unittest.TestCase):
         # the secret-shape suffix (e.g. `GH_HOST`); they must still be
         # stripped via `_FORBIDDEN_AGENT_ENV`.
         env = {"GH_HOST": "github.example.com", "PATH": "/usr/bin"}
-        out = _filter_agent_env(env)
-        self.assertNotIn("GH_HOST", out)
-        self.assertEqual(out.get("PATH"), "/usr/bin")
+        filtered_env = _filter_agent_env(env)
+        self.assertNotIn("GH_HOST", filtered_env)
+        self.assertEqual(filtered_env.get("PATH"), "/usr/bin")
 
     def test_drops_write_credential_locators_in_both_modes(self) -> None:
         # `_AGENT_WRITE_CREDENTIAL_LOCATORS` is stripped regardless of
@@ -331,10 +331,10 @@ class FilterAgentEnvTest(unittest.TestCase):
         # askpass / GIT_SSH_COMMAND.
         env = {name: "value" for name in _AGENT_WRITE_CREDENTIAL_LOCATORS}
         for allow in (True, False):
-            out = _filter_agent_env(env, allow_provider_auth=allow)
+            filtered_env = _filter_agent_env(env, allow_provider_auth=allow)
             for name in _AGENT_WRITE_CREDENTIAL_LOCATORS:
                 self.assertNotIn(
-                    name, out,
+                    name, filtered_env,
                     f"{name} must be stripped (allow_provider_auth={allow})",
                 )
 
@@ -343,9 +343,9 @@ class FilterAgentEnvTest(unittest.TestCase):
         # shape filter; the agent CLI uses these to talk to its own
         # model and stripping them breaks the run.
         env = {name: "value-long-enough" for name in _AGENT_PROVIDER_AUTH_ALLOWLIST}
-        out = _filter_agent_env(env)
+        filtered_env = _filter_agent_env(env)
         for name in _AGENT_PROVIDER_AUTH_ALLOWLIST:
-            self.assertEqual(out.get(name), "value-long-enough")
+            self.assertEqual(filtered_env.get(name), "value-long-enough")
 
     def test_allow_provider_auth_false_strips_provider_keys(self) -> None:
         # Verify-command path passes `allow_provider_auth=False` so the
@@ -354,14 +354,14 @@ class FilterAgentEnvTest(unittest.TestCase):
         # gain billable access to the operator's model account.
         env = {name: "value-long-enough" for name in _AGENT_PROVIDER_AUTH_ALLOWLIST}
         env["PATH"] = "/usr/bin"
-        out = _filter_agent_env(env, allow_provider_auth=False)
+        filtered_env = _filter_agent_env(env, allow_provider_auth=False)
         for name in _AGENT_PROVIDER_AUTH_ALLOWLIST:
             self.assertNotIn(
-                name, out,
+                name, filtered_env,
                 f"{name} must be stripped when allow_provider_auth=False",
             )
         # Non-secret entries still survive.
-        self.assertEqual(out.get("PATH"), "/usr/bin")
+        self.assertEqual(filtered_env.get("PATH"), "/usr/bin")
 
     def test_secret_shape_predicate(self) -> None:
         # Direct check on the predicate so the contract is documented
@@ -539,12 +539,12 @@ class TerminateAllRunningTest(unittest.TestCase):
     def test_sigterms_each_group_and_no_sigkill_when_fully_exited(self) -> None:
         # Both leaders exit on SIGTERM and the signal-0 group probe reports the
         # group empty, so no SIGKILL is sent -- the clean-shutdown path.
-        p1, p2 = MagicMock(), MagicMock()
-        p1.pid, p2.pid = 111, 222
-        p1.wait.return_value = 0
-        p2.wait.return_value = 0
-        agents._register_proc(p1)
-        agents._register_proc(p2)
+        proc1, proc2 = MagicMock(), MagicMock()
+        proc1.pid, proc2.pid = 111, 222
+        proc1.wait.return_value = 0
+        proc2.wait.return_value = 0
+        agents._register_proc(proc1)
+        agents._register_proc(proc2)
 
         def killpg(pid: int, sig: int) -> None:
             if sig == 0:  # liveness probe: group has no surviving member
@@ -554,8 +554,8 @@ class TerminateAllRunningTest(unittest.TestCase):
             with patch.object(agents.os, "killpg", side_effect=killpg) as kp:
                 n = agents.terminate_all_running(grace=0.5)
         finally:
-            agents._unregister_proc(p1)
-            agents._unregister_proc(p2)
+            agents._unregister_proc(proc1)
+            agents._unregister_proc(proc2)
         self.assertEqual(n, 2)
         sent = {c.args for c in kp.call_args_list}
         self.assertIn((111, signal.SIGTERM), sent)

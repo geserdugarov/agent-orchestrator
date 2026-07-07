@@ -44,9 +44,9 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(len(gh.opened_prs), 1)
         # pickup_comment_id seeded so the validating handoff can anchor
         # the in_review watermark seed on it.
-        data = gh.pinned_data(20)
-        self.assertIn("pickup_comment_id", data)
-        self.assertIn("created_at", data)
+        state = gh.pinned_data(20)
+        self.assertIn("pickup_comment_id", state)
+        self.assertIn("created_at", state)
 
     def test_handle_ready_keeps_existing_pickup_state(self) -> None:
         # If pickup state was already seeded (e.g. by a re-tick after the
@@ -114,8 +114,8 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
             push_branch=True,
         )
 
-        data = gh.pinned_data(22)
-        last_action = data.get("last_action_comment_id")
+        state = gh.pinned_data(22)
+        last_action = state.get("last_action_comment_id")
         self.assertIsNotNone(
             last_action,
             "last_action_comment_id must be set so the in_review "
@@ -149,5 +149,5 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
             push_branch=True,
         )
 
-        data = gh.pinned_data(23)
-        self.assertGreaterEqual(int(data["last_action_comment_id"]), 9999)
+        state = gh.pinned_data(23)
+        self.assertGreaterEqual(int(state["last_action_comment_id"]), 9999)

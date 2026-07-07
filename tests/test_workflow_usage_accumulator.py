@@ -183,13 +183,13 @@ class DeveloperRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin
                 push_branch=True,
             )
 
-        data = gh.pinned_data(30)
-        self.assertEqual(data["issue_agent_runs"], 1)
+        state = gh.pinned_data(30)
+        self.assertEqual(state["issue_agent_runs"], 1)
         # Empty stdout parses to a `no-usage` metric: a counted run with zero
         # tokens and no dollar cost.
-        self.assertEqual(data["issue_total_tokens"], 0)
-        self.assertNotIn("issue_total_cost_usd", data)
-        self.assertEqual(data["issue_cost_sources"], ["no-usage"])
+        self.assertEqual(state["issue_total_tokens"], 0)
+        self.assertNotIn("issue_total_cost_usd", state)
+        self.assertEqual(state["issue_cost_sources"], ["no-usage"])
 
     def test_interrupted_spawn_does_not_persist_counters(self) -> None:
         gh = FakeGitHubClient()
@@ -207,9 +207,9 @@ class DeveloperRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin
 
         # The shutdown-sweep contract returns before `write_pinned_state`, so
         # the in-memory fold never reaches GitHub.
-        data = gh.pinned_data(31)
-        self.assertNotIn("issue_agent_runs", data)
-        self.assertNotIn("issue_total_tokens", data)
+        state = gh.pinned_data(31)
+        self.assertNotIn("issue_agent_runs", state)
+        self.assertNotIn("issue_total_tokens", state)
 
 
 class ResumeRunUsageAccumulationTest(unittest.TestCase):
@@ -295,10 +295,10 @@ class ReviewerRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin)
                 ),
             )
 
-        data = gh.pinned_data(32)
-        self.assertEqual(data["issue_agent_runs"], 1)
-        self.assertEqual(data["issue_total_tokens"], 0)
-        self.assertEqual(data["issue_cost_sources"], ["no-usage"])
+        state = gh.pinned_data(32)
+        self.assertEqual(state["issue_agent_runs"], 1)
+        self.assertEqual(state["issue_total_tokens"], 0)
+        self.assertEqual(state["issue_cost_sources"], ["no-usage"])
 
     def test_interrupted_reviewer_does_not_persist_counters(self) -> None:
         gh = FakeGitHubClient()
@@ -328,11 +328,11 @@ class ReviewerRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin)
 
         # A shutdown-killed reviewer returns before `write_pinned_state`, so
         # neither the folded counters nor a `reviewer_failed` park reach GitHub.
-        data = gh.pinned_data(33)
-        self.assertNotIn("issue_agent_runs", data)
-        self.assertNotIn("issue_total_tokens", data)
-        self.assertNotEqual(data.get("park_reason"), "reviewer_failed")
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(33)
+        self.assertNotIn("issue_agent_runs", state)
+        self.assertNotIn("issue_total_tokens", state)
+        self.assertNotEqual(state.get("park_reason"), "reviewer_failed")
+        self.assertFalse(state.get("awaiting_human"))
 
 
 if __name__ == "__main__":

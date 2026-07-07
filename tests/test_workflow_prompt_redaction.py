@@ -121,7 +121,7 @@ class RedactSecretsTest(unittest.TestCase):
         # the credential into the park comment.
         token = "ghp_filebackedtokenvalue9876"
         # Ensure the env path wouldn't catch it on its own.
-        env_without_token = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
+        env_without_token = {name: value for name, value in os.environ.items() if name != "GITHUB_TOKEN"}
         with patch.dict(os.environ, env_without_token, clear=True), \
                 patch.object(config, "GITHUB_TOKEN", token):
             out = workflow._redact_secrets(f"cat ran: {token} got captured")

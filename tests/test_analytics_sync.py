@@ -178,8 +178,8 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
-        for rec in records:
-            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+        for record in records:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _sample_record(
@@ -189,14 +189,14 @@ def _sample_record(
     ts: str = "2026-05-25T12:00:00+00:00",
     **extras,
 ) -> dict:
-    rec = {
+    record = {
         "ts": ts,
         "repo": "owner/repo",
         "issue": issue,
         "event": event,
     }
-    rec.update(extras)
-    return rec
+    record.update(extras)
+    return record
 
 
 class AnalyticsDbUrlConfigTest(unittest.TestCase):
@@ -709,8 +709,8 @@ class AnalyticsSyncCliTest(unittest.TestCase):
             # Restore the root logger so a UTC handler doesn't leak
             # into other tests in the same process.
             root = logging.getLogger()
-            for h in list(root.handlers):
-                root.removeHandler(h)
+            for handler in list(root.handlers):
+                root.removeHandler(handler)
         self.assertEqual(rc, 0)
         out_text = out_buf.getvalue()
         err_text = err_buf.getvalue()
@@ -935,8 +935,8 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
             _write_jsonl(path, records)
             fake = _FakeConnection()
             fake.pre_check_hashes = set()
-            for rec in records[:2]:
-                fake.seen_hashes.add(analytics_sync._content_hash(rec))
+            for record in records[:2]:
+                fake.seen_hashes.add(analytics_sync._content_hash(record))
             with patch.object(analytics_sync, "_BATCH_SIZE", 4):
                 result = analytics_sync.sync_jsonl_to_postgres(
                     connect=lambda url: fake,
@@ -1120,8 +1120,8 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
                 "ANALYTICS_DB_URL": "postgresql://h/db",
             })
             fake = _FakeConnection()
-            for rec in records[:2]:
-                fake.seen_hashes.add(analytics_sync._content_hash(rec))
+            for record in records[:2]:
+                fake.seen_hashes.add(analytics_sync._content_hash(record))
             result = analytics_sync.sync_jsonl_to_postgres(
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,
@@ -1231,7 +1231,7 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
                     connect=lambda url: fake,
                     json_adapter=lambda v: v,
                 )
-        progress_lines = [m for m in cm.output if "progress lines=" in m]
+        progress_lines = [line for line in cm.output if "progress lines=" in line]
         # Two full-batch flushes -> two progress records (no partial
         # batch at EOF because the count divides the batch size).
         self.assertEqual(len(progress_lines), 2)
@@ -1267,7 +1267,7 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
                         connect=lambda url: fake,
                         json_adapter=lambda v: v,
                     )
-        progress_lines = [m for m in cm.output if "progress lines=" in m]
+        progress_lines = [line for line in cm.output if "progress lines=" in line]
         self.assertEqual(len(progress_lines), 2)
         self.assertIn("lines=3", progress_lines[0])
         self.assertIn("inserted=3", progress_lines[0])
@@ -1376,8 +1376,8 @@ class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
                 "ANALYTICS_DB_URL": "postgresql://h/db",
             })
             fake = _FakeConnection()
-            for rec in records:
-                fake.seen_hashes.add(analytics_sync._content_hash(rec))
+            for record in records:
+                fake.seen_hashes.add(analytics_sync._content_hash(record))
             result = analytics_sync.sync_jsonl_to_postgres(
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,

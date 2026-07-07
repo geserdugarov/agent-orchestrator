@@ -652,9 +652,9 @@ class MultiRepoConfigTest(unittest.TestCase):
             })
 
             specs = config.default_repo_specs()
-            self.assertEqual([s.slug for s in specs],
+            self.assertEqual([spec.slug for spec in specs],
                              ["alpha/one", "beta/two", "gamma/three"])
-            self.assertEqual([s.base_branch for s in specs],
+            self.assertEqual([spec.base_branch for spec in specs],
                              ["main", "develop", "master"])
             self.assertEqual(specs[1].target_root, other)
             # Backward-compatible: three-field entries default remote_name
@@ -677,7 +677,7 @@ class MultiRepoConfigTest(unittest.TestCase):
             })
             specs = config.default_repo_specs()
             self.assertEqual(
-                [(s.slug, s.remote_name) for s in specs],
+                [(spec.slug, spec.remote_name) for spec in specs],
                 [("alpha/one", "origin"), ("beta/two", "private")],
             )
 
@@ -743,10 +743,10 @@ class MultiRepoConfigTest(unittest.TestCase):
     def test_slug_with_empty_component_aborts_at_import(self) -> None:
         # `owner//repo` and `/repo` and `owner/` are all malformed even
         # though they contain `/`; require exactly two non-empty components.
-        for bad in ("owner//repo", "/repo", "owner/", "//"):
-            with self.subTest(slug=bad):
+        for bad_slug in ("owner//repo", "/repo", "owner/", "//"):
+            with self.subTest(slug=bad_slug):
                 with self.assertRaises(SystemExit) as cm:
-                    self._load_config({"REPOS": f"{bad}|/tmp|main"})
+                    self._load_config({"REPOS": f"{bad_slug}|/tmp|main"})
                 self.assertIn("owner/name", str(cm.exception))
 
     def test_slug_with_extra_path_segment_aborts_at_import(self) -> None:
@@ -780,15 +780,15 @@ class MultiRepoConfigTest(unittest.TestCase):
         import io
         from contextlib import redirect_stderr
 
-        buf = io.StringIO()
-        with redirect_stderr(buf):
+        captured_stderr = io.StringIO()
+        with redirect_stderr(captured_stderr):
             config = self._load_config(
                 {"REPOS": "alpha/one|/this/path/does/not/exist|main"}
             )
         specs = config.default_repo_specs()
         self.assertEqual(len(specs), 1)
-        self.assertIn("does not exist", buf.getvalue())
-        self.assertIn("alpha/one", buf.getvalue())
+        self.assertIn("does not exist", captured_stderr.getvalue())
+        self.assertIn("alpha/one", captured_stderr.getvalue())
 
 
 class ParallelLimitsConfigTest(unittest.TestCase):
@@ -873,7 +873,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
             })
             specs = config.default_repo_specs()
             self.assertEqual(
-                [(s.slug, s.parallel_limit) for s in specs],
+                [(spec.slug, spec.parallel_limit) for spec in specs],
                 [("alpha/one", 3), ("beta/two", 7)],
             )
 
@@ -891,7 +891,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
             })
             specs = config.default_repo_specs()
             self.assertEqual(
-                [(s.slug, s.remote_name, s.parallel_limit) for s in specs],
+                [(spec.slug, spec.remote_name, spec.parallel_limit) for spec in specs],
                 [
                     ("alpha/one", "origin", 2),
                     ("beta/two", "private", 2),

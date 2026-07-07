@@ -41,8 +41,8 @@ class HandleDocumentingMissingPrNumberTest(unittest.TestCase):
 
         workflow._handle_documenting(gh, _TEST_SPEC, issue)
 
-        data = gh.pinned_data(101)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(101)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertIn("documenting", gh.posted_comments[-1][1])
         # Label is not flipped -- the operator decides whether to
         # relabel back or leave it.
@@ -117,17 +117,17 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch_ahead_behind=(0, 0),
         )
         lifecycle = [
-            e for e in gh.recorded_events
-            if e["event"] in ("agent_spawn", "agent_exit")
-            and e.get("stage") == "documenting"
+            event for event in gh.recorded_events
+            if event["event"] in ("agent_spawn", "agent_exit")
+            and event.get("stage") == "documenting"
         ]
         self.assertEqual(len(lifecycle), 2)
-        for ev in lifecycle:
-            self.assertEqual(ev.get("review_round"), 2)
+        for event in lifecycle:
+            self.assertEqual(event.get("review_round"), 2)
 
-        data = gh.pinned_data(201)
-        self.assertEqual(data.get("docs_verdict"), "updated")
-        self.assertEqual(data.get("docs_checked_sha"), "bbb")
+        state = gh.pinned_data(201)
+        self.assertEqual(state.get("docs_verdict"), "updated")
+        self.assertEqual(state.get("docs_checked_sha"), "bbb")
         # A PR-conversation announcement is posted so reviewers see the
         # docs commit in context.
         self.assertTrue(any(
@@ -154,8 +154,8 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks["_push_branch"].assert_not_called()
         self.assertIn((201, "in_review"), gh.label_history)
-        data = gh.pinned_data(201)
-        self.assertEqual(data.get("docs_verdict"), "no_change")
+        state = gh.pinned_data(201)
+        self.assertEqual(state.get("docs_verdict"), "no_change")
         self.assertTrue(any(
             "no docs changes required" in body
             for _, body in gh.posted_pr_comments
@@ -177,10 +177,10 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
         # The verdict is NOT recorded -- the agent did not give one.
-        self.assertNotIn("docs_verdict", data)
+        self.assertNotIn("docs_verdict", state)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("agent needs your input", last_comment)
         self.assertIn("docs/architecture.md", last_comment)
@@ -199,9 +199,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch_ahead_behind=(0, 0),
         )
 
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "agent_silent")
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "agent_silent")
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
 
@@ -218,9 +218,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "agent_timeout")
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "agent_timeout")
         self.assertIn("agent timed out", gh.posted_comments[-1][1])
 
     def test_dirty_worktree_parks_without_push(self) -> None:
@@ -240,8 +240,8 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
         # `_on_dirty_worktree` does NOT set a transient park_reason --
         # the worktree carries unreviewed edits and needs a human.
         last_comment = gh.posted_comments[-1][1]
@@ -270,9 +270,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertNotIn("docs_verdict", data)
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertNotIn("docs_verdict", state)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted change", last_comment)
         self.assertIn("README.md", last_comment)
@@ -298,8 +298,8 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted change", last_comment)
         self.assertIn("docs/architecture.md", last_comment)
@@ -324,8 +324,8 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch_ahead_behind=(0, 0),
         )
 
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
@@ -349,9 +349,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "diverged_branch")
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "diverged_branch")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("behind", last_comment)
 
@@ -376,9 +376,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "fetch_failed")
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "fetch_failed")
 
     def test_push_failure_parks_with_push_failed(self) -> None:
         gh, issue = self._seeded()
@@ -393,9 +393,9 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch_ahead_behind=(0, 0),
         )
 
-        data = gh.pinned_data(201)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "push_failed")
+        state = gh.pinned_data(201)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "push_failed")
         self.assertNotIn((201, "in_review"), gh.label_history)
         self.assertNotIn((201, "validating"), gh.label_history)
 
@@ -435,9 +435,9 @@ class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_called_once()
         self.assertIn((301, "in_review"), gh.label_history)
-        data = gh.pinned_data(301)
-        self.assertEqual(data.get("docs_verdict"), "updated")
-        self.assertEqual(data.get("docs_checked_sha"), "recovered-sha")
+        state = gh.pinned_data(301)
+        self.assertEqual(state.get("docs_verdict"), "updated")
+        self.assertEqual(state.get("docs_checked_sha"), "recovered-sha")
         self.assertTrue(any(
             "recovered docs commit" in body
             for _, body in gh.posted_pr_comments
@@ -458,9 +458,9 @@ class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_not_called()
         self.assertNotIn((301, "in_review"), gh.label_history)
         self.assertNotIn((301, "validating"), gh.label_history)
-        data = gh.pinned_data(301)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "push_failed")
+        state = gh.pinned_data(301)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "push_failed")
 
     def test_recovery_with_dirty_worktree_parks_without_push(self) -> None:
         # A previous tick committed docs AND left some files
@@ -481,8 +481,8 @@ class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((301, "in_review"), gh.label_history)
         self.assertNotIn((301, "validating"), gh.label_history)
-        data = gh.pinned_data(301)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(301)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted change", last_comment)
         self.assertIn("docs/dirty.md", last_comment)
@@ -545,10 +545,10 @@ class HandleDocumentingAwaitingHumanResumeTest(
         )
         mocks["_push_branch"].assert_called_once()
         self.assertIn((401, "in_review"), gh.label_history)
-        data = gh.pinned_data(401)
-        self.assertEqual(data.get("docs_verdict"), "updated")
+        state = gh.pinned_data(401)
+        self.assertEqual(state.get("docs_verdict"), "updated")
         # The pre-park comment id was consumed by the resume.
-        self.assertEqual(data.get("last_action_comment_id"), 2100)
+        self.assertEqual(state.get("last_action_comment_id"), 2100)
 
     def test_human_reply_no_commit_does_not_advance(self) -> None:
         # The resume produces no new commit (the dev replied with a
@@ -592,11 +592,11 @@ class HandleDocumentingAwaitingHumanResumeTest(
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((403, "in_review"), gh.label_history)
         self.assertNotIn((403, "validating"), gh.label_history)
-        data = gh.pinned_data(403)
+        state = gh.pinned_data(403)
         # Still parked: no commit means the docs pass did not land
         # anything and the issue must stay awaiting human input.
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertNotIn("docs_verdict", data)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertNotIn("docs_verdict", state)
 
     def test_human_reply_no_change_with_unpushed_commit_pushes(self) -> None:
         # A previous tick committed docs and then parked (push_failed
@@ -644,9 +644,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
 
         mocks["_push_branch"].assert_called_once()
         self.assertIn((404, "in_review"), gh.label_history)
-        data = gh.pinned_data(404)
-        self.assertEqual(data.get("docs_verdict"), "updated")
-        self.assertEqual(data.get("docs_checked_sha"), "docs-sha")
+        state = gh.pinned_data(404)
+        self.assertEqual(state.get("docs_verdict"), "updated")
+        self.assertEqual(state.get("docs_checked_sha"), "docs-sha")
         # The PR comment names the recovery-on-no-change path so a
         # reviewer scanning the PR can see why we advanced.
         self.assertTrue(any(
@@ -688,9 +688,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
         mocks["_push_branch"].assert_called_once()
         self.assertNotIn((405, "in_review"), gh.label_history)
         self.assertNotIn((405, "validating"), gh.label_history)
-        data = gh.pinned_data(405)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "push_failed")
+        state = gh.pinned_data(405)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "push_failed")
 
     def test_no_new_comments_keeps_parked(self) -> None:
         gh = FakeGitHubClient()
@@ -779,8 +779,8 @@ class HandleDocumentingAwaitingHumanResumeTest(
         # recent-comments thread that the prompt embeds).
         self.assertIn("please retry", prompt)
         # Comment was consumed.
-        data = gh.pinned_data(406)
-        self.assertEqual(data.get("last_action_comment_id"), 6100)
+        state = gh.pinned_data(406)
+        self.assertEqual(state.get("last_action_comment_id"), 6100)
 
     def test_human_reply_no_change_persists_docs_checked_sha(self) -> None:
         # Regression: a NO_CHANGE outcome on a resume (no prior
@@ -825,9 +825,9 @@ class HandleDocumentingAwaitingHumanResumeTest(
         # without push and record the SHA the dev verified.
         mocks["_push_branch"].assert_not_called()
         self.assertIn((407, "in_review"), gh.label_history)
-        data = gh.pinned_data(407)
-        self.assertEqual(data.get("docs_verdict"), "no_change")
-        self.assertEqual(data.get("docs_checked_sha"), "pr-head-sha")
+        state = gh.pinned_data(407)
+        self.assertEqual(state.get("docs_verdict"), "no_change")
+        self.assertEqual(state.get("docs_checked_sha"), "pr-head-sha")
 
 
 class HandleDocumentingInterruptedTest(
@@ -868,11 +868,11 @@ class HandleDocumentingInterruptedTest(
         self.assertEqual(mocks["run_agent"].call_count, 1)
         self.assertEqual(gh.write_state_calls, before_writes)
         self.assertNotIn((202, "in_review"), gh.label_history)
-        data = gh.pinned_data(202)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertNotIn("docs_verdict", data)
+        state = gh.pinned_data(202)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertNotIn("docs_verdict", state)
         # The pre-spawn `docs_checked_sha=before_sha` write was discarded.
-        self.assertNotIn("docs_checked_sha", data)
+        self.assertNotIn("docs_checked_sha", state)
         self.assertEqual(gh.posted_pr_comments, [])
         self.assertFalse(any(
             "agent needs your input" in body or "timed out" in body
@@ -911,13 +911,13 @@ class HandleDocumentingInterruptedTest(
         # The reply DID drive a resume, but the interruption is ignored.
         self.assertEqual(mocks["run_agent"].call_count, 1)
         self.assertEqual(gh.write_state_calls, before_writes)
-        data = gh.pinned_data(203)
+        state = gh.pinned_data(203)
         # The park is not consumed and the consumed-reply watermark bump is
         # discarded, so the next process re-resumes on the same reply.
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("last_action_comment_id"), 2000)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("last_action_comment_id"), 2000)
         self.assertNotIn((203, "in_review"), gh.label_history)
-        self.assertNotIn("docs_verdict", data)
+        self.assertNotIn("docs_verdict", state)
 
 
 class HandleDocumentingParkedSilenceTest(
@@ -1075,14 +1075,14 @@ class HandleDocumentingDriftTest(
             "issue body changed" in body
             for _, body in gh.posted_comments
         ))
-        data = gh.pinned_data(701)
+        state = gh.pinned_data(701)
         # Park flags cleared.
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
+        self.assertEqual(state.get("review_round"), 0)
         # Drift hash updated -- a second tick would not re-fire drift.
         self.assertNotEqual(
-            data.get("user_content_hash"),
+            state.get("user_content_hash"),
             "stale-hash-from-original-body",
         )
 
@@ -1104,9 +1104,9 @@ class HandleDocumentingDriftTest(
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         # Hash updated; notice posted; relabel to validating.
-        data = gh.pinned_data(701)
+        state = gh.pinned_data(701)
         self.assertNotEqual(
-            data.get("user_content_hash"),
+            state.get("user_content_hash"),
             "stale-hash-from-original-body",
         )
         self.assertTrue(any(
@@ -1115,7 +1115,7 @@ class HandleDocumentingDriftTest(
         ))
         self.assertIn((701, "validating"), gh.label_history)
         self.assertNotIn((701, "in_review"), gh.label_history)
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertEqual(state.get("review_round"), 0)
 
     def test_body_edit_with_recovered_commit_still_relabels_without_push(
         self,
@@ -1147,8 +1147,8 @@ class HandleDocumentingDriftTest(
             "issue body changed" in body
             for _, body in gh.posted_comments
         ))
-        data = gh.pinned_data(701)
-        self.assertEqual(data.get("review_round"), 0)
+        state = gh.pinned_data(701)
+        self.assertEqual(state.get("review_round"), 0)
 
     def test_body_edit_resets_unpushed_local_docs_commit(self) -> None:
         # Regression: drift mid-final-docs-hop must discard any
@@ -1214,8 +1214,8 @@ class HandleDocumentingDriftTest(
         # Drift fetch was attempted before the probe + reset.
         mocks["_authed_fetch"].assert_called()
 
-        data = gh.pinned_data(701)
-        self.assertEqual(data.get("review_round"), 0)
+        state = gh.pinned_data(701)
+        self.assertEqual(state.get("review_round"), 0)
 
     def test_body_edit_resets_dirty_worktree_with_no_local_commits(
         self,
@@ -1273,8 +1273,8 @@ class HandleDocumentingDriftTest(
         self.assertNotIn((701, "in_review"), gh.label_history)
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(701)
-        self.assertEqual(data.get("review_round"), 0)
+        state = gh.pinned_data(701)
+        self.assertEqual(state.get("review_round"), 0)
 
     def test_body_edit_resets_when_remote_advanced_past_local(
         self,
@@ -1331,8 +1331,8 @@ class HandleDocumentingDriftTest(
         self.assertNotIn((701, "in_review"), gh.label_history)
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(701)
-        self.assertEqual(data.get("review_round"), 0)
+        state = gh.pinned_data(701)
+        self.assertEqual(state.get("review_round"), 0)
 
     def test_body_edit_parks_on_clean_failure(self) -> None:
         # Regression: `git clean -fd` is the final step of the drift
@@ -1379,15 +1379,15 @@ class HandleDocumentingDriftTest(
         self.assertNotIn((701, "in_review"), gh.label_history)
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(701)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(701)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "worktree_reset_failed",
+            state.get("park_reason"), "worktree_reset_failed",
         )
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertEqual(state.get("review_round"), 0)
         # Drift-unwind sentinel persists across the park so a later
         # retry tick re-attempts the cleanup + relabel.
-        self.assertTrue(data.get("docs_drift_unwind_pending"))
+        self.assertTrue(state.get("docs_drift_unwind_pending"))
 
     def test_body_edit_parks_on_ahead_behind_probe_failure(self) -> None:
         # Regression: `_branch_ahead_behind` swallows git errors as
@@ -1431,14 +1431,14 @@ class HandleDocumentingDriftTest(
         self.assertNotIn((701, "in_review"), gh.label_history)
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(701)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(701)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "worktree_reset_failed",
+            state.get("park_reason"), "worktree_reset_failed",
         )
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertEqual(state.get("review_round"), 0)
         # Drift-unwind sentinel persists across the park.
-        self.assertTrue(data.get("docs_drift_unwind_pending"))
+        self.assertTrue(state.get("docs_drift_unwind_pending"))
 
     def test_body_edit_parks_on_reset_failure(self) -> None:
         # Regression: the `git reset --hard <remote>/<branch>` is
@@ -1483,16 +1483,16 @@ class HandleDocumentingDriftTest(
         self.assertNotIn((701, "in_review"), gh.label_history)
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(701)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(701)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "worktree_reset_failed",
+            state.get("park_reason"), "worktree_reset_failed",
         )
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertEqual(state.get("review_round"), 0)
         # Drift-unwind sentinel persists so a later retry tick
         # re-attempts the cleanup + relabel without needing fresh
         # drift to trigger it.
-        self.assertTrue(data.get("docs_drift_unwind_pending"))
+        self.assertTrue(state.get("docs_drift_unwind_pending"))
 
     def test_pending_unwind_retries_cleanup_after_operator_unpark(
         self,
@@ -1562,8 +1562,8 @@ class HandleDocumentingDriftTest(
         # Relabeled to validating; marker cleared.
         self.assertIn((701, "validating"), gh.label_history)
         self.assertNotIn((701, "in_review"), gh.label_history)
-        data = gh.pinned_data(701)
-        self.assertFalse(data.get("docs_drift_unwind_pending"))
+        state = gh.pinned_data(701)
+        self.assertFalse(state.get("docs_drift_unwind_pending"))
 
     def test_pending_unwind_silent_when_still_parked_no_input(
         self,
@@ -1627,11 +1627,11 @@ class HandleDocumentingDriftTest(
         self.assertNotIn((701, "validating"), gh.label_history)
         self.assertNotIn((701, "in_review"), gh.label_history)
         # Marker preserved; the park is still in effect.
-        data = gh.pinned_data(701)
-        self.assertTrue(data.get("docs_drift_unwind_pending"))
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(701)
+        self.assertTrue(state.get("docs_drift_unwind_pending"))
+        self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(
-            data.get("park_reason"), "worktree_reset_failed",
+            state.get("park_reason"), "worktree_reset_failed",
         )
 
     def test_body_edit_with_recovered_commit_parks_on_fetch_failure(
@@ -1673,12 +1673,12 @@ class HandleDocumentingDriftTest(
         # No push, no agent.
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(701)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "fetch_failed")
-        self.assertEqual(data.get("review_round"), 0)
+        state = gh.pinned_data(701)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "fetch_failed")
+        self.assertEqual(state.get("review_round"), 0)
         # Drift-unwind sentinel persists across the park.
-        self.assertTrue(data.get("docs_drift_unwind_pending"))
+        self.assertTrue(state.get("docs_drift_unwind_pending"))
 
 
 class HandleDocumentingExternalMergeTest(
@@ -1811,8 +1811,8 @@ class HandleDocumentingFinalDocsHandoffTest(
         mocks["_push_branch"].assert_not_called()
         self.assertIn((707, "in_review"), gh.label_history)
         self.assertNotIn((707, "validating"), gh.label_history)
-        data = gh.pinned_data(707)
-        self.assertEqual(data.get("docs_verdict"), "no_change")
+        state = gh.pinned_data(707)
+        self.assertEqual(state.get("docs_verdict"), "no_change")
 
     def test_no_change_with_recovered_ahead_advances_to_in_review(
         self,
@@ -1875,8 +1875,8 @@ class HandleDocumentingFinalDocsHandoffTest(
         # Route back through `validating`.
         self.assertIn((707, "validating"), gh.label_history)
         self.assertNotIn((707, "in_review"), gh.label_history)
-        data = gh.pinned_data(707)
-        self.assertEqual(data.get("review_round"), 0)
+        state = gh.pinned_data(707)
+        self.assertEqual(state.get("review_round"), 0)
 
     def test_resume_consumed_reply_does_not_replay_as_in_review_feedback(
         self,
@@ -1947,10 +1947,10 @@ class HandleDocumentingFinalDocsHandoffTest(
         )
 
         self.assertIn((709, "in_review"), gh.label_history)
-        data = gh.pinned_data(709)
-        self.assertEqual(data.get("last_action_comment_id"), 1100)
+        state = gh.pinned_data(709)
+        self.assertEqual(state.get("last_action_comment_id"), 1100)
         self.assertGreaterEqual(
-            data.get("pr_last_comment_id"), 1100,
+            state.get("pr_last_comment_id"), 1100,
             "pr_last_comment_id must ratchet past the consumed human "
             "issue-thread reply on the final-docs handoff so the next "
             "in_review tick does not replay it as fresh PR feedback",
@@ -1959,7 +1959,7 @@ class HandleDocumentingFinalDocsHandoffTest(
         # In_review tick: ensure the consumed reply is NOT replayed as
         # fresh feedback (the actual route-to-fixing bug the ratchet
         # guards against).
-        if not any(l.name == "in_review" for l in issue.labels):
+        if not any(label.name == "in_review" for label in issue.labels):
             issue.labels = [FakeLabel("in_review")]
         mocks_ir = self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),

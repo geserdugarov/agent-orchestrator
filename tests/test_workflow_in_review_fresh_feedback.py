@@ -115,12 +115,12 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         self.assertIn((880, "fixing"), gh.label_history)
         # Pending-fix metadata records the triggering comment id and an
         # ISO timestamp so the fixing handler has a bookmark.
-        data = gh.pinned_data(880)
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 3000)
-        self.assertIn("pending_fix_at", data)
+        state = gh.pinned_data(880)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), 3000)
+        self.assertIn("pending_fix_at", state)
         # Watermark stays put so the fixing handler can rescan and reach
         # the triggering comment on its next tick.
-        self.assertEqual(data.get("pr_last_comment_id"), 1999)
+        self.assertEqual(state.get("pr_last_comment_id"), 1999)
 
     def test_route_persists_full_batch_id_lists_all_surfaces(self) -> None:
         # The route must persist the FULL per-surface id lists (not just the
@@ -173,20 +173,20 @@ class InReviewRoutesFreshFeedbackToFixingTest(
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(880)
+        state = gh.pinned_data(880)
         self.assertIn((880, "fixing"), gh.label_history)
         # Issue space combines issue-thread (2050) + PR-conversation
         # (2100, 2200), sorted ascending.
         self.assertEqual(
-            data.get("pending_fix_issue_ids"), [2050, 2100, 2200],
+            state.get("pending_fix_issue_ids"), [2050, 2100, 2200],
         )
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 2200)
-        self.assertEqual(data.get("pending_fix_review_ids"), [40, 41])
-        self.assertEqual(data.get("pending_fix_review_max_id"), 41)
-        self.assertEqual(data.get("pending_fix_review_summary_ids"), [7])
-        self.assertEqual(data.get("pending_fix_review_summary_max_id"), 7)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), 2200)
+        self.assertEqual(state.get("pending_fix_review_ids"), [40, 41])
+        self.assertEqual(state.get("pending_fix_review_max_id"), 41)
+        self.assertEqual(state.get("pending_fix_review_summary_ids"), [7])
+        self.assertEqual(state.get("pending_fix_review_summary_max_id"), 7)
         # Watermarks stay put so the fixing rescan can still reach them.
-        self.assertEqual(data.get("pr_last_comment_id"), 1999)
+        self.assertEqual(state.get("pr_last_comment_id"), 1999)
 
     def test_no_fresh_feedback_pings_hitl_for_manual_merge(self) -> None:
         # The in_review -> fixing route must NOT preempt the mergeable /
@@ -297,14 +297,14 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         # The issue routed to `fixing` and recorded the triggering
         # bookmark.
         self.assertIn((1660, "fixing"), gh.label_history)
-        data = gh.pinned_data(1660)
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 7000)
-        self.assertIn("pending_fix_at", data)
+        state = gh.pinned_data(1660)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), 7000)
+        self.assertIn("pending_fix_at", state)
         # And the hash was refreshed so the drift path does NOT
         # double-fire on the same comment changes after the fixing
         # handler (or an operator) bounces the issue back to `in_review`.
         self.assertNotEqual(
-            data.get("user_content_hash"),
+            state.get("user_content_hash"),
             "stale-hash-from-before-the-human-comment",
         )
 

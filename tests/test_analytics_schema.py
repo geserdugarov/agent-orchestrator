@@ -103,12 +103,12 @@ class AnalyticsAgentRunsViewTest(unittest.TestCase):
         # downstream consumers do not have to repeat the predicate.
         text = _normalize(_schema_text())
         # match the view body up to its terminating semicolon
-        m = re.search(
+        match = re.search(
             r"CREATE OR REPLACE VIEW analytics_agent_runs AS\s+(.*?);",
             text,
         )
-        assert m is not None, "analytics_agent_runs view missing"
-        body = m.group(1)
+        assert match is not None, "analytics_agent_runs view missing"
+        body = match.group(1)
         self.assertRegex(body, r"FROM analytics_events")
         self.assertRegex(body, r"WHERE event = 'agent_exit'")
 

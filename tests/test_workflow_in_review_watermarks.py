@@ -134,11 +134,11 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_not_called()
         self.assertIn((65, "fixing"), gh.label_history)
         self.assertNotIn((65, "validating"), gh.label_history)
-        data = gh.pinned_data(65)
+        state = gh.pinned_data(65)
         # Bookmark recorded but the inline-review watermark stays where it
         # was -- the fixing handler needs the triggering comment.
-        self.assertEqual(data.get("pending_fix_review_max_id"), 42)
-        self.assertEqual(data.get("pr_last_review_comment_id"), 41)
+        self.assertEqual(state.get("pending_fix_review_max_id"), 42)
+        self.assertEqual(state.get("pr_last_review_comment_id"), 41)
 
     def test_id_overlap_across_spaces_does_not_drop_comments(self) -> None:
         # Inline review comment id (5) is LOWER than the issue-comment
