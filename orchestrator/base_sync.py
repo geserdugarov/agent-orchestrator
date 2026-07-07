@@ -16,7 +16,7 @@ Owns the helpers that drive the pre-tick base sync:
   the per-tick refresh is willing to drive through the rebase flow.
 * `_sync_worktree_with_base` -- per-worktree dispatch: pre-PR rebase or
   PR-having clean-rebase / conflict detour, with skip rules for dirty
-  trees, `backlog`, `hold_base_sync`, and the `question` label.
+  trees, `backlog` / `paused`, `hold_base_sync`, and the `question` label.
 * `_sync_pr_worktree_to_base` -- for a behind-base PR-having issue,
   attempt a local rebase + push (force-with-lease); on a clean rebase
   reset `review_round` and relabel to `validating`; only relabel to
@@ -61,10 +61,10 @@ from .git_plumbing import (
 )
 from .state_machine import WorkflowLabel
 from .github import (
-    BACKLOG_LABEL,
     BASE_SYNC_HOLD_LABEL,
     GitHubClient,
     PinnedState,
+    hard_skip_control_label,
     issue_has_label,
 )
 from .scheduler import IssueScheduler
@@ -797,14 +797,15 @@ def _sync_worktree_with_base(
             "issue=#%d not retrievable; skipping base sync", issue_number,
         )
         return
-    if issue_has_label(issue, BACKLOG_LABEL):
-        # Match the dispatcher's hard-skip: `backlog` means "the orchestrator
-        # should not touch this issue at all", so refresh must not rebase
-        # base, post a PR comment, or detour the issue to
+    skip_label = hard_skip_control_label(issue)
+    if skip_label is not None:
+        # Match the dispatcher's hard-skip: `backlog` / `paused` mean "the
+        # orchestrator should not touch this issue at all", so refresh must
+        # not rebase base, post a PR comment, or detour the issue to
         # `resolving_conflict` before `_process_issue` would have skipped it.
         log.debug(
             "issue=#%d has %r; skipping base sync",
-            issue_number, BACKLOG_LABEL,
+            issue_number, skip_label,
         )
         return
     if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):

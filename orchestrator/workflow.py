@@ -50,11 +50,10 @@ from .config import RepoSpec
 from .usage import UsageMetrics
 from .state_machine import WorkflowLabel
 from .github import (
-    BACKLOG_LABEL,
     COMMUNITY_CONTRIBUTION_LABEL,
     GitHubClient,
     PinnedState,
-    issue_has_label,
+    hard_skip_control_label,
 )
 from .scheduler import IssueScheduler
 
@@ -800,16 +799,17 @@ def tick(
     family_numbers: list[int] = []
     fanout_numbers: list[int] = []
     for issue in gh.list_pollable_issues():
-        # `backlog` is a "not yet" hold -- filter it before the family /
-        # fanout split so a parked, workflow-label-less issue is never
-        # folded into the family bucket (see `_dispatch_via_scheduler` for
-        # why that starves fanout under `parallel_limit=1`).
-        # `_process_issue` skips backlog anyway.
+        # `backlog` / `paused` are hard-skip holds -- filter them before the
+        # family / fanout split so a parked, workflow-label-less issue is
+        # never folded into the family bucket (see `_dispatch_via_scheduler`
+        # for why that starves fanout under `parallel_limit=1`).
+        # `_process_issue` skips them anyway.
         try:
-            if issue_has_label(issue, BACKLOG_LABEL):
+            skip_label = hard_skip_control_label(issue)
+            if skip_label is not None:
                 log.info(
                     "repo=%s issue=#%s has %r; skipping",
-                    spec.slug, issue.number, BACKLOG_LABEL,
+                    spec.slug, issue.number, skip_label,
                 )
                 continue
             label = gh.workflow_label(issue)
@@ -1004,10 +1004,10 @@ def _dispatch_via_scheduler(
     per-repo slot (under the default ``parallel_limit=1``) and deadlock
     the very children it waits on. A bucket containing ``decomposing``
     (spawns the decomposer agent) or an unlabeled-pickup ``None`` stays
-    cap-counted. ``backlog`` issues are filtered out before this split --
-    a parked issue carries no workflow label, so leaving it in would fold
-    it into the bucket and force ``cap_exempt=False``, starving fanout
-    behind a "not yet" hold under ``parallel_limit=1``. The family mutex
+    cap-counted. ``backlog`` / ``paused`` issues are filtered out before
+    this split -- a parked issue carries no workflow label, so leaving it in
+    would fold it into the bucket and force ``cap_exempt=False``, starving
+    fanout behind a hard-skip hold under ``parallel_limit=1``. The family mutex
     still applies, so a follow-up tick that finds another family issue
     still serializes against this bucket.
 
@@ -1029,19 +1029,21 @@ def _dispatch_via_scheduler(
     # Tracked so they can be submitted cap-exempt below.
     fanout_closed: set[int] = set()
     for issue in gh.list_pollable_issues():
-        # `backlog` is an operator "not yet" hold: the issue sits outside
-        # the state machine until the label is removed. Drop it BEFORE the
-        # family/fanout split. A parked issue carries no workflow label, so
-        # it would otherwise land in the family bucket and -- being neither
-        # `blocked` nor `umbrella` -- flip the whole bucket to cap-counted,
-        # reserving the only per-repo slot under `parallel_limit=1` and
-        # starving every fanout issue behind it. `_process_issue` skips
-        # backlog anyway; filtering here keeps it from holding a slot.
+        # `backlog` / `paused` are operator hard-skip holds: the issue sits
+        # outside the state machine until the label is removed. Drop it
+        # BEFORE the family/fanout split. A parked issue carries no workflow
+        # label, so it would otherwise land in the family bucket and -- being
+        # neither `blocked` nor `umbrella` -- flip the whole bucket to
+        # cap-counted, reserving the only per-repo slot under
+        # `parallel_limit=1` and starving every fanout issue behind it.
+        # `_process_issue` skips these anyway; filtering here keeps them from
+        # holding a slot.
         try:
-            if issue_has_label(issue, BACKLOG_LABEL):
+            skip_label = hard_skip_control_label(issue)
+            if skip_label is not None:
                 log.info(
                     "repo=%s issue=#%s has %r; skipping",
-                    spec.slug, issue.number, BACKLOG_LABEL,
+                    spec.slug, issue.number, skip_label,
                 )
                 continue
             label = gh.workflow_label(issue)
@@ -1158,16 +1160,17 @@ def _dispatch_via_scheduler(
 
 
 def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
-    # Postponed-task hold: applying `backlog` parks the issue outside the
-    # state machine entirely until the label is removed. Checked before
-    # reading the workflow label so the orchestrator never decomposes,
-    # spawns an agent, or otherwise reacts while the operator is using
-    # the label as a "not yet" signal. Backlog-skips are NOT counted as a
-    # stage evaluation: no handler runs and there is nothing to time.
-    if issue_has_label(issue, BACKLOG_LABEL):
+    # Postponed-task hold: applying `backlog` (or `paused`) parks the issue
+    # outside the state machine entirely until the label is removed. Checked
+    # before reading the workflow label so the orchestrator never decomposes,
+    # spawns an agent, or otherwise reacts while the operator is using the
+    # label as a "not yet" signal. Hard-skips are NOT counted as a stage
+    # evaluation: no handler runs and there is nothing to time.
+    skip_label = hard_skip_control_label(issue)
+    if skip_label is not None:
         log.info(
             "repo=%s issue=#%s has %r; skipping",
-            spec.slug, issue.number, BACKLOG_LABEL,
+            spec.slug, issue.number, skip_label,
         )
         return
     label = gh.workflow_label(issue)

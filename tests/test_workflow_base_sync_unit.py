@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import base_sync, config, workflow
-from orchestrator.github import BACKLOG_LABEL, BASE_SYNC_HOLD_LABEL
+from orchestrator.github import BACKLOG_LABEL, BASE_SYNC_HOLD_LABEL, PAUSED_LABEL
 
 from tests.fakes import (
     FakeComment,
@@ -1663,6 +1663,37 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
     def test_backlog_label_skips_pre_pr_base_rebase(self) -> None:
         issue = make_issue(ISSUE, label=LABEL_IMPLEMENTING)
         issue.labels.append(FakeLabel(BACKLOG_LABEL))
+        self.gh.add_issue(issue)
+        merge = MagicMock()
+        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        with _patch_base_sync(
+            dirty=MagicMock(return_value=[]), rebase=merge, git=git_mock,
+        ):
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
+
+        merge.assert_not_called()
+        self.assertEqual(self.gh.label_history, [])
+
+    def test_paused_label_skips_pr_refresh_detour(self) -> None:
+        # `paused` is the same hard skip as `backlog`: the refresh path must
+        # not relabel the issue to `resolving_conflict` or post a PR notice
+        # while the operator has the in-flight issue frozen.
+        self._seed_pr_issue(extra_labels=[PAUSED_LABEL])
+        self._add_pr()
+        merge = MagicMock()
+        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
+        with _patch_base_sync(
+            dirty=MagicMock(return_value=[]), rebase=merge, git=git_mock,
+        ):
+            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
+
+        merge.assert_not_called()
+        self.assertEqual(self.gh.label_history, [])
+        self.assertEqual(self.gh.posted_pr_comments, [])
+
+    def test_paused_label_skips_pre_pr_base_rebase(self) -> None:
+        issue = make_issue(ISSUE, label=LABEL_IMPLEMENTING)
+        issue.labels.append(FakeLabel(PAUSED_LABEL))
         self.gh.add_issue(issue)
         merge = MagicMock()
         git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
