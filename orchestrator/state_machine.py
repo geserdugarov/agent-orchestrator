@@ -10,7 +10,7 @@ unchanged. The point of the enum is not to replace the strings but to
 give them one authoritative definition, IDE/refactor support, and a
 membership set the typo guard can validate against.
 
-`ControlLabel` holds operator-applied *modifiers* (`backlog`,
+`ControlLabel` holds operator-applied *modifiers* (`backlog`, `paused`,
 `hold_base_sync`, `community_contribution`) that coexist with a workflow
 label or PR and pause/redirect processing without being workflow states
 themselves -- an issue is `implementing` + `backlog` at once. They are
@@ -54,9 +54,15 @@ class ControlLabel(StrEnum):
     the underlying `WorkflowLabel` intact (a child can be `ready` +
     `backlog` -- "ready in the FSM, but operator-held"). Never passed to
     `set_workflow_label` and never present in the transition table.
+
+    `backlog` and `paused` are both hard skips -- the orchestrator ignores
+    the issue entirely while either is present. They differ only in intent:
+    `backlog` is a "not yet" hold on a fresh issue, `paused` an operator
+    pause on an in-flight one.
     """
 
     BACKLOG = "backlog"
+    PAUSED = "paused"
     HOLD_BASE_SYNC = "hold_base_sync"
     COMMUNITY_CONTRIBUTION = "community_contribution"
 

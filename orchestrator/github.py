@@ -76,6 +76,7 @@ WORKFLOW_LABELS = frozenset(WorkflowLabel)
 
 BASE_SYNC_HOLD_LABEL = ControlLabel.HOLD_BASE_SYNC
 BACKLOG_LABEL = ControlLabel.BACKLOG
+PAUSED_LABEL = ControlLabel.PAUSED
 # Applied by `sweep_community_contribution_prs` to any open PR whose author
 # is not in `ALLOWED_ISSUE_AUTHORS`. The orchestrator only labels and pings
 # HITL once per PR; it never drives the PR's lifecycle, so the label is a
@@ -93,6 +94,11 @@ CONTROL_LABEL_SPECS: tuple[tuple[ControlLabel, str, str], ...] = (
         "Skip orchestrator processing entirely until the label is removed",
     ),
     (
+        PAUSED_LABEL,
+        "d4c5f9",
+        "Pause an in-flight issue: skip orchestrator processing entirely until the label is removed",
+    ),
+    (
         COMMUNITY_CONTRIBUTION_LABEL,
         "7057ff",
         "PR opened by an author outside ALLOWED_ISSUE_AUTHORS; human review requested",
@@ -106,6 +112,27 @@ def issue_has_label(issue: Issue, label_name: str) -> bool:
         ((getattr(label, "name", "") or "").lower() == wanted)
         for label in (issue.labels or [])
     )
+
+
+# Control labels that make the orchestrator ignore an issue for the tick: no
+# handler runs, no worktree is rebased, no per-repo/global slot is consumed,
+# no stage evaluation is recorded. `backlog` and `paused` share this "hard
+# skip" contract (they differ only in operator intent -- a fresh "not yet"
+# hold vs. an in-flight pause), so every skip point checks them together.
+HARD_SKIP_CONTROL_LABELS: tuple[ControlLabel, ...] = (BACKLOG_LABEL, PAUSED_LABEL)
+
+
+def hard_skip_control_label(issue: Issue) -> Optional[str]:
+    """Return the first hard-skip control label on `issue`, or None.
+
+    The returned member (a `ControlLabel`, hence a plain string) feeds the
+    "has %r; skipping" log line so operators see which label parked the
+    issue.
+    """
+    for label in HARD_SKIP_CONTROL_LABELS:
+        if issue_has_label(issue, label):
+            return label
+    return None
 
 
 def _write_event_record(record: dict) -> None:

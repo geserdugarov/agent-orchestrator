@@ -18,7 +18,7 @@ from unittest.mock import patch
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import analytics, workflow
-from orchestrator.github import BACKLOG_LABEL
+from orchestrator.github import BACKLOG_LABEL, PAUSED_LABEL
 
 from tests.fakes import FakeGitHubClient, FakeLabel, make_issue
 from tests.workflow_helpers import _TEST_SPEC
@@ -127,23 +127,25 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         self.assertEqual(rec["result"], "error")
         self.assertIn("duration_s", rec)
 
-    def test_backlog_skip_does_not_record_stage_evaluation(self) -> None:
-        # Backlog parks the issue OUTSIDE the state machine before any
-        # handler runs; there is nothing to time. The early return must
-        # short-circuit before the timing wrapper writes a record so
-        # operators do not see a noisy run of zero-duration evaluations
-        # for issues that the orchestrator deliberately ignores.
-        with tempfile.TemporaryDirectory(prefix="analytics-backlog-") as td:
-            path = Path(td) / "analytics.jsonl"
-            gh = FakeGitHubClient()
-            issue = make_issue(8004, label="implementing")
-            issue.labels.append(FakeLabel(BACKLOG_LABEL))
-            gh.add_issue(issue)
-            with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
-                 patch.object(workflow, "_handle_implementing") as handler:
-                workflow._process_issue(gh, _TEST_SPEC, issue)
-            handler.assert_not_called()
-        self.assertEqual(self._records(path), [])
+    def test_hard_skip_does_not_record_stage_evaluation(self) -> None:
+        # A hard-skip control label (`backlog` / `paused`) parks the issue
+        # OUTSIDE the state machine before any handler runs; there is nothing
+        # to time. The early return must short-circuit before the timing
+        # wrapper writes a record so operators do not see a noisy run of
+        # zero-duration evaluations for issues the orchestrator ignores.
+        for skip_label in (BACKLOG_LABEL, PAUSED_LABEL):
+            with self.subTest(label=skip_label):
+                with tempfile.TemporaryDirectory(prefix="analytics-skip-") as td:
+                    path = Path(td) / "analytics.jsonl"
+                    gh = FakeGitHubClient()
+                    issue = make_issue(8004, label="implementing")
+                    issue.labels.append(FakeLabel(skip_label))
+                    gh.add_issue(issue)
+                    with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
+                         patch.object(workflow, "_handle_implementing") as handler:
+                        workflow._process_issue(gh, _TEST_SPEC, issue)
+                    handler.assert_not_called()
+                    self.assertEqual(self._records(path), [])
 
     def test_disabled_sink_does_not_write_evaluation_record(self) -> None:
         # The off knob is documented as a silent no-op for the analytics

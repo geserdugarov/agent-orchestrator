@@ -20,7 +20,7 @@ An issue should have at most one workflow label at a time. Non-workflow labels s
 preserved; the orchestrator only swaps labels from its own workflow set. Label names are part of the public contract
 because live GitHub issues carry them.
 
-Three non-workflow **control labels** modify behavior without occupying the workflow slot:
+Four non-workflow **control labels** modify behavior without occupying the workflow slot:
 
 - `hold_base_sync` pauses per-tick base sync, `in_review` HITL pings / unmergeable parks, and `resolving_conflict`
   rebases until removed.
@@ -28,6 +28,9 @@ Three non-workflow **control labels** modify behavior without occupying the work
   (so a parked, workflow-label-less issue cannot fold into the cap-counted family bucket and starve other work under
   `parallel_limit=1`), and each stage handler also skips it before the workflow label is read. Removing it hands control
   back to the state machine on the next tick.
+- `paused` is the same hard skip as `backlog` at every point (dispatch, scheduler routing, `_process_issue`, and base
+  sync), differing only in intent: `backlog` is a "not yet" hold on a fresh issue, `paused` freezes an already
+  in-flight one without discarding its state. Removing it resumes processing on the next tick.
 - `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open
   PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR. Bot-authored PRs
   (Dependabot, Renovate, CI bots) are skipped via GitHub's `user.type == "Bot"` flag — they open PRs structurally and

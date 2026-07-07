@@ -12,7 +12,7 @@ from unittest.mock import patch
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import base_sync, config, workflow
-from orchestrator.github import BACKLOG_LABEL
+from orchestrator.github import BACKLOG_LABEL, PAUSED_LABEL
 
 from tests.fakes import FakeGitHubClient, FakeLabel, make_issue
 
@@ -1128,14 +1128,14 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
 
 
 class BacklogDispatchFilterTest(unittest.TestCase):
-    """A `backlog` issue carries no workflow label, so the per-tick
-    dispatcher would otherwise fold it into the family bucket. Because
-    `backlog` is neither `blocked` nor `umbrella`, that flips the whole
-    bucket to cap-counted -- and under `parallel_limit=1` the bucket then
-    reserves the only per-repo slot every tick, starving all fanout work
-    behind a parked "not yet" issue. The dispatcher must drop `backlog`
-    issues BEFORE the family/fanout split so they never reserve or block a
-    scheduler slot (`_process_issue` skips them anyway).
+    """A hard-skip (`backlog` / `paused`) issue carries no workflow label, so
+    the per-tick dispatcher would otherwise fold it into the family bucket.
+    Because such an issue is neither `blocked` nor `umbrella`, that flips the
+    whole bucket to cap-counted -- and under `parallel_limit=1` the bucket
+    then reserves the only per-repo slot every tick, starving all fanout work
+    behind a parked issue. The dispatcher must drop hard-skip issues BEFORE
+    the family/fanout split so they never reserve or block a scheduler slot
+    (`_process_issue` skips them anyway).
     """
 
     def _spec(self, parallel_limit: int = 5) -> config.RepoSpec:
@@ -1159,24 +1159,24 @@ class BacklogDispatchFilterTest(unittest.TestCase):
             timer.cancel()
         self.assertEqual(sched.active_count(repo_slug), 0)
 
-    def _backlog_issue(self, number: int):
+    def _parked_issue(self, number: int, label: str = BACKLOG_LABEL):
         issue = make_issue(number)
-        issue.labels.append(FakeLabel(BACKLOG_LABEL))
+        issue.labels.append(FakeLabel(label))
         return issue
 
-    def test_backlog_only_does_not_starve_fanout(self) -> None:
-        # Per-repo cap 1: a parked `backlog` issue (no workflow label) and a
-        # real `implementing` fanout issue. Before the fix the backlog issue
-        # formed a cap-counted family bucket that grabbed the only slot, so
-        # the implementer was `per_repo_cap`-skipped every tick. After the
-        # fix the backlog issue is filtered out and the fanout runs.
+    def _assert_parked_does_not_starve_fanout(self, parked_label: str) -> None:
+        # Per-repo cap 1: a parked hard-skip issue (no workflow label) and a
+        # real `implementing` fanout issue. Left in, the parked issue forms a
+        # cap-counted family bucket that grabs the only slot, so the
+        # implementer is `per_repo_cap`-skipped every tick. Filtered at
+        # dispatch, the fanout runs and the parked issue is never processed.
         import threading
         from orchestrator.scheduler import IssueScheduler
         sched = IssueScheduler(global_cap=8, per_repo_cap=1)
         self.addCleanup(sched.shutdown)
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label="implementing"))
-        gh.add_issue(self._backlog_issue(2))
+        gh.add_issue(self._parked_issue(2, parked_label))
 
         start = threading.Event()
         release = threading.Event()
@@ -1196,8 +1196,8 @@ class BacklogDispatchFilterTest(unittest.TestCase):
                 workflow.tick(gh, self._spec(parallel_limit=1), scheduler=sched)
                 self.assertTrue(
                     start.wait(timeout=2.0),
-                    "implementing #1 was starved -- the backlog issue must "
-                    "not occupy the only per-repo slot",
+                    f"implementing #1 was starved -- the {parked_label} issue "
+                    "must not occupy the only per-repo slot",
                 )
         finally:
             release.set()
@@ -1205,8 +1205,14 @@ class BacklogDispatchFilterTest(unittest.TestCase):
         with lock:
             self.assertNotIn(
                 2, processed,
-                "backlog #2 must be filtered at dispatch, never processed",
+                f"{parked_label} #2 must be filtered at dispatch, never processed",
             )
+
+    def test_backlog_only_does_not_starve_fanout(self) -> None:
+        self._assert_parked_does_not_starve_fanout(BACKLOG_LABEL)
+
+    def test_paused_only_does_not_starve_fanout(self) -> None:
+        self._assert_parked_does_not_starve_fanout(PAUSED_LABEL)
 
     def test_backlog_does_not_make_blocked_bucket_cap_counted(self) -> None:
         # The production regression: a `blocked` parent and a parked
@@ -1222,7 +1228,7 @@ class BacklogDispatchFilterTest(unittest.TestCase):
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label="implementing"))
         gh.add_issue(make_issue(2, label="blocked"))
-        gh.add_issue(self._backlog_issue(3))
+        gh.add_issue(self._parked_issue(3, BACKLOG_LABEL))
 
         starts: dict[int, threading.Event] = {
             1: threading.Event(),

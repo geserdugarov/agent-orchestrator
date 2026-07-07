@@ -62,6 +62,7 @@ class WorkflowLabelEnumTest(unittest.TestCase):
         # Control labels are modifiers, not FSM states: they must not leak
         # into the workflow vocabulary.
         self.assertEqual(ControlLabel.BACKLOG, "backlog")
+        self.assertEqual(ControlLabel.PAUSED, "paused")
         self.assertEqual(
             ControlLabel.COMMUNITY_CONTRIBUTION, "community_contribution",
         )

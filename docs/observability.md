@@ -136,8 +136,8 @@ JSONL file is the raw foundation layer for the Postgres aggregation step.
 - `stage_enter` — `GitHubClient._emit_stage_enter` alongside the audit `stage_enter`; one record per workflow label
   transition; carries `stage`.
 - `stage_evaluation` — `workflow._process_issue` dispatcher (try/except/finally wrapper); carries `stage`,
-  `duration_s` (handler wall-clock), `result` (`"ok"` / `"error"`); omitted for `backlog`-skipped issues (no handler
-  runs).
+  `duration_s` (handler wall-clock), `result` (`"ok"` / `"error"`); omitted for `backlog`- / `paused`-skipped issues
+  (no handler runs).
 - `agent_exit` — `workflow._run_agent_tracked`; one record per tracked agent invocation; agent context + parsed token
   / model / cost details (see below).
 - `repo_skill_catalog` — `orchestrator.skill_catalog._emit_repo_skill_catalog`, driven once per tick per spec by
