@@ -520,7 +520,7 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             spec, issue, _wf._recent_comments_text(issue),
             config.default_repo_specs(),
         )
-        wt, result = _wf._resume_dev_with_text(
+        wt, result, _ = _wf._resume_dev_with_text(
             gh, spec, issue, state, prompt,
             followup_has_tracked_repos=True,
         )
@@ -577,7 +577,7 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # could overflow on the final docs pass without ever rotating. The
         # `_ensure_worktree` fallback inside the helper is harmless here
         # because the PR-anchored worktree was already restored above.
-        wt, result = _wf._resume_dev_with_text(
+        wt, result, _ = _wf._resume_dev_with_text(
             gh, spec, issue, state, prompt,
             followup_has_tracked_repos=True,
         )
