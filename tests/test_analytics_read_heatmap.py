@@ -52,11 +52,11 @@ class HourlyHeatmapTest(unittest.TestCase):
         self.assertIn("FROM analytics_events", sql)
         # SQL totals input + output + cache_read + cache_write so
         # the matrix renders token volume rather than event count.
-        for col in (
+        for column in (
             "input_tokens", "output_tokens",
             "cache_read_tokens", "cache_write_tokens",
         ):
-            self.assertIn(col, sql)
+            self.assertIn(column, sql)
 
     def test_legacy_three_tuple_rows_default_tokens_to_zero(self) -> None:
         # Older fixtures still emit 3-tuple `(weekday, hour, count)`

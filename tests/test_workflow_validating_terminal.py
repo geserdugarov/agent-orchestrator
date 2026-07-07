@@ -166,10 +166,10 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         # Label hop: validating -> documenting (NOT directly in_review).
         self.assertIn((9, "documenting"), gh.label_history)
         self.assertNotIn((9, "in_review"), gh.label_history)
-        data = gh.pinned_data(9)
+        state = gh.pinned_data(9)
         # Watermark, approval and squash comments all seeded before the
         # relabel and preserved across the hop.
-        self.assertIsNotNone(data.get("pr_last_comment_id"))
+        self.assertIsNotNone(state.get("pr_last_comment_id"))
         self.assertTrue(any(
             ":white_check_mark:" in body and "approved" in body
             for _, body in gh.posted_pr_comments
@@ -197,9 +197,9 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
                 ),
             )
 
-        data = gh.pinned_data(9)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "verify_failed")
+        state = gh.pinned_data(9)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "verify_failed")
         self.assertNotIn((9, "documenting"), gh.label_history)
         self.assertNotIn((9, "in_review"), gh.label_history)
 
@@ -218,8 +218,8 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
                 squash_result=(False, None, 0, "force-with-lease rejected"),
             )
 
-        data = gh.pinned_data(9)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(9)
+        self.assertTrue(state.get("awaiting_human"))
         # The park comment names the failure so the operator can triage.
         self.assertTrue(any(
             "squash-on-approval failed" in body

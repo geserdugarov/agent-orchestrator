@@ -154,14 +154,14 @@ class HandlePickupInitializesUserContentHashTest(
                 has_new_commits=False,
             )
 
-        data = gh.pinned_data(1)
-        self.assertIn("user_content_hash", data)
+        state = gh.pinned_data(1)
+        self.assertIn("user_content_hash", state)
         # Hash filters the pickup comment by id (it has been recorded in
         # `orchestrator_comment_ids`), so it should match a re-computation
         # over the same set.
-        orch_ids = set(data.get("orchestrator_comment_ids") or [])
+        orch_ids = set(state.get("orchestrator_comment_ids") or [])
         self.assertEqual(
-            data["user_content_hash"],
+            state["user_content_hash"],
             workflow._compute_user_content_hash(issue, orch_ids),
         )
 
@@ -183,8 +183,8 @@ class HandlePickupInitializesUserContentHashTest(
                 ),
             )
 
-        data = gh.pinned_data(2)
-        self.assertIn("user_content_hash", data)
+        state = gh.pinned_data(2)
+        self.assertIn("user_content_hash", state)
 
 
 class UserContentChangePromptIncludesCommentsTest(unittest.TestCase):
@@ -245,8 +245,8 @@ class FirstTimeHashSeedingIsDurableTest(
 
         # Baseline durably persisted by the first-call branch in
         # `_detect_user_content_change`.
-        data = gh.pinned_data(100)
-        self.assertIsNotNone(data.get("user_content_hash"))
+        state = gh.pinned_data(100)
+        self.assertIsNotNone(state.get("user_content_hash"))
 
     def test_blocked_child_no_op_persists_baseline(self) -> None:
         # A `blocked` child waiting on a sibling is a per-tick no-op.
@@ -263,8 +263,8 @@ class FirstTimeHashSeedingIsDurableTest(
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(200)
-        self.assertIsNotNone(data.get("user_content_hash"))
+        state = gh.pinned_data(200)
+        self.assertIsNotNone(state.get("user_content_hash"))
 
 
 class NoCommitAckDoesNotParkTest(
@@ -305,9 +305,9 @@ class NoCommitAckDoesNotParkTest(
             head_shas=["same-sha", "same-sha"],
         )
 
-        data = gh.pinned_data(600)
+        state = gh.pinned_data(600)
         # Crucial: must NOT park as a question.
-        self.assertFalse(data.get("awaiting_human"))
+        self.assertFalse(state.get("awaiting_human"))
         # Dev's ACK justification was posted on the issue as an FYI.
         self.assertTrue(any(
             "existing work satisfies the edit" in body
@@ -351,16 +351,16 @@ class NoCommitAckDoesNotParkTest(
             head_shas=["same", "same"],
         )
 
-        data = gh.pinned_data(700)
+        state = gh.pinned_data(700)
         # Must NOT park (the dev acknowledged, not asked a question).
-        self.assertFalse(data.get("awaiting_human"))
+        self.assertFalse(state.get("awaiting_human"))
         # MUST bounce directly to validating (no documenting hop) so
         # the reviewer re-evaluates against the updated body.
         self.assertIn((700, "validating"), gh.label_history)
         # And NOT through documenting -- no commit landed.
         self.assertNotIn((700, "documenting"), gh.label_history)
         # review_round reset so the validating cap counts fresh rounds.
-        self.assertEqual(data.get("review_round"), 0)
+        self.assertEqual(state.get("review_round"), 0)
         # Dev's reply still posted on the issue as an FYI.
         self.assertTrue(any(
             "existing work satisfies the edit" in body
@@ -415,12 +415,12 @@ class DriftMarksCommentsConsumedTest(
             head_shas=["before", "after"],
         )
 
-        data = gh.pinned_data(900)
+        state = gh.pinned_data(900)
         # last_action_comment_id advanced past the human comment so the
         # eventual handoff to in_review does not classify it as fresh
         # feedback.
         self.assertGreaterEqual(
-            int(data.get("last_action_comment_id")), 5000,
+            int(state.get("last_action_comment_id")), 5000,
         )
 
     def test_in_review_fresh_human_comment_routes_to_fixing_not_drift(
@@ -467,19 +467,19 @@ class DriftMarksCommentsConsumedTest(
         mocks["run_agent"].assert_not_called()
         self.assertIn((910, "fixing"), gh.label_history)
         self.assertNotIn((910, "validating"), gh.label_history)
-        data = gh.pinned_data(910)
+        state = gh.pinned_data(910)
         # The triggering comment is bookmarked for the fixing handler.
-        self.assertEqual(data.get("pending_fix_issue_max_id"), 6000)
+        self.assertEqual(state.get("pending_fix_issue_max_id"), 6000)
         # Hash is updated so the drift check does not re-fire on the
         # same comment change after the fixing handler (or an operator
         # relabel) bounces the issue back to `in_review`.
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
         # Watermark is deliberately left at the route-time value so the
         # fixing handler can read the triggering comment to build its
         # dev-resume prompt (the bookmark above tells it where to start).
         # The fixing handler advances this watermark itself once the
         # consumed feedback has been fed to the dev.
-        self.assertEqual(data.get("pr_last_comment_id"), 0)
+        self.assertEqual(state.get("pr_last_comment_id"), 0)
 
     def test_implementing_drift_bumps_last_action_past_human_comment(
         self,
@@ -513,12 +513,12 @@ class DriftMarksCommentsConsumedTest(
             head_shas=["before-resume", "after-resume"],
         )
 
-        data = gh.pinned_data(920)
+        state = gh.pinned_data(920)
         # The dev's commit goes through `_on_commits` which flips to
         # validating; the validating->in_review handoff later reads
         # last_action_comment_id, so we must have bumped past 7000.
         self.assertGreaterEqual(
-            int(data.get("last_action_comment_id")), 7000,
+            int(state.get("last_action_comment_id")), 7000,
         )
 
     def test_resolving_conflict_drift_bumps_last_action(self) -> None:
@@ -557,12 +557,12 @@ class DriftMarksCommentsConsumedTest(
             head_shas=["before", "after", "after"],
         )
 
-        data = gh.pinned_data(930)
+        state = gh.pinned_data(930)
         # After the pushed resolution flips to validating, the
         # subsequent handoff back to in_review must not replay the human
         # comment that arrived during conflict resolution.
         self.assertGreaterEqual(
-            int(data.get("last_action_comment_id")), 8000,
+            int(state.get("last_action_comment_id")), 8000,
         )
 
 
@@ -748,9 +748,9 @@ class DriftNonAckResponseParksTest(
             head_shas=["same-sha", "same-sha"],
         )
 
-        data = gh.pinned_data(601)
+        state = gh.pinned_data(601)
         # Must park awaiting human so the real question isn't lost.
-        self.assertTrue(data.get("awaiting_human"))
+        self.assertTrue(state.get("awaiting_human"))
         # Must NOT have posted the misleading "satisfies" comment.
         self.assertFalse(any(
             "existing work satisfies the edit" in body
@@ -794,9 +794,9 @@ class DriftNonAckResponseParksTest(
             head_shas=["same", "same"],
         )
 
-        data = gh.pinned_data(701)
+        state = gh.pinned_data(701)
         # Park flagged.
-        self.assertTrue(data.get("awaiting_human"))
+        self.assertTrue(state.get("awaiting_human"))
         # NOT bounced to validating: the dev didn't ack OR commit, so
         # the in_review label is preserved and the human resolves the
         # question.
@@ -840,8 +840,8 @@ class DriftNonAckResponseParksTest(
             head_shas=["sha-before", "sha-before"],
         )
 
-        data = gh.pinned_data(602)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(602)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertFalse(any(
             "existing work satisfies the edit" in body
             for _, body in gh.posted_comments

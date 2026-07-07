@@ -56,15 +56,15 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # agent approves -- not as a pre-review hop.
         self.assertIn((1, "validating"), gh.label_history)
         self.assertNotIn((1, "documenting"), gh.label_history)
-        data = gh.pinned_data(1)
-        self.assertEqual(data["pr_number"], opened.number)
-        self.assertEqual(data["branch"], "orchestrator/geserdugarov__agent-orchestrator/issue-1")
+        state = gh.pinned_data(1)
+        self.assertEqual(state["pr_number"], opened.number)
+        self.assertEqual(state["branch"], "orchestrator/geserdugarov__agent-orchestrator/issue-1")
         # First fresh dev spawn writes the new keys; the legacy field is
         # deliberately not migrated.
-        self.assertEqual(data["dev_agent"], config.DEV_AGENT)
-        self.assertEqual(data["dev_session_id"], "sess-1")
-        self.assertNotIn("codex_session_id", data)
-        self.assertEqual(data["review_round"], 0)
+        self.assertEqual(state["dev_agent"], config.DEV_AGENT)
+        self.assertEqual(state["dev_session_id"], "sess-1")
+        self.assertNotIn("codex_session_id", state)
+        self.assertEqual(state["review_round"], 0)
 
     def test_commits_with_dirty_tree_parks_without_pushing(self) -> None:
         gh, issue = self._seeded()
@@ -95,14 +95,14 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         self.assertEqual(gh.opened_prs, [])
-        data = gh.pinned_data(1)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(1)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("> What database should I use?", last_comment)
         self.assertIn("agent needs your input", last_comment)
         # A real question with content is not a silent failure.
-        self.assertIsNone(data.get("park_reason"))
-        self.assertEqual(data.get("silent_park_count", 0), 0)
+        self.assertIsNone(state.get("park_reason"))
+        self.assertEqual(state.get("silent_park_count", 0), 0)
 
     def test_no_commits_no_message_parks_as_silent_failure(self) -> None:
         # Empty `last_message` AND no commits is the poisoned-resume shape
@@ -118,10 +118,10 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             has_new_commits=False,
         )
 
-        data = gh.pinned_data(1)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "agent_silent")
-        self.assertEqual(data.get("silent_park_count"), 1)
+        state = gh.pinned_data(1)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "agent_silent")
+        self.assertEqual(state.get("silent_park_count"), 1)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("agent produced no output", last_comment)
         self.assertIn("session-resume failure", last_comment)
@@ -152,9 +152,9 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("401 Unauthorized", last_comment)
         self.assertIn("_Agent exit code:_ 1", last_comment)
         self.assertTrue(any(
-            "agent produced no output" in r.getMessage()
-            and "exit_code=1" in r.getMessage()
-            for r in logs.records
+            "agent produced no output" in record.getMessage()
+            and "exit_code=1" in record.getMessage()
+            for record in logs.records
         ))
 
     def test_push_failure_parks_without_opening_pr(self) -> None:
@@ -285,9 +285,9 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
         # No durable state churn: the in-memory `awaiting_human=False` /
         # watermark-bump / session writes are all discarded.
         self.assertEqual(gh.write_state_calls, before_writes)
-        data = gh.pinned_data(70)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("last_action_comment_id"), 900)
+        state = gh.pinned_data(70)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("last_action_comment_id"), 900)
         # No PR, no label flip, no HITL question / timeout park comment.
         self.assertEqual(gh.opened_prs, [])
         self.assertEqual(gh.label_history, [])
@@ -322,10 +322,10 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
         self.assertEqual(gh.write_state_calls, before_writes)
         self.assertEqual(gh.opened_prs, [])
         self.assertEqual(gh.label_history, [])
-        data = gh.pinned_data(71)
+        state = gh.pinned_data(71)
         # The interrupted spawn's session id is NOT persisted -- the next
         # process re-spawns fresh rather than resuming a half-built session.
-        self.assertNotIn("dev_session_id", data)
+        self.assertNotIn("dev_session_id", state)
 
 
 class HandleImplementingRecoveredWorktreeTest(unittest.TestCase, _PatchedWorkflowMixin):

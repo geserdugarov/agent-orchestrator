@@ -54,8 +54,8 @@ class ResolvingConflictDirtyParkingTest(
             )
 
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((200, "validating"), gh.label_history)
 
     def test_agent_left_rebase_in_progress_parks_without_push(self) -> None:
@@ -74,8 +74,8 @@ class ResolvingConflictDirtyParkingTest(
         )
 
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((200, "validating"), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("rebase is still in progress", last_comment)
@@ -106,8 +106,8 @@ class ResolvingConflictDirtyParkingTest(
         mocks["_push_branch"].assert_not_called()
         merge_mock.assert_not_called()
         self.assertNotIn((200, "validating"), gh.label_history)
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted", last_comment)
 
@@ -125,8 +125,8 @@ class ResolvingConflictDirtyParkingTest(
         )
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((200, "validating"), gh.label_history)
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
 
     def test_dirty_clean_rebase_no_op_parks_without_flip(self) -> None:
         # Clean no-op rebase (HEAD didn't change because base hadn't
@@ -144,8 +144,8 @@ class ResolvingConflictDirtyParkingTest(
         )
         mocks["_push_branch"].assert_not_called()
         self.assertNotIn((200, "validating"), gh.label_history)
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
 
 
 if __name__ == "__main__":

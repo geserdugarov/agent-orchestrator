@@ -93,14 +93,14 @@ class ResolvingConflictPublishesAlreadyRebasedTest(
         mocks = self._run_diverged(gh, issue, on_base=True, recognized=True)
         # Force-published over the stale PR head -> validating, no park.
         self.assertIn((310, "validating"), gh.label_history)
-        data = gh.pinned_data(310)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertNotEqual(data.get("park_reason"), "diverged_branch")
-        self.assertEqual(data.get("review_round"), 0)
+        state = gh.pinned_data(310)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertNotEqual(state.get("park_reason"), "diverged_branch")
+        self.assertEqual(state.get("review_round"), 0)
         rounds = [
-            e for e in gh.recorded_events
-            if e.get("event") == "conflict_round"
-            and e.get("action") == "incremented"
+            event for event in gh.recorded_events
+            if event.get("event") == "conflict_round"
+            and event.get("action") == "incremented"
         ]
         self.assertEqual(len(rounds), 1)
         self.assertEqual(rounds[0].get("outcome"), "recovered_push")
@@ -120,9 +120,9 @@ class ResolvingConflictPublishesAlreadyRebasedTest(
         self.assertNotIn((310, "validating"), gh.label_history)
         self.assertTrue(gh.pinned_data(310).get("awaiting_human"))
         parks = [
-            e for e in gh.recorded_events
-            if e.get("event") == "park_awaiting_human"
-            and e.get("reason") == "diverged_branch"
+            event for event in gh.recorded_events
+            if event.get("event") == "park_awaiting_human"
+            and event.get("reason") == "diverged_branch"
         ]
         self.assertEqual(len(parks), 1)
 

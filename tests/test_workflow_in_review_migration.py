@@ -115,10 +115,10 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_not_called()
         self.assertNotIn((150, "validating"), gh.label_history)
         # Watermarks were persisted so subsequent ticks see only newer ids.
-        data = gh.pinned_data(150)
-        self.assertGreaterEqual(data.get("pr_last_comment_id"), 920)
-        self.assertEqual(data.get("pr_last_review_comment_id"), 30)
-        self.assertEqual(data.get("pr_last_review_summary_id"), 4000)
+        state = gh.pinned_data(150)
+        self.assertGreaterEqual(state.get("pr_last_comment_id"), 920)
+        self.assertEqual(state.get("pr_last_review_comment_id"), 30)
+        self.assertEqual(state.get("pr_last_review_summary_id"), 4000)
 
     def test_legacy_first_tick_pings_hitl_for_mergeable_pr(self) -> None:
         # All gates passing: the migration must not park or otherwise
@@ -195,10 +195,10 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
             run_agent=_agent(),
         )
-        data = gh.pinned_data(400)
-        self.assertEqual(data.get("pr_last_review_comment_id"), 0)
-        self.assertEqual(data.get("pr_last_review_summary_id"), 0)
-        self.assertEqual(data.get("pr_last_comment_id"), 0)
+        state = gh.pinned_data(400)
+        self.assertEqual(state.get("pr_last_review_comment_id"), 0)
+        self.assertEqual(state.get("pr_last_review_summary_id"), 0)
+        self.assertEqual(state.get("pr_last_comment_id"), 0)
 
         # Now a human posts the first inline review comment. With the fix,
         # the next tick sees pr_last_review_comment_id=0 (already set) and
@@ -242,8 +242,8 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
             run_agent=_agent(),
         )
-        data = gh.pinned_data(400)
-        self.assertEqual(data.get("pr_last_review_summary_id"), 0)
+        state = gh.pinned_data(400)
+        self.assertEqual(state.get("pr_last_review_summary_id"), 0)
 
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr.reviews.append(

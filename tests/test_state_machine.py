@@ -143,13 +143,13 @@ class TransitionTableTest(unittest.TestCase):
 
     def test_every_target_is_a_workflow_label(self) -> None:
         for targets in ALLOWED_TRANSITIONS.values():
-            for t in targets:
-                self.assertIsInstance(t, WorkflowLabel)
+            for target in targets:
+                self.assertIsInstance(target, WorkflowLabel)
 
     def test_question_has_no_inbound_edge(self) -> None:
         # `question` is operator-applied only; nothing transitions INTO it.
-        for src, targets in ALLOWED_TRANSITIONS.items():
-            self.assertNotIn(WorkflowLabel.QUESTION, targets, src)
+        for source, targets in ALLOWED_TRANSITIONS.items():
+            self.assertNotIn(WorkflowLabel.QUESTION, targets, source)
 
     def test_entry_is_not_terminalizable(self) -> None:
         # An unlabeled issue only decomposes or implements -- never jumps
@@ -170,12 +170,12 @@ class TransitionTableTest(unittest.TestCase):
         # Drift meta-test: every `set_workflow_label(..., WorkflowLabel.X)`
         # target in the package must be an allowed target somewhere in the
         # table, so a new write site can't outrun the declared graph.
-        pkg = pathlib.Path(github.__file__).parent
-        pat = re.compile(r"set_workflow_label\([^)]*?WorkflowLabel\.([A-Z_]+)")
+        package = pathlib.Path(github.__file__).parent
+        pattern = re.compile(r"set_workflow_label\([^)]*?WorkflowLabel\.([A-Z_]+)")
         emitted: set[WorkflowLabel] = set()
-        for py in pkg.rglob("*.py"):
-            for m in pat.finditer(py.read_text()):
-                emitted.add(WorkflowLabel[m.group(1)])
+        for py_file in package.rglob("*.py"):
+            for match in pattern.finditer(py_file.read_text()):
+                emitted.add(WorkflowLabel[match.group(1)])
         reachable: set[WorkflowLabel] = set().union(*ALLOWED_TRANSITIONS.values())
         self.assertTrue(emitted, "scan found no set_workflow_label targets")
         self.assertLessEqual(emitted, reachable, emitted - reachable)
@@ -208,9 +208,9 @@ class TransitionTableTest(unittest.TestCase):
         # not a real state, so it is skipped rather than required to co-reach.
         terminals = {WorkflowLabel.DONE, WorkflowLabel.REJECTED}
         reverse: dict[WorkflowLabel, set[WorkflowLabel | None]] = {}
-        for src, targets in ALLOWED_TRANSITIONS.items():
+        for source, targets in ALLOWED_TRANSITIONS.items():
             for target in targets:
-                reverse.setdefault(target, set()).add(src)
+                reverse.setdefault(target, set()).add(source)
         seen = set(terminals)
         frontier = list(terminals)
         while frontier:

@@ -113,7 +113,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `in_review`. The squash / watermark state rides through the hop
         # untouched.
         self.assertIn((5, "documenting"), gh.label_history)
-        data = gh.pinned_data(5)
+        state = gh.pinned_data(5)
         # The squash notice was posted to the PR conversation.
         squash_notice_posted = any(
             ":package: squashed 3 commits to 1" in body
@@ -125,10 +125,10 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         # Watermark must include the squash comment so the next in_review
         # tick does not see it as fresh PR feedback once debounce expires.
-        approval_and_squash_ids = [c.id for c in pr.issue_comments]
+        approval_and_squash_ids = [comment.id for comment in pr.issue_comments]
         self.assertTrue(approval_and_squash_ids)
         self.assertGreaterEqual(
-            data.get("pr_last_comment_id"), max(approval_and_squash_ids),
+            state.get("pr_last_comment_id"), max(approval_and_squash_ids),
             "pr_last_comment_id must advance past both the approval and "
             "the squash PR comments",
         )
@@ -139,11 +139,11 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         # the reviewer agent (its run_agent call would otherwise be
         # visible in mocks_r below).
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
-        for c in list(issue.comments) + list(pr.issue_comments):
-            if c.created_at is None:
-                c.created_at = long_ago
+        for comment in list(issue.comments) + list(pr.issue_comments):
+            if comment.created_at is None:
+                comment.created_at = long_ago
         pr.approved = True
-        if not any(l.name == "in_review" for l in issue.labels):
+        if not any(label.name == "in_review" for label in issue.labels):
             issue.labels = [FakeLabel("in_review")]
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
@@ -189,8 +189,8 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(mocks["_squash_and_force_push"].call_count, 1)
         # Park happened: awaiting_human flag set, HITL message posted to
         # the issue thread.
-        data = gh.pinned_data(5)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(5)
+        self.assertTrue(state.get("awaiting_human"))
         park_posted = any(
             "squash-on-approval failed" in body
             for _, body in gh.posted_comments
@@ -329,7 +329,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
             "log", "--reverse", "--pretty=%s", "origin/main..HEAD",
             cwd=self.work,
         )
-        return [s for s in out.splitlines() if s.strip()]
+        return [line for line in out.splitlines() if line.strip()]
 
     def test_squash_collapses_three_commits_to_one(self) -> None:
         # First commit's subject ("fix: typo") is conventional-commit form,

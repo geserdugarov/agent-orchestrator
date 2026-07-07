@@ -86,7 +86,7 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
             workflow._sweep_community_contribution_prs(gh, _TEST_SPEC)
         # Still labeled exactly once, no duplicate comment.
-        names = [l.name for l in gh.pulls[3].labels]
+        names = [label.name for label in gh.pulls[3].labels]
         self.assertEqual(names.count(COMMUNITY_CONTRIBUTION_LABEL), 1)
         self.assertEqual(gh.posted_pr_comments, [])
 
@@ -119,7 +119,7 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
             gh.pr_has_label(gh.pulls[2], COMMUNITY_CONTRIBUTION_LABEL)
         )
         self.assertEqual(
-            sorted(n for n, _ in gh.posted_pr_comments), [1, 2]
+            sorted(number for number, _ in gh.posted_pr_comments), [1, 2]
         )
 
     def test_comment_failure_leaves_pr_unlabeled_for_retry(self) -> None:
@@ -144,7 +144,7 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
         self.assertTrue(
             gh.pr_has_label(gh.pulls[11], COMMUNITY_CONTRIBUTION_LABEL)
         )
-        self.assertEqual([n for n, _ in gh.posted_pr_comments], [11])
+        self.assertEqual([number for number, _ in gh.posted_pr_comments], [11])
 
     def test_enumeration_failure_is_swallowed(self) -> None:
         gh = FakeGitHubClient()

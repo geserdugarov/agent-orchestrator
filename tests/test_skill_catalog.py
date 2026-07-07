@@ -154,24 +154,24 @@ class RecordRepoSkillCatalogShapeTest(unittest.TestCase):
             },
         )
         self.assertEqual(len(captured), 1)
-        rec = captured[0]
-        self.assertEqual(rec["event"], "repo_skill_catalog")
+        record = captured[0]
+        self.assertEqual(record["event"], "repo_skill_catalog")
         # Repo-level event: issue is the sentinel 0 so the record still
         # satisfies the ts/repo/issue/event envelope without a DDL change.
-        self.assertEqual(rec["issue"], 0)
-        self.assertEqual(rec["repo"], "geserdugarov/agent-orchestrator")
-        self.assertEqual(rec["base_branch"], "main")
-        self.assertEqual(rec["remote_name"], "origin")
-        self.assertEqual(rec["skills_available"], ["develop", "review"])
+        self.assertEqual(record["issue"], 0)
+        self.assertEqual(record["repo"], "geserdugarov/agent-orchestrator")
+        self.assertEqual(record["base_branch"], "main")
+        self.assertEqual(record["remote_name"], "origin")
+        self.assertEqual(record["skills_available"], ["develop", "review"])
         self.assertEqual(
-            rec["skill_paths"]["review"],
+            record["skill_paths"]["review"],
             [
                 ".agents/skills/review/SKILL.md",
                 ".claude/skills/review/SKILL.md",
             ],
         )
-        self.assertIsInstance(rec["ts"], str)
-        self.assertNotIn("stage", rec)
+        self.assertIsInstance(record["ts"], str)
+        self.assertNotIn("stage", record)
 
     def test_empty_catalog_keeps_skills_available_drops_skill_paths(
         self,
@@ -186,9 +186,9 @@ class RecordRepoSkillCatalogShapeTest(unittest.TestCase):
             skills_available=[],
             skill_paths=None,
         )
-        rec = captured[0]
-        self.assertEqual(rec["skills_available"], [])
-        self.assertNotIn("skill_paths", rec)
+        record = captured[0]
+        self.assertEqual(record["skills_available"], [])
+        self.assertNotIn("skill_paths", record)
 
 
 class ListSkillTreeTest(unittest.TestCase):
@@ -332,9 +332,9 @@ class TickEmitsRepoSkillCatalogTest(unittest.TestCase):
 
 def _make_skill(root: Path, name: str) -> None:
     """Create a `<root>/<name>/SKILL.md` skill definition under `root`."""
-    d = root / name
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# skill\n", encoding="utf-8")
 
 
 class DiscoverLocalSkillsTest(unittest.TestCase):
@@ -432,7 +432,7 @@ class DiscoverCodexToolsTest(unittest.TestCase):
         self.assertIn("exec_command", tools)
         self.assertIn("web_search", tools)
         # De-duplicated, non-empty names only.
-        self.assertTrue(all(isinstance(t, str) and t for t in tools))
+        self.assertTrue(all(isinstance(tool, str) and tool for tool in tools))
         self.assertEqual(len(tools), len(set(tools)))
 
 

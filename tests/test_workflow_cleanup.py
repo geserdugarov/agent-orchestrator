@@ -69,14 +69,14 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         # Worktree remove issued first, then rev-parse to probe the local
         # branch, then `branch -D`. The remote-side delete recorder confirms
         # gh.delete_remote_branch was called with the per-issue branch.
-        cmds = [c.args[0] for c in git_mock.call_args_list]
+        cmds = [call.args[0] for call in git_mock.call_args_list]
         self.assertEqual(
             cmds[:3],
             ["worktree", "rev-parse", "branch"],
         )
         # The branch -D invocation targets the per-issue branch by name.
         branch_call = next(
-            c for c in git_mock.call_args_list if c.args[0] == "branch"
+            call for call in git_mock.call_args_list if call.args[0] == "branch"
         )
         self.assertEqual(branch_call.args[1], "-D")
         self.assertEqual(branch_call.args[2], self.BRANCH)
@@ -90,7 +90,7 @@ class CleanupTerminalBranchTest(unittest.TestCase):
             worktree_exists=False, local_branch_exists=True,
         )
 
-        cmds = [c.args[0] for c in git_mock.call_args_list]
+        cmds = [call.args[0] for call in git_mock.call_args_list]
         self.assertNotIn("worktree", cmds)
         self.assertIn("rev-parse", cmds)
         self.assertIn("branch", cmds)
@@ -104,7 +104,7 @@ class CleanupTerminalBranchTest(unittest.TestCase):
             worktree_exists=True, local_branch_exists=False,
         )
 
-        cmds = [c.args[0] for c in git_mock.call_args_list]
+        cmds = [call.args[0] for call in git_mock.call_args_list]
         self.assertIn("worktree", cmds)
         self.assertIn("rev-parse", cmds)
         self.assertNotIn("branch", cmds)

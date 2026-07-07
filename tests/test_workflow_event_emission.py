@@ -40,14 +40,14 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         gh.set_workflow_label(issue, "implementing")
         self.assertEqual(len(gh.recorded_events), 1)
-        ev = gh.recorded_events[0]
-        self.assertEqual(ev["event"], "stage_enter")
-        self.assertEqual(ev["stage"], "implementing")
-        self.assertEqual(ev["issue"], 1)
-        self.assertEqual(ev["repo"], "geserdugarov/agent-orchestrator")
-        self.assertIn("ts", ev)
+        event = gh.recorded_events[0]
+        self.assertEqual(event["event"], "stage_enter")
+        self.assertEqual(event["stage"], "implementing")
+        self.assertEqual(event["issue"], 1)
+        self.assertEqual(event["repo"], "geserdugarov/agent-orchestrator")
+        self.assertIn("ts", event)
         # UTC timestamp, ISO 8601 with offset.
-        datetime.fromisoformat(ev["ts"])
+        datetime.fromisoformat(event["ts"])
 
     def test_none_label_does_not_emit(self) -> None:
         # Clearing the workflow label is not a stage; the helper must
@@ -72,7 +72,10 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
                 run_agent=_agent(last_message="need clarification"),
                 has_new_commits=False,
             )
-        stages = [e["stage"] for e in gh.recorded_events if e["event"] == "stage_enter"]
+        stages = [
+            event["stage"] for event in gh.recorded_events
+            if event["event"] == "stage_enter"
+        ]
         self.assertIn("decomposing", stages)
 
     def test_event_log_path_writes_one_jsonl_object_per_line(self) -> None:
@@ -95,15 +98,15 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(len(lines), 3)
             records = [json.loads(line) for line in lines]
             self.assertEqual(
-                [r["stage"] for r in records],
+                [record["stage"] for record in records],
                 ["implementing", "validating", "documenting"],
             )
-            for r in records:
-                self.assertEqual(r["event"], "stage_enter")
-                self.assertEqual(r["issue"], 7)
-                self.assertEqual(r["repo"], "geserdugarov/agent-orchestrator")
+            for record in records:
+                self.assertEqual(record["event"], "stage_enter")
+                self.assertEqual(record["issue"], 7)
+                self.assertEqual(record["repo"], "geserdugarov/agent-orchestrator")
                 # ts must be a valid ISO-8601 UTC timestamp.
-                ts = datetime.fromisoformat(r["ts"])
+                ts = datetime.fromisoformat(record["ts"])
                 self.assertEqual(ts.tzinfo, timezone.utc)
             # JSONL invariant: exactly one object per line, no blank lines.
             for line in lines:
@@ -139,9 +142,9 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     @staticmethod
     def _events(gh, event_name: str) -> list[dict]:
-        return [e for e in gh.recorded_events if e["event"] == event_name]
+        return [event for event in gh.recorded_events if event["event"] == event_name]
 
-    def test_fresh_developer_spawn_emits_paired_lifecycle_events(self) -> None:
+    def test_fresh_developer_spawn_emits_paired_events(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(1, label="implementing")
         gh.add_issue(issue)
@@ -155,20 +158,20 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(len(spawns), 1)
         self.assertEqual(len(exits), 1)
         spawn = spawns[0]
-        ex = exits[0]
+        exit_event = exits[0]
         self.assertEqual(spawn["stage"], "implementing")
         self.assertEqual(spawn["agent_role"], "developer")
         self.assertEqual(spawn["agent"], config.DEV_AGENT)
         self.assertNotIn("session_id", spawn)  # fresh spawn -- no resume id
-        self.assertEqual(ex["session_id"], "sess-dev")
-        self.assertEqual(ex["exit_code"], 0)
-        self.assertFalse(ex["timed_out"])
-        self.assertIn("duration_s", ex)
-        self.assertGreaterEqual(ex["duration_s"], 0)
+        self.assertEqual(exit_event["session_id"], "sess-dev")
+        self.assertEqual(exit_event["exit_code"], 0)
+        self.assertFalse(exit_event["timed_out"])
+        self.assertIn("duration_s", exit_event)
+        self.assertGreaterEqual(exit_event["duration_s"], 0)
         # retry_count is incremented to 1 by `_check_and_increment_retry_budget`
         # BEFORE the spawn, so the recorded value is what the agent ran under.
         self.assertEqual(spawn["retry_count"], 1)
-        self.assertEqual(ex["retry_count"], 1)
+        self.assertEqual(exit_event["retry_count"], 1)
 
     def test_reviewer_spawn_carries_review_round_and_retry_count(self) -> None:
         gh = FakeGitHubClient()
@@ -199,8 +202,8 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
         spawns = self._events(gh, "agent_spawn")
         exits = self._events(gh, "agent_exit")
-        reviewer_spawns = [s for s in spawns if s["agent_role"] == "reviewer"]
-        reviewer_exits = [e for e in exits if e["agent_role"] == "reviewer"]
+        reviewer_spawns = [event for event in spawns if event["agent_role"] == "reviewer"]
+        reviewer_exits = [event for event in exits if event["agent_role"] == "reviewer"]
         self.assertEqual(len(reviewer_spawns), 1)
         self.assertEqual(len(reviewer_exits), 1)
         self.assertEqual(reviewer_spawns[0]["stage"], "validating")

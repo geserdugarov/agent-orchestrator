@@ -21,7 +21,7 @@ class ConnReusePathTest(unittest.TestCase):
     the `connect=` factory or closing the connection.
     """
 
-    def test_get_summary_reuses_passed_conn_without_calling_factory(self) -> None:
+    def test_get_summary_reuses_passed_conn(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         # A single combined-SQL row is enough so the reader does not

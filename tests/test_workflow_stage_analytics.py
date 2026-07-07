@@ -56,9 +56,9 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
                  patch.object(workflow, "_handle_implementing"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
             records = [
-                r for r in self._records(path)
-                if r.get("event") == "stage_evaluation"
-                and r.get("issue") == 8001
+                record for record in self._records(path)
+                if record.get("event") == "stage_evaluation"
+                and record.get("issue") == 8001
             ]
         self.assertEqual(len(records), 1)
         rec = records[0]
@@ -86,9 +86,9 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
                  patch.object(workflow, "_handle_pickup"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
             records = [
-                r for r in self._records(path)
-                if r.get("event") == "stage_evaluation"
-                and r.get("issue") == 8002
+                record for record in self._records(path)
+                if record.get("event") == "stage_evaluation"
+                and record.get("issue") == 8002
             ]
         self.assertEqual(len(records), 1)
         rec = records[0]
@@ -117,9 +117,9 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
                     workflow._process_issue(gh, _TEST_SPEC, issue)
                 self.assertIs(ctx.exception, sentinel)
             records = [
-                r for r in self._records(path)
-                if r.get("event") == "stage_evaluation"
-                and r.get("issue") == 8003
+                record for record in self._records(path)
+                if record.get("event") == "stage_evaluation"
+                and record.get("issue") == 8003
             ]
         self.assertEqual(len(records), 1)
         rec = records[0]
@@ -191,14 +191,14 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
             records = self._records(path)
         self.assertEqual(len(records), 2)
         self.assertEqual(
-            [r["stage"] for r in records],
+            [record["stage"] for record in records],
             ["implementing", "validating"],
         )
-        for r in records:
-            self.assertEqual(r["event"], "stage_enter")
-            self.assertEqual(r["issue"], 8101)
-            self.assertEqual(r["repo"], "geserdugarov/agent-orchestrator")
-            datetime.fromisoformat(r["ts"])
+        for record in records:
+            self.assertEqual(record["event"], "stage_enter")
+            self.assertEqual(record["issue"], 8101)
+            self.assertEqual(record["repo"], "geserdugarov/agent-orchestrator")
+            datetime.fromisoformat(record["ts"])
 
     def test_label_cleared_to_none_does_not_emit_record(self) -> None:
         # Mirrors the existing `_emit_stage_enter` no-op for None labels:

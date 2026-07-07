@@ -49,19 +49,19 @@ class HandleReadyRoutesBackOnHashChangeTest(
         # Routed back to decomposing; the implementer must NOT have run
         # this tick.
         self.assertIn((50, "decomposing"), gh.label_history)
-        data = gh.pinned_data(50)
+        state = gh.pinned_data(50)
         # Session id dropped so the next tick spawns fresh, but the
         # recorded `decomposer_agent` spec is PRESERVED -- the
         # lock-on-first-spawn rule (see FullSpecPersistenceTest) means
         # a mid-flight config flip must not retarget the issue's
         # recorded role identity. The fresh spawn uses the recorded
         # spec via `_read_decomposer_session`.
-        self.assertIsNone(data.get("decomposer_session_id"))
-        self.assertEqual(data.get("decomposer_agent"), "claude")
+        self.assertIsNone(state.get("decomposer_session_id"))
+        self.assertEqual(state.get("decomposer_agent"), "claude")
         # New hash now persisted so the next decomposing tick sees a
         # stable baseline.
         self.assertNotEqual(
-            data.get("user_content_hash"), "stale-hash-from-prior-tick",
+            state.get("user_content_hash"), "stale-hash-from-prior-tick",
         )
         # A human-visible notice is posted.
         self.assertTrue(any(
@@ -143,10 +143,10 @@ class HandleDecomposingResetsSessionOnHashChangeTest(
         mocks["run_agent"].assert_called_once()
         kwargs = mocks["run_agent"].call_args.kwargs
         self.assertIsNone(kwargs.get("resume_session_id"))
-        data = gh.pinned_data(90)
+        state = gh.pinned_data(90)
         # The new session id from the fresh spawn was persisted, not the
         # stale one.
-        self.assertEqual(data.get("decomposer_session_id"), "new-sess")
+        self.assertEqual(state.get("decomposer_session_id"), "new-sess")
         # Notice posted.
         self.assertTrue(any(
             "issue content changed" in body
@@ -187,12 +187,12 @@ class HandleBlockedHashDriftTest(
         # back to decomposing"). The next tick spawns a fresh decomposer
         # against the new body.
         self.assertIn((300, "decomposing"), gh.label_history)
-        data = gh.pinned_data(300)
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(300)
+        self.assertFalse(state.get("awaiting_human"))
         # Manifest state cleared so half-finished-recovery does not fire.
-        self.assertEqual(data.get("children"), [])
-        self.assertIsNone(data.get("decomposer_session_id"))
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertEqual(state.get("children"), [])
+        self.assertIsNone(state.get("decomposer_session_id"))
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
         # Notice explicitly lists the now-orphaned child so the operator
         # knows to close it manually if it no longer applies.
         notice = next(
@@ -223,8 +223,8 @@ class HandleBlockedHashDriftTest(
         )
 
         self.assertIn((310, "decomposing"), gh.label_history)
-        data = gh.pinned_data(310)
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        state = gh.pinned_data(310)
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
         # Notice posted; no orphans for a child with no own children.
         notice = next(
             body for _, body in gh.posted_comments
@@ -269,7 +269,7 @@ class HandleUmbrellaHashDriftTest(
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(400)
+        state = gh.pinned_data(400)
         # Routed back to decomposing per spec.
         self.assertIn((400, "decomposing"), gh.label_history)
         # Crucially: did NOT close the umbrella to `done`.
@@ -277,9 +277,9 @@ class HandleUmbrellaHashDriftTest(
         self.assertFalse(umbrella.closed)
         # Manifest state cleared so half-finished-recovery does not fire
         # against the stale children list / umbrella flag.
-        self.assertEqual(data.get("children"), [])
-        self.assertIsNone(data.get("umbrella"))
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertEqual(state.get("children"), [])
+        self.assertIsNone(state.get("umbrella"))
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
         # Orphans listed in the notice.
         notice = next(
             body for _, body in gh.posted_comments

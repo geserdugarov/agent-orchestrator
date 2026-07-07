@@ -146,7 +146,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((62, "done"), gh.label_history)
         self.assertFalse(parent.closed)
         self.assertEqual(
-            [b for n, b in gh.posted_comments if n == 62], [],
+            [body for n, body in gh.posted_comments if n == 62], [],
         )
 
     def test_rejected_child_parks_umbrella(self) -> None:
@@ -159,8 +159,8 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(63)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(63)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((63, "done"), gh.label_history)
         self.assertFalse(parent.closed)
         last_comment = gh.posted_comments[-1][1]
@@ -184,8 +184,8 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(64)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(64)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((64, "done"), gh.label_history)
         self.assertFalse(parent.closed)
         last_comment = gh.posted_comments[-1][1]
@@ -236,10 +236,10 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertTrue(
             any(
-                "umbrella parent" in m
-                and "1 held" in m
-                and f"#{children[1].number} waits on #{children[0].number}" in m
-                for m in cm.output
+                "umbrella parent" in line
+                and "1 held" in line
+                and f"#{children[1].number} waits on #{children[0].number}" in line
+                for line in cm.output
             ),
             cm.output,
         )
@@ -272,7 +272,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(66)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(66)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((66, "done"), gh.label_history)
         self.assertFalse(parent.closed)

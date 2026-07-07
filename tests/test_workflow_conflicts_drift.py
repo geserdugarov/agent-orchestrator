@@ -110,10 +110,10 @@ class HandleResolvingConflictHashDriftTest(
         # No durable state churn: the refreshed `user_content_hash`,
         # consumed-comment, and session mutations are all discarded.
         self.assertEqual(gh.write_state_calls, before_writes)
-        data = gh.pinned_data(501)
-        self.assertEqual(data.get("user_content_hash"), "stale-hash")
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertEqual(data.get("conflict_round"), 0)
+        state = gh.pinned_data(501)
+        self.assertEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertEqual(state.get("conflict_round"), 0)
         # No flip back to validating and no HITL question / ack on the issue.
         self.assertNotIn((501, "validating"), gh.label_history)
         self.assertFalse(any(

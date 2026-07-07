@@ -45,8 +45,8 @@ class ResolvingConflictStaleDivergedTest(
         merge_mock.assert_not_called()
         mocks["_push_branch"].assert_not_called()
         mocks["run_agent"].assert_not_called()
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((200, "validating"), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("stale or diverged", last_comment)
@@ -69,8 +69,8 @@ class ResolvingConflictStaleDivergedTest(
             )
         merge_mock.assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(200)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((200, "validating"), gh.label_history)
 
 

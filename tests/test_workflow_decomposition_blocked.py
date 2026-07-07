@@ -78,7 +78,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No label flip on parent and no comment posted on the parent.
         self.assertNotIn((31, "ready"), gh.label_history)
         self.assertEqual(
-            [b for n, b in gh.posted_comments if n == 31], [],
+            [body for n, body in gh.posted_comments if n == 31], [],
         )
 
     def test_rejected_child_parks_parent(self) -> None:
@@ -92,8 +92,8 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(32)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(32)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("rejected", last_comment)
         self.assertIn(f"#{children[1].number}", last_comment)
@@ -126,8 +126,8 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(40)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(40)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("closed without reaching", last_comment)
         self.assertIn("#402", last_comment)
@@ -163,8 +163,8 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(41)
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(41)
+        self.assertFalse(state.get("awaiting_human"))
         # Parent stays `blocked`: no `ready` flip while other_child is
         # still implementing, and no manual-close park comment posted.
         self.assertNotIn((41, "ready"), gh.label_history)
@@ -192,8 +192,8 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(42)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(42)
+        self.assertTrue(state.get("awaiting_human"))
         self.assertTrue(any(
             "closed without reaching" in body and "#421" in body
             for _, body in gh.posted_comments
@@ -242,10 +242,10 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertTrue(
             any(
-                "blocked parent" in m
-                and "1 held" in m
-                and f"#{children[1].number} waits on #{children[0].number}" in m
-                for m in cm.output
+                "blocked parent" in line
+                and "1 held" in line
+                and f"#{children[1].number} waits on #{children[0].number}" in line
+                for line in cm.output
             ),
             cm.output,
         )
@@ -279,8 +279,8 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(34)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(34)
+        self.assertTrue(state.get("awaiting_human"))
 
     def test_blocked_child_with_parent_number_is_noop(self) -> None:
         # A dependency-blocked child created by the decomposer carries
@@ -304,8 +304,8 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        data = gh.pinned_data(35)
-        self.assertFalse(data.get("awaiting_human"))
+        state = gh.pinned_data(35)
+        self.assertFalse(state.get("awaiting_human"))
         self.assertEqual(gh.posted_comments, before_comments)
         self.assertEqual(gh.label_history, before_labels)
 
@@ -365,6 +365,6 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         self.assertIn((38, "ready"), gh.label_history)
-        data = gh.pinned_data(38)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        state = gh.pinned_data(38)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))

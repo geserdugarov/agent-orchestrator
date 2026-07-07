@@ -25,7 +25,7 @@ class ListPollableIssuesTest(unittest.TestCase):
         gh.add_issue(make_issue(1, label="implementing"))
         gh.add_issue(make_issue(2, label="validating"))
         out = list(gh.list_pollable_issues())
-        self.assertEqual({i.number for i in out}, {1, 2})
+        self.assertEqual({issue.number for issue in out}, {1, 2})
 
     def test_includes_closed_in_review_for_external_merge_finalization(self) -> None:
         gh = FakeGitHubClient()
@@ -35,9 +35,9 @@ class ListPollableIssuesTest(unittest.TestCase):
         # Closed but no in_review label: must be skipped (already finalized).
         closed_done = make_issue(8, label="done")
         closed_done.closed = True
-        for i in (open_issue, closed_in_review, closed_done):
-            gh.add_issue(i)
-        out = {i.number for i in gh.list_pollable_issues()}
+        for issue in (open_issue, closed_in_review, closed_done):
+            gh.add_issue(issue)
+        out = {issue.number for issue in gh.list_pollable_issues()}
         self.assertEqual(out, {1, 7})
 
     def test_includes_closed_question_for_terminal_cleanup(self) -> None:
@@ -50,9 +50,9 @@ class ListPollableIssuesTest(unittest.TestCase):
         open_issue = make_issue(1, label="implementing")
         closed_question = make_issue(9, label="question")
         closed_question.closed = True
-        for i in (open_issue, closed_question):
-            gh.add_issue(i)
-        out = {i.number for i in gh.list_pollable_issues()}
+        for issue in (open_issue, closed_question):
+            gh.add_issue(issue)
+        out = {issue.number for issue in gh.list_pollable_issues()}
         self.assertEqual(out, {1, 9})
 
 
@@ -68,7 +68,7 @@ class ListPollableIssuesClosedSweepTest(unittest.TestCase):
         closed = make_issue(301, label="implementing")
         closed.closed = True
         gh.add_issue(closed)
-        yielded = [i.number for i in gh.list_pollable_issues()]
+        yielded = [issue.number for issue in gh.list_pollable_issues()]
         self.assertIn(301, yielded)
 
     def test_closed_documenting_is_yielded(self) -> None:
@@ -76,7 +76,7 @@ class ListPollableIssuesClosedSweepTest(unittest.TestCase):
         closed = make_issue(302, label="documenting")
         closed.closed = True
         gh.add_issue(closed)
-        yielded = [i.number for i in gh.list_pollable_issues()]
+        yielded = [issue.number for issue in gh.list_pollable_issues()]
         self.assertIn(302, yielded)
 
     def test_closed_validating_is_yielded(self) -> None:
@@ -84,7 +84,7 @@ class ListPollableIssuesClosedSweepTest(unittest.TestCase):
         closed = make_issue(303, label="validating")
         closed.closed = True
         gh.add_issue(closed)
-        yielded = [i.number for i in gh.list_pollable_issues()]
+        yielded = [issue.number for issue in gh.list_pollable_issues()]
         self.assertIn(303, yielded)
 
 
@@ -102,7 +102,7 @@ class ClosedSweepCadenceTest(unittest.TestCase):
         gh.add_issue(closed)
         # Default knob (1): the closed issue surfaces on every call.
         for _ in range(3):
-            out = {i.number for i in gh.list_pollable_issues()}
+            out = {issue.number for issue in gh.list_pollable_issues()}
             self.assertEqual(out, {1, 7})
 
     def test_throttled_sweep_runs_on_first_then_every_nth_call(self) -> None:
@@ -113,12 +113,12 @@ class ClosedSweepCadenceTest(unittest.TestCase):
         gh.add_issue(closed)
         with mock.patch.object(config, "CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", 3):
             # Call 1 (first): sweep runs -> closed issue present.
-            self.assertEqual({i.number for i in gh.list_pollable_issues()}, {1, 7})
+            self.assertEqual({issue.number for issue in gh.list_pollable_issues()}, {1, 7})
             # Calls 2 and 3: sweep skipped -> open issue only.
-            self.assertEqual({i.number for i in gh.list_pollable_issues()}, {1})
-            self.assertEqual({i.number for i in gh.list_pollable_issues()}, {1})
+            self.assertEqual({issue.number for issue in gh.list_pollable_issues()}, {1})
+            self.assertEqual({issue.number for issue in gh.list_pollable_issues()}, {1})
             # Call 4 (== first + N): sweep runs again.
-            self.assertEqual({i.number for i in gh.list_pollable_issues()}, {1, 7})
+            self.assertEqual({issue.number for issue in gh.list_pollable_issues()}, {1, 7})
 
     def test_throttle_never_drops_open_issues(self) -> None:
         gh = FakeGitHubClient()
@@ -126,7 +126,7 @@ class ClosedSweepCadenceTest(unittest.TestCase):
         gh.add_issue(make_issue(2, label="validating"))
         with mock.patch.object(config, "CLOSED_ISSUE_SWEEP_EVERY_N_TICKS", 5):
             for _ in range(5):
-                out = {i.number for i in gh.list_pollable_issues()}
+                out = {issue.number for issue in gh.list_pollable_issues()}
                 self.assertEqual(out, {1, 2})
 
 

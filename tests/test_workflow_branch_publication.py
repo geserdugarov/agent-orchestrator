@@ -30,19 +30,19 @@ class PushBranchTest(unittest.TestCase):
 
     @staticmethod
     def _ok(stdout: str = "", stderr: str = "") -> "object":
-        r = MagicMock()
-        r.returncode = 0
-        r.stdout = stdout
-        r.stderr = stderr
-        return r
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = stdout
+        result.stderr = stderr
+        return result
 
     @staticmethod
     def _fail(stderr: str = "boom") -> "object":
-        r = MagicMock()
-        r.returncode = 128
-        r.stdout = ""
-        r.stderr = stderr
-        return r
+        result = MagicMock()
+        result.returncode = 128
+        result.stdout = ""
+        result.stderr = stderr
+        return result
 
     def _patch(self, run_results: list) -> "tuple":
         run_mock = MagicMock(side_effect=run_results)
@@ -56,9 +56,7 @@ class PushBranchTest(unittest.TestCase):
         run_patch = patch.object(workflow.subprocess, "run", run_mock)
         return run_mock, token_patch, run_patch
 
-    def test_existing_remote_branch_force_with_lease_uses_observed_sha(
-        self,
-    ) -> None:
+    def test_existing_remote_branch_uses_observed_sha(self) -> None:
         # rewrite check (clean), ls-remote (returns sha), push (ok)
         sha = "87b2bc94b03a1729ef8b8145836d0959f433600e"
         ls_stdout = f"{sha}\trefs/heads/orchestrator/issue-5\n"

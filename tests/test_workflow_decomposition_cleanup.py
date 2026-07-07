@@ -57,11 +57,11 @@ class ReadyDriftClearsStaleManifestStateTest(
         # `expected_children_count is not None OR children is non-empty`)
         # cannot fire and short-circuit the re-decompose.
         self.assertIn((800, "decomposing"), gh.label_history)
-        data = gh.pinned_data(800)
-        self.assertEqual(data.get("children"), [])
-        self.assertIsNone(data.get("expected_children_count"))
-        self.assertEqual(data.get("dep_graph"), {})
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        state = gh.pinned_data(800)
+        self.assertEqual(state.get("children"), [])
+        self.assertIsNone(state.get("expected_children_count"))
+        self.assertEqual(state.get("dep_graph"), {})
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
         # Orphaned children listed in the notice so the operator can
         # close any that no longer apply.
         notice = next(
@@ -126,12 +126,12 @@ class DecomposingDriftBeforeHalfFinishedRecoveryTest(
         mocks["run_agent"].assert_called_once()
         # Manifest tracking cleared so the recovery branch cannot
         # fire on subsequent ticks against the stale state.
-        data = gh.pinned_data(1100)
-        self.assertEqual(data.get("children"), [])
-        self.assertIsNone(data.get("expected_children_count"))
-        self.assertEqual(data.get("dep_graph"), {})
+        state = gh.pinned_data(1100)
+        self.assertEqual(state.get("children"), [])
+        self.assertIsNone(state.get("expected_children_count"))
+        self.assertEqual(state.get("dep_graph"), {})
         # New hash baseline persisted.
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
         # Parent did NOT finalize to `blocked` against the stale
         # manifest; instead the fresh decomposer voted `single` -> `ready`.
         self.assertNotIn((1100, "blocked"), gh.label_history)

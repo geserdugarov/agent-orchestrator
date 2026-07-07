@@ -74,8 +74,8 @@ class HandleImplementingResumeOnHashChangeTest(
         self.assertNotIn((60, "decomposing"), gh.label_history)
         self.assertIn((60, "validating"), gh.label_history)
         self.assertNotIn((60, "documenting"), gh.label_history)
-        data = gh.pinned_data(60)
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        state = gh.pinned_data(60)
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
         self.assertTrue(any(
             "issue body changed" in body
             for _, body in gh.posted_comments
@@ -121,8 +121,8 @@ class HandleImplementingResumeOnHashChangeTest(
             for _, body in gh.posted_comments
         ))
         # But the new hash is persisted.
-        data = gh.pinned_data(61)
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        state = gh.pinned_data(61)
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
 
 
 class ImplementingDriftInterruptedResumeTest(
@@ -162,10 +162,10 @@ class ImplementingDriftInterruptedResumeTest(
         # No durable state churn -- the refreshed hash / consumed-comment /
         # awaiting-human writes are all discarded.
         self.assertEqual(gh.write_state_calls, before_writes)
-        data = gh.pinned_data(62)
-        self.assertEqual(data.get("user_content_hash"), "stale-hash")
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("last_action_comment_id"), 500)
+        state = gh.pinned_data(62)
+        self.assertEqual(state.get("user_content_hash"), "stale-hash")
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("last_action_comment_id"), 500)
         # No PR, no label flip, and no HITL question / ack / timeout park.
         self.assertEqual(gh.opened_prs, [])
         self.assertNotIn((62, "validating"), gh.label_history)
@@ -230,9 +230,9 @@ class ImplementingDriftHeadShaDeltaTest(
         self.assertEqual(gh.opened_prs, [])
         self.assertNotIn((850, "validating"), gh.label_history)
         # Should fall to the silent-failure park via `_on_question`.
-        data = gh.pinned_data(850)
-        self.assertTrue(data.get("awaiting_human"))
-        self.assertEqual(data.get("park_reason"), "agent_silent")
+        state = gh.pinned_data(850)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "agent_silent")
 
 
 class ImplementingDriftNoDevSessionRecoveredCommitsTest(
@@ -275,13 +275,13 @@ class ImplementingDriftNoDevSessionRecoveredCommitsTest(
         self.assertEqual(gh.opened_prs, [])
         self.assertNotIn((860, "validating"), gh.label_history)
         # Parked so the operator can adjudicate.
-        data = gh.pinned_data(860)
-        self.assertTrue(data.get("awaiting_human"))
+        state = gh.pinned_data(860)
+        self.assertTrue(state.get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("never saw the edited requirements", last_comment)
         # New hash baseline persisted so subsequent ticks don't keep
         # re-firing the drift park on the same edit.
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
 
     def test_drift_no_session_no_recovered_commits_falls_through(
         self,
@@ -364,12 +364,12 @@ class ImplementingDriftAwaitingHumanNoDevSessionTest(
             push_branch=True,
         )
 
-        data = gh.pinned_data(1200)
+        state = gh.pinned_data(1200)
         # The new hash is durably persisted -- the drift does NOT loop.
-        self.assertNotEqual(data.get("user_content_hash"), "stale-hash")
+        self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
         # Park flags cleared so the fresh-spawn branch fired.
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
         # The fresh implement prompt was used (NOT the resume-with-just-
         # comments prompt), so the dev sees the updated body.
         mocks["run_agent"].assert_called_once()
@@ -419,7 +419,7 @@ class ImplementingDriftAwaitingHumanNoDevSessionTest(
         self.assertIn("here's more detail", prompt)
         # Comment marked consumed so the validating->in_review handoff
         # later won't classify it as fresh PR feedback.
-        data = gh.pinned_data(1210)
+        state = gh.pinned_data(1210)
         self.assertGreaterEqual(
-            int(data.get("last_action_comment_id")), 500,
+            int(state.get("last_action_comment_id")), 500,
         )

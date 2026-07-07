@@ -18,9 +18,7 @@ from tests.workflow_helpers import _PatchedWorkflowMixin, _TEST_SPEC, _agent
 
 
 class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_pickup_with_decompose_off_routes_straight_to_implementing(
-        self,
-    ) -> None:
+    def test_pickup_with_decompose_off_routes_to_implementing(self) -> None:
         # Legacy path retained behind the DECOMPOSE kill switch: an
         # unlabeled issue still goes straight to implementing without a
         # decomposer round, so operators can disable decomposition without
