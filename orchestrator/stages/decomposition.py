@@ -361,6 +361,18 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             if result.session_id:
                 state.set("decomposer_session_id", result.session_id)
 
+        # Live pause: an operator applied `paused` / `backlog` while the
+        # decomposer ran (fresh spawn or awaiting-human resume). Dispatch only
+        # saw the pre-run labels, so re-check a freshly fetched issue and return
+        # WITHOUT folding usage, parking on timeout, creating child issues,
+        # relabeling, or writing pinned state -- durable GitHub state stays
+        # exactly as the prior tick left it and the next tick re-runs the
+        # decomposer once the label is removed. The read-only decompose worktree
+        # is torn down by the `finally` as on any normal exit and recreated on
+        # the re-run.
+        if _wf._paused_during_agent_run(gh, issue):
+            return
+
         state.set("last_agent_action_at", _wf._now_iso())
         # Fold this run's usage into the per-issue counters at the convergence
         # of the fresh-spawn and awaiting-human resume branches, so a real

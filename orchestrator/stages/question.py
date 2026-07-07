@@ -291,6 +291,18 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             if result.session_id:
                 state.set("question_session_id", result.session_id)
 
+        # Live pause: an operator applied `paused` / `backlog` while the
+        # question agent ran (fresh spawn or awaiting-human resume). Dispatch
+        # only saw the pre-run labels, so re-check a freshly fetched issue and
+        # return WITHOUT folding usage, parking, or writing pinned state --
+        # durable GitHub state stays exactly as the prior tick left it and the
+        # next tick re-runs once the label is removed. The read-only worktree is
+        # disposed by the `finally` per the `keep_worktree` flag as on any
+        # normal exit: a prior unsafe park's kept worktree survives (the flag
+        # was seeded True), a clean tick's is reaped and recreated on the re-run.
+        if _wf._paused_during_agent_run(gh, issue):
+            return
+
         state.set("last_question_at", _wf._now_iso())
         # Fold this run's usage into the per-issue counters at the convergence
         # of the fresh-spawn and awaiting-human resume branches, so a real

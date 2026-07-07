@@ -986,6 +986,15 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         review_round=round_n,
         retry_count=state.get("retry_count"),
     )
+    # Live pause: an operator applied `paused` / `backlog` while the reviewer
+    # ran. Dispatch only saw the pre-run labels, so re-check a freshly fetched
+    # issue and return WITHOUT folding usage, recording the review session,
+    # parking, or relabeling -- durable GitHub state stays exactly as the prior
+    # tick left it and the next tick re-spawns a fresh reviewer once the label
+    # is removed. Nothing is stranded: the reviewer is read-only and spawns
+    # fresh each round.
+    if _wf._paused_during_agent_run(gh, issue):
+        return
     _wf._accumulate_issue_usage(state, review.usage)
     if review.session_id:
         state.set("last_review_session_id", review.session_id)
