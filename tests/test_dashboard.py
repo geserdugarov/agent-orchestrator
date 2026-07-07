@@ -246,8 +246,8 @@ class ScriptPathLaunchTest(unittest.TestCase):
         # re-import inside `runpy` does not poison the rest of the
         # test session with a half-initialised package.
         saved_modules = {
-            k: v for k, v in sys.modules.items()
-            if k == "orchestrator" or k.startswith("orchestrator.")
+            module_name: module for module_name, module in sys.modules.items()
+            if module_name == "orchestrator" or module_name.startswith("orchestrator.")
         }
         try:
             # Match Streamlit's launch shape: only the script's
@@ -258,9 +258,9 @@ class ScriptPathLaunchTest(unittest.TestCase):
                 if not p or Path(p).resolve() != resolved_root
             ]
             sys.path.insert(0, str(script_dir))
-            for k in list(sys.modules):
-                if k == "orchestrator" or k.startswith("orchestrator."):
-                    del sys.modules[k]
+            for module_name in list(sys.modules):
+                if module_name == "orchestrator" or module_name.startswith("orchestrator."):
+                    del sys.modules[module_name]
 
             # `run_name="not_main"` keeps the `if __name__ == "__main__":`
             # block from firing, so the test does not require Streamlit
@@ -273,9 +273,9 @@ class ScriptPathLaunchTest(unittest.TestCase):
             self.assertIn("analytics_read", namespace)
         finally:
             sys.path[:] = original_path
-            for k in list(sys.modules):
-                if k == "orchestrator" or k.startswith("orchestrator."):
-                    del sys.modules[k]
+            for module_name in list(sys.modules):
+                if module_name == "orchestrator" or module_name.startswith("orchestrator."):
+                    del sys.modules[module_name]
             sys.modules.update(saved_modules)
 
 
@@ -746,25 +746,25 @@ class IssuesTableHtmlTest(unittest.TestCase):
     def test_columns_match_standalone_mock(self) -> None:
         _, dashboard = _reload()
         rows = [self._row("acme/a", 1, 12.0)]
-        html_out = dashboard._issues_table_html(rows)
+        html = dashboard._issues_table_html(rows)
         for header in ("Issue", "Cost", "Runs", "Review rds",
                        "Retries", "Status"):
-            self.assertIn(f">{header}<", html_out)
+            self.assertIn(f">{header}<", html)
 
     def test_status_pill_renders_clean_when_no_failures(self) -> None:
         _, dashboard = _reload()
         rows = [self._row("acme/a", 1, 4.0, failed=0)]
-        html_out = dashboard._issues_table_html(rows)
-        self.assertIn('class="orch-pill ok"', html_out)
-        self.assertIn(">clean<", html_out)
-        self.assertNotIn('class="orch-pill bad"', html_out)
+        html = dashboard._issues_table_html(rows)
+        self.assertIn('class="orch-pill ok"', html)
+        self.assertIn(">clean<", html)
+        self.assertNotIn('class="orch-pill bad"', html)
 
     def test_status_pill_renders_fail_when_failures_present(self) -> None:
         _, dashboard = _reload()
         rows = [self._row("acme/a", 1, 4.0, failed=3)]
-        html_out = dashboard._issues_table_html(rows)
-        self.assertIn('class="orch-pill bad"', html_out)
-        self.assertIn(">3 fail<", html_out)
+        html = dashboard._issues_table_html(rows)
+        self.assertIn('class="orch-pill bad"', html)
+        self.assertIn(">3 fail<", html)
 
     def test_in_row_cost_bar_relative_to_max(self) -> None:
         # Cheapest issue's bar is a fraction of the most expensive
@@ -774,19 +774,19 @@ class IssuesTableHtmlTest(unittest.TestCase):
             self._row("acme/a", 1, 10.0),
             self._row("acme/b", 2, 5.0),
         ]
-        html_out = dashboard._issues_table_html(rows)
+        html = dashboard._issues_table_html(rows)
         # Full-width bar on the most expensive issue and a half-
         # width bar on the cheaper one.
-        self.assertIn("width:100.0%", html_out)
-        self.assertIn("width:50.0%", html_out)
+        self.assertIn("width:100.0%", html)
+        self.assertIn("width:50.0%", html)
 
     def test_review_rounds_three_or_more_warn_tone(self) -> None:
         _, dashboard = _reload()
         rows = [self._row("acme/a", 1, 4.0, max_round=4)]
-        html_out = dashboard._issues_table_html(rows)
+        html = dashboard._issues_table_html(rows)
         # High-review-round cells get the warn class so the operator
         # can spot rework-heavy issues at a glance.
-        self.assertIn('class="orch-badge-warn">4', html_out)
+        self.assertIn('class="orch-badge-warn">4', html)
 
 
 class SkillTriggersHtmlTest(unittest.TestCase):
@@ -809,17 +809,17 @@ class SkillTriggersHtmlTest(unittest.TestCase):
     def test_columns_present(self) -> None:
         _, dashboard = _reload()
         rows = [self._row("developer", "claude", 9, 3, 3)]
-        html_out = dashboard._skill_triggers_html(rows)
+        html = dashboard._skill_triggers_html(rows)
         for header in ("Role", "Backend", "Runs", "Skill runs",
                        "Trigger rate", "Triggers"):
-            self.assertIn(f">{header}<", html_out)
+            self.assertIn(f">{header}<", html)
 
     def test_rate_rendered_as_percent(self) -> None:
         _, dashboard = _reload()
         rows = [self._row("developer", "claude", 4, 1, 1)]
-        html_out = dashboard._skill_triggers_html(rows)
+        html = dashboard._skill_triggers_html(rows)
         # 1 of 4 runs triggered a skill -> 25%.
-        self.assertIn(">25%<", html_out)
+        self.assertIn(">25%<", html)
 
     def test_rate_bar_relative_to_busiest_group(self) -> None:
         _, dashboard = _reload()
@@ -827,26 +827,26 @@ class SkillTriggersHtmlTest(unittest.TestCase):
             self._row("developer", "claude", 10, 10, 10),  # rate 1.0
             self._row("reviewer", "codex", 10, 5, 5),       # rate 0.5
         ]
-        html_out = dashboard._skill_triggers_html(rows)
+        html = dashboard._skill_triggers_html(rows)
         # Full-width bar on the 100%-rate group, half-width on the 50%.
-        self.assertIn("width:100.0%", html_out)
-        self.assertIn("width:50.0%", html_out)
+        self.assertIn("width:100.0%", html)
+        self.assertIn("width:50.0%", html)
 
     def test_zero_rate_group_renders_zero_percent(self) -> None:
         # A quiet reviewer (0 skill runs) is a real signal, not a
         # dropped row: it renders as an explicit 0% with an empty bar.
         _, dashboard = _reload()
         rows = [self._row("reviewer", "codex", 5, 0, 0)]
-        html_out = dashboard._skill_triggers_html(rows)
-        self.assertIn(">0%<", html_out)
-        self.assertIn("width:0.0%", html_out)
+        html = dashboard._skill_triggers_html(rows)
+        self.assertIn(">0%<", html)
+        self.assertIn("width:0.0%", html)
 
     def test_role_html_escaped(self) -> None:
         _, dashboard = _reload()
         rows = [self._row("dev<&>", "claude", 1, 0, 0)]
-        html_out = dashboard._skill_triggers_html(rows)
-        self.assertIn("dev&lt;&amp;&gt;", html_out)
-        self.assertNotIn("dev<&>", html_out)
+        html = dashboard._skill_triggers_html(rows)
+        self.assertIn("dev&lt;&amp;&gt;", html)
+        self.assertNotIn("dev<&>", html)
 
 
 class SkillMatrixHtmlTest(unittest.TestCase):
@@ -873,10 +873,10 @@ class SkillMatrixHtmlTest(unittest.TestCase):
     def test_columns_match_issue_spec(self) -> None:
         _, dashboard = _reload()
         rows = [self._row("owner/repo", "develop", "developer", "claude", 2)]
-        html_out = dashboard._skill_matrix_html(rows)
+        html = dashboard._skill_matrix_html(rows)
         for header in ("Repo", "Role", "Backend", "Skill",
                        "Runs", "Runs with skill", "Trigger rate"):
-            self.assertIn(f">{header}<", html_out)
+            self.assertIn(f">{header}<", html)
 
     def test_cell_values_rendered(self) -> None:
         _, dashboard = _reload()
@@ -885,18 +885,18 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         rows = [self._row(
             "owner/repo", "develop", "developer", "claude", 5, skill_runs=3,
         )]
-        html_out = dashboard._skill_matrix_html(rows)
+        html = dashboard._skill_matrix_html(rows)
         # Full repo path (not just the trailing component) so two repos
         # that share a short name stay distinct in a cross-repo matrix.
-        self.assertIn(">owner/repo<", html_out)
-        self.assertIn(">developer<", html_out)
-        self.assertIn(">claude<", html_out)
-        self.assertIn(">develop<", html_out)
-        self.assertIn(">5<", html_out)
-        self.assertIn(">3<", html_out)
+        self.assertIn(">owner/repo<", html)
+        self.assertIn(">developer<", html)
+        self.assertIn(">claude<", html)
+        self.assertIn(">develop<", html)
+        self.assertIn(">5<", html)
+        self.assertIn(">3<", html)
         # Trigger rate is derived from the two counts (3/5) and rounds to
         # a whole percent, matching the aggregate table's format.
-        self.assertIn(">60%<", html_out)
+        self.assertIn(">60%<", html)
 
     def test_zero_count_row_renders_explicit_muted_zero(self) -> None:
         # An offered-but-never-triggered catalog cell is a real
@@ -907,48 +907,48 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         rows = [self._row(
             "owner/repo", "review", "developer", "claude", 4, skill_runs=0,
         )]
-        html_out = dashboard._skill_matrix_html(rows)
-        self.assertIn("orch-skillmatrix-zero", html_out)
-        self.assertIn(">0<", html_out)
+        html = dashboard._skill_matrix_html(rows)
+        self.assertIn("orch-skillmatrix-zero", html)
+        self.assertIn(">0<", html)
         # The derived trigger rate is `0%` and muted on the same signal,
         # so an offered-but-quiet cell reads consistently across columns.
-        self.assertIn('<span class="orch-skillmatrix-zero">0%</span>', html_out)
+        self.assertIn('<span class="orch-skillmatrix-zero">0%</span>', html)
         # The cohort total is not muted -- it is a plain right-aligned cell.
-        self.assertIn('<td class="r">4</td>', html_out)
+        self.assertIn('<td class="r">4</td>', html)
 
     def test_repo_role_backend_skill_html_escaped(self) -> None:
         # Every free-text cell is HTML-escaped so a skill / repo / role
         # name carrying markup cannot break out of the table.
         _, dashboard = _reload()
         rows = [self._row("o/<r&>", "sk<i>ll", "dev<&>", "back<end>", 1)]
-        html_out = dashboard._skill_matrix_html(rows)
-        self.assertIn("o/&lt;r&amp;&gt;", html_out)
-        self.assertIn("sk&lt;i&gt;ll", html_out)
-        self.assertIn("dev&lt;&amp;&gt;", html_out)
-        self.assertIn("back&lt;end&gt;", html_out)
-        self.assertNotIn("<r&>", html_out)
-        self.assertNotIn("dev<&>", html_out)
+        html = dashboard._skill_matrix_html(rows)
+        self.assertIn("o/&lt;r&amp;&gt;", html)
+        self.assertIn("sk&lt;i&gt;ll", html)
+        self.assertIn("dev&lt;&amp;&gt;", html)
+        self.assertIn("back&lt;end&gt;", html)
+        self.assertNotIn("<r&>", html)
+        self.assertNotIn("dev<&>", html)
 
     def test_empty_rows_render_fallback_not_table(self) -> None:
         # No catalog records matched and no run fired a skill -> there
         # is no catalog-backed matrix to build, so a clear fallback
         # notice renders in place of the table.
         _, dashboard = _reload()
-        html_out = dashboard._skill_matrix_html([])
-        self.assertIn("orch-skillmatrix-empty", html_out)
-        self.assertIn("No catalog-backed skill matrix", html_out)
+        html = dashboard._skill_matrix_html([])
+        self.assertIn("orch-skillmatrix-empty", html)
+        self.assertIn("No catalog-backed skill matrix", html)
         # Names the opt-in switch so a quiet panel is not mistaken for a
         # bug, mirroring the aggregate table's caption.
-        self.assertIn("TRACK_SKILL_TRIGGERS", html_out)
+        self.assertIn("TRACK_SKILL_TRIGGERS", html)
         # The table markup itself is not emitted on the fallback path.
-        self.assertNotIn("<table", html_out)
+        self.assertNotIn("<table", html)
 
     def test_fallback_message_is_html_escaped(self) -> None:
         # The fallback message is escaped before it lands in the div, so
         # the apostrophe-carrying copy renders without breaking out.
         _, dashboard = _reload()
-        html_out = dashboard._skill_matrix_html([])
-        self.assertIn("&#x27;", html_out)
+        html = dashboard._skill_matrix_html([])
+        self.assertIn("&#x27;", html)
 
 
 class SkillMatrixSortTest(unittest.TestCase):
@@ -981,44 +981,44 @@ class SkillMatrixSortTest(unittest.TestCase):
 
     def test_headers_are_clickable_self_targeting_sort_links(self) -> None:
         _, dashboard = _reload()
-        html_out = dashboard._skill_matrix_html(self._rows())
+        html = dashboard._skill_matrix_html(self._rows())
         # Every column is an in-tab anchor pointing at its own sort param.
         for key in ("repo", "role", "backend", "skill",
                     "runs", "skill_runs", "rate"):
-            self.assertIn(f"?mtx_sort={key}&mtx_dir=", html_out)
-        self.assertIn('target="_self"', html_out)
+            self.assertIn(f"?mtx_sort={key}&mtx_dir=", html)
+        self.assertIn('target="_self"', html)
         # Text columns default a first click to ascending, numeric ones to
         # descending (largest first is the interesting end for counts).
-        self.assertIn("?mtx_sort=repo&mtx_dir=asc", html_out)
-        self.assertIn("?mtx_sort=runs&mtx_dir=desc", html_out)
+        self.assertIn("?mtx_sort=repo&mtx_dir=asc", html)
+        self.assertIn("?mtx_sort=runs&mtx_dir=desc", html)
         # With no active sort no header carries a direction indicator (the
         # class still appears in the CSS block, so match the span markup).
-        self.assertNotIn('<span class="orch-skillmatrix-sort">', html_out)
+        self.assertNotIn('<span class="orch-skillmatrix-sort">', html)
 
     def test_active_descending_column_shows_down_arrow_and_flips(self) -> None:
         _, dashboard = _reload()
-        html_out = dashboard._skill_matrix_html(
+        html = dashboard._skill_matrix_html(
             self._rows(), sort_key="runs", descending=True,
         )
         # Exactly one column is marked active, and it shows the ▼ arrow.
         self.assertEqual(
-            html_out.count('<span class="orch-skillmatrix-sort">'), 1,
+            html.count('<span class="orch-skillmatrix-sort">'), 1,
         )
         self.assertIn(
-            '<span class="orch-skillmatrix-sort">▼</span>', html_out,
+            '<span class="orch-skillmatrix-sort">▼</span>', html,
         )
         # Re-clicking the active (descending) column flips it to ascending.
-        self.assertIn("?mtx_sort=runs&mtx_dir=asc", html_out)
+        self.assertIn("?mtx_sort=runs&mtx_dir=asc", html)
 
     def test_active_ascending_column_shows_up_arrow_and_flips(self) -> None:
         _, dashboard = _reload()
-        html_out = dashboard._skill_matrix_html(
+        html = dashboard._skill_matrix_html(
             self._rows(), sort_key="repo", descending=False,
         )
         self.assertIn(
-            '<span class="orch-skillmatrix-sort">▲</span>', html_out,
+            '<span class="orch-skillmatrix-sort">▲</span>', html,
         )
-        self.assertIn("?mtx_sort=repo&mtx_dir=desc", html_out)
+        self.assertIn("?mtx_sort=repo&mtx_dir=desc", html)
 
     def test_rows_render_in_selected_column_order(self) -> None:
         _, dashboard = _reload()
@@ -1045,23 +1045,23 @@ class SkillMatrixSortTest(unittest.TestCase):
             self._row("a/repo", "beta", "developer", "claude", 4, 1),
             self._row("a/repo", "gamma", "reviewer", "codex", 4, 3),
         ]
-        html_out = dashboard._skill_matrix_html(rows)
+        html = dashboard._skill_matrix_html(rows)
         # Within a/repo, rate descending: gamma (75%) precedes beta (25%).
         self.assertLess(
-            html_out.index(">gamma<"), html_out.index(">beta<"),
+            html.index(">gamma<"), html.index(">beta<"),
         )
         # Repo ascending: the a/repo rows precede the b/repo row.
         self.assertLess(
-            html_out.index(">beta<"), html_out.index(">alpha<"),
+            html.index(">beta<"), html.index(">alpha<"),
         )
 
     def test_sort_helper_unknown_key_is_identity(self) -> None:
         from orchestrator import dashboard_html
         rows = self._rows()
-        out = dashboard_html._sort_skill_matrix_rows(rows, None, False)
-        self.assertEqual(out, rows)
-        out = dashboard_html._sort_skill_matrix_rows(rows, "bogus", True)
-        self.assertEqual(out, rows)
+        sorted_rows = dashboard_html._sort_skill_matrix_rows(rows, None, False)
+        self.assertEqual(sorted_rows, rows)
+        sorted_rows = dashboard_html._sort_skill_matrix_rows(rows, "bogus", True)
+        self.assertEqual(sorted_rows, rows)
 
     def test_parse_matrix_sort_from_query_params(self) -> None:
         _, dashboard = _reload()
@@ -1094,15 +1094,15 @@ class DeltaPillTest(unittest.TestCase):
 
     def test_positive_default_paints_up_red_arrow(self) -> None:
         _, dashboard = _reload()
-        out = dashboard._delta_pill(0.25)
-        self.assertIn('orch-delta up', out)
-        self.assertIn('▲', out)
+        html = dashboard._delta_pill(0.25)
+        self.assertIn('orch-delta up', html)
+        self.assertIn('▲', html)
 
     def test_negative_default_paints_down_green_arrow(self) -> None:
         _, dashboard = _reload()
-        out = dashboard._delta_pill(-0.25)
-        self.assertIn('orch-delta down', out)
-        self.assertIn('▼', out)
+        html = dashboard._delta_pill(-0.25)
+        self.assertIn('orch-delta down', html)
+        self.assertIn('▼', html)
 
     def test_invert_swaps_only_color_not_arrow(self) -> None:
         # `invert=True` reserved for "up is good" KPIs (issues
@@ -1140,17 +1140,17 @@ class InsightsHtmlTest(unittest.TestCase):
             severity="warning",
             message="Agent failure rate >= 10% in this window.",
         )
-        out = dashboard._insights_html([banner])
+        html = dashboard._insights_html([banner])
         # The message body lands verbatim (with HTML-escaping) and the
         # severity word is NOT prefixed.
         self.assertIn(
             "Agent failure rate &gt;= 10% in this window.",
-            out,
+            html,
         )
-        self.assertNotIn("<strong>Warning.</strong>", out)
+        self.assertNotIn("<strong>Warning.</strong>", html)
         # The CSS class still carries the severity so the colored
         # icon / banner background paints correctly.
-        self.assertIn('orch-insight warning', out)
+        self.assertIn('orch-insight warning', html)
 
 
 class PlotlyConfigTest(unittest.TestCase):
