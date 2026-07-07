@@ -520,9 +520,10 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             spec, issue, _wf._recent_comments_text(issue),
             config.default_repo_specs(),
         )
-        wt, result, _ = _wf._resume_dev_with_text(
+        wt, result, paused = _wf._resume_dev_with_text(
             gh, spec, issue, state, prompt,
             followup_has_tracked_repos=True,
+            pause_guard=True,
         )
         recovered = False
     elif ahead > 0:
@@ -556,6 +557,9 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # updated to the recovered HEAD on a successful push.
         before_sha = ""
         recovered = True
+        # No agent ran this tick (dispatch already gated the label at tick
+        # start), so there is no live-pause window to observe here.
+        paused = False
     else:
         before_sha = _wf._head_sha(wt)
         state.set("docs_checked_sha", before_sha or "")
@@ -577,9 +581,10 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # could overflow on the final docs pass without ever rotating. The
         # `_ensure_worktree` fallback inside the helper is harmless here
         # because the PR-anchored worktree was already restored above.
-        wt, result, _ = _wf._resume_dev_with_text(
+        wt, result, paused = _wf._resume_dev_with_text(
             gh, spec, issue, state, prompt,
             followup_has_tracked_repos=True,
+            pause_guard=True,
         )
         state.set("branch", branch)
         recovered = False
@@ -594,6 +599,16 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # are discarded so the next process re-runs the docs pass. Must precede
     # the timeout/dirty/commit/no-change/question branches below.
     if _wf._ignore_if_interrupted(issue, result):
+        return
+
+    # Live pause applied while the docs agent ran: honor the decision the
+    # resume helper already made (the recovered `ahead > 0` branch ran no
+    # agent and reports False). Stop before the push / no-change / question
+    # disposition below posts a PR comment, pushes, advances to `in_review`,
+    # or writes pinned state. The committed docs work stays on the branch and
+    # republishes through the recovered-worktree path once the label is
+    # removed.
+    if paused:
         return
 
     if result.timed_out:

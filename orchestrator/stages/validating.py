@@ -763,10 +763,20 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             followup = _wf._build_user_content_change_prompt(
                 issue, _wf._recent_comments_text(issue),
             )
-            wt, result, _ = _wf._resume_dev_with_text(
-                gh, spec, issue, state, followup,
+            wt, result, paused = _wf._resume_dev_with_text(
+                gh, spec, issue, state, followup, pause_guard=True,
             )
             state.set("last_agent_action_at", _wf._now_iso())
+            if paused:
+                # Live pause applied during the drift resume: the helper
+                # already stopped before persisting the session id or
+                # clearing `awaiting_human`. Return WITHOUT running the
+                # result handler (which would post / push / advance the
+                # round) or writing pinned state, so the drift bookkeeping
+                # staged above stays unrecorded and the committed work stays
+                # on the branch; the next tick re-detects the drift once the
+                # label is removed.
+                return
             # Custom result handler: a no-commit-with-message reply is the
             # dev confirming the existing work already satisfies the edit,
             # and the resume prompt explicitly invites that response.
@@ -909,11 +919,21 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                     branch=_wf._resolve_branch_name(state, spec, issue.number),
                 )
             before_sha = _wf._head_sha(wt)
-            resumed = _wf._resume_developer_on_human_reply(gh, spec, issue, state)
+            resumed = _wf._resume_developer_on_human_reply(
+                gh, spec, issue, state, pause_guard=True,
+            )
             if resumed is None:
                 return
-            wt, result, _ = resumed
+            wt, result, paused = resumed
             state.set("last_agent_action_at", _wf._now_iso())
+            if paused:
+                # Live pause applied mid-resume: stop before
+                # `_handle_dev_fix_result` parks / pushes / relabels and
+                # before any pinned-state write. The helper left durable
+                # state (session id, `awaiting_human`, watermark) exactly as
+                # the prior tick had it, so the carried-over commit
+                # republishes once the label is removed.
+                return
             if not _handle_dev_fix_result(
                 gh, spec, issue, state, wt, result, before_sha
             ):
@@ -1273,10 +1293,19 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # same overflow loop. The helper tags its events with the current label,
     # which the `fixing` flip above has already set, so the spawn stays
     # `fixing`.
-    wt, dev_result, _ = _wf._resume_dev_with_text(
-        gh, spec, issue, state, fix_prompt,
+    wt, dev_result, paused = _wf._resume_dev_with_text(
+        gh, spec, issue, state, fix_prompt, pause_guard=True,
     )
     state.set("last_agent_action_at", _wf._now_iso())
+
+    if paused:
+        # Live pause during the reviewer-change fix. The pre-spawn `fixing`
+        # flip is durable, but no result is published: return before
+        # `_handle_dev_fix_result` parks / pushes / relabels and before the
+        # pinned-state write, leaving the committed fix on the branch. Once
+        # the label is removed `_handle_fixing` owns the resume from the
+        # `fixing` label.
+        return
 
     if not _handle_dev_fix_result(
         gh, spec, issue, state, wt, dev_result, before_sha

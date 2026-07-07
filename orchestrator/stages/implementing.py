@@ -354,18 +354,17 @@ def _resume_dev_with_text(
     Returns `(worktree, result, paused)`. `paused` is the live-pause decision
     -- True only when `pause_guard` is set AND a hard-skip control label
     (`paused` / `backlog`) was applied to a freshly fetched issue while an agent
-    run was in flight. `pause_guard` is opt-in: the developer-agent stages that
-    honor a live pause (implementing / in_review / fixing / resolving_conflict)
-    pass it True, while the validating / documenting callers pass it False and
-    get `paused=False` always, so their behavior is unchanged. The check runs
-    after BOTH agent runs -- the initial resume/spawn AND the poisoned-session
-    fresh retry -- because each has its own live-pause window: the first fires
-    before the retry spawns a second agent, and the second before the retry's
-    result is persisted. When it fires the helper stops before the session id is
-    persisted and before `awaiting_human` is cleared, and the caller must honor
-    the returned flag by stopping too -- the decision is propagated, not
-    re-fetched, so there is no window where the caller reads the label
-    differently than the helper did.
+    run was in flight. `pause_guard` is opt-in (default False): every
+    developer-resume caller -- implementing, validating, documenting, in_review,
+    fixing, and resolving_conflict -- passes it True and honors the flag. The
+    check runs after BOTH agent runs -- the initial resume/spawn AND the
+    poisoned-session fresh retry -- because each has its own live-pause window:
+    the first fires before the retry spawns a second agent, and the second
+    before the retry's result is persisted. When it fires the helper stops
+    before the session id is persisted and before `awaiting_human` is cleared,
+    and the caller must honor the returned flag by stopping too -- the decision
+    is propagated, not re-fetched, so there is no window where the caller reads
+    the label differently than the helper did.
     """
     from .. import workflow as _wf
 
@@ -461,9 +460,9 @@ def _resume_dev_with_text(
     # poisoned-session retry below spawns a second agent, before the session id
     # is persisted, and before `awaiting_human` is cleared, and hand the
     # decision back so the caller returns without advancing pinned state. Read
-    # from a freshly fetched issue -- the handler `issue`
-    # snapshotted its labels before the run -- and propagate the result rather
-    # than have the caller re-fetch, so both act on the same observation.
+    # from a freshly fetched issue -- the handler `issue` snapshotted its labels
+    # before the run -- and propagate the result rather than have the caller
+    # re-fetch, so both act on the same observation.
     if pause_guard and _wf._paused_during_agent_run(gh, issue):
         return wt, result, True
 
@@ -546,8 +545,8 @@ def _resume_developer_on_human_reply(
     Returns (worktree, agent_result, paused) on resume, or None if there are no
     new comments since the last park (caller should return without writing
     state). `paused` is forwarded from `_resume_dev_with_text` and is only ever
-    True when `pause_guard` is set (opt-in for implementing; `validating` passes
-    it False and ignores the flag).
+    True when `pause_guard` is set; both callers (implementing and validating)
+    pass it True and honor the flag.
 
     Used by `implementing` and `validating` -- both deliberately watch only
     the issue's comment thread, not the PR's. The `in_review` handler watches

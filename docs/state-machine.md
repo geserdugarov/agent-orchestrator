@@ -33,13 +33,15 @@ Four non-workflow **control labels** modify behavior without occupying the workf
   in-flight one without discarding its state. Removing it resumes processing on the next tick. Because those skip points
   read the issue's labels at tick start, every stage that runs an agent additionally re-checks a freshly fetched issue
   right after the run returns (`_paused_during_agent_run`, alongside each stage's `interrupted` short-circuit): the
-  dev-agent stages that resume committed work (`implementing`, `in_review`, `fixing`, `resolving_conflict`) and the
-  read-only agent stages (the decomposer run in `decomposing`, fresh spawn and awaiting-human resume; the reviewer run
-  in `validating`; and the question run, fresh spawn and awaiting-human resume) all consult it. A `paused` applied
-  mid-run stops before a PR opens, the label flips, a HITL park or ACK comment posts, usage counters fold, child issues
-  are created, watermarks advance, or pinned state advances, so a dev stage's committed work stays on the branch and
-  republishes through the normal recovered-worktree / stranded-fix path once the label is removed, while the read-only
-  decomposer / reviewer / question runs simply re-run from durable state on the next tick.
+  dev-agent stages that resume committed work (`implementing`, `in_review`, `fixing`, `resolving_conflict`, the
+  `validating` drift / awaiting-human / reviewer-change dev resumes, and the `documenting` initial and follow-up docs
+  passes) and the read-only agent stages (the decomposer run in `decomposing`, fresh spawn and awaiting-human resume;
+  the reviewer run in `validating`; and the question run, fresh spawn and awaiting-human resume) all consult it. A
+  `paused` applied mid-run stops before a PR opens, the label flips, a HITL park or ACK comment posts, a docs push
+  lands, usage counters fold, child issues are created, watermarks advance, or pinned state advances, so a dev stage's
+  committed work stays on the branch and republishes through the normal recovered-worktree / stranded-fix path once the
+  label is removed, while the read-only decomposer / reviewer / question runs simply re-run from durable state on the
+  next tick.
 - `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open
   PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR. Bot-authored PRs
   (Dependabot, Renovate, CI bots) are skipped via GitHub's `user.type == "Bot"` flag — they open PRs structurally and
@@ -501,6 +503,11 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
        pinned state (the pre-spawn `docs_checked_sha` / watermark writes are discarded), so the next process re-runs the
        docs pass. Precedes every branch below. The recovered `ahead > 0` path synthesizes a non-interrupted result, so
        it is unaffected.
+     - `paused` / `backlog` applied mid-run → same short-circuit as `interrupted`: `_paused_during_agent_run` re-reads a
+       FRESHLY fetched issue after the initial-docs and awaiting-human resumes, and on a hit the handler returns WITHOUT
+       pushing, posting the docs notice, advancing to `in_review`, ratcheting watermarks, or writing pinned state. The
+       committed docs work stays on the branch and republishes through the `ahead > 0` recovered path once the label is
+       removed (the recovered path itself runs no agent, so it observes no live-pause window).
      - `timed_out` → park (`agent_timeout`).
      - dirty worktree → `_on_dirty_worktree`: park.
      - new commit on a clean tree → `_push_branch`. On success record `docs_checked_sha=after_sha`,
@@ -560,6 +567,12 @@ so `DEV_AGENT` flips made mid-flight do not retarget the docs pass either.
        `interrupted` dev resume is ignored: the handler returns WITHOUT writing the post-spawn state (no resume-budget
        charge, no watermark, no park), so the pre-spawn `fixing` flip stands and the next tick re-runs the cycle; any
        commit the killed run left is republished later via the stranded-fix tail, not this run.
+  5. `paused` / `backlog` applied mid-run → each of the three dev resumes (the drift resume, the awaiting-human resume,
+     and the CHANGES_REQUESTED fix resume) re-checks a FRESHLY fetched issue via `_paused_during_agent_run`. On a hit
+     the handler returns WITHOUT running its result handler (`_post_user_content_change_result` /
+     `_handle_dev_fix_result`), so no comment posts, no push, no `review_round` bump, no relabel, and no pinned-state
+     write. The committed work stays on the branch; the CHANGES_REQUESTED path leaves the pre-spawn `fixing` flip
+     standing and `_handle_fixing` owns the resume once the label is removed.
 - **Output**: label moved to `documenting` (approval after verify + squash) OR `fixing` (CHANGES_REQUESTED) OR no label
   change with `review_round` bumped (awaiting-human resume, drift, transient-park recovery push) OR a HITL park.
 
