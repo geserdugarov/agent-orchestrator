@@ -353,7 +353,10 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      `_handle_implementing`. Step 2 runs first so orphan children are not abandoned.
   4. **Awaiting-human resume OR fresh spawn.** Resume on a new comment; otherwise gate on the per-issue retry budget
      (shared with `implementing`), ensure a read-only worktree, resolve the spec via `_read_decomposer_session`, persist
-     `decomposer_agent` BEFORE invoking `run_agent`, and spawn the decomposer.
+     `decomposer_agent` BEFORE invoking `run_agent`, and spawn the decomposer. A mid-run `paused` / `backlog` re-check
+     (`_paused_during_agent_run`) right after the run returns short-circuits both branches BEFORE the usage fold,
+     timeout / read-only park, manifest parse, child creation, or relabel, so the next tick re-runs the decomposer from
+     durable state.
   5. **Read-only check.** If the worktree now has commits or dirty files, park awaiting human and KEEP the worktree for
      operator inspection. The decomposer is read-only — without this guard, `_handle_implementing`'s recovery path
      would later push decomposer-authored work as implementation.
@@ -529,7 +532,9 @@ so `DEV_AGENT` flips made mid-flight do not retarget the docs pass either.
      `/orchestrator add-review-rounds N` escape hatch.
   3. Otherwise persist `config.REVIEW_AGENT_SPEC` to `review_agent` (traceability only — the reviewer is spawned fresh
      each round with no resume), then run the reviewer with the read-only prompt (must end with `VERDICT: APPROVED` or
-     `VERDICT: CHANGES_REQUESTED`).
+     `VERDICT: CHANGES_REQUESTED`). A mid-run `paused` / `backlog` re-check (`_paused_during_agent_run`) right after the
+     reviewer returns short-circuits BEFORE the usage fold, session record, verdict parse, verify gate, squash, or
+     relabel, so the next tick re-spawns a fresh reviewer from durable state.
   4. Parse the last `VERDICT:` marker (`_parse_review_verdict`):
      - **approved** → in order: (1) run the local verify gate
        (`_run_verify_commands(wt, config.VERIFY_COMMANDS, config.VERIFY_TIMEOUT)`); a non-ok result parks via
@@ -795,7 +800,10 @@ can fire.
      advance the watermark BEFORE spawning, then resume the locked session via `_build_question_followup_prompt`.
   3. **Fresh spawn.** Ensure the per-issue worktree, resolve the question spec via `_read_question_session` (falls back
      to the decomposer's spec on the first-ever spawn), persist `question_agent` BEFORE invoking `run_agent`, build the
-     read-only `_build_question_prompt`, spawn, and persist `question_session_id`.
+     read-only `_build_question_prompt`, spawn, and persist `question_session_id`. A mid-run `paused` / `backlog`
+     re-check (`_paused_during_agent_run`) right after the run returns short-circuits the resume and fresh spawn alike
+     BEFORE the usage fold, park, or pinned-state write, so the next tick re-runs from durable state (the `finally`
+     still disposes the worktree per `keep_worktree`).
   4. Branch on result:
      - `timed_out` → `_park_question` with `question_timeout`. **Keep** the worktree for operator inspection.
      - new commits → `_park_question` with `question_commits`. **Keep** the worktree: this stage is read-only.
