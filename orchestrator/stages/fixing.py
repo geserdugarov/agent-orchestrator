@@ -519,8 +519,8 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             branch=_wf._resolve_branch_name(state, spec, issue.number),
         )
     before_sha = _wf._head_sha(wt)
-    wt, dev_result, _ = _wf._resume_dev_with_text(
-        gh, spec, issue, state, followup,
+    wt, dev_result, paused = _wf._resume_dev_with_text(
+        gh, spec, issue, state, followup, pause_guard=True,
     )
     state.set("last_agent_action_at", _wf._now_iso())
 
@@ -563,6 +563,16 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # head that is missing the fix. Leaving the commit on disk lets a later
     # clean run republish it via the stranded-fix tail.
     if dev_result.interrupted:
+        return
+
+    # Live pause applied while the agent ran: an operator added `paused` (or
+    # `backlog`) mid-run. Honor the decision `_resume_dev_with_text` already
+    # made (propagated, not re-fetched) and stop before the ACK fast path, the
+    # stranded-fix publish, `_handle_dev_fix_result`, the watermark advance, or
+    # any relabel / pinned-state write. The committed work stays on the branch,
+    # so once the label is removed the normal recovered / stranded-fix path
+    # republishes it.
+    if paused:
         return
 
     # ACK fast path (in_review route only): the dev made no commit but

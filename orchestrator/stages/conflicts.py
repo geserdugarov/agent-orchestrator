@@ -227,7 +227,9 @@ def _handle_resolving_conflict(
         followup = _wf._build_user_content_change_prompt(
             issue, _wf._recent_comments_text(issue),
         )
-        wt, result, _ = _wf._resume_dev_with_text(gh, spec, issue, state, followup)
+        wt, result, paused = _wf._resume_dev_with_text(
+            gh, spec, issue, state, followup, pause_guard=True,
+        )
         state.set("last_agent_action_at", _wf._now_iso())
         # Shutdown-sweep interruption: ignore the partial result and return
         # WITHOUT writing pinned state -- the drift bookkeeping (refreshed
@@ -238,6 +240,14 @@ def _handle_resolving_conflict(
         # `last_message` / route through `_on_question` before the caller
         # persists those changes below.
         if _wf._ignore_if_interrupted(issue, result):
+            return
+        # Live pause applied mid-run: an operator added `paused` (or `backlog`)
+        # while this drift resume was in flight. Same short-circuit as the
+        # interrupted branch -- return before `_post_user_content_change_result`,
+        # the conflict-round bump, or any relabel / pinned-state write, so the
+        # drift stays unconsumed and the committed work stays on the branch
+        # until the label is removed.
+        if paused:
             return
         outcome = _wf._post_user_content_change_result(
             gh, spec, issue, state, wt, result, before_sha,
@@ -289,8 +299,16 @@ def _handle_resolving_conflict(
                 branch=_wf._resolve_branch_name(state, spec, issue.number),
             )
         before_sha = _wf._head_sha(wt)
-        wt, result, _ = _wf._resume_dev_with_text(gh, spec, issue, state, followup)
+        wt, result, paused = _wf._resume_dev_with_text(
+            gh, spec, issue, state, followup, pause_guard=True,
+        )
         state.set("last_agent_action_at", _wf._now_iso())
+        # Live pause applied mid-run: honor the helper's decision and return
+        # before `_post_conflict_resolution_result` (which parses the result,
+        # pushes, relabels, and writes pinned state). The in-progress rebase
+        # stays on the branch until the label is removed.
+        if paused:
+            return
         # No explicit lease here: resume worktrees may be mid-rebase or
         # ahead of the remote PR head, so `before_sha` is not necessarily
         # the remote SHA. Let `_push_branch` lease against live ls-remote.
@@ -648,8 +666,15 @@ def _handle_resolving_conflict(
     fix_prompt = _wf._build_conflict_resolution_prompt(
         f"{spec.remote_name}/{spec.base_branch}", conflicted_files,
     )
-    wt, result, _ = _wf._resume_dev_with_text(gh, spec, issue, state, fix_prompt)
+    wt, result, paused = _wf._resume_dev_with_text(
+        gh, spec, issue, state, fix_prompt, pause_guard=True,
+    )
     state.set("last_agent_action_at", _wf._now_iso())
+    # Live pause applied mid-run: return before `_post_conflict_resolution_result`
+    # pushes / relabels / writes pinned state -- the resolved commit stays on the
+    # branch until the label is removed.
+    if paused:
+        return
     _post_conflict_resolution_result(
         gh, spec, issue, state, wt, result, before_sha, conflict_round,
         force_with_lease=before_sha or None,

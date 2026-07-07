@@ -354,17 +354,18 @@ def _resume_dev_with_text(
     Returns `(worktree, result, paused)`. `paused` is the live-pause decision
     -- True only when `pause_guard` is set AND a hard-skip control label
     (`paused` / `backlog`) was applied to a freshly fetched issue while an agent
-    run was in flight. `pause_guard` is opt-in so the shared behavior for the
-    validating / in_review / documenting / fixing / conflict callers is unchanged
-    (they pass it False and get `paused=False` always). The check runs after
-    BOTH agent runs -- the initial resume/spawn AND the poisoned-session fresh
-    retry -- because each has its own live-pause window: the first fires before
-    the retry spawns a second agent, and the second before the retry's result is
-    persisted. When it fires the helper stops before the session id is persisted
-    and before `awaiting_human` is cleared, and the caller must honor the
-    returned flag by stopping too -- the decision is propagated, not re-fetched,
-    so there is no window where the caller reads the label differently than the
-    helper did.
+    run was in flight. `pause_guard` is opt-in: the developer-agent stages that
+    honor a live pause (implementing / in_review / fixing / resolving_conflict)
+    pass it True, while the validating / documenting callers pass it False and
+    get `paused=False` always, so their behavior is unchanged. The check runs
+    after BOTH agent runs -- the initial resume/spawn AND the poisoned-session
+    fresh retry -- because each has its own live-pause window: the first fires
+    before the retry spawns a second agent, and the second before the retry's
+    result is persisted. When it fires the helper stops before the session id is
+    persisted and before `awaiting_human` is cleared, and the caller must honor
+    the returned flag by stopping too -- the decision is propagated, not
+    re-fetched, so there is no window where the caller reads the label
+    differently than the helper did.
     """
     from .. import workflow as _wf
 
@@ -455,12 +456,12 @@ def _resume_dev_with_text(
     )
     _wf._accumulate_issue_usage(state, result.usage)
 
-    # Live pause (opt-in via `pause_guard`, so only implementing's callers see
-    # this): an operator applied `paused` (or `backlog`) while this resume/spawn
-    # was in flight. Stop BEFORE the poisoned-session retry below spawns a second
-    # agent, before the session id is persisted, and before `awaiting_human` is
-    # cleared, and hand the decision back so the caller returns without advancing
-    # pinned state. Read from a freshly fetched issue -- the handler `issue`
+    # Live pause (opt-in via `pause_guard`): an operator applied `paused` (or
+    # `backlog`) while this resume/spawn was in flight. Stop BEFORE the
+    # poisoned-session retry below spawns a second agent, before the session id
+    # is persisted, and before `awaiting_human` is cleared, and hand the
+    # decision back so the caller returns without advancing pinned state. Read
+    # from a freshly fetched issue -- the handler `issue`
     # snapshotted its labels before the run -- and propagate the result rather
     # than have the caller re-fetch, so both act on the same observation.
     if pause_guard and _wf._paused_during_agent_run(gh, issue):

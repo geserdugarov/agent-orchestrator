@@ -31,10 +31,12 @@ Four non-workflow **control labels** modify behavior without occupying the workf
 - `paused` is the same hard skip as `backlog` at every point (dispatch, scheduler routing, `_process_issue`, and base
   sync), differing only in intent: `backlog` is a "not yet" hold on a fresh issue, `paused` freezes an already
   in-flight one without discarding its state. Removing it resumes processing on the next tick. Because those skip points
-  read the issue's labels at tick start, the implementing stage additionally re-checks a freshly fetched issue right
-  after a dev agent run returns (`_paused_during_agent_run`): a `paused` applied mid-run stops before the PR opens, the
-  label flips, a HITL park posts, or pinned state advances, so the committed work stays on the branch and republishes
-  through the normal recovered-worktree path once the label is removed.
+  read the issue's labels at tick start, every stage that resumes a dev agent (`implementing`, `in_review`, `fixing`,
+  `resolving_conflict`) additionally re-checks a freshly fetched issue right after the run returns
+  (`_paused_during_agent_run`, alongside each stage's `interrupted` short-circuit): a `paused` applied mid-run stops
+  before a PR opens, the label flips, a HITL park or ACK comment posts, watermarks advance, or pinned state advances, so
+  the committed work stays on the branch and republishes through the normal recovered-worktree / stranded-fix path once
+  the label is removed.
 - `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open
   PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR. Bot-authored PRs
   (Dependabot, Renovate, CI bots) are skipped via GitHub's `user.type == "Bot"` flag — they open PRs structurally and
@@ -321,7 +323,8 @@ Per-stage specifics:
   `_post_user_content_change_result` and returns WITHOUT writing pinned state, so the refreshed `user_content_hash` /
   consumed-comment changes are discarded and the next process re-detects and re-runs the drift resume (the caller guards
   via `_ignore_if_interrupted` ahead of the helper; the shared helper also self-guards on interrupted as a backstop,
-  returning `"parked"`).
+  returning `"parked"`). A mid-run `paused` / `backlog` (`pause_guard=True`) short-circuits the same way, right after
+  the interrupted check.
 - For **`implementing`** drift, the resume runs only when `dev_session_id` is recorded. With recovered unpushed commits
   but no session the handler parks (the commits were authored against the pre-drift body). With no session, no recovered
   commits, and `awaiting_human=True`, park flags are cleared so the fresh-spawn branch fires this tick against the
@@ -586,7 +589,8 @@ so `DEV_AGENT` flips made mid-flight do not retarget the docs pass either.
      `review_round=0` and bounce directly back to `validating`. A no-commit response without the `ACK:` marker parks via
      `_on_question`. An `interrupted` resume short-circuits via `_ignore_if_interrupted` BEFORE
      `_post_user_content_change_result` and the watermark bump, returning WITHOUT writing pinned state so the drift
-     stays unconsumed for the next process to retry.
+     stays unconsumed for the next process to retry. A mid-run `paused` / `backlog` (`pause_guard=True`) short-circuits
+     the same way, right after the interrupted check.
   5. **Manual-merge HITL path** (only reached with no fresh PR feedback AND no drift):
      - `pr_is_mergeable` is `None` → try next tick.
      - `False` → park with `unmergeable`; HITL ping mentioning every `HITL_HANDLE`, bump watermarks past the park
@@ -680,10 +684,11 @@ state. The PR comment that triggers a route to `fixing` is the human signal; awa
   7. **Quiet window**: compute the newest `created_at` (or `submitted_at` for review summaries); if younger than
      `IN_REVIEW_DEBOUNCE_SECONDS`, return.
   8. **Resume**: build a `_build_pr_comment_followup` prompt over ALL unread surfaces, resume the locked dev via
-     `_resume_dev_with_text`, refresh `user_content_hash` (so any issue-thread comment we just fed to the dev doesn't
-     re-fire validating's drift check). An `interrupted` resume is ignored entirely BEFORE the ACK fast path, the
-     stranded-fix check, and the watermark advance below: the handler returns WITHOUT writing pinned state, so no
-     watermark advances, `awaiting_human` is untouched, and the next tick re-discovers the same feedback. Otherwise, a
+     `_resume_dev_with_text` (`pause_guard=True`), refresh `user_content_hash` (so any issue-thread comment we just fed
+     to the dev doesn't re-fire validating's drift check). An `interrupted` resume is ignored entirely BEFORE the ACK
+     fast path, the stranded-fix check, and the watermark advance below: the handler returns WITHOUT writing pinned
+     state, so no watermark advances, `awaiting_human` is untouched, and the next tick re-discovers the same feedback. A
+     mid-run `paused` / `backlog` short-circuits the same way, right after the interrupted check. Otherwise, a
      no-commit reply first checks for a **stranded fix** (`_stranded_fix_unpushed`): when the worktree is clean and HEAD
      is strictly ahead of the fetched remote PR branch (a fix committed by an earlier parked run whose publish was
      blocked — e.g. a dirty-park whose stray files were cleaned up afterwards), the handler publishes it through the
@@ -756,13 +761,16 @@ state. The PR comment that triggers a route to `fixing` is the human signal; awa
       perpetually-unmergeable-due-to-branch-protection PR within `MAX_CONFLICT_ROUNDS` ticks. If HEAD moved,
       force-with-lease push and flip to `validating`.
   11. **Conflicted rebase**: build a conflict-resolution prompt via `_build_conflict_resolution_prompt`, resume the dev
-      with it, then run `_post_conflict_resolution_result`.
+      with it (`pause_guard=True`), then run `_post_conflict_resolution_result`.
   12. `_post_conflict_resolution_result`: `interrupted` (shutdown sweep killed the run mid-flight) → ignore the
       partial result and return WITHOUT writing pinned state, leaving durable state retryable (this is the one branch
       that does not write; it precedes all others); timeout / unfinished rebase / no commit / dirty / push fail →
       park; success → force-with-lease push, increment `conflict_round`, reset `review_round=0`, flip to `validating`.
       Fresh-rebase pushes pin the lease to the pre-rebase PR head; awaiting-human resume pushes use `_push_branch`'s
-      live `ls-remote` lease fallback because `before_sha` may be an intermediate SHA.
+      live `ls-remote` lease fallback because `before_sha` may be an intermediate SHA. On BOTH resume paths (fresh
+      conflict and awaiting-human), a mid-run `paused` / `backlog` returns in the handler BEFORE
+      `_post_conflict_resolution_result` runs, so the resolved commit stays on the branch and no push / relabel / write
+      happens until the label is removed.
 - **Output**: label moved to `validating` (any pushed resolution OR no-op rebase), OR no label change (drift ACK /
   `_on_question` park: rebase still unfinished), OR `done` / `rejected` (terminal), OR a HITL park.
 

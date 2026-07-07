@@ -487,8 +487,8 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 f"{prefix}Unread PR conversation comments:\n\n{pr_block}"
             )
         followup = _wf._build_user_content_change_prompt(issue, comments_text)
-        wt, dev_result, _ = _wf._resume_dev_with_text(
-            gh, spec, issue, state, followup,
+        wt, dev_result, paused = _wf._resume_dev_with_text(
+            gh, spec, issue, state, followup, pause_guard=True,
         )
         state.set("last_agent_action_at", _wf._now_iso())
         # Shutdown-sweep-killed resume: bail WITHOUT writing pinned state so
@@ -500,6 +500,14 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # the watermark bump below so neither parses partial `last_message`
         # nor persists the consumption.
         if _wf._ignore_if_interrupted(issue, dev_result):
+            return
+        # Live pause applied mid-run: an operator added `paused` (or `backlog`)
+        # while this drift resume was in flight. Honor the helper's decision and
+        # return before `_post_user_content_change_result`, the watermark bump,
+        # or any relabel / pinned-state write -- the refreshed hash and consumed
+        # comments staged above are discarded, so the drift stays unconsumed and
+        # the committed work stays on the branch until the label is removed.
+        if paused:
             return
         # The user-content-change result handler treats a no-commit reply
         # as an ack rather than parking on it; a harmless clarification
