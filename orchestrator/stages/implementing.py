@@ -313,7 +313,8 @@ def _resume_dev_with_text(
     followup_text: str,
     *,
     followup_has_tracked_repos: bool = False,
-) -> Tuple[Path, AgentResult]:
+    pause_guard: bool = False,
+) -> Tuple[Path, AgentResult, bool]:
     """Resume the dev's locked-backend session with the given prompt text.
 
     The backend is locked to whatever wrote `dev_session_id` (or the legacy
@@ -349,6 +350,21 @@ def _resume_dev_with_text(
     whose transcript was GC'd or grew past the context window doesn't park
     (`agent_silent` for two ticks, or `awaiting_human` forever) before
     recovering.
+
+    Returns `(worktree, result, paused)`. `paused` is the live-pause decision
+    -- True only when `pause_guard` is set AND a hard-skip control label
+    (`paused` / `backlog`) was applied to a freshly fetched issue while an agent
+    run was in flight. `pause_guard` is opt-in so the shared behavior for the
+    validating / in_review / documenting / fixing / conflict callers is unchanged
+    (they pass it False and get `paused=False` always). The check runs after
+    BOTH agent runs -- the initial resume/spawn AND the poisoned-session fresh
+    retry -- because each has its own live-pause window: the first fires before
+    the retry spawns a second agent, and the second before the retry's result is
+    persisted. When it fires the helper stops before the session id is persisted
+    and before `awaiting_human` is cleared, and the caller must honor the
+    returned flag by stopping too -- the decision is propagated, not re-fetched,
+    so there is no window where the caller reads the label differently than the
+    helper did.
     """
     from .. import workflow as _wf
 
@@ -439,6 +455,17 @@ def _resume_dev_with_text(
     )
     _wf._accumulate_issue_usage(state, result.usage)
 
+    # Live pause (opt-in via `pause_guard`, so only implementing's callers see
+    # this): an operator applied `paused` (or `backlog`) while this resume/spawn
+    # was in flight. Stop BEFORE the poisoned-session retry below spawns a second
+    # agent, before the session id is persisted, and before `awaiting_human` is
+    # cleared, and hand the decision back so the caller returns without advancing
+    # pinned state. Read from a freshly fetched issue -- the handler `issue`
+    # snapshotted its labels before the run -- and propagate the result rather
+    # than have the caller re-fetch, so both act on the same observation.
+    if pause_guard and _wf._paused_during_agent_run(gh, issue):
+        return wt, result, True
+
     # Deterministic poisoned-session recovery: if we resumed with a session
     # id and Claude reported either a stale session ("no conversation found")
     # or a context-window overflow ("Prompt is too long"), the pinned session
@@ -480,6 +507,14 @@ def _resume_dev_with_text(
         # counted too -- both consumed tokens on this issue.
         _wf._accumulate_issue_usage(state, result.usage)
 
+        # The fresh retry is a SECOND run with its own live-pause window: an
+        # operator may have applied `paused` while it was in flight even though
+        # the pre-retry fetch above was clean. Re-check here, before the session
+        # persistence / disposition below, so the retry's result is not
+        # published while the issue is frozen.
+        if pause_guard and _wf._paused_during_agent_run(gh, issue):
+            return wt, result, True
+
     if fresh_spawn:
         # Fresh spawn produced a session id -- record it so subsequent resumes
         # pick up the live session, and zero the resume budget so the new
@@ -497,16 +532,21 @@ def _resume_dev_with_text(
         # the next tick can rotate once the transcript has grown enough.
         state.set("dev_resume_count", resume_count + 1)
     state.set("awaiting_human", False)
-    return wt, result
+    return wt, result, False
 
 
 def _resume_developer_on_human_reply(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
-) -> Optional[Tuple[Path, AgentResult]]:
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    *,
+    pause_guard: bool = False,
+) -> Optional[Tuple[Path, AgentResult, bool]]:
     """Resume the developer's agent session with new issue-level comments.
 
-    Returns (worktree, agent_result) on resume, or None if there are no new
-    comments since the last park (caller should return without writing state).
+    Returns (worktree, agent_result, paused) on resume, or None if there are no
+    new comments since the last park (caller should return without writing
+    state). `paused` is forwarded from `_resume_dev_with_text` and is only ever
+    True when `pause_guard` is set (opt-in for implementing; `validating` passes
+    it False and ignores the flag).
 
     Used by `implementing` and `validating` -- both deliberately watch only
     the issue's comment thread, not the PR's. The `in_review` handler watches
@@ -535,7 +575,9 @@ def _resume_developer_on_human_reply(
         for c in new_comments if c.body
     )
     followup = f"{followup}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
-    return _resume_dev_with_text(gh, spec, issue, state, followup)
+    return _resume_dev_with_text(
+        gh, spec, issue, state, followup, pause_guard=pause_guard,
+    )
 
 
 def _try_recover_implementing_timeout_park(
@@ -785,8 +827,8 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             followup = _wf._build_user_content_change_prompt(
                 issue, _wf._recent_comments_text(issue),
             )
-            wt, result = _resume_dev_with_text(
-                gh, spec, issue, state, followup,
+            wt, result, paused = _resume_dev_with_text(
+                gh, spec, issue, state, followup, pause_guard=True,
             )
             state.set("last_agent_action_at", _wf._now_iso())
             state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
@@ -801,6 +843,12 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
             # re-detects and re-runs it. Must precede the timeout/commit/ack/
             # question branches below.
             if _wf._ignore_if_interrupted(issue, result):
+                return
+            # Live pause applied during the drift resume: honor the decision the
+            # helper already made (propagated, not re-fetched) so a label the
+            # helper saw cannot be missed by a second read, then stop before
+            # opening a PR / parking / advancing pinned state.
+            if paused:
                 return
             if this_resume_committed:
                 # A commit landed on THIS resume -- publish it even if the
@@ -946,10 +994,12 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 branch=_wf._resolve_branch_name(state, spec, issue.number),
             )
         before_sha = _wf._head_sha(wt_pre)
-        resumed = _resume_developer_on_human_reply(gh, spec, issue, state)
+        resumed = _resume_developer_on_human_reply(
+            gh, spec, issue, state, pause_guard=True,
+        )
         if resumed is None:
             return
-        wt, result = resumed
+        wt, result, paused = resumed
     else:
         wt = _wf._ensure_worktree(
             spec, issue.number,
@@ -976,6 +1026,9 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 stdout="",
                 stderr="",
             )
+            # No agent ran this tick (dispatch already gated the label at tick
+            # start), so there is no live-pause window to observe here.
+            paused = False
         else:
             if not _check_and_increment_retry_budget(gh, issue, state):
                 gh.write_pinned_state(issue, state)
@@ -1015,6 +1068,10 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
                 # Fresh session -> its resume budget starts from zero, even
                 # when a prior (retried) session left a non-zero count.
                 state.set("dev_resume_count", 0)
+            # A fresh spawn ran an agent this tick, so an operator may have
+            # applied `paused` mid-run. One fetch here; the convergence check
+            # below honors this decision without a second read.
+            paused = _wf._paused_during_agent_run(gh, issue)
         state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
 
     state.set("last_agent_action_at", _wf._now_iso())
@@ -1025,6 +1082,16 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
     # mutations above are discarded) so the next process retries from durable
     # state. Must precede the timeout/question/dirty/push branches below.
     if _wf._ignore_if_interrupted(issue, result):
+        return
+
+    # Live pause applied while the agent ran: honor the single decision made
+    # above -- the awaiting-human resume propagates it from the helper, the
+    # fresh spawn fetched once after its run, and the recovered-worktree path
+    # (no agent this tick) reports False. Stop before the timeout / commit /
+    # question disposition below opens a PR, relabels, parks, or advances
+    # pinned state. Once the operator removes the label a later tick
+    # republishes the carried-over commit normally.
+    if paused:
         return
 
     if result.timed_out:

@@ -227,7 +227,7 @@ def _handle_resolving_conflict(
         followup = _wf._build_user_content_change_prompt(
             issue, _wf._recent_comments_text(issue),
         )
-        wt, result = _wf._resume_dev_with_text(gh, spec, issue, state, followup)
+        wt, result, _ = _wf._resume_dev_with_text(gh, spec, issue, state, followup)
         state.set("last_agent_action_at", _wf._now_iso())
         # Shutdown-sweep interruption: ignore the partial result and return
         # WITHOUT writing pinned state -- the drift bookkeeping (refreshed
@@ -289,7 +289,7 @@ def _handle_resolving_conflict(
                 branch=_wf._resolve_branch_name(state, spec, issue.number),
             )
         before_sha = _wf._head_sha(wt)
-        wt, result = _wf._resume_dev_with_text(gh, spec, issue, state, followup)
+        wt, result, _ = _wf._resume_dev_with_text(gh, spec, issue, state, followup)
         state.set("last_agent_action_at", _wf._now_iso())
         # No explicit lease here: resume worktrees may be mid-rebase or
         # ahead of the remote PR head, so `before_sha` is not necessarily
@@ -648,7 +648,7 @@ def _handle_resolving_conflict(
     fix_prompt = _wf._build_conflict_resolution_prompt(
         f"{spec.remote_name}/{spec.base_branch}", conflicted_files,
     )
-    wt, result = _wf._resume_dev_with_text(gh, spec, issue, state, fix_prompt)
+    wt, result, _ = _wf._resume_dev_with_text(gh, spec, issue, state, fix_prompt)
     state.set("last_agent_action_at", _wf._now_iso())
     _post_conflict_resolution_result(
         gh, spec, issue, state, wt, result, before_sha, conflict_round,

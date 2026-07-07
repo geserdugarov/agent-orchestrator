@@ -519,7 +519,7 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             branch=_wf._resolve_branch_name(state, spec, issue.number),
         )
     before_sha = _wf._head_sha(wt)
-    wt, dev_result = _wf._resume_dev_with_text(
+    wt, dev_result, _ = _wf._resume_dev_with_text(
         gh, spec, issue, state, followup,
     )
     state.set("last_agent_action_at", _wf._now_iso())

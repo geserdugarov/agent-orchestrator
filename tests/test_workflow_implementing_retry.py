@@ -574,7 +574,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
-            _, result = workflow._resume_dev_with_text(
+            _, result, _ = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "go",
             )
 
@@ -769,7 +769,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
 
         with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
-            _, result = workflow._resume_dev_with_text(
+            _, result, _ = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "go",
             )
 
@@ -871,7 +871,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
         with patch.object(config, "DEV_SESSION_MAX_RESUMES", threshold), \
              patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
-            wt, result = workflow._resume_dev_with_text(
+            wt, result, _ = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "fix it",
             )
         return state, result

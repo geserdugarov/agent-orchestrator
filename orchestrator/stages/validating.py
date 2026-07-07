@@ -763,7 +763,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             followup = _wf._build_user_content_change_prompt(
                 issue, _wf._recent_comments_text(issue),
             )
-            wt, result = _wf._resume_dev_with_text(
+            wt, result, _ = _wf._resume_dev_with_text(
                 gh, spec, issue, state, followup,
             )
             state.set("last_agent_action_at", _wf._now_iso())
@@ -912,7 +912,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             resumed = _wf._resume_developer_on_human_reply(gh, spec, issue, state)
             if resumed is None:
                 return
-            wt, result = resumed
+            wt, result, _ = resumed
             state.set("last_agent_action_at", _wf._now_iso())
             if not _handle_dev_fix_result(
                 gh, spec, issue, state, wt, result, before_sha
@@ -1264,7 +1264,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # same overflow loop. The helper tags its events with the current label,
     # which the `fixing` flip above has already set, so the spawn stays
     # `fixing`.
-    wt, dev_result = _wf._resume_dev_with_text(
+    wt, dev_result, _ = _wf._resume_dev_with_text(
         gh, spec, issue, state, fix_prompt,
     )
     state.set("last_agent_action_at", _wf._now_iso())

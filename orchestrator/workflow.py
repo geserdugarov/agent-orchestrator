@@ -331,6 +331,7 @@ __all__ = [
     "_parse_documentation_verdict",
     "_parse_manifest",
     "_parse_review_verdict",
+    "_paused_during_agent_run",
     "_post_issue_comment",
     "_post_issue_usage_verdict",
     "_post_pr_comment",
@@ -1463,6 +1464,49 @@ def _ignore_if_interrupted(issue: Issue, result: AgentResult) -> bool:
         "issue=#%d agent run interrupted by shutdown sweep; leaving durable "
         "state untouched for retry by the next process",
         issue.number,
+    )
+    return True
+
+
+def _paused_during_agent_run(gh: GitHubClient, issue: Issue) -> bool:
+    """True when a hard-skip control label (`paused` / `backlog`) was applied
+    to `issue` while an agent run was in flight.
+
+    The dispatcher and `_process_issue` read the issue's labels once, at tick
+    start, and skip a hard-skipped issue before any handler runs. But a stage
+    that spawns an agent holds that label snapshot for the whole run -- minutes,
+    typically -- so an operator who applies `paused` mid-run would otherwise not
+    take effect until the run's results were already published: PR opened, label
+    flipped, HITL park posted, action watermark consumed, pinned state advanced.
+
+    Stage handlers call this right after an agent run returns, BEFORE any of
+    that disposition, and `return` WITHOUT writing pinned state on a True result
+    -- mirroring `_ignore_if_interrupted`. Durable GitHub state is left exactly
+    as the prior tick had it and the agent's committed work stays on the branch,
+    so once the operator removes the label the next tick republishes it through
+    the normal recovered-worktree path.
+
+    The label is read from a FRESHLY fetched issue (`gh.get_issue`), never the
+    stale handler `issue` whose labels were snapshotted before the run -- the
+    whole point is to catch a label applied mid-run. A fetch failure returns
+    False (publish as before): the guard is an additive safety net and must not
+    itself strand a run that would otherwise have completed.
+    """
+    try:
+        fresh = gh.get_issue(issue.number)
+    except Exception:
+        log.debug(
+            "issue=#%d not retrievable for post-agent pause check; proceeding",
+            issue.number,
+        )
+        return False
+    skip_label = hard_skip_control_label(fresh)
+    if skip_label is None:
+        return False
+    log.info(
+        "issue=#%d acquired %r during the agent run; leaving durable state "
+        "untouched until the label is removed",
+        issue.number, skip_label,
     )
     return True
 

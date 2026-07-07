@@ -30,7 +30,11 @@ Four non-workflow **control labels** modify behavior without occupying the workf
   back to the state machine on the next tick.
 - `paused` is the same hard skip as `backlog` at every point (dispatch, scheduler routing, `_process_issue`, and base
   sync), differing only in intent: `backlog` is a "not yet" hold on a fresh issue, `paused` freezes an already
-  in-flight one without discarding its state. Removing it resumes processing on the next tick.
+  in-flight one without discarding its state. Removing it resumes processing on the next tick. Because those skip points
+  read the issue's labels at tick start, the implementing stage additionally re-checks a freshly fetched issue right
+  after a dev agent run returns (`_paused_during_agent_run`): a `paused` applied mid-run stops before the PR opens, the
+  label flips, a HITL park posts, or pinned state advances, so the committed work stays on the branch and republishes
+  through the normal recovered-worktree path once the label is removed.
 - `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open
   PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR. Bot-authored PRs
   (Dependabot, Renovate, CI bots) are skipped via GitHub's `user.type == "Bot"` flag — they open PRs structurally and
@@ -425,6 +429,12 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
        pinned state, so durable GitHub state stays exactly as the prior tick left it and the next process retries.
        Precedes every branch below and applies to both the awaiting-human and user-content-change resumes. Never posts a
        HITL question, consumes `awaiting_human`, or advances a watermark.
+     - `paused` / `backlog` applied mid-run → same short-circuit as `interrupted`: return WITHOUT writing pinned
+       state, so no PR opens, no relabel, no park, no watermark bump. `_paused_during_agent_run` re-reads a FRESHLY
+       fetched issue (`gh.get_issue`) because the dispatch-time skip only saw the pre-run labels. Applies to the fresh
+       spawn, the awaiting-human resume (including the pre-disposition `_resume_dev_with_text` poisoned-session retry),
+       and the user-content-change resume. The committed work stays on the branch and republishes through step 3's
+       recovered-worktree path once the label is removed.
      - `timed_out` → dispose on whether HEAD advanced past the pre-agent SHA snapshot: a clean advance publishes via
        `_on_commits` exactly as a normal completion (a clean commit produced just before/around the kill is **not**
        stranded behind `awaiting_human`); a dirty advance parks via `_on_dirty_worktree`; no advance parks

@@ -487,7 +487,7 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 f"{prefix}Unread PR conversation comments:\n\n{pr_block}"
             )
         followup = _wf._build_user_content_change_prompt(issue, comments_text)
-        wt, dev_result = _wf._resume_dev_with_text(
+        wt, dev_result, _ = _wf._resume_dev_with_text(
             gh, spec, issue, state, followup,
         )
         state.set("last_agent_action_at", _wf._now_iso())
