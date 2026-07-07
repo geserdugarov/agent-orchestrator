@@ -24,7 +24,7 @@ def _td():
 
 def _run(**overrides):
     import orchestrator.trajectory_reader as tr
-    rec = {
+    record = {
         "ts": "2026-06-20T10:00:00+00:00",
         "repo": "acme/widgets",
         "issue": 42,
@@ -34,8 +34,8 @@ def _run(**overrides):
         "backend": "claude",
         "steps": [],
     }
-    rec.update(overrides)
-    return tr.parse_record(rec, seq=0)
+    record.update(overrides)
+    return tr.parse_record(record, seq=0)
 
 
 class LazyImportTest(unittest.TestCase):
@@ -81,8 +81,8 @@ class ScriptPathLaunchTest(unittest.TestCase):
 
         original_path = list(sys.path)
         saved_modules = {
-            k: v for k, v in sys.modules.items()
-            if k == "orchestrator" or k.startswith("orchestrator.")
+            module_name: module for module_name, module in sys.modules.items()
+            if module_name == "orchestrator" or module_name.startswith("orchestrator.")
         }
         try:
             resolved_root = repo_root.resolve()
@@ -91,29 +91,29 @@ class ScriptPathLaunchTest(unittest.TestCase):
                 if not p or Path(p).resolve() != resolved_root
             ]
             sys.path.insert(0, str(script_dir))
-            for k in list(sys.modules):
-                if k == "orchestrator" or k.startswith("orchestrator."):
-                    del sys.modules[k]
+            for module_name in list(sys.modules):
+                if module_name == "orchestrator" or module_name.startswith("orchestrator."):
+                    del sys.modules[module_name]
 
             namespace = runpy.run_path(str(script), run_name="not_main")
             self.assertIn("main", namespace)
             self.assertIn("trajectory_reader", namespace)
         finally:
             sys.path[:] = original_path
-            for k in list(sys.modules):
-                if k == "orchestrator" or k.startswith("orchestrator."):
-                    del sys.modules[k]
+            for module_name in list(sys.modules):
+                if module_name == "orchestrator" or module_name.startswith("orchestrator."):
+                    del sys.modules[module_name]
             sys.modules.update(saved_modules)
 
 
 class TopbarHtmlTest(unittest.TestCase):
 
     def test_carries_title_and_in_view_pill(self) -> None:
-        out = _td()._topbar_html(10, 3)
-        self.assertIn("orch-topbar", out)
-        self.assertIn("Orchestrator Trajectories", out)
-        self.assertIn("10 recorded", out)
-        self.assertIn("3 / 10", out)
+        html = _td()._topbar_html(10, 3)
+        self.assertIn("orch-topbar", html)
+        self.assertIn("Orchestrator Trajectories", html)
+        self.assertIn("10 recorded", html)
+        self.assertIn("3 / 10", html)
 
 
 class KpiStripHtmlTest(unittest.TestCase):
@@ -124,56 +124,56 @@ class KpiStripHtmlTest(unittest.TestCase):
             total_runs=5, distinct_issues=3, distinct_repos=2,
             total_tool_calls=11, truncated_runs=1, total_cost_usd=12.5,
         )
-        out = _td()._kpi_strip_html(summary)
-        self.assertIn("orch-kpis", out)
+        html = _td()._kpi_strip_html(summary)
+        self.assertIn("orch-kpis", html)
         for label in ("Runs", "Issues", "Repos", "Tool calls", "Total cost"):
-            self.assertIn(f">{label}</span>", out)
-        self.assertIn("1 truncated", out)
+            self.assertIn(f">{label}</span>", html)
+        self.assertIn("1 truncated", html)
         # Exact cents even above $10 -- the compact `fmt_money` would read
         # `$12`, dropping the authoritative figure's cents.
-        self.assertIn(">$12.50</div>", out)
+        self.assertIn(">$12.50</div>", html)
 
     def test_no_truncated_reads_none_and_zero_cost(self) -> None:
         import orchestrator.trajectory_reader as tr
-        out = _td()._kpi_strip_html(tr.TrajectorySummary(total_runs=2))
-        self.assertIn("none truncated", out)
-        self.assertIn(">$0.00</div>", out)
+        html = _td()._kpi_strip_html(tr.TrajectorySummary(total_runs=2))
+        self.assertIn("none truncated", html)
+        self.assertIn(">$0.00</div>", html)
 
 
 class MetaHtmlTest(unittest.TestCase):
 
     def test_only_present_fields_render(self) -> None:
         run = _run(session_id="sess-1", review_round=2)
-        out = _td()._meta_html(run)
-        self.assertIn(">Repo</div>", out)
-        self.assertIn(">acme/widgets</div>", out)
-        self.assertIn(">Review round</div>", out)
-        self.assertIn(">sess-1</div>", out)
+        html = _td()._meta_html(run)
+        self.assertIn(">Repo</div>", html)
+        self.assertIn(">acme/widgets</div>", html)
+        self.assertIn(">Review round</div>", html)
+        self.assertIn(">sess-1</div>", html)
         # No retry_count on this run -> the tile is omitted entirely.
-        self.assertNotIn(">Retry count</div>", out)
+        self.assertNotIn(">Retry count</div>", html)
 
     def test_html_escaped(self) -> None:
         run = _run(repo="o/<r&>")
-        out = _td()._meta_html(run)
-        self.assertIn("o/&lt;r&amp;&gt;", out)
-        self.assertNotIn("o/<r&>", out)
+        html = _td()._meta_html(run)
+        self.assertIn("o/&lt;r&amp;&gt;", html)
+        self.assertNotIn("o/<r&>", html)
 
 
 class ChipsHtmlTest(unittest.TestCase):
 
     def test_label_and_pills(self) -> None:
-        out = _td()._labeled_chips_html("Tools offered", ["Bash", "Edit"])
-        self.assertIn("Tools offered", out)
-        self.assertIn(">Bash</span>", out)
-        self.assertIn(">Edit</span>", out)
+        html = _td()._labeled_chips_html("Tools offered", ["Bash", "Edit"])
+        self.assertIn("Tools offered", html)
+        self.assertIn(">Bash</span>", html)
+        self.assertIn(">Edit</span>", html)
 
     def test_empty_is_blank(self) -> None:
         self.assertEqual(_td()._labeled_chips_html("Tools", []), "")
 
     def test_escaped(self) -> None:
-        out = _td()._labeled_chips_html("Skills", ["<x>"])
-        self.assertIn("&lt;x&gt;", out)
-        self.assertNotIn("<x>", out)
+        html = _td()._labeled_chips_html("Skills", ["<x>"])
+        self.assertIn("&lt;x&gt;", html)
+        self.assertNotIn("<x>", html)
 
 
 class RunsTableHtmlTest(unittest.TestCase):
@@ -184,36 +184,36 @@ class RunsTableHtmlTest(unittest.TestCase):
             steps=[{"kind": "tool_call", "name": "Bash"},
                    {"kind": "tool_result", "tool_id": "t"}],
         )
-        out = _td()._runs_table_html([run])
+        html = _td()._runs_table_html([run])
         for header in ("Issue", "Repo", "Stage", "Role", "Backend",
                        "Round", "Steps", "Tool calls", "Recorded"):
-            self.assertIn(f">{header}</th>", out)
-        self.assertIn("#42", out)
-        self.assertIn(">acme/widgets</td>", out)
+            self.assertIn(f">{header}</th>", html)
+        self.assertIn("#42", html)
+        self.assertIn(">acme/widgets</td>", html)
         # 2 steps, 1 of which is a tool call.
-        self.assertIn(">2</td>", out)
-        self.assertIn(">1</td>", out)
+        self.assertIn(">2</td>", html)
+        self.assertIn(">1</td>", html)
 
     def test_repo_escaped(self) -> None:
-        out = _td()._runs_table_html([_run(repo="o/<r&>")])
-        self.assertIn("o/&lt;r&amp;&gt;", out)
-        self.assertNotIn("o/<r&>", out)
+        html = _td()._runs_table_html([_run(repo="o/<r&>")])
+        self.assertIn("o/&lt;r&amp;&gt;", html)
+        self.assertNotIn("o/<r&>", html)
 
     def test_fixture_row_flagged(self) -> None:
         # `ignored` is the sentinel prompt that marks a synthetic fixture.
         run = _run(user_input="ignored")
         self.assertTrue(run.is_fixture)
-        out = _td()._runs_table_html([run])
-        self.assertIn('<tr class="fixture">', out)
-        self.assertIn("orch-traj-fixture-tag", out)
-        self.assertIn(">fixture</span>", out)
+        html = _td()._runs_table_html([run])
+        self.assertIn('<tr class="fixture">', html)
+        self.assertIn("orch-traj-fixture-tag", html)
+        self.assertIn(">fixture</span>", html)
 
     def test_real_row_not_flagged(self) -> None:
         run = _run()
         self.assertFalse(run.is_fixture)
-        out = _td()._runs_table_html([run])
-        self.assertNotIn('class="fixture"', out)
-        self.assertNotIn("orch-traj-fixture-tag", out)
+        html = _td()._runs_table_html([run])
+        self.assertNotIn('class="fixture"', html)
+        self.assertNotIn("orch-traj-fixture-tag", html)
 
 
 class TimelineEntryHtmlTest(unittest.TestCase):
@@ -221,63 +221,63 @@ class TimelineEntryHtmlTest(unittest.TestCase):
     def test_prompt_bracket_badge(self) -> None:
         import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind=tr.TIMELINE_PROMPT, content="do x")
-        out = _td()._timeline_entry_html(entry, 0)
-        self.assertIn("orch-traj-badge prompt", out)
-        self.assertIn(">prompt</span>", out)
+        html = _td()._timeline_entry_html(entry, 0)
+        self.assertIn("orch-traj-badge prompt", html)
+        self.assertIn(">prompt</span>", html)
         # 0-based index renders 1-based for humans.
-        self.assertIn(">1</span>", out)
+        self.assertIn(">1</span>", html)
 
     def test_output_bracket_badge(self) -> None:
         import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind=tr.TIMELINE_OUTPUT, content="done")
-        out = _td()._timeline_entry_html(entry, 4)
-        self.assertIn("orch-traj-badge output", out)
-        self.assertIn(">final output</span>", out)
-        self.assertIn(">5</span>", out)
+        html = _td()._timeline_entry_html(entry, 4)
+        self.assertIn("orch-traj-badge output", html)
+        self.assertIn(">final output</span>", html)
+        self.assertIn(">5</span>", html)
 
     def test_tool_call_badge_name_and_id(self) -> None:
         import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind="tool_call", name="Bash", tool_id="t1")
-        out = _td()._timeline_entry_html(entry, 1)
-        self.assertIn("orch-traj-badge call", out)
-        self.assertIn(">tool call</span>", out)
-        self.assertIn(">Bash</span>", out)
-        self.assertIn("t1", out)
+        html = _td()._timeline_entry_html(entry, 1)
+        self.assertIn("orch-traj-badge call", html)
+        self.assertIn(">tool call</span>", html)
+        self.assertIn(">Bash</span>", html)
+        self.assertIn("t1", html)
 
     def test_tool_result_badge(self) -> None:
         import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind="tool_result", tool_id="t1")
-        out = _td()._timeline_entry_html(entry, 2)
-        self.assertIn("orch-traj-badge result", out)
-        self.assertIn(">tool result</span>", out)
+        html = _td()._timeline_entry_html(entry, 2)
+        self.assertIn("orch-traj-badge result", html)
+        self.assertIn(">tool result</span>", html)
 
     def test_assistant_turn_badge(self) -> None:
         import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind="assistant_message", content="hi")
-        out = _td()._timeline_entry_html(entry, 0)
-        self.assertIn("orch-traj-badge assistant", out)
-        self.assertIn(">assistant</span>", out)
+        html = _td()._timeline_entry_html(entry, 0)
+        self.assertIn("orch-traj-badge assistant", html)
+        self.assertIn(">assistant</span>", html)
 
     def test_user_turn_badge(self) -> None:
         import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind="user_message", content="more")
-        out = _td()._timeline_entry_html(entry, 0)
-        self.assertIn("orch-traj-badge user", out)
-        self.assertIn(">user turn</span>", out)
+        html = _td()._timeline_entry_html(entry, 0)
+        self.assertIn("orch-traj-badge user", html)
+        self.assertIn(">user turn</span>", html)
 
     def test_unknown_kind_falls_through(self) -> None:
         import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind="weird")
-        out = _td()._timeline_entry_html(entry, 0)
-        self.assertIn("orch-traj-badge result", out)
-        self.assertIn(">weird</span>", out)
+        html = _td()._timeline_entry_html(entry, 0)
+        self.assertIn("orch-traj-badge result", html)
+        self.assertIn(">weird</span>", html)
 
     def test_name_escaped(self) -> None:
         import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind="tool_call", name="<x>")
-        out = _td()._timeline_entry_html(entry, 0)
-        self.assertIn("&lt;x&gt;", out)
-        self.assertNotIn("<x></span>", out)
+        html = _td()._timeline_entry_html(entry, 0)
+        self.assertIn("&lt;x&gt;", html)
+        self.assertNotIn("<x></span>", html)
 
 
 class RunPickerLabelTest(unittest.TestCase):
@@ -285,9 +285,9 @@ class RunPickerLabelTest(unittest.TestCase):
     def test_fixture_run_prefixed(self) -> None:
         run = _run(session_id="sess-9")
         self.assertTrue(run.is_fixture)
-        out = _td()._run_picker_label(run)
-        self.assertTrue(out.startswith("[fixture] "))
-        self.assertIn(run.detail_label(), out)
+        label = _td()._run_picker_label(run)
+        self.assertTrue(label.startswith("[fixture] "))
+        self.assertIn(run.detail_label(), label)
 
     def test_real_run_plain_label(self) -> None:
         # The per-run picker drops repo / issue (chosen in the cascading
@@ -326,21 +326,21 @@ class RunUsageHtmlTest(unittest.TestCase):
                     "cache_read_tokens": 18240, "cache_write_tokens": 512,
                     "cost_usd": 0.0123, "cost_source": "estimated"}],
         )
-        out = _td()._run_usage_html(run)
-        self.assertIn(">Run usage</span>", out)
-        self.assertIn("claude-opus-4-8", out)
-        self.assertIn("9 turns", out)
-        self.assertIn("cache-read 812,440", out)
-        self.assertIn("cache-write 20,110", out)
+        html = _td()._run_usage_html(run)
+        self.assertIn(">Run usage</span>", html)
+        self.assertIn("claude-opus-4-8", html)
+        self.assertIn("9 turns", html)
+        self.assertIn("cache-read 812,440", html)
+        self.assertIn("cache-write 20,110", html)
         # `cached_tokens` is 0 on claude -> no always-zero cached chip.
-        self.assertNotIn("cached ", out)
+        self.assertNotIn("cached ", html)
         # Authoritative run cost with its source, exact to the cent.
-        self.assertIn("reported $0.83", out)
-        self.assertIn("orch-traj-chip cost", out)
+        self.assertIn("reported $0.83", html)
+        self.assertIn("orch-traj-chip cost", html)
         # Note carries both honesty points for the claude (per-turn) path.
-        self.assertIn("authoritative when reported", out)
-        self.assertIn("claude-only estimates", out)
-        self.assertIn("need not sum to it", out)
+        self.assertIn("authoritative when reported", html)
+        self.assertIn("claude-only estimates", html)
+        self.assertIn("need not sum to it", html)
 
     def test_codex_summary_shows_not_available_note(self) -> None:
         run = _run(
@@ -351,40 +351,40 @@ class RunUsageHtmlTest(unittest.TestCase):
                        "cost_source": "estimated"},
             turns=[],
         )
-        out = _td()._run_usage_html(run)
-        self.assertIn("gpt-5-codex", out)
+        html = _td()._run_usage_html(run)
+        self.assertIn("gpt-5-codex", html)
         # Codex has no read/write split, so `cached_tokens` is its only cache
         # signal and must reach the row.
-        self.assertIn("cached 500", out)
-        self.assertIn("estimated $0.05", out)
+        self.assertIn("cached 500", html)
+        self.assertIn("estimated $0.05", html)
         # Codex has no per-turn detail: it gets the run summary plus a note,
         # and never the per-turn estimate caveat.
-        self.assertIn("not available for this backend", out)
-        self.assertNotIn("need not sum to it", out)
+        self.assertIn("not available for this backend", html)
+        self.assertNotIn("need not sum to it", html)
 
     def test_pre_usage_record_renders_nothing(self) -> None:
         self.assertEqual(_td()._run_usage_html(_run()), "")
 
     def test_unpriced_run_names_source_without_dollars(self) -> None:
         run = _run(run_usage={"models": [], "cost_source": "no-usage"})
-        out = _td()._run_usage_html(run)
+        html = _td()._run_usage_html(run)
         # Unpriced -> the cost chip names the source, no dollar figure.
-        self.assertIn(">no-usage</span>", out)
-        self.assertNotIn("$", out)
+        self.assertIn(">no-usage</span>", html)
+        self.assertNotIn("$", html)
 
 
 class TurnUsageHtmlTest(unittest.TestCase):
 
     def test_strip_carries_model_tokens_and_est_cost(self) -> None:
-        out = _td()._turn_usage_html(_turn())
-        self.assertIn("orch-traj-turn", out)
-        self.assertIn("claude-opus-4-8", out)
-        self.assertIn("in 12 tok", out)
-        self.assertIn("out 340 tok", out)
-        self.assertIn("cache-read 18,240", out)
-        self.assertIn("cache-write 512", out)
+        html = _td()._turn_usage_html(_turn())
+        self.assertIn("orch-traj-turn", html)
+        self.assertIn("claude-opus-4-8", html)
+        self.assertIn("in 12 tok", html)
+        self.assertIn("out 340 tok", html)
+        self.assertIn("cache-read 18,240", html)
+        self.assertIn("cache-write 512", html)
         # Sub-cent precision so a small estimate is not floored to `$0.00`.
-        self.assertIn("est. $0.0123", out)
+        self.assertIn("est. $0.0123", html)
 
     def test_cache_hit_chip_only_when_cache_read(self) -> None:
         self.assertIn("cache hit", _td()._turn_usage_html(_turn()))
@@ -393,15 +393,15 @@ class TurnUsageHtmlTest(unittest.TestCase):
         )
 
     def test_unpriced_turn_reads_est_na(self) -> None:
-        out = _td()._turn_usage_html(
+        html = _td()._turn_usage_html(
             _turn(cost_usd=None, cost_source="unknown-price")
         )
-        self.assertIn("est. n/a", out)
+        self.assertIn("est. n/a", html)
 
     def test_model_escaped(self) -> None:
-        out = _td()._turn_usage_html(_turn(model="<m>"))
-        self.assertIn("&lt;m&gt;", out)
-        self.assertNotIn("<m></span>", out)
+        html = _td()._turn_usage_html(_turn(model="<m>"))
+        self.assertIn("&lt;m&gt;", html)
+        self.assertNotIn("<m></span>", html)
 
 
 class TimelineUsageBoundaryTest(unittest.TestCase):
@@ -459,10 +459,10 @@ class TimelineUsageBoundaryTest(unittest.TestCase):
 class CardHeaderHtmlTest(unittest.TestCase):
 
     def test_title_and_sub_escaped(self) -> None:
-        out = _td()._card_header_html("Title <b>", "Sub & more")
-        self.assertIn("orch-card-title", out)
-        self.assertIn("Title &lt;b&gt;", out)
-        self.assertIn("Sub &amp; more", out)
+        html = _td()._card_header_html("Title <b>", "Sub & more")
+        self.assertIn("orch-card-title", html)
+        self.assertIn("Title &lt;b&gt;", html)
+        self.assertIn("Sub &amp; more", html)
 
 
 if __name__ == "__main__":

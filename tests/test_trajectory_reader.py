@@ -32,7 +32,7 @@ def _write_jsonl(path: Path, lines) -> None:
 
 
 def _record(**overrides):
-    rec = {
+    record = {
         "ts": "2026-06-20T10:00:00+00:00",
         "repo": "acme/widgets",
         "issue": 42,
@@ -42,14 +42,14 @@ def _record(**overrides):
         "backend": "claude",
         "steps": [],
     }
-    rec.update(overrides)
-    return rec
+    record.update(overrides)
+    return record
 
 
 class ParseRecordTest(unittest.TestCase):
 
     def test_full_record_round_trips(self) -> None:
-        rec = _record(
+        record = _record(
             session_id="sess-1",
             review_round=2,
             retry_count=1,
@@ -67,7 +67,7 @@ class ParseRecordTest(unittest.TestCase):
             ],
             truncated=True,
         )
-        run = tr.parse_record(rec, seq=3)
+        run = tr.parse_record(record, seq=3)
         assert run is not None
         self.assertEqual(run.seq, 3)
         self.assertEqual(run.issue, 42)
@@ -144,7 +144,7 @@ class ParseRecordTest(unittest.TestCase):
 
 def _usage_record(**overrides):
     """A claude record carrying run + per-turn usage and turn-stamped steps."""
-    rec = _record(
+    record = _record(
         user_input="fix the parser",
         output="done",
         run_usage={
@@ -176,8 +176,8 @@ def _usage_record(**overrides):
             {"kind": "assistant_message", "turn": 1, "content": "done"},
         ],
     )
-    rec.update(overrides)
-    return rec
+    record.update(overrides)
+    return record
 
 
 class UsageParsingTest(unittest.TestCase):
@@ -219,7 +219,7 @@ class UsageParsingTest(unittest.TestCase):
         assert run is not None
         # Billed steps carry their turn; the tool_result input stays None.
         self.assertEqual(
-            [s.turn for s in run.steps], [0, 0, None, 1]
+            [step.turn for step in run.steps], [0, 0, None, 1]
         )
         # The timeline mirrors the step turn so the page can render the
         # per-turn strip at the boundary; the brackets carry no turn.
@@ -563,19 +563,19 @@ class SummarizeTest(unittest.TestCase):
             ),
             tr.parse_record(_record(issue=2, repo="b/b"), seq=2),
         ]
-        s = tr.summarize(runs)
-        self.assertEqual(s.total_runs, 3)
+        summary = tr.summarize(runs)
+        self.assertEqual(summary.total_runs, 3)
         # Two runs share (a/a, 1); (b/b, 2) is the third distinct issue.
-        self.assertEqual(s.distinct_issues, 2)
-        self.assertEqual(s.distinct_repos, 2)
-        self.assertEqual(s.total_tool_calls, 2)
-        self.assertEqual(s.truncated_runs, 1)
+        self.assertEqual(summary.distinct_issues, 2)
+        self.assertEqual(summary.distinct_repos, 2)
+        self.assertEqual(summary.total_tool_calls, 2)
+        self.assertEqual(summary.truncated_runs, 1)
 
     def test_empty(self) -> None:
-        s = tr.summarize([])
+        summary = tr.summarize([])
         self.assertEqual(
-            (s.total_runs, s.distinct_issues, s.distinct_repos,
-             s.total_tool_calls, s.truncated_runs, s.total_cost_usd),
+            (summary.total_runs, summary.distinct_issues, summary.distinct_repos,
+             summary.total_tool_calls, summary.truncated_runs, summary.total_cost_usd),
             (0, 0, 0, 0, 0, 0.0),
         )
 

@@ -65,14 +65,14 @@ class UsageOverTimeTest(unittest.TestCase):
         # Three stacked area bands (Input, Output, Cache) plus the
         # cost line; the Cache band totals cache_read + cache_write
         # per day (the standalone mock's `r.cr + r.cw` accounting).
-        names = [t.name for t in fig.data]
+        names = [trace.name for trace in fig.data]
         self.assertIn("Input", names)
         self.assertIn("Output", names)
         self.assertIn("Cache", names)
         self.assertIn("Cost", names)
-        cache_trace = next(t for t in fig.data if t.name == "Cache")
+        cache_trace = next(trace for trace in fig.data if trace.name == "Cache")
         self.assertEqual(tuple(cache_trace.y), (600, 1500))
-        cost_trace = next(t for t in fig.data if t.name == "Cost")
+        cost_trace = next(trace for trace in fig.data if trace.name == "Cost")
         # Cost rides the secondary axis so it can use $ ticks.
         self.assertEqual(cost_trace.yaxis, "y2")
 
@@ -91,7 +91,7 @@ class UsageOverTimeTest(unittest.TestCase):
             backend_rows_by_day=backend_by_day,
             mode="backend",
         )
-        names = {t.name for t in fig.data}
+        names = {trace.name for trace in fig.data}
         # Backend bands plus the cost overlay.
         self.assertIn("claude", names)
         self.assertIn("codex", names)
@@ -171,7 +171,7 @@ class CostByStageTest(unittest.TestCase):
         # (one per stage). No-cache is added first so cache stacks
         # outward; the chart stacks under `barmode="stack"`.
         self.assertEqual(len(fig.data), 2)
-        self.assertEqual([t.name for t in fig.data], ["No cache", "Cache"])
+        self.assertEqual([trace.name for trace in fig.data], ["No cache", "Cache"])
         self.assertEqual(fig.layout.barmode, "stack")
         for trace in fig.data:
             self.assertEqual(len(trace.y), 2)
@@ -315,7 +315,7 @@ class CostByReviewRoundTest(unittest.TestCase):
         # trace stacks below cache (cache reads outward).
         self.assertEqual(len(fig.data), 4)
         self.assertEqual(
-            [t.name for t in fig.data],
+            [trace.name for trace in fig.data],
             [
                 "Review (no cache)",
                 "Review (cache)",
