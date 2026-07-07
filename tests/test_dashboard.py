@@ -26,10 +26,17 @@ from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 
+# Hermetic reload env: skip .env autoloading and point the token file at a
+# guaranteed-missing path so no ambient GITHUB_TOKEN leaks into a test.
+SKIP_DOTENV_ENV = "ORCHESTRATOR_SKIP_DOTENV"
+TOKEN_FILE_ENV = "ORCHESTRATOR_TOKEN_FILE"
+MISSING_TOKEN_FILE = "/tmp/agent-orchestrator-token-missing"
+
+
 def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {
-        "ORCHESTRATOR_SKIP_DOTENV": "1",
-        "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
+        SKIP_DOTENV_ENV: "1",
+        TOKEN_FILE_ENV: MISSING_TOKEN_FILE,
     }
     if extra:
         env.update(extra)
@@ -69,20 +76,97 @@ def _reload(env: dict[str, str] | None = None):
         return analytics, dashboard
 
 
+# The dashboard's only configuration input is the analytics DB URL env
+# var; tests flip it between "unset" (the disabled-DB banner / hermetic
+# reload) and a syntactically-valid Postgres URL (the source-inspection
+# reloads that read `dashboard.main`).
+ANALYTICS_DB_URL_ENV = "ANALYTICS_DB_URL"
+PARALLEL_READS_ENV = "DASHBOARD_PARALLEL_READS"
+CONFIGURED_DB_URL = "postgresql://h/db"
+
+# Recurring May-2026 anchors for the window / preset / KPI-delta tests.
+# The canonical current window is MAY_22..MAY_28 (7 days); the preset
+# data extent spans MAY_1..MAY_28 with its exclusive end at MAY_29, and
+# the 3-day preset opens at MAY_26.
+MAY_1 = date(2026, 5, 1)
+MAY_7 = date(2026, 5, 7)
+MAY_22 = date(2026, 5, 22)
+MAY_26 = date(2026, 5, 26)
+MAY_28 = date(2026, 5, 28)
+MAY_29 = date(2026, 5, 29)
+
+# Incidental first/last-seen timestamps stamped by the issue-summary row
+# builders. Never asserted -- the builders only need a valid ordered pair.
+FIRST_SEEN = datetime(2026, 5, 1, tzinfo=timezone.utc)
+LAST_SEEN = datetime(2026, 5, 2, tzinfo=timezone.utc)
+
+# Sample repo slugs shared by the issue-summary builders.
+REPO_A = "acme/a"
+REPO_B = "acme/b"
+REPO_C = "acme/c"
+
+# Fan-out reader names grouped by staged-render wave (issue #379): the
+# first wave feeds the topbar / KPI strip, the second the remaining
+# widgets.
+FIRST_WAVE_READER_NAMES = (
+    "summary", "prev_summary", "ts_points",
+    "review_round_rows", "throughput_rows", "cost_coverage_rows",
+)
+SECOND_WAVE_READER_NAMES = (
+    "stage_rows", "agent_exits", "issues_rows",
+    "backend_rows", "repo_rows", "heatmap_rows",
+    "backend_daily_rows", "skill_rows", "skill_matrix_rows",
+)
+
+# Canonical drill-down issue number, shared by the parse + cache-key tests.
+ISSUE_NUMBER = 42
+
+# Cache-key fixture inputs: a sample repo plus the event / stage filter
+# selections whose list->tuple normalization the cache key must preserve.
+CACHE_REPO = "acme/widgets"
+EVENT_NAMES = ("agent_exit", "stage_enter")
+STAGE_NAMES = ("implementing",)
+
+# Skill-matrix sort contract: the query-param names the clickable headers
+# write, the two direction tokens, and the column keys in header order.
+MTX_SORT_PARAM = "mtx_sort"
+MTX_DIR_PARAM = "mtx_dir"
+SORT_ASC = "asc"
+SORT_DESC = "desc"
+MTX_SORT_KEYS = (
+    "repo", "role", "backend", "skill", "runs", "skill_runs", "rate",
+)
+
+
+class _MainSourceTest(unittest.TestCase):
+    """Base for tests that inspect `dashboard.main`'s source under a
+    configured DB URL.
+
+    Streamlit / Plotly are opt-in (not installed for the default
+    `uv sync --locked`), so these read the rendered function source
+    rather than driving the page under Streamlit.
+    """
+
+    def _main_source(self) -> str:
+        import inspect
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        return inspect.getsource(dashboard.main)
+
+
 class DefaultDateRangeTest(unittest.TestCase):
 
     def test_default_window_covers_n_days_including_today(self) -> None:
         _, dashboard = _reload()
         start, end = dashboard.default_date_range(
-            today=date(2026, 5, 28), days=7
+            today=MAY_28, days=7
         )
-        self.assertEqual(end, date(2026, 5, 28))
-        self.assertEqual(start, date(2026, 5, 22))
+        self.assertEqual(end, MAY_28)
+        self.assertEqual(start, MAY_22)
 
     def test_days_one_yields_today_only(self) -> None:
         _, dashboard = _reload()
         start, end = dashboard.default_date_range(
-            today=date(2026, 5, 28), days=1
+            today=MAY_28, days=1
         )
         self.assertEqual(start, end)
 
@@ -91,10 +175,10 @@ class DefaultDateRangeTest(unittest.TestCase):
         # clamps to "today only" instead of returning end < start.
         _, dashboard = _reload()
         start, end = dashboard.default_date_range(
-            today=date(2026, 5, 28), days=0
+            today=MAY_28, days=0
         )
-        self.assertEqual(start, date(2026, 5, 28))
-        self.assertEqual(end, date(2026, 5, 28))
+        self.assertEqual(start, MAY_28)
+        self.assertEqual(end, MAY_28)
 
 
 class ToWindowTest(unittest.TestCase):
@@ -103,7 +187,7 @@ class ToWindowTest(unittest.TestCase):
         # `analytics_read` uses `ts < end`; midnight on the day after
         # `end_date` is what makes events from `end_date` visible.
         _, dashboard = _reload()
-        window = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 3))
+        window = dashboard.to_window(MAY_1, date(2026, 5, 3))
         self.assertEqual(
             window.start, datetime(2026, 5, 1, tzinfo=timezone.utc)
         )
@@ -116,13 +200,13 @@ class ToWindowTest(unittest.TestCase):
         # Swapping silently keeps the dashboard useful instead of
         # collapsing to an empty SQL window.
         _, dashboard = _reload()
-        window = dashboard.to_window(date(2026, 5, 5), date(2026, 5, 1))
-        self.assertEqual(window.start.date(), date(2026, 5, 1))
+        window = dashboard.to_window(date(2026, 5, 5), MAY_1)
+        self.assertEqual(window.start.date(), MAY_1)
         self.assertEqual(window.end.date(), date(2026, 5, 6))
 
     def test_single_day_window(self) -> None:
         _, dashboard = _reload()
-        window = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 1))
+        window = dashboard.to_window(MAY_1, MAY_1)
         self.assertEqual(
             window.start, datetime(2026, 5, 1, tzinfo=timezone.utc)
         )
@@ -135,12 +219,12 @@ class ParseIssueNumberTest(unittest.TestCase):
 
     def test_bare_int(self) -> None:
         _, dashboard = _reload()
-        self.assertEqual(dashboard.parse_issue_number("42"), 42)
+        self.assertEqual(dashboard.parse_issue_number("42"), ISSUE_NUMBER)
 
     def test_hash_prefix_and_whitespace(self) -> None:
         _, dashboard = _reload()
-        self.assertEqual(dashboard.parse_issue_number(" #42 "), 42)
-        self.assertEqual(dashboard.parse_issue_number("# 42"), 42)
+        self.assertEqual(dashboard.parse_issue_number(" #42 "), ISSUE_NUMBER)
+        self.assertEqual(dashboard.parse_issue_number("# 42"), ISSUE_NUMBER)
 
     def test_empty_returns_none(self) -> None:
         _, dashboard = _reload()
@@ -164,7 +248,7 @@ class ParseIssueNumberTest(unittest.TestCase):
 class DbUnconfiguredMessageTest(unittest.TestCase):
 
     def test_unset_url_returns_message(self) -> None:
-        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
         self.assertEqual(
             dashboard.db_unconfigured_message(),
             dashboard.UNCONFIGURED_DB_MESSAGE,
@@ -175,7 +259,7 @@ class DbUnconfiguredMessageTest(unittest.TestCase):
         # inside `config`, so the helper should treat them the same.
         for sentinel in ("off", "disabled", "none", "OFF", "Disabled"):
             with self.subTest(sentinel=sentinel):
-                _, dashboard = _reload({"ANALYTICS_DB_URL": sentinel})
+                _, dashboard = _reload({ANALYTICS_DB_URL_ENV: sentinel})
                 self.assertEqual(
                     dashboard.db_unconfigured_message(),
                     dashboard.UNCONFIGURED_DB_MESSAGE,
@@ -183,7 +267,7 @@ class DbUnconfiguredMessageTest(unittest.TestCase):
 
     def test_configured_url_returns_none(self) -> None:
         _, dashboard = _reload(
-            {"ANALYTICS_DB_URL": "postgresql://h/db"}
+            {ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL}
         )
         self.assertIsNone(dashboard.db_unconfigured_message())
 
@@ -349,40 +433,40 @@ class PresetWindowTest(unittest.TestCase):
 
     def test_three_day_preset_anchors_at_max(self) -> None:
         _, dashboard = _reload()
-        extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
+        extent = self._extent(MAY_1, MAY_28)
         window = dashboard.preset_window(dashboard.PRESET_3D, extent)
         self.assertIsNotNone(window)
         # Three-day preset spans the max date and the two days before
         # it, exclusive end at midnight the day after the max.
-        self.assertEqual(window.start.date(), date(2026, 5, 26))
-        self.assertEqual(window.end.date(), date(2026, 5, 29))
+        self.assertEqual(window.start.date(), MAY_26)
+        self.assertEqual(window.end.date(), MAY_29)
 
     def test_seven_day_preset_anchors_at_max(self) -> None:
         _, dashboard = _reload()
-        extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
+        extent = self._extent(MAY_1, MAY_28)
         window = dashboard.preset_window(dashboard.PRESET_7D, extent)
         self.assertIsNotNone(window)
-        self.assertEqual(window.start.date(), date(2026, 5, 22))
-        self.assertEqual(window.end.date(), date(2026, 5, 29))
+        self.assertEqual(window.start.date(), MAY_22)
+        self.assertEqual(window.end.date(), MAY_29)
 
     def test_seven_day_preset_clamps_to_min(self) -> None:
         # Data extent is only 3 days wide -- "Last 7 days" must
         # clamp the start at the data extent's min, not reach
         # before it.
         _, dashboard = _reload()
-        extent = self._extent(date(2026, 5, 26), date(2026, 5, 28))
+        extent = self._extent(MAY_26, MAY_28)
         window = dashboard.preset_window(dashboard.PRESET_7D, extent)
         self.assertIsNotNone(window)
-        self.assertEqual(window.start.date(), date(2026, 5, 26))
-        self.assertEqual(window.end.date(), date(2026, 5, 29))
+        self.assertEqual(window.start.date(), MAY_26)
+        self.assertEqual(window.end.date(), MAY_29)
 
     def test_all_preset_covers_full_extent(self) -> None:
         _, dashboard = _reload()
-        extent = self._extent(date(2026, 1, 1), date(2026, 5, 28))
+        extent = self._extent(date(2026, 1, 1), MAY_28)
         window = dashboard.preset_window(dashboard.PRESET_ALL, extent)
         self.assertIsNotNone(window)
         self.assertEqual(window.start.date(), date(2026, 1, 1))
-        self.assertEqual(window.end.date(), date(2026, 5, 29))
+        self.assertEqual(window.end.date(), MAY_29)
 
     def test_custom_preset_returns_none(self) -> None:
         # The caller renders a date-range picker when the preset is
@@ -390,7 +474,7 @@ class PresetWindowTest(unittest.TestCase):
         # branch on a falsy value rather than special-casing the
         # preset string in two places.
         _, dashboard = _reload()
-        extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
+        extent = self._extent(MAY_1, MAY_28)
         self.assertIsNone(
             dashboard.preset_window(dashboard.PRESET_CUSTOM, extent)
         )
@@ -404,7 +488,7 @@ class PresetWindowTest(unittest.TestCase):
 
     def test_unknown_preset_returns_none(self) -> None:
         _, dashboard = _reload()
-        extent = self._extent(date(2026, 5, 1), date(2026, 5, 28))
+        extent = self._extent(MAY_1, MAY_28)
         self.assertIsNone(
             dashboard.preset_window("not-a-preset", extent)
         )
@@ -436,20 +520,20 @@ class PreviousWindowTest(unittest.TestCase):
 
     def test_length_preserved(self) -> None:
         _, dashboard = _reload()
-        win = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 7))
+        win = dashboard.to_window(MAY_1, MAY_7)
         prev = dashboard.previous_window(win)
         self.assertEqual(prev.end, win.start)
         self.assertEqual(prev.end - prev.start, win.end - win.start)
 
     def test_seven_day_window_yields_seven_day_previous(self) -> None:
         _, dashboard = _reload()
-        win = dashboard.to_window(date(2026, 5, 22), date(2026, 5, 28))
+        win = dashboard.to_window(MAY_22, MAY_28)
         prev = dashboard.previous_window(win)
         # `to_window`'s end is exclusive (one day past `end_date`),
         # so the seven-day window spans 7 calendar days; the previous
         # window starts seven days before the current start.
         self.assertEqual(prev.start.date(), date(2026, 5, 15))
-        self.assertEqual(prev.end.date(), date(2026, 5, 22))
+        self.assertEqual(prev.end.date(), MAY_22)
 
 
 class KpiDeltaTest(unittest.TestCase):
@@ -667,8 +751,8 @@ class TopExpensiveIssuesTest(unittest.TestCase):
             repo=repo,
             issue=num,
             event_count=events,
-            first_seen=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            last_seen=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            first_seen=FIRST_SEEN,
+            last_seen=LAST_SEEN,
             latest_stage="implementing",
             agent_exits=1,
             total_cost_usd=cost,
@@ -679,40 +763,40 @@ class TopExpensiveIssuesTest(unittest.TestCase):
     def test_sorts_by_cost_desc(self) -> None:
         _, dashboard = _reload()
         rows = [
-            self._issue("acme/a", 1, 0.10),
-            self._issue("acme/b", 2, 1.00),
-            self._issue("acme/c", 3, 0.50),
+            self._issue(REPO_A, 1, 0.10),
+            self._issue(REPO_B, 2, 1.00),
+            self._issue(REPO_C, 3, 0.50),
         ]
         top = dashboard.top_expensive_issues(rows, limit=2)
         self.assertEqual([(r.repo, r.issue) for r in top],
-                         [("acme/b", 2), ("acme/c", 3)])
+                         [(REPO_B, 2), (REPO_C, 3)])
 
     def test_none_cost_sorts_last(self) -> None:
         _, dashboard = _reload()
         rows = [
-            self._issue("acme/a", 1, None),
-            self._issue("acme/b", 2, 0.10),
+            self._issue(REPO_A, 1, None),
+            self._issue(REPO_B, 2, 0.10),
         ]
         top = dashboard.top_expensive_issues(rows, limit=5)
         self.assertEqual([r.issue for r in top], [2, 1])
 
     def test_limit_zero_returns_empty(self) -> None:
         _, dashboard = _reload()
-        rows = [self._issue("acme/a", 1, 0.10)]
+        rows = [self._issue(REPO_A, 1, 0.10)]
         self.assertEqual(dashboard.top_expensive_issues(rows, limit=0), [])
 
     def test_ties_break_on_event_count_then_identity(self) -> None:
         _, dashboard = _reload()
         rows = [
-            self._issue("acme/a", 1, 1.00, events=2),
-            self._issue("acme/a", 2, 1.00, events=10),
-            self._issue("acme/b", 1, 1.00, events=2),
+            self._issue(REPO_A, 1, 1.00, events=2),
+            self._issue(REPO_A, 2, 1.00, events=10),
+            self._issue(REPO_B, 1, 1.00, events=2),
         ]
         top = dashboard.top_expensive_issues(rows)
         # Higher event count first, then (repo, issue) ascending.
         self.assertEqual(
             [(r.repo, r.issue) for r in top],
-            [("acme/a", 2), ("acme/a", 1), ("acme/b", 1)],
+            [(REPO_A, 2), (REPO_A, 1), (REPO_B, 1)],
         )
 
 
@@ -725,14 +809,13 @@ class IssuesTableHtmlTest(unittest.TestCase):
     def _row(self, repo, issue, cost, *, failed=0, max_round=None,
              max_retry=None):
         _, dashboard = _reload()
-        from datetime import datetime, timezone
         from orchestrator.analytics.read import IssueSummaryRow
         return IssueSummaryRow(
             repo=repo,
             issue=issue,
             event_count=10,
-            first_seen=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            last_seen=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            first_seen=FIRST_SEEN,
+            last_seen=LAST_SEEN,
             latest_stage="implementing",
             agent_exits=4,
             total_cost_usd=cost,
@@ -745,7 +828,7 @@ class IssuesTableHtmlTest(unittest.TestCase):
 
     def test_columns_match_standalone_mock(self) -> None:
         _, dashboard = _reload()
-        rows = [self._row("acme/a", 1, 12.0)]
+        rows = [self._row(REPO_A, 1, 12.0)]
         html = dashboard._issues_table_html(rows)
         for header in ("Issue", "Cost", "Runs", "Review rds",
                        "Retries", "Status"):
@@ -753,7 +836,7 @@ class IssuesTableHtmlTest(unittest.TestCase):
 
     def test_status_pill_renders_clean_when_no_failures(self) -> None:
         _, dashboard = _reload()
-        rows = [self._row("acme/a", 1, 4.0, failed=0)]
+        rows = [self._row(REPO_A, 1, 4.0, failed=0)]
         html = dashboard._issues_table_html(rows)
         self.assertIn('class="orch-pill ok"', html)
         self.assertIn(">clean<", html)
@@ -761,7 +844,7 @@ class IssuesTableHtmlTest(unittest.TestCase):
 
     def test_status_pill_renders_fail_when_failures_present(self) -> None:
         _, dashboard = _reload()
-        rows = [self._row("acme/a", 1, 4.0, failed=3)]
+        rows = [self._row(REPO_A, 1, 4.0, failed=3)]
         html = dashboard._issues_table_html(rows)
         self.assertIn('class="orch-pill bad"', html)
         self.assertIn(">3 fail<", html)
@@ -771,8 +854,8 @@ class IssuesTableHtmlTest(unittest.TestCase):
         # issue's full-width bar.
         _, dashboard = _reload()
         rows = [
-            self._row("acme/a", 1, 10.0),
-            self._row("acme/b", 2, 5.0),
+            self._row(REPO_A, 1, 10.0),
+            self._row(REPO_B, 2, 5.0),
         ]
         html = dashboard._issues_table_html(rows)
         # Full-width bar on the most expensive issue and a half-
@@ -782,7 +865,7 @@ class IssuesTableHtmlTest(unittest.TestCase):
 
     def test_review_rounds_three_or_more_warn_tone(self) -> None:
         _, dashboard = _reload()
-        rows = [self._row("acme/a", 1, 4.0, max_round=4)]
+        rows = [self._row(REPO_A, 1, 4.0, max_round=4)]
         html = dashboard._issues_table_html(rows)
         # High-review-round cells get the warn class so the operator
         # can spot rework-heavy issues at a glance.
@@ -983,14 +1066,15 @@ class SkillMatrixSortTest(unittest.TestCase):
         _, dashboard = _reload()
         html = dashboard._skill_matrix_html(self._rows())
         # Every column is an in-tab anchor pointing at its own sort param.
-        for key in ("repo", "role", "backend", "skill",
-                    "runs", "skill_runs", "rate"):
-            self.assertIn(f"?mtx_sort={key}&mtx_dir=", html)
+        for key in MTX_SORT_KEYS:
+            self.assertIn(f"?{MTX_SORT_PARAM}={key}&{MTX_DIR_PARAM}=", html)
         self.assertIn('target="_self"', html)
         # Text columns default a first click to ascending, numeric ones to
         # descending (largest first is the interesting end for counts).
-        self.assertIn("?mtx_sort=repo&mtx_dir=asc", html)
-        self.assertIn("?mtx_sort=runs&mtx_dir=desc", html)
+        self.assertIn(f"?{MTX_SORT_PARAM}=repo&{MTX_DIR_PARAM}={SORT_ASC}", html)
+        self.assertIn(
+            f"?{MTX_SORT_PARAM}=runs&{MTX_DIR_PARAM}={SORT_DESC}", html
+        )
         # With no active sort no header carries a direction indicator (the
         # class still appears in the CSS block, so match the span markup).
         self.assertNotIn('<span class="orch-skillmatrix-sort">', html)
@@ -1008,7 +1092,9 @@ class SkillMatrixSortTest(unittest.TestCase):
             '<span class="orch-skillmatrix-sort">▼</span>', html,
         )
         # Re-clicking the active (descending) column flips it to ascending.
-        self.assertIn("?mtx_sort=runs&mtx_dir=asc", html)
+        self.assertIn(
+            f"?{MTX_SORT_PARAM}=runs&{MTX_DIR_PARAM}={SORT_ASC}", html
+        )
 
     def test_active_ascending_column_shows_up_arrow_and_flips(self) -> None:
         _, dashboard = _reload()
@@ -1018,7 +1104,9 @@ class SkillMatrixSortTest(unittest.TestCase):
         self.assertIn(
             '<span class="orch-skillmatrix-sort">▲</span>', html,
         )
-        self.assertIn("?mtx_sort=repo&mtx_dir=desc", html)
+        self.assertIn(
+            f"?{MTX_SORT_PARAM}=repo&{MTX_DIR_PARAM}={SORT_DESC}", html
+        )
 
     def test_rows_render_in_selected_column_order(self) -> None:
         _, dashboard = _reload()
@@ -1067,14 +1155,14 @@ class SkillMatrixSortTest(unittest.TestCase):
         _, dashboard = _reload()
         cases = [
             ({}, (None, False)),
-            ({"mtx_sort": "runs"}, ("runs", False)),
-            ({"mtx_sort": "runs", "mtx_dir": "desc"}, ("runs", True)),
-            ({"mtx_sort": "runs", "mtx_dir": "asc"}, ("runs", False)),
-            ({"mtx_sort": "rate", "mtx_dir": "desc"}, ("rate", True)),
+            ({MTX_SORT_PARAM: "runs"}, ("runs", False)),
+            ({MTX_SORT_PARAM: "runs", MTX_DIR_PARAM: SORT_DESC}, ("runs", True)),
+            ({MTX_SORT_PARAM: "runs", MTX_DIR_PARAM: SORT_ASC}, ("runs", False)),
+            ({MTX_SORT_PARAM: "rate", MTX_DIR_PARAM: SORT_DESC}, ("rate", True)),
             # An unknown / stale column degrades to the default order
             # rather than raising.
-            ({"mtx_sort": "bogus", "mtx_dir": "desc"}, (None, False)),
-            ({"mtx_dir": "desc"}, (None, False)),
+            ({MTX_SORT_PARAM: "bogus", MTX_DIR_PARAM: SORT_DESC}, (None, False)),
+            ({MTX_DIR_PARAM: SORT_DESC}, (None, False)),
         ]
         for params, expected in cases:
             with self.subTest(params=params):
@@ -1175,27 +1263,27 @@ class CacheKeyTest(unittest.TestCase):
 
     def test_lists_become_tuples(self) -> None:
         _, dashboard = _reload()
-        window = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 7))
+        window = dashboard.to_window(MAY_1, MAY_7)
         key = dashboard.cache_key(
-            window, "acme/widgets",
-            ["agent_exit", "stage_enter"], ["implementing"], 42,
+            window, CACHE_REPO,
+            list(EVENT_NAMES), list(STAGE_NAMES), ISSUE_NUMBER,
         )
         self.assertEqual(
             key,
             (
                 window.start,
                 window.end,
-                "acme/widgets",
-                ("agent_exit", "stage_enter"),
-                ("implementing",),
-                42,
+                CACHE_REPO,
+                EVENT_NAMES,
+                STAGE_NAMES,
+                ISSUE_NUMBER,
             ),
         )
         hash(key)  # must be hashable
 
     def test_none_is_preserved(self) -> None:
         _, dashboard = _reload()
-        window = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 7))
+        window = dashboard.to_window(MAY_1, MAY_7)
         key = dashboard.cache_key(window, None, None, None, None)
         self.assertEqual(
             key, (window.start, window.end, None, None, None, None)
@@ -1206,15 +1294,15 @@ class CacheKeyTest(unittest.TestCase):
         # nothing"; the cache key must keep the empty tuple distinct
         # from None so the two SQL shapes do not collide in cache.
         _, dashboard = _reload()
-        window = dashboard.to_window(date(2026, 5, 1), date(2026, 5, 7))
-        empty = dashboard.cache_key(window, "r", [], [], None)
-        none = dashboard.cache_key(window, "r", None, None, None)
+        window = dashboard.to_window(MAY_1, MAY_7)
+        empty = dashboard.cache_key(window, CACHE_REPO, [], [], None)
+        none = dashboard.cache_key(window, CACHE_REPO, None, None, None)
         self.assertNotEqual(empty, none)
         self.assertEqual(empty[3], ())
         self.assertEqual(empty[4], ())
 
 
-class CachedReadConnectionScopingTest(unittest.TestCase):
+class CachedReadConnectionScopingTest(_MainSourceTest):
     """The redesigned read path reuses a thread-local analytics
     connection across the dashboard's 14 reads instead of opening a
     socket per call (issue #376). The Streamlit cache keys must
@@ -1227,14 +1315,9 @@ class CachedReadConnectionScopingTest(unittest.TestCase):
     the dashboard dependency group (Streamlit + Plotly are opt-in).
     """
 
-    def _main_source(self) -> str:
-        import inspect
-        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
-        return inspect.getsource(dashboard.main)
-
     def _drilldown_source(self) -> str:
         import inspect
-        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
         return inspect.getsource(dashboard._render_drilldown)
 
     def test_main_uses_analytics_connection_scope(self) -> None:
@@ -1345,7 +1428,7 @@ class AnalyticsConnectionExposureTest(unittest.TestCase):
     """
 
     def test_analytics_connection_is_a_context_manager(self) -> None:
-        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
         self.assertTrue(
             hasattr(dashboard.analytics_read, "analytics_connection")
         )
@@ -1368,12 +1451,12 @@ class DashboardParallelReadsEnabledTest(unittest.TestCase):
     """
 
     def test_unset_defaults_to_false(self) -> None:
-        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
         self.assertFalse(dashboard.dashboard_parallel_reads_enabled())
 
     def test_empty_string_is_false(self) -> None:
         _, dashboard = _reload(
-            {"ANALYTICS_DB_URL": "", "DASHBOARD_PARALLEL_READS": ""}
+            {ANALYTICS_DB_URL_ENV: "", PARALLEL_READS_ENV: ""}
         )
         self.assertFalse(dashboard.dashboard_parallel_reads_enabled())
 
@@ -1385,8 +1468,8 @@ class DashboardParallelReadsEnabledTest(unittest.TestCase):
             with self.subTest(sentinel=sentinel):
                 _, dashboard = _reload(
                     {
-                        "ANALYTICS_DB_URL": "",
-                        "DASHBOARD_PARALLEL_READS": sentinel,
+                        ANALYTICS_DB_URL_ENV: "",
+                        PARALLEL_READS_ENV: sentinel,
                     }
                 )
                 self.assertTrue(
@@ -1398,8 +1481,8 @@ class DashboardParallelReadsEnabledTest(unittest.TestCase):
             with self.subTest(sentinel=sentinel):
                 _, dashboard = _reload(
                     {
-                        "ANALYTICS_DB_URL": "",
-                        "DASHBOARD_PARALLEL_READS": sentinel,
+                        ANALYTICS_DB_URL_ENV: "",
+                        PARALLEL_READS_ENV: sentinel,
                     }
                 )
                 self.assertFalse(
@@ -1411,7 +1494,7 @@ class DashboardParallelReadsEnabledTest(unittest.TestCase):
         # trailing whitespace so a stray newline does not silently fall
         # back to the sequential path.
         _, dashboard = _reload(
-            {"ANALYTICS_DB_URL": "", "DASHBOARD_PARALLEL_READS": "  on  "}
+            {ANALYTICS_DB_URL_ENV: "", PARALLEL_READS_ENV: "  on  "}
         )
         self.assertTrue(dashboard.dashboard_parallel_reads_enabled())
 
@@ -1427,7 +1510,7 @@ class FacadeReExportCompatibilityTest(unittest.TestCase):
     """
 
     def test_parallel_reads_internals_reexported_from_state(self) -> None:
-        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
         import orchestrator.dashboard_state as state
         # Each facade name is the very object the extracted module
         # defines -- a genuine re-export, not a shadow copy.
@@ -1607,7 +1690,7 @@ class FanOutReadsParallelTest(unittest.TestCase):
         self.assertIn("query failed", str(cm.exception))
 
 
-class MainParallelFanOutWiringTest(unittest.TestCase):
+class MainParallelFanOutWiringTest(_MainSourceTest):
     """`main()` must dispatch the 14 widget reads through
     `_fan_out_reads`, drive the parallel switch off the env-backed
     helper, and emit a single `dashboard.load:` INFO line so the A/B
@@ -1615,11 +1698,6 @@ class MainParallelFanOutWiringTest(unittest.TestCase):
     the default `uv sync --locked`, so these tests inspect the
     `main()` source rather than driving it under Streamlit.
     """
-
-    def _main_source(self) -> str:
-        import inspect
-        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
-        return inspect.getsource(dashboard.main)
 
     def test_main_uses_fan_out_helper(self) -> None:
         src = self._main_source()
@@ -1664,18 +1742,13 @@ class MainParallelFanOutWiringTest(unittest.TestCase):
         )
 
 
-class SkillMatrixWiringTest(unittest.TestCase):
+class SkillMatrixWiringTest(_MainSourceTest):
     """`main()` wires the per-skill trigger matrix through the same
     cached / fan-out read pattern as every other widget and renders it
     as the second table under the existing "Skill trigger rates"
     aggregate. Streamlit is not installed for the default sync, so these
     inspect `main()`'s source rather than driving it under Streamlit.
     """
-
-    def _main_source(self) -> str:
-        import inspect
-        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
-        return inspect.getsource(dashboard.main)
 
     def test_matrix_read_calls_matrix_read_model(self) -> None:
         src = self._main_source()
@@ -1747,7 +1820,7 @@ class SkillMatrixWiringTest(unittest.TestCase):
         self.assertIn("expanded=False", block)
 
 
-class StaticMetadataCacheTest(unittest.TestCase):
+class StaticMetadataCacheTest(_MainSourceTest):
     """`get_data_extent` and `get_filter_options` (issue #379) carry
     no filter inputs and only change as `analytics.sync` ingests new
     events, so the dashboard wraps them in `@st.cache_data` under the
@@ -1756,18 +1829,13 @@ class StaticMetadataCacheTest(unittest.TestCase):
     round-trip on every Streamlit rerun.
     """
 
-    def _main_source(self) -> str:
-        import inspect
-        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
-        return inspect.getsource(dashboard.main)
-
     def test_ttl_is_five_minutes(self) -> None:
         # Pin the constant so a future tweak changes it deliberately.
         # A 5-minute TTL is long enough to absorb the typical rerun
         # cadence (Streamlit rerenders on every widget interaction)
         # but short enough that a freshly-synced repo / event value
         # surfaces within one `analytics.sync` cycle.
-        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
         self.assertEqual(dashboard.STATIC_METADATA_TTL_SECONDS, 300)
 
     def test_extent_reader_decorated_with_longer_ttl(self) -> None:
@@ -1825,7 +1893,7 @@ class StaticMetadataCacheTest(unittest.TestCase):
         self.assertIn("options = _read_filter_options()", src)
 
 
-class StagedRenderTest(unittest.TestCase):
+class StagedRenderTest(_MainSourceTest):
     """Issue #379 splits the read fan-out into two staged waves so
     the topbar / filter meta / insight banners / KPI strip paint as
     soon as their inputs are available, rather than blocking on every
@@ -1835,11 +1903,6 @@ class StagedRenderTest(unittest.TestCase):
     placeholder write happens on the main render thread between the
     two waves.
     """
-
-    def _main_source(self) -> str:
-        import inspect
-        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
-        return inspect.getsource(dashboard.main)
 
     def _wave_block(self, src: str, name: str) -> str:
         # The reader lists are short, indented at the function-body
@@ -1861,42 +1924,26 @@ class StagedRenderTest(unittest.TestCase):
         # reader has to update the staging explicitly.
         src = self._main_source()
         wave = self._wave_block(src, "first_wave_readers")
-        for name in (
-            "summary", "prev_summary", "ts_points",
-            "review_round_rows", "throughput_rows",
-            "cost_coverage_rows",
-        ):
+        for name in FIRST_WAVE_READER_NAMES:
             with self.subTest(name=name):
                 self.assertIn(f'"{name}"', wave)
         # The remaining widget reads are NOT in the first wave -- they
         # would force the spinner to wait for the slowest widget read
         # before the KPI strip can paint.
-        for name in (
-            "stage_rows", "agent_exits", "issues_rows",
-            "backend_rows", "repo_rows", "heatmap_rows",
-            "backend_daily_rows", "skill_rows", "skill_matrix_rows",
-        ):
+        for name in SECOND_WAVE_READER_NAMES:
             with self.subTest(name=name):
                 self.assertNotIn(f'"{name}"', wave)
 
     def test_second_wave_carries_the_remaining_widget_reads(self) -> None:
         src = self._main_source()
         wave = self._wave_block(src, "second_wave_readers")
-        for name in (
-            "stage_rows", "agent_exits", "issues_rows",
-            "backend_rows", "repo_rows", "heatmap_rows",
-            "backend_daily_rows", "skill_rows", "skill_matrix_rows",
-        ):
+        for name in SECOND_WAVE_READER_NAMES:
             with self.subTest(name=name):
                 self.assertIn(f'"{name}"', wave)
         # And the topbar / KPI-strip inputs are NOT in the second
         # wave -- they belong to the first wave so the strip can
         # paint before the slow widget reads finish.
-        for name in (
-            "summary", "prev_summary", "ts_points",
-            "review_round_rows", "throughput_rows",
-            "cost_coverage_rows",
-        ):
+        for name in FIRST_WAVE_READER_NAMES:
             with self.subTest(name=name):
                 self.assertNotIn(f'"{name}"', wave)
 
@@ -1924,7 +1971,7 @@ class StagedRenderTest(unittest.TestCase):
         # instead of staring at a blank page. Pin the constant +
         # `st.spinner` call so a future refactor cannot silently drop
         # the feedback surface.
-        _, dashboard = _reload({"ANALYTICS_DB_URL": ""})
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
         self.assertEqual(
             dashboard.LOADING_INDICATOR_MESSAGE, "Loading analytics…"
         )
@@ -1992,17 +2039,12 @@ class StagedRenderTest(unittest.TestCase):
         self.assertIn("return", empty_block)
 
 
-class StagedRenderErrorTest(unittest.TestCase):
+class StagedRenderErrorTest(_MainSourceTest):
     """A read error in EITHER wave must surface as one `st.error` +
     `st.stop` -- the second-wave error path is what stops a half-
     rendered dashboard (topbar / KPI strip already painted) from
     silently continuing into broken widget code.
     """
-
-    def _main_source(self) -> str:
-        import inspect
-        _, dashboard = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
-        return inspect.getsource(dashboard.main)
 
     def test_both_waves_catch_analytics_read_error(self) -> None:
         src = self._main_source()
