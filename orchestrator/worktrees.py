@@ -123,4 +123,64 @@ from .worktree_lifecycle import _sanitize_branch_segment as _sanitize_branch_seg
 from .worktree_lifecycle import _sanitize_slug as _sanitize_slug
 from .worktree_lifecycle import _worktree_path as _worktree_path
 
+# Canonical inventory of the compatibility surface this hub re-exports.
+# Every entry is imported above from a focused module (`git_plumbing`,
+# `worktree_lifecycle`, `verify`, `branch_publication`, `base_sync`); keeping
+# the list explicit makes the re-export surface auditable in one place and
+# governs `from orchestrator.worktrees import *`. Underscore names stay in the
+# list because the historical import surface these callers depend on is
+# module-internal by design.
+__all__ = [
+    "VerifyResult",
+    "_AUTO_REBASE_PARK_REASONS",
+    "_CONVENTIONAL_RE",
+    "_GIT_NO_PROMPT_ENV",
+    "_PR_REFRESH_DETOUR_LABELS",
+    "_SLUG_SAFE_RE",
+    "_TARGET_ROOT_LOCKS",
+    "_TARGET_ROOT_LOCKS_LOCK",
+    "_authed_fetch",
+    "_authed_target_fetch",
+    "_branch_ahead_behind",
+    "_branch_has_unpushed_commits",
+    "_branch_name",
+    "_cleanup_decompose_worktree",
+    "_cleanup_question_worktree",
+    "_cleanup_terminal_branch",
+    "_decompose_worktree_path",
+    "_ensure_decompose_worktree",
+    "_ensure_pr_worktree",
+    "_ensure_worktree",
+    "_first_commit_subject",
+    "_git",
+    "_git_hardened",
+    "_has_new_commits",
+    "_head_sha",
+    "_infer_subject_prefix",
+    "_is_conventional_subject",
+    "_is_prefixed_subject",
+    "_merge_base_into_worktree",
+    "_park_auto_rebase_failure",
+    "_pr_title_from_commit_or_issue",
+    "_push_branch",
+    "_rebase_base_into_worktree",
+    "_rebase_in_progress",
+    "_recent_base_subjects",
+    "_recover_pending_auto_base_rebase",
+    "_refresh_base_and_worktrees",
+    "_repo_worktrees_root",
+    "_resolve_branch_name",
+    "_route_pr_worktree_to_resolving_conflict",
+    "_run_verify_commands",
+    "_sanitize_branch_segment",
+    "_sanitize_slug",
+    "_squash_and_force_push",
+    "_sync_pr_worktree_to_base",
+    "_sync_worktree_with_base",
+    "_target_root_lock",
+    "_truncate_verify_output",
+    "_worktree_dirty_files",
+    "_worktree_path",
+]
+
 log = logging.getLogger(__name__)

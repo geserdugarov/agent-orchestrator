@@ -2,7 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Verdict parsers used by review and documentation stages: marker shape,
 case insensitivity, last-marker-wins semantics, and the strict rules that
-keep ambiguous prose from being misread as a structured outcome."""
+keep ambiguous prose from being misread as a structured outcome.
+
+The parsers live in `orchestrator.workflow_messages`; this suite imports them
+from there (the module that owns the behavior) and separately pins the
+historical `orchestrator.workflow._parse_*` re-export as a compatibility
+contract."""
 from __future__ import annotations
 
 import os
@@ -10,7 +15,10 @@ import unittest
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
-from orchestrator.workflow import _parse_documentation_verdict, _parse_review_verdict
+from orchestrator.workflow_messages import (
+    _parse_documentation_verdict,
+    _parse_review_verdict,
+)
 
 
 class ParseReviewVerdictTest(unittest.TestCase):
@@ -138,3 +146,23 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
 
     def test_empty_message_returns_unknown(self) -> None:
         self.assertEqual(_parse_documentation_verdict(""), ("unknown", ""))
+
+
+class VerdictParserReexportTest(unittest.TestCase):
+    """`workflow.py` re-exports the verdict parsers under their original
+    names so historical `from orchestrator.workflow import _parse_*` call
+    sites (and `patch.object(workflow, "_parse_*")` interception) keep
+    working. The facade name must resolve to the same object the focused
+    `workflow_messages` module defines."""
+
+    def test_workflow_facade_reexports_the_focused_parsers(self) -> None:
+        from orchestrator import workflow, workflow_messages
+
+        self.assertIs(
+            workflow._parse_review_verdict,
+            workflow_messages._parse_review_verdict,
+        )
+        self.assertIs(
+            workflow._parse_documentation_verdict,
+            workflow_messages._parse_documentation_verdict,
+        )
