@@ -621,7 +621,10 @@ state. The PR comment that triggers a route to `fixing` is the human signal; awa
   5. If `awaiting_human`, first handle the **`/orchestrator continue` operator command** (`_handle_continue_command`).
      It is matched as an EXACT LINE (`^\s*/orchestrator continue\s*$`), so a comment carrying the command line AND real
      guidance still counts as the command; the command is handled on BOTH routes so a session-limit / session-failure
-     park (`agent_silent` / `agent_timeout`) is never resumed on the bare command text. The helper returns one of three
+     park (`agent_silent` / `agent_timeout`) is never resumed on the bare command text. A recognized Claude
+     session/usage-limit notice returned as the dev's final message (`_is_session_limit_message`) is itself parked
+     `agent_silent` by `_on_question`, a retryable session failure rather than a real `park_reason=None` question, so a
+     quota reset is retried here rather than refused as needing human guidance. The helper returns one of three
      actions: **replay** — an eligible session-failure park **with a reconstructable batch** (the in_review route):
      drop the poisoned dev session (`_drop_poisoned_dev_session` — so the retry re-grounds a fresh session on the
      committed branch), clear the park, and **replay the preserved feedback batch** (`_reconstruct_pending_fix_batch`)
