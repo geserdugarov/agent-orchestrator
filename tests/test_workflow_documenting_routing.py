@@ -78,8 +78,8 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         # base -- so without the detour a sibling-PR merge during the
         # docs pass would leave the docs commit on a stale base and
         # only the next in_review tick would catch it. Including the
-        # label here is what keeps `hold_base_sync` as the only label
-        # that gates auto-rebase for a PR-stage worktree.
+        # label here is what lets the pre-tick refresh auto-rebase a
+        # behind-base docs-pass worktree instead of stranding it.
         from orchestrator.worktrees import _PR_REFRESH_DETOUR_LABELS
 
         self.assertIn("documenting", _PR_REFRESH_DETOUR_LABELS)

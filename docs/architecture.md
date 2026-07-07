@@ -108,7 +108,7 @@ are re-exported from the facade because more than one stage reaches for them.
 An issue should have at most one workflow label at a time. The set is `decomposing`, `ready`, `blocked`, `umbrella`,
 `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`, and the two
 terminals `done` / `rejected`. The orchestrator also creates four non-workflow control labels: `hold_base_sync` pauses
-per-tick base sync and rebases while present, `backlog` and `paused` each make per-tick handlers skip the issue entirely
+`resolving_conflict` rebases while present, `backlog` and `paused` each make per-tick handlers skip the issue entirely
 (`backlog` is a "not yet" hold on a fresh issue, `paused` freezes an in-flight one), and
 `community_contribution` is applied by the per-tick open-PR sweep to PRs from non-bot authors outside
 `ALLOWED_ISSUE_AUTHORS` so a human reviews them.
@@ -168,7 +168,7 @@ The orchestrator process is stateless; the label and the pinned JSON are the ent
 For the full per-tick sequence (eligible-issue enumeration, family vs. fan-out partitioning, the pre-PR rebase /
 PR-having clean-rebase + push (with `resolving_conflict` reached on actual rebase conflicts, plus the `fixing`
 worktree-drift dead-lock breaker that hands a stuck validating-route transient fix-loop to `resolving_conflict` when the
-worktree is behind base or carries an unpushed rebase), the `hold_base_sync` / `question` skips, the per-tick
+worktree is behind base or carries an unpushed rebase), the `question` skip, the per-tick
 external-merge sweeps, and the complete pinned-state JSON schema), see
 [`state-machine.md#per-tick-flow-workflowtick`](state-machine.md#per-tick-flow-workflowtick).
 

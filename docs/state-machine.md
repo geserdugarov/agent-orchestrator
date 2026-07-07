@@ -22,7 +22,7 @@ because live GitHub issues carry them.
 
 Four non-workflow **control labels** modify behavior without occupying the workflow slot:
 
-- `hold_base_sync` pauses per-tick base sync and `resolving_conflict` rebases until removed.
+- `hold_base_sync` pauses `resolving_conflict` rebases until removed.
 - `backlog` makes the orchestrator skip the issue: the per-tick dispatcher filters it out before the family/fanout split
   (so a parked, workflow-label-less issue cannot fold into the cap-counted family bucket and starve other work under
   `parallel_limit=1`), and each stage handler also skips it before the workflow label is read. Removing it hands control
@@ -143,7 +143,7 @@ Two paths depending on whether a PR exists:
   reviewer re-runs against the rewritten head. Only when the rebase actually leaves conflicted files does the helper
   relabel to `resolving_conflict`.
 
-`hold_base_sync` skips both paths. The `question` label also skips unconditionally — its handler tears down its own
+The `question` label skips both paths unconditionally — its handler tears down its own
 worktree, and merging base into a question worktree would either accrete commits on a read-only branch or mask an
 inspection state.
 
