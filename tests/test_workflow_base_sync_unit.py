@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import base_sync, config, workflow
-from orchestrator.github import BACKLOG_LABEL, BASE_SYNC_HOLD_LABEL, PAUSED_LABEL
+from orchestrator.github import BACKLOG_LABEL, PAUSED_LABEL
 
 from tests.fakes import (
     FakeComment,
@@ -273,7 +273,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self, *, label: str = LABEL_IN_REVIEW, extra_labels=(), **state,
     ) -> FakeIssue:
         """Seed issue #7 at `label` with pinned PR #42 on the canonical
-        branch. `extra_labels` are appended to the issue (hold / backlog
+        branch. `extra_labels` are appended to the issue (backlog / paused
         markers); `state` fields merge into the pinned state. Returns the
         issue so callers can seed comments on its thread."""
         issue = make_issue(ISSUE, label=label)
@@ -695,7 +695,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # an auto-rebase-park retry must NOT land on disk until the
         # rebase is actually committed. Before this fix, the refresh
         # cleared the park up front; if a later gate (dirty check,
-        # PR fetch failure, hold_base_sync) early-returned, the issue
+        # PR fetch failure) early-returned, the issue
         # was left unparked + watermark-advanced even though no retry
         # happened, so the same-tick stage handlers could run on the
         # still-behind PR head and consume the operator's "retry"
@@ -747,41 +747,6 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             last_action_comment_id=99,
         )
         # No PR added -- `gh.get_pr` raises.
-        self.gh._issues[ISSUE].comments.append(FakeComment(
-            id=200, body="retry", user=FakeUser("human"),
-        ))
-        merge = MagicMock()
-        push = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
-        with _patch_base_sync(
-            dirty=MagicMock(return_value=[]), rebase=merge, push=push,
-            git=git_mock,
-        ):
-            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
-        merge.assert_not_called()
-        push.assert_not_called()
-        self.assertEqual(self.gh.label_history, [])
-        state = self.gh.pinned_data(ISSUE)
-        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
-        self.assertEqual(
-            state.get(KEY_PARK_REASON), PARK_PUSH_FAILED,
-        )
-        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 99)
-
-    def test_pr_auto_rebase_park_survives_early_exit_when_hold_added(
-        self,
-    ) -> None:
-        # Same regression for the `hold_base_sync` gate: an operator
-        # who applies `hold_base_sync` AFTER replying to the park
-        # message has explicitly paused auto-rebase. The park must
-        # survive on disk so handlers do not run unprotected.
-        self._seed_pr_issue(
-            extra_labels=[BASE_SYNC_HOLD_LABEL],
-            awaiting_human=True,
-            park_reason=PARK_PUSH_FAILED,
-            last_action_comment_id=99,
-        )
-        self._add_pr()
         self.gh._issues[ISSUE].comments.append(FakeComment(
             id=200, body="retry", user=FakeUser("human"),
         ))
@@ -1614,34 +1579,6 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # Anchor cleared.
         state = self.gh.pinned_data(ISSUE)
         self.assertIsNone(state.get(KEY_PENDING_PUSH_SHA))
-
-    def test_hold_base_sync_label_skips_pr_refresh_detour(self) -> None:
-        self._seed_pr_issue(extra_labels=[BASE_SYNC_HOLD_LABEL])
-        self._add_pr()
-        merge = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
-        with _patch_base_sync(
-            dirty=MagicMock(return_value=[]), rebase=merge, git=git_mock,
-        ):
-            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
-
-        merge.assert_not_called()
-        self.assertEqual(self.gh.label_history, [])
-        self.assertEqual(self.gh.posted_pr_comments, [])
-
-    def test_hold_base_sync_label_skips_pre_pr_base_rebase(self) -> None:
-        issue = make_issue(ISSUE, label=LABEL_IMPLEMENTING)
-        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
-        self.gh.add_issue(issue)
-        merge = MagicMock()
-        git_mock = MagicMock(return_value=_git_result(stdout="3\n"))
-        with _patch_base_sync(
-            dirty=MagicMock(return_value=[]), rebase=merge, git=git_mock,
-        ):
-            workflow._sync_worktree_with_base(self.gh, self.spec, self.wt, ISSUE)
-
-        merge.assert_not_called()
-        self.assertEqual(self.gh.label_history, [])
 
     def test_backlog_label_skips_pr_refresh_detour(self) -> None:
         # `backlog` is a hard skip: the refresh path must not relabel the

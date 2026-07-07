@@ -16,7 +16,7 @@ Owns the helpers that drive the pre-tick base sync:
   the per-tick refresh is willing to drive through the rebase flow.
 * `_sync_worktree_with_base` -- per-worktree dispatch: pre-PR rebase or
   PR-having clean-rebase / conflict detour, with skip rules for dirty
-  trees, `backlog` / `paused`, `hold_base_sync`, and the `question` label.
+  trees, `backlog` / `paused`, and the `question` label.
 * `_sync_pr_worktree_to_base` -- for a behind-base PR-having issue,
   attempt a local rebase + push (force-with-lease); on a clean rebase
   reset `review_round` and relabel to `validating`; only relabel to
@@ -61,7 +61,6 @@ from .git_plumbing import (
 )
 from .state_machine import WorkflowLabel
 from .github import (
-    BASE_SYNC_HOLD_LABEL,
     GitHubClient,
     PinnedState,
     hard_skip_control_label,
@@ -174,9 +173,7 @@ def _refresh_base_and_worktrees(
       when the rebase actually leaves conflicted files does the issue
       get relabeled to `resolving_conflict` -- the
       `_handle_resolving_conflict` handler then drives the dev agent to
-      resolve the conflict. Applying the `hold_base_sync` label to an
-      issue pauses both the pre-PR local rebase and the PR refresh
-      flow until the label is removed. Issues already labeled
+      resolve the conflict. Issues already labeled
       `resolving_conflict` are left alone (the handler runs this tick
       anyway); other labels are skipped (no PR worktree to refresh in
       those states).
@@ -260,12 +257,11 @@ def _refresh_base_and_worktrees(
 # addressed. Documenting only checks ahead/behind vs. the PR branch
 # (not the base) itself, so without this refresh-time rebase a
 # sibling-PR merge during the docs pass would leave the docs commit
-# on a stale base and only the next in_review tick would catch it;
-# including the label here means only the `hold_base_sync` control
-# label gates a PR-stage worktree's auto-rebase. `resolving_conflict`
-# itself is excluded -- the handler runs this tick regardless and will
-# do the rebase anyway. Other labels mean either no PR yet (pre-PR
-# path applies instead) or terminal (done/rejected, nothing to refresh).
+# on a stale base and only the next in_review tick would catch it.
+# `resolving_conflict` itself is excluded -- the handler runs this
+# tick regardless and will do the rebase anyway. Other labels mean
+# either no PR yet (pre-PR path applies instead) or terminal
+# (done/rejected, nothing to refresh).
 _PR_REFRESH_DETOUR_LABELS = frozenset(
     {
         WorkflowLabel.VALIDATING, WorkflowLabel.DOCUMENTING,
@@ -808,12 +804,6 @@ def _sync_worktree_with_base(
             issue_number, skip_label,
         )
         return
-    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
-        log.debug(
-            "issue=#%d has %r; skipping base sync",
-            issue_number, BASE_SYNC_HOLD_LABEL,
-        )
-        return
     # `question`-labeled issues are read-only: the question agent
     # must not commit, and `_handle_question` already tears down the
     # per-issue worktree on every safe exit. The only worktrees that
@@ -960,10 +950,6 @@ def _sync_pr_worktree_to_base(
       `MAX_REVIEW_ROUNDS` / `MAX_CONFLICT_ROUNDS` caps that exist
       precisely to require human intervention after repeated failures.
 
-    * The issue has `hold_base_sync`, an explicit operator hold for
-      series work where base should be integrated once after the
-      prerequisite PRs land, not after every intermediate base advance.
-
     * The PR is no longer open. A merged PR advances `origin/<base>`,
       so the still-validating / still-in_review / still-fixing
       worktree pointed at the now-stale branch is naturally behind
@@ -1007,8 +993,8 @@ def _sync_pr_worktree_to_base(
     """
     # Read once: every early return below also needs to clear a stale
     # recovery anchor so a flag set on a prior tick cannot survive a
-    # manual operator relabel / hold / terminal PR transition and
-    # later trigger bogus recovery when the issue returns to a
+    # manual operator relabel / terminal PR transition and later
+    # trigger bogus recovery when the issue returns to a
     # refresh-driven label.
     pending_pre_rebase_sha = state.get("pending_auto_base_rebase_push_sha")
 
@@ -1044,8 +1030,8 @@ def _sync_pr_worktree_to_base(
     # ATOMICALLY with the state write that actually publishes the
     # rebase. Until then it stays a local var; in-memory state still
     # carries `awaiting_human=True`. The downstream gates
-    # (`hold_base_sync`, PR fetch failure, PR-state terminal, dirty,
-    # `behind == 0`, recovery's case-1 fall-through) can therefore
+    # (PR fetch failure, PR-state terminal, dirty, `behind == 0`,
+    # recovery's case-1 fall-through) can therefore
     # early-return WITHOUT having silently dropped the park: on-disk
     # `awaiting_human` is untouched until the rebase actually
     # commits, the operator's comment is still ahead of the
@@ -1088,19 +1074,6 @@ def _sync_pr_worktree_to_base(
             "operator's reply is not silently consumed)",
             issue.number, park_reason,
         )
-
-    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
-        # `hold_base_sync` deliberately leaves the recovery anchor in
-        # place: the operator may want to remove the hold later, at
-        # which point the next refresh runs the recovery against the
-        # original pre-rebase SHA. Clearing here would erase that
-        # signal.
-        log.debug(
-            "issue=#%d behind %s/%s by %d but has %r; not auto-rebasing",
-            issue.number, spec.remote_name, spec.base_branch, behind,
-            BASE_SYNC_HOLD_LABEL,
-        )
-        return
 
     try:
         pr = gh.get_pr(pr_number)
