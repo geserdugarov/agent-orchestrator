@@ -46,6 +46,7 @@ from github.Issue import Issue
 
 from .. import config
 from ..agents import AgentResult
+from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import GitHubClient, PinnedState
@@ -882,7 +883,14 @@ def _handle_validating_awaiting_human(
     if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
         return "return"
     last_action_id = state.get("last_action_comment_id")
-    new_comments = gh.comments_after(issue, last_action_id)
+    # Drop untrusted authors before any branch below acts on the batch: with
+    # `ALLOWED_ISSUE_AUTHORS` set an outsider comment must not resume the parked
+    # reviewer/dev session, satisfy the `/orchestrator add-review-rounds`
+    # cap-reset command, or supply the "retry" nudge that re-spawns the reviewer.
+    # Filtering here makes an all-outsider batch indistinguishable from silence,
+    # so a `reviewer_timeout` / `reviewer_failed` park still falls through to the
+    # transient-recovery branch instead of waking the reviewer on outsider noise.
+    new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
     # `/orchestrator add-review-rounds N` operator command. Only honored
     # on a `review_cap` park: the cap has consumed every review round and
     # plain resuming the dev would re-park on the same cap next tick (the

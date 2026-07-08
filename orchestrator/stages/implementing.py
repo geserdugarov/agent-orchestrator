@@ -608,27 +608,25 @@ def _resume_developer_on_human_reply(
     if the agent crashes or times out, those comments are still recorded
     as consumed (the dev DID see them via the resume prompt), and the
     failure is surfaced via the timeout/dirty/question paths instead.
+
+    Untrusted authors are dropped up front so nothing they post drives the
+    resume: with `ALLOWED_ISSUE_AUTHORS` set an outsider reply posted while the
+    issue is parked awaiting human must not reach the dev prompt NOR advance the
+    consumed watermark. Only trusted comments are consumed, so an outsider reply
+    trailing a trusted one is left unconsumed rather than persisted as the
+    watermark; an all-untrusted batch is treated as "no new reply".
     """
     last_action_id = state.get("last_action_comment_id")
-    new_comments = gh.comments_after(issue, last_action_id)
+    new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
     if not new_comments:
         return None
     consumed_max = max(c.id for c in new_comments)
     state.set("last_action_comment_id", consumed_max)
     from .. import workflow as _wf
 
-    # Drop untrusted authors before their comment bodies/URLs reach the dev
-    # prompt: with `ALLOWED_ISSUE_AUTHORS` set an outsider reply posted while
-    # the issue is parked awaiting human must not steer the developer. The
-    # watermark advanced past the whole raw batch above, so a trusted reply
-    # mixed with outsider noise still consumes both; an all-untrusted batch
-    # leaves nothing to act on and is treated as "no new reply".
-    trusted = filter_trusted(new_comments)
-    if not trusted:
-        return None
     followup = "\n\n".join(
         f"@{c.user.login if c.user else 'user'}: {c.body}"
-        for c in trusted if c.body
+        for c in new_comments if c.body
     )
     followup = f"{followup}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
     return _resume_dev_with_text(
@@ -1048,10 +1046,14 @@ def _prepare_dev_run(
         # may have finished a clean commit just after (the #77 shape: the
         # commit timestamp landed after the timeout event), so re-attempt the
         # publish silently before falling back to the human-reply resume.
-        # Skip when the human already replied -- their comment IS the resume
-        # signal and the resume path below consumes it.
-        if state.get("park_reason") == "agent_timeout" and not gh.comments_after(
-            issue, state.get("last_action_comment_id")
+        # Skip when a TRUSTED human already replied -- their comment IS the
+        # resume signal and the resume path below consumes it. Filter first so
+        # that with `ALLOWED_ISSUE_AUTHORS` set an outsider-only comment reads
+        # as silence and still triggers recovery: without the filter the raw
+        # non-empty check would skip recovery, then `_resume_developer_on_human_reply`
+        # would drop the outsider and return, stranding a late clean commit.
+        if state.get("park_reason") == "agent_timeout" and not filter_trusted(
+            gh.comments_after(issue, state.get("last_action_comment_id"))
         ):
             outcome = _try_recover_implementing_timeout_park(
                 gh, spec, issue, state

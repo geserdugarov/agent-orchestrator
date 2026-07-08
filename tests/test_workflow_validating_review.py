@@ -6,6 +6,7 @@ import os
 import unittest
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
@@ -1073,3 +1074,145 @@ class ValidatingInterruptedResumeHandlerTest(
         state = gh.pinned_data(9)
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(state.get("last_action_comment_id"), 1000)
+
+
+class HandleValidatingResumeTrustFilterTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """With `ALLOWED_ISSUE_AUTHORS` set, only trusted authors drive an
+    awaiting-human validating resume. An outsider comment must neither satisfy
+    the `/orchestrator add-review-rounds` cap-reset command nor supply the
+    "retry" nudge that re-spawns a timed-out reviewer; a trusted author still
+    drives both paths exactly as with no allowlist configured.
+    """
+
+    _ALLOWLIST = ("geserdugarov",)
+
+    def _seed_cap_park(self, gh, *, author, body):
+        issue = make_issue(90, label="validating")
+        issue.comments.append(
+            FakeComment(id=1100, body=body, user=FakeUser(author))
+        )
+        gh.add_issue(issue)
+        gh.seed_state(
+            90,
+            awaiting_human=True,
+            park_reason="review_cap",
+            last_action_comment_id=950,
+            review_round=config.MAX_REVIEW_ROUNDS,
+            dev_session_id="dev-sess",
+            dev_agent="codex",
+            pr_number=17,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-90",
+        )
+        return issue
+
+    def _seed_reviewer_timeout_park(self, gh, *, author):
+        issue = make_issue(91, label="validating")
+        issue.comments.append(
+            FakeComment(id=1200, body="please retry", user=FakeUser(author))
+        )
+        gh.add_issue(issue)
+        gh.seed_state(
+            91,
+            awaiting_human=True,
+            park_reason="reviewer_timeout",
+            last_action_comment_id=950,
+            review_round=1,
+            dev_session_id="dev-sess",
+            dev_agent="codex",
+            pr_number=18,
+            branch="orchestrator/geserdugarov__agent-orchestrator/issue-91",
+        )
+        return issue
+
+    def test_outsider_add_review_rounds_command_ignored(self) -> None:
+        gh = FakeGitHubClient()
+        issue = self._seed_cap_park(
+            gh, author="mallory",
+            body="/orchestrator add-review-rounds 5",
+        )
+        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
+            mocks = self._run(
+                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+        # The outsider's command never reaches the parser: no reviewer rerun,
+        # the cap and park stay put, and the watermark is not advanced past the
+        # outsider comment so a later trusted command is still seen.
+        mocks["run_agent"].assert_not_called()
+        state = gh.pinned_data(90)
+        self.assertTrue(state.get("awaiting_human"))
+        self.assertEqual(state.get("park_reason"), "review_cap")
+        self.assertEqual(state.get("review_round"), config.MAX_REVIEW_ROUNDS)
+        self.assertEqual(state.get("last_action_comment_id"), 950)
+        self.assertFalse(any(
+            "review-cap reset" in body for _, body in gh.posted_comments
+        ))
+
+    def test_trusted_add_review_rounds_command_honored_under_allowlist(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = self._seed_cap_park(
+            gh, author="geserdugarov",
+            body="/orchestrator add-review-rounds 1",
+        )
+        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
+            mocks = self._run(
+                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                head_shas=["aaa"],
+            )
+        # A trusted operator's command resets the cap and reruns the reviewer
+        # exactly as with no allowlist configured.
+        state = gh.pinned_data(90)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertIsNone(state.get("park_reason"))
+        self.assertEqual(
+            state.get("review_round"), config.MAX_REVIEW_ROUNDS - 1,
+        )
+        self.assertEqual(state.get("last_action_comment_id"), 1100)
+        self.assertEqual(mocks["run_agent"].call_count, 1)
+        self.assertTrue(any(
+            "review-cap reset" in body for _, body in gh.posted_comments
+        ))
+
+    def test_outsider_retry_nudge_does_not_respawn_reviewer(self) -> None:
+        gh = FakeGitHubClient()
+        issue = self._seed_reviewer_timeout_park(gh, author="mallory")
+        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
+            mocks = self._run(
+                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+            )
+        # Filtered to empty, so the reviewer_timeout park self-heals through the
+        # transient-recovery branch (as on a no-comment tick) instead of the
+        # outsider's nudge waking the reviewer.
+        mocks["run_agent"].assert_not_called()
+
+    def test_trusted_retry_nudge_respawns_reviewer_under_allowlist(
+        self,
+    ) -> None:
+        gh = FakeGitHubClient()
+        issue = self._seed_reviewer_timeout_park(gh, author="geserdugarov")
+        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
+            mocks = self._run(
+                lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                head_shas=["aaa"],
+            )
+        # The trusted nudge re-spawns the reviewer this tick and advances the
+        # watermark past the consumed comment.
+        self.assertEqual(mocks["run_agent"].call_count, 1)
+        reviewer_spawns = [
+            e for e in gh.recorded_events
+            if e["event"] == "agent_spawn"
+            and e.get("agent_role") == "reviewer"
+        ]
+        self.assertEqual(len(reviewer_spawns), 1)
+        self.assertEqual(gh.pinned_data(91).get("last_action_comment_id"), 1200)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -101,22 +101,19 @@ def _resume_decomposer_on_human_reply(
     from .. import workflow as _wf
 
     last_action_id = state.get("last_action_comment_id")
-    new_comments = gh.comments_after(issue, last_action_id)
+    # Drop untrusted authors up front (mirrors `_resume_developer_on_human_reply`):
+    # with `ALLOWED_ISSUE_AUTHORS` set an outsider reply on a parked decomposer
+    # session must not steer it NOR advance the consumed watermark. Only trusted
+    # comments are consumed, so an outsider reply trailing a trusted one is left
+    # unconsumed; an all-untrusted batch leaves nothing to resume on.
+    new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
     if not new_comments:
         return None
     consumed_max = max(c.id for c in new_comments)
     state.set("last_action_comment_id", consumed_max)
-    # Drop untrusted authors before their bodies/URLs reach the decomposer
-    # prompt (mirrors `_resume_developer_on_human_reply`): with
-    # `ALLOWED_ISSUE_AUTHORS` set an outsider reply on a parked decomposer
-    # session must not steer it. The watermark advanced past the whole raw
-    # batch above; an all-untrusted batch leaves nothing to resume on.
-    trusted = filter_trusted(new_comments)
-    if not trusted:
-        return None
     followup = "\n\n".join(
         f"@{c.user.login if c.user else 'user'}: {c.body}"
-        for c in trusted if c.body
+        for c in new_comments if c.body
     )
     wt = _wf._decompose_worktree_path(spec, issue.number)
     if not wt.exists():
