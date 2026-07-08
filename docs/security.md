@@ -183,6 +183,45 @@ Every PR opened by the orchestrator is AI-generated, so the policy is the workfl
   its own host or in a dedicated VM / container; do not co-locate it with other workloads' secrets on the same user
   account.
 
+## Comment trust boundary (`ALLOWED_ISSUE_AUTHORS`)
+
+The orchestrator feeds issue- and PR-thread comments to coding agents as workflow-driving instructions. On a public
+repo that is a prompt-injection surface: any account can post a comment that steers an agent, resumes a parked session,
+or re-triggers work. `ALLOWED_ISSUE_AUTHORS` is the operator's control. It defaults unset; setting it to the maintainer
+logins turns the pickup allowlist into a comment trust boundary enforced by the shared `comment_trust` helpers
+(`is_trusted_author` / `filter_trusted`). The env-var reference is in
+[`configuration.md#agent-roles`](configuration.md#agent-roles); the full per-surface filter list is in
+[`state-machine.md#user-content-drift-detection`](state-machine.md#user-content-drift-detection).
+
+The security posture:
+
+- **Opt-in, legacy-safe by default.** Unset (the default) trusts every author, preserving the single-user behavior a
+  private-repo deployment expects. The boundary exists only once an operator lists the trusted logins, so enabling it is
+  a deliberate act, not a silent behavior change.
+- **Visible, not deleted.** An untrusted comment stays on the GitHub thread for humans to read; the orchestrator never
+  hides, edits, or deletes it. What changes is only its *use as workflow input* — it is omitted from agent
+  prompts, the `user_content_hash` drift signal, every awaiting-human resume signal (including the base-sync
+  auto-rebase retry-unpark and the `/orchestrator add-review-rounds` review-cap command), and the `in_review` /
+  `fixing` PR-feedback loop. So an outsider on a public repo cannot inject instructions into an agent, resume a
+  parked session, retry a parked rebase, route `in_review` to `fixing`, or shift the drift hash, while the audit
+  trail of what they said stays intact.
+- **Filtering is fail-safe.** A comment whose author failed to load (empty login) is untrusted. On the awaiting-human
+  resume paths (and the auto-rebase retry-unpark) the filter runs on the whole comment batch up front, so an untrusted
+  comment there never advances the consumed-watermark nor is marked read — it is re-filtered on each later tick
+  rather than silently absorbed as a new baseline. The `in_review` drift path instead excludes untrusted
+  PR-conversation comments from the drift prompt but still advances its watermarks past them, so a later tick does
+  not re-scan them as fresh feedback.
+- **Third-party Bot/App handling is deliberate.** Two distinct mechanisms apply. The `user_content_hash` drift hash and
+  the community-contribution PR sweep exclude Bot / GitHub-App accounts (Dependabot, Renovate, CI bots) structurally via
+  GitHub's `user.type == "Bot"` flag, independent of the allowlist. The comment trust boundary itself does not: on the
+  prompt / resume / PR-feedback surfaces a bot is gated like any other author — trusted while the allowlist is empty
+  (legacy behavior), and under a populated allowlist trusted only when its own login is explicitly listed. So an
+  intentionally allowlisted automation account still works; an unlisted one does not.
+- **Scope is comment content, not capability.** This boundary keeps untrusted *words* out of agent prompts and workflow
+  signals; it is not a sandbox. Agents still run as the orchestrator's OS user with sandbox bypass, so the host remains
+  the real trust boundary (see [above](#ai-generated-code-review-tests-and-scans) and
+  [`architecture.md#design-constraints`](architecture.md#design-constraints)).
+
 ## Cross-repo awareness disclosure (`EXPOSE_TRACKED_REPOS`)
 
 When more than one repo is configured (`REPOS`) and `EXPOSE_TRACKED_REPOS` is on (the default), working-agent prompts

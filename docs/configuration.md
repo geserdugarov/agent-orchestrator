@@ -101,15 +101,20 @@ session lock, and full examples.
 - `ALLOWED_ISSUE_AUTHORS` — default _(unset)_. comma-separated GitHub logins; when set, only auto-pick-up unlabeled
   issues from those authors, and the per-tick sweep labels open PRs from anyone outside the list with
   `community_contribution` and @-mentions `HITL_HANDLE` once per PR (bot-authored PRs such as Dependabot are excluded
-  via `user.type == "Bot"`). When set it additionally drops comments from authors outside the list from the
+  via `user.type == "Bot"`). When set it additionally becomes a comment trust boundary: comments from authors outside
+  the list stay visible on GitHub but are dropped from the
   conversation text fed to every agent prompt (implement / review / documentation / decompose / question / conflict,
   the awaiting-human resumes, and the `in_review` / `fixing` PR-feedback loop), from the base-sync auto-rebase
   retry-unpark signal, and from the `user_content_hash` drift signal, so an outsider on a public repo cannot inject
   workflow-driving instructions into an agent, resume an awaiting-human session, retry a parked auto-rebase, reset the
   review-round cap via `/orchestrator add-review-rounds`, route `in_review` to `fixing` (or set its pending-fix
   bookmark), or shift the hash to re-trigger drift. Login comparison is
-  case-insensitive; an empty allowlist trusts every author (legacy single-user behavior). See
-  [`state-machine.md`](state-machine.md#user-content-drift-detection) for the full drift-hash filter list
+  case-insensitive; an empty allowlist trusts every author (legacy single-user behavior), so on these prompt / resume /
+  PR-feedback surfaces a Bot/App login is gated like any other author — excluded only once the allowlist is populated
+  and its login is not on it. A separate `user.type == "Bot"` structural check, independent of the allowlist, covers
+  the `user_content_hash` drift hash and the community-contribution PR sweep. See
+  [`state-machine.md`](state-machine.md#user-content-drift-detection) for the full drift-hash filter list and
+  [`security.md`](security.md#comment-trust-boundary-allowed_issue_authors) for the trust-boundary rationale
 
 ## Cadence and budgets
 
