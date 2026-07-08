@@ -102,9 +102,10 @@ session lock, and full examples.
   issues from those authors, and the per-tick sweep labels open PRs from anyone outside the list with
   `community_contribution` and @-mentions `HITL_HANDLE` once per PR (bot-authored PRs such as Dependabot are excluded
   via `user.type == "Bot"`). When set it additionally drops comments from authors outside the list from the
-  conversation text fed to every agent prompt (implement / review / documentation / decompose / question / conflict and
-  the awaiting-human resumes) and from the `user_content_hash` drift signal, so an outsider on a public repo cannot
-  inject workflow-driving instructions into an agent or shift the hash to re-trigger drift. Login comparison is
+  conversation text fed to every agent prompt (implement / review / documentation / decompose / question / conflict,
+  the awaiting-human resumes, and the `in_review` / `fixing` PR-feedback loop) and from the `user_content_hash` drift
+  signal, so an outsider on a public repo cannot inject workflow-driving instructions into an agent, route `in_review`
+  to `fixing` (or set its pending-fix bookmark), or shift the hash to re-trigger drift. Login comparison is
   case-insensitive; an empty allowlist trusts every author (legacy single-user behavior). See
   [`state-machine.md`](state-machine.md#user-content-drift-detection) for the full drift-hash filter list
 
