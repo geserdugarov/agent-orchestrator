@@ -38,10 +38,8 @@ from .. import config
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import (
-    BASE_SYNC_HOLD_LABEL,
     GitHubClient,
     PinnedState,
-    issue_has_label,
 )
 
 
@@ -542,13 +540,6 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             state.set("review_round", 0)
             gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
         gh.write_pinned_state(issue, state)
-        return
-
-    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
-        _wf.log.info(
-            "issue=#%d has %r; holding in_review HITL ping",
-            issue.number, BASE_SYNC_HOLD_LABEL,
-        )
         return
 
     # Manual-merge-only: humans drive the merge. An unmergeable PR parks

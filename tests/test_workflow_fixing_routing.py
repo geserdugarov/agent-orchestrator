@@ -24,7 +24,6 @@ from orchestrator import base_sync, config, workflow
 
 from tests.fakes import (
     FakeGitHubClient,
-    FakeLabel,
     FakePR,
     FakePRRef,
     make_issue,
@@ -443,13 +442,10 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         gh: FakeGitHubClient,
         number: int,
         *,
-        extra_labels=(),
         park_reason: str | None = "push_failed",
         pending_fix_at: str | None = None,
     ) -> None:
         issue = make_issue(number, label="fixing")
-        for name in extra_labels:
-            issue.labels.append(FakeLabel(name))
         gh.add_issue(issue)
         pr = FakePR(
             number=900 + number,
@@ -560,19 +556,6 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
 
         self.assertNotIn((31, "resolving_conflict"), gh.label_history)
         self.assertTrue(gh.pinned_data(31).get("awaiting_human"))
-        self.post.assert_not_called()
-
-    def test_stuck_push_failed_held_stays_parked(self) -> None:
-        # `hold_base_sync` is an explicit operator pause; respect it even
-        # when the worktree is behind base.
-        gh = FakeGitHubClient()
-        self._seed_parked_fixing(gh, 32, extra_labels=("hold_base_sync",))
-        p1, p2, p3, p4, p5, p6 = self._drift_patches(5)
-        with p1, p2, p3, p4, p5, p6:
-            workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(32))
-
-        self.assertNotIn((32, "resolving_conflict"), gh.label_history)
-        self.assertTrue(gh.pinned_data(32).get("awaiting_human"))
         self.post.assert_not_called()
 
     def test_stuck_push_failed_dirty_stays_parked(self) -> None:

@@ -13,12 +13,10 @@ from unittest.mock import patch
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
-from orchestrator.github import BASE_SYNC_HOLD_LABEL
 
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
-    FakeLabel,
     FakePR,
     FakePRRef,
     FakePRReview,
@@ -340,25 +338,6 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(30).get("pending_fix_issue_max_id"), human_comment.id,
         )
 
-    def test_in_review_hold_base_sync_pauses_hitl_ping(self) -> None:
-        # BASE_SYNC_HOLD label suppresses the HITL ping so the operator's
-        # in-progress base sync can finish without spamming the issue
-        # thread.
-        pr = self._open_pr(approved=True, mergeable=True, check_state="success")
-        gh, issue = self._seed(pr=pr)
-        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
-
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(),
-        )
-
-        mocks["run_agent"].assert_not_called()
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
-        self.assertEqual(gh.posted_comments, [])
-        self.assertNotIn("merged_at", gh.pinned_data(30))
-
     def test_in_review_unmergeable_parks_for_human(self) -> None:
         # PR not mergeable: park awaiting human with
         # `park_reason="unmergeable"`. The orchestrator never routes from
@@ -384,24 +363,6 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No conflict_round seeded -- the orchestrator never enters the
         # auto-resolution route from here.
         self.assertNotIn("conflict_round", state)
-
-    def test_in_review_hold_base_sync_skips_unmergeable_park(self) -> None:
-        pr = self._open_pr(approved=True, mergeable=False, check_state="success")
-        gh, issue = self._seed(pr=pr)
-        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
-
-        mocks = self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(),
-        )
-
-        mocks["run_agent"].assert_not_called()
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.posted_comments, [])
-        self.assertEqual(gh.label_history, [])
-        state = gh.pinned_data(30)
-        self.assertFalse(state.get("awaiting_human"))
-        self.assertIsNone(state.get("park_reason"))
 
     def test_in_review_mergeable_pending(self) -> None:
         # mergeable=None means GitHub is still computing. Don't ping,

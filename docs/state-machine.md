@@ -22,8 +22,7 @@ because live GitHub issues carry them.
 
 Four non-workflow **control labels** modify behavior without occupying the workflow slot:
 
-- `hold_base_sync` pauses per-tick base sync, `in_review` HITL pings / unmergeable parks, and `resolving_conflict`
-  rebases until removed.
+- `hold_base_sync` pauses per-tick base sync and `resolving_conflict` rebases until removed.
 - `backlog` makes the orchestrator skip the issue: the per-tick dispatcher filters it out before the family/fanout split
   (so a parked, workflow-label-less issue cannot fold into the cap-counted family bucket and starve other work under
   `parallel_limit=1`), and each stage handler also skips it before the workflow label is read. Removing it hands control
@@ -693,7 +692,7 @@ state. The PR comment that triggers a route to `fixing` is the human signal; awa
      stuck-validating-route-transient branch above: the self-recovery could not clear the condition, and the underlying
      cause may be a base advance that landed mid-park (the per-tick base sync deliberately stands down on every
      `awaiting_human` park — `_sync_pr_worktree_to_base` returns at its `awaiting_human` gate — so nobody else will
-     sync this worktree). On a clean worktree (not held by `hold_base_sync`) the breaker routes to `resolving_conflict`
+     sync this worktree). On a clean worktree the breaker routes to `resolving_conflict`
      — seeding `conflict_round` when absent, clearing the park, posting a PR notice, emitting `conflict_round`
      `action="entered"` (`stage="fixing"`) — in either of two shapes, both reconciled by the conflict handler, which
      owns rebasing AND publishing a PR branch:
@@ -702,9 +701,10 @@ state. The PR comment that triggers a route to `fixing` is the human signal; awa
          needs a force-publish (see `_handle_resolving_conflict` below).
 
      The routing decision is cheap — no extra fetch, since `pr` was already fetched this tick. With no drift (the
-     worktree is in sync with the PR head), or a dirty / held worktree, the park is left intact and the issue keeps
-     awaiting a human. The `pending_fix_*` bookmarks and in_review watermarks are left untouched so the eventual
-     in_review re-entry still re-discovers the feedback.
+     worktree is in sync with the PR head), or a dirty worktree, the park is left intact and the issue keeps
+     awaiting a human. An operator who wants to freeze this reconciliation applies `paused`, which hard-skips the
+     issue at dispatch so the breaker never runs. The `pending_fix_*` bookmarks and in_review watermarks are left
+     untouched so the eventual in_review re-entry still re-discovers the feedback.
   6. If no unread feedback at all (watermarks already cover the bookmarks), clear `pending_fix_*` and bounce back to
      `validating`.
   7. **Quiet window**: compute the newest `created_at` (or `submitted_at` for review summaries); if younger than
@@ -902,8 +902,8 @@ because session state lives in pinned state, not in the worktree.
      park_reason + pending_fix_at. For a stuck validating-route
      transient park (`_VALIDATING_TRANSIENT_PARK_REASONS` with
      pending_fix_at unset, _try_recover_validating_transient_park
-     returns "stuck"), route to resolving_conflict when the clean,
-     unheld worktree is out of sync with the PR -- behind base, OR
+     returns "stuck"), route to resolving_conflict when the clean
+     worktree is out of sync with the PR -- behind base, OR
      already on base but local HEAD != the live pr.head.sha (an
      unpushed local rebase) -- the dead-lock breaker base sync can't
      reach while parked. Every other awaiting-human shape (real agent

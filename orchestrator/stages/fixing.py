@@ -78,8 +78,8 @@ branch: parks shaped like a real agent question or a dirty worktree
 when the worktree has drifted, because we cannot distinguish a genuine
 "agent needs input" from a "nothing to fix" remark by inspection --
 auto-recovering either would silently bypass the HITL contract. The
-helper no-ops when `hold_base_sync` is set, the worktree is missing /
-dirty, or the worktree is already in sync with the PR head.
+helper no-ops when the worktree is missing / dirty, or the worktree is
+already in sync with the PR head.
 
 Separately, an in_review-route resume that produces no commit but ends
 with an explicit `ACK: <reason>` marker returns straight to `in_review`
@@ -150,7 +150,7 @@ from github.Issue import Issue
 from .. import config
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
-from ..github import BASE_SYNC_HOLD_LABEL, GitHubClient, issue_has_label
+from ..github import GitHubClient
 
 
 # Park reasons `/orchestrator continue` may retry: a dev session that went
@@ -730,19 +730,15 @@ def _reconcile_parked_fixing(
     already fetched this tick) -- no extra fetch here.
 
     Returns False (issue stays parked) when the worktree is missing,
-    dirty (an operator may be inspecting a dirty-tree park), the issue
-    carries `hold_base_sync` (an explicit operator pause on base
-    integration), or the worktree is already in sync with the PR head
-    (the transient condition is the real blocker, not drift).
+    dirty (an operator may be inspecting a dirty-tree park), or the
+    worktree is already in sync with the PR head (the transient
+    condition is the real blocker, not drift).
 
     The `pending_fix_*` bookmarks and in_review watermarks are left
     untouched so the eventual `in_review` re-entry still re-discovers the
     feedback (mirrors the refresh-time conflict detour).
     """
     from .. import workflow as _wf
-
-    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
-        return False
 
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
