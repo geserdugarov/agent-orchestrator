@@ -38,6 +38,7 @@ import subprocess  # noqa: F401 -- re-exported so tests can `patch.object(workfl
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -250,6 +251,7 @@ __all__ = [
     "_FOREGROUND_ONLY_NOTE",
     "_MANIFEST_RE",
     "_ORCH_COMMENT_MARKER",
+    "_PollablePartition",
     "_SILENT_PARKS_BEFORE_FRESH_SESSION",
     "_STDERR_TAIL_BUDGET",
     "_VALIDATING_TRANSIENT_PARK_REASONS",
@@ -273,6 +275,7 @@ __all__ = [
     "_build_tracked_repos_context",
     "_build_user_content_change_prompt",
     "_check_and_increment_retry_budget",
+    "_classify_pollable_issue",
     "_cleanup_decompose_worktree",
     "_cleanup_question_worktree",
     "_cleanup_terminal_branch",
@@ -289,6 +292,7 @@ __all__ = [
     "_ensure_decompose_worktree",
     "_ensure_pr_worktree",
     "_ensure_worktree",
+    "_family_bucket_cap_exempt",
     "_finalize_if_issue_closed",
     "_finalize_if_pr_merged",
     "_first_commit_subject",
@@ -331,6 +335,7 @@ __all__ = [
     "_parse_documentation_verdict",
     "_parse_manifest",
     "_parse_review_verdict",
+    "_partition_pollable_issues",
     "_paused_during_agent_run",
     "_post_issue_comment",
     "_post_issue_usage_verdict",
@@ -345,11 +350,13 @@ __all__ = [
     "_rebase_in_progress",
     "_recent_comments_text",
     "_redact_secrets",
+    "_refetch_and_process",
     "_refresh_base_and_worktrees",
     "_resolve_branch_name",
     "_resume_dev_with_text",
     "_resume_developer_on_human_reply",
     "_route_drift_to_decomposing",
+    "_route_issue_to_handler",
     "_run_agent_tracked",
     "_run_verify_commands",
     "_sanitize_branch_segment",
@@ -806,6 +813,141 @@ def _sweep_community_contribution_prs(
             )
 
 
+@dataclass(frozen=True)
+class _PollablePartition:
+    """Family / fanout split of one repo's pollable issues for a single tick.
+
+    ``family_numbers`` and ``family_labels`` are index-aligned so the
+    cap-exempt decision (`_family_bucket_cap_exempt`) can read each
+    family-aware issue's workflow label. ``fanout_closed`` is the subset of
+    ``fanout_numbers`` whose issue is already closed -- a cheap terminal
+    finalize the dispatcher submits cap-exempt.
+    """
+    family_numbers: list[int]
+    family_labels: list[Optional[str]]
+    fanout_numbers: list[int]
+    fanout_closed: set[int]
+
+
+def _classify_pollable_issue(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue,
+) -> tuple[bool, Optional[str]]:
+    """Read one pollable issue's workflow label for the family / fanout split.
+
+    Returns ``(skip, label)``. ``skip=True`` marks a hard-skip control label
+    (``backlog`` / ``paused``): the operator parked the issue outside the
+    state machine, so the caller drops it BEFORE the partition -- a parked,
+    workflow-label-less issue folded into the family bucket would flip the
+    whole bucket cap-counted and starve fanout under ``parallel_limit=1``
+    (``_process_issue`` skips it anyway).
+
+    A label-read failure (including one raised by ``hard_skip_control_label``
+    itself) is reported as ``(False, None)`` so the issue is conservatively
+    routed into the family bucket, where ``_process_issue``'s own per-issue
+    exception isolation picks up any sustained failure. The label read runs
+    on the caller thread so bucketing needs no extra worker-side round-trip.
+    """
+    try:
+        skip_label = hard_skip_control_label(issue)
+        if skip_label is not None:
+            log.info(
+                "repo=%s issue=#%s has %r; skipping",
+                spec.slug, issue.number, skip_label,
+            )
+            return True, None
+        return False, gh.workflow_label(issue)
+    except Exception:
+        log.exception(
+            "repo=%s issue=#%s label read failed; routing to family bucket "
+            "so per-issue exception isolation can pick up any sustained "
+            "failure", spec.slug, issue.number,
+        )
+        return False, None
+
+
+def _partition_pollable_issues(
+    gh: GitHubClient, spec: RepoSpec,
+) -> _PollablePartition:
+    """Split this tick's pollable issues into the family and fanout buckets.
+
+    Family-aware labels (``decomposing`` / ``blocked`` / ``umbrella``) and
+    the unlabeled-pickup ``None`` are cross-issue writers -- a parent's
+    ``_handle_decomposing`` recovery seeds ``parent_number`` on a child
+    while the child's ``_handle_blocked`` would otherwise clobber the same
+    pinned-state comment -- so they must never run two at a time and are
+    collected into ``family_numbers`` (with index-aligned ``family_labels``).
+    Every other label touches only its own per-issue state and fans out; a
+    closed fanout issue is additionally recorded in ``fanout_closed`` because
+    its handler is a cheap terminal finalize submitted cap-exempt. Hard-skip
+    (``backlog`` / ``paused``) issues are dropped entirely.
+    """
+    family_numbers: list[int] = []
+    family_labels: list[Optional[str]] = []
+    fanout_numbers: list[int] = []
+    fanout_closed: set[int] = set()
+    for issue in gh.list_pollable_issues():
+        skip, label = _classify_pollable_issue(gh, spec, issue)
+        if skip:
+            continue
+        issue_number = int(issue.number)
+        if label is None or label in _FAMILY_AWARE_LABELS:
+            family_numbers.append(issue_number)
+            family_labels.append(label)
+        else:
+            fanout_numbers.append(issue_number)
+            if _issue_is_closed(issue):
+                fanout_closed.add(issue_number)
+    return _PollablePartition(
+        family_numbers, family_labels, fanout_numbers, fanout_closed,
+    )
+
+
+def _family_bucket_cap_exempt(family_labels: list[Optional[str]]) -> bool:
+    """True when a family bucket may skip the per-repo / global caps.
+
+    A bucket is cap-exempt only when EVERY issue in it this tick runs a
+    no-agent / no-worktree handler -- all labels in ``_CAP_EXEMPT_FAMILY_LABELS``
+    (``blocked`` / ``umbrella``, pure dep-graph walks). Such a bucket must
+    always get its turn even when the parallel caps are saturated by real
+    implementation work: a ``blocked`` parent polling its children, or an
+    ``umbrella`` aggregating them, would otherwise be starved of the only
+    per-repo slot under the default ``parallel_limit=1`` -- and a ``blocked``
+    parent waiting on its own children would deadlock them. A bucket
+    containing ``decomposing`` (spawns the decomposer agent) or an
+    unlabeled-pickup ``None`` (routes through ``_handle_pickup``, may spawn an
+    agent) stays cap-counted.
+    """
+    return all(lbl in _CAP_EXEMPT_FAMILY_LABELS for lbl in family_labels)
+
+
+def _refetch_and_process(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue_number: int,
+    *,
+    semaphore_cm: Optional[contextlib.AbstractContextManager] = None,
+) -> None:
+    """Mint a per-worker client, refetch the Issue, and run its handler.
+
+    Only issue NUMBERS cross the thread boundary. PyGithub's ``Issue`` and
+    the parent ``GitHubClient`` / ``Repository`` / ``Requester`` chain hold
+    mutable per-request state that is not documented thread-safe, so each
+    worker calls ``gh._for_worker_thread()`` to mint a fresh client and
+    refetches its Issue against THAT client -- every in-flight HTTP call is
+    then the sole consumer of its requester's state.
+
+    ``semaphore_cm`` wraps the ``_process_issue`` call so the legacy parallel
+    path can thread the cross-repo ``global_semaphore`` through here; the
+    scheduler path leaves it ``None`` (a no-op) because the scheduler owns
+    the cross-repo cap itself.
+    """
+    worker_gh = gh._for_worker_thread()
+    worker_issue = worker_gh.get_issue(issue_number)
+    cm = semaphore_cm if semaphore_cm is not None else contextlib.nullcontext()
+    with cm:
+        _process_issue(worker_gh, spec, worker_issue)
+
+
 def tick(
     gh: GitHubClient,
     spec: RepoSpec,
@@ -908,62 +1050,13 @@ def tick(
     # the whole eligible set this tick); on an enumeration failure the
     # whole tick aborts -- the next tick's enumeration will retry.
     #
-    # Partition by `_FAMILY_AWARE_LABELS`: stages that read/write across
-    # parent/child boundaries must never run two at a time -- a parent's
-    # `_handle_decomposing` recovery seeds `parent_number` on a child
-    # while the child's `_handle_blocked` would otherwise clobber the
-    # same pinned-state comment. The remaining issues fan out across the
-    # worker pool because their handlers touch only per-issue state.
-    #
-    # Both buckets share a single executor capped at `limit`, and the
-    # family-aware workers acquire a tick-local lock around their
-    # `_process_issue` call so they cannot overlap with each other. They
-    # CAN overlap with non-family workers: a slow decomposing /
-    # unlabeled-pickup agent run on one worker no longer blocks the
-    # other `limit-1` workers from advancing unrelated implementing /
-    # validating issues in the same tick. Without this overlap a mixed
-    # tick with one long decomposing issue and several ready /
-    # implementing issues would still process those implementing issues
-    # serially after the decomposer finished -- the opposite of what
-    # `parallel_limit > 1` is supposed to deliver.
-    #
-    # Label is read on the caller thread to avoid an extra worker-side
-    # GitHub round-trip just to bucket the issue. Per-issue exception
-    # isolation extends to that label read: a PyGithub lazy-load failure
-    # on one issue's labels must not abort the whole tick before the
-    # other eligible issues are even classified. A failing read is
-    # logged and the issue is conservatively routed into the family
-    # bucket, where the per-issue try/except below catches any sustained
-    # failure with the same log line shape the rest of `tick` produces.
-    family_numbers: list[int] = []
-    fanout_numbers: list[int] = []
-    for issue in gh.list_pollable_issues():
-        # `backlog` / `paused` are hard-skip holds -- filter them before the
-        # family / fanout split so a parked, workflow-label-less issue is
-        # never folded into the family bucket (see `_dispatch_via_scheduler`
-        # for why that starves fanout under `parallel_limit=1`).
-        # `_process_issue` skips them anyway.
-        try:
-            skip_label = hard_skip_control_label(issue)
-            if skip_label is not None:
-                log.info(
-                    "repo=%s issue=#%s has %r; skipping",
-                    spec.slug, issue.number, skip_label,
-                )
-                continue
-            label = gh.workflow_label(issue)
-        except Exception:
-            log.exception(
-                "repo=%s issue=#%s label read failed; routing to "
-                "family bucket so per-issue exception isolation can pick "
-                "up any sustained failure", spec.slug, issue.number,
-            )
-            family_numbers.append(issue.number)
-            continue
-        if label is None or label in _FAMILY_AWARE_LABELS:
-            family_numbers.append(issue.number)
-        else:
-            fanout_numbers.append(issue.number)
+    # Partition family-aware (cross-issue writer) work off from fanout so
+    # the family bucket drains sequentially inside ONE task while the rest
+    # fan out; `_partition_pollable_issues` owns the skip-label filtering,
+    # per-issue label-read isolation, and the family/fanout split.
+    partition = _partition_pollable_issues(gh, spec)
+    family_numbers = partition.family_numbers
+    fanout_numbers = partition.fanout_numbers
 
     if not family_numbers and not fanout_numbers:
         return
@@ -985,18 +1078,6 @@ def tick(
     # worker threads.
     workers = min(limit, total_tasks)
 
-    # Only issue NUMBERS cross the thread boundary. PyGithub's `Issue`
-    # and the parent `GitHubClient`/`Repository`/`Requester` chain hold
-    # mutable per-request state that is not documented as thread-safe;
-    # passing an Issue resolved on the caller thread into a worker
-    # thread would have that worker drive a shared `Requester` and
-    # could corrupt concurrent GitHub operations. Each worker instead
-    # calls `gh._for_worker_thread()` to mint a fresh client (= fresh
-    # Github + Requester + Repository) and refetches its Issue against
-    # THAT client, so every in-flight HTTP call is the sole consumer of
-    # its requester's state. The fake mirrors `_for_worker_thread` to
-    # return `self`, so tests keep their single-fake assertion model.
-
     def _drain_family_bucket() -> None:
         """Process every family-aware issue this tick sequentially.
 
@@ -1010,21 +1091,14 @@ def tick(
         """
         for issue_number in family_numbers:
             try:
-                worker_gh = gh._for_worker_thread()
-                worker_issue = worker_gh.get_issue(issue_number)
-                with semaphore_cm:
-                    _process_issue(worker_gh, spec, worker_issue)
+                _refetch_and_process(
+                    gh, spec, issue_number, semaphore_cm=semaphore_cm,
+                )
             except Exception:
                 log.exception(
                     "repo=%s issue=#%s processing failed",
                     spec.slug, issue_number,
                 )
-
-    def _run_fanout_in_worker(issue_number: int) -> None:
-        worker_gh = gh._for_worker_thread()
-        worker_issue = worker_gh.get_issue(issue_number)
-        with semaphore_cm:
-            _process_issue(worker_gh, spec, worker_issue)
 
     with ThreadPoolExecutor(
         max_workers=workers,
@@ -1037,7 +1111,9 @@ def tick(
         if family_numbers:
             futures[ex.submit(_drain_family_bucket)] = family_sentinel
         for n in fanout_numbers:
-            futures[ex.submit(_run_fanout_in_worker, n)] = n
+            futures[
+                ex.submit(_refetch_and_process, gh, spec, n, semaphore_cm=semaphore_cm)
+            ] = n
         # `as_completed` so a slow issue does not delay logging the failures
         # of faster ones. Each `fut.result()` is wrapped individually so one
         # raising issue cannot abort the remaining futures' result drain.
@@ -1160,65 +1236,18 @@ def _dispatch_via_scheduler(
     per-repo slot.
     """
     per_repo_cap = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
-    family_numbers: list[int] = []
-    family_labels: list[Optional[str]] = []
-    fanout_numbers: list[int] = []
-    # Closed fan-out issues only need a terminal finalization (flip to
-    # `done` / `rejected` + branch cleanup); their handlers spawn no agent.
-    # Tracked so they can be submitted cap-exempt below.
-    fanout_closed: set[int] = set()
-    for issue in gh.list_pollable_issues():
-        # `backlog` / `paused` are operator hard-skip holds: the issue sits
-        # outside the state machine until the label is removed. Drop it
-        # BEFORE the family/fanout split. A parked issue carries no workflow
-        # label, so it would otherwise land in the family bucket and -- being
-        # neither `blocked` nor `umbrella` -- flip the whole bucket to
-        # cap-counted, reserving the only per-repo slot under
-        # `parallel_limit=1` and starving every fanout issue behind it.
-        # `_process_issue` skips these anyway; filtering here keeps them from
-        # holding a slot.
-        try:
-            skip_label = hard_skip_control_label(issue)
-            if skip_label is not None:
-                log.info(
-                    "repo=%s issue=#%s has %r; skipping",
-                    spec.slug, issue.number, skip_label,
-                )
-                continue
-            label = gh.workflow_label(issue)
-        except Exception:
-            log.exception(
-                "repo=%s issue=#%s label read failed; routing to "
-                "family bucket so per-issue exception isolation can pick "
-                "up any sustained failure", spec.slug, issue.number,
-            )
-            label = None
-        issue_number = int(issue.number)
-        if label is None or label in _FAMILY_AWARE_LABELS:
-            family_numbers.append(issue_number)
-            family_labels.append(label)
-        else:
-            fanout_numbers.append(issue_number)
-            if _issue_is_closed(issue):
-                fanout_closed.add(issue_number)
+    # `_partition_pollable_issues` owns the skip-label filtering, per-issue
+    # label-read isolation, and the family/fanout split (including the closed
+    # fan-out set). `backlog` / `paused` issues are dropped there so a parked,
+    # workflow-label-less issue never folds into the bucket and flips it
+    # cap-counted, which would reserve the only per-repo slot and starve
+    # fanout under `parallel_limit=1`.
+    partition = _partition_pollable_issues(gh, spec)
+    family_numbers = partition.family_numbers
+    fanout_numbers = partition.fanout_numbers
 
     if family_numbers:
-        # A family bucket is cap-exempt only when EVERY issue in it this
-        # tick runs a no-agent / no-worktree handler -- i.e. all labels are
-        # in `_CAP_EXEMPT_FAMILY_LABELS` (`blocked` / `umbrella`, pure
-        # dep-graph walks). Such a bucket must always get its turn even when
-        # the parallel caps are saturated by real implementation work: a
-        # `blocked` parent polling its children, or an `umbrella`
-        # aggregating them, would otherwise be starved of the only per-repo
-        # slot under the default `parallel_limit=1` -- and a `blocked`
-        # parent waiting on its own children would deadlock them. A bucket
-        # containing `decomposing` (spawns the decomposer agent) or an
-        # unlabeled-pickup `None` (routes through `_handle_pickup`, may spawn
-        # an agent) stays cap-counted because those entries do real,
-        # slot-worthy work.
-        bucket_cap_exempt = all(
-            lbl in _CAP_EXEMPT_FAMILY_LABELS for lbl in family_labels
-        )
+        bucket_cap_exempt = _family_bucket_cap_exempt(partition.family_labels)
 
         def _drain_family_bucket(numbers: list[int] = family_numbers) -> None:
             """Process every family-aware issue this tick sequentially.
@@ -1247,9 +1276,7 @@ def _dispatch_via_scheduler(
                                 spec.slug, n,
                             )
                             continue
-                        worker_gh = gh._for_worker_thread()
-                        worker_issue = worker_gh.get_issue(n)
-                        _process_issue(worker_gh, spec, worker_issue)
+                        _refetch_and_process(gh, spec, n)
                 except Exception:
                     log.exception(
                         "repo=%s issue=#%s processing failed",
@@ -1278,9 +1305,7 @@ def _dispatch_via_scheduler(
 
     for n in fanout_numbers:
         def _run(number: int = n) -> None:
-            worker_gh = gh._for_worker_thread()
-            worker_issue = worker_gh.get_issue(number)
-            _process_issue(worker_gh, spec, worker_issue)
+            _refetch_and_process(gh, spec, number)
 
         scheduler.submit(
             spec.slug,
@@ -1293,8 +1318,53 @@ def _dispatch_via_scheduler(
             # instead of being starved behind active agent work under
             # `parallel_limit=1` (mirrors the `_CAP_EXEMPT_FAMILY_LABELS`
             # exemption for `blocked` / `umbrella`).
-            cap_exempt=(n in fanout_closed),
+            cap_exempt=(n in partition.fanout_closed),
             per_repo_cap=per_repo_cap,
+        )
+
+
+def _route_issue_to_handler(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, label: Optional[str],
+) -> None:
+    """Dispatch one issue to its stage handler by workflow label.
+
+    The handlers are looked up as module globals so a test that patches
+    ``workflow._handle_<stage>`` intercepts the call even though the dispatch
+    lives here. ``done`` / ``rejected`` are terminal no-ops; an unrecognized
+    label is logged and left alone for a human. Timing and the
+    ``stage_evaluation`` analytics record stay in ``_process_issue``, which
+    wraps this call in its try / except / finally.
+    """
+    if label is None:
+        _handle_pickup(gh, spec, issue)
+    elif label == "decomposing":
+        _handle_decomposing(gh, spec, issue)
+    elif label == "ready":
+        _handle_ready(gh, spec, issue)
+    elif label == "blocked":
+        _handle_blocked(gh, spec, issue)
+    elif label == "umbrella":
+        _handle_umbrella(gh, spec, issue)
+    elif label == "implementing":
+        _handle_implementing(gh, spec, issue)
+    elif label == "documenting":
+        _handle_documenting(gh, spec, issue)
+    elif label == "validating":
+        _handle_validating(gh, spec, issue)
+    elif label == "in_review":
+        _handle_in_review(gh, spec, issue)
+    elif label == "fixing":
+        _handle_fixing(gh, spec, issue)
+    elif label == "resolving_conflict":
+        _handle_resolving_conflict(gh, spec, issue)
+    elif label == "question":
+        _handle_question(gh, spec, issue)
+    elif label in ("done", "rejected"):
+        return
+    else:
+        log.warning(
+            "repo=%s issue=#%s label=%r not implemented yet; leaving alone",
+            spec.slug, issue.number, label,
         )
 
 
@@ -1325,37 +1395,7 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     start = time.monotonic()
     result = "ok"
     try:
-        if label is None:
-            _handle_pickup(gh, spec, issue)
-        elif label == "decomposing":
-            _handle_decomposing(gh, spec, issue)
-        elif label == "ready":
-            _handle_ready(gh, spec, issue)
-        elif label == "blocked":
-            _handle_blocked(gh, spec, issue)
-        elif label == "umbrella":
-            _handle_umbrella(gh, spec, issue)
-        elif label == "implementing":
-            _handle_implementing(gh, spec, issue)
-        elif label == "documenting":
-            _handle_documenting(gh, spec, issue)
-        elif label == "validating":
-            _handle_validating(gh, spec, issue)
-        elif label == "in_review":
-            _handle_in_review(gh, spec, issue)
-        elif label == "fixing":
-            _handle_fixing(gh, spec, issue)
-        elif label == "resolving_conflict":
-            _handle_resolving_conflict(gh, spec, issue)
-        elif label == "question":
-            _handle_question(gh, spec, issue)
-        elif label in ("done", "rejected"):
-            return
-        else:
-            log.warning(
-                "repo=%s issue=#%s label=%r not implemented yet; leaving alone",
-                spec.slug, issue.number, label,
-            )
+        _route_issue_to_handler(gh, spec, issue, label)
     except Exception:
         result = "error"
         raise
