@@ -292,9 +292,15 @@ Non-human content is filtered five ways:
   directly (`filter_trusted` in the implementing, validating, decomposing, resolving_conflict, and question resumes);
   and the four-surface PR-feedback scans driving the `in_review` -> `fixing` route, the fixing dev-resume, and the
   `/orchestrator continue` batch replay (`filter_trusted` in `_scan_fresh_pr_feedback`, the drift-resume
-  PR-conversation block, `_rescan_fixing_feedback`, and `_reconstruct_pending_fix_batch`). An untrusted comment
-  therefore neither shifts the drift hash, sets a pending-fix bookmark, routes `in_review` to `fixing`, nor reaches any
-  agent prompt.
+  PR-conversation block, `_rescan_fixing_feedback`, and `_reconstruct_pending_fix_batch`). On the implementing,
+  validating, decomposing, and question resumes the filter runs on the whole `comments_after` batch up front, so it
+  gates the non-empty check, the quoted follow-up, the consumed-watermark advance, and — in `validating` — the
+  `/orchestrator add-review-rounds` review-cap command and the reviewer-respawn nudge; an untrusted comment resumes
+  none of those sessions and does not advance the watermark (it is re-filtered on each later tick, never marked
+  consumed). The `resolving_conflict` resume filters only the quoted prompt, so its watermark still advances past the
+  raw batch. An untrusted comment therefore neither shifts the drift hash, sets a pending-fix bookmark, routes
+  `in_review` to `fixing`, resumes an awaiting-human decomposer / developer / reviewer / question session, satisfies
+  the `/orchestrator add-review-rounds` review-cap command, nor reaches any agent prompt.
 
 `_detect_user_content_change` durably persists the baseline on its FIRST encounter via `gh.write_pinned_state`, so an
 early-return tick cannot silently absorb a later edit as the new baseline. On drift the action depends on lifecycle
@@ -546,8 +552,9 @@ so `DEV_AGENT` flips made mid-flight do not retarget the docs pass either.
      spawned on either short-circuit.
   1. Awaiting-human path: resume on the dev's locked spec; on a successful pushed fix, bump `review_round` and stay on
      `validating`. Exception: on a `review_cap` park the human reply does NOT wake the dev — the operator must post
-     `/orchestrator add-review-rounds N` on its own line, which resets `review_round` to `MAX_REVIEW_ROUNDS - N`, clears
-     the park, and falls through to spawn the reviewer this same tick.
+     `/orchestrator add-review-rounds N` on its own line (honored only from an allowlisted author when
+     `ALLOWED_ISSUE_AUTHORS` is set — an outsider's command is filtered out before the parse), which resets
+     `review_round` to `MAX_REVIEW_ROUNDS - N`, clears the park, and falls through to spawn the reviewer this same tick.
   2. If `review_round >= MAX_REVIEW_ROUNDS` (default 3), park (`review_cap`). The park comment surfaces the
      `/orchestrator add-review-rounds N` escape hatch.
   3. Otherwise persist `config.REVIEW_AGENT_SPEC` to `review_agent` (traceability only — the reviewer is spawned fresh
