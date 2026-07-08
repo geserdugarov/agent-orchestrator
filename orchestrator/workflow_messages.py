@@ -32,6 +32,7 @@ from github.Issue import Issue
 
 from . import config
 from .agents import AgentResult
+from .comment_trust import is_trusted_author
 from .config import RepoSpec
 from .github import GitHubClient, PinnedState
 
@@ -590,10 +591,22 @@ def _has_dep_cycle(children: list[dict]) -> bool:
 
 
 def _recent_comments_text(issue: Issue, max_chars: int = 4000) -> str:
+    """Conversation text fed to every agent prompt (implement, review,
+    documentation, decompose, question, and the drift-resume prompt).
+
+    An untrusted author's comment is dropped whole -- its body and any URLs
+    it contains never reach the prompt -- so once `ALLOWED_ISSUE_AUTHORS`
+    is set an outsider on a public repo cannot smuggle workflow-driving
+    instructions into a coding agent through the issue thread. With no
+    allowlist configured `is_trusted_author` trusts every author, so the
+    default single-user deployment sees the full thread unchanged.
+    """
     chunks: list[str] = []
     for c in issue.get_comments():
         body = c.body or ""
         if "<!--orchestrator-state" in body:
+            continue
+        if not is_trusted_author(getattr(c, "user", None)):
             continue
         login = c.user.login if c.user else "user"
         chunks.append(f"@{login}: {body}")

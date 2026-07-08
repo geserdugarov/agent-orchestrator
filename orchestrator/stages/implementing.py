@@ -29,6 +29,7 @@ from github.Issue import Issue
 
 from .. import config
 from ..agents import AgentResult
+from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import GitHubClient, PinnedState
@@ -616,9 +617,18 @@ def _resume_developer_on_human_reply(
     state.set("last_action_comment_id", consumed_max)
     from .. import workflow as _wf
 
+    # Drop untrusted authors before their comment bodies/URLs reach the dev
+    # prompt: with `ALLOWED_ISSUE_AUTHORS` set an outsider reply posted while
+    # the issue is parked awaiting human must not steer the developer. The
+    # watermark advanced past the whole raw batch above, so a trusted reply
+    # mixed with outsider noise still consumes both; an all-untrusted batch
+    # leaves nothing to act on and is treated as "no new reply".
+    trusted = filter_trusted(new_comments)
+    if not trusted:
+        return None
     followup = "\n\n".join(
         f"@{c.user.login if c.user else 'user'}: {c.body}"
-        for c in new_comments if c.body
+        for c in trusted if c.body
     )
     followup = f"{followup}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
     return _resume_dev_with_text(

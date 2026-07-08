@@ -34,6 +34,7 @@ from typing import Optional
 
 from github.Issue import Issue
 
+from .comment_trust import is_trusted_author
 from .state_machine import WorkflowLabel
 from .github import PINNED_STATE_MARKER, GitHubClient, PinnedState
 from .workflow_messages import (
@@ -53,7 +54,7 @@ def _compute_user_content_hash(
     Used by `_detect_user_content_change` so the orchestrator can react
     when a human edits the issue body or adds acceptance criteria after
     the workflow has already picked it up. Non-human content is filtered
-    four ways:
+    five ways:
 
     * pinned-state comment by `PINNED_STATE_MARKER`;
     * orchestrator-posted comments by `_ORCH_COMMENT_MARKER` embedded in
@@ -67,12 +68,17 @@ def _compute_user_content_hash(
       filtered by the id-list or marker because we never post them, and
       they post structurally (e.g. weekly Dependabot bumps) which would
       otherwise re-trigger drift detection on every tick they post.
+    * untrusted authors by `is_trusted_author` when `ALLOWED_ISSUE_AUTHORS`
+      is set. This keeps an outsider's comment from shifting the hash and
+      re-triggering drift (and the re-decompose / dev-resume it drives) on
+      a public repo. With no allowlist configured everyone is trusted, so
+      the default deployment's hash is unchanged.
 
-    Author-login matching is deliberately avoided because the orchestrator
-    PAT is often shared with a human reviewer's GitHub account; a login
-    filter would falsely drop the human's real review comments. The
-    `user.type` flag is a structural GitHub-account property and does not
-    conflict with that constraint.
+    The orchestrator's OWN comments are dropped by marker/id (above),
+    never by login, so a PAT shared with a human reviewer's account does
+    not swallow that reviewer's real comments as bot noise. The allowlist
+    filter is a separate, opt-in login gate: an operator who enables it is
+    expected to list the reviewer login they post under.
     """
     parts = [issue.title or "", issue.body or ""]
     for c in issue.get_comments():
@@ -86,6 +92,8 @@ def _compute_user_content_hash(
             continue
         user = getattr(c, "user", None)
         if user is not None and getattr(user, "type", None) == "Bot":
+            continue
+        if not is_trusted_author(user):
             continue
         parts.append(body)
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
