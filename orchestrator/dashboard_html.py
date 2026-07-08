@@ -6,11 +6,13 @@ The page renders several panels directly from HTML strings (rather
 than Plotly figures or `st.dataframe`) -- the topbar, filter meta,
 KPI strip, insight banners, the per-card header, the inline SVG
 sparkline / delta pill, the "Most expensive issues" table, the
-"Skill trigger rates" aggregate table, and the per-skill trigger
-matrix that sits under it. Each builder takes read-model rows /
-small dataclasses (plus, where a panel needs them, the formatter
-callables the caller passes from `dashboard_theme`) and returns a
-string the page drops into `st.markdown(..., unsafe_allow_html=True)`.
+backend-efficiency cards, the cost-attribution coverage bar, the
+reliability-tile strip, the "Skill trigger rates" aggregate table,
+and the per-skill trigger matrix that sits under it. Each builder
+takes read-model rows / small dataclasses (plus, where a panel needs
+them, the formatter callables -- or the whole `dashboard_theme`
+handle -- the caller passes in) and returns a string the page drops
+into `st.markdown(..., unsafe_allow_html=True)`.
 
 Keeping these in their own module means the rendering markup stays
 together and free of any Streamlit / Plotly import, so the polling
@@ -23,6 +25,8 @@ from datetime import date
 from typing import Callable, Optional, Sequence
 
 from orchestrator.analytics.read import (
+    BackendEfficiencyRow,
+    CostCoverageRow,
     DataExtent,
     IssueSummaryRow,
     SkillTriggerMatrixRow,
@@ -699,3 +703,156 @@ def _insights_html(
             '</div>'
         )
     return '<div class="orch-insights">' + "".join(rows) + '</div>'
+
+
+def _backend_efficiency_card_html(
+    row: BackendEfficiencyRow, *, theme
+) -> str:
+    """Render one backend-efficiency card to inline HTML.
+
+    A spend headline over a `$ / 1M tok` · `% cache hit` · `$ / run`
+    row. The caller renders one card per backend (a separate
+    `st.markdown` each, so Streamlit's inter-element gap keeps the cards
+    spaced). Two accounting choices match the rest of the redesigned
+    page:
+
+    - **Token total** is `input + output + cache_read + cache_write`
+      (the same volume the headline KPI reports), so the `cost / 1M
+      tok` tile divides by that full total rather than raw input.
+    - **Cache leverage** is `cache_read / (cache_read + input)` -- the
+      share of billable input served from cache, which is the cost
+      lever the operator reads off the card. A high cache hit means a
+      smaller fraction of input tokens pays the model's input rate.
+
+    Colors and formatters come from the caller's `dashboard_theme`
+    handle so this module stays free of the theme import (and the
+    lazy-import invariant the dashboard relies on).
+    """
+    tokens = int(
+        (row.total_input_tokens or 0)
+        + (row.total_output_tokens or 0)
+        + (row.total_cache_read_tokens or 0)
+        + (row.total_cache_write_tokens or 0)
+    )
+    cost_per_m = (
+        (row.total_cost_usd / (tokens / 1_000_000))
+        if tokens > 0 else 0.0
+    )
+    cost_per_run = (
+        (row.total_cost_usd / row.runs)
+        if row.runs > 0 else 0.0
+    )
+    cache_read = int(row.total_cache_read_tokens or 0)
+    input_tok = int(row.total_input_tokens or 0)
+    cache_hit_pct = (
+        (cache_read / (cache_read + input_tok) * 100)
+        if (cache_read + input_tok) > 0 else 0.0
+    )
+    color = theme.color_for(
+        row.backend, explicit=theme.BACKEND_COLORS
+    )
+    return (
+        f'<div style="border:1px solid {theme.BORDER};'
+        f'border-radius:8px;padding:10px 12px;'
+        f'margin-bottom:8px">'
+        f'<div style="display:flex;align-items:center;'
+        f'gap:8px;margin-bottom:4px">'
+        f'<span style="display:inline-block;width:10px;'
+        f'height:10px;border-radius:50%;background:{color}">'
+        f'</span>'
+        f'<b style="color:{theme.TEXT}">'
+        f'{html.escape(row.backend)}</b>'
+        f'<span style="color:{theme.MUTED_TEXT};'
+        f'font-size:12px;margin-left:auto">'
+        f'{row.runs} runs · {theme.fmt_tokens(tokens)} tok'
+        '</span>'
+        '</div>'
+        f'<div style="color:{theme.TEXT};font-size:20px;'
+        f'font-weight:600;'
+        f'font-family:{theme.MONO_FONT_FAMILY};'
+        f'margin-bottom:6px">'
+        f'{html.escape(theme.fmt_money_exact(row.total_cost_usd))}'
+        f'<span style="color:{theme.MUTED_TEXT};'
+        f'font-size:11px;margin-left:8px;'
+        f'font-family:{theme.FONT_FAMILY}">'
+        f'spend</span></div>'
+        f'<div style="display:flex;gap:14px;font-size:12px;'
+        f'color:{theme.MUTED_TEXT}">'
+        f'<span>${cost_per_m:.2f} / 1M tok</span>'
+        f'<span>{cache_hit_pct:.0f}% cache hit</span>'
+        f'<span>${cost_per_run:.2f} / run</span>'
+        '</div></div>'
+    )
+
+
+def _cost_coverage_bar_html(
+    rows: Sequence[CostCoverageRow], *, theme
+) -> str:
+    """Render the cost-attribution coverage bar to inline HTML.
+
+    Segments are sized by token share, not run share -- a few
+    high-token runs can dominate cost while looking like a thin slice
+    of the run count, so the bar follows the standalone mock and sizes
+    by `total_tokens`. Falls back to the run-count share only when the
+    window carries no token volume yet (a fresh database with
+    `agent_exit` rows that never reported usage). Colors / formatters
+    come from the caller's `dashboard_theme` handle.
+    """
+    total_tokens = sum(int(r.total_tokens or 0) for r in rows)
+    if total_tokens > 0:
+        weights = [int(r.total_tokens or 0) for r in rows]
+        total = total_tokens
+    else:
+        weights = [int(r.runs or 0) for r in rows]
+        total = sum(weights) or 1
+    segs = []
+    legend = []
+    for r, w in zip(rows, weights):
+        pct = w / total * 100
+        color = theme.color_for(
+            r.cost_source,
+            [r.cost_source for r in rows],
+            explicit=theme.COST_SOURCE_COLORS,
+        )
+        segs.append(
+            f'<span style="width:{pct:.1f}%;background:{color}" '
+            f'title="{html.escape(r.cost_source)}"></span>'
+        )
+        legend.append(
+            f'<span><span class="dot" '
+            f'style="background:{color}"></span>'
+            f'{html.escape(r.cost_source)} '
+            f'<b style="color:{theme.TEXT};'
+            f'font-family:{theme.MONO_FONT_FAMILY}">'
+            f'{pct:.1f}%</b>'
+            '</span>'
+        )
+    return (
+        '<div class="orch-cov-title">'
+        'Cost attribution coverage</div>'
+        f'<div class="orch-cov-bar">{"".join(segs)}</div>'
+        f'<div class="orch-cov-legend">{"".join(legend)}</div>'
+    )
+
+
+def _reliability_tiles_html(
+    tiles: Sequence[tuple], *, fmt_num
+) -> str:
+    """Render the reliability-tile strip to inline HTML.
+
+    Each tile is a `(value, label, tone)` triple from
+    `dashboard_kpis.reliability_tile_data`; numeric values format
+    through the caller's `fmt_num`, string values (e.g. the `0%`
+    success rate) pass through verbatim. The `tone` class paints the
+    warn / bad tiles so a window's failures and timeouts stand out.
+    """
+    tiles_html = "".join(
+        f'<div class="orch-rel-tile {tone}">'
+        f'<div class="orch-rel-value">'
+        f'{html.escape(v if isinstance(v, str) else fmt_num(v))}'
+        f'</div>'
+        f'<div class="orch-rel-label">{html.escape(lbl)}</div>'
+        '</div>'
+        for v, lbl, tone in tiles
+    )
+    return f'<div class="orch-rel-tiles">{tiles_html}</div>'

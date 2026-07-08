@@ -139,18 +139,28 @@ MTX_SORT_KEYS = (
 
 
 class _MainSourceTest(unittest.TestCase):
-    """Base for tests that inspect `dashboard.main`'s source under a
+    """Base for tests that inspect `dashboard.main`'s source (and the
+    focused read / render helpers it dispatches through) under a
     configured DB URL.
 
     Streamlit / Plotly are opt-in (not installed for the default
     `uv sync --locked`), so these read the rendered function source
-    rather than driving the page under Streamlit.
+    rather than driving the page under Streamlit. `main()` delegates
+    the staged read fan-out (`_widget_readers` / `_dispatch_reads`),
+    the load-timing log (`_log_dashboard_load`), and the empty / error
+    rendering branches (`_read_static_metadata`, `_render_no_data`,
+    `_render_empty_window`) to module-level helpers, so `_source_of`
+    fetches a named helper's source for the assertions that pin strings
+    living inside it.
     """
 
     def _main_source(self) -> str:
+        return self._source_of("main")
+
+    def _source_of(self, name: str) -> str:
         import inspect
         _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        return inspect.getsource(dashboard.main)
+        return inspect.getsource(getattr(dashboard, name))
 
 
 class DefaultDateRangeTest(unittest.TestCase):
@@ -1241,6 +1251,158 @@ class InsightsHtmlTest(unittest.TestCase):
         self.assertIn('orch-insight warning', html)
 
 
+class BackendEfficiencyCardHtmlTest(unittest.TestCase):
+    """The per-backend efficiency card is hand-rolled HTML so the
+    caller can render one `st.markdown` per backend. Token totals
+    include the cache band (`input + output + cache_read +
+    cache_write`) and cache leverage is `cache_read / (cache_read +
+    input)` -- the share of billable input served from cache.
+    """
+
+    def _row(self, **kw):
+        from orchestrator.analytics.read import BackendEfficiencyRow
+        return BackendEfficiencyRow(**kw)
+
+    def test_headline_and_metrics_rendered(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator import dashboard_theme as theme
+        row = self._row(
+            backend="claude", runs=4, total_cost_usd=8.0,
+            total_input_tokens=1_000_000, total_output_tokens=0,
+            total_cache_read_tokens=1_000_000, total_cache_write_tokens=0,
+        )
+        html = dashboard._backend_efficiency_card_html(row, theme=theme)
+        self.assertIn("claude", html)
+        self.assertIn("4 runs", html)
+        # tokens = 2M -> $8 / 2M = $4.00 / 1M tok.
+        self.assertIn("$4.00 / 1M tok", html)
+        # cache_read 1M / (input 1M + cache_read 1M) = 50% cache hit.
+        self.assertIn("50% cache hit", html)
+        # $8 / 4 runs = $2.00 / run.
+        self.assertIn("$2.00 / run", html)
+
+    def test_zero_tokens_and_runs_do_not_divide_by_zero(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator import dashboard_theme as theme
+        row = self._row(backend="codex", runs=0, total_cost_usd=0.0)
+        html = dashboard._backend_efficiency_card_html(row, theme=theme)
+        self.assertIn("$0.00 / 1M tok", html)
+        self.assertIn("0% cache hit", html)
+        self.assertIn("$0.00 / run", html)
+
+    def test_backend_name_html_escaped(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator import dashboard_theme as theme
+        row = self._row(backend="ba<ck>", runs=1, total_cost_usd=1.0)
+        html = dashboard._backend_efficiency_card_html(row, theme=theme)
+        self.assertIn("ba&lt;ck&gt;", html)
+        self.assertNotIn("ba<ck>", html)
+
+
+class CostCoverageBarHtmlTest(unittest.TestCase):
+    """The cost-attribution coverage bar sizes segments by token share
+    when the window carries token volume, falling back to run share
+    only when it does not -- a few high-token runs can dominate cost
+    while looking like a thin slice of the run count.
+    """
+
+    def _row(self, source, runs, tokens):
+        from orchestrator.analytics.read import CostCoverageRow
+        return CostCoverageRow(
+            cost_source=source, runs=runs, total_tokens=tokens
+        )
+
+    def test_segments_sized_by_token_share(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator import dashboard_theme as theme
+        # 750 / 1000 tokens = 75% by tokens, NOT 10% by run count.
+        rows = [
+            self._row("reported", 1, 750),
+            self._row("unknown-price", 9, 250),
+        ]
+        html = dashboard._cost_coverage_bar_html(rows, theme=theme)
+        self.assertIn("Cost attribution coverage", html)
+        self.assertIn("width:75.0%", html)
+        self.assertIn("25.0%", html)
+
+    def test_falls_back_to_run_share_without_tokens(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator import dashboard_theme as theme
+        # No token volume yet -> size by run share: 3 / 4 = 75%.
+        rows = [self._row("reported", 3, 0), self._row("unknown", 1, 0)]
+        html = dashboard._cost_coverage_bar_html(rows, theme=theme)
+        self.assertIn("width:75.0%", html)
+
+    def test_cost_source_html_escaped(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator import dashboard_theme as theme
+        rows = [self._row("src<&>", 1, 10)]
+        html = dashboard._cost_coverage_bar_html(rows, theme=theme)
+        self.assertIn("src&lt;&amp;&gt;", html)
+        self.assertNotIn("src<&>", html)
+
+
+class ReliabilityTilesHtmlTest(unittest.TestCase):
+    """The reliability strip renders the `(value, label, tone)` triples
+    from `reliability_tile_data`; numeric values format through
+    `fmt_num`, string values pass through verbatim, and the `tone`
+    class paints the warn / bad tiles.
+    """
+
+    def test_tiles_carry_value_label_and_tone(self) -> None:
+        _, dashboard = _reload()
+        tiles = [
+            (250, "Agent runs", ""),
+            ("0%", "Success rate", "bad"),
+            (17, "Timeouts", "bad"),
+        ]
+        html = dashboard._reliability_tiles_html(
+            tiles, fmt_num=lambda n: f"{n}"
+        )
+        self.assertIn("orch-rel-tiles", html)
+        self.assertIn(">250<", html)       # numeric value via fmt_num
+        self.assertIn(">0%<", html)        # string value passes through
+        self.assertIn(">Timeouts<", html)
+        self.assertIn("orch-rel-tile bad", html)
+
+    def test_label_html_escaped(self) -> None:
+        _, dashboard = _reload()
+        tiles = [(1, "la<b>el", "")]
+        html = dashboard._reliability_tiles_html(tiles, fmt_num=str)
+        self.assertIn("la&lt;b&gt;el", html)
+        self.assertNotIn("la<b>el", html)
+
+
+class BuildReadKeysTest(unittest.TestCase):
+    """`_build_read_keys` composes the current + previous-window cache
+    keys the staged fan-out splats into the read wrappers (`*key` /
+    `*prev_key`), so the previous key must carry the same filters over
+    the immediately-preceding equal-length window.
+    """
+
+    def test_current_and_previous_keys(self) -> None:
+        _, dashboard = _reload()
+        window = dashboard.to_window(MAY_22, MAY_28)
+        key, prev_key = dashboard._build_read_keys(
+            window=window,
+            repo_filter=CACHE_REPO,
+            event_filter=list(EVENT_NAMES),
+            stage_filter=None,
+            issue_filter=ISSUE_NUMBER,
+        )
+        self.assertEqual(
+            key,
+            (window.start, window.end, CACHE_REPO, EVENT_NAMES, None,
+             ISSUE_NUMBER),
+        )
+        prev = dashboard.previous_window(window)
+        self.assertEqual(
+            prev_key,
+            (prev.start, prev.end, CACHE_REPO, EVENT_NAMES, None,
+             ISSUE_NUMBER),
+        )
+
+
 class PlotlyConfigTest(unittest.TestCase):
     """`PLOTLY_CONFIG` is passed to every `st.plotly_chart` so the
     hover modebar (camera / zoom / pan) stays off every card --
@@ -1303,31 +1465,42 @@ class CacheKeyTest(unittest.TestCase):
 
 
 class CachedReadConnectionScopingTest(_MainSourceTest):
-    """The redesigned read path reuses a thread-local analytics
-    connection across the dashboard's 14 reads instead of opening a
-    socket per call (issue #376). The Streamlit cache keys must
-    therefore stay connection-free -- a raw `psycopg.Connection` is
-    not a hashable cache key and every reload would otherwise look
-    like a cache miss.
+    """The read path reuses a thread-local analytics connection across
+    the dashboard's reads instead of opening a socket per call (issue
+    #376). The Streamlit cache keys must therefore stay
+    connection-free -- a raw `psycopg.Connection` is not a hashable
+    cache key and every reload would otherwise look like a cache miss.
 
-    These tests inspect the source of `dashboard.main` rather than
-    driving it under Streamlit so the suite stays hermetic against
-    the dashboard dependency group (Streamlit + Plotly are opt-in).
+    The cached widget wrappers live in the `_widget_readers` helper and
+    the static metadata reads in `_read_static_metadata`, so these
+    inspect those helper sources (plus `_render_drilldown`) -- the
+    suite stays hermetic against the dashboard dependency group
+    (Streamlit + Plotly are opt-in).
     """
 
-    def _drilldown_source(self) -> str:
-        import inspect
-        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
-        return inspect.getsource(dashboard._render_drilldown)
+    def _readers_source(self) -> str:
+        return self._source_of("_widget_readers")
 
-    def test_main_uses_analytics_connection_scope(self) -> None:
-        src = self._main_source()
-        self.assertIn(
-            "analytics_read.analytics_connection()", src,
-            "dashboard.main must scope reads through "
-            "`analytics_connection` so the per-thread persistent "
-            "socket is reused across widgets",
-        )
+    def _metadata_source(self) -> str:
+        return self._source_of("_read_static_metadata")
+
+    def _drilldown_source(self) -> str:
+        return self._source_of("_render_drilldown")
+
+    def test_reads_scope_through_analytics_connection(self) -> None:
+        # The cached widget wrappers, the static metadata reads, and
+        # the per-issue drill-down all check out the per-thread
+        # persistent socket via `analytics_connection` so it is reused
+        # across widgets.
+        for label, src in (
+            ("widget readers", self._readers_source()),
+            ("static metadata", self._metadata_source()),
+            ("drill-down", self._drilldown_source()),
+        ):
+            with self.subTest(source=label):
+                self.assertIn(
+                    "analytics_read.analytics_connection()", src,
+                )
 
     def test_cached_wrappers_do_not_accept_conn_arg(self) -> None:
         # Each `_read_*` wrapper's positional parameter list is the
@@ -1335,7 +1508,7 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # st.cache_data to hash a connection object, which crashes
         # on the unhashable psycopg.Connection and (with a stringy
         # fallback) treats every refreshed conn as a cache miss.
-        src = self._main_source()
+        src = self._readers_source()
         wrapper_names = [
             "_read_summary",
             "_read_prev_kpi",
@@ -1353,9 +1526,9 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         ]
         for name in wrapper_names:
             with self.subTest(name=name):
-                # Each wrapper's signature line lives inside main()'s
-                # source; check that none mention `conn` as a
-                # parameter (which would land in the cache key).
+                # Each wrapper's signature line lives inside
+                # `_widget_readers`; check that none mention `conn` as
+                # a parameter (which would land in the cache key).
                 marker = f"def {name}("
                 self.assertIn(marker, src)
                 # Pull the def line(s) up to the closing paren so we
@@ -1376,16 +1549,18 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # `analytics_connection()` must be forwarded to the read
         # helper -- otherwise we open a new socket per call (the very
         # thing the refactor is supposed to eliminate).
-        main_src = self._main_source()
-        # 13 cached wrappers (including Layer 3's `_read_prev_kpi`)
-        # + the extent / options reads at the top of main() = 15
-        # forwards inside main(). The per-issue drill-down lives in
-        # `_render_drilldown` and is checked separately.
+        readers_src = self._readers_source()
+        # 15 cached widget wrappers each forward the scoped connection.
         self.assertGreaterEqual(
-            main_src.count("conn=conn"), 15,
-            "every read inside main() should forward the scoped "
-            "connection from `analytics_connection`",
+            readers_src.count("conn=conn"), 15,
+            "every widget read should forward the scoped connection "
+            "from `analytics_connection`",
         )
+        # The two static-metadata reads forward it too.
+        self.assertGreaterEqual(
+            self._metadata_source().count("conn=conn"), 2,
+        )
+        # And the per-issue drill-down runs its own scoped read.
         drilldown_src = self._drilldown_source()
         self.assertIn("analytics_read.analytics_connection()", drilldown_src)
         self.assertIn("conn=conn", drilldown_src)
@@ -1399,7 +1574,7 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # `analytics_read.get_kpi_prev` rather than reusing the
         # full `get_summary` shape -- if it falls back to the heavy
         # path, the cold-load wins from Layer 3 evaporate.
-        src = self._main_source()
+        src = self._readers_source()
         marker = "def _read_prev_kpi("
         self.assertIn(marker, src)
         head = src.index(marker)
@@ -1690,18 +1865,84 @@ class FanOutReadsParallelTest(unittest.TestCase):
         self.assertIn("query failed", str(cm.exception))
 
 
-class MainParallelFanOutWiringTest(_MainSourceTest):
-    """`main()` must dispatch the 14 widget reads through
-    `_fan_out_reads`, drive the parallel switch off the env-backed
-    helper, and emit a single `dashboard.load:` INFO line so the A/B
-    rollout has a measurement surface. Streamlit is not installed for
-    the default `uv sync --locked`, so these tests inspect the
-    `main()` source rather than driving it under Streamlit.
+class MainRenderDispatchTest(_MainSourceTest):
+    """`main()` dispatches its body through focused `_render_*` helpers
+    -- the sidebar / date filter bar up top, then the widget cards in
+    top-to-bottom page order after the fan-out. The skill-trigger card
+    stays inline in `main()` between the heatmap and recent-runs
+    helpers (its wiring is source-inspected by `SkillMatrixWiringTest`).
     """
 
-    def test_main_uses_fan_out_helper(self) -> None:
+    def test_render_helpers_called_in_page_order(self) -> None:
         src = self._main_source()
-        self.assertIn("_fan_out_reads(", src)
+        order = [
+            "_render_sidebar_filters(",
+            "_render_date_filter_bar(",
+            "_render_hero_usage(",
+            "_render_stage_review_bars(",
+            "_render_issues_and_backends(",
+            "_render_repo_and_reliability(",
+            "_render_activity_heatmap(",
+            "_render_recent_runs(",
+        ]
+        idxs = [src.index(marker) for marker in order]
+        self.assertEqual(idxs, sorted(idxs))
+        # The final drill-down is the page's last section. The
+        # empty-window short-circuit also calls `_render_drilldown`
+        # earlier, so anchor on the last occurrence.
+        self.assertLess(idxs[-1], src.rindex("_render_drilldown("))
+
+    def test_skill_card_stays_inline_between_heatmap_and_recent_runs(
+        self,
+    ) -> None:
+        src = self._main_source()
+        heatmap = src.index("_render_activity_heatmap(")
+        skill = src.index("_skill_triggers_html(skill_rows)")
+        recent = src.index("_render_recent_runs(")
+        self.assertLess(heatmap, skill)
+        self.assertLess(skill, recent)
+
+    def test_read_and_error_branches_dispatch_to_helpers(self) -> None:
+        # `main` dispatches the staged read fan-out and the empty /
+        # error rendering branches through focused helpers rather than
+        # inlining the cached wrappers, the fan-out, the load log, and
+        # the metadata / no-data / empty-window banners.
+        src = self._main_source()
+        for marker in (
+            "_read_static_metadata(",
+            "_render_no_data(",
+            "_widget_readers(",
+            "_dispatch_reads(",
+            "_log_dashboard_load(",
+            "_render_empty_window(",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, src)
+        # The read-error banners and the cached wrappers belong to the
+        # helpers, so `main` never inlines `st.error(`, a
+        # `_fan_out_reads` call, or a `_read_*` wrapper definition.
+        self.assertNotIn("st.error(", src)
+        self.assertNotIn("_fan_out_reads(", src)
+        self.assertNotIn("def _read_summary(", src)
+
+
+class MainParallelFanOutWiringTest(_MainSourceTest):
+    """`main()` dispatches the widget reads through `_dispatch_reads`
+    (which wraps `_fan_out_reads`), drives the parallel switch off the
+    env-backed helper, and logs a single `dashboard.load:` INFO line
+    via `_log_dashboard_load` so the A/B rollout has a measurement
+    surface. Streamlit is not installed for the default `uv sync
+    --locked`, so these inspect the rendered sources rather than
+    driving the page under Streamlit.
+    """
+
+    def test_dispatch_wraps_fan_out_helper(self) -> None:
+        # `_fan_out_reads` is the single dispatch surface; `main`
+        # reaches it through the `_dispatch_reads` wave helper.
+        self.assertIn("_dispatch_reads(", self._main_source())
+        self.assertIn(
+            "_fan_out_reads(", self._source_of("_dispatch_reads"),
+        )
 
     def test_main_drives_parallel_off_env_helper(self) -> None:
         src = self._main_source()
@@ -1711,47 +1952,40 @@ class MainParallelFanOutWiringTest(_MainSourceTest):
         self.assertIn("dashboard_parallel_reads_enabled()", src)
 
     def test_main_emits_load_timing_log(self) -> None:
-        src = self._main_source()
         # The instrumentation line carries total wall-clock, reader
         # count, and the parallel flag so the operator can A/B with a
-        # single grep.
-        self.assertIn("dashboard.load:", src)
-        self.assertIn("perf_counter()", src)
+        # single grep; it is emitted by `_log_dashboard_load`, which
+        # `main` calls (and clocks with `perf_counter`).
+        main_src = self._main_source()
+        self.assertIn("_log_dashboard_load(", main_src)
+        self.assertIn("perf_counter()", main_src)
+        self.assertIn(
+            "dashboard.load:", self._source_of("_log_dashboard_load"),
+        )
 
-    def test_main_catches_analytics_read_error_around_fan_out(self) -> None:
-        # The fan-out is wrapped in the same `try/except
-        # AnalyticsReadError` the sequential path used, so a worker
-        # exception still surfaces as one `st.error`. The staged
-        # split (issue #379) calls `_fan_out_reads` twice -- once
-        # for the topbar / KPI inputs and once for the rest of the
-        # widgets -- so the wiring assertion is that the fan-out
-        # helper is the only dispatch surface and that the read
-        # error type is caught around it.
-        src = self._main_source()
-        self.assertIn(
-            "_fan_out_reads(\n                first_wave_readers", src
-        )
-        self.assertIn(
-            "_fan_out_reads(\n                    second_wave_readers", src
-        )
-        # Two `try/except AnalyticsReadError` blocks -- one per wave
-        # -- so a worker exception in either wave surfaces as one
-        # `st.error` and stops the render.
-        self.assertGreaterEqual(
-            src.count("analytics_read.AnalyticsReadError"), 2,
-        )
+    def test_dispatch_catches_analytics_read_error(self) -> None:
+        # The `_dispatch_reads` wave helper wraps the fan-out in a
+        # `try/except AnalyticsReadError` -> one `st.error` + stop, so
+        # a worker exception surfaces as one banner rather than a
+        # trace. (Both waves route through this single helper; the
+        # routing is pinned by `StagedRenderErrorTest`.)
+        dispatch_src = self._source_of("_dispatch_reads")
+        self.assertIn("analytics_read.AnalyticsReadError", dispatch_src)
+        self.assertIn("st.error(", dispatch_src)
+        self.assertIn("st.stop()", dispatch_src)
 
 
 class SkillMatrixWiringTest(_MainSourceTest):
-    """`main()` wires the per-skill trigger matrix through the same
-    cached / fan-out read pattern as every other widget and renders it
-    as the second table under the existing "Skill trigger rates"
-    aggregate. Streamlit is not installed for the default sync, so these
-    inspect `main()`'s source rather than driving it under Streamlit.
+    """The per-skill trigger matrix rides the same cached / fan-out
+    read pattern as every other widget (its wrapper lives in
+    `_widget_readers`) and renders as the second table under the
+    "Skill trigger rates" aggregate (inline in `main`). Streamlit is
+    not installed for the default sync, so these inspect the rendered
+    sources rather than driving the page under Streamlit.
     """
 
     def test_matrix_read_calls_matrix_read_model(self) -> None:
-        src = self._main_source()
+        src = self._source_of("_widget_readers")
         self.assertIn("def _read_skill_trigger_matrix(", src)
         self.assertIn("analytics_read.get_skill_trigger_matrix(", src)
 
@@ -1759,7 +1993,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
         # Reuse the cached-read pattern: the scoped thread-local
         # connection is forwarded to the read helper so the matrix read
         # shares the open socket rather than opening its own.
-        src = self._main_source()
+        src = self._source_of("_widget_readers")
         marker = "def _read_skill_trigger_matrix("
         head = src.index(marker)
         body = src[head:src.index("\n\n", head)]
@@ -1770,14 +2004,14 @@ class SkillMatrixWiringTest(_MainSourceTest):
         # `conn` must not appear in the wrapper's parameter list -- it
         # would land in the `st.cache_data` key and crash on the
         # unhashable psycopg connection.
-        src = self._main_source()
+        src = self._source_of("_widget_readers")
         marker = "def _read_skill_trigger_matrix("
         head = src.index(marker)
         tail = src.index("):", head)
         self.assertNotIn(" conn", src[head:tail])
 
     def test_matrix_dispatched_in_second_wave(self) -> None:
-        src = self._main_source()
+        src = self._source_of("_widget_readers")
         self.assertIn(
             '("skill_matrix_rows", '
             "lambda: _read_skill_trigger_matrix(*key))",
@@ -1823,11 +2057,14 @@ class SkillMatrixWiringTest(_MainSourceTest):
 class StaticMetadataCacheTest(_MainSourceTest):
     """`get_data_extent` and `get_filter_options` (issue #379) carry
     no filter inputs and only change as `analytics.sync` ingests new
-    events, so the dashboard wraps them in `@st.cache_data` under the
-    longer `STATIC_METADATA_TTL_SECONDS` (5 min) instead of the
-    per-filter 60 s TTL. Together these collapse the topbar / sidebar
-    round-trip on every Streamlit rerun.
+    events, so the `_read_static_metadata` helper wraps them in
+    `@st.cache_data` under the longer `STATIC_METADATA_TTL_SECONDS`
+    (5 min) instead of the per-filter 60 s TTL. Together these collapse
+    the topbar / sidebar round-trip on every Streamlit rerun.
     """
+
+    def _metadata_source(self) -> str:
+        return self._source_of("_read_static_metadata")
 
     def test_ttl_is_five_minutes(self) -> None:
         # Pin the constant so a future tweak changes it deliberately.
@@ -1839,7 +2076,7 @@ class StaticMetadataCacheTest(_MainSourceTest):
         self.assertEqual(dashboard.STATIC_METADATA_TTL_SECONDS, 300)
 
     def test_extent_reader_decorated_with_longer_ttl(self) -> None:
-        src = self._main_source()
+        src = self._metadata_source()
         marker = "def _read_data_extent("
         self.assertIn(marker, src)
         # The cached wrapper must sit directly under
@@ -1855,7 +2092,7 @@ class StaticMetadataCacheTest(_MainSourceTest):
         self.assertIn("show_spinner=False", decorator_window)
 
     def test_filter_options_reader_decorated_with_longer_ttl(self) -> None:
-        src = self._main_source()
+        src = self._metadata_source()
         marker = "def _read_filter_options("
         self.assertIn(marker, src)
         head = src.index(marker)
@@ -1874,23 +2111,27 @@ class StaticMetadataCacheTest(_MainSourceTest):
         # the empty signature so a future refactor cannot silently
         # re-introduce a parameter (e.g. a connection) that would
         # turn into part of the cache key.
-        src = self._main_source()
+        src = self._metadata_source()
         for marker in ("def _read_data_extent(", "def _read_filter_options("):
             with self.subTest(marker=marker):
                 head = src.index(marker)
                 tail = src.index("):", head)
                 self.assertEqual(src[head:tail + 1], marker + ")")
 
-    def test_main_dispatches_through_cached_readers(self) -> None:
-        # The bare `get_data_extent(conn=conn)` / `get_filter_options
-        # (conn=conn)` calls the old code paid on every rerun must be
-        # gone -- the only call sites for those reads now live inside
-        # the cached wrappers' bodies (where they are intentionally
-        # routed through the thread-local connection).
-        src = self._main_source()
-        # `main` itself calls the cached wrappers, not the raw reads.
-        self.assertIn("extent = _read_data_extent()", src)
-        self.assertIn("options = _read_filter_options()", src)
+    def test_main_dispatches_through_metadata_helper(self) -> None:
+        # `main` reads the extent / options through the
+        # `_read_static_metadata` helper, not the raw reads -- the bare
+        # `get_data_extent` / `get_filter_options` calls live only
+        # inside the helper's cached wrappers (routed through the
+        # thread-local connection).
+        main_src = self._main_source()
+        self.assertIn("_read_static_metadata(", main_src)
+        self.assertNotIn("get_data_extent(", main_src)
+        self.assertNotIn("get_filter_options(", main_src)
+        # The helper itself dispatches through the cached wrappers.
+        meta_src = self._metadata_source()
+        self.assertIn("_read_data_extent()", meta_src)
+        self.assertIn("_read_filter_options()", meta_src)
 
 
 class StagedRenderTest(_MainSourceTest):
@@ -1917,12 +2158,16 @@ class StagedRenderTest(_MainSourceTest):
         tail = src.index("\n    ]", head)
         return src[head:tail]
 
+    def _readers_source(self) -> str:
+        # The staged reader lists live in the `_widget_readers` helper.
+        return self._source_of("_widget_readers")
+
     def test_first_wave_carries_only_kpi_topbar_inputs(self) -> None:
         # The six reads in the first wave are exactly the inputs the
         # topbar / filter meta / insight banners / KPI strip consume.
         # Pin the set so a future refactor that adds (or drops) a
         # reader has to update the staging explicitly.
-        src = self._main_source()
+        src = self._readers_source()
         wave = self._wave_block(src, "first_wave_readers")
         for name in FIRST_WAVE_READER_NAMES:
             with self.subTest(name=name):
@@ -1935,7 +2180,7 @@ class StagedRenderTest(_MainSourceTest):
                 self.assertNotIn(f'"{name}"', wave)
 
     def test_second_wave_carries_the_remaining_widget_reads(self) -> None:
-        src = self._main_source()
+        src = self._readers_source()
         wave = self._wave_block(src, "second_wave_readers")
         for name in SECOND_WAVE_READER_NAMES:
             with self.subTest(name=name):
@@ -1953,8 +2198,8 @@ class StagedRenderTest(_MainSourceTest):
         # wave dispatch and BEFORE the second wave dispatch.
         # Otherwise the staged-render gain evaporates.
         src = self._main_source()
-        first = src.index("_fan_out_reads(\n                first_wave_readers")
-        second = src.index("_fan_out_reads(\n                    second_wave_readers")
+        first = src.index("_dispatch_reads(\n            first_wave_readers")
+        second = src.index("_dispatch_reads(\n            second_wave_readers")
         topbar_render = src.index("topbar_slot.markdown(")
         meta_render = src.index("meta_slot.markdown(")
         kpi_render = src.index("_kpi_strip_html(kpis)")
@@ -1979,17 +2224,17 @@ class StagedRenderTest(_MainSourceTest):
         self.assertIn(
             "with st.spinner(LOADING_INDICATOR_MESSAGE):", src,
         )
-        # And the spinner brackets BOTH fan-out calls -- a spinner
+        # And the spinner brackets BOTH dispatch calls -- a spinner
         # that only covered the first wave would clear before the
         # second wave painted its widgets.
         spinner_head = src.index(
             "with st.spinner(LOADING_INDICATOR_MESSAGE):"
         )
         first = src.index(
-            "_fan_out_reads(\n                first_wave_readers"
+            "_dispatch_reads(\n            first_wave_readers"
         )
         second = src.index(
-            "_fan_out_reads(\n                    second_wave_readers"
+            "_dispatch_reads(\n            second_wave_readers"
         )
         self.assertLess(spinner_head, first)
         self.assertLess(spinner_head, second)
@@ -1998,15 +2243,16 @@ class StagedRenderTest(_MainSourceTest):
         # Worker threads in `_fan_out_reads` only return data -- the
         # `st.*` / `topbar_slot.markdown(...)` calls all live in
         # `main()` itself, on the main render thread. We assert this
-        # by checking the reader entries are pure data callables
-        # (`lambda: _read_*(...)`) with no Streamlit writes inside.
-        src = self._main_source()
-        # The first/second wave list comprehensions are pure data
-        # closures -- `st.` (i.e. Streamlit attribute access) only
-        # appears outside those list entries.
+        # by checking the reader entries in `_widget_readers` are pure
+        # data callables (`lambda: _read_*(...)`) with no Streamlit
+        # writes inside.
+        src = self._readers_source()
+        # The first/second wave list literals are pure data closures --
+        # `st.` (i.e. Streamlit attribute access) only appears outside
+        # those list entries (the wrapper decorators sit above them).
         for marker, end in (
             ("first_wave_readers: list", "second_wave_readers"),
-            ("second_wave_readers: list", "total_reads"),
+            ("second_wave_readers: list", "return first_wave_readers"),
         ):
             with self.subTest(marker=marker):
                 head = src.index(marker)
@@ -2025,65 +2271,53 @@ class StagedRenderTest(_MainSourceTest):
         # The `summary.total_events == 0` check sits between the
         # first-wave dispatch and the second-wave dispatch.
         first = src.index(
-            "_fan_out_reads(\n                first_wave_readers"
+            "_dispatch_reads(\n            first_wave_readers"
         )
         second = src.index(
-            "_fan_out_reads(\n                    second_wave_readers"
+            "_dispatch_reads(\n            second_wave_readers"
         )
         empty_check = src.index("summary.total_events == 0")
         self.assertLess(first, empty_check)
         self.assertLess(empty_check, second)
-        # And the empty branch returns early so the second wave
-        # never executes on an empty window.
+        # And the empty branch returns early (via `_render_empty_window`)
+        # so the second wave never executes on an empty window.
         empty_block = src[empty_check:second]
         self.assertIn("return", empty_block)
+        self.assertIn("_render_empty_window(", empty_block)
 
 
 class StagedRenderErrorTest(_MainSourceTest):
-    """A read error in EITHER wave must surface as one `st.error` +
-    `st.stop` -- the second-wave error path is what stops a half-
-    rendered dashboard (topbar / KPI strip already painted) from
-    silently continuing into broken widget code.
+    """A read error in EITHER wave surfaces as one `st.error` +
+    `st.stop`: both waves route through the single `_dispatch_reads`
+    helper (whose handler is pinned by `MainParallelFanOutWiringTest`),
+    and the second-wave dispatch runs only AFTER the topbar / KPI strip
+    have painted -- so a second-wave error stops a half-rendered
+    dashboard cleanly instead of continuing into broken widget code.
     """
 
-    def test_both_waves_catch_analytics_read_error(self) -> None:
+    def test_both_waves_route_through_dispatch_helper(self) -> None:
+        # Each wave is dispatched via `_dispatch_reads`, so both inherit
+        # the same `try/except AnalyticsReadError` -> `st.error` + stop
+        # handling rather than each open-coding it.
         src = self._main_source()
-        # Each fan-out call must be inside a `try/except
-        # analytics_read.AnalyticsReadError` so a worker exception in
-        # either wave surfaces as one user-friendly error rather than
-        # a stack trace.
-        first = src.index(
-            "_fan_out_reads(\n                first_wave_readers"
+        self.assertIn(
+            "_dispatch_reads(\n            first_wave_readers", src
         )
-        second = src.index(
-            "_fan_out_reads(\n                    second_wave_readers"
+        self.assertIn(
+            "_dispatch_reads(\n            second_wave_readers", src
         )
-        # Walk back from each fan-out call to find the surrounding
-        # `try:` -- it must be within a small window (just opens
-        # the block) and the matching `except` must catch the read
-        # error and stop the dashboard.
-        for label, head in (("first", first), ("second", second)):
-            with self.subTest(wave=label):
-                tail = src.index("st.stop()", head)
-                except_idx = src.rindex("except", head, tail)
-                handler = src[except_idx:tail + len("st.stop()")]
-                self.assertIn(
-                    "analytics_read.AnalyticsReadError", handler
-                )
-                self.assertIn("st.error(", handler)
-                self.assertIn("st.stop()", handler)
 
     def test_second_wave_error_after_topbar_paints(self) -> None:
-        # The second-wave error path runs AFTER the topbar / KPI
-        # strip have already painted -- so the user sees real
-        # content (the topbar + KPI strip) and then a single
+        # The second-wave dispatch runs AFTER the topbar / KPI strip
+        # have already painted -- so the user sees real content (the
+        # topbar + KPI strip) and then, on a read error, a single
         # `st.error` instead of a half-rendered dashboard.
         src = self._main_source()
         topbar_render = src.index("topbar_slot.markdown(")
-        second_try = src.index(
-            "_fan_out_reads(\n                    second_wave_readers"
+        second_dispatch = src.index(
+            "_dispatch_reads(\n            second_wave_readers"
         )
-        self.assertLess(topbar_render, second_try)
+        self.assertLess(topbar_render, second_dispatch)
 
 
 class FanOutReadsErrorPropagationTest(unittest.TestCase):
