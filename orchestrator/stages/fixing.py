@@ -148,6 +148,7 @@ from typing import Optional
 from github.Issue import Issue
 
 from .. import config
+from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import GitHubClient
@@ -285,7 +286,9 @@ def _rescan_fixing_feedback(gh: GitHubClient, issue: Issue, pr, state) -> tuple:
     Returns ``(issue_space_new, review_space_new, review_summary_new,
     new_feedback)`` where `new_feedback` is the three surfaces concatenated
     in prompt order: issue-space (issue-thread + PR-conversation), then
-    inline review comments, then review summaries.
+    inline review comments, then review summaries. Untrusted authors are
+    dropped from every surface (see `filter_trusted`) so outsider feedback
+    never reaches the dev-resume prompt or extends the debounce window.
     """
     from .. import workflow as _wf
 
@@ -324,11 +327,18 @@ def _rescan_fixing_feedback(gh: GitHubClient, issue: Issue, pr, state) -> tuple:
     # filter is needed.
     new_pr_inline = list(gh.pr_inline_comments_after(pr, review_wm))
     new_pr_reviews = list(gh.pr_reviews_after(pr, review_summary_wm))
-    issue_space_new = sorted(
+    # Drop untrusted authors on every surface before their feedback reaches the
+    # `_build_pr_comment_followup` prompt or extends the debounce window: with
+    # `ALLOWED_ISSUE_AUTHORS` set an outsider's issue / PR / review comment must
+    # not resume the dev. The orchestrator marker/id filtering (above) is
+    # preserved; an empty allowlist trusts everyone.
+    issue_space_new = filter_trusted(sorted(
         list(new_issue_side) + list(new_pr_conv), key=lambda c: c.id,
+    ))
+    review_space_new = filter_trusted(sorted(new_pr_inline, key=lambda c: c.id))
+    review_summary_new = filter_trusted(
+        sorted(new_pr_reviews, key=lambda r: r.id)
     )
-    review_space_new = sorted(new_pr_inline, key=lambda c: c.id)
-    review_summary_new = sorted(new_pr_reviews, key=lambda r: r.id)
     new_feedback = issue_space_new + review_space_new + review_summary_new
     return issue_space_new, review_space_new, review_summary_new, new_feedback
 
@@ -1002,7 +1012,12 @@ def _reconstruct_pending_fix_batch(gh, issue, pr, state) -> list:
         ]
         review_summary.sort(key=lambda r: r.id)
 
-    return issue_space + review_space + review_summary
+    # Re-apply the author allowlist at reconstruction time, not only at route
+    # time: an issue parked before the trust gate shipped can carry untrusted
+    # ids in `pending_fix_*_ids`, and `ALLOWED_ISSUE_AUTHORS` may change between
+    # the route and the `/orchestrator continue` replay. Filtering here keeps an
+    # untrusted author's feedback out of the replay prompt regardless.
+    return filter_trusted(issue_space + review_space + review_summary)
 
 
 def _advance_consumed_watermarks(

@@ -288,9 +288,13 @@ Non-human content is filtered five ways:
 - untrusted authors via `comment_trust.is_trusted_author` when `ALLOWED_ISSUE_AUTHORS` is set (opt-in; empty allowlist
   trusts everyone), so an outsider's comment cannot shift the hash and re-trigger drift on a public repo. The same trust
   helpers filter the conversation text fed to agent prompts: `_recent_comments_text` (implement / review /
-  documentation / decompose / question / drift-resume) and the awaiting-human resume paths that quote new replies
-  directly (`filter_trusted` in the implementing, validating, decomposing, resolving_conflict, and question resumes).
-  An untrusted comment therefore reaches neither the drift hash nor any agent prompt.
+  documentation / decompose / question / drift-resume); the awaiting-human resume paths that quote new replies
+  directly (`filter_trusted` in the implementing, validating, decomposing, resolving_conflict, and question resumes);
+  and the four-surface PR-feedback scans driving the `in_review` -> `fixing` route, the fixing dev-resume, and the
+  `/orchestrator continue` batch replay (`filter_trusted` in `_scan_fresh_pr_feedback`, the drift-resume
+  PR-conversation block, `_rescan_fixing_feedback`, and `_reconstruct_pending_fix_batch`). An untrusted comment
+  therefore neither shifts the drift hash, sets a pending-fix bookmark, routes `in_review` to `fixing`, nor reaches any
+  agent prompt.
 
 `_detect_user_content_change` durably persists the baseline on its FIRST encounter via `gh.write_pinned_state`, so an
 early-return tick cannot silently absorb a later edit as the new baseline. On drift the action depends on lifecycle

@@ -41,6 +41,7 @@ from typing import Optional
 from github.Issue import Issue
 
 from .. import config
+from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import (
@@ -251,6 +252,8 @@ def _scan_fresh_pr_feedback(
     Returns `(issue_space_new, review_space_new, review_summary_new)`, each
     already sorted ascending by id. The issue-thread and PR-conversation
     streams share one id namespace and are merged into `issue_space_new`.
+    Untrusted authors are dropped from every surface (see `filter_trusted`)
+    so outsider feedback cannot bookmark a pending fix or route to `fixing`.
     """
     from .. import workflow as _wf
 
@@ -266,11 +269,19 @@ def _scan_fresh_pr_feedback(
     )
     new_pr_inline = list(gh.pr_inline_comments_after(pr, review_wm))
     new_pr_reviews = list(gh.pr_reviews_after(pr, review_summary_wm))
-    issue_space_new = sorted(
+    # Drop untrusted authors on every surface before their feedback can set a
+    # pending-fix bookmark or route `in_review` -> `fixing`: with
+    # `ALLOWED_ISSUE_AUTHORS` set an outsider's issue / PR / review comment
+    # must not steer the dev fix-loop. The orchestrator marker/id filtering
+    # (above) is preserved; this is the login gate layered on top of it. An
+    # empty allowlist trusts everyone, so the default deployment is unchanged.
+    issue_space_new = filter_trusted(sorted(
         list(new_issue_side) + list(new_pr_conv), key=lambda c: c.id
+    ))
+    review_space_new = filter_trusted(sorted(new_pr_inline, key=lambda c: c.id))
+    review_summary_new = filter_trusted(
+        sorted(new_pr_reviews, key=lambda r: r.id)
     )
-    review_space_new = sorted(new_pr_inline, key=lambda c: c.id)
-    review_summary_new = sorted(new_pr_reviews, key=lambda r: r.id)
     return issue_space_new, review_space_new, review_summary_new
 
 
@@ -473,7 +484,14 @@ def _handle_user_content_drift(
             branch=_wf._resolve_branch_name(state, spec, issue.number),
         )
     before_sha = _wf._head_sha(wt)
-    followup = _build_drift_resume_prompt(issue, unread_pr_conv)
+    # Filter untrusted authors out of the PR-conversation block quoted in the
+    # drift-resume prompt (the issue-thread text `_build_drift_resume_prompt`
+    # pulls from `_recent_comments_text` is already allowlist-filtered). The
+    # watermark bump below still consumes the raw `unread_pr_conv` so an
+    # outsider comment is not re-scanned as fresh feedback next tick.
+    followup = _build_drift_resume_prompt(
+        issue, filter_trusted(unread_pr_conv),
+    )
     wt, dev_result, paused = _wf._resume_dev_with_text(
         gh, spec, issue, state, followup, pause_guard=True,
     )
