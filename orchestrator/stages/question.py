@@ -109,21 +109,20 @@ def _consume_new_human_replies(
     BEFORE the spawn so a crashed / timed-out resume still records the comments
     as consumed (the agent did see them via the followup prompt).
 
-    Untrusted authors are dropped from the returned batch: the live resume
-    path feeds these comments straight into `_build_question_followup_prompt`,
-    so with `ALLOWED_ISSUE_AUTHORS` set an outsider's reply must not steer the
-    question agent. The watermark advances past the whole raw batch first, so a
-    trusted reply arriving alongside outsider noise consumes both in one tick;
-    an all-untrusted batch leaves nothing to act on and is treated as "no new
-    reply".
+    Untrusted authors are dropped up front: the live resume path feeds these
+    comments straight into `_build_question_followup_prompt`, so with
+    `ALLOWED_ISSUE_AUTHORS` set an outsider's reply must not steer the question
+    agent NOR advance the consumed watermark. Only trusted comments are
+    consumed, so an outsider reply trailing a trusted one is left unconsumed
+    rather than persisted as the watermark; an all-untrusted batch leaves
+    nothing to act on and is treated as "no new reply".
     """
     last_action_id = state.get("last_action_comment_id")
-    new_comments = gh.comments_after(issue, last_action_id)
+    new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
     if not new_comments:
         return None
     state.set("last_action_comment_id", max(c.id for c in new_comments))
-    trusted = filter_trusted(new_comments)
-    return trusted or None
+    return new_comments
 
 
 def _build_question_resume_prompt(
