@@ -33,6 +33,7 @@ observed and logged as not-yet-implemented.
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import subprocess  # noqa: F401 -- re-exported so tests can `patch.object(workflow.subprocess, "run", ...)`
 import threading
@@ -302,7 +303,9 @@ __all__ = [
     "_decompose_worktree_path",
     "_detect_user_content_change",
     "_dispatch_via_scheduler",
+    "_drain_family_bucket",
     "_drain_review_pr_terminals",
+    "_drain_scheduler_family_bucket",
     "_drift_ack_reason",
     "_drop_poisoned_dev_session",
     "_emit_repo_skill_catalog",
@@ -378,6 +381,8 @@ __all__ = [
     "_route_drift_to_decomposing",
     "_route_issue_to_handler",
     "_run_agent_tracked",
+    "_run_parallel_tick",
+    "_run_sequential_tick",
     "_run_verify_commands",
     "_sanitize_branch_segment",
     "_sanitize_slug",
@@ -968,6 +973,141 @@ def _refetch_and_process(
         _process_issue(worker_gh, spec, worker_issue)
 
 
+def _run_sequential_tick(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    semaphore_cm: contextlib.AbstractContextManager,
+) -> None:
+    """Process this tick's pollable issues one at a time on the caller thread.
+
+    `parallel_limit == 1` (the legacy default) streams directly over
+    `gh.list_pollable_issues()` rather than materializing the list first.
+    Materializing would change observable behavior on a partial enumeration
+    failure (e.g. a PyGithub pagination error mid-sweep): the sequential loop
+    processes everything yielded BEFORE the failure, but a `list(...)` upfront
+    would lose every already-yielded issue when the generator raises. Each
+    `_process_issue` is wrapped in its own try/except so one raising issue
+    cannot stop the rest.
+    """
+    for issue in gh.list_pollable_issues():
+        try:
+            with semaphore_cm:
+                _process_issue(gh, spec, issue)
+        except Exception:
+            log.exception(
+                "repo=%s issue=#%s processing failed",
+                spec.slug, issue.number,
+            )
+
+
+def _drain_family_bucket(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    family_numbers: list[int],
+    *,
+    semaphore_cm: contextlib.AbstractContextManager,
+) -> None:
+    """Process this tick's family-aware issues sequentially on one thread.
+
+    The parallel path submits the whole family bucket as ONE executor task so
+    its footprint stays at exactly one worker slot regardless of how many
+    family-aware issues are pending, leaving the other `limit - 1` slots free
+    for fanout. Per-issue exception isolation lives INSIDE this loop (one
+    try/except per issue) so the bucket keeps draining if any single family
+    handler raises; the function itself never raises, so the caller's
+    `fut.result()` only ever surfaces a programming-level failure.
+    """
+    for issue_number in family_numbers:
+        try:
+            _refetch_and_process(
+                gh, spec, issue_number, semaphore_cm=semaphore_cm,
+            )
+        except Exception:
+            log.exception(
+                "repo=%s issue=#%s processing failed",
+                spec.slug, issue_number,
+            )
+
+
+def _run_parallel_tick(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    limit: int,
+    semaphore_cm: contextlib.AbstractContextManager,
+) -> None:
+    """Fan this tick's pollable issues out across a bounded thread pool.
+
+    Family-aware (cross-issue writer) work is partitioned off from fanout so
+    the family bucket drains sequentially inside ONE task while the rest fan
+    out; `_partition_pollable_issues` owns the skip-label filtering, per-issue
+    label-read isolation, and the family/fanout split. Each `_process_issue`
+    is independent (per-issue worktree, PinnedState, GitHub label/comment
+    surface) so worker threads serialize only at the PyGithub HTTP layer,
+    which is already thread-safe.
+
+    The executor needs the full submission set up front to bound
+    `max_workers`, so the generator is materialized in `_partition_pollable_issues`;
+    on an enumeration failure the whole tick aborts and the next tick's
+    enumeration retries. Folding the whole family bucket into one drain task
+    caps its footprint at exactly one executor slot regardless of how many
+    family-aware issues there are, leaving the other `limit - 1` slots free
+    for fanout -- submitting per-family-issue futures with a shared lock would
+    instead let a waiting family future occupy the other worker slot and
+    starve fanout under a small `limit`.
+    """
+    partition = _partition_pollable_issues(gh, spec)
+    family_numbers = partition.family_numbers
+    fanout_numbers = partition.fanout_numbers
+    if not family_numbers and not fanout_numbers:
+        return
+    total_tasks = (1 if family_numbers else 0) + len(fanout_numbers)
+    # max_workers is capped at `limit` AND at the submitted-task count so a
+    # quiet tick (e.g. one fan-out issue) does not spin up idle worker threads.
+    workers = min(limit, total_tasks)
+    with ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix=f"orch-{spec.slug.replace('/', '__')}",
+    ) as ex:
+        # Sentinel for the family bucket future so the as_completed loop can
+        # distinguish it from per-fanout-issue futures.
+        family_sentinel: object = object()
+        futures: dict[Any, Any] = {}
+        if family_numbers:
+            futures[
+                ex.submit(
+                    _drain_family_bucket, gh, spec, family_numbers,
+                    semaphore_cm=semaphore_cm,
+                )
+            ] = family_sentinel
+        for n in fanout_numbers:
+            futures[
+                ex.submit(_refetch_and_process, gh, spec, n, semaphore_cm=semaphore_cm)
+            ] = n
+        # `as_completed` so a slow issue does not delay logging the failures
+        # of faster ones. Each `fut.result()` is wrapped individually so one
+        # raising issue cannot abort the remaining futures' result drain.
+        for fut in as_completed(futures):
+            tag = futures[fut]
+            try:
+                fut.result()
+            except Exception:
+                if tag is family_sentinel:
+                    # `_drain_family_bucket` catches per-issue exceptions
+                    # itself; reaching here means a programming error in
+                    # the drain loop. Log it loudly but don't kill the
+                    # remaining (fanout) futures' drain.
+                    log.exception(
+                        "repo=%s family bucket drain raised (programming "
+                        "error -- per-issue exceptions are handled inside "
+                        "the drain)", spec.slug,
+                    )
+                else:
+                    log.exception(
+                        "repo=%s issue=#%s processing failed",
+                        spec.slug, tag,
+                    )
+
+
 def tick(
     gh: GitHubClient,
     spec: RepoSpec,
@@ -1028,135 +1168,23 @@ def tick(
     if scheduler is not None:
         _dispatch_via_scheduler(gh, spec, scheduler)
         return
-    # parallel_limit==1 (the legacy default) keeps the sequential iteration
-    # in-thread AND keeps streaming directly over `gh.list_pollable_issues()`
-    # rather than materializing the list first. Materializing here would
-    # change observable behavior on a partial enumeration failure (e.g. a
-    # PyGithub pagination error mid-sweep): the legacy loop processes
-    # everything yielded BEFORE the failure, but a `list(...)` upfront
-    # would lose every already-yielded issue when the generator raises.
-    # limit>1 fans the per-issue work out across a bounded thread pool;
-    # each `_process_issue` is independent (per-issue worktree, per-issue
-    # PinnedState, per-issue GitHub label/comment surface) so threads
-    # serialize only at the PyGithub HTTP layer, which is already
-    # thread-safe.
-    #
-    # `parallel_limit` is the local cap on worker threads this tick will
-    # spin up. The host-wide `MAX_PARALLEL_ISSUES_GLOBAL` cap is enforced
-    # by `global_semaphore` around each `_process_issue` call, not by
-    # shrinking the worker pool: with multiple repos ticking in parallel,
-    # workers from different repos may queue on the semaphore until a
-    # global slot frees up, which is the whole point of a cross-repo cap.
-    # Shrinking the pool here would mean a single quiet repo could
-    # under-utilize the budget even when other repos have nothing to do.
+    # `parallel_limit` is the local cap on worker threads this tick spins up.
+    # The host-wide `MAX_PARALLEL_ISSUES_GLOBAL` cap is enforced by
+    # `global_semaphore` around each `_process_issue` call, not by shrinking
+    # the worker pool: with multiple repos ticking in parallel, workers from
+    # different repos may queue on the semaphore until a global slot frees up,
+    # which is the whole point of a cross-repo cap. None falls back to a no-op
+    # context manager so a direct test invocation of `tick(gh, spec)` keeps
+    # working unchanged. `limit == 1` (the legacy default) stays sequential
+    # and in-thread; `limit > 1` fans out across a bounded pool.
     limit = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
     semaphore_cm = (
         global_semaphore if global_semaphore is not None else contextlib.nullcontext()
     )
     if limit == 1:
-        for issue in gh.list_pollable_issues():
-            try:
-                with semaphore_cm:
-                    _process_issue(gh, spec, issue)
-            except Exception:
-                log.exception(
-                    "repo=%s issue=#%s processing failed",
-                    spec.slug, issue.number,
-                )
-        return
-    # Parallel path: the executor needs the full submission set up front to
-    # bound `max_workers` correctly, so the generator is materialized here.
-    # The trade-off is consistent with the parallel mode's intent (fan out
-    # the whole eligible set this tick); on an enumeration failure the
-    # whole tick aborts -- the next tick's enumeration will retry.
-    #
-    # Partition family-aware (cross-issue writer) work off from fanout so
-    # the family bucket drains sequentially inside ONE task while the rest
-    # fan out; `_partition_pollable_issues` owns the skip-label filtering,
-    # per-issue label-read isolation, and the family/fanout split.
-    partition = _partition_pollable_issues(gh, spec)
-    family_numbers = partition.family_numbers
-    fanout_numbers = partition.fanout_numbers
-
-    if not family_numbers and not fanout_numbers:
-        return
-    # The family bucket is submitted as a SINGLE drain task that
-    # processes its issues sequentially on one worker thread. With
-    # `parallel_limit=2`, two family issues, and one fanout issue,
-    # submitting two family futures plus one fanout future would let a
-    # slow first family handler hold one worker slot while the second
-    # family future occupied the other worker slot blocking on a
-    # family lock -- the fanout issue would be queued and could not run
-    # until the slow family handler exited, defeating mixed-stage
-    # concurrency. Folding the whole family bucket into one drain task
-    # caps its footprint at exactly one executor slot regardless of how
-    # many family-aware issues there are, leaving the other `limit-1`
-    # slots free for fanout.
-    total_tasks = (1 if family_numbers else 0) + len(fanout_numbers)
-    # max_workers is capped at `limit` AND at the submitted-task count
-    # so a quiet tick (e.g. one fan-out issue) does not spin up idle
-    # worker threads.
-    workers = min(limit, total_tasks)
-
-    def _drain_family_bucket() -> None:
-        """Process every family-aware issue this tick sequentially.
-
-        Per-issue exception isolation lives INSIDE this function (one
-        try/except per issue) so the family bucket keeps draining if any
-        single family handler raises; without that, the as_completed
-        loop below would see one swallowed-or-raising future for the
-        whole bucket. The function itself never raises -- the outer
-        loop's `fut.result()` call therefore only ever logs a
-        programming-level failure for this future.
-        """
-        for issue_number in family_numbers:
-            try:
-                _refetch_and_process(
-                    gh, spec, issue_number, semaphore_cm=semaphore_cm,
-                )
-            except Exception:
-                log.exception(
-                    "repo=%s issue=#%s processing failed",
-                    spec.slug, issue_number,
-                )
-
-    with ThreadPoolExecutor(
-        max_workers=workers,
-        thread_name_prefix=f"orch-{spec.slug.replace('/', '__')}",
-    ) as ex:
-        # Sentinel for the family bucket future so the as_completed loop
-        # can distinguish it from per-fanout-issue futures.
-        family_sentinel: object = object()
-        futures: dict[Any, Any] = {}
-        if family_numbers:
-            futures[ex.submit(_drain_family_bucket)] = family_sentinel
-        for n in fanout_numbers:
-            futures[
-                ex.submit(_refetch_and_process, gh, spec, n, semaphore_cm=semaphore_cm)
-            ] = n
-        # `as_completed` so a slow issue does not delay logging the failures
-        # of faster ones. Each `fut.result()` is wrapped individually so one
-        # raising issue cannot abort the remaining futures' result drain.
-        for fut in as_completed(futures):
-            tag = futures[fut]
-            try:
-                fut.result()
-            except Exception:
-                if tag is family_sentinel:
-                    # `_drain_family_bucket` catches per-issue exceptions
-                    # itself; reaching here means a programming error in
-                    # the drain loop. Log it loudly but don't kill the
-                    # remaining (fanout) futures' drain.
-                    log.exception(
-                        "repo=%s family bucket drain raised (programming "
-                        "error -- per-issue exceptions are handled inside "
-                        "the drain)", spec.slug,
-                    )
-                else:
-                    log.exception(
-                        "repo=%s issue=#%s processing failed",
-                        spec.slug, tag,
-                    )
+        _run_sequential_tick(gh, spec, semaphore_cm)
+    else:
+        _run_parallel_tick(gh, spec, limit, semaphore_cm)
 
 
 _FAMILY_BUCKET_ISSUE: int = 0
@@ -1178,6 +1206,55 @@ def _issue_is_closed(issue) -> bool:
     return bool(getattr(issue, "closed", False)) or (
         getattr(issue, "state", "open") == "closed"
     )
+
+
+def _drain_scheduler_family_bucket(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    scheduler: IssueScheduler,
+    family_numbers: list[int],
+) -> None:
+    """Drain this tick's family-aware issues sequentially under one bucket.
+
+    Runs as the single ``family=True`` scheduler submit per repo, so the
+    family slot is held for the whole drain: a concurrent tick mid-drain
+    cannot squeeze a second family worker past the gate and no two
+    family-aware handlers ever run at once. ``scheduler.track_active`` wraps
+    each iteration so ``is_active(repo, n)`` reports True for the issue
+    currently being processed inside the bucket -- the pre-tick base refresh
+    relies on that signal to avoid rebasing a worktree under a running agent;
+    without the per-iteration claim only the bucket's sentinel key would
+    appear in the in-flight set and a concurrent refresh would race the agent.
+
+    ``track_active`` yields a ``claimed`` bool: when False the issue is
+    already in flight on another worker (e.g. a fanout submit accepted on a
+    previous tick before this issue was relabeled into the family bucket), so
+    the drain skips ``_process_issue`` for that iteration and the next polling
+    pass picks it up once the other worker exits -- two workers running the
+    same handler concurrently would race the worktree and pinned state.
+    Per-issue exception isolation lives inside the loop so one raising family
+    handler does not abort the rest of the bucket.
+
+    Each per-issue call mirrors the fanout path: ``_refetch_and_process``
+    mints a fresh ``GitHubClient`` via ``gh._for_worker_thread()`` and
+    refetches the Issue against it (PyGithub is not documented thread-safe).
+    """
+    for n in family_numbers:
+        try:
+            with scheduler.track_active(spec.slug, n) as claimed:
+                if not claimed:
+                    log.info(
+                        "repo=%s issue=#%s already in flight; "
+                        "family bucket skipping this iteration",
+                        spec.slug, n,
+                    )
+                    continue
+                _refetch_and_process(gh, spec, n)
+        except Exception:
+            log.exception(
+                "repo=%s issue=#%s processing failed",
+                spec.slug, n,
+            )
 
 
 def _dispatch_via_scheduler(
@@ -1266,71 +1343,37 @@ def _dispatch_via_scheduler(
     family_numbers = partition.family_numbers
     fanout_numbers = partition.fanout_numbers
 
-    if family_numbers:
-        bucket_cap_exempt = _family_bucket_cap_exempt(partition.family_labels)
-
-        def _drain_family_bucket(numbers: list[int] = family_numbers) -> None:
-            """Process every family-aware issue this tick sequentially.
-
-            Per-issue exception isolation lives INSIDE this function so the
-            family bucket keeps draining if any single family handler
-            raises. ``track_active`` is per iteration so a refresh on a
-            sibling repo tick observes the in-flight family issue and
-            skips its worktree sync.
-
-            ``track_active`` yields a ``claimed`` bool: when False, the
-            issue is already in flight on another worker (e.g. a fanout
-            submit accepted on a previous tick before this issue was
-            relabeled into the family bucket). Skipping the inner
-            ``_process_issue`` call prevents two workers from running
-            the same handler concurrently; the next polling pass picks
-            it up once the other worker exits.
-            """
-            for n in numbers:
-                try:
-                    with scheduler.track_active(spec.slug, n) as claimed:
-                        if not claimed:
-                            log.info(
-                                "repo=%s issue=#%s already in flight; "
-                                "family bucket skipping this iteration",
-                                spec.slug, n,
-                            )
-                            continue
-                        _refetch_and_process(gh, spec, n)
-                except Exception:
-                    log.exception(
-                        "repo=%s issue=#%s processing failed",
-                        spec.slug, n,
-                    )
-
-        if not scheduler.submit(
-            spec.slug,
-            _FAMILY_BUCKET_ISSUE,
-            _drain_family_bucket,
-            family=True,
-            cap_exempt=bucket_cap_exempt,
-            per_repo_cap=per_repo_cap,
-        ):
-            # The scheduler logs the precise skip reason (closed,
-            # family_slot_held, cap, ...) inside `submit`; this line
-            # gives the dispatch-layer context -- which issues were
-            # waiting on this bucket -- so an operator can correlate
-            # "umbrella not advancing" with a previous tick's bucket
-            # still in flight.
-            log.info(
-                "repo=%s family bucket (%d issues) not submitted this "
-                "tick; next polling pass retries",
-                spec.slug, len(family_numbers),
-            )
+    # One `family=True` submit per repo drains every family-aware issue
+    # sequentially (see `_drain_scheduler_family_bucket`). The bucket is
+    # cap-exempt only when every family issue runs a no-agent handler
+    # (`_family_bucket_cap_exempt`); short-circuit `and` keeps the exempt
+    # probe and the submit off the no-family path entirely.
+    if family_numbers and not scheduler.submit(
+        spec.slug,
+        _FAMILY_BUCKET_ISSUE,
+        functools.partial(
+            _drain_scheduler_family_bucket, gh, spec, scheduler, family_numbers,
+        ),
+        family=True,
+        cap_exempt=_family_bucket_cap_exempt(partition.family_labels),
+        per_repo_cap=per_repo_cap,
+    ):
+        # The scheduler logs the precise skip reason (closed, family_slot_held,
+        # cap, ...) inside `submit`; this line gives the dispatch-layer context
+        # -- which issues were waiting on this bucket -- so an operator can
+        # correlate "umbrella not advancing" with a previous tick's bucket
+        # still in flight.
+        log.info(
+            "repo=%s family bucket (%d issues) not submitted this "
+            "tick; next polling pass retries",
+            spec.slug, len(family_numbers),
+        )
 
     for n in fanout_numbers:
-        def _run(number: int = n) -> None:
-            _refetch_and_process(gh, spec, number)
-
         scheduler.submit(
             spec.slug,
             n,
-            _run,
+            functools.partial(_refetch_and_process, gh, spec, n),
             family=False,
             # A closed issue's handler is a cheap terminal finalization with
             # no agent spawn -- exempt it from the per-repo / global caps so
