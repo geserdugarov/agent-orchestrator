@@ -97,25 +97,67 @@ def _read_question_session(
     )
 
 
+def _consume_new_human_replies(
+    gh: GitHubClient, issue: Issue, state: PinnedState
+) -> Optional[list]:
+    """Return new issue-thread comments since the last park, advancing the
+    consume watermark past them.
+
+    Returns None when nothing new arrived (caller returns without writing
+    state). Mirrors `_resume_developer_on_human_reply`: the watermark advances
+    BEFORE the spawn so a crashed / timed-out resume still records the comments
+    as consumed (the agent did see them via the followup prompt).
+    """
+    last_action_id = state.get("last_action_comment_id")
+    new_comments = gh.comments_after(issue, last_action_id)
+    if not new_comments:
+        return None
+    state.set("last_action_comment_id", max(c.id for c in new_comments))
+    return new_comments
+
+
+def _build_question_resume_prompt(
+    spec: RepoSpec,
+    issue: Issue,
+    new_comments: list,
+    question_sid: Optional[str],
+) -> str:
+    """Assemble the resume prompt for a human reply.
+
+    When we have a live session to resume, the brief follow-up prompt is
+    enough -- the agent already has the issue body / title / prior
+    conversation cached in its session state. Without a session id (the prior
+    tick's CLI hiccup left `question_session_id` empty), `_run_agent_tracked`
+    starts a fresh agent that has no cached context, so a followup-only prompt
+    would arrive without an issue body, title, or prior conversation and the
+    agent would have nothing to answer against. Switch to the full question
+    prompt in that case so the recovery spawn sees the same context a
+    first-tick run would, with the human's reply visible in the conversation
+    block via `_recent_comments_text`.
+    """
+    from .. import workflow as _wf
+
+    if question_sid is None:
+        return _wf._build_question_prompt(
+            spec, issue, _wf._recent_comments_text(issue),
+            config.default_repo_specs(),
+        )
+    return _wf._build_question_followup_prompt(new_comments)
+
+
 def _resume_question_on_human_reply(
     gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
 ) -> Optional[AgentResult]:
     """Resume the question session with new issue-thread comments.
 
     Returns the AgentResult, or None if no new comments arrived since
-    the last park (caller should return without writing state). Mirrors
-    `_resume_developer_on_human_reply` -- the watermark advances BEFORE
-    the spawn so a crashed/timed-out resume still records the comments
-    as consumed (the agent did see them via the followup prompt).
+    the last park (caller should return without writing state).
     """
     from .. import workflow as _wf
 
-    last_action_id = state.get("last_action_comment_id")
-    new_comments = gh.comments_after(issue, last_action_id)
-    if not new_comments:
+    new_comments = _consume_new_human_replies(gh, issue, state)
+    if new_comments is None:
         return None
-    consumed_max = max(c.id for c in new_comments)
-    state.set("last_action_comment_id", consumed_max)
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _wf._ensure_worktree(
@@ -125,25 +167,9 @@ def _resume_question_on_human_reply(
     question_spec, question_backend, question_args, question_sid = (
         _read_question_session(state)
     )
-    # When we have a live session to resume, the brief follow-up
-    # prompt is enough -- the agent already has the issue body /
-    # title / prior conversation cached in its session state.
-    # Without a session id (the prior tick's CLI hiccup left
-    # `question_session_id` empty), `_run_agent_tracked` starts a
-    # fresh agent that has no cached context, so a followup-only
-    # prompt would arrive without an issue body, title, or prior
-    # conversation and the agent would have nothing to answer
-    # against. Switch to the full question prompt in that case so
-    # the recovery spawn sees the same context a first-tick run
-    # would, with the human's reply visible in the conversation
-    # block via `_recent_comments_text`.
-    if question_sid is None:
-        prompt = _wf._build_question_prompt(
-            spec, issue, _wf._recent_comments_text(issue),
-            config.default_repo_specs(),
-        )
-    else:
-        prompt = _wf._build_question_followup_prompt(new_comments)
+    prompt = _build_question_resume_prompt(
+        spec, issue, new_comments, question_sid,
+    )
     result = _wf._run_agent_tracked(
         gh, issue.number,
         agent_role="question",
