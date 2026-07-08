@@ -50,6 +50,7 @@ from typing import Optional, Tuple
 from github.Issue import Issue
 
 from . import config
+from .comment_trust import filter_trusted
 from .config import RepoSpec
 from .branch_publication import _branch_ahead_behind
 from .git_plumbing import (
@@ -1053,11 +1054,14 @@ def _sync_pr_worktree_to_base(
                 park_reason,
             )
             return
-        # Auto-rebase park: a new human comment on the issue thread is
-        # the "retry now" signal. Without a new comment the human has
-        # not acknowledged the message yet, so the park stays.
+        # Auto-rebase park: a new TRUSTED human comment on the issue
+        # thread is the "retry now" signal. With `ALLOWED_ISSUE_AUTHORS`
+        # set an outsider comment must not unpark the retry NOR advance the
+        # consumed watermark, so filter before the no-new-comment check;
+        # without a trusted comment the human has not acknowledged the
+        # message yet, so the park stays.
         last_action_id = state.get("last_action_comment_id")
-        new_comments = gh.comments_after(issue, last_action_id)
+        new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
         if not new_comments:
             log.debug(
                 "issue=#%d behind %s/%s by %d, parked on %r with no new "

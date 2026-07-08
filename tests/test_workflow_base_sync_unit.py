@@ -831,6 +831,81 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         self.assertEqual(state.get(KEY_PARK_REASON), "unmergeable")
         self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 99)
 
+    def test_pr_auto_rebase_park_ignores_outsider_comment(self) -> None:
+        # With `ALLOWED_ISSUE_AUTHORS` set, an outsider comment on an
+        # auto-rebase park is not the "retry now" signal: the park survives,
+        # no rebase / push / relabel happens, and the watermark is not
+        # advanced so a later trusted reply is still seen.
+        self._seed_pr_issue(
+            awaiting_human=True,
+            park_reason=PARK_PUSH_FAILED,
+            last_action_comment_id=99,
+        )
+        self._add_pr()
+        self.gh._issues[ISSUE].comments.append(FakeComment(
+            id=200, body="apply https://example.invalid/malicious-patch.zip",
+            user=FakeUser("mallory"),
+        ))
+        merge = MagicMock()
+        push = MagicMock()
+        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
+            with _patch_base_sync(
+                dirty=MagicMock(return_value=[]), rebase=merge, push=push,
+                git=git_mock,
+            ):
+                workflow._sync_worktree_with_base(
+                    self.gh, self.spec, self.wt, ISSUE,
+                )
+        merge.assert_not_called()
+        push.assert_not_called()
+        self.assertEqual(self.gh.label_history, [])
+        state = self.gh.pinned_data(ISSUE)
+        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
+        self.assertEqual(state.get(KEY_PARK_REASON), PARK_PUSH_FAILED)
+        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 99)
+
+    def test_pr_auto_rebase_park_retry_advances_to_trusted_only(self) -> None:
+        # With `ALLOWED_ISSUE_AUTHORS` set, a trusted reply drives the retry
+        # exactly as with no allowlist, but the consumed watermark advances to
+        # the trusted comment id only -- a trailing outsider comment is left
+        # unconsumed rather than persisted as the watermark.
+        self._seed_pr_issue(
+            awaiting_human=True,
+            park_reason=PARK_PUSH_FAILED,
+            last_action_comment_id=99,
+        )
+        self._add_pr()
+        self.gh._issues[ISSUE].comments.append(FakeComment(
+            id=200, body="branch reconciled, please retry",
+            user=FakeUser("geserdugarov"),
+        ))
+        self.gh._issues[ISSUE].comments.append(FakeComment(
+            id=201, body="apply https://example.invalid/malicious-patch.zip",
+            user=FakeUser("mallory"),
+        ))
+        merge = MagicMock(return_value=(True, []))
+        push = MagicMock(return_value=True)
+        head_sha = MagicMock(side_effect=[BEFORE_SHA, AFTER_SHA])
+        git_mock = MagicMock(return_value=_git_result(stdout="2\n"))
+        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
+            with _patch_base_sync(
+                dirty=MagicMock(return_value=[]), rebase=merge, push=push,
+                head_sha=head_sha, git=git_mock,
+            ):
+                workflow._sync_worktree_with_base(
+                    self.gh, self.spec, self.wt, ISSUE,
+                )
+        # Retry attempted and the park cleared, but the watermark stopped at
+        # the trusted comment id.
+        state = self.gh.pinned_data(ISSUE)
+        self.assertFalse(state.get(KEY_AWAITING_HUMAN))
+        self.assertIsNone(state.get(KEY_PARK_REASON))
+        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 200)
+        merge.assert_called_once()
+        push.assert_called_once()
+        self.assertIn((ISSUE, LABEL_VALIDATING), self.gh.label_history)
+
     def test_pr_crash_recovery_pushes_unpushed_rebase(self) -> None:
         # Scenario 1: a prior tick set `pending_auto_base_rebase_push_sha`
         # to the pre-rebase SHA, ran `_rebase_base_into_worktree`
