@@ -194,10 +194,18 @@ def _is_bare_orchestrator_continue(comment) -> bool:
     )
 
 
-def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _fixing_preflight(gh: GitHubClient, spec: RepoSpec, issue: Issue, state):
+    """Fetch the PR and run the pre-rescan guards shared with
+    `_handle_in_review`: PR-state terminals, a closed issue with no
+    resolvable PR, and a `fixing` label with no pinned `pr_number`.
+
+    Returns the fetched PR to continue the fix loop on, or ``None`` when
+    the tick is fully handled -- a terminal finalized, a closed issue was
+    left alone, a missing-PR park was posted, or the PR fetch failed -- and
+    the caller must return immediately.
+    """
     from .. import workflow as _wf
 
-    state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")
     # Bind `pr` up front so the post-terminal guard below can branch on
     # it even when `pr_number` is None (in which case the fetch is
@@ -211,10 +219,9 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # short-circuits the resume cycle.
     #
     # PyGithub failures here are typically transient (network blip, rate
-    # limit, 5xx). Catch and bail with `pr=None` so the rescan below
-    # also short-circuits via the `if pr is None: return` guard --
-    # the next tick re-fetches and picks up wherever we left off; the
-    # watermarks are unchanged so no feedback is lost.
+    # limit, 5xx). Catch and bail with `pr=None` so the caller also
+    # short-circuits -- the next tick re-fetches and picks up wherever we
+    # left off; the watermarks are unchanged so no feedback is lost.
     if pr_number is not None:
         try:
             pr = gh.get_pr(int(pr_number))
@@ -227,7 +234,7 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         if _wf._drain_review_pr_terminals(
             gh, spec, issue, state, pr, stage="fixing",
         ):
-            return
+            return None
 
     # Closed issue with no PR (or a PR lookup failure): nothing to
     # finalize via the PR-state arcs above. Leave alone rather than
@@ -238,7 +245,7 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             "leaving alone (relabel manually to finalize)",
             spec.slug, issue.number,
         )
-        return
+        return None
 
     if pr_number is None:
         # `fixing` is only ever entered with a recorded PR (in_review
@@ -246,7 +253,7 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # relabel from outside that route -- park once and surface to a
         # human; the dev-resume path needs the PR to push a fix.
         if state.get("awaiting_human"):
-            return
+            return None
         _wf._park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} `fixing` without a pinned "
@@ -256,16 +263,31 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             reason="missing_pr_number",
         )
         gh.write_pinned_state(issue, state)
-        return
+        return None
 
     # `pr_number` was set but `gh.get_pr` raised above. The exception is
-    # already logged; bail this tick so the rescan below does not
+    # already logged; bail this tick so the caller's rescan does not
     # dereference `None`. PyGithub failures here are typically transient
     # (network blip, rate limit, 5xx), so the next tick re-fetches and
     # picks up wherever we left off; the watermarks are unchanged so no
     # feedback is lost.
     if pr is None:
-        return
+        return None
+
+    return pr
+
+
+def _rescan_fixing_feedback(gh: GitHubClient, issue: Issue, pr, state) -> tuple:
+    """Rescan the four PR-feedback surfaces for comments past the in_review
+    watermarks (NOT the `pending_fix_*` bookmarks -- those stay in pinned
+    state as the reconstruction source for `_reconstruct_pending_fix_batch`).
+
+    Returns ``(issue_space_new, review_space_new, review_summary_new,
+    new_feedback)`` where `new_feedback` is the three surfaces concatenated
+    in prompt order: issue-space (issue-thread + PR-conversation), then
+    inline review comments, then review summaries.
+    """
+    from .. import workflow as _wf
 
     # Mirror `_handle_in_review`'s fallback: if no PR-side watermark
     # exists yet (an in_review tick that routed to `fixing` before
@@ -276,19 +298,6 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # `pr_conversation_comments_after` would be called with `after_id=None`
     # and re-feed every historical issue / PR-conversation comment into
     # the dev's `_build_pr_comment_followup` prompt as fresh feedback.
-    # Capture `pending_fix_at` BEFORE the bookmark-clear branches below.
-    # It distinguishes the in_review->fixing route (set by the in_review
-    # handler when fresh PR feedback lands) from the validating->fixing
-    # route (set when a CHANGES_REQUESTED dev fix parks). The pushed-fix
-    # branch resets `review_round` to 0 only for the in_review route --
-    # there, the previous reviewer round was APPROVED so the next round
-    # starts fresh. For validating->fixing, the previous round was
-    # CHANGES_REQUESTED and we're still inside the same review cycle, so
-    # the round must be bumped, not reset (otherwise MAX_REVIEW_ROUNDS
-    # accounting silently restarts when a parked CHANGES_REQUESTED fix
-    # is finished off via a human reply).
-    pending_fix_at_was_set = state.get("pending_fix_at") is not None
-
     issue_wm = state.get("pr_last_comment_id")
     if issue_wm is None:
         issue_wm = state.get("last_action_comment_id")
@@ -321,175 +330,166 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     review_space_new = sorted(new_pr_inline, key=lambda c: c.id)
     review_summary_new = sorted(new_pr_reviews, key=lambda r: r.id)
     new_feedback = issue_space_new + review_space_new + review_summary_new
+    return issue_space_new, review_space_new, review_summary_new, new_feedback
 
-    # Parked from a prior failed resume: bail unless something new has
-    # arrived since the bump that followed the park. The watermarks were
-    # advanced past the previously-consumed feedback, so `new_feedback`
-    # here can only contain genuinely new content (a human reply, a fresh
-    # inline review, a follow-up summary). Without this guard a single
-    # poisoned tick would loop on every poll until human intervention,
-    # spamming the same dev-resume prompt at the agent.
-    #
-    # Exception: when the park reason can resolve without a human comment
-    # AND the issue arrived here via the validating route (CHANGES_
-    # REQUESTED dev fix), attempt silent recovery first. The
-    # `_handle_validating` CHANGES_REQUESTED branch flips to `fixing`
-    # BEFORE spawning the dev, so a transient park (`push_failed` /
-    # `agent_timeout`) lands under `fixing` instead of `validating`;
-    # without this recovery branch the issue would sit forever in
-    # `fixing` awaiting a human comment the underlying condition does
-    # not produce. The shared `_try_recover_validating_transient_park`
-    # helper (re-exported from `workflow`) implements the dev-side
-    # reconcile and round bookkeeping.
-    #
-    # The route discriminator is `pending_fix_at`: the in_review route
-    # sets it when fresh human PR feedback drives the relabel, while the
-    # validating route leaves it unset. Recovery must NOT run on the
-    # in_review route because:
-    #
-    #   * `_handle_fixing` advances the PR-feedback watermarks past the
-    #     human comment even on a timed-out dev resume (so the dev does
-    #     not replay it). A subsequent silent recovery that clears
-    #     `agent_timeout` and bounces back to `validating` would consume
-    #     the human's PR feedback without ever applying a fix.
-    #   * The shared helper bumps `review_round` on its `pushed` outcome.
-    #     The in_review route resets `review_round` to 0 on a pushed fix
-    #     (the previous reviewer round was APPROVED, so a new cycle
-    #     starts fresh), so the shared helper would mis-account the
-    #     round when a deferred push lands on this route.
-    #
-    # On the in_review route a transient park therefore stays parked
-    # until a human comment arrives, matching the original behavior
-    # (this code path had no transient recovery before -- the validating
-    # handler held that responsibility for parks under `validating`).
-    #
-    # `replay_batch` is set only by an accepted `/orchestrator continue`
-    # command below: the PRESERVED PR-feedback batch (plus any genuinely new
-    # feedback that arrived with the command) to resume the fresh dev on,
-    # instead of the per-tick rescan. It skips the debounce and re-grounds a
-    # dropped session further down.
-    replay_batch: Optional[list] = None
-    if state.get("awaiting_human"):
-        park_reason = state.get("park_reason")
-        # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
-        # the `_sync_pr_worktree_to_base` retry loop -- the operator's
-        # new comment is the "retry the rebase" signal, NOT fresh PR
-        # feedback for the dev fix-loop. Stay silent so the refresh
-        # keeps ownership of the comment; resuming the dev here would
-        # spawn it on a prompt that has nothing to do with the
-        # outstanding fix.
-        if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
-            return
 
-        # `/orchestrator continue` operator command (exact line, so a comment
-        # carrying the command AND real guidance still counts). Handled on
-        # BOTH routes so a session-failure park (`agent_silent` /
-        # `agent_timeout`) never resumes the dev on the bare command text.
-        # `_handle_continue_command` decides:
-        #   * "replay" -- eligible park with a reconstructable batch (the
-        #     in_review route): the poisoned session is dropped and the park
-        #     cleared, and we resume the fresh dev on the preserved batch (see
-        #     below), skipping the debounce.
-        #   * "refuse" -- a content-free continue on a park it cannot retry
-        #     (an unsafe park needing real guidance, or an eligible park with
-        #     no batch, e.g. the validating route): command consumed + reason
-        #     posted; stay parked.
-        #   * "passthrough" -- the command arrived WITH genuine guidance on a
-        #     park with no replayable batch: fall through to the normal resume
-        #     so that guidance (not a bare continue) drives the dev.
-        continue_cmds = _parse_orchestrator_continue(issue_space_new)
-        if continue_cmds:
-            action, items = _handle_continue_command(
-                gh, issue, state, pr, park_reason, continue_cmds,
-                new_feedback, issue_space_new, review_space_new,
-                review_summary_new,
-            )
-            if action == "refuse":
-                gh.write_pinned_state(issue, state)
-                return
-            if action == "replay":
-                replay_batch = items
-            # "passthrough": fall through to the normal resume below.
+def _dispatch_parked_fixing(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state,
+    pr,
+    new_feedback: list,
+    issue_space_new: list,
+    review_space_new: list,
+    review_summary_new: list,
+) -> tuple:
+    """Reconcile a `fixing` tick that arrived with `awaiting_human` set.
 
-        validating_routed = state.get("pending_fix_at") is None
-        if (
-            not new_feedback
-            and park_reason in _wf._VALIDATING_TRANSIENT_PARK_REASONS
-            and validating_routed
-        ):
-            recovery = _wf._try_recover_validating_transient_park(
-                spec, issue, state,
-            )
-            if recovery == "stuck":
-                # The transient condition has not resolved on its own
-                # (e.g. `push_failed` keeps failing). When the worktree
-                # has drifted from the PR head in the meantime, hand the
-                # reconciliation to `resolving_conflict` rather than sit
-                # parked forever -- the per-tick base sync deliberately
-                # stands down on every `awaiting_human` park, so nobody
-                # else will sync this worktree. Limiting the drift route
-                # to this branch keeps the HITL contract intact: question
-                # / dirty / silent / in_review-route transient parks fall
-                # through to the bare `return` below and keep waiting for
-                # a human comment.
-                _reconcile_parked_fixing(gh, spec, issue, state, pr)
-                return
-            # Conditions resolved (either no fix landed or a deferred
-            # push finished). Clear the park flags and flip back to
-            # `validating` so the reviewer re-evaluates the current head
-            # next tick. The helper has already bumped `review_round`
-            # when a fix landed (push_failed, or agent_timeout that
-            # finished its push). Clear the pending_fix_* bookmarks
-            # defensively: this branch ONLY fires when `pending_fix_at`
-            # was already None, so the clear is a no-op in normal flow,
-            # but a stale bookmark from an earlier route would otherwise
-            # mis-flag the next reviewer round.
-            state.set("awaiting_human", False)
-            state.set("park_reason", None)
-            _clear_pending_fix_bookmarks(state)
-            gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
+    Returns ``(stop, replay_batch)``. ``stop=True`` means the tick is fully
+    handled and the caller must return immediately (auto-rebase park, a
+    refused `/orchestrator continue`, a silent validating-route recovery, a
+    worktree-drift reroute, or a stay-parked-until-fresh-reply). ``stop=False``
+    clears the park and the caller proceeds to the resume; `replay_batch` is
+    the preserved feedback batch when an accepted `/orchestrator continue`
+    replays it, otherwise ``None``.
+    """
+    from .. import workflow as _wf
+
+    park_reason = state.get("park_reason")
+    # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
+    # the `_sync_pr_worktree_to_base` retry loop -- the operator's
+    # new comment is the "retry the rebase" signal, NOT fresh PR
+    # feedback for the dev fix-loop. Stay silent so the refresh
+    # keeps ownership of the comment; resuming the dev here would
+    # spawn it on a prompt that has nothing to do with the
+    # outstanding fix.
+    if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
+        return True, None
+
+    # `/orchestrator continue` operator command (exact line, so a comment
+    # carrying the command AND real guidance still counts). Handled on
+    # BOTH routes so a session-failure park (`agent_silent` /
+    # `agent_timeout`) never resumes the dev on the bare command text.
+    # `_handle_continue_command` decides:
+    #   * "replay" -- eligible park with a reconstructable batch (the
+    #     in_review route): the poisoned session is dropped and the park
+    #     cleared, and we resume the fresh dev on the preserved batch
+    #     (returned as `replay_batch`), skipping the debounce.
+    #   * "refuse" -- a content-free continue on a park it cannot retry
+    #     (an unsafe park needing real guidance, or an eligible park with
+    #     no batch, e.g. the validating route): command consumed + reason
+    #     posted; stay parked.
+    #   * "passthrough" -- the command arrived WITH genuine guidance on a
+    #     park with no replayable batch: fall through to the normal resume
+    #     so that guidance (not a bare continue) drives the dev.
+    replay_batch = None
+    continue_cmds = _parse_orchestrator_continue(issue_space_new)
+    if continue_cmds:
+        action, items = _handle_continue_command(
+            gh, issue, state, pr, park_reason, continue_cmds,
+            new_feedback, issue_space_new, review_space_new,
+            review_summary_new,
+        )
+        if action == "refuse":
             gh.write_pinned_state(issue, state)
-            return
-        if not new_feedback:
-            # All other awaiting_human shapes (question parks, dirty
-            # worktree parks, silent-crash parks, in_review-route
-            # transients) stay parked until a fresh human reply lands.
-            # We cannot distinguish "agent has a real question" from
-            # "agent reported nothing to change" by inspection -- both
-            # surface through `_on_question` with `park_reason=None` --
-            # so auto-routing either would silently bypass the HITL
-            # contract. The same applies to a clean in-sync worktree on
-            # the in_review route: the dev may have replied with a real
-            # question that needs a human to resolve, so the only
-            # automatic exit from `fixing` for the in_review route is
-            # the ACK fast path below (on the same tick the dev
-            # explicitly marks its no-commit reply with `ACK:`).
-            return
+            return True, None
+        if action == "replay":
+            replay_batch = items
+        # "passthrough": fall through to the normal resume below.
+
+    # Exception to the stay-parked default: when the park reason can
+    # resolve without a human comment AND the issue arrived here via the
+    # validating route (CHANGES_REQUESTED dev fix), attempt silent
+    # recovery first. The `_handle_validating` CHANGES_REQUESTED branch
+    # flips to `fixing` BEFORE spawning the dev, so a transient park
+    # (`push_failed` / `agent_timeout`) lands under `fixing` instead of
+    # `validating`; without this branch the issue would sit forever in
+    # `fixing` awaiting a human comment the underlying condition does not
+    # produce. Recovery must NOT run on the in_review route: that route
+    # advances the PR-feedback watermarks past the human comment even on
+    # a timed-out resume, and the shared helper bumps `review_round` on
+    # its `pushed` outcome, which the in_review route resets to 0 -- so a
+    # deferred push there would consume feedback without a fix and
+    # mis-account the round. The route discriminator is `pending_fix_at`
+    # (set by the in_review route, unset by the validating route).
+    validating_routed = state.get("pending_fix_at") is None
+    if (
+        not new_feedback
+        and park_reason in _wf._VALIDATING_TRANSIENT_PARK_REASONS
+        and validating_routed
+    ):
+        recovery = _wf._try_recover_validating_transient_park(
+            spec, issue, state,
+        )
+        if recovery == "stuck":
+            # The transient condition has not resolved on its own
+            # (e.g. `push_failed` keeps failing). When the worktree
+            # has drifted from the PR head in the meantime, hand the
+            # reconciliation to `resolving_conflict` rather than sit
+            # parked forever -- the per-tick base sync deliberately
+            # stands down on every `awaiting_human` park, so nobody
+            # else will sync this worktree. Limiting the drift route
+            # to this branch keeps the HITL contract intact: question
+            # / dirty / silent / in_review-route transient parks fall
+            # through to the bare stay-parked return below and keep
+            # waiting for a human comment.
+            _reconcile_parked_fixing(gh, spec, issue, state, pr)
+            return True, None
+        # Conditions resolved (either no fix landed or a deferred
+        # push finished). Clear the park flags and flip back to
+        # `validating` so the reviewer re-evaluates the current head
+        # next tick. The helper has already bumped `review_round`
+        # when a fix landed (push_failed, or agent_timeout that
+        # finished its push). Clear the pending_fix_* bookmarks
+        # defensively: this branch ONLY fires when `pending_fix_at`
+        # was already None, so the clear is a no-op in normal flow,
+        # but a stale bookmark from an earlier route would otherwise
+        # mis-flag the next reviewer round.
         state.set("awaiting_human", False)
         state.set("park_reason", None)
-
-    # Watermarks already cover the triggering bookmarks (a prior tick
-    # consumed them, or an operator advanced them manually). Nothing
-    # left to address; clear the route bookkeeping and bounce back to
-    # `validating` so the reviewer re-evaluates against the current
-    # head instead of leaving the issue stuck in `fixing` with no
-    # work.
-    if not new_feedback:
         _clear_pending_fix_bookmarks(state)
         gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
         gh.write_pinned_state(issue, state)
-        return
+        return True, None
 
-    # Quiet window: hold the resume until no comment has landed for
-    # `IN_REVIEW_DEBOUNCE_SECONDS`. A newer comment arriving on a
-    # later tick is naturally picked up by the rescan above, which
-    # extends the wait because the freshest timestamp controls the
-    # gate. Comments without a usable timestamp (older fakes,
-    # PyGithub edge cases) do not block the resume; in production
-    # `created_at` / `submitted_at` are always set. An accepted
-    # `/orchestrator continue` (`replay_batch` set) skips the wait
-    # entirely -- it is a deliberate operator signal, not chatter to
-    # debounce.
+    if not new_feedback:
+        # All other awaiting_human shapes (question parks, dirty
+        # worktree parks, silent-crash parks, in_review-route
+        # transients) stay parked until a fresh human reply lands.
+        # We cannot distinguish "agent has a real question" from
+        # "agent reported nothing to change" by inspection -- both
+        # surface through `_on_question` with `park_reason=None` --
+        # so auto-routing either would silently bypass the HITL
+        # contract. The same applies to a clean in-sync worktree on
+        # the in_review route: the dev may have replied with a real
+        # question that needs a human to resolve, so the only
+        # automatic exit from `fixing` for the in_review route is
+        # the ACK fast path in the resume tail (on the same tick the
+        # dev explicitly marks its no-commit reply with `ACK:`).
+        return True, None
+
+    state.set("awaiting_human", False)
+    state.set("park_reason", None)
+    return False, replay_batch
+
+
+def _fixing_debounce_open(new_feedback: list, replay_batch) -> bool:
+    """True while the quiet window is still open: hold the resume until no
+    comment has landed for `IN_REVIEW_DEBOUNCE_SECONDS`.
+
+    A newer comment arriving on a later tick is naturally picked up by the
+    rescan, which extends the wait because the freshest timestamp controls
+    the gate. Comments without a usable timestamp (older fakes, PyGithub
+    edge cases) do not block the resume; in production `created_at` /
+    `submitted_at` are always set. An accepted `/orchestrator continue`
+    (`replay_batch` set) skips the wait entirely -- it is a deliberate
+    operator signal, not chatter to debounce.
+    """
+    from .. import workflow as _wf
+
+    if replay_batch is not None:
+        return False
     now = datetime.now(timezone.utc)
     latest_ts: Optional[datetime] = None
     for c in new_feedback:
@@ -498,12 +498,55 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             continue
         if latest_ts is None or ts > latest_ts:
             latest_ts = ts
-    if (
-        replay_batch is None
-        and latest_ts is not None
+    return (
+        latest_ts is not None
         and (now - latest_ts).total_seconds() < config.IN_REVIEW_DEBOUNCE_SECONDS
-    ):
-        return
+    )
+
+
+def _apply_fix_review_round(state, pending_fix_at_was_set: bool) -> None:
+    """Update `review_round` on a pushed fix per the route discriminator.
+
+      * in_review->fixing (`pending_fix_at` was set): reset to 0. The
+        previous reviewer round was APPROVED (the in_review HITL ping is
+        gated on approval); the new fix starts a fresh round-count so
+        MAX_REVIEW_ROUNDS does not trip prematurely on issues that pass
+        back through review after a human PR comment.
+      * validating->fixing (a CHANGES_REQUESTED dev fix that parked and
+        was finished via a human reply): bump. The previous round was
+        CHANGES_REQUESTED, not APPROVED, so we are still in the same
+        review cycle and the round counter must advance to keep
+        MAX_REVIEW_ROUNDS accounting honest.
+    """
+    if pending_fix_at_was_set:
+        state.set("review_round", 0)
+    else:
+        round_n = int(state.get("review_round") or 0)
+        state.set("review_round", round_n + 1)
+
+
+def _resume_fixing_and_dispatch_result(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state,
+    new_feedback: list,
+    replay_batch,
+    pending_fix_at_was_set: bool,
+    issue_space_new: list,
+    review_space_new: list,
+    review_summary_new: list,
+) -> None:
+    """Resume the locked dev session over the unread feedback (or a
+    preserved `/orchestrator continue` batch), then dispatch the result:
+    the in_review-route ACK fast path, the pushed-fix bounce back to
+    `validating`, or a park via `_handle_dev_fix_result`.
+
+    Runs after the quiet window has elapsed. Owns the worktree ensure, the
+    dev resume, the user-content hash refresh, the interrupted / live-paused
+    guards, the consumed-watermark advance, and the route round bookkeeping.
+    """
+    from .. import workflow as _wf
 
     # On an accepted `/orchestrator continue`, resume on the PRESERVED batch
     # (plus any new feedback that came with the command), not the command
@@ -670,34 +713,81 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     # Bookmarks served their purpose; clear them so a later
     # in_review->fixing route writes fresh values rather than mixing
-    # rounds. The round update depends on which route brought us here
-    # (see `pending_fix_at_was_set` above):
-    #
-    #   * in_review->fixing: reset to 0. The previous reviewer round
-    #     was APPROVED (the in_review HITL ping is gated on approval);
-    #     the new fix starts a fresh round-count so MAX_REVIEW_ROUNDS
-    #     does not trip prematurely on issues that pass back through
-    #     review after a human PR comment.
-    #
-    #   * validating->fixing (CHANGES_REQUESTED dev fix that parked and
-    #     was finished via a human reply): bump. The previous round
-    #     was CHANGES_REQUESTED, not APPROVED, so we are still in the
-    #     same review cycle and the round counter must advance to keep
-    #     MAX_REVIEW_ROUNDS accounting honest.
-    #
-    # Flip DIRECTLY to `validating` so the reviewer re-evaluates the
-    # new head next tick. Docs do not run on this exit -- the single
-    # docs pass is deferred to the final-docs handoff after reviewer
-    # approval, so running the docs stage against an unapproved diff
-    # here would just push a no-op and waste a tick.
+    # rounds. `_apply_fix_review_round` then updates `review_round` per
+    # the route discriminator (`pending_fix_at_was_set`), and we flip
+    # DIRECTLY to `validating` so the reviewer re-evaluates the new head
+    # next tick. Docs do not run on this exit -- the single docs pass is
+    # deferred to the final-docs handoff after reviewer approval, so
+    # running the docs stage against an unapproved diff here would just
+    # push a no-op and waste a tick.
     _clear_pending_fix_bookmarks(state)
-    if pending_fix_at_was_set:
-        state.set("review_round", 0)
-    else:
-        round_n = int(state.get("review_round") or 0)
-        state.set("review_round", round_n + 1)
+    _apply_fix_review_round(state, pending_fix_at_was_set)
     gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
     gh.write_pinned_state(issue, state)
+
+
+def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+    state = gh.read_pinned_state(issue)
+
+    pr = _fixing_preflight(gh, spec, issue, state)
+    if pr is None:
+        return
+
+    # Capture the route discriminator BEFORE the bookmark-clear branches
+    # below. `pending_fix_at` distinguishes the in_review->fixing route
+    # (set by the in_review handler when fresh PR feedback lands) from the
+    # validating->fixing route (set when a CHANGES_REQUESTED dev fix
+    # parks). It steers the pushed-fix `review_round` update and the
+    # in_review-route ACK fast path in the resume tail.
+    pending_fix_at_was_set = state.get("pending_fix_at") is not None
+
+    (
+        issue_space_new,
+        review_space_new,
+        review_summary_new,
+        new_feedback,
+    ) = _rescan_fixing_feedback(gh, issue, pr, state)
+
+    # `replay_batch` is set only by an accepted `/orchestrator continue`
+    # command inside `_dispatch_parked_fixing`: the PRESERVED PR-feedback
+    # batch (plus any genuinely new feedback that arrived with the command)
+    # to resume the fresh dev on, instead of the per-tick rescan. It skips
+    # the debounce and re-grounds a dropped session in the resume tail.
+    #
+    # `_dispatch_parked_fixing` bails (`stop=True`) unless something new has
+    # arrived since the park bump: the watermarks were advanced past the
+    # previously-consumed feedback, so `new_feedback` can only carry
+    # genuinely new content, and without that guard a single poisoned tick
+    # would loop on every poll, spamming the same dev-resume prompt.
+    replay_batch: Optional[list] = None
+    if state.get("awaiting_human"):
+        stop, replay_batch = _dispatch_parked_fixing(
+            gh, spec, issue, state, pr, new_feedback,
+            issue_space_new, review_space_new, review_summary_new,
+        )
+        if stop:
+            return
+
+    # Watermarks already cover the triggering bookmarks (a prior tick
+    # consumed them, or an operator advanced them manually). Nothing
+    # left to address; clear the route bookkeeping and bounce back to
+    # `validating` so the reviewer re-evaluates against the current
+    # head instead of leaving the issue stuck in `fixing` with no
+    # work.
+    if not new_feedback:
+        _clear_pending_fix_bookmarks(state)
+        gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
+        gh.write_pinned_state(issue, state)
+        return
+
+    if _fixing_debounce_open(new_feedback, replay_batch):
+        return
+
+    _resume_fixing_and_dispatch_result(
+        gh, spec, issue, state, new_feedback, replay_batch,
+        pending_fix_at_was_set,
+        issue_space_new, review_space_new, review_summary_new,
+    )
 
 
 def _reconcile_parked_fixing(
