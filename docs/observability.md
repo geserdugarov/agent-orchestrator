@@ -860,10 +860,13 @@ or non-dashboard caller does not require the group to be installed. A regression
 asserts that loading `orchestrator.dashboard` keeps `streamlit`, `pandas`, `plotly`, and `orchestrator.dashboard_charts`
 out of `sys.modules`.
 
-**Module layout.** `orchestrator/dashboard.py` keeps the Streamlit page orchestration (`main()`, the cached read
-wrappers, the staged fan-out, and the per-issue drill-down) plus compatibility re-exports of every helper under its
-original name, so `streamlit run orchestrator/dashboard.py` and the historical `orchestrator.dashboard.*` import surface
-are unchanged. The pure helpers live in three import-light modules (stdlib plus `orchestrator.analytics`, so they hold
+**Module layout.** `orchestrator/dashboard.py` keeps the Streamlit page orchestration — `main()` is a thin orchestrator
+that delegates the static-metadata read (`_read_static_metadata`), the staged widget fan-out (`_widget_readers` +
+`_dispatch_reads`), the load-timing log (`_log_dashboard_load`), the empty / error states (`_render_no_data`,
+`_render_empty_window`), and every filter / widget section (the `_render_*` helpers) plus the per-issue drill-down to
+focused module-level helpers — alongside compatibility re-exports of every pure helper under its original name, so
+`streamlit run orchestrator/dashboard.py` and the historical `orchestrator.dashboard.*` import surface are unchanged.
+The pure helpers live in three import-light modules (stdlib plus `orchestrator.analytics`, so they hold
 the lazy-import invariant): `orchestrator/dashboard_state.py` (date / window math, preset and timezone vocabulary,
 stage-filter / cache-key resolution, the issue-number parser, the DB-config banner check, and the read fan-out switch),
 `orchestrator/dashboard_kpis.py` (KPI delta math, the computed insight banners, the reliability-tile triples, the
@@ -972,10 +975,9 @@ base color so the pair stays visibly tied to the role), `hour_weekday_heatmap` (
 per-cell token totals, Sunday-first, with a `tz_label` parameter that annotates the x-axis — the caller passes the
 matching offset to `get_hourly_heatmap` so cells already reflect that zone), and `done_per_day_bars` (resolved-per-day
 bars with explicit `window_start` / `window_end` for zero-day backfill). The topbar, filter meta, KPI strip, insight
-banners, per-card header, sparkline / delta pill, most-expensive-issues table, skill-trigger-rates aggregate table, and
-per-skill trigger matrix are built by inline-HTML helpers in `orchestrator/dashboard_html.py` (re-exported through
-`dashboard.py`); the cost-source coverage bar and backend-efficiency cards are rendered from HTML strings inline in
-`main()`.
+banners, per-card header, sparkline / delta pill, most-expensive-issues table, backend-efficiency card, cost-source
+coverage bar, reliability-tile strip, skill-trigger-rates aggregate table, and per-skill trigger matrix are built by
+inline-HTML helpers in `orchestrator/dashboard_html.py` (re-exported through `dashboard.py`).
 
 **Theme.** `orchestrator/dashboard_theme.py` is a plotly-free token module: palette (cool gray `#f4f5f8` page, white
 cards, indigo accent, muted ink tints), spacing tokens, the `1480px` content max-width, per-token-type / per-backend /

@@ -33,13 +33,25 @@ file stays the Streamlit orchestration layer:
   ordering, and the rework-share aggregation.
 - `orchestrator.dashboard_html` -- the inline-HTML builders for the
   topbar, filter meta, KPI strip, insight stack, per-card header,
-  sparkline / delta pill, the issues / skill-trigger tables, and the
-  per-skill trigger matrix.
+  sparkline / delta pill, the issues / skill-trigger tables, the
+  per-skill trigger matrix, the backend-efficiency card, the
+  cost-coverage bar, and the reliability-tile strip.
 
-Every helper is re-exported below under its original name so
-`streamlit run orchestrator/dashboard.py`, the historical
-`orchestrator.dashboard.*` helper surface, and the existing dashboard
-tests keep working without touching the extracted modules.
+`main()` is a thin orchestrator: it delegates the static-metadata read
+(`_read_static_metadata`), the staged widget fan-out (`_widget_readers`
++ `_dispatch_reads`), the load-timing log (`_log_dashboard_load`), the
+empty / error states (`_render_no_data`, `_render_empty_window`), and
+every filter / widget section (the `_render_*` helpers) to focused
+module-level helpers, so it reads as a top-to-bottom sequence of calls
+rather than a single 1000-line function.
+
+Every pure helper from those three modules is re-exported below under
+its original name so `streamlit run orchestrator/dashboard.py`, the
+historical `orchestrator.dashboard.*` helper surface, and the existing
+dashboard tests keep working without touching the extracted modules.
+The `main()`-support helpers (the read / dispatch / logging helpers and
+the `_render_*` render helpers) are defined in this module, are not
+re-exported, and stay module-private.
 
 Reads go through `orchestrator.analytics.read` (which already
 handles unset DB, connection errors, and lazy psycopg import) and
@@ -77,7 +89,6 @@ Run:
 """
 from __future__ import annotations
 
-import html
 import logging
 import sys
 from datetime import date, timedelta
@@ -169,12 +180,15 @@ from orchestrator.dashboard_kpis import (  # noqa: E402
     top_expensive_issues as top_expensive_issues,
 )
 from orchestrator.dashboard_html import (  # noqa: E402
+    _backend_efficiency_card_html as _backend_efficiency_card_html,
     _card_header_html as _card_header_html,
+    _cost_coverage_bar_html as _cost_coverage_bar_html,
     _delta_pill as _delta_pill,
     _filter_meta_html as _filter_meta_html,
     _insights_html as _insights_html,
     _issues_table_html as _issues_table_html,
     _kpi_strip_html as _kpi_strip_html,
+    _reliability_tiles_html as _reliability_tiles_html,
     _skill_matrix_html as _skill_matrix_html,
     _skill_triggers_html as _skill_triggers_html,
     _sparkline_svg as _sparkline_svg,
@@ -226,7 +240,9 @@ __all__ = [
     "UNPRICED_COST_SOURCES",
     "UNPRICED_COVERAGE_THRESHOLD",
     "_TRUTHY",
+    "_backend_efficiency_card_html",
     "_card_header_html",
+    "_cost_coverage_bar_html",
     "_delta_pill",
     "_extent_dates",
     "_fan_out_reads",
@@ -235,6 +251,7 @@ __all__ = [
     "_issues_table_html",
     "_kpi_strip_html",
     "_parse_parallel_reads_flag",
+    "_reliability_tiles_html",
     "_render_drilldown",
     "_skill_matrix_html",
     "_skill_triggers_html",
@@ -319,86 +336,18 @@ def main() -> None:
         st.warning(unset)
         st.stop()
 
-    # `get_data_extent` and `get_filter_options` carry no filter
-    # inputs (the cache key is empty), so they tolerate a longer TTL
-    # than the per-filter window reads -- the values only change as
-    # `analytics.sync` ingests new events. Cache them under
-    # `STATIC_METADATA_TTL_SECONDS` (5 min) so the sidebar / topbar
-    # do not re-pay a round-trip on every Streamlit rerun.
-    @st.cache_data(
-        show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS
-    )
-    def _read_data_extent():
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_data_extent(conn=conn)
-
-    @st.cache_data(
-        show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS
-    )
-    def _read_filter_options():
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_filter_options(conn=conn)
-
-    try:
-        extent = _read_data_extent()
-        options = _read_filter_options()
-    except analytics_read.AnalyticsReadError as e:
-        st.error(
-            "Could not load analytics filter options: "
-            f"{e}. Verify `ANALYTICS_DB_URL` and that the Postgres "
-            "service is reachable, then reload."
-        )
-        st.stop()
+    extent, options = _read_static_metadata(st=st)
 
     if extent.min_ts is None or extent.max_ts is None:
-        st.markdown(
-            _topbar_html(
-                extent=extent,
-                distinct_repos=0,
-                total_events=0,
-                spend_in_range=0.0,
-                fmt_money_exact=theme.fmt_money_exact,
-                fmt_num=theme.fmt_num,
-            ),
-            unsafe_allow_html=True,
-        )
-        st.info(NO_DATA_MESSAGE)
-        st.stop()
+        _render_no_data(st=st, extent=extent, theme=theme)
+        return
 
     extent_min_d = extent.min_ts.date()
     extent_max_d = extent.max_ts.date()
 
-    with st.sidebar:
-        st.header("Filters")
-        repo_options = ("All", *options.repos) if options.repos else ("All",)
-        repo_choice = st.selectbox("Repo", repo_options, index=0)
-        event_choice = st.multiselect(
-            "Events",
-            list(options.events),
-            default=list(options.events),
-            help=(
-                "Narrows every widget. An empty selection means "
-                "'show nothing for these events'."
-            ),
-        )
-        stage_choice = st.multiselect(
-            "Stages",
-            list(options.stages),
-            default=list(options.stages),
-            help=(
-                "Narrows every widget. An empty selection means "
-                "'show nothing for these stages'."
-            ),
-        )
-        issue_input = st.text_input(
-            "Issue number",
-            value="",
-            help=(
-                "Enter `123` or `#123` to narrow every widget to one "
-                "issue AND render the per-issue event trace at the "
-                "bottom. Requires a specific repo above."
-            ),
-        )
+    repo_choice, event_choice, stage_choice, issue_input = (
+        _render_sidebar_filters(st=st, options=options)
+    )
 
     # Timezone selector lives inside the "When agents run" block (see
     # the heatmap card below), but the offset is read here so the
@@ -417,83 +366,15 @@ def main() -> None:
     topbar_slot = st.empty()
 
     # Filter bar: presets + date inputs + range meta inside a bordered
-    # container styled as the "Date range" card. Preset state persists
-    # in session_state so a custom date pick survives reruns.
-    if "preset" not in st.session_state:
-        st.session_state.preset = DEFAULT_PRESET
-    with st.container(border=True):
-        # A hidden `.orch-cardmark` as the bordered container's first
-        # child lets the shared white-card rule in
-        # `dashboard_theme.PAGE_CSS` (`:has(> stElementContainer
-        # .orch-cardmark)`) paint this filter bar like every other card --
-        # Streamlit 1.58 dropped the stable border-wrapper testid the old
-        # per-card selector relied on. The `.orch-filterbar-anchor` below
-        # stays in the left column purely as the hidden label sentinel.
-        st.markdown(
-            '<div class="orch-cardmark"></div>', unsafe_allow_html=True
-        )
-        # Single-line filter bar: label · preset switch · From · To ·
-        # range meta, all bottom-aligned so the short controls (label,
-        # radio, meta) sit on the same baseline as the taller date
-        # inputs.
-        (
-            fb_label,
-            fb_preset,
-            fb_from,
-            fb_to,
-            fb_meta,
-        ) = st.columns(
-            [1.0, 1.7, 1.4, 1.4, 3.0], vertical_alignment="bottom"
-        )
-        with fb_label:
-            st.markdown(
-                '<div class="orch-filterbar-anchor"></div>'
-                '<span class="orch-filter-label">Date range</span>',
-                unsafe_allow_html=True,
-            )
-        with fb_preset:
-            preset_choice = st.radio(
-                "Range preset",
-                options=(PRESET_3D, PRESET_7D, PRESET_ALL),
-                format_func=lambda p: PRESET_INLINE_LABELS[p],
-                index=(
-                    (PRESET_3D, PRESET_7D, PRESET_ALL).index(
-                        st.session_state.preset
-                    )
-                    if st.session_state.preset
-                    in (PRESET_3D, PRESET_7D, PRESET_ALL)
-                    else 2
-                ),
-                horizontal=True,
-                label_visibility="collapsed",
-                key="_preset_radio",
-            )
-        initial_window = (
-            preset_window(preset_choice, extent)
-            or to_window(extent_min_d, extent_max_d)
-        )
-        with fb_from:
-            start_date = st.date_input(
-                "From",
-                value=initial_window.start.date(),
-                min_value=extent_min_d,
-                max_value=extent_max_d,
-            )
-        with fb_to:
-            end_default = (initial_window.end - timedelta(days=1)).date()
-            end_date = st.date_input(
-                "To",
-                value=end_default,
-                min_value=extent_min_d,
-                max_value=extent_max_d,
-            )
-        # Range meta ("… → … · N days · N runs") sits in the last column
-        # of the same row. Rendered after the summary query lands below
-        # (the run count is not known yet), so capture the slot now.
-        with fb_meta:
-            meta_slot = st.empty()
-    window = to_window(start_date, end_date)
-    st.session_state.preset = preset_choice
+    # container styled as the "Date range" card. `meta_slot` is filled
+    # after the summary read lands (the run count is not known yet);
+    # `window` feeds every downstream read.
+    window, meta_slot = _render_date_filter_bar(
+        st=st,
+        extent=extent,
+        extent_min_d=extent_min_d,
+        extent_max_d=extent_max_d,
+    )
 
     repo_filter = None if repo_choice == "All" else repo_choice
     issue_input_parsed = parse_issue_number(issue_input)
@@ -503,27 +384,400 @@ def main() -> None:
     event_filter = list(event_choice)
     stage_filter = resolve_stage_filter(stage_choice, options.stages)
 
-    key = cache_key(
-        window, repo_filter, event_filter, stage_filter, issue_filter
-    )
-    prev_w = previous_window(window)
-    prev_key = cache_key(
-        prev_w, repo_filter, event_filter, stage_filter, issue_filter
+    key, prev_key = _build_read_keys(
+        window=window,
+        repo_filter=repo_filter,
+        event_filter=event_filter,
+        stage_filter=stage_filter,
+        issue_filter=issue_filter,
     )
 
-    # Connection scoping: each cached wrapper checks out a thread-local
-    # analytics connection inside its body via `analytics_connection()`
-    # rather than threading a connection through the cache key (a raw
-    # psycopg.Connection is not hashable and would crash the wrapper,
-    # and every reload would otherwise look like a cache miss). The
-    # thread-local persists across wrappers in the same render pass,
-    # so the first cache-miss pays the ~1 s psycopg handshake and the
-    # remaining 13 reads reuse the open socket. On a broken-connection
-    # error inside a `with` block the CM closes the cached socket so
-    # the next wrapper opens a fresh one. The cache key stays
-    # `(start, end, repo, events_t, stages_t, issue)` -- exactly the
-    # filter tuple, which is what we want anyway.
+    first_wave_readers, second_wave_readers = _widget_readers(
+        st=st,
+        key=key,
+        prev_key=prev_key,
+        tz_offset_choice=tz_offset_choice,
+    )
+    total_reads = len(first_wave_readers) + len(second_wave_readers)
+    parallel = dashboard_parallel_reads_enabled()
+    load_start = perf_counter()
+    # Single inline spinner spans both waves -- the topbar / KPI
+    # strip rendered between waves provides progressive feedback
+    # while the second wave finishes, and the spinner clears once
+    # every widget has its data. UI writes always run on this main
+    # thread (the worker threads `_fan_out_reads` spawns only return
+    # data back through the futures), so the staged renders below
+    # never reach Streamlit from a worker.
+    with st.spinner(LOADING_INDICATOR_MESSAGE):
+        results = _dispatch_reads(
+            first_wave_readers, st=st, parallel=parallel,
+        )
+        summary = results["summary"]
+        prev_summary = results["prev_summary"]
+        ts_points = results["ts_points"]
+        review_round_rows = results["review_round_rows"]
+        throughput_rows = results["throughput_rows"]
+        cost_coverage_rows = results["cost_coverage_rows"]
 
+        # Topbar / filter meta paint on the first-wave results so the
+        # user sees real content before the second wave fires.
+        topbar_slot.markdown(
+            _topbar_html(
+                extent=extent,
+                distinct_repos=summary.distinct_repos,
+                total_events=summary.total_events,
+                spend_in_range=summary.total_cost_usd,
+                fmt_money_exact=theme.fmt_money_exact,
+                fmt_num=theme.fmt_num,
+            ),
+            unsafe_allow_html=True,
+        )
+        days_in_window = max((window.end - window.start).days, 1)
+        meta_slot.markdown(
+            _filter_meta_html(
+                from_d=window.start.date(),
+                to_d=(window.end - timedelta(days=1)).date(),
+                days=days_in_window,
+                runs=summary.total_agent_runs,
+                fmt_num=theme.fmt_num,
+            ),
+            unsafe_allow_html=True,
+        )
+
+        if summary.total_events == 0:
+            # Empty window -- skip the second wave entirely; the
+            # remaining reads would only paint empty cards.
+            _render_empty_window(
+                st=st,
+                pd=pd,
+                load_start=load_start,
+                reads=len(first_wave_readers),
+                parallel=parallel,
+                window=window,
+                repo_filter=repo_filter,
+                issue_input_parsed=issue_input_parsed,
+                event_filter=event_filter,
+                stage_filter=stage_filter,
+            )
+            return
+
+        # Insights + KPI strip ---------------------------------------
+        # Token totals include cache_read + cache_write so the
+        # headline figure matches the standalone mock's
+        # `input + output + cache_read + cache_write` accounting; the
+        # `cached_tokens` cumulative column is deliberately excluded
+        # so the cache band is not double-counted.
+        banners = compute_insights(
+            summary,
+            cost_coverage_rows=cost_coverage_rows,
+        )
+        if banners:
+            st.markdown(_insights_html(banners), unsafe_allow_html=True)
+        total_cost = float(summary.total_cost_usd or 0.0)
+        total_tokens = int(
+            (summary.total_input_tokens or 0)
+            + (summary.total_output_tokens or 0)
+            + (summary.total_cache_read_tokens or 0)
+            + (summary.total_cache_write_tokens or 0)
+        )
+        total_cost_prev = float(prev_summary.total_cost_usd or 0.0)
+        total_tokens_prev = int(
+            (prev_summary.total_input_tokens or 0)
+            + (prev_summary.total_output_tokens or 0)
+            + (prev_summary.total_cache_read_tokens or 0)
+            + (prev_summary.total_cache_write_tokens or 0)
+        )
+        resolved = sum(int(r.resolved or 0) for r in throughput_rows)
+        rejected = sum(int(r.rejected or 0) for r in throughput_rows)
+        rr_total_cost, rr_rework_cost = rework_totals(review_round_rows)
+        rework_share = (
+            (rr_rework_cost / rr_total_cost) if rr_total_cost > 0 else 0.0
+        )
+
+        # Sparkline series, one entry per day in the window. Daily
+        # tokens mirror the KPI accounting and include the cache band.
+        days = sorted({p.day for p in ts_points})
+        days_index = {d: i for i, d in enumerate(days)}
+        daily_cost = [0.0] * len(days)
+        daily_tokens = [0.0] * len(days)
+        for p in ts_points:
+            i = days_index[p.day]
+            daily_cost[i] += float(p.cost_usd or 0.0)
+            daily_tokens[i] += float(
+                (p.input_tokens or 0)
+                + (p.output_tokens or 0)
+                + (p.cache_read_tokens or 0)
+                + (p.cache_write_tokens or 0)
+            )
+        done_index = {r.day: int(r.resolved or 0) for r in throughput_rows}
+        daily_done = [done_index.get(d, 0) for d in days]
+
+        kpis = [
+            {
+                "label": "Total spend",
+                "value": theme.fmt_money_exact(total_cost),
+                "delta": kpi_delta(total_cost, total_cost_prev),
+                "sub": (
+                    f"{theme.fmt_money(total_cost / days_in_window)}/day"
+                ),
+                "spark": daily_cost,
+                "spark_color": theme.ACCENT,
+            },
+            {
+                "label": "Total tokens",
+                "value": theme.fmt_tokens(total_tokens),
+                "delta": kpi_delta(total_tokens, total_tokens_prev),
+                "sub": f"{theme.fmt_tokens(total_tokens / days_in_window)}/day",
+                "spark": daily_tokens,
+                "spark_color": theme.TOKEN_TYPE_COLORS["Input"],
+            },
+            {
+                "label": "Cost / resolved issue",
+                "value": (
+                    f"${total_cost / resolved:,.2f}"
+                    if resolved > 0 else "—"
+                ),
+                "delta": None,
+                "sub": f"{resolved} resolved · {rejected} rejected",
+                "spark": daily_done,
+                "spark_color": theme.TOKEN_TYPE_COLORS["Cache"],
+            },
+            {
+                "label": "Rework share",
+                "value": f"{rework_share * 100:.0f}%",
+                "delta": None,
+                "sub": (
+                    f"{theme.fmt_money_exact(rr_rework_cost)} in review "
+                    "rounds >= 1"
+                ),
+                "spark": None,
+            },
+        ]
+        st.markdown(_kpi_strip_html(kpis), unsafe_allow_html=True)
+
+        # Second wave -- the remaining widget reads. The KPI strip
+        # already painted above, so the user has real content on
+        # screen while the second wave finishes.
+        results.update(_dispatch_reads(
+            second_wave_readers, st=st, parallel=parallel,
+        ))
+    _log_dashboard_load(
+        load_start=load_start, reads=total_reads, parallel=parallel,
+    )
+    stage_rows = results["stage_rows"]
+    agent_exits = results["agent_exits"]
+    issues_rows = results["issues_rows"]
+    backend_rows = results["backend_rows"]
+    repo_rows = results["repo_rows"]
+    heatmap_rows = results["heatmap_rows"]
+    backend_daily_rows = results["backend_daily_rows"]
+    skill_rows = results["skill_rows"]
+    skill_matrix_rows = results["skill_matrix_rows"]
+
+    _render_hero_usage(
+        st=st,
+        dashboard_charts=dashboard_charts,
+        ts_points=ts_points,
+        backend_daily_rows=backend_daily_rows,
+    )
+    _render_stage_review_bars(
+        st=st,
+        dashboard_charts=dashboard_charts,
+        stage_rows=stage_rows,
+        review_round_rows=review_round_rows,
+    )
+    _render_issues_and_backends(
+        st=st,
+        theme=theme,
+        issues_rows=issues_rows,
+        backend_rows=backend_rows,
+        cost_coverage_rows=cost_coverage_rows,
+    )
+    _render_repo_and_reliability(
+        st=st,
+        dashboard_charts=dashboard_charts,
+        theme=theme,
+        repo_rows=repo_rows,
+        summary=summary,
+        throughput_rows=throughput_rows,
+        window=window,
+        resolved=resolved,
+        rejected=rejected,
+    )
+    _render_activity_heatmap(
+        st=st,
+        dashboard_charts=dashboard_charts,
+        heatmap_rows=heatmap_rows,
+        tz_offset_choice=tz_offset_choice,
+    )
+
+    # ── Skill trigger rates ────────────────────────────
+    # Opt-in read-side widget over the `skills_triggered` /
+    # `skills_triggered_count` fields `record_agent_exit` folds into
+    # `extras` when `TRACK_SKILL_TRIGGERS` is on. A `0%` rate is a real
+    # signal ("this role's skill is not firing"), but it cannot tell a
+    # tracked-but-quiet run from one whose tracking was off, so the
+    # caption names the switch when nothing has triggered yet.
+    with st.container(border=True):
+        st.markdown(
+            _card_header_html(
+                "Skill trigger rates",
+                "Share of agent runs that triggered a skill, by role and "
+                "backend (requires TRACK_SKILL_TRIGGERS)",
+            ),
+            unsafe_allow_html=True,
+        )
+        if skill_rows:
+            st.markdown(
+                _skill_triggers_html(skill_rows),
+                unsafe_allow_html=True,
+            )
+            if not any(r.skill_runs for r in skill_rows):
+                st.caption(
+                    "No skill triggers recorded in this window. Enable "
+                    "`TRACK_SKILL_TRIGGERS` (default off) so "
+                    "`record_agent_exit` records which skills each run "
+                    "pulls."
+                )
+            # Second table: the per-skill x (repo, role, backend) trigger
+            # matrix. Folds each repo's skill catalog into the observed
+            # triggers so an offered-but-never-triggered skill surfaces
+            # as an explicit `0` cell; `_skill_matrix_html` renders a
+            # clear fallback notice in place of the table when the read
+            # model returns no catalog-backed matrix (no catalog records
+            # matched and no run fired a skill). Folded into an expander
+            # (collapsed by default, mirroring "Recent agent runs" below)
+            # so the matrix -- capped at 100 rows by the read model
+            # (Runs-with-skill DESC then Runs DESC) and shown by default
+            # repo-ascending then trigger-rate-descending -- does not
+            # dominate the card until the operator opens it.
+            with st.expander(
+                "Per-skill trigger matrix · which skills each "
+                "repo × role × backend cohort reaches for",
+                expanded=False,
+            ):
+                # Clickable column headers re-sort the matrix: each header
+                # anchor writes `mtx_sort` / `mtx_dir` query params, which
+                # this parses back into a (column, direction) pair the
+                # render applies on top of the read model's default order.
+                matrix_sort_key, matrix_sort_desc = parse_skill_matrix_sort(
+                    st.query_params
+                )
+                st.markdown(
+                    _skill_matrix_html(
+                        skill_matrix_rows,
+                        sort_key=matrix_sort_key,
+                        descending=matrix_sort_desc,
+                    ),
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("No `agent_exit` rows match the current filters.")
+
+    _render_recent_runs(
+        st=st,
+        pd=pd,
+        agent_exits=agent_exits,
+        tz_offset_choice=tz_offset_choice,
+    )
+
+    _render_drilldown(
+        st=st,
+        pd=pd,
+        window=window,
+        repo_filter=repo_filter,
+        issue_input_parsed=issue_input_parsed,
+        event_filter=event_filter,
+        stage_filter=stage_filter,
+    )
+
+    st.markdown(
+        '<div class="orch-foot">'
+        f'Real data · window {window.start.date().isoformat()} → '
+        f'{(window.end - timedelta(days=1)).date().isoformat()} · '
+        f'{theme.fmt_num(summary.total_agent_runs)} agent runs'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _read_static_metadata(*, st: Any):
+    """Read the data extent + filter options through cached wrappers.
+
+    `get_data_extent` / `get_filter_options` carry no filter inputs (the
+    cache key is empty) and only change as `analytics.sync` ingests new
+    events, so both are cached under the longer `STATIC_METADATA_TTL_SECONDS`
+    (5 min) rather than the per-filter 60 s TTL -- collapsing the sidebar /
+    topbar round-trip on every rerun. Returns `(extent, options)`; a read
+    error is surfaced as one `st.error` and stops the app.
+    """
+    @st.cache_data(show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS)
+    def _read_data_extent():
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_data_extent(conn=conn)
+
+    @st.cache_data(show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS)
+    def _read_filter_options():
+        with analytics_read.analytics_connection() as conn:
+            return analytics_read.get_filter_options(conn=conn)
+
+    try:
+        return _read_data_extent(), _read_filter_options()
+    except analytics_read.AnalyticsReadError as e:
+        st.error(
+            "Could not load analytics filter options: "
+            f"{e}. Verify `ANALYTICS_DB_URL` and that the Postgres "
+            "service is reachable, then reload."
+        )
+        st.stop()
+
+
+def _render_no_data(*, st: Any, extent: DataExtent, theme: Any) -> None:
+    """Render the no-data startup state and stop.
+
+    The data extent is empty (`analytics_events` holds zero rows), so paint
+    the topbar with zeroed counts and surface `NO_DATA_MESSAGE` below it
+    before halting the app.
+    """
+    st.markdown(
+        _topbar_html(
+            extent=extent,
+            distinct_repos=0,
+            total_events=0,
+            spend_in_range=0.0,
+            fmt_money_exact=theme.fmt_money_exact,
+            fmt_num=theme.fmt_num,
+        ),
+        unsafe_allow_html=True,
+    )
+    st.info(NO_DATA_MESSAGE)
+    st.stop()
+
+
+def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
+    """Define the cached per-filter read wrappers and stage them.
+
+    Returns `(first_wave_readers, second_wave_readers)` -- each a list of
+    `(name, zero-arg callable)` pairs `_fan_out_reads` dispatches.
+
+    Connection scoping: each wrapper checks out a thread-local analytics
+    connection inside its body via `analytics_connection()` rather than
+    threading a connection through the cache key (a raw `psycopg.Connection`
+    is not hashable and would crash the wrapper, and every reload would
+    otherwise look like a cache miss). The thread-local persists across
+    wrappers in the same render pass, so the first cache-miss pays the
+    psycopg handshake and the rest reuse the open socket. The cache key
+    stays the filter tuple `(start, end, repo, events_t, stages_t, issue)`.
+
+    Split into two staged waves so the topbar / filter meta / insight
+    banners / KPI strip can paint as soon as their inputs are available
+    instead of blocking on every widget: the first wave carries the six
+    reads those above-the-fold widgets consume, the second the nine
+    remaining widget reads. The lambdas close over `key` / `prev_key` so
+    the executor never threads filter tuples through the futures, and
+    worker threads only return data -- every `st.*` write happens on the
+    caller's render thread between the waves.
+    """
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_summary(start, end, repo, events_t, stages_t, issue):
         with analytics_read.analytics_connection() as conn:
@@ -755,208 +1009,259 @@ def main() -> None:
         ("skill_rows", lambda: _read_skill_trigger_rates(*key)),
         ("skill_matrix_rows", lambda: _read_skill_trigger_matrix(*key)),
     ]
-    total_reads = len(first_wave_readers) + len(second_wave_readers)
-    parallel = dashboard_parallel_reads_enabled()
-    load_start = perf_counter()
-    # Single inline spinner spans both waves -- the topbar / KPI
-    # strip rendered between waves provides progressive feedback
-    # while the second wave finishes, and the spinner clears once
-    # every widget has its data. UI writes always run on this main
-    # thread (the worker threads `_fan_out_reads` spawns only return
-    # data back through the futures), so the staged renders below
-    # never reach Streamlit from a worker.
-    with st.spinner(LOADING_INDICATOR_MESSAGE):
-        try:
-            results = _fan_out_reads(
-                first_wave_readers, parallel=parallel
-            )
-        except analytics_read.AnalyticsReadError as e:
-            st.error(
-                f"Analytics query failed: {e}. The dashboard cannot render "
-                "without database access; check Postgres connectivity and "
-                "reload."
-            )
-            st.stop()
-        summary = results["summary"]
-        prev_summary = results["prev_summary"]
-        ts_points = results["ts_points"]
-        review_round_rows = results["review_round_rows"]
-        throughput_rows = results["throughput_rows"]
-        cost_coverage_rows = results["cost_coverage_rows"]
+    return first_wave_readers, second_wave_readers
 
-        # Topbar / filter meta paint on the first-wave results so the
-        # user sees real content before the second wave fires.
-        topbar_slot.markdown(
-            _topbar_html(
-                extent=extent,
-                distinct_repos=summary.distinct_repos,
-                total_events=summary.total_events,
-                spend_in_range=summary.total_cost_usd,
-                fmt_money_exact=theme.fmt_money_exact,
-                fmt_num=theme.fmt_num,
-            ),
-            unsafe_allow_html=True,
-        )
-        days_in_window = max((window.end - window.start).days, 1)
-        meta_slot.markdown(
-            _filter_meta_html(
-                from_d=window.start.date(),
-                to_d=(window.end - timedelta(days=1)).date(),
-                days=days_in_window,
-                runs=summary.total_agent_runs,
-                fmt_num=theme.fmt_num,
-            ),
-            unsafe_allow_html=True,
-        )
 
-        if summary.total_events == 0:
-            # Empty window -- skip the second wave entirely. Log the
-            # short-circuit so the A/B comparison still has a line.
-            log.info(
-                "dashboard.load: total=%.1fs reads=%d parallel=%s",
-                perf_counter() - load_start,
-                len(first_wave_readers),
-                "true" if parallel else "false",
-            )
-            st.info(EMPTY_WINDOW_MESSAGE)
-            _render_drilldown(
-                st=st,
-                pd=pd,
-                window=window,
-                repo_filter=repo_filter,
-                issue_input_parsed=issue_input_parsed,
-                event_filter=event_filter,
-                stage_filter=stage_filter,
-            )
-            return
+def _dispatch_reads(readers, *, st: Any, parallel: bool):
+    """Dispatch one read wave and surface a read error as one banner.
 
-        # Insights + KPI strip ---------------------------------------
-        # Token totals include cache_read + cache_write so the
-        # headline figure matches the standalone mock's
-        # `input + output + cache_read + cache_write` accounting; the
-        # `cached_tokens` cumulative column is deliberately excluded
-        # so the cache band is not double-counted.
-        banners = compute_insights(
-            summary,
-            cost_coverage_rows=cost_coverage_rows,
+    Runs the wave through `_fan_out_reads` (sequential, or across a thread
+    pool when `parallel`) and returns the name->data dict. An
+    `AnalyticsReadError` from any reader is caught, rendered as one
+    `st.error`, and stops the app -- the dashboard cannot render without
+    database access.
+    """
+    try:
+        return _fan_out_reads(readers, parallel=parallel)
+    except analytics_read.AnalyticsReadError as e:
+        st.error(
+            f"Analytics query failed: {e}. The dashboard cannot render "
+            "without database access; check Postgres connectivity and "
+            "reload."
         )
-        if banners:
-            st.markdown(_insights_html(banners), unsafe_allow_html=True)
-        total_cost = float(summary.total_cost_usd or 0.0)
-        total_tokens = int(
-            (summary.total_input_tokens or 0)
-            + (summary.total_output_tokens or 0)
-            + (summary.total_cache_read_tokens or 0)
-            + (summary.total_cache_write_tokens or 0)
-        )
-        total_cost_prev = float(prev_summary.total_cost_usd or 0.0)
-        total_tokens_prev = int(
-            (prev_summary.total_input_tokens or 0)
-            + (prev_summary.total_output_tokens or 0)
-            + (prev_summary.total_cache_read_tokens or 0)
-            + (prev_summary.total_cache_write_tokens or 0)
-        )
-        resolved = sum(int(r.resolved or 0) for r in throughput_rows)
-        rejected = sum(int(r.rejected or 0) for r in throughput_rows)
-        rr_total_cost, rr_rework_cost = rework_totals(review_round_rows)
-        rework_share = (
-            (rr_rework_cost / rr_total_cost) if rr_total_cost > 0 else 0.0
-        )
+        st.stop()
 
-        # Sparkline series, one entry per day in the window. Daily
-        # tokens mirror the KPI accounting and include the cache band.
-        days = sorted({p.day for p in ts_points})
-        days_index = {d: i for i, d in enumerate(days)}
-        daily_cost = [0.0] * len(days)
-        daily_tokens = [0.0] * len(days)
-        for p in ts_points:
-            i = days_index[p.day]
-            daily_cost[i] += float(p.cost_usd or 0.0)
-            daily_tokens[i] += float(
-                (p.input_tokens or 0)
-                + (p.output_tokens or 0)
-                + (p.cache_read_tokens or 0)
-                + (p.cache_write_tokens or 0)
-            )
-        done_index = {r.day: int(r.resolved or 0) for r in throughput_rows}
-        daily_done = [done_index.get(d, 0) for d in days]
 
-        kpis = [
-            {
-                "label": "Total spend",
-                "value": theme.fmt_money_exact(total_cost),
-                "delta": kpi_delta(total_cost, total_cost_prev),
-                "sub": (
-                    f"{theme.fmt_money(total_cost / days_in_window)}/day"
-                ),
-                "spark": daily_cost,
-                "spark_color": theme.ACCENT,
-            },
-            {
-                "label": "Total tokens",
-                "value": theme.fmt_tokens(total_tokens),
-                "delta": kpi_delta(total_tokens, total_tokens_prev),
-                "sub": f"{theme.fmt_tokens(total_tokens / days_in_window)}/day",
-                "spark": daily_tokens,
-                "spark_color": theme.TOKEN_TYPE_COLORS["Input"],
-            },
-            {
-                "label": "Cost / resolved issue",
-                "value": (
-                    f"${total_cost / resolved:,.2f}"
-                    if resolved > 0 else "—"
-                ),
-                "delta": None,
-                "sub": f"{resolved} resolved · {rejected} rejected",
-                "spark": daily_done,
-                "spark_color": theme.TOKEN_TYPE_COLORS["Cache"],
-            },
-            {
-                "label": "Rework share",
-                "value": f"{rework_share * 100:.0f}%",
-                "delta": None,
-                "sub": (
-                    f"{theme.fmt_money_exact(rr_rework_cost)} in review "
-                    "rounds >= 1"
-                ),
-                "spark": None,
-            },
-        ]
-        st.markdown(_kpi_strip_html(kpis), unsafe_allow_html=True)
+def _log_dashboard_load(*, load_start: float, reads: int, parallel: bool) -> None:
+    """Emit the single `dashboard.load:` INFO line for the A/B rollout.
 
-        # Second wave -- the remaining widget reads. The KPI strip
-        # already painted above, so the user has real content on
-        # screen while the second wave finishes.
-        try:
-            results.update(
-                _fan_out_reads(
-                    second_wave_readers, parallel=parallel
-                )
-            )
-        except analytics_read.AnalyticsReadError as e:
-            st.error(
-                f"Analytics query failed: {e}. The dashboard cannot render "
-                "without database access; check Postgres connectivity and "
-                "reload."
-            )
-            st.stop()
+    Carries total wall-clock, the reader count (6 when the empty-window
+    short-circuit skips the second wave, else 15), and the parallel flag,
+    so the sequential / parallel paths can be A/B'd with one
+    `grep dashboard.load streamlit.log`.
+    """
     log.info(
         "dashboard.load: total=%.1fs reads=%d parallel=%s",
         perf_counter() - load_start,
-        total_reads,
+        reads,
         "true" if parallel else "false",
     )
-    stage_rows = results["stage_rows"]
-    agent_exits = results["agent_exits"]
-    issues_rows = results["issues_rows"]
-    backend_rows = results["backend_rows"]
-    repo_rows = results["repo_rows"]
-    heatmap_rows = results["heatmap_rows"]
-    backend_daily_rows = results["backend_daily_rows"]
-    skill_rows = results["skill_rows"]
-    skill_matrix_rows = results["skill_matrix_rows"]
 
-    # ── Hero: Spend & token usage over time ──────────────────────
+
+def _render_empty_window(
+    *,
+    st: Any,
+    pd: Any,
+    load_start: float,
+    reads: int,
+    parallel: bool,
+    window: DateWindow,
+    repo_filter: Optional[str],
+    issue_input_parsed: Optional[int],
+    event_filter: Optional[Sequence[str]],
+    stage_filter: Optional[Sequence[str]],
+) -> None:
+    """Render the empty-window state (no events match the filters).
+
+    The first wave's summary returned zero events, so the second wave is
+    skipped entirely -- the remaining widget reads would only paint empty
+    cards. Logs the short-circuit (so the A/B line still lands), surfaces
+    `EMPTY_WINDOW_MESSAGE`, and still renders the per-issue drill-down
+    (which runs its own read).
+    """
+    _log_dashboard_load(load_start=load_start, reads=reads, parallel=parallel)
+    st.info(EMPTY_WINDOW_MESSAGE)
+    _render_drilldown(
+        st=st,
+        pd=pd,
+        window=window,
+        repo_filter=repo_filter,
+        issue_input_parsed=issue_input_parsed,
+        event_filter=event_filter,
+        stage_filter=stage_filter,
+    )
+
+
+def _render_sidebar_filters(*, st: Any, options: Any):
+    """Render the sidebar filter widgets; return the raw selections.
+
+    The repo selector plus the event / stage multiselects and the
+    issue-number input. Returns `(repo_choice, event_choice,
+    stage_choice, issue_input)`; the caller resolves these into the
+    tri-state read filters. An empty multiselect is a deliberate "show
+    nothing for these" signal, not "no filter" -- that distinction is
+    made downstream, not here.
+    """
+    with st.sidebar:
+        st.header("Filters")
+        repo_options = ("All", *options.repos) if options.repos else ("All",)
+        repo_choice = st.selectbox("Repo", repo_options, index=0)
+        event_choice = st.multiselect(
+            "Events",
+            list(options.events),
+            default=list(options.events),
+            help=(
+                "Narrows every widget. An empty selection means "
+                "'show nothing for these events'."
+            ),
+        )
+        stage_choice = st.multiselect(
+            "Stages",
+            list(options.stages),
+            default=list(options.stages),
+            help=(
+                "Narrows every widget. An empty selection means "
+                "'show nothing for these stages'."
+            ),
+        )
+        issue_input = st.text_input(
+            "Issue number",
+            value="",
+            help=(
+                "Enter `123` or `#123` to narrow every widget to one "
+                "issue AND render the per-issue event trace at the "
+                "bottom. Requires a specific repo above."
+            ),
+        )
+    return repo_choice, event_choice, stage_choice, issue_input
+
+
+def _render_date_filter_bar(
+    *,
+    st: Any,
+    extent: DataExtent,
+    extent_min_d: date,
+    extent_max_d: date,
+):
+    """Render the preset + date-range filter bar.
+
+    Returns `(window, meta_slot)`: the resolved `DateWindow` every
+    downstream read is scoped to, and the `st.empty()` placeholder the
+    range meta ("… → … · N days · N runs") fills once the summary read
+    lands (the run count is not known yet). The selected preset persists
+    in `st.session_state` so a custom pick survives a rerun.
+    """
+    if "preset" not in st.session_state:
+        st.session_state.preset = DEFAULT_PRESET
+    with st.container(border=True):
+        # A hidden `.orch-cardmark` as the bordered container's first
+        # child lets the shared white-card rule in
+        # `dashboard_theme.PAGE_CSS` (`:has(> stElementContainer
+        # .orch-cardmark)`) paint this filter bar like every other card --
+        # Streamlit 1.58 dropped the stable border-wrapper testid the old
+        # per-card selector relied on. The `.orch-filterbar-anchor` below
+        # stays in the left column purely as the hidden label sentinel.
+        st.markdown(
+            '<div class="orch-cardmark"></div>', unsafe_allow_html=True
+        )
+        # Single-line filter bar: label · preset switch · From · To ·
+        # range meta, all bottom-aligned so the short controls (label,
+        # radio, meta) sit on the same baseline as the taller date
+        # inputs.
+        (
+            fb_label,
+            fb_preset,
+            fb_from,
+            fb_to,
+            fb_meta,
+        ) = st.columns(
+            [1.0, 1.7, 1.4, 1.4, 3.0], vertical_alignment="bottom"
+        )
+        with fb_label:
+            st.markdown(
+                '<div class="orch-filterbar-anchor"></div>'
+                '<span class="orch-filter-label">Date range</span>',
+                unsafe_allow_html=True,
+            )
+        with fb_preset:
+            preset_choice = st.radio(
+                "Range preset",
+                options=(PRESET_3D, PRESET_7D, PRESET_ALL),
+                format_func=lambda p: PRESET_INLINE_LABELS[p],
+                index=(
+                    (PRESET_3D, PRESET_7D, PRESET_ALL).index(
+                        st.session_state.preset
+                    )
+                    if st.session_state.preset
+                    in (PRESET_3D, PRESET_7D, PRESET_ALL)
+                    else 2
+                ),
+                horizontal=True,
+                label_visibility="collapsed",
+                key="_preset_radio",
+            )
+        initial_window = (
+            preset_window(preset_choice, extent)
+            or to_window(extent_min_d, extent_max_d)
+        )
+        with fb_from:
+            start_date = st.date_input(
+                "From",
+                value=initial_window.start.date(),
+                min_value=extent_min_d,
+                max_value=extent_max_d,
+            )
+        with fb_to:
+            end_default = (initial_window.end - timedelta(days=1)).date()
+            end_date = st.date_input(
+                "To",
+                value=end_default,
+                min_value=extent_min_d,
+                max_value=extent_max_d,
+            )
+        # The run count is not known until the summary read lands, so
+        # capture the meta slot now and fill it between fan-out waves.
+        with fb_meta:
+            meta_slot = st.empty()
+    window = to_window(start_date, end_date)
+    st.session_state.preset = preset_choice
+    return window, meta_slot
+
+
+def _build_read_keys(
+    *,
+    window: DateWindow,
+    repo_filter: Optional[str],
+    event_filter: Optional[Sequence[str]],
+    stage_filter: Optional[Sequence[str]],
+    issue_filter: Optional[int],
+):
+    """Build the current + previous-window cache-key tuples.
+
+    Returns `(key, prev_key)`: the `(start, end, repo, events, stages,
+    issue)` tuple the fan-out reads are cached under, and the same
+    tuple shifted to the immediately-preceding equal-length window for
+    the KPI delta pills. The reader lambdas splat these with `*key` /
+    `*prev_key`, so the tuple order is the read helpers' positional
+    contract.
+    """
+    key = cache_key(
+        window, repo_filter, event_filter, stage_filter, issue_filter
+    )
+    prev_key = cache_key(
+        previous_window(window),
+        repo_filter,
+        event_filter,
+        stage_filter,
+        issue_filter,
+    )
+    return key, prev_key
+
+
+def _render_hero_usage(
+    *,
+    st: Any,
+    dashboard_charts: Any,
+    ts_points: Any,
+    backend_daily_rows: Any,
+) -> None:
+    """Render the hero spend / token-usage stacked-area card.
+
+    Carries the "By token type / By backend" toggle. The backend stack
+    is built off `get_backend_daily_tokens` (not the LIMIT-capped
+    recent-runs table) so a busy window's stack matches the full-window
+    cost line and KPI tiles instead of silently undercounting.
+    """
     with st.container(border=True):
         st.markdown(
             _card_header_html(
@@ -980,11 +1285,6 @@ def main() -> None:
         )
         st.session_state.stack_mode = stack_mode
 
-        # Build the per-day per-backend token map off
-        # `get_backend_daily_tokens`, not the LIMIT-capped recent-runs
-        # table -- in busy windows the cap would silently undercount
-        # the "By backend" stack while the cost line and KPI tiles
-        # still report the full window.
         backend_by_day: dict[date, dict[str, float]] = {}
         if stack_mode == "backend":
             for row in backend_daily_rows:
@@ -1009,9 +1309,19 @@ def main() -> None:
             config=PLOTLY_CONFIG,
         )
 
-    # ── Stage cost (7/12) + review-cycle cost (5/12) ─────────────
-    # Pin both bar panels to the same height (driven by whichever has
-    # more bars) so the two cards line up bottom-to-bottom.
+
+def _render_stage_review_bars(
+    *,
+    st: Any,
+    dashboard_charts: Any,
+    stage_rows: Any,
+    review_round_rows: Any,
+) -> None:
+    """Render the side-by-side per-stage / per-review-round cost bars.
+
+    Both bar panels are pinned to the same height (driven by whichever
+    has more bars) so the two cards line up bottom-to-bottom.
+    """
     bars_h = 40 * max(len(stage_rows), len(review_round_rows), 1) + 80
     col_stage, col_round = st.columns([7, 5])
     with col_stage:
@@ -1045,7 +1355,24 @@ def main() -> None:
                 config=PLOTLY_CONFIG,
             )
 
-    # ── Top expensive issues (7/12) + backend efficiency (5/12) ──
+
+def _render_issues_and_backends(
+    *,
+    st: Any,
+    theme: Any,
+    issues_rows: Any,
+    backend_rows: Any,
+    cost_coverage_rows: Any,
+) -> None:
+    """Render the top-cost issues table + backend-efficiency column.
+
+    Left (7/12): the "Most expensive issues" table. `issues_rows` is
+    already cost-ordered from SQL, but it is piped through
+    `top_expensive_issues` so the in-memory cost / event-count
+    tie-breakers stay authoritative and the set never exceeds
+    `DEFAULT_EXPENSIVE_LIMIT`. Right (5/12): the per-backend efficiency
+    cards above the cost-source coverage bar.
+    """
     col_issues, col_backend = st.columns([7, 5])
     with col_issues:
         with st.container(border=True):
@@ -1056,11 +1383,6 @@ def main() -> None:
                 ),
                 unsafe_allow_html=True,
             )
-            # `issues_rows` is already cost-ordered from the SQL
-            # (`sort_by="cost"`); pipe through `top_expensive_issues`
-            # so the in-memory cost / event-count tie-breakers stay
-            # the source of truth and the rendered set never exceeds
-            # `DEFAULT_EXPENSIVE_LIMIT`.
             expensive = top_expensive_issues(issues_rows)
             if expensive:
                 st.markdown(
@@ -1080,125 +1402,43 @@ def main() -> None:
                 unsafe_allow_html=True,
             )
             if backend_rows:
+                # One `st.markdown` per card (not a single joined
+                # markdown) so Streamlit's inter-element gap keeps the
+                # cards visually separated.
                 for row in backend_rows:
-                    # Per-backend token total mirrors the headline KPI:
-                    # input + output + cache_read + cache_write so the
-                    # "cost / 1M tok" tile divides by the same volume
-                    # the rest of the redesigned page reports.
-                    tokens = int(
-                        (row.total_input_tokens or 0)
-                        + (row.total_output_tokens or 0)
-                        + (row.total_cache_read_tokens or 0)
-                        + (row.total_cache_write_tokens or 0)
-                    )
-                    cost_per_m = (
-                        (row.total_cost_usd / (tokens / 1_000_000))
-                        if tokens > 0 else 0.0
-                    )
-                    cost_per_run = (
-                        (row.total_cost_usd / row.runs)
-                        if row.runs > 0 else 0.0
-                    )
-                    # Cache leverage: share of "billable input" served
-                    # from cache. Matches the standalone mock's
-                    # `cacheRead / (cacheRead + input)` accounting --
-                    # high cache hit means a smaller fraction of input
-                    # tokens hit the model's input rate, which is the
-                    # cost lever the operator is reading off the card.
-                    cache_read = int(row.total_cache_read_tokens or 0)
-                    input_tok = int(row.total_input_tokens or 0)
-                    cache_hit_pct = (
-                        (cache_read / (cache_read + input_tok) * 100)
-                        if (cache_read + input_tok) > 0 else 0.0
-                    )
-                    color = theme.color_for(
-                        row.backend, explicit=theme.BACKEND_COLORS
-                    )
                     st.markdown(
-                        f'<div style="border:1px solid {theme.BORDER};'
-                        f'border-radius:8px;padding:10px 12px;'
-                        f'margin-bottom:8px">'
-                        f'<div style="display:flex;align-items:center;'
-                        f'gap:8px;margin-bottom:4px">'
-                        f'<span style="display:inline-block;width:10px;'
-                        f'height:10px;border-radius:50%;background:{color}">'
-                        f'</span>'
-                        f'<b style="color:{theme.TEXT}">'
-                        f'{html.escape(row.backend)}</b>'
-                        f'<span style="color:{theme.MUTED_TEXT};'
-                        f'font-size:12px;margin-left:auto">'
-                        f'{row.runs} runs · {theme.fmt_tokens(tokens)} tok'
-                        '</span>'
-                        '</div>'
-                        f'<div style="color:{theme.TEXT};font-size:20px;'
-                        f'font-weight:600;'
-                        f'font-family:{theme.MONO_FONT_FAMILY};'
-                        f'margin-bottom:6px">'
-                        f'{html.escape(theme.fmt_money_exact(row.total_cost_usd))}'
-                        f'<span style="color:{theme.MUTED_TEXT};'
-                        f'font-size:11px;margin-left:8px;'
-                        f'font-family:{theme.FONT_FAMILY}">'
-                        f'spend</span></div>'
-                        f'<div style="display:flex;gap:14px;font-size:12px;'
-                        f'color:{theme.MUTED_TEXT}">'
-                        f'<span>${cost_per_m:.2f} / 1M tok</span>'
-                        f'<span>{cache_hit_pct:.0f}% cache hit</span>'
-                        f'<span>${cost_per_run:.2f} / run</span>'
-                        '</div></div>',
+                        _backend_efficiency_card_html(row, theme=theme),
                         unsafe_allow_html=True,
                     )
             else:
                 st.info("No `agent_exit` rows match the current filters.")
             if cost_coverage_rows:
-                # Token share, not run share -- a few high-token runs
-                # can dominate cost while looking like a thin slice of
-                # the run count, so the standalone mock sizes the bar
-                # by `tok` and we follow suit. Falls back to the run
-                # share when the window carries no token volume yet
-                # (a brand-new database with `agent_exit` rows that
-                # never reported usage).
-                total_tokens = sum(
-                    int(r.total_tokens or 0) for r in cost_coverage_rows
-                )
-                if total_tokens > 0:
-                    weights = [
-                        int(r.total_tokens or 0) for r in cost_coverage_rows
-                    ]
-                    total = total_tokens
-                else:
-                    weights = [int(r.runs or 0) for r in cost_coverage_rows]
-                    total = sum(weights) or 1
-                segs = []
-                legend = []
-                for r, w in zip(cost_coverage_rows, weights):
-                    pct = w / total * 100
-                    color = theme.color_for(
-                        r.cost_source,
-                        [r.cost_source for r in cost_coverage_rows],
-                        explicit=theme.COST_SOURCE_COLORS,
-                    )
-                    segs.append(
-                        f'<span style="width:{pct:.1f}%;background:{color}" '
-                        f'title="{html.escape(r.cost_source)}"></span>'
-                    )
-                    legend.append(
-                        f'<span><span class="dot" '
-                        f'style="background:{color}"></span>'
-                        f'{html.escape(r.cost_source)} '
-                        f'<b style="color:{theme.TEXT};'
-                        f'font-family:{theme.MONO_FONT_FAMILY}">'
-                        f'{pct:.1f}%</b>'
-                        '</span>'
-                    )
                 st.markdown(
-                    '<div class="orch-cov-title">'
-                    'Cost attribution coverage</div>'
-                    f'<div class="orch-cov-bar">{"".join(segs)}</div>'
-                    f'<div class="orch-cov-legend">{"".join(legend)}</div>',
+                    _cost_coverage_bar_html(cost_coverage_rows, theme=theme),
                     unsafe_allow_html=True,
                 )
 
-    # ── Repo cost (7/12) + reliability tiles (5/12) ─────────────
+
+def _render_repo_and_reliability(
+    *,
+    st: Any,
+    dashboard_charts: Any,
+    theme: Any,
+    repo_rows: Any,
+    summary: Summary,
+    throughput_rows: Any,
+    window: DateWindow,
+    resolved: int,
+    rejected: int,
+) -> None:
+    """Render the per-repo cost bars + reliability / throughput column.
+
+    The reliability tiles source every value from the same full-window
+    `Summary` aggregate (not the LIMIT-capped recent-runs read) so a
+    long window still sees every timeout / failure. The resolved-per-day
+    chart is passed the window so zero-resolution days the SQL elides
+    still render an explicit bar against the calendar baseline.
+    """
     col_repo, col_rel = st.columns([7, 5])
     with col_repo:
         with st.container(border=True):
@@ -1223,30 +1463,13 @@ def main() -> None:
                 ),
                 unsafe_allow_html=True,
             )
-            # Pull every reliability tile off the same full-window
-            # `Summary` aggregate so e.g. the timeout count sees every
-            # timed-out run in the window, not just the latest 100
-            # rows surfaced by `get_recent_agent_exits`.
             raw_tiles = reliability_tile_data(
                 summary, resolved=resolved, rejected=rejected,
             )
-            tiles_html = "".join(
-                f'<div class="orch-rel-tile {tone}">'
-                f'<div class="orch-rel-value">'
-                f'{html.escape(v if isinstance(v, str) else theme.fmt_num(v))}'
-                f'</div>'
-                f'<div class="orch-rel-label">{html.escape(lbl)}</div>'
-                '</div>'
-                for v, lbl, tone in raw_tiles
-            )
             st.markdown(
-                f'<div class="orch-rel-tiles">{tiles_html}</div>',
+                _reliability_tiles_html(raw_tiles, fmt_num=theme.fmt_num),
                 unsafe_allow_html=True,
             )
-            # Pass the window so every day -- including zero-
-            # resolution ones the SQL elides -- renders an
-            # explicit bar. Without the window the chart would
-            # appear "gappy" against a calendar baseline.
             st.plotly_chart(
                 dashboard_charts.done_per_day_bars(
                     throughput_rows,
@@ -1258,7 +1481,22 @@ def main() -> None:
                 config=PLOTLY_CONFIG,
             )
 
-    # ── When agents run (heatmap) ──────────────────────────
+
+def _render_activity_heatmap(
+    *,
+    st: Any,
+    dashboard_charts: Any,
+    heatmap_rows: Any,
+    tz_offset_choice: int,
+) -> None:
+    """Render the weekday × hour token-volume heatmap card.
+
+    The in-card UTC-offset selectbox binds to
+    `st.session_state["tz_offset_hours"]` (seeded in `main()` before
+    the second-wave fan-out) so the heatmap read and this widget agree
+    on the offset; on change Streamlit reruns and the next read buckets
+    in the newly-picked zone.
+    """
     tz_label = format_tz_offset(int(tz_offset_choice))
     with st.container(border=True):
         st.markdown(
@@ -1268,11 +1506,6 @@ def main() -> None:
             ),
             unsafe_allow_html=True,
         )
-        # Per-card UTC-offset selector. `key="tz_offset_hours"` ties
-        # it to the session_state slot seeded above so the heatmap
-        # read (which already fired in the second-wave fan-out) and
-        # this widget agree on the value. On change Streamlit reruns
-        # the script and the next read uses the new offset.
         st.selectbox(
             "Timezone",
             TZ_OFFSET_OPTIONS,
@@ -1292,70 +1525,20 @@ def main() -> None:
             config=PLOTLY_CONFIG,
         )
 
-    # ── Skill trigger rates ────────────────────────────
-    # Opt-in read-side widget over the `skills_triggered` /
-    # `skills_triggered_count` fields `record_agent_exit` folds into
-    # `extras` when `TRACK_SKILL_TRIGGERS` is on. A `0%` rate is a real
-    # signal ("this role's skill is not firing"), but it cannot tell a
-    # tracked-but-quiet run from one whose tracking was off, so the
-    # caption names the switch when nothing has triggered yet.
-    with st.container(border=True):
-        st.markdown(
-            _card_header_html(
-                "Skill trigger rates",
-                "Share of agent runs that triggered a skill, by role and "
-                "backend (requires TRACK_SKILL_TRIGGERS)",
-            ),
-            unsafe_allow_html=True,
-        )
-        if skill_rows:
-            st.markdown(
-                _skill_triggers_html(skill_rows),
-                unsafe_allow_html=True,
-            )
-            if not any(r.skill_runs for r in skill_rows):
-                st.caption(
-                    "No skill triggers recorded in this window. Enable "
-                    "`TRACK_SKILL_TRIGGERS` (default off) so "
-                    "`record_agent_exit` records which skills each run "
-                    "pulls."
-                )
-            # Second table: the per-skill x (repo, role, backend) trigger
-            # matrix. Folds each repo's skill catalog into the observed
-            # triggers so an offered-but-never-triggered skill surfaces
-            # as an explicit `0` cell; `_skill_matrix_html` renders a
-            # clear fallback notice in place of the table when the read
-            # model returns no catalog-backed matrix (no catalog records
-            # matched and no run fired a skill). Folded into an expander
-            # (collapsed by default, mirroring "Recent agent runs" below)
-            # so the matrix -- capped at 100 rows by the read model
-            # (Runs-with-skill DESC then Runs DESC) and shown by default
-            # repo-ascending then trigger-rate-descending -- does not
-            # dominate the card until the operator opens it.
-            with st.expander(
-                "Per-skill trigger matrix · which skills each "
-                "repo × role × backend cohort reaches for",
-                expanded=False,
-            ):
-                # Clickable column headers re-sort the matrix: each header
-                # anchor writes `mtx_sort` / `mtx_dir` query params, which
-                # this parses back into a (column, direction) pair the
-                # render applies on top of the read model's default order.
-                matrix_sort_key, matrix_sort_desc = parse_skill_matrix_sort(
-                    st.query_params
-                )
-                st.markdown(
-                    _skill_matrix_html(
-                        skill_matrix_rows,
-                        sort_key=matrix_sort_key,
-                        descending=matrix_sort_desc,
-                    ),
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.info("No `agent_exit` rows match the current filters.")
 
-    # ── Recent agent runs expander ──────────────────────────
+def _render_recent_runs(
+    *,
+    st: Any,
+    pd: Any,
+    agent_exits: Any,
+    tz_offset_choice: int,
+) -> None:
+    """Render the "Recent agent runs" collapsible table.
+
+    The `ts` column is shifted from stored UTC to the wall-clock of the
+    selected offset via `shift_ts` so it reads in the same zone as the
+    heatmap above it.
+    """
     with st.expander("Recent agent runs", expanded=False):
         if agent_exits:
             ts_offset = timedelta(hours=int(tz_offset_choice))
@@ -1382,25 +1565,6 @@ def main() -> None:
             st.dataframe(df_exits, use_container_width=True)
         else:
             st.info("No `agent_exit` rows match the current filters.")
-
-    _render_drilldown(
-        st=st,
-        pd=pd,
-        window=window,
-        repo_filter=repo_filter,
-        issue_input_parsed=issue_input_parsed,
-        event_filter=event_filter,
-        stage_filter=stage_filter,
-    )
-
-    st.markdown(
-        '<div class="orch-foot">'
-        f'Real data · window {window.start.date().isoformat()} → '
-        f'{(window.end - timedelta(days=1)).date().isoformat()} · '
-        f'{theme.fmt_num(summary.total_agent_runs)} agent runs'
-        '</div>',
-        unsafe_allow_html=True,
-    )
 
 
 def _render_drilldown(
