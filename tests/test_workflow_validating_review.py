@@ -468,6 +468,56 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # Interrupted is not a question / timeout / dirty park.
         self.assertFalse(state.get("awaiting_human"))
 
+    def test_changes_requested_park_records_reviewer_anchor(self) -> None:
+        # #742: on the validating -> fixing route the reviewer-feedback PR
+        # comment id is anchored in `pending_fix_reviewer_comment_id` so a
+        # session-failure park is retryable by `/orchestrator continue`.
+        # `pending_fix_at` must stay UNSET -- it is the in_review-route
+        # discriminator that drives the review-round reset, so setting it here
+        # would mis-account the round on the eventual pushed fix.
+        gh, issue = self._seeded()
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=[
+                self._changes_requested_review(),
+                # No-commit park: the dev asks a question / goes silent.
+                _agent(session_id="dev-sess", last_message="why?"),
+            ],
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["aaa", "aaa"],
+        )
+
+        state = gh.pinned_data(6)
+        self.assertTrue(state.get("awaiting_human"))
+        # The reviewer feedback is anchored, and its id matches the PR comment
+        # the handler posted this tick.
+        self.assertIsNotNone(state.get("pending_fix_reviewer_comment_id"))
+        # The in_review-route discriminator is NOT set on this route.
+        self.assertIsNone(state.get("pending_fix_at"))
+        self.assertIn((6, "fixing"), gh.label_history)
+
+    def test_changes_requested_pushed_fix_clears_reviewer_anchor(self) -> None:
+        # On a pushed inline fix this reviewer round is addressed, so the
+        # anchor is cleared (a later session-failure park must not replay it)
+        # and the round bumps back on `validating`.
+        gh, issue = self._seeded(review_round=2)
+        self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=[
+                self._changes_requested_review(),
+                _agent(session_id="dev-sess", last_message="fixed"),
+            ],
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["aaa", "bbb"],
+        )
+
+        state = gh.pinned_data(6)
+        self.assertIsNone(state.get("pending_fix_reviewer_comment_id"))
+        self.assertEqual(state.get("review_round"), 3)
+        self.assertEqual(gh.label_history[-1], (6, "validating"))
+
 
 class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_human_reply_resumes_dev_bumps_round_no_reviewer_this_tick(self) -> None:

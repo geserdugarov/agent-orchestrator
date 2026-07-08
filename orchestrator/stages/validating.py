@@ -1220,13 +1220,23 @@ def _handle_validating_changes_requested(
     `review_round` accounting, `MAX_REVIEW_ROUNDS`, dev-session pinning, and the
     final-docs handoff are unchanged -- only the visible label moves with the
     active work.
+
+    The id of the reviewer-feedback PR comment is recorded in
+    `pending_fix_reviewer_comment_id` so a session-failure park on this route
+    (`agent_silent` / `agent_timeout`) is retryable by `/orchestrator continue`:
+    the fixing handler's `_reconstruct_pending_fix_batch` replays that exact
+    comment. `pending_fix_at` is deliberately NOT set (it discriminates the
+    in_review route's review-round reset from this route's bump), so the anchor
+    is a standalone key cleared on the pushed-fix exit here and inside
+    `_clear_pending_fix_bookmarks`.
     """
     from .. import workflow as _wf
 
     feedback = body.strip() or (review.last_message or "").strip()
+    reviewer_comment = None
     if pr_number is not None:
         try:
-            _wf._post_pr_comment(
+            reviewer_comment = _wf._post_pr_comment(
                 gh, int(pr_number), state,
                 f":eyes: {config.REVIEW_AGENT} review (round {round_n + 1}/"
                 f"{config.MAX_REVIEW_ROUNDS}) requested changes:\n\n{feedback}",
@@ -1236,6 +1246,19 @@ def _handle_validating_changes_requested(
                 "issue=#%s could not post review to PR #%s",
                 issue.number, pr_number,
             )
+
+    # Anchor the reviewer-feedback PR comment so a session-failure park on
+    # this validating route can be retried by `/orchestrator continue`: the
+    # dev may hit a session limit below and park as `agent_silent` with no
+    # `pending_fix_*_ids` on file, and `_reconstruct_pending_fix_batch`
+    # replays this exact comment as the validating-route batch. Deliberately
+    # do NOT set `pending_fix_at` -- it is the in_review-route discriminator
+    # that drives the review-round RESET (this route bumps instead) and the
+    # ACK fast path, so setting it would mis-account the round. The anchor is
+    # cleared on a pushed fix below and inside `_clear_pending_fix_bookmarks`.
+    anchor_id = getattr(reviewer_comment, "id", None)
+    if anchor_id is not None:
+        state.set("pending_fix_reviewer_comment_id", int(anchor_id))
 
     gh.set_workflow_label(issue, WorkflowLabel.FIXING)
     gh.write_pinned_state(issue, state)
@@ -1290,8 +1313,11 @@ def _handle_validating_changes_requested(
         return
 
     # Pushed fix: bump the round and hand back to `validating` so the
-    # reviewer re-evaluates the new head next tick.
+    # reviewer re-evaluates the new head next tick. Clear the reviewer
+    # anchor -- this round's feedback is addressed, so a later session-
+    # failure park must not replay it as if it were still outstanding.
     state.set("review_round", round_n + 1)
+    state.set("pending_fix_reviewer_comment_id", None)
     gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
     gh.write_pinned_state(issue, state)
 
