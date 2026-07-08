@@ -320,6 +320,28 @@ def _dedup_models(models: Iterable[str]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _select_cost(
+    reported: Optional[float],
+    estimated: Optional[float],
+    has_usage: bool,
+) -> tuple[Optional[float], str]:
+    """Choose the authoritative cost and the ``cost_source`` tag for it.
+
+    A CLI-reported ``total_cost_usd`` always wins over a first-party estimate,
+    and an estimate wins over nothing. With neither, ``no-usage`` marks a stream
+    that carried no usage records at all, distinct from ``unknown-price`` (usage
+    was present but the model has no known rate). Shared by both parsers so the
+    precedence cannot drift between backends.
+    """
+    if reported is not None:
+        return reported, "reported"
+    if estimated is not None:
+        return estimated, "estimated"
+    if not has_usage:
+        return None, "no-usage"
+    return None, "unknown-price"
+
+
 # --- claude parser ----------------------------------------------------------
 
 def _claude_model_name(event: dict[str, Any]) -> str:
@@ -387,18 +409,19 @@ def _claude_usage_record(usage: dict[str, Any]) -> dict[str, int]:
     }
 
 
-def parse_claude_usage(stdout: str) -> UsageMetrics:
-    """Extract usage / cost from a ``claude -p --output-format stream-json`` run.
+def _claude_usage_records(
+    events: list[dict[str, Any]],
+) -> list[tuple[int, str, dict[str, int]]]:
+    """Group claude usage into ``(idx, model, record)`` rows, last frame wins.
 
-    Per-message usage events are grouped by ``message.id`` and the last
-    occurrence of each id wins; Claude streams partial usage on intermediate
-    frames and the final frame carries the authoritative count. When no
-    assistant usage events exist we fall back to the terminal
-    ``type:"result"`` frame's ``usage`` block.
+    Per-message usage events are keyed by ``message.id`` (falling back to
+    ``request_id`` then stream position) and the last occurrence of each id
+    overwrites earlier ones -- Claude streams partial usage on intermediate
+    frames and the final frame carries the authoritative count. Rows are
+    returned sorted by each id's final stored frame index (its last
+    occurrence). When no assistant usage events exist we fall back to the
+    terminal ``type:"result"`` frame's ``usage`` block.
     """
-    events = _iter_events(stdout)
-    metrics = UsageMetrics(backend="claude")
-
     by_id: dict[str, tuple[int, str, dict[str, int]]] = {}
     for idx, ev in enumerate(events):
         if ev.get("type") != "assistant":
@@ -413,19 +436,30 @@ def parse_claude_usage(stdout: str) -> UsageMetrics:
         by_id[msg_id] = (idx, _claude_model_name(ev), _claude_usage_record(usage))
 
     if by_id:
-        records = [v for _, v in sorted(by_id.items(), key=lambda kv: kv[1][0])]
-    else:
-        records = []
-        for idx, ev in enumerate(events):
-            if ev.get("type") != "result":
-                continue
-            usage = ev.get("usage")
-            if not isinstance(usage, dict):
-                continue
-            records.append(
-                (idx, _claude_model_name(ev), _claude_usage_record(usage))
-            )
+        return [v for _, v in sorted(by_id.items(), key=lambda kv: kv[1][0])]
 
+    records: list[tuple[int, str, dict[str, int]]] = []
+    for idx, ev in enumerate(events):
+        if ev.get("type") != "result":
+            continue
+        usage = ev.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        records.append(
+            (idx, _claude_model_name(ev), _claude_usage_record(usage))
+        )
+    return records
+
+
+def _claude_aggregate_by_model(
+    records: list[tuple[int, str, dict[str, int]]],
+) -> tuple[dict[str, dict[str, int]], list[str]]:
+    """Sum usage records into per-model token buckets, keeping first-seen order.
+
+    Per-model aggregation (rather than one flat total) keeps each model's
+    tokens together so ``_claude_estimate_total`` can price a mixed-model run
+    at each model's own rate.
+    """
     per_model: dict[str, dict[str, int]] = {}
     model_order: list[str] = []
     for _, model, rec in records:
@@ -438,6 +472,63 @@ def parse_claude_usage(stdout: str) -> UsageMetrics:
             model_order.append(model)
         for k, v in rec.items():
             bucket[k] += v
+    return per_model, model_order
+
+
+def _claude_estimate_total(
+    per_model: dict[str, dict[str, int]],
+) -> Optional[float]:
+    """Sum each model's estimated cost, or ``None`` if any model is unpriced.
+
+    Returns ``None`` (never a partial sum) when the price table has no rate for
+    some model in the run, so the caller can tell ``estimated`` from
+    ``unknown-price``; also ``None`` when there are no usage records at all.
+    """
+    if not per_model:
+        return None
+    parts: list[float] = []
+    for model, bucket in per_model.items():
+        part = _claude_estimate_cost(model, bucket)
+        if part is None:
+            return None
+        parts.append(part)
+    return sum(parts)
+
+
+def _claude_turn_count(
+    events: list[dict[str, Any]],
+    records: list[tuple[int, str, dict[str, int]]],
+) -> Optional[int]:
+    """Turn count for a claude run: the ``result`` frame's ``num_turns``.
+
+    Falls back to the number of per-message usage records when no ``result``
+    frame reports ``num_turns``; ``None`` when neither is available.
+    """
+    num_turns: Optional[int] = None
+    for ev in events:
+        if ev.get("type") == "result":
+            nt = ev.get("num_turns")
+            if isinstance(nt, (int, float)):
+                num_turns = int(nt)
+    if num_turns is None and records:
+        num_turns = len(records)
+    return num_turns
+
+
+def parse_claude_usage(stdout: str) -> UsageMetrics:
+    """Extract usage / cost from a ``claude -p --output-format stream-json`` run.
+
+    Per-message usage events are grouped by ``message.id`` and the last
+    occurrence of each id wins; Claude streams partial usage on intermediate
+    frames and the final frame carries the authoritative count. When no
+    assistant usage events exist we fall back to the terminal
+    ``type:"result"`` frame's ``usage`` block.
+    """
+    events = _iter_events(stdout)
+    metrics = UsageMetrics(backend="claude")
+
+    records = _claude_usage_records(events)
+    per_model, model_order = _claude_aggregate_by_model(records)
 
     for bucket in per_model.values():
         metrics.input_tokens += bucket["input"]
@@ -449,40 +540,12 @@ def parse_claude_usage(stdout: str) -> UsageMetrics:
     metrics.models = _dedup_models(model_order)
 
     reported = _find_last_reported_cost(events)
+    estimated = _claude_estimate_total(per_model)
+    metrics.cost_usd, metrics.cost_source = _select_cost(
+        reported, estimated, bool(records)
+    )
 
-    estimated: Optional[float] = None
-    if per_model:
-        parts: list[float] = []
-        priced_all = True
-        for model, bucket in per_model.items():
-            part = _claude_estimate_cost(model, bucket)
-            if part is None:
-                priced_all = False
-                break
-            parts.append(part)
-        if priced_all:
-            estimated = sum(parts)
-
-    if reported is not None:
-        metrics.cost_usd = reported
-        metrics.cost_source = "reported"
-    elif estimated is not None:
-        metrics.cost_usd = estimated
-        metrics.cost_source = "estimated"
-    elif not records:
-        metrics.cost_source = "no-usage"
-    else:
-        metrics.cost_source = "unknown-price"
-
-    num_turns = None
-    for ev in events:
-        if ev.get("type") == "result":
-            nt = ev.get("num_turns")
-            if isinstance(nt, (int, float)):
-                num_turns = int(nt)
-    if num_turns is None and records:
-        num_turns = len(records)
-    metrics.turns = num_turns
+    metrics.turns = _claude_turn_count(events, records)
     return metrics
 
 
@@ -591,18 +654,15 @@ def _codex_usage_record(usage: dict[str, Any]) -> dict[str, int]:
 _TURN_COMPLETE_RE = re.compile(r"turn[_ -]?complete|turncomplete", re.IGNORECASE)
 
 
-def parse_codex_usage(
-    stdout: str, fallback_model: Optional[str] = None
-) -> UsageMetrics:
-    """Extract usage / cost from a ``codex exec --json`` run.
+def _codex_usage_events(
+    events: list[dict[str, Any]],
+) -> list[tuple[str, dict[str, int]]]:
+    """Collect non-empty codex usage records as ``(model, record)`` in order.
 
-    Codex usage events are cumulative across the session; the shell
-    reference takes the *last* non-zero usage record as the authoritative
-    total rather than summing per-event deltas. We do the same here.
+    Frames whose input + cached + output sum to zero are dropped so the
+    last-wins pick in ``parse_codex_usage`` lands on a frame that actually
+    carried tokens rather than a trailing empty one.
     """
-    events = _iter_events(stdout)
-    metrics = UsageMetrics(backend="codex")
-
     usage_events: list[tuple[str, dict[str, int]]] = []
     for ev in events:
         usage = _codex_usage_block(ev)
@@ -613,75 +673,79 @@ def parse_codex_usage(
             continue
         model = _codex_model_name(ev, usage)
         usage_events.append((model, rec))
+    return usage_events
 
-    if usage_events:
-        last_model, last_usage = usage_events[-1]
-    else:
-        last_model, last_usage = "unknown", {"input": 0, "cached": 0, "output": 0}
 
-    chosen_model: Optional[str] = _codex_known_model(last_model)
-    if chosen_model is None:
+def _codex_select_model(
+    events: list[dict[str, Any]],
+    last_model: str,
+    fallback_model: Optional[str],
+) -> Optional[str]:
+    """Pick the run's model: the last usage frame's, else a stream-wide scan.
+
+    Prefers the model named on the authoritative (last) usage frame. Failing
+    that, the last ``model`` field seen anywhere in the stream wins, then the
+    caller-supplied ``fallback_model``. ``None`` when nothing names a model.
+    """
+    chosen = _codex_known_model(last_model)
+    if chosen is None:
         for ev in events:
             for obj in _walk_objects(ev):
                 cand = _codex_known_model(obj.get("model"))
                 if cand:
-                    chosen_model = cand
-        if chosen_model is None and fallback_model:
-            chosen_model = _codex_known_model(fallback_model)
+                    chosen = cand
+        if chosen is None and fallback_model:
+            chosen = _codex_known_model(fallback_model)
+    return chosen
 
-    model_label = chosen_model or "unknown"
 
-    metrics.input_tokens = last_usage["input"]
-    metrics.cached_tokens = last_usage["cached"]
-    metrics.output_tokens = last_usage["output"]
-    if chosen_model is not None:
-        metrics.models = (chosen_model,)
+def _codex_estimate_cost(
+    model: str, usage: dict[str, int]
+) -> Optional[float]:
+    """Price a codex usage record, honoring the long-context tier.
 
-    reported = _find_last_reported_cost(events)
+    ``None`` when the model has no known rate, when the run carried no
+    input/output tokens, or when it used cached tokens the family publishes no
+    cached rate for (billing those at the input rate would overcharge).
+    """
+    rates = _codex_rates(model)
+    if rates is None or (usage["input"] + usage["output"]) <= 0:
+        return None
+    cached = usage["cached"]
+    # Codex/OpenAI reports input_tokens as the *total* prompt count and
+    # cached_input_tokens as the portion of that prompt served from cache.
+    # Bill the non-cached remainder at the input rate; bill the cached
+    # portion at the cached rate when published, otherwise leave the
+    # estimate unknown rather than overcharge.
+    uncached = max(usage["input"] - cached, 0)
+    cached_rate = rates["cached"]
+    # Long-context tier: some Codex SKUs (e.g. gpt-5.5) bill the
+    # entire session at elevated rates once total input crosses a
+    # threshold. The multipliers default to 1.0 (no change) for any
+    # rate entry without long-context keys, so flat-priced families
+    # are unaffected.
+    threshold = rates.get("long_context_threshold")
+    input_mult = 1.0
+    output_mult = 1.0
+    if threshold is not None and usage["input"] > threshold:
+        input_mult = rates.get("long_context_input_mult") or 1.0
+        output_mult = rates.get("long_context_output_mult") or 1.0
+    if cached > 0 and cached_rate is None:
+        return None
+    cr = cached_rate if cached_rate is not None else rates["input"]
+    return (
+        uncached * rates["input"] * input_mult
+        + cached * cr * input_mult
+        + usage["output"] * rates["output"] * output_mult
+    ) / 1_000_000
 
-    estimated: Optional[float] = None
-    rates = _codex_rates(model_label)
-    if rates is not None and (last_usage["input"] + last_usage["output"]) > 0:
-        cached = last_usage["cached"]
-        # Codex/OpenAI reports input_tokens as the *total* prompt count and
-        # cached_input_tokens as the portion of that prompt served from cache.
-        # Bill the non-cached remainder at the input rate; bill the cached
-        # portion at the cached rate when published, otherwise leave the
-        # estimate unknown rather than overcharge.
-        uncached = max(last_usage["input"] - cached, 0)
-        cached_rate = rates["cached"]
-        # Long-context tier: some Codex SKUs (e.g. gpt-5.5) bill the
-        # entire session at elevated rates once total input crosses a
-        # threshold. The multipliers default to 1.0 (no change) for any
-        # rate entry without long-context keys, so flat-priced families
-        # are unaffected.
-        threshold = rates.get("long_context_threshold")
-        input_mult = 1.0
-        output_mult = 1.0
-        if threshold is not None and last_usage["input"] > threshold:
-            input_mult = rates.get("long_context_input_mult") or 1.0
-            output_mult = rates.get("long_context_output_mult") or 1.0
-        if cached > 0 and cached_rate is None:
-            estimated = None
-        else:
-            cr = cached_rate if cached_rate is not None else rates["input"]
-            estimated = (
-                uncached * rates["input"] * input_mult
-                + cached * cr * input_mult
-                + last_usage["output"] * rates["output"] * output_mult
-            ) / 1_000_000
 
-    if reported is not None:
-        metrics.cost_usd = reported
-        metrics.cost_source = "reported"
-    elif estimated is not None:
-        metrics.cost_usd = estimated
-        metrics.cost_source = "estimated"
-    elif not usage_events:
-        metrics.cost_source = "no-usage"
-    else:
-        metrics.cost_source = "unknown-price"
+def _codex_turn_count(events: list[dict[str, Any]]) -> Optional[int]:
+    """Turn count for a codex run: a ``num_turns`` reported anywhere in stream.
 
+    Falls back to counting ``turn_complete``-typed events -- codex has no
+    per-turn usage frame -- and returns ``None`` when neither signal is present.
+    """
     num_turns: Optional[int] = None
     for ev in events:
         for obj in _walk_objects(ev):
@@ -695,7 +759,43 @@ def parse_codex_usage(
             if isinstance(t, str) and _TURN_COMPLETE_RE.search(t):
                 count += 1
         num_turns = count or None
-    metrics.turns = num_turns
+    return num_turns
+
+
+def parse_codex_usage(
+    stdout: str, fallback_model: Optional[str] = None
+) -> UsageMetrics:
+    """Extract usage / cost from a ``codex exec --json`` run.
+
+    Codex usage events are cumulative across the session; the shell
+    reference takes the *last* non-zero usage record as the authoritative
+    total rather than summing per-event deltas. We do the same here.
+    """
+    events = _iter_events(stdout)
+    metrics = UsageMetrics(backend="codex")
+
+    usage_events = _codex_usage_events(events)
+    if usage_events:
+        last_model, last_usage = usage_events[-1]
+    else:
+        last_model, last_usage = "unknown", {"input": 0, "cached": 0, "output": 0}
+
+    chosen_model = _codex_select_model(events, last_model, fallback_model)
+    model_label = chosen_model or "unknown"
+
+    metrics.input_tokens = last_usage["input"]
+    metrics.cached_tokens = last_usage["cached"]
+    metrics.output_tokens = last_usage["output"]
+    if chosen_model is not None:
+        metrics.models = (chosen_model,)
+
+    reported = _find_last_reported_cost(events)
+    estimated = _codex_estimate_cost(model_label, last_usage)
+    metrics.cost_usd, metrics.cost_source = _select_cost(
+        reported, estimated, bool(usage_events)
+    )
+
+    metrics.turns = _codex_turn_count(events)
     return metrics
 
 
@@ -1152,6 +1252,89 @@ def _claude_turn_key(idx: int, event: dict[str, Any]) -> str:
     return str(idx)
 
 
+def _claude_assistant_steps(
+    content: list[Any], turn: Optional[int], seen_calls: set[str],
+) -> list[TrajectoryStep]:
+    """Steps from one assistant frame's content: ``text`` + ``tool_use`` blocks.
+
+    ``text`` blocks become ``assistant_message`` turns; ``tool_use`` blocks
+    become ``tool_call`` steps de-duplicated by the block ``id`` (defensive
+    against ``--include-partial-messages`` re-emitting a block across frames --
+    ``seen_calls`` carries that state across the whole stream). Every step
+    carries the frame's ``turn`` index. The raw ``input`` / ``text`` payload
+    rides along verbatim (no redaction here).
+    """
+    steps: list[TrajectoryStep] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text = block.get("text")
+            if isinstance(text, str) and text:
+                steps.append(TrajectoryStep(
+                    kind="assistant_message",
+                    turn=turn,
+                    content=text,
+                ))
+        elif btype == "tool_use":
+            name = block.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            bid = block.get("id")
+            tool_id = bid if isinstance(bid, str) and bid else ""
+            if tool_id:
+                if tool_id in seen_calls:
+                    continue
+                seen_calls.add(tool_id)
+            steps.append(TrajectoryStep(
+                kind="tool_call",
+                name=name,
+                tool_id=tool_id,
+                turn=turn,
+                content=block.get("input"),
+            ))
+    return steps
+
+
+def _claude_user_steps(
+    content: list[Any], seen_results: set[str],
+) -> list[TrajectoryStep]:
+    """Steps from one user frame's content: ``text`` + ``tool_result`` blocks.
+
+    ``text`` blocks become ``user_message`` turns; ``tool_result`` blocks
+    become ``tool_result`` steps de-duplicated by ``tool_use_id`` (which also
+    joins each back to its call). These are turn *inputs*, not billed output,
+    so they carry no ``turn`` index. The raw ``content`` / ``text`` payload
+    rides along verbatim (no redaction here).
+    """
+    steps: list[TrajectoryStep] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text = block.get("text")
+            if isinstance(text, str) and text:
+                steps.append(TrajectoryStep(
+                    kind="user_message",
+                    content=text,
+                ))
+        elif btype == "tool_result":
+            rid = block.get("tool_use_id")
+            tool_id = rid if isinstance(rid, str) and rid else ""
+            if tool_id:
+                if tool_id in seen_results:
+                    continue
+                seen_results.add(tool_id)
+            steps.append(TrajectoryStep(
+                kind="tool_result",
+                tool_id=tool_id,
+                content=block.get("content"),
+            ))
+    return steps
+
+
 def _claude_trajectory_steps(
     events: Iterable[dict[str, Any]],
 ) -> tuple[TrajectoryStep, ...]:
@@ -1199,54 +1382,10 @@ def _claude_trajectory_steps(
         content = msg.get("content")
         if not isinstance(content, list):
             continue
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            btype = block.get("type")
-            if etype == "assistant" and btype == "text":
-                text = block.get("text")
-                if isinstance(text, str) and text:
-                    steps.append(TrajectoryStep(
-                        kind="assistant_message",
-                        turn=turn,
-                        content=text,
-                    ))
-            elif etype == "assistant" and btype == "tool_use":
-                name = block.get("name")
-                if not isinstance(name, str) or not name:
-                    continue
-                bid = block.get("id")
-                tool_id = bid if isinstance(bid, str) and bid else ""
-                if tool_id:
-                    if tool_id in seen_calls:
-                        continue
-                    seen_calls.add(tool_id)
-                steps.append(TrajectoryStep(
-                    kind="tool_call",
-                    name=name,
-                    tool_id=tool_id,
-                    turn=turn,
-                    content=block.get("input"),
-                ))
-            elif etype == "user" and btype == "text":
-                text = block.get("text")
-                if isinstance(text, str) and text:
-                    steps.append(TrajectoryStep(
-                        kind="user_message",
-                        content=text,
-                    ))
-            elif etype == "user" and btype == "tool_result":
-                rid = block.get("tool_use_id")
-                tool_id = rid if isinstance(rid, str) and rid else ""
-                if tool_id:
-                    if tool_id in seen_results:
-                        continue
-                    seen_results.add(tool_id)
-                steps.append(TrajectoryStep(
-                    kind="tool_result",
-                    tool_id=tool_id,
-                    content=block.get("content"),
-                ))
+        if etype == "assistant":
+            steps.extend(_claude_assistant_steps(content, turn, seen_calls))
+        else:
+            steps.extend(_claude_user_steps(content, seen_results))
     return tuple(steps)
 
 
@@ -1405,6 +1544,23 @@ def _codex_trajectory_steps(
                     kind="assistant_message",
                     content=text,
                 ))
+    return _codex_assemble_steps(order, commands, outputs, messages, anon)
+
+
+def _codex_assemble_steps(
+    order: list[str],
+    commands: dict[str, str],
+    outputs: dict[str, Any],
+    messages: dict[str, str],
+    anon: list[TrajectoryStep],
+) -> tuple[TrajectoryStep, ...]:
+    """Emit steps in first-seen ``item.id`` order, then the inline anon steps.
+
+    Each id yields up to its call (``command``), result (``aggregated_output``)
+    and message (``text``) in that fixed order -- collapsing the ``item.started``
+    / ``item.completed`` pair into one step (or one call + one result). The anon
+    steps -- items that carried no id -- follow in the order they were seen.
+    """
     steps: list[TrajectoryStep] = []
     for iid in order:
         if iid in commands:
