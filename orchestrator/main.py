@@ -309,81 +309,53 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 0
 
 
-def _run_tick(
+def _tick_one_repo(
+    spec: config.RepoSpec, gh: GitHubClient, scheduler: IssueScheduler,
+) -> None:
+    """Drive one repo's `workflow.tick`, isolating shutdown and failures.
+
+    Re-checks `_running` first so a signal that arrived between submission
+    and this call actually starting still skips the tick instead of forcing
+    the user to wait through a slow `workflow.tick` after they hit Ctrl+C. A
+    per-repo exception is caught and logged so one failing repo cannot stop
+    the others from advancing this tick. Shared by the single-repo in-thread
+    path and every multi-repo fan-out worker.
+    """
+    if not _running:
+        log.info(
+            "repo=%s shutdown requested before tick start; skipping",
+            spec.slug,
+        )
+        return
+    log.info("tick: repo=%s", spec.slug)
+    try:
+        workflow.tick(gh, spec, scheduler=scheduler)
+    except Exception:
+        log.exception("tick failed for repo=%s; continuing", spec.slug)
+
+
+def _fan_out_repo_ticks(
     clients: list[tuple[config.RepoSpec, GitHubClient]],
     scheduler: IssueScheduler,
 ) -> None:
-    """Drive a single tick across every configured repo.
+    """Run every configured repo's tick concurrently across a thread pool.
 
-    With one configured repo the call stays in-thread to keep the legacy
-    single-repo deployment unchanged (no extra repo-fanout executor; the
-    scheduler still drives per-issue work on its own internal threads).
-    With multiple configured repos the per-repo `workflow.tick`
-    invocations are fanned out across a ThreadPoolExecutor so a slow
-    repo does not delay the others' progress -- the orchestrator's
-    whole point is to keep advancing every configured repo each tick.
-
-    Per-repo exceptions are caught and logged so one failing repo cannot
-    stop the others from advancing this tick; `scheduler` is threaded
-    through so the cross-repo / per-repo caps, duplicate-active-issue
-    skip, and family-aware mutex stay enforced across concurrent
-    per-repo ticks. Shared between `--once` and the polling loop so
-    both paths fan out identically.
+    A slow repo does not delay the others' progress -- the orchestrator's
+    whole point is to keep advancing every configured repo each tick. Each
+    worker (`_tick_one_repo`) already catches its own exceptions; reaching
+    the `fut.result()` raise here indicates a programming-level failure in
+    the worker itself, which we still want to log loudly.
     """
-    if not clients:
-        return
-
-    if len(clients) == 1:
-        spec, gh = clients[0]
-        if not _running:
-            log.info("shutdown requested; skipping tick")
-            return
-        log.info("tick: repo=%s", spec.slug)
-        try:
-            workflow.tick(gh, spec, scheduler=scheduler)
-        except Exception:
-            log.exception("tick failed for repo=%s; continuing", spec.slug)
-        # Reap any worker completions that landed since the last poll.
-        # `workflow.tick` itself returns as soon as it has submitted the
-        # eligible-issue callables, so the loop below would otherwise see
-        # worker failures only on the polling pass that happens to share
-        # a tick with the worker exit. Draining once per polling pass
-        # makes "submitted on tick N, failed before tick N+1" surface on
-        # tick N+1 deterministically, alongside the analytics retention
-        # pass below.
-        scheduler.reap()
-        analytics.prune_with_retention_logging()
-        return
-
-    def _tick_one(spec: config.RepoSpec, gh: GitHubClient) -> None:
-        # Re-check shutdown inside the worker: a signal that arrived
-        # between submission and the worker actually starting still skips
-        # the tick instead of forcing the user to wait through a slow
-        # `workflow.tick` after they hit Ctrl+C.
-        if not _running:
-            log.info(
-                "repo=%s shutdown requested before tick start; skipping",
-                spec.slug,
-            )
-            return
-        log.info("tick: repo=%s", spec.slug)
-        try:
-            workflow.tick(gh, spec, scheduler=scheduler)
-        except Exception:
-            log.exception("tick failed for repo=%s; continuing", spec.slug)
-
     with ThreadPoolExecutor(
         max_workers=len(clients),
         thread_name_prefix="orch-repo",
     ) as ex:
         futures = {
-            ex.submit(_tick_one, spec, gh): spec.slug for spec, gh in clients
+            ex.submit(_tick_one_repo, spec, gh, scheduler): spec.slug
+            for spec, gh in clients
         }
-        # `as_completed` so the loop logs a stuck repo as soon as the
-        # others finish, instead of waiting for the slowest. Each future's
-        # body already catches its own exceptions; reaching the
-        # `fut.result()` raise here indicates a programming-level failure
-        # in `_tick_one` itself, which we still want to log loudly.
+        # `as_completed` so the loop logs a stuck repo as soon as the others
+        # finish, instead of waiting for the slowest.
         for fut in as_completed(futures):
             try:
                 fut.result()
@@ -392,11 +364,39 @@ def _run_tick(
                     "repo=%s tick worker raised unexpectedly",
                     futures[fut],
                 )
-    # Reap any worker completions that landed since the last poll.
-    # `_dispatch_via_scheduler` deliberately does NOT reap, so this is
-    # the single per-polling-pass drain point: one reap per tick
-    # regardless of repo count, paired with the analytics retention
-    # call below for the same cadence.
+
+
+def _run_tick(
+    clients: list[tuple[config.RepoSpec, GitHubClient]],
+    scheduler: IssueScheduler,
+) -> None:
+    """Drive a single tick across every configured repo.
+
+    With one configured repo the call stays in-thread to keep the legacy
+    single-repo deployment unchanged (no extra repo-fanout executor; the
+    scheduler still drives per-issue work on its own internal threads). With
+    multiple configured repos the per-repo `workflow.tick` invocations are
+    fanned out across a ThreadPoolExecutor. `scheduler` is threaded through
+    either way so the cross-repo / per-repo caps, duplicate-active-issue skip,
+    and family-aware mutex stay enforced across concurrent per-repo ticks;
+    shared between `--once` and the polling loop so both paths behave
+    identically.
+
+    `scheduler.reap()` and `analytics.prune_with_retention_logging()` run
+    exactly once at the end of the pass regardless of repo count.
+    `workflow.tick` returns as soon as it has submitted the eligible-issue
+    callables, so this single drain is what surfaces "submitted on tick N,
+    failed before tick N+1" worker failures on the next pass -- keeping the
+    documented "one reap per polling pass" cadence, alongside the analytics
+    retention pass. `_dispatch_via_scheduler` deliberately does NOT reap.
+    """
+    if not clients:
+        return
+    if len(clients) == 1:
+        spec, gh = clients[0]
+        _tick_one_repo(spec, gh, scheduler)
+    else:
+        _fan_out_repo_ticks(clients, scheduler)
     scheduler.reap()
     analytics.prune_with_retention_logging()
 
