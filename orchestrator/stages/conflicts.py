@@ -31,10 +31,8 @@ from ..agents import AgentResult
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import (
-    BASE_SYNC_HOLD_LABEL,
     GitHubClient,
     PinnedState,
-    issue_has_label,
 )
 
 
@@ -188,13 +186,6 @@ def _handle_resolving_conflict(
     if _wf._drain_review_pr_terminals(
         gh, spec, issue, state, pr, stage="resolving_conflict",
     ):
-        return
-
-    if issue_has_label(issue, BASE_SYNC_HOLD_LABEL):
-        _wf.log.info(
-            "issue=#%d has %r; pausing resolving_conflict base rebase",
-            issue.number, BASE_SYNC_HOLD_LABEL,
-        )
         return
 
     # User-content drift: a human edited the issue body while the dev

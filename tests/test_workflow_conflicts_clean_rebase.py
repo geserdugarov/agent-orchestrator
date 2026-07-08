@@ -9,11 +9,9 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
-from orchestrator.github import BASE_SYNC_HOLD_LABEL
 
 from tests.fakes import (
     FakeGitHubClient,
-    FakeLabel,
     FakePR,
     FakePRRef,
     make_issue,
@@ -107,8 +105,8 @@ class ResolvingConflictCleanRebaseTest(
     unittest.TestCase, _ResolvingConflictMixin
 ):
     """Drive `_handle_resolving_conflict` through the clean base-rebase
-    routing: the no-agent rebase push, the hold-label pause, the no-op /
-    cap rounds, and the PR-state terminal short-circuits.
+    routing: the no-agent rebase push, the no-op / cap rounds, and the
+    PR-state terminal short-circuits.
     """
 
     def test_clean_rebase_pushes_and_flips_to_validating(self) -> None:
@@ -139,24 +137,6 @@ class ResolvingConflictCleanRebaseTest(
         self.assertEqual(state.get("review_round"), 0)
         self.assertEqual(state.get("conflict_round"), 1)
         self.assertIn("last_conflict_resolved_at", state)
-
-    def test_hold_base_sync_label_pauses(self) -> None:
-        gh, issue, pr = self._seed()
-        issue.labels.append(FakeLabel(BASE_SYNC_HOLD_LABEL))
-        mocks, merge_mock, git_mock = self._run_with_merge(
-            gh, issue,
-            merge_succeeded=True,
-            head_shas=["beforehead", "merged"],
-            push_branch=True,
-        )
-
-        mocks["run_agent"].assert_not_called()
-        merge_mock.assert_not_called()
-        mocks["_push_branch"].assert_not_called()
-        self.assertEqual(gh.label_history, [])
-        state = gh.pinned_data(200)
-        self.assertEqual(state.get("conflict_round"), 0)
-        self.assertFalse(state.get("awaiting_human"))
 
     def test_clean_rebase_up_to_date_skips_push_and_ticks_round(
         self,
