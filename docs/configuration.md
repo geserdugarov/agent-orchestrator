@@ -647,6 +647,6 @@ When each setting's change takes effect:
 - `paused` — Same hard skip as `backlog`, but intended for an already in-flight issue: apply it to freeze processing
   (no handler runs, no worktree is rebased, no PR-stage relabel) without discarding the issue's state, and remove it to
   resume where it left off. Applying it while a developer agent is mid-run also takes effect: every stage that resumes a
-  dev agent (`implementing`, `in_review`, `fixing`, `resolving_conflict`) re-reads the label after the run returns and
-  discards the result rather than pushing, opening a PR, relabeling, advancing watermarks, or posting comments, so the
-  committed work stays on the branch and republishes once the label is removed.
+  dev agent (`implementing`, `validating`, `documenting`, `in_review`, `fixing`, `resolving_conflict`) re-reads the
+  label after the run returns and discards the result rather than pushing, opening a PR, relabeling, advancing
+  watermarks, or posting comments, so the committed work stays on the branch and republishes once the label is removed.
