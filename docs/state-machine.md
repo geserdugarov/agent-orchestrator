@@ -22,7 +22,8 @@ because live GitHub issues carry them.
 
 Four non-workflow **control labels** modify behavior without occupying the workflow slot:
 
-- `hold_base_sync` pauses `resolving_conflict` rebases until removed.
+- `hold_base_sync` is retained as a control label but no longer gates any behavior; use `paused` to freeze an
+  in-flight issue.
 - `backlog` makes the orchestrator skip the issue: the per-tick dispatcher filters it out before the family/fanout split
   (so a parked, workflow-label-less issue cannot fold into the cap-counted family bucket and starve other work under
   `parallel_limit=1`), and each stage handler also skips it before the workflow label is read. Removing it hands control

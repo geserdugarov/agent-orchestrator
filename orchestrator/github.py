@@ -86,7 +86,7 @@ CONTROL_LABEL_SPECS: tuple[tuple[ControlLabel, str, str], ...] = (
     (
         BASE_SYNC_HOLD_LABEL,
         "5319e7",
-        "Pause conflict-resolution rebases; use paused to freeze handlers",
+        "Retained but no longer gates any behavior; use paused to freeze handlers",
     ),
     (
         BACKLOG_LABEL,
