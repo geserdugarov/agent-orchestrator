@@ -74,7 +74,6 @@ WORKFLOW_LABEL_SPECS: tuple[tuple[WorkflowLabel, str, str], ...] = (
 assert {spec[0] for spec in WORKFLOW_LABEL_SPECS} == set(WorkflowLabel)
 WORKFLOW_LABELS = frozenset(WorkflowLabel)
 
-BASE_SYNC_HOLD_LABEL = ControlLabel.HOLD_BASE_SYNC
 BACKLOG_LABEL = ControlLabel.BACKLOG
 PAUSED_LABEL = ControlLabel.PAUSED
 # Applied by `sweep_community_contribution_prs` to any open PR whose author
@@ -83,11 +82,6 @@ PAUSED_LABEL = ControlLabel.PAUSED
 # pure "needs a human" signal rather than a workflow stage.
 COMMUNITY_CONTRIBUTION_LABEL = ControlLabel.COMMUNITY_CONTRIBUTION
 CONTROL_LABEL_SPECS: tuple[tuple[ControlLabel, str, str], ...] = (
-    (
-        BASE_SYNC_HOLD_LABEL,
-        "5319e7",
-        "Retained but no longer gates any behavior; use paused to freeze handlers",
-    ),
     (
         BACKLOG_LABEL,
         "c5def5",

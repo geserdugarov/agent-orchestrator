@@ -11,11 +11,11 @@ give them one authoritative definition, IDE/refactor support, and a
 membership set the typo guard can validate against.
 
 `ControlLabel` holds operator-applied *modifiers* (`backlog`, `paused`,
-`hold_base_sync`, `community_contribution`) that coexist with a workflow
-label or PR and pause/redirect processing without being workflow states
-themselves -- an issue is `implementing` + `backlog` at once. They are
-deliberately NOT workflow states and never flow through `set_workflow_label`
-or the transition table.
+`community_contribution`) that coexist with a workflow label or PR and
+pause/redirect processing without being workflow states themselves -- an
+issue is `implementing` + `backlog` at once. They are deliberately NOT
+workflow states and never flow through `set_workflow_label` or the
+transition table.
 
 The transition table and guard live in this module too; `github.set_workflow_label`
 is the single chokepoint that calls them.
@@ -63,7 +63,6 @@ class ControlLabel(StrEnum):
 
     BACKLOG = "backlog"
     PAUSED = "paused"
-    HOLD_BASE_SYNC = "hold_base_sync"
     COMMUNITY_CONTRIBUTION = "community_contribution"
 
 

@@ -80,7 +80,7 @@ class HardSkipControlLabelTest(unittest.TestCase):
 
     def test_returns_none_without_a_hard_skip_label(self) -> None:
         issue = make_issue(760, label="implementing")
-        issue.labels.append(FakeLabel("hold_base_sync"))
+        issue.labels.append(FakeLabel("community_contribution"))
         self.assertIsNone(hard_skip_control_label(issue))
 
     def test_reports_the_present_hard_skip_label(self) -> None:
