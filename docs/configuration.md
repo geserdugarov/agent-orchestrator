@@ -468,8 +468,8 @@ dependency.
 - `python -m orchestrator.main --once` — single tick then exit. Useful for tests and debugging.
 - `python -m orchestrator.main --log-level DEBUG` — verbose logs.
 
-On first start the orchestrator creates the workflow labels and the `hold_base_sync` / `backlog` / `paused` /
-`community_contribution` control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
+On first start the orchestrator creates the workflow labels and the `backlog` / `paused` / `community_contribution`
+control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
 
 ## Running under systemd (user service)
 
@@ -638,10 +638,6 @@ When each setting's change takes effect:
 
 ## Control labels
 
-- `hold_base_sync` — Retained as a control label for backward compatibility, but it no longer gates any orchestrator
-  behavior: per-tick base sync and `resolving_conflict` rebases both run regardless of whether it is applied. To
-  suspend an in-flight issue's handlers (e.g. the `resolving_conflict` base rebase, the `in_review` ready-ping /
-  unmergeable park, or the `fixing` drift breaker), use `paused`.
 - `backlog` — Apply to an issue (typically at creation) to keep the orchestrator from picking it up. The dispatcher
   skips the issue entirely while the label is present; remove the label to release the issue for processing.
 - `paused` — Same hard skip as `backlog`, but intended for an already in-flight issue: apply it to freeze processing

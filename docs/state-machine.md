@@ -20,10 +20,8 @@ An issue should have at most one workflow label at a time. Non-workflow labels s
 preserved; the orchestrator only swaps labels from its own workflow set. Label names are part of the public contract
 because live GitHub issues carry them.
 
-Four non-workflow **control labels** modify behavior without occupying the workflow slot:
+Three non-workflow **control labels** modify behavior without occupying the workflow slot:
 
-- `hold_base_sync` is retained as a control label but no longer gates any behavior; use `paused` to freeze an
-  in-flight issue.
 - `backlog` makes the orchestrator skip the issue: the per-tick dispatcher filters it out before the family/fanout split
   (so a parked, workflow-label-less issue cannot fold into the cap-counted family bucket and starve other work under
   `parallel_limit=1`), and each stage handler also skips it before the workflow label is read. Removing it hands control

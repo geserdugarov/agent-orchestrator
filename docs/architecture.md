@@ -107,11 +107,10 @@ are re-exported from the facade because more than one stage reaches for them.
 
 An issue should have at most one workflow label at a time. The set is `decomposing`, `ready`, `blocked`, `umbrella`,
 `implementing`, `documenting`, `validating`, `in_review`, `fixing`, `resolving_conflict`, `question`, and the two
-terminals `done` / `rejected`. The orchestrator also creates four non-workflow control labels: `hold_base_sync` is
-retained but no longer gates any behavior, `backlog` and `paused` each make per-tick handlers skip the issue entirely
-(`backlog` is a "not yet" hold on a fresh issue, `paused` freezes an in-flight one), and
-`community_contribution` is applied by the per-tick open-PR sweep to PRs from non-bot authors outside
-`ALLOWED_ISSUE_AUTHORS` so a human reviews them.
+terminals `done` / `rejected`. The orchestrator also creates three non-workflow control labels: `backlog` and `paused`
+each make per-tick handlers skip the issue entirely (`backlog` is a "not yet" hold on a fresh issue, `paused` freezes
+an in-flight one), and `community_contribution` is applied by the per-tick open-PR sweep to PRs from non-bot authors
+outside `ALLOWED_ISSUE_AUTHORS` so a human reviews them.
 
 Label names are part of the public contract because live GitHub issues already carry them. For the meaning of each
 label, the control-label semantics, and the per-stage transitions they trigger, see
