@@ -218,8 +218,13 @@ The schema is defined by `read_pinned_state` / `write_pinned_state` (see `github
   watermarks — the in_review watermarks are deliberately left behind so the `fixing` rescan can re-discover the
   triggering comments, and the id lists let `_reconstruct_pending_fix_batch` rebuild the exact triggering batch after
   the watermarks advance past it (falling back conservatively to the max ids for issues parked before the lists were
-  recorded). The rebuilt batch is what the `/orchestrator continue` operator command replays when retrying a
-  session-failure park (see `_handle_fixing`).
+  recorded). The `validating → fixing` route instead records a single `pending_fix_reviewer_comment_id` — the id of the
+  PR conversation comment carrying the reviewer's CHANGES_REQUESTED feedback — and does NOT set `pending_fix_at` (that
+  key is the route discriminator that drives the review-round reset). `_reconstruct_pending_fix_batch` re-fetches that
+  exact comment by id (outside `filter_trusted`, since it is the orchestrator's own reviewer output the author allowlist
+  would otherwise drop) as the validating-route replay anchor. The rebuilt batch is what the `/orchestrator continue`
+  operator command replays when retrying a session-failure park (see `_handle_fixing`); the anchor is cleared on a
+  pushed fix and inside `_clear_pending_fix_bookmarks`.
 - **Crash-recovery anchor.** `pending_auto_base_rebase_push_sha` — set to the pre-rebase local HEAD immediately BEFORE
   `_rebase_base_into_worktree`; cleared on every exit. A non-empty value on entry means a previous tick rebased and died
   before the post-push write, and `_recover_pending_auto_base_rebase` keys off it to either no-op, push the recovered
@@ -660,8 +665,9 @@ state. The PR comment that triggers a route to `fixing` is the human signal; awa
     records `pending_fix_at` + per-namespace `pending_fix_*_max_id` bookmarks and the full `pending_fix_*_ids` batch
     lists.
   - `_handle_validating` on a `CHANGES_REQUESTED` verdict, flipped BEFORE the dev spawn. This route does NOT set
-    `pending_fix_at`; the dev runs inline and on a pushed fix validating flips the label back itself. Only the parked
-    outcomes leave the fixing handler to own the awaiting-human cycle.
+    `pending_fix_at`; it records `pending_fix_reviewer_comment_id` (the id of the reviewer-feedback PR comment) as its
+    lone replay anchor. The dev runs inline and on a pushed fix validating flips the label back itself (clearing the
+    anchor). Only the parked outcomes leave the fixing handler to own the awaiting-human cycle.
 
   Also runs on closed-`fixing` issues so an externally-merged PR finalizes to `done`.
 - **Input**: pinned `pr_number`, `branch`, `dev_agent` / `dev_session_id`, `pending_fix_at` + per-namespace bookmarks
@@ -681,17 +687,18 @@ state. The PR comment that triggers a route to `fixing` is the human signal; awa
      session/usage-limit notice returned as the dev's final message (`_is_session_limit_message`) is itself parked
      `agent_silent` by `_on_question`, a retryable session failure rather than a real `park_reason=None` question, so a
      quota reset is retried here rather than refused as needing human guidance. The helper returns one of three
-     actions: **replay** — an eligible session-failure park **with a reconstructable batch** (the in_review route):
-     drop the poisoned dev session (`_drop_poisoned_dev_session` — so the retry re-grounds a fresh session on the
-     committed branch), clear the park, and **replay the preserved feedback batch** (`_reconstruct_pending_fix_batch`)
-     carrying ALL fresh feedback (the command comment and any guidance posted with or beside it) verbatim so nothing is
-     dropped — resuming the fresh dev on it, skipping the debounce; **refuse** — a content-free continue (every
-     fresh comment is a bare command) on a park it cannot retry (an unsafe park needing real human guidance, both
-     `park_reason=None`; or an eligible reason with **no reconstructable batch**, e.g. the validating route whose
-     triggering reviewer verdict is not preserved as a batch): the command comment is consumed (watermark advanced past
-     it so the refusal does not re-fire) and a note is posted, and the issue stays parked; **passthrough** — the
-     command arrived alongside genuine guidance on a park with no replayable batch, so it falls through to the normal
-     resume below and that guidance drives the dev.
+     actions: **replay** — an eligible session-failure park **with a reconstructable batch** (the in_review route's
+     `pending_fix_*` bookmarks, or the validating route's `pending_fix_reviewer_comment_id` anchor): drop the poisoned
+     dev session (`_drop_poisoned_dev_session` — so the retry re-grounds a fresh session on the committed branch), clear
+     the park, and **replay the preserved feedback batch** (`_reconstruct_pending_fix_batch`) carrying ALL fresh
+     feedback (the command comment and any guidance posted with or beside it) verbatim so nothing is dropped — resuming
+     the fresh dev on it, skipping the debounce; **refuse** — a content-free continue (every fresh comment is a bare
+     command) on a park it cannot retry (an unsafe park needing real human guidance, both `park_reason=None`; or an
+     eligible reason with **no reconstructable batch**, e.g. a validating-route park whose reviewer anchor was never
+     recorded or has since been deleted): the command comment is consumed (watermark advanced past it so the refusal
+     does not re-fire) and a note is posted, and the issue stays parked; **passthrough** — the command arrived alongside
+     genuine guidance on a park with no replayable batch, so it falls through to the normal resume below and that
+     guidance drives the dev.
 
      Otherwise, when the rescan finds nothing new, branch on `park_reason` AND the route discriminator `pending_fix_at`:
      - **Transient reason** (`push_failed` / `agent_timeout` / `reviewer_timeout` / `reviewer_failed` — the

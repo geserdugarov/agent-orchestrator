@@ -19,11 +19,13 @@ label:
     `CHANGES_REQUESTED` verdict so the dev-fix subphase is observably
     labeled `fixing` (the active job is "fixing reviewer-requested
     changes", not "validating"). This route does NOT set
-    `pending_fix_at`; the dev runs inline in the same tick and the
-    validating handler flips back to `validating` itself on a pushed
-    fix with `review_round` bumped. Only the parked outcomes (timeout
-    / no-commit / dirty / push-fail) leave the fixing handler to own
-    the awaiting-human cycle here.
+    `pending_fix_at`; instead it records `pending_fix_reviewer_comment_id`
+    (the id of the reviewer-feedback PR comment) as the lone replay anchor
+    for `_reconstruct_pending_fix_batch`. The dev runs inline in the same
+    tick and the validating handler flips back to `validating` itself on a
+    pushed fix with `review_round` bumped (clearing the anchor). Only the
+    parked outcomes (timeout / no-commit / dirty / push-fail) leave the
+    fixing handler to own the awaiting-human cycle here.
 
 Each tick the handler rescans unread feedback from the existing watermarks
 (NOT the `pending_fix_*` bookmarks recorded by the route -- those remain
@@ -103,19 +105,22 @@ A park on a session-limit / session-failure reason (`agent_silent` /
 that carries the command line AND real guidance still counts as the
 command). Rather than resuming the dev on the command text -- which would
 drop the review feedback the poisoned session never addressed -- the
-handler rechecks `park_reason`, and on the in_review route (the only route
-that preserves a replayable batch) drops the poisoned dev session so the
-retry re-grounds a fresh one on the committed branch and replays the
-PRESERVED feedback batch reconstructed from the `pending_fix_*` bookmarks,
-carrying ALL fresh feedback (the command comment and any guidance posted
-with or beside it) verbatim so nothing the operator wrote is dropped. The
-command is handled on BOTH routes so a validating-route session-failure
-park is never resumed on the bare command text either; with no batch to
-replay there, a content-free continue is refused while a continue that
-came WITH genuine guidance falls through to the normal resume so that
-guidance drives the dev. Parks that still need real human guidance -- a
-genuine agent question or a dirty worktree (both `park_reason=None`), or
-any eligible park with no reconstructable batch -- refuse a content-free
+handler rechecks `park_reason`, drops the poisoned dev session so the retry
+re-grounds a fresh one on the committed branch, and replays the PRESERVED
+feedback batch (`_reconstruct_pending_fix_batch`): the `pending_fix_*`
+bookmarks on the in_review route, or the single
+`pending_fix_reviewer_comment_id` PR-comment anchor on the validating route
+(the reviewer's CHANGES_REQUESTED feedback that
+`_handle_validating_changes_requested` posted before the dev parked). ALL
+fresh feedback (the command comment and any guidance posted with or beside
+it) is carried verbatim so nothing the operator wrote is dropped. The
+command is handled on BOTH routes; when NEITHER route has a reconstructable
+batch (a validating-route park whose anchor was never recorded or has since
+been deleted) a content-free continue is refused while a continue that came
+WITH genuine guidance falls through to the normal resume so that guidance
+drives the dev. Parks that still need real human guidance -- a genuine
+agent question or a dirty worktree (both `park_reason=None`), or any
+eligible park with no reconstructable batch -- refuse a content-free
 continue: the command is consumed and a note is posted, and the issue
 stays parked.
 
@@ -383,13 +388,15 @@ def _dispatch_parked_fixing(
     # `agent_timeout`) never resumes the dev on the bare command text.
     # `_handle_continue_command` decides:
     #   * "replay" -- eligible park with a reconstructable batch (the
-    #     in_review route): the poisoned session is dropped and the park
-    #     cleared, and we resume the fresh dev on the preserved batch
+    #     in_review `pending_fix_*` bookmarks, or the validating-route
+    #     reviewer-comment anchor): the poisoned session is dropped and the
+    #     park cleared, and we resume the fresh dev on the preserved batch
     #     (returned as `replay_batch`), skipping the debounce.
     #   * "refuse" -- a content-free continue on a park it cannot retry
-    #     (an unsafe park needing real guidance, or an eligible park with
-    #     no batch, e.g. the validating route): command consumed + reason
-    #     posted; stay parked.
+    #     (an unsafe park needing real guidance, or an eligible park with no
+    #     reconstructable batch, e.g. a validating-route park whose reviewer
+    #     anchor was never recorded): command consumed + reason posted; stay
+    #     parked.
     #   * "passthrough" -- the command arrived WITH genuine guidance on a
     #     park with no replayable batch: fall through to the normal resume
     #     so that guidance (not a bare continue) drives the dev.
@@ -929,6 +936,11 @@ def _clear_pending_fix_bookmarks(state) -> None:
     state.set("pending_fix_issue_ids", None)
     state.set("pending_fix_review_ids", None)
     state.set("pending_fix_review_summary_ids", None)
+    # Validating-route reviewer-feedback replay anchor (recorded by
+    # `_handle_validating_changes_requested`). Cleared alongside the
+    # in_review-route bookmarks so a later route writes fresh values and a
+    # session-failure park never replays an already-addressed reviewer round.
+    state.set("pending_fix_reviewer_comment_id", None)
 
 
 def _pending_fix_id_set(state, ids_key: str, max_id_key: str) -> set:
@@ -951,6 +963,36 @@ def _pending_fix_id_set(state, ids_key: str, max_id_key: str) -> set:
     return set()
 
 
+def _reviewer_anchor_comment(gh, pr, state):
+    """Fetch the validating-route reviewer-feedback replay anchor, or None.
+
+    `_handle_validating_changes_requested` posts the automated reviewer's
+    CHANGES_REQUESTED feedback as one PR-conversation comment and records its
+    id in `pending_fix_reviewer_comment_id` (WITHOUT setting `pending_fix_at`,
+    which discriminates the two routes' review-round accounting). That route
+    preserves no `pending_fix_*_ids`, so this single comment is the only
+    replayable input for a `/orchestrator continue` on a session-failure park
+    that came through validating.
+
+    Re-fetch it by id from the PR conversation surface. The comment is
+    orchestrator-authored -- normally dropped from a rescan by the id-set
+    filter and by `filter_trusted` when the PAT login is not allowlisted --
+    but it carries the reviewer's own trusted feedback, so the caller adds it
+    OUTSIDE the trust filter. `bool` is rejected explicitly (it is an `int`
+    subclass and a stray `True` must not read as id 1). Returns None when the
+    anchor id is unset / not an int, or the comment can no longer be fetched
+    (deleted, or a PR read that returned without it) -- the empty-batch
+    refusal then holds.
+    """
+    anchor_id = state.get("pending_fix_reviewer_comment_id")
+    if not isinstance(anchor_id, int) or isinstance(anchor_id, bool):
+        return None
+    for c in gh.pr_conversation_comments_after(pr, None):
+        if c.id == anchor_id:
+            return c
+    return None
+
+
 def _reconstruct_pending_fix_batch(gh, issue, pr, state) -> list:
     """Rebuild the exact feedback batch that drove the `in_review` -> `fixing`
     route from the pinned `pending_fix_*` metadata.
@@ -967,6 +1009,14 @@ def _reconstruct_pending_fix_batch(gh, issue, pr, state) -> list:
     id. Filtering by the recorded id set inherently drops the orchestrator's
     own comments (their ids were never in the batch) and survives watermark
     advancement because the fetch is unbounded.
+
+    The validating -> fixing route preserves no `pending_fix_*_ids`; its lone
+    replay anchor is the reviewer-feedback PR comment recorded in
+    `pending_fix_reviewer_comment_id`. `_reviewer_anchor_comment` re-fetches
+    it and it is prepended to the batch OUTSIDE `filter_trusted` (it is the
+    orchestrator's own trusted reviewer output, which the author allowlist
+    would otherwise drop). The two routes are mutually exclusive in practice,
+    so the anchor is de-duplicated against the id-set batch defensively.
 
     Existing parked issues that carry only `pending_fix_*_max_id` (no id
     lists) get the conservative single-item reconstruction from
@@ -1017,7 +1067,20 @@ def _reconstruct_pending_fix_batch(gh, issue, pr, state) -> list:
     # ids in `pending_fix_*_ids`, and `ALLOWED_ISSUE_AUTHORS` may change between
     # the route and the `/orchestrator continue` replay. Filtering here keeps an
     # untrusted author's feedback out of the replay prompt regardless.
-    return filter_trusted(issue_space + review_space + review_summary)
+    trusted_batch = filter_trusted(issue_space + review_space + review_summary)
+
+    # Prepend the validating-route reviewer anchor (see
+    # `_reviewer_anchor_comment`) -- outside `filter_trusted` because it is the
+    # orchestrator's own trusted reviewer feedback the allowlist would drop.
+    # Consult it ONLY on the validating route (`pending_fix_at` unset): a stale
+    # anchor left behind by an earlier validating park must not be prepended to
+    # an in_review-route batch. The dedup guard is defensive belt-and-braces --
+    # the two routes are mutually exclusive, so `trusted_batch` is empty here.
+    if state.get("pending_fix_at") is None:
+        anchor = _reviewer_anchor_comment(gh, pr, state)
+        if anchor is not None and all(o.id != anchor.id for o in trusted_batch):
+            return [anchor] + trusted_batch
+    return trusted_batch
 
 
 def _advance_consumed_watermarks(
@@ -1088,21 +1151,23 @@ def _handle_continue_command(
     Returns `(action, items)`:
 
       * ``("replay", batch)`` -- an eligible park WITH a reconstructable
-        batch (the in_review route). Drops the poisoned dev session (so the
-        retry re-grounds a FRESH session on the committed branch rather than
-        replaying the transcript that already failed) and clears the park, as
-        side effects; `batch` is the preserved PR-feedback batch
-        (`_reconstruct_pending_fix_batch`) followed by ALL fresh feedback
-        verbatim -- the command comment AND any guidance posted with or beside
-        it -- so nothing the operator wrote is dropped. Pinned state is NOT
-        written here (the caller's resume tail writes it).
+        batch (the in_review `pending_fix_*` bookmarks, or the
+        validating-route `pending_fix_reviewer_comment_id` anchor). Drops the
+        poisoned dev session (so the retry re-grounds a FRESH session on the
+        committed branch rather than replaying the transcript that already
+        failed) and clears the park, as side effects; `batch` is the
+        preserved PR-feedback batch (`_reconstruct_pending_fix_batch`)
+        followed by ALL fresh feedback verbatim -- the command comment AND
+        any guidance posted with or beside it -- so nothing the operator
+        wrote is dropped. Pinned state is NOT written here (the caller's
+        resume tail writes it).
       * ``("refuse", None)`` -- a content-free continue (every fresh comment
         is a bare command) on a park it cannot retry: an unsafe park that
-        still needs real human guidance, or an eligible park with no batch to
-        replay (the validating route, whose triggering reviewer verdict is
-        not preserved as a batch). Consumes the command comment (so the
-        refusal does not re-fire) and posts the reason; the caller writes
-        state and the issue stays parked.
+        still needs real human guidance, or an eligible park with no
+        reconstructable batch (a validating-route park whose reviewer anchor
+        was never recorded or has since been deleted). Consumes the command
+        comment (so the refusal does not re-fire) and posts the reason; the
+        caller writes state and the issue stays parked.
       * ``("passthrough", None)`` -- the command arrived alongside genuine
         guidance on a park with no replayable batch. No side effect; the
         caller runs the normal resume so that guidance (not a bare continue)

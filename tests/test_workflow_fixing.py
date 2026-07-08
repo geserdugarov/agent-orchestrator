@@ -117,6 +117,7 @@ PENDING_FIX_REVIEW_MAX_ID = "pending_fix_review_max_id"
 PENDING_FIX_REVIEW_IDS = "pending_fix_review_ids"
 PENDING_FIX_REVIEW_SUMMARY_MAX_ID = "pending_fix_review_summary_max_id"
 PENDING_FIX_REVIEW_SUMMARY_IDS = "pending_fix_review_summary_ids"
+PENDING_FIX_REVIEWER_COMMENT_ID = "pending_fix_reviewer_comment_id"
 
 # --- Mock keys returned by `_PatchedWorkflowMixin._run` -----------------
 RUN_AGENT = "run_agent"
@@ -2125,6 +2126,95 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         self.assertIn("trusted issue ask", prompt)
         self.assertNotIn(malicious_url, prompt)
 
+    def _pr_with_reviewer_anchor(self, *, anchor_id: int = 2100):
+        # Validating-route shape: no `pending_fix_*_ids`, no `pending_fix_at`,
+        # just the orchestrator-authored reviewer-feedback PR comment whose id
+        # `_handle_validating_changes_requested` recorded. It carries the hidden
+        # orchestrator marker like the real post, so a rescan would filter it --
+        # only the anchor id re-surfaces it for the replay.
+        issue = make_issue(ISSUE, label=FIXING)
+        reviewer = FakeComment(
+            id=anchor_id,
+            body=(
+                ":eyes: codex review (round 1/3) requested changes:\n\n"
+                "please fix the docstring ordering\n\n<!--orchestrator-comment-->"
+            ),
+            user=FakeUser(ORCHESTRATOR),
+        )
+        pr = FakePR(
+            number=PR_NUMBER, head_branch=BRANCH,
+            head=FakePRRef(sha=PR_HEAD_SHA),
+            issue_comments=[reviewer],
+        )
+        gh = FakeGitHubClient()
+        gh.add_issue(issue)
+        gh.add_pr(pr)
+        return gh, issue, pr
+
+    def test_reconstructs_validating_route_reviewer_anchor(self) -> None:
+        # No id lists / no `pending_fix_at`; the lone anchor is the recorded
+        # reviewer PR comment. Reconstruction must re-fetch it by id even
+        # though it is orchestrator-authored and the watermark has advanced.
+        gh, issue, pr = self._pr_with_reviewer_anchor()
+        gh.seed_state(
+            ISSUE,
+            pr_last_comment_id=8000,
+            pending_fix_reviewer_comment_id=2100,
+        )
+        state = gh.read_pinned_state(issue)
+
+        batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
+
+        self.assertEqual([o.id for o in batch], [2100])
+        prompt = workflow._build_pr_comment_followup(batch)
+        self.assertIn("please fix the docstring ordering", prompt)
+
+    def test_reviewer_anchor_survives_author_allowlist(self) -> None:
+        # The anchor is the orchestrator's own reviewer output, so it must be
+        # replayed even when the allowlist does NOT list the orchestrator's
+        # login -- it is prepended OUTSIDE `filter_trusted`.
+        gh, issue, pr = self._pr_with_reviewer_anchor()
+        gh.seed_state(
+            ISSUE,
+            pr_last_comment_id=8000,
+            pending_fix_reviewer_comment_id=2100,
+        )
+        state = gh.read_pinned_state(issue)
+
+        with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
+            batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
+
+        self.assertEqual([o.id for o in batch], [2100])
+
+    def test_reviewer_anchor_ignored_when_pending_fix_at_set(self) -> None:
+        # A stale anchor left behind by an earlier validating park must NOT be
+        # prepended to an in_review-route batch (`pending_fix_at` set): the
+        # route discriminator gates it out.
+        gh, issue, pr = self._pr_with_reviewer_anchor()
+        gh.seed_state(
+            ISSUE,
+            pr_last_comment_id=8000,
+            pending_fix_at="2026-05-24T00:00:00+00:00",
+            pending_fix_reviewer_comment_id=2100,
+        )
+        state = gh.read_pinned_state(issue)
+
+        self.assertEqual(_reconstruct_pending_fix_batch(gh, issue, pr, state), [])
+
+    def test_reviewer_anchor_missing_comment_yields_empty(self) -> None:
+        # The anchor id points at a comment that no longer exists (deleted, or
+        # a PR read that returned without it): reconstruction yields an empty
+        # batch so the caller's refusal holds.
+        gh, issue, pr = self._pr_with_reviewer_anchor()
+        gh.seed_state(
+            ISSUE,
+            pr_last_comment_id=8000,
+            pending_fix_reviewer_comment_id=999999,
+        )
+        state = gh.read_pinned_state(issue)
+
+        self.assertEqual(_reconstruct_pending_fix_batch(gh, issue, pr, state), [])
+
     def test_id_set_prefers_list_and_rejects_bool_max_id(self) -> None:
         from orchestrator.github import PinnedState
 
@@ -2153,6 +2243,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             PENDING_FIX_ISSUE_IDS: [2050, 2100],
             PENDING_FIX_REVIEW_IDS: [40, 41],
             PENDING_FIX_REVIEW_SUMMARY_IDS: [7],
+            PENDING_FIX_REVIEWER_COMMENT_ID: 2100,
         })
 
         _clear_pending_fix_bookmarks(state)
@@ -2165,6 +2256,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             PENDING_FIX_ISSUE_IDS,
             PENDING_FIX_REVIEW_IDS,
             PENDING_FIX_REVIEW_SUMMARY_IDS,
+            PENDING_FIX_REVIEWER_COMMENT_ID,
         ):
             self.assertIsNone(state.get(key))
 
@@ -2378,10 +2470,11 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(call.kwargs.get("resume_session_id"), POISONED_SESSION)
 
     def test_validating_route_session_failure_refuses_continue(self) -> None:
-        # A validating-route park (no `pending_fix_at`, no preserved batch) on
-        # a session-failure reason must NOT resume the dev on the bare command
-        # text. With nothing to replay it is refused: no agent spawn, command
-        # consumed, issue stays parked.
+        # A validating-route park (no `pending_fix_at`, no preserved batch, and
+        # no `pending_fix_reviewer_comment_id` anchor) on a session-failure
+        # reason must NOT resume the dev on the bare command text. With nothing
+        # to replay it is refused: no agent spawn, command consumed, issue stays
+        # parked. This is the #742 negative case -- the anchor is absent.
         for reason in (PARK_AGENT_SILENT, PARK_AGENT_TIMEOUT):
             with self.subTest(reason=reason):
                 gh, issue, pr = self._seed_parked_with_batch(
@@ -2403,6 +2496,105 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 self.assertTrue(any(
                     "no preserved" in body for _, body in gh.posted_comments
                 ))
+
+    def _seed_validating_route_anchored_park(
+        self, *, park_reason, reviewer_id: int = 2100, command_id: int = 9000,
+    ):
+        # #742 shape: a validating-route session-failure park (no
+        # `pending_fix_at`, no `pending_fix_*_ids`) whose LONE replay anchor is
+        # the reviewer-feedback PR comment recorded in
+        # `pending_fix_reviewer_comment_id`. The reviewer comment is
+        # orchestrator-authored, carries the hidden marker, and sits BELOW the
+        # advanced watermark (so the per-tick rescan drops it) -- only the
+        # anchor id re-surfaces it for the replay. A bare `/orchestrator
+        # continue` sits ABOVE the watermark so the rescan sees it.
+        issue = make_issue(ISSUE, label=FIXING)
+        issue.comments.append(
+            FakeComment(
+                id=command_id, body="/orchestrator continue", user=FakeUser(DAVE),
+            ),
+        )
+        reviewer = FakeComment(
+            id=reviewer_id,
+            body=(
+                ":eyes: codex review (round 3/5) requested changes:\n\n"
+                "please fix the last-frame-wins docstring\n\n"
+                "<!--orchestrator-comment-->"
+            ),
+            user=FakeUser(ORCHESTRATOR),
+        )
+        pr = FakePR(
+            number=PR_NUMBER, head_branch=BRANCH,
+            head=FakePRRef(sha=PR_HEAD_SHA),
+            mergeable=True, check_state="success",
+            issue_comments=[reviewer],
+        )
+        gh = FakeGitHubClient()
+        gh.add_issue(issue)
+        gh.add_pr(pr)
+        gh.seed_state(
+            ISSUE,
+            **{
+                "pr_number": PR_NUMBER,
+                "branch": BRANCH,
+                "dev_agent": DEV_AGENT,
+                "dev_session_id": POISONED_SESSION,
+                REVIEW_ROUND: 2,
+                AWAITING_HUMAN: True,
+                PARK_REASON: park_reason,
+                "silent_park_count": 2,
+                PR_LAST_COMMENT_ID: 8000,
+                PR_LAST_REVIEW_COMMENT_ID: 50,
+                PR_LAST_REVIEW_SUMMARY_ID: 10,
+                PENDING_FIX_REVIEWER_COMMENT_ID: reviewer_id,
+                # No `pending_fix_at`, no `pending_fix_*_ids` -> validating route.
+            },
+        )
+        return gh, issue, pr
+
+    def test_validating_route_anchor_replays_reviewer_feedback(self) -> None:
+        # #742: a validating-route park after a session limit, with the reviewer
+        # feedback anchored in `pending_fix_reviewer_comment_id`. A bare
+        # `/orchestrator continue` must REPLAY that reviewer feedback on a fresh
+        # session -- not refuse with "no preserved PR-feedback batch".
+        for reason in (PARK_AGENT_SILENT, PARK_AGENT_TIMEOUT):
+            with self.subTest(reason=reason):
+                gh, issue, pr = self._seed_validating_route_anchored_park(
+                    park_reason=reason,
+                )
+
+                mocks = self._run(
+                    lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                    run_agent=_agent(
+                        session_id=FRESH_SESSION, last_message="pushed fix",
+                    ),
+                    head_shas=(SHA_BEFORE, SHA_AFTER),
+                )
+
+                # Dev invoked once; the poisoned session is dropped so the
+                # retry is a FRESH spawn (no resume id) grounded on the branch.
+                mocks[RUN_AGENT].assert_called_once()
+                call = mocks[RUN_AGENT].call_args
+                self.assertIsNone(call.kwargs.get("resume_session_id"))
+                # The reviewer feedback reaches the dev -- NOT the bare command.
+                self.assertIn(
+                    "please fix the last-frame-wins docstring", call.args[1],
+                )
+                # No refusal was posted.
+                self.assertFalse(any(
+                    "no preserved" in body for _, body in gh.posted_comments
+                ))
+                data = gh.pinned_data(ISSUE)
+                self.assertEqual(data.get("dev_session_id"), FRESH_SESSION)
+                # Pushed fix -> back to `validating`, park cleared.
+                self.assertIn((ISSUE, VALIDATING), gh.label_history)
+                self.assertFalse(data.get(AWAITING_HUMAN))
+                self.assertIsNone(data.get(PARK_REASON))
+                # Validating-route round accounting: BUMP (2 -> 3), NOT the
+                # in_review-route reset to 0.
+                self.assertEqual(data.get(REVIEW_ROUND), 3)
+                # Anchor cleared on the pushed fix so it is not replayed again.
+                self.assertIsNone(data.get(PENDING_FIX_REVIEWER_COMMENT_ID))
 
     def test_command_mixed_with_guidance_is_not_swallowed(self) -> None:
         # A PR-conversation comment mixing real guidance with a
