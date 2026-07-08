@@ -217,9 +217,17 @@ HITL_MENTIONS: str = " ".join(f"@{handle}" for handle in HITL_HANDLES)
 # willing to auto-pick-up. Empty (the default) disables the allowlist and
 # preserves the legacy "anyone can trigger" behavior. Set this on a public
 # repo to keep random users from spending the orchestrator's compute budget
-# on useless tasks. The guard only fires at pickup; if a maintainer manually
-# labels an outsider's issue (e.g. `implementing`) the workflow still drives
-# it to completion, so this is purely a triage filter.
+# on useless tasks. When set this list is also the comment trust boundary
+# (see `comment_trust`): comments from authors outside it stay visible on
+# GitHub but are dropped from agent prompts, the `user_content_hash` drift
+# signal, awaiting-human resume signals, and PR / `fixing` feedback, so an
+# outsider on a public repo cannot inject workflow-driving instructions.
+# On these surfaces a Bot/App login is gated like any other author, kept
+# out only once the allowlist is populated; a separate `user.type ==
+# "Bot"` structural check covers the drift hash and community-PR sweep.
+# Pickup itself still fires only on unlabeled issues: a
+# maintainer who manually labels an outsider's issue (e.g. `implementing`)
+# drives it to completion.
 ALLOWED_ISSUE_AUTHORS: tuple[str, ...] = _parse_hitl_handles(
     os.environ.get("ALLOWED_ISSUE_AUTHORS", "")
 )
