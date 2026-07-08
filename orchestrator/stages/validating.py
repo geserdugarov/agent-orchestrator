@@ -14,6 +14,18 @@ recovery (`_try_recover_validating_transient_park` plus its
 handoff watermark seeding (`_seed_watermark_past_self`,
 `_latest_pr_comment_ids`).
 
+`_handle_validating` itself is a thin dispatcher over stage-private
+sub-handlers -- terminal-finalization guards
+(`_finalize_validating_terminal`), the user-content drift resume
+(`_resume_dev_on_validating_drift`), awaiting-human routing
+(`_handle_validating_awaiting_human`), verdict routing
+(`_finalize_validating_approval` with its in_review handoff seeding
+`_seed_in_review_handoff_watermarks` + the pure `_ratchet_watermark`,
+`_park_reviewer_no_verdict`, `_handle_validating_changes_requested`), and
+the pure verify-failure formatter `_verify_failure_detail`. None of these
+are re-exported: they are internal to this module and reached directly, not
+through the facade.
+
 ALL workflow-owned helpers (`_park_awaiting_human`, `_run_agent_tracked`,
 `_now_iso`, the worktree plumbing, the drift / manifest / messaging
 helpers re-exported into `workflow`) are reached through the parent
@@ -621,6 +633,37 @@ _VERIFY_STATUS_TO_REASON = {
 }
 
 
+def _verify_failure_detail(verify) -> str:
+    """One-line description of a non-ok local-verify result, naming the
+    failing command and its failure mode.
+
+    The `head_changed` branch surfaces both short SHAs so the operator can
+    `git show` the stray commit and decide whether to keep it (re-spawn the
+    reviewer on the new HEAD) or revert it before re-trying.
+    """
+    if verify.status == "timeout":
+        return (
+            f"`{verify.command}` timed out after "
+            f"{config.VERIFY_TIMEOUT}s"
+        )
+    if verify.status == "dirty":
+        files = ", ".join(f"`{p}`" for p in verify.dirty_files[:10])
+        if len(verify.dirty_files) > 10:
+            files += f", … (+{len(verify.dirty_files) - 10} more)"
+        return f"`{verify.command}` left the worktree dirty: {files}"
+    if verify.status == "head_changed":
+        before = (verify.head_before or "")[:12] or "(no HEAD)"
+        after = (verify.head_after or "")[:12] or "(no HEAD)"
+        return (
+            f"`{verify.command}` moved HEAD ({before} -> {after}); "
+            "verify commands must not commit"
+        )
+    return (
+        f"`{verify.command}` exited with code "
+        f"{verify.exit_code if verify.exit_code is not None else '?'}"
+    )
+
+
 def _park_verify_failure(
     gh: GitHubClient,
     issue: Issue,
@@ -639,35 +682,7 @@ def _park_verify_failure(
     from .. import workflow as _wf
 
     reason = _VERIFY_STATUS_TO_REASON.get(verify.status, "verify_failed")
-    if verify.status == "timeout":
-        detail = (
-            f"`{verify.command}` timed out after "
-            f"{config.VERIFY_TIMEOUT}s"
-        )
-    elif verify.status == "dirty":
-        files = ", ".join(f"`{p}`" for p in verify.dirty_files[:10])
-        if len(verify.dirty_files) > 10:
-            files += f", … (+{len(verify.dirty_files) - 10} more)"
-        detail = (
-            f"`{verify.command}` left the worktree dirty: {files}"
-        )
-    elif verify.status == "head_changed":
-        # The verify command produced a new commit (or otherwise moved
-        # HEAD) on its own. Surface both SHAs so the operator can
-        # `git show` the commit and decide whether to keep it
-        # (re-spawn the reviewer on the new HEAD) or revert it before
-        # re-trying. Show short SHAs for legibility.
-        before = (verify.head_before or "")[:12] or "(no HEAD)"
-        after = (verify.head_after or "")[:12] or "(no HEAD)"
-        detail = (
-            f"`{verify.command}` moved HEAD ({before} -> {after}); "
-            "verify commands must not commit"
-        )
-    else:
-        detail = (
-            f"`{verify.command}` exited with code "
-            f"{verify.exit_code if verify.exit_code is not None else '?'}"
-        )
+    detail = _verify_failure_detail(verify)
 
     message = (
         f"{config.HITL_MENTIONS} local verification failed; PR not handed "
@@ -687,271 +702,620 @@ def _park_verify_failure(
     state.set("park_reason", reason)
 
 
+def _ratchet_watermark(prev, seeded):
+    """Combine a previously-persisted in_review watermark with a freshly-seeded
+    one, never moving backward.
+
+    A prior in_review tick may have already advanced the persisted watermark
+    past PR feedback the dev has since fixed; `_seed_watermark_past_self` stops
+    at the first post-pickup human comment, so without the max() that consumed
+    comment would replay as "new". Returns the max of the two when both are
+    present, the one that exists otherwise, or 0 when neither does -- 0 means
+    "scan all from the beginning" and marks the surface as already seeded so the
+    in_review legacy migration does not advance past historical human feedback.
+    """
+    if isinstance(prev, int):
+        return prev if seeded is None else max(seeded, prev)
+    return seeded if seeded is not None else 0
+
+
+def _finalize_validating_terminal(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+) -> bool:
+    """Terminal short-circuits checked before the reviewer runs; True when one
+    fired and the caller must return.
+
+    External merge: a human merged the PR while the reviewer was queued.
+    Finalize to `done` rather than running the reviewer against a branch that
+    already landed. Closed-issue counterpart: the closed-`validating` sweep
+    yields issues a human closed without a merged PR (the change was rejected
+    mid-review, or the PR was closed-without-merge); flip to `rejected` so the
+    reviewer does not spawn against a closed issue and the PR is not relabeled
+    back to `in_review`. The in_review / fixing handlers carry equivalent
+    terminal checks.
+    """
+    from .. import workflow as _wf
+
+    if _wf._finalize_if_pr_merged(gh, spec, issue, state):
+        return True
+    if _wf._finalize_if_issue_closed(gh, spec, issue, state):
+        return True
+    return False
+
+
+def _resume_dev_on_validating_drift(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+) -> bool:
+    """Resume the dev session when a human edited the issue title/body while the
+    reviewer was running.
+
+    Re-decomposing now would discard the dev's already-pushed work, so notify
+    the human, resume the dev session on its locked backend with the new body,
+    and on a successful pushed fix bump `review_round` while staying on
+    `validating` (no relabel emitted) so the reviewer re-evaluates the updated
+    body + new diff on the next tick. An ACK reply (no commit) keeps the issue
+    on `validating`. On a failed resume (timeout, dirty, no commit), the
+    standard park flags land via `_post_user_content_change_result`.
+
+    Returns True when a drift was detected and fully handled (caller must
+    return). Returns False when there is no drift, or when the issue is parked
+    with a reviewer-side reason (`reviewer_timeout` / `reviewer_failed`) or on
+    the review-round cap (`review_cap`) -- those defer to the awaiting-human
+    branch. A human "retry" comment on a reviewer-side park must re-spawn the
+    REVIEWER, not the dev: the failure produced no review output for the dev to
+    act on, and the reviewer re-reads the updated `issue.body` + comments via
+    `_build_review_prompt` when it runs. For `review_cap`, the cap has consumed
+    every round, so resuming the dev would re-park on the cap next tick; the
+    operator's `/orchestrator add-review-rounds` command lives in the
+    awaiting-human branch, and the command comment itself bumps the user-content
+    hash, so without this bypass the drift block would fire first and the
+    command would never be parsed. The new baseline hash is persisted here
+    either way so the next tick's drift check has a stable comparison point.
+    """
+    from .. import workflow as _wf
+
+    new_hash = _wf._detect_user_content_change(gh, issue, state)
+    if new_hash is None:
+        return False
+    state.set("user_content_hash", new_hash)
+    defer_to_awaiting_human = (
+        state.get("awaiting_human")
+        and state.get("park_reason")
+        in ("reviewer_timeout", "reviewer_failed", "review_cap")
+    )
+    if defer_to_awaiting_human:
+        return False
+
+    _wf._post_issue_comment(
+        gh, issue, state,
+        ":pencil2: issue body changed; resuming dev session.",
+    )
+    # Mark the full issue thread as consumed: the dev sees it via
+    # `_recent_comments_text` in the resume prompt, so the eventual
+    # handoff to in_review must not replay those comments as fresh
+    # feedback. Mirrors `_resume_developer_on_human_reply`'s pre-spawn bump.
+    _wf._mark_drift_comments_consumed(gh, issue, state)
+    wt = _wf._worktree_path(spec, issue.number)
+    if not wt.exists():
+        wt = _wf._ensure_worktree(
+            spec, issue.number,
+            branch=_wf._resolve_branch_name(state, spec, issue.number),
+        )
+    before_sha = _wf._head_sha(wt)
+    followup = _wf._build_user_content_change_prompt(
+        issue, _wf._recent_comments_text(issue),
+    )
+    wt, result, paused = _wf._resume_dev_with_text(
+        gh, spec, issue, state, followup, pause_guard=True,
+    )
+    state.set("last_agent_action_at", _wf._now_iso())
+    if paused:
+        # Live pause applied during the drift resume: the helper already
+        # stopped before persisting the session id or clearing
+        # `awaiting_human`. Return WITHOUT running the result handler (which
+        # would post / push / advance the round) or writing pinned state, so
+        # the drift bookkeeping staged above stays unrecorded and the committed
+        # work stays on the branch; the next tick re-detects the drift once the
+        # label is removed.
+        return True
+    # Custom result handler: a no-commit-with-message reply is the dev
+    # confirming the existing work already satisfies the edit, and the resume
+    # prompt explicitly invites that response. `_handle_dev_fix_result` would
+    # park on it via `_on_question`; use the user-content-specific helper so a
+    # harmless clarification does not stall the issue.
+    outcome = _post_user_content_change_result(
+        gh, spec, issue, state, wt, result, before_sha,
+    )
+    if result.interrupted:
+        # Shutdown-killed resume: the consumption pre-staged before the spawn
+        # (`user_content_hash`, the consumed drift-comment watermark via
+        # `_mark_drift_comments_consumed`, and `last_agent_action_at`) must NOT
+        # persist, or the next tick would treat the body change as already
+        # handled and skip the retry. `_post_user_content_change_result`
+        # already returned "parked" without side effects; bail WITHOUT writing
+        # so the next tick re-detects the drift and resumes a fresh session.
+        return True
+    if outcome == "pushed":
+        round_n = int(state.get("review_round") or 0)
+        state.set("review_round", round_n + 1)
+    gh.write_pinned_state(issue, state)
+    return True
+
+
+def _handle_validating_awaiting_human(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+) -> str:
+    """Route an awaiting-human `validating` tick after a park.
+
+    A human replied (or a transient condition self-resolved) while the issue
+    was parked. Resume the developer with their feedback -- identical mechanic
+    to implementing's resume, but on a clean pushed fix we bump the round while
+    staying on `validating` (no relabel emitted) so the reviewer re-evaluates
+    the new head next tick. Docs are deferred to the final-docs handoff after
+    reviewer approval.
+
+    Returns ``"return"`` when the tick is fully handled (caller must return) or
+    ``"spawn_reviewer"`` when the park cleared into a reviewer re-run (review-cap
+    reset, reviewer timeout / silent crash) and the caller should fall through
+    to the round-cap check and reviewer spawn.
+    """
+    from .. import workflow as _wf
+
+    # Transient-park recovery: when the original park reason is something
+    # that can resolve without a human comment (a push race that the
+    # next --force-with-lease push will land, or an agent timeout that
+    # the next tick can simply rerun past), re-attempt silently. This
+    # mirrors the in_review recovery branch -- without it, the issue
+    # would sit forever, because `_resume_developer_on_human_reply`
+    # only fires on new issue-thread comments and the human action
+    # that unstuck the underlying condition typically does not include
+    # one.
+    park_reason = state.get("park_reason")
+    # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
+    # the `_sync_pr_worktree_to_base` retry loop -- the operator's
+    # new comment is the "retry the rebase" signal, NOT a dev /
+    # reviewer trigger for this stage. Stay silent so the refresh
+    # keeps ownership of the comment; resuming the dev or
+    # respawning the reviewer here would consume the comment as
+    # input it has no context for and silently drop the retry
+    # intent.
+    if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
+        return "return"
+    last_action_id = state.get("last_action_comment_id")
+    new_comments = gh.comments_after(issue, last_action_id)
+    # `/orchestrator add-review-rounds N` operator command. Only honored
+    # on a `review_cap` park: the cap has consumed every review round and
+    # plain resuming the dev would re-park on the same cap next tick (the
+    # original bug -- the round bump in the resume branch just trips
+    # `round_n >= MAX_REVIEW_ROUNDS` again). On other parks the human's
+    # reply IS the input the dev / reviewer needs, so we don't intercept
+    # it. On a non-command reply while parked on the cap we stay parked
+    # silently rather than waking the dev on a do-nothing prompt.
+    if park_reason == "review_cap":
+        if not new_comments:
+            return "return"
+        cmd = _parse_add_review_rounds(new_comments)
+        if cmd is None:
+            return "return"
+        consumed_max = max(c.id for c in new_comments)
+        state.set("last_action_comment_id", consumed_max)
+        n, err = cmd
+        if err is not None:
+            _wf._post_issue_comment(
+                gh, issue, state,
+                f":warning: `/orchestrator add-review-rounds` ignored: "
+                f"{err}.",
+            )
+            gh.write_pinned_state(issue, state)
+            return "return"
+        new_round = max(0, config.MAX_REVIEW_ROUNDS - n)
+        state.set("review_round", new_round)
+        state.set("awaiting_human", False)
+        state.set("park_reason", None)
+        _wf._post_issue_comment(
+            gh, issue, state,
+            f":arrows_counterclockwise: review-cap reset: granting {n} "
+            f"more round(s) "
+            f"(`review_round`={new_round}/{config.MAX_REVIEW_ROUNDS}); "
+            "rerunning reviewer.",
+        )
+        # Rerun the reviewer on the same tick (parity with the
+        # reviewer_timeout / reviewer_failed branch). The spawn block reads
+        # `review_round` again from state.
+        return "spawn_reviewer"
+    elif (
+        not new_comments
+        and park_reason in _VALIDATING_TRANSIENT_PARK_REASONS
+    ):
+        recovery = _try_recover_validating_transient_park(
+            spec, issue, state
+        )
+        if recovery == "stuck":
+            return "return"  # still stuck, do not re-post the park comment
+        # Conditions resolved: clear the park flags. The recovery
+        # helper has already bumped review_round when a fix landed
+        # (push_failed, or agent_timeout that finished its push), so
+        # we only handle the flag clear here. The handoff watermark
+        # `last_action_comment_id` was already advanced by the
+        # original `_park_awaiting_human` call, so the in_review
+        # handler will not re-feed any already-consumed comments.
+        state.set("awaiting_human", False)
+        state.set("park_reason", None)
+        gh.write_pinned_state(issue, state)
+        return "return"
+    elif (
+        new_comments
+        and park_reason in ("reviewer_timeout", "reviewer_failed")
+    ):
+        # The park was reviewer-side (timeout or silent crash); a
+        # human "Retry" / "Continue" nudge should re-spawn the
+        # REVIEWER, not the dev. The dev session has nothing to act
+        # on -- the failure produced no review output -- and waking
+        # it just yields a "nothing to do" question that re-parks
+        # the issue. Advance the watermark past the consumed
+        # comments, clear the park flags, and rerun the reviewer.
+        consumed_max = max(c.id for c in new_comments)
+        state.set("last_action_comment_id", consumed_max)
+        state.set("awaiting_human", False)
+        state.set("park_reason", None)
+        return "spawn_reviewer"
+    else:
+        wt = _wf._worktree_path(spec, issue.number)
+        if not wt.exists():
+            wt = _wf._ensure_worktree(
+                spec, issue.number,
+                branch=_wf._resolve_branch_name(state, spec, issue.number),
+            )
+        before_sha = _wf._head_sha(wt)
+        resumed = _wf._resume_developer_on_human_reply(
+            gh, spec, issue, state, pause_guard=True,
+        )
+        if resumed is None:
+            return "return"
+        wt, result, paused = resumed
+        state.set("last_agent_action_at", _wf._now_iso())
+        if paused:
+            # Live pause applied mid-resume: stop before
+            # `_handle_dev_fix_result` parks / pushes / relabels and
+            # before any pinned-state write. The helper left durable
+            # state (session id, `awaiting_human`, watermark) exactly as
+            # the prior tick had it, so the carried-over commit
+            # republishes once the label is removed.
+            return "return"
+        if not _handle_dev_fix_result(
+            gh, spec, issue, state, wt, result, before_sha
+        ):
+            if result.interrupted:
+                # Shutdown-killed resume:
+                # `_resume_developer_on_human_reply` advanced
+                # `last_action_comment_id` and `_resume_dev_with_text`
+                # cleared `awaiting_human` in-memory. Skip the write so
+                # neither reaches GitHub -- the park stays put and the
+                # next tick re-consumes the same human reply against a
+                # fresh dev session. Other no-fix outcomes (timeout /
+                # question / dirty / push-fail) still persist their flags.
+                return "return"
+            gh.write_pinned_state(issue, state)
+            return "return"
+        round_n = int(state.get("review_round") or 0)
+        state.set("review_round", round_n + 1)
+        gh.write_pinned_state(issue, state)
+        return "return"
+
+
+def _seed_in_review_handoff_watermarks(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    pr_number,
+    squashed_count: int,
+) -> None:
+    """Seed the in_review comment watermarks so `_handle_in_review` does not
+    replay the orchestrator's own automated comments ("picking this up",
+    "PR opened", the approval just posted, the squash notice) as fresh PR
+    feedback once the debounce expires.
+
+    A get_pr failure is recoverable -- the in_review handler falls back to its
+    legacy `last_action_comment_id` watermark -- so we log and return without
+    seeding.
+    """
+    from .. import workflow as _wf
+
+    if pr_number is None:
+        return
+    try:
+        pr = gh.get_pr(int(pr_number))
+    except Exception as e:
+        # Surface the failure but skip the traceback -- it adds no signal.
+        _wf.log.warning(
+            "issue=#%s could not snapshot PR #%s for in_review "
+            "handoff: %s", issue.number, pr_number, e,
+        )
+        return
+    # Post the squash PR comment BEFORE seeding watermarks so the seed walks
+    # past it (its id lands in `orchestrator_comment_ids` via `_post_pr_comment`).
+    # Without that ordering, the next in_review tick treats the squash comment
+    # as fresh PR feedback once the debounce expires and resumes the dev
+    # session over an informational orchestrator post.
+    if squashed_count > 1:
+        try:
+            _wf._post_pr_comment(
+                gh, int(pr_number), state,
+                f":package: squashed {squashed_count} commits "
+                "to 1 after approval",
+            )
+        except Exception:
+            _wf.log.exception(
+                "issue=#%s could not post squash notice to "
+                "PR #%s", issue.number, pr_number,
+            )
+    issue_wm, review_wm = _latest_pr_comment_ids(gh, issue, pr, state)
+    state.set(
+        "pr_last_comment_id",
+        _ratchet_watermark(state.get("pr_last_comment_id"), issue_wm),
+    )
+    # Inline review comments and review summaries live in namespaces the
+    # orchestrator never posts on, so `_latest_pr_comment_ids` returns None for
+    # the inline surface and there is no seeded summary value; `_ratchet_watermark`
+    # defaults each to 0 so the in_review legacy migration treats them as
+    # already seeded and does NOT advance past human feedback submitted on those
+    # surfaces during validate.
+    state.set(
+        "pr_last_review_comment_id",
+        _ratchet_watermark(state.get("pr_last_review_comment_id"), review_wm),
+    )
+    state.set(
+        "pr_last_review_summary_id",
+        _ratchet_watermark(state.get("pr_last_review_summary_id"), None),
+    )
+
+
+def _finalize_validating_approval(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+    wt: Path,
+    pr_number,
+) -> None:
+    """Finalize an approved review: verify gate, approval comment, optional
+    squash, in_review handoff watermarks, then relabel to `documenting`.
+
+    The verify gate is the first gate after the reviewer so an obviously-broken
+    branch never reaches `in_review` (GitHub CI still runs against the PR for
+    the human merging it). Default-empty `VERIFY_COMMANDS` short-circuits to
+    "ok". A failed / timed-out command or a dirty tree left behind parks
+    awaiting_human in `validating` with a stable `park_reason`. A failed
+    squash / force-push also parks and STAYS in `validating` (no relabel) so
+    the original commits remain on the branch for a human to adjudicate. On
+    success the (possibly squashed) head routes through `documenting` for a
+    final docs pass before in_review picks up; the watermarks, approval, and
+    squash comment seeded here are preserved across the documenting hop.
+    """
+    from .. import workflow as _wf
+
+    verify = _wf._run_verify_commands(
+        wt, config.VERIFY_COMMANDS, config.VERIFY_TIMEOUT,
+    )
+    if verify.status != "ok":
+        _park_verify_failure(gh, issue, state, verify)
+        gh.write_pinned_state(issue, state)
+        return
+
+    if pr_number is not None:
+        try:
+            _wf._post_pr_comment(
+                gh, int(pr_number), state,
+                f":white_check_mark: {config.REVIEW_AGENT} review approved.",
+            )
+        except Exception:
+            _wf.log.exception(
+                "issue=#%s could not post approval to PR #%s",
+                issue.number, pr_number,
+            )
+
+    squashed_count = 0
+    if config.SQUASH_ON_APPROVAL:
+        success, _sha_after, n_squashed, err = _wf._squash_and_force_push(
+            spec, wt, _wf._resolve_branch_name(state, spec, issue.number), issue,
+        )
+        if not success:
+            _wf._park_awaiting_human(
+                gh, issue, state,
+                f"{config.HITL_MENTIONS} squash-on-approval failed "
+                f"({err}); the original commits are still on the "
+                "branch and the PR was not relabeled. Manual "
+                "intervention needed (squash + force-push by hand, "
+                "or set `SQUASH_ON_APPROVAL=off` and re-run the "
+                "reviewer).",
+                reason="squash_failed",
+            )
+            gh.write_pinned_state(issue, state)
+            return
+        squashed_count = n_squashed
+
+    _seed_in_review_handoff_watermarks(
+        gh, issue, state, pr_number, squashed_count,
+    )
+    gh.set_workflow_label(issue, WorkflowLabel.DOCUMENTING)
+    gh.write_pinned_state(issue, state)
+
+
+def _park_reviewer_no_verdict(
+    gh: GitHubClient, issue: Issue, state: PinnedState, review
+) -> None:
+    """Park `validating` when the reviewer produced no VERDICT line.
+
+    A silent crash (empty last message + non-zero exit -- codex-side error,
+    network blip) is tagged transient (`reviewer_failed`) so the next tick
+    re-spawns the reviewer instead of waking the dev on a human "Retry" comment;
+    there is no review output the dev could act on, and
+    `_resume_developer_on_human_reply` would otherwise hand the wrong agent a
+    do-nothing prompt. A reviewer that emitted text but merely omitted the
+    VERDICT line is left as `reviewer_no_verdict` for human adjudication, and
+    stderr diagnostics are suppressed (the human is reading real model output).
+    """
+    from .. import workflow as _wf
+
+    raw = (review.last_message or "").strip() or "(reviewer produced no final message)"
+    quoted = "> " + raw.replace("\n", "\n> ")
+    silent_crash = (
+        not (review.last_message or "").strip() and review.exit_code != 0
+    )
+    diag = (
+        _wf._format_stderr_diagnostics(review, "Reviewer")
+        if not (review.last_message or "").strip()
+        else ""
+    )
+    _wf._park_awaiting_human(
+        gh, issue, state,
+        f"{config.HITL_MENTIONS} reviewer did not emit a VERDICT line; "
+        f"manual adjudication needed.\n\n_Last reviewer message:_\n\n"
+        f"{quoted}{diag}",
+        reason="reviewer_failed" if silent_crash else "reviewer_no_verdict",
+    )
+    if silent_crash:
+        state.set("park_reason", "reviewer_failed")
+    _wf.log.warning(
+        "issue=#%s reviewer emitted no VERDICT; exit_code=%d "
+        "timed_out=%s stderr_tail=%r",
+        issue.number, review.exit_code, review.timed_out,
+        _wf._stderr_log_tail(review),
+    )
+    gh.write_pinned_state(issue, state)
+
+
+def _handle_validating_changes_requested(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+    wt: Path,
+    pr_number,
+    review,
+    body: str,
+    round_n: int,
+) -> None:
+    """CHANGES_REQUESTED: post the reviewer feedback on the PR, flip to
+    `fixing`, and resume the dev.
+
+    The dev-fix subphase runs under the `fixing` label so the active job is
+    observably "fixing reviewer-requested changes" rather than "validating"
+    (which reads as reviewer/verify work only); `fixing` thereby extends to
+    automated reviewer feedback in addition to its original in_review
+    human-feedback duty. The label is flipped BEFORE the dev spawn so a crash
+    inside the spawn still leaves the issue on `fixing` with stale
+    awaiting_human=False, which the next tick's fixing handler treats as
+    no-feedback and bounces back to `validating`. On a successful pushed fix we
+    bump `review_round` and relabel to `validating`; on any park the issue stays
+    on `fixing` and the fixing handler owns the awaiting-human rescan.
+    `review_round` accounting, `MAX_REVIEW_ROUNDS`, dev-session pinning, and the
+    final-docs handoff are unchanged -- only the visible label moves with the
+    active work.
+    """
+    from .. import workflow as _wf
+
+    feedback = body.strip() or (review.last_message or "").strip()
+    if pr_number is not None:
+        try:
+            _wf._post_pr_comment(
+                gh, int(pr_number), state,
+                f":eyes: {config.REVIEW_AGENT} review (round {round_n + 1}/"
+                f"{config.MAX_REVIEW_ROUNDS}) requested changes:\n\n{feedback}",
+            )
+        except Exception:
+            _wf.log.exception(
+                "issue=#%s could not post review to PR #%s",
+                issue.number, pr_number,
+            )
+
+    gh.set_workflow_label(issue, WorkflowLabel.FIXING)
+    gh.write_pinned_state(issue, state)
+
+    fix_prompt = _wf._build_fix_prompt(feedback)
+    before_sha = _wf._head_sha(wt)
+    # Resume through the shared helper rather than a bare `_run_agent_tracked`:
+    # the reviewer-feedback fix is a dev-session resume like every other, so it
+    # must charge the per-session resume budget (`DEV_SESSION_MAX_RESUMES`),
+    # rotate to a fresh spawn at the threshold, and recover immediately from a
+    # Claude context-window overflow. A direct resume replays the whole
+    # transcript every round and would let this common route slide into the
+    # same overflow loop. The helper tags its events with the current label,
+    # which the `fixing` flip above has already set, so the spawn stays
+    # `fixing`.
+    wt, dev_result, paused = _wf._resume_dev_with_text(
+        gh, spec, issue, state, fix_prompt, pause_guard=True,
+    )
+    state.set("last_agent_action_at", _wf._now_iso())
+
+    if paused:
+        # Live pause during the reviewer-change fix. The pre-spawn `fixing`
+        # flip is durable, but no result is published: return before
+        # `_handle_dev_fix_result` parks / pushes / relabels and before the
+        # pinned-state write, leaving the committed fix on the branch. Once
+        # the label is removed `_handle_fixing` owns the resume from the
+        # `fixing` label.
+        return
+
+    if not _handle_dev_fix_result(
+        gh, spec, issue, state, wt, dev_result, before_sha
+    ):
+        if dev_result.interrupted:
+            # Shutdown-killed resume: do NOT persist the post-spawn state.
+            # `_resume_dev_with_text` charged the per-session resume budget
+            # (`dev_resume_count`) and `last_agent_action_at` was stamped,
+            # but the run produced no considered result, so persisting them
+            # would burn a retry slot and advance the staleness clock for a
+            # tick that did nothing. Skip the write; the pre-spawn `fixing`
+            # flip stands, the next tick re-runs the CHANGES_REQUESTED cycle,
+            # and any local commit the killed run left is NOT pushed here --
+            # `_handle_dev_fix_result`'s stranded-fix gate republishes it on
+            # the next clean resume rather than this interrupted one.
+            return
+        # Park (timeout / no-commit / dirty / push-fail): the issue stays
+        # on `fixing` so the next tick's `_handle_fixing` owns the
+        # awaiting-human rescan. The fixing handler's filter drops the
+        # orchestrator's own reviewer-feedback PR comment and park
+        # comment, so an awaiting_human=True tick with no new human reply
+        # returns silently rather than bouncing back to `validating`.
+        gh.write_pinned_state(issue, state)
+        return
+
+    # Pushed fix: bump the round and hand back to `validating` so the
+    # reviewer re-evaluates the new head next tick.
+    state.set("review_round", round_n + 1)
+    gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
+    gh.write_pinned_state(issue, state)
+
+
 def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     from .. import workflow as _wf
 
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")
 
-    # External merge short-circuit: a human merged the PR while the
-    # reviewer was queued. Finalize to `done` here rather than running
-    # the reviewer agent against a branch that already landed; the
-    # in_review / fixing handlers have an equivalent terminal check.
-    if _wf._finalize_if_pr_merged(gh, spec, issue, state):
+    if _finalize_validating_terminal(gh, spec, issue, state):
         return
 
-    # Closed-issue counterpart: the closed-`validating` sweep yields
-    # issues a human closed without a merged PR (the operator rejected
-    # the change mid-review, or the PR was closed-without-merge). Flip
-    # to `rejected` so the reviewer agent does not spawn against a
-    # closed issue and the PR is not relabeled back to `in_review`.
-    if _wf._finalize_if_issue_closed(gh, spec, issue, state):
+    # User-content drift resume runs before the awaiting-human and reviewer
+    # branches: a body edit mid-review must resume the dev on the new body
+    # rather than re-review stale work. Returns True when it fully handled the
+    # tick; a reviewer-side (`reviewer_timeout` / `reviewer_failed`) or
+    # `review_cap` park defers to the awaiting-human branch below (that branch
+    # owns the human's "retry" / `/orchestrator add-review-rounds` comment).
+    if _resume_dev_on_validating_drift(gh, spec, issue, state):
         return
 
-    # User-content drift: a human edited the issue title/body while the
-    # reviewer was running. Re-decomposing now would discard the dev's
-    # already-pushed work, so notify the human, resume the dev session on
-    # its locked backend with the new body, and on a successful pushed fix
-    # bump `review_round` while staying on `validating` (no relabel
-    # emitted) so the reviewer re-evaluates the updated body + new diff
-    # on the next tick. An ACK reply (no commit) keeps the issue on
-    # `validating`. On a failed resume (timeout, dirty, no commit), the
-    # standard park flags land via `_handle_dev_fix_result`.
-    #
-    # Exception: when the issue is parked with a reviewer-side park reason
-    # (`reviewer_timeout` / `reviewer_failed`) OR on the review-round cap
-    # (`review_cap`), defer to the awaiting-human branch below. A human
-    # "retry" comment on a reviewer-side park must re-spawn the REVIEWER,
-    # not the dev: the failure produced no review output for the dev to
-    # act on, and the reviewer naturally re-reads the updated `issue.body`
-    # + comments via `_build_review_prompt` when it runs. For `review_cap`,
-    # the cap has consumed every round, so resuming the dev would re-park
-    # on the cap next tick (the original bug); the operator's
-    # `/orchestrator add-review-rounds` command lives in the awaiting-human
-    # branch, and the operator's command comment itself is a non-orchestrator
-    # comment that bumps the user-content hash, so without this bypass the
-    # drift block fires first and the command never gets parsed. We still
-    # persist the new baseline here so the next tick's drift check sees a
-    # stable comparison point (otherwise the drift would loop on every
-    # subsequent tick).
-    new_hash = _wf._detect_user_content_change(gh, issue, state)
-    if new_hash is not None:
-        state.set("user_content_hash", new_hash)
-        defer_to_awaiting_human = (
-            state.get("awaiting_human")
-            and state.get("park_reason")
-            in ("reviewer_timeout", "reviewer_failed", "review_cap")
-        )
-        if not defer_to_awaiting_human:
-            _wf._post_issue_comment(
-                gh, issue, state,
-                ":pencil2: issue body changed; resuming dev session.",
-            )
-            # Mark the full issue thread as consumed: the dev sees it via
-            # `_recent_comments_text` in the resume prompt, so the eventual
-            # handoff to in_review must not replay those comments as fresh
-            # feedback. Mirrors `_resume_developer_on_human_reply`'s
-            # pre-spawn bump.
-            _wf._mark_drift_comments_consumed(gh, issue, state)
-            wt = _wf._worktree_path(spec, issue.number)
-            if not wt.exists():
-                wt = _wf._ensure_worktree(
-                    spec, issue.number,
-                    branch=_wf._resolve_branch_name(state, spec, issue.number),
-                )
-            before_sha = _wf._head_sha(wt)
-            followup = _wf._build_user_content_change_prompt(
-                issue, _wf._recent_comments_text(issue),
-            )
-            wt, result, paused = _wf._resume_dev_with_text(
-                gh, spec, issue, state, followup, pause_guard=True,
-            )
-            state.set("last_agent_action_at", _wf._now_iso())
-            if paused:
-                # Live pause applied during the drift resume: the helper
-                # already stopped before persisting the session id or
-                # clearing `awaiting_human`. Return WITHOUT running the
-                # result handler (which would post / push / advance the
-                # round) or writing pinned state, so the drift bookkeeping
-                # staged above stays unrecorded and the committed work stays
-                # on the branch; the next tick re-detects the drift once the
-                # label is removed.
-                return
-            # Custom result handler: a no-commit-with-message reply is the
-            # dev confirming the existing work already satisfies the edit,
-            # and the resume prompt explicitly invites that response.
-            # `_handle_dev_fix_result` would park on it via `_on_question`;
-            # use the user-content-specific helper so a harmless clarification
-            # does not stall the issue.
-            outcome = _post_user_content_change_result(
-                gh, spec, issue, state, wt, result, before_sha,
-            )
-            if result.interrupted:
-                # Shutdown-killed resume: the consumption pre-staged before
-                # the spawn (`user_content_hash`, the consumed drift-comment
-                # watermark via `_mark_drift_comments_consumed`, and
-                # `last_agent_action_at`) must NOT persist, or the next tick
-                # would treat the body change as already handled and skip the
-                # retry. `_post_user_content_change_result` already returned
-                # "parked" without side effects; bail WITHOUT writing so the
-                # next tick re-detects the drift and resumes a fresh session.
-                return
-            if outcome == "pushed":
-                round_n = int(state.get("review_round") or 0)
-                state.set("review_round", round_n + 1)
-            gh.write_pinned_state(issue, state)
-            return
-        # reviewer-side park OR review_cap: fall through to the
-        # awaiting-human branch below, which will consume the human's
-        # "retry" / `/orchestrator add-review-rounds` comment, clear the
-        # park flags, and re-spawn the reviewer.
-
-    # Awaiting-human path: human replied after a park; resume the developer
-    # codex with their feedback. Identical mechanic to implementing's resume,
-    # but on a clean pushed fix we bump the round while staying on
-    # `validating` (no relabel emitted) so the reviewer re-evaluates the
-    # new head on the next tick. Docs are not run here; they are deferred
-    # to the final-docs handoff after reviewer approval.
+    # Awaiting-human path: human replied after a park (or a transient
+    # condition self-resolved). The helper resumes the dev on their feedback,
+    # recovers transient parks silently, or clears a reviewer-side / review-cap
+    # park into a reviewer re-run. "return" -> the tick is fully handled;
+    # "spawn_reviewer" -> fall through to the round-cap check and reviewer
+    # spawn below.
     if state.get("awaiting_human"):
-        # Transient-park recovery: when the original park reason is something
-        # that can resolve without a human comment (a push race that the
-        # next --force-with-lease push will land, or an agent timeout that
-        # the next tick can simply rerun past), re-attempt silently. This
-        # mirrors the in_review recovery branch -- without it, the issue
-        # would sit forever, because `_resume_developer_on_human_reply`
-        # only fires on new issue-thread comments and the human action
-        # that unstuck the underlying condition typically does not include
-        # one.
-        park_reason = state.get("park_reason")
-        # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
-        # the `_sync_pr_worktree_to_base` retry loop -- the operator's
-        # new comment is the "retry the rebase" signal, NOT a dev /
-        # reviewer trigger for this stage. Stay silent so the refresh
-        # keeps ownership of the comment; resuming the dev or
-        # respawning the reviewer here would consume the comment as
-        # input it has no context for and silently drop the retry
-        # intent.
-        if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
-            return
-        last_action_id = state.get("last_action_comment_id")
-        new_comments = gh.comments_after(issue, last_action_id)
-        # `/orchestrator add-review-rounds N` operator command. Only honored
-        # on a `review_cap` park: the cap has consumed every review round and
-        # plain resuming the dev would re-park on the same cap next tick (the
-        # original bug -- the round bump in the resume branch just trips
-        # `round_n >= MAX_REVIEW_ROUNDS` again). On other parks the human's
-        # reply IS the input the dev / reviewer needs, so we don't intercept
-        # it. On a non-command reply while parked on the cap we stay parked
-        # silently rather than waking the dev on a do-nothing prompt.
-        if park_reason == "review_cap":
-            if not new_comments:
-                return
-            cmd = _parse_add_review_rounds(new_comments)
-            if cmd is None:
-                return
-            consumed_max = max(c.id for c in new_comments)
-            state.set("last_action_comment_id", consumed_max)
-            n, err = cmd
-            if err is not None:
-                _wf._post_issue_comment(
-                    gh, issue, state,
-                    f":warning: `/orchestrator add-review-rounds` ignored: "
-                    f"{err}.",
-                )
-                gh.write_pinned_state(issue, state)
-                return
-            new_round = max(0, config.MAX_REVIEW_ROUNDS - n)
-            state.set("review_round", new_round)
-            state.set("awaiting_human", False)
-            state.set("park_reason", None)
-            _wf._post_issue_comment(
-                gh, issue, state,
-                f":arrows_counterclockwise: review-cap reset: granting {n} "
-                f"more round(s) "
-                f"(`review_round`={new_round}/{config.MAX_REVIEW_ROUNDS}); "
-                "rerunning reviewer.",
-            )
-            # Fall through to the reviewer-spawn block below so the
-            # reviewer reruns on the same tick (parity with the
-            # reviewer_timeout / reviewer_failed branch). The block reads
-            # `review_round` again from state.
-        elif (
-            not new_comments
-            and park_reason in _VALIDATING_TRANSIENT_PARK_REASONS
-        ):
-            recovery = _try_recover_validating_transient_park(
-                spec, issue, state
-            )
-            if recovery == "stuck":
-                return  # still stuck, do not re-post the park comment
-            # Conditions resolved: clear the park flags. The recovery
-            # helper has already bumped review_round when a fix landed
-            # (push_failed, or agent_timeout that finished its push), so
-            # we only handle the flag clear here. The handoff watermark
-            # `last_action_comment_id` was already advanced by the
-            # original `_park_awaiting_human` call, so the in_review
-            # handler will not re-feed any already-consumed comments.
-            state.set("awaiting_human", False)
-            state.set("park_reason", None)
-            gh.write_pinned_state(issue, state)
-            return
-        elif (
-            new_comments
-            and park_reason in ("reviewer_timeout", "reviewer_failed")
-        ):
-            # The park was reviewer-side (timeout or silent crash); a
-            # human "Retry" / "Continue" nudge should re-spawn the
-            # REVIEWER, not the dev. The dev session has nothing to act
-            # on -- the failure produced no review output -- and waking
-            # it just yields a "nothing to do" question that re-parks
-            # the issue. Advance the watermark past the consumed
-            # comments, clear the park flags, and fall through to the
-            # reviewer-spawn block below.
-            consumed_max = max(c.id for c in new_comments)
-            state.set("last_action_comment_id", consumed_max)
-            state.set("awaiting_human", False)
-            state.set("park_reason", None)
-        else:
-            wt = _wf._worktree_path(spec, issue.number)
-            if not wt.exists():
-                wt = _wf._ensure_worktree(
-                    spec, issue.number,
-                    branch=_wf._resolve_branch_name(state, spec, issue.number),
-                )
-            before_sha = _wf._head_sha(wt)
-            resumed = _wf._resume_developer_on_human_reply(
-                gh, spec, issue, state, pause_guard=True,
-            )
-            if resumed is None:
-                return
-            wt, result, paused = resumed
-            state.set("last_agent_action_at", _wf._now_iso())
-            if paused:
-                # Live pause applied mid-resume: stop before
-                # `_handle_dev_fix_result` parks / pushes / relabels and
-                # before any pinned-state write. The helper left durable
-                # state (session id, `awaiting_human`, watermark) exactly as
-                # the prior tick had it, so the carried-over commit
-                # republishes once the label is removed.
-                return
-            if not _handle_dev_fix_result(
-                gh, spec, issue, state, wt, result, before_sha
-            ):
-                if result.interrupted:
-                    # Shutdown-killed resume:
-                    # `_resume_developer_on_human_reply` advanced
-                    # `last_action_comment_id` and `_resume_dev_with_text`
-                    # cleared `awaiting_human` in-memory. Skip the write so
-                    # neither reaches GitHub -- the park stays put and the
-                    # next tick re-consumes the same human reply against a
-                    # fresh dev session. Other no-fix outcomes (timeout /
-                    # question / dirty / push-fail) still persist their flags.
-                    return
-                gh.write_pinned_state(issue, state)
-                return
-            round_n = int(state.get("review_round") or 0)
-            state.set("review_round", round_n + 1)
-            gh.write_pinned_state(issue, state)
+        if _handle_validating_awaiting_human(
+            gh, spec, issue, state
+        ) == "return":
             return
 
     round_n = int(state.get("review_round") or 0)
@@ -1057,282 +1421,18 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     )
 
     if verdict == "approved":
-        # Local verification gate: run the configured `VERIFY_COMMANDS` in
-        # the per-issue worktree before posting the approval or relabeling
-        # to `in_review`. Default-empty `VERIFY_COMMANDS` short-circuits to
-        # "ok" so the legacy "no verification" behaviour is unchanged. A
-        # failed / timed-out command, or a dirty tree left behind, parks
-        # awaiting_human in `validating` with a stable `park_reason` so the
-        # operator can fix the breakage. The verify gate is the first gate
-        # after the reviewer agent so an obviously-broken branch never
-        # reaches `in_review`; GitHub CI still runs against the PR for the
-        # human merging it.
-        verify = _wf._run_verify_commands(
-            wt, config.VERIFY_COMMANDS, config.VERIFY_TIMEOUT,
-        )
-        if verify.status != "ok":
-            _park_verify_failure(gh, issue, state, verify)
-            gh.write_pinned_state(issue, state)
-            return
-
-        if pr_number is not None:
-            try:
-                _wf._post_pr_comment(
-                    gh, int(pr_number), state,
-                    f":white_check_mark: {config.REVIEW_AGENT} review approved.",
-                )
-            except Exception:
-                _wf.log.exception(
-                    "issue=#%s could not post approval to PR #%s",
-                    issue.number, pr_number,
-                )
-
-        # Squash before seeding the in_review handoff. If the squash or
-        # force-push fails we park awaiting_human and STAY in `validating`
-        # (no relabel), so the original commits remain on the branch and a
-        # human can adjudicate.
-        squashed_count = 0
-        if config.SQUASH_ON_APPROVAL:
-            success, _sha_after, n_squashed, err = _wf._squash_and_force_push(
-                spec, wt, _wf._resolve_branch_name(state, spec, issue.number), issue,
-            )
-            if not success:
-                _wf._park_awaiting_human(
-                    gh, issue, state,
-                    f"{config.HITL_MENTIONS} squash-on-approval failed "
-                    f"({err}); the original commits are still on the "
-                    "branch and the PR was not relabeled. Manual "
-                    "intervention needed (squash + force-push by hand, "
-                    "or set `SQUASH_ON_APPROVAL=off` and re-run the "
-                    "reviewer).",
-                    reason="squash_failed",
-                )
-                gh.write_pinned_state(issue, state)
-                return
-            squashed_count = n_squashed
-
-        if pr_number is not None:
-            # Seed the in_review comment watermark so `_handle_in_review`
-            # does not replay the orchestrator's own automated comments
-            # ("picking this up", "PR opened", the approval just posted)
-            # as fresh PR feedback once the debounce expires.
-            try:
-                pr = gh.get_pr(int(pr_number))
-            except Exception as e:
-                # Recoverable: the in_review handler will fall back to its
-                # legacy `last_action_comment_id` watermark. Surface the
-                # failure but skip the traceback -- it adds no signal.
-                _wf.log.warning(
-                    "issue=#%s could not snapshot PR #%s for in_review "
-                    "handoff: %s", issue.number, pr_number, e,
-                )
-            else:
-                # Post the squash PR comment BEFORE seeding watermarks so
-                # the seed walks past it (its id lands in
-                # `orchestrator_comment_ids` via `_post_pr_comment`).
-                # Without that ordering, the next in_review tick treats
-                # the squash comment as fresh PR feedback once the
-                # debounce expires and resumes the dev session over an
-                # informational orchestrator post.
-                if squashed_count > 1:
-                    try:
-                        _wf._post_pr_comment(
-                            gh, int(pr_number), state,
-                            f":package: squashed {squashed_count} commits "
-                            "to 1 after approval",
-                        )
-                    except Exception:
-                        _wf.log.exception(
-                            "issue=#%s could not post squash notice to "
-                            "PR #%s", issue.number, pr_number,
-                        )
-                issue_wm, review_wm = _latest_pr_comment_ids(
-                    gh, issue, pr, state
-                )
-                # Ratchet: a previous in_review tick may have already
-                # advanced these watermarks past PR feedback the dev has
-                # since fixed. _seed_watermark_past_self stops at the first
-                # post-pickup human comment, so without max() that consumed
-                # comment would replay as "new" on the next in_review tick.
-                prev_issue_wm = state.get("pr_last_comment_id")
-                if isinstance(prev_issue_wm, int):
-                    issue_wm = (
-                        prev_issue_wm if issue_wm is None
-                        else max(issue_wm, prev_issue_wm)
-                    )
-                # Default to 0 ("scan all from the beginning") when the
-                # seed-past-self logic returned None and no prior watermark
-                # exists. That happens for legacy state without a recorded
-                # pickup id; setting 0 stops the in_review legacy migration
-                # from then advancing past historical content (including
-                # human feedback posted during implementing/validating)
-                # while still letting `orchestrator_comment_ids` filter
-                # recorded bot comments out of the next tick's scan.
-                if issue_wm is None:
-                    issue_wm = 0
-                state.set("pr_last_comment_id", issue_wm)
-                # Inline review comments and review summaries live in
-                # namespaces the orchestrator never posts on, so the
-                # seed-past-self logic always returns None for those
-                # surfaces. Default each to 0 ("scan all from beginning")
-                # so the in_review legacy migration sees them as already
-                # seeded and does NOT advance past human feedback the
-                # human submitted on those surfaces during validate. Ratchet
-                # past anything a prior in_review tick already consumed.
-                prev_review_wm = state.get("pr_last_review_comment_id")
-                if isinstance(prev_review_wm, int):
-                    review_wm = (
-                        prev_review_wm if review_wm is None
-                        else max(review_wm, prev_review_wm)
-                    )
-                if review_wm is None:
-                    review_wm = 0
-                state.set("pr_last_review_comment_id", review_wm)
-                prev_summary_wm = state.get("pr_last_review_summary_id")
-                summary_wm = (
-                    prev_summary_wm
-                    if isinstance(prev_summary_wm, int)
-                    else 0
-                )
-                state.set("pr_last_review_summary_id", summary_wm)
-        # Route through `documenting` for a final docs pass on the
-        # approved (and possibly squashed) head before in_review picks
-        # up. `_handle_documenting`'s success exits always advance to
-        # `in_review`. The PR watermarks, approval comment, and squash
-        # comment seeded here are preserved across the documenting hop
-        # unchanged.
-        gh.set_workflow_label(issue, WorkflowLabel.DOCUMENTING)
-        gh.write_pinned_state(issue, state)
+        _finalize_validating_approval(gh, spec, issue, state, wt, pr_number)
         return
 
     if verdict == "unknown":
-        raw = (review.last_message or "").strip() or "(reviewer produced no final message)"
-        quoted = "> " + raw.replace("\n", "\n> ")
-        # Surface stderr only on the silent-review path (empty last_message).
-        # If the reviewer DID emit text but it just lacked a VERDICT line,
-        # the human is reading real model output and stderr noise would
-        # only distract.
-        silent_crash = (
-            not (review.last_message or "").strip() and review.exit_code != 0
-        )
-        diag = (
-            _wf._format_stderr_diagnostics(review, "Reviewer")
-            if not (review.last_message or "").strip()
-            else ""
-        )
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} reviewer did not emit a VERDICT line; "
-            f"manual adjudication needed.\n\n_Last reviewer message:_\n\n"
-            f"{quoted}{diag}",
-            reason="reviewer_failed" if silent_crash else "reviewer_no_verdict",
-        )
-        if silent_crash:
-            # Tag as transient so the next tick re-spawns the reviewer
-            # instead of waking the dev on a human "Retry" comment.
-            # Mirrors `reviewer_timeout`: a crash with empty stdout +
-            # non-zero exit (codex-side error, network blip) leaves no
-            # output the dev could act on, and `_resume_developer_on_human_reply`
-            # would otherwise hand the wrong agent a do-nothing prompt.
-            state.set("park_reason", "reviewer_failed")
-        _wf.log.warning(
-            "issue=#%s reviewer emitted no VERDICT; exit_code=%d "
-            "timed_out=%s stderr_tail=%r",
-            issue.number, review.exit_code, review.timed_out,
-            _wf._stderr_log_tail(review),
-        )
-        gh.write_pinned_state(issue, state)
+        _park_reviewer_no_verdict(gh, issue, state, review)
         return
 
-    # CHANGES_REQUESTED -- post the feedback on the PR, then resume the dev.
-    # The dev-fix subphase runs under the `fixing` label so the active job
-    # is observably "fixing reviewer-requested changes" rather than
-    # "validating" (which would now read as reviewer/verify work only). On
-    # a successful pushed fix we relabel back to `validating` so the
-    # reviewer re-evaluates the new head next tick; on any park the issue
-    # stays on `fixing` and the fixing handler owns the awaiting-human
-    # rescan + dev resume cycle (`fixing` already extends to "automated
-    # reviewer feedback" by virtue of this route, in addition to its
-    # original in_review human-feedback duty). `review_round` accounting,
-    # `MAX_REVIEW_ROUNDS`, dev-session pinning, and the final-docs handoff
-    # are unchanged -- only the visible label moves with the active work.
-    feedback = body.strip() or (review.last_message or "").strip()
-    if pr_number is not None:
-        try:
-            _wf._post_pr_comment(
-                gh, int(pr_number), state,
-                f":eyes: {config.REVIEW_AGENT} review (round {round_n + 1}/"
-                f"{config.MAX_REVIEW_ROUNDS}) requested changes:\n\n{feedback}",
-            )
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not post review to PR #%s",
-                issue.number, pr_number,
-            )
-
-    # Flip to `fixing` BEFORE spawning the dev so the GitHub label reflects
-    # the active job for the duration of the dev subprocess (and for any
-    # subsequent ticks if the run parks). The label set is independent of
-    # the pinned-state write below; doing it first means a crash inside the
-    # dev spawn still leaves the issue on `fixing` with stale awaiting_human
-    # =False, which the next tick's fixing handler treats as no-feedback
-    # and bounces back to `validating` so the reviewer reruns. Without the
-    # pre-spawn flip, a crash would leave a stale `validating` label over
-    # work the reviewer never produced a verdict for.
-    gh.set_workflow_label(issue, WorkflowLabel.FIXING)
-    gh.write_pinned_state(issue, state)
-
-    fix_prompt = _wf._build_fix_prompt(feedback)
-    before_sha = _wf._head_sha(wt)
-    # Resume through the shared helper rather than a bare `_run_agent_tracked`:
-    # the reviewer-feedback fix is a dev-session resume like every other, so it
-    # must charge the per-session resume budget (`DEV_SESSION_MAX_RESUMES`),
-    # rotate to a fresh spawn at the threshold, and recover immediately from a
-    # Claude context-window overflow. A direct resume replays the whole
-    # transcript every round and would let this common route slide into the
-    # same overflow loop. The helper tags its events with the current label,
-    # which the `fixing` flip above has already set, so the spawn stays
-    # `fixing`.
-    wt, dev_result, paused = _wf._resume_dev_with_text(
-        gh, spec, issue, state, fix_prompt, pause_guard=True,
+    # CHANGES_REQUESTED: post the reviewer feedback, flip to `fixing`, and
+    # resume the dev. On a pushed fix the handler bumps `review_round` and
+    # relabels back to `validating` so the reviewer re-evaluates the new head;
+    # on any park the issue stays on `fixing` and the fixing handler owns the
+    # awaiting-human rescan.
+    _handle_validating_changes_requested(
+        gh, spec, issue, state, wt, pr_number, review, body, round_n,
     )
-    state.set("last_agent_action_at", _wf._now_iso())
-
-    if paused:
-        # Live pause during the reviewer-change fix. The pre-spawn `fixing`
-        # flip is durable, but no result is published: return before
-        # `_handle_dev_fix_result` parks / pushes / relabels and before the
-        # pinned-state write, leaving the committed fix on the branch. Once
-        # the label is removed `_handle_fixing` owns the resume from the
-        # `fixing` label.
-        return
-
-    if not _handle_dev_fix_result(
-        gh, spec, issue, state, wt, dev_result, before_sha
-    ):
-        if dev_result.interrupted:
-            # Shutdown-killed resume: do NOT persist the post-spawn state.
-            # `_resume_dev_with_text` charged the per-session resume budget
-            # (`dev_resume_count`) and `last_agent_action_at` was stamped,
-            # but the run produced no considered result, so persisting them
-            # would burn a retry slot and advance the staleness clock for a
-            # tick that did nothing. Skip the write; the pre-spawn `fixing`
-            # flip stands, the next tick re-runs the CHANGES_REQUESTED cycle,
-            # and any local commit the killed run left is NOT pushed here --
-            # `_handle_dev_fix_result`'s stranded-fix gate republishes it on
-            # the next clean resume rather than this interrupted one.
-            return
-        # Park (timeout / no-commit / dirty / push-fail): the issue stays
-        # on `fixing` so the next tick's `_handle_fixing` owns the
-        # awaiting-human rescan. The fixing handler's filter drops the
-        # orchestrator's own reviewer-feedback PR comment and park
-        # comment, so an awaiting_human=True tick with no new human reply
-        # returns silently rather than bouncing back to `validating`.
-        gh.write_pinned_state(issue, state)
-        return
-
-    # Pushed fix: bump the round and hand back to `validating` so the
-    # reviewer re-evaluates the new head next tick.
-    state.set("review_round", round_n + 1)
-    gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
-    gh.write_pinned_state(issue, state)
