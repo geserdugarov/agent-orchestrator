@@ -278,13 +278,19 @@ watermark).
 `_handle_fixing` and `_handle_question` deliberately skip the drift check. `_handle_fixing` refreshes
 `user_content_hash` itself once it has consumed the PR-side feedback; `_handle_question` runs its own conversation flow.
 
-Non-human content is filtered four ways:
+Non-human content is filtered five ways:
 
 - pinned-state comments by `PINNED_STATE_MARKER`;
 - orchestrator-posted comments by `_ORCH_COMMENT_MARKER` (an HTML comment embedded via `_with_orch_marker`, invisible in
   rendered Markdown, survives id-cap eviction);
 - legacy orchestrator comments by id from `orchestrator_comment_ids`;
-- third-party Bot/App accounts (Dependabot, Renovate, CI bots) via GitHub's `user.type == "Bot"` structural flag.
+- third-party Bot/App accounts (Dependabot, Renovate, CI bots) via GitHub's `user.type == "Bot"` structural flag;
+- untrusted authors via `comment_trust.is_trusted_author` when `ALLOWED_ISSUE_AUTHORS` is set (opt-in; empty allowlist
+  trusts everyone), so an outsider's comment cannot shift the hash and re-trigger drift on a public repo. The same trust
+  helpers filter the conversation text fed to agent prompts: `_recent_comments_text` (implement / review /
+  documentation / decompose / question / drift-resume) and the awaiting-human resume paths that quote new replies
+  directly (`filter_trusted` in the implementing, validating, decomposing, resolving_conflict, and question resumes).
+  An untrusted comment therefore reaches neither the drift hash nor any agent prompt.
 
 `_detect_user_content_change` durably persists the baseline on its FIRST encounter via `gh.write_pinned_state`, so an
 early-return tick cannot silently absorb a later edit as the new baseline. On drift the action depends on lifecycle

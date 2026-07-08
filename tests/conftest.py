@@ -37,7 +37,19 @@ import os
 # assertions and trips `uv run pytest`. Clearing these BEFORE the first
 # `orchestrator.config` import below makes the suite hermetic regardless
 # of the shell environment.
-for _agent_var in ("DEV_AGENT", "REVIEW_AGENT", "DECOMPOSE_AGENT"):
+#
+# `ALLOWED_ISSUE_AUTHORS` is the same class of leak: config reads it at
+# import time, and the comment-trust filter now drops non-allowlisted
+# authors from prompt conversation text and the drift hash. An operator
+# who exported it (a real deployment does) would otherwise see the
+# suite's default fake authors (`alice`, `human`, `geserdugarov`)
+# filtered and dozens of stage tests fail. Clearing it pins the legacy
+# empty-allowlist ("trust everyone") default the stage tests assume;
+# tests that exercise the allowlist patch `config.ALLOWED_ISSUE_AUTHORS`
+# to a populated value inline, which overrides the import-time value.
+for _agent_var in (
+    "DEV_AGENT", "REVIEW_AGENT", "DECOMPOSE_AGENT", "ALLOWED_ISSUE_AUTHORS",
+):
     os.environ.pop(_agent_var, None)
 
 from unittest.mock import patch  # noqa: E402

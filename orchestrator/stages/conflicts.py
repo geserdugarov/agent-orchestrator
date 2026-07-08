@@ -37,6 +37,7 @@ from github.Issue import Issue
 
 from .. import config
 from ..agents import AgentResult
+from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import (
@@ -475,9 +476,17 @@ def _resume_awaiting_human(
         return  # no human reply yet
     consumed_max = max(c.id for c in new_comments)
     state.set("last_action_comment_id", consumed_max)
+    # Drop untrusted authors before their bodies/URLs reach the conflict-resume
+    # dev prompt (mirrors `_resume_developer_on_human_reply`): with
+    # `ALLOWED_ISSUE_AUTHORS` set an outsider reply on a parked rebase must not
+    # steer the developer. The watermark advanced past the whole raw batch
+    # above; an all-untrusted batch is treated as "no human reply yet".
+    trusted = filter_trusted(new_comments)
+    if not trusted:
+        return
     followup = "\n\n".join(
         f"@{c.user.login if c.user else 'user'}: {c.body}"
-        for c in new_comments if c.body
+        for c in trusted if c.body
     )
     followup = f"{followup}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
     wt = _wf._worktree_path(spec, issue.number)

@@ -37,6 +37,7 @@ from github.Issue import Issue
 
 from .. import config
 from ..agents import AgentResult
+from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import GitHubClient, PinnedState
@@ -107,13 +108,22 @@ def _consume_new_human_replies(
     state). Mirrors `_resume_developer_on_human_reply`: the watermark advances
     BEFORE the spawn so a crashed / timed-out resume still records the comments
     as consumed (the agent did see them via the followup prompt).
+
+    Untrusted authors are dropped from the returned batch: the live resume
+    path feeds these comments straight into `_build_question_followup_prompt`,
+    so with `ALLOWED_ISSUE_AUTHORS` set an outsider's reply must not steer the
+    question agent. The watermark advances past the whole raw batch first, so a
+    trusted reply arriving alongside outsider noise consumes both in one tick;
+    an all-untrusted batch leaves nothing to act on and is treated as "no new
+    reply".
     """
     last_action_id = state.get("last_action_comment_id")
     new_comments = gh.comments_after(issue, last_action_id)
     if not new_comments:
         return None
     state.set("last_action_comment_id", max(c.id for c in new_comments))
-    return new_comments
+    trusted = filter_trusted(new_comments)
+    return trusted or None
 
 
 def _build_question_resume_prompt(
