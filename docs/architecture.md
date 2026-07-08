@@ -55,6 +55,9 @@ orchestrator/
   workflow_drift.py     user-content drift detection (hash, compute, route)
   workflow_messages.py  prompt builders, parsers, comment / marker helpers,
                         stderr redaction
+  comment_trust.py      shared trust helpers (is_trusted_author /
+                        filter_trusted) gating comment authors on the
+                        ALLOWED_ISSUE_AUTHORS allowlist
   git_plumbing.py       hardened git subprocess layer: `_git` / `_git_hardened`,
                         per-target-root locks, authed fetch / push helpers
   verify.py             local-verify runner and worktree-state probes
