@@ -3,7 +3,15 @@
 """The `paused` control label is a hard skip on an in-flight issue: while it
 is present the orchestrator runs no handler, consumes no slot, and records no
 stage evaluation. It shares the `backlog` skip path (see
-`github.hard_skip_control_label`), differing only in operator intent."""
+`github.hard_skip_control_label`), differing only in operator intent.
+
+Removing the label is the whole resume protocol: the next poll picks the issue
+back up from durable state (`test_removing_paused_allows_dispatch`). There is no
+un-pause command -- `/orchestrator continue` is unrelated, replaying specific
+`awaiting_human` parked retry flows rather than clearing `paused`. Applying
+`paused` while an agent is mid-run is honored after the run returns, before its
+post-agent side effects; those live-guard cases live in
+`test_workflow_paused_agent_guard.py` and the per-stage `_paused` modules."""
 from __future__ import annotations
 
 import os
