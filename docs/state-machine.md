@@ -41,7 +41,12 @@ Four non-workflow **control labels** modify behavior without occupying the workf
   lands, usage counters fold, child issues are created, watermarks advance, or pinned state advances, so a dev stage's
   committed work stays on the branch and republishes through the normal recovered-worktree / stranded-fix path once the
   label is removed, while the read-only decomposer / reviewer / question runs simply re-run from durable state on the
-  next tick.
+  next tick. Because `paused` is a plain control label, removing it is the entire resume protocol — the next poll
+  picks the issue back up from durable state; there is no un-pause command. This is distinct from `/orchestrator
+  continue` (§ `_handle_fixing` `_handle_continue_command`), which replays only specific `awaiting_human` parked
+  *retry* flows: pausing is never a `park_reason`, so a continue command is not an un-pause and does not clear
+  `paused`. It is unrelated to un-pausing, but not exempt from it — the hard skip fires in `_process_issue` before any
+  handler, so a continue comment posted on a paused issue is deferred with everything else until the label is removed.
 - `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open
   PR whose author is not in the allowlist is labeled and `HITL_HANDLE` is @-mentioned once per PR. Bot-authored PRs
   (Dependabot, Renovate, CI bots) are skipped via GitHub's `user.type == "Bot"` flag — they open PRs structurally and
