@@ -289,18 +289,19 @@ Non-human content is filtered five ways:
   trusts everyone), so an outsider's comment cannot shift the hash and re-trigger drift on a public repo. The same trust
   helpers filter the conversation text fed to agent prompts: `_recent_comments_text` (implement / review /
   documentation / decompose / question / drift-resume); the awaiting-human resume paths that quote new replies
-  directly (`filter_trusted` in the implementing, validating, decomposing, resolving_conflict, and question resumes);
-  and the four-surface PR-feedback scans driving the `in_review` -> `fixing` route, the fixing dev-resume, and the
-  `/orchestrator continue` batch replay (`filter_trusted` in `_scan_fresh_pr_feedback`, the drift-resume
-  PR-conversation block, `_rescan_fixing_feedback`, and `_reconstruct_pending_fix_batch`). On the implementing,
-  validating, decomposing, and question resumes the filter runs on the whole `comments_after` batch up front, so it
-  gates the non-empty check, the quoted follow-up, the consumed-watermark advance, and — in `validating` — the
-  `/orchestrator add-review-rounds` review-cap command and the reviewer-respawn nudge; an untrusted comment resumes
-  none of those sessions and does not advance the watermark (it is re-filtered on each later tick, never marked
-  consumed). The `resolving_conflict` resume filters only the quoted prompt, so its watermark still advances past the
-  raw batch. An untrusted comment therefore neither shifts the drift hash, sets a pending-fix bookmark, routes
-  `in_review` to `fixing`, resumes an awaiting-human decomposer / developer / reviewer / question session, satisfies
-  the `/orchestrator add-review-rounds` review-cap command, nor reaches any agent prompt.
+  directly (`filter_trusted` in the implementing, validating, decomposing, documenting, resolving_conflict, and
+  question resumes) plus the auto-rebase-park retry-unpark in `_sync_pr_worktree_to_base`; and the four-surface
+  PR-feedback scans driving the `in_review` -> `fixing` route, the fixing dev-resume, and the `/orchestrator continue`
+  batch replay (`filter_trusted` in `_scan_fresh_pr_feedback`, the drift-resume PR-conversation block,
+  `_rescan_fixing_feedback`, and `_reconstruct_pending_fix_batch`). On every awaiting-human resume — and the
+  auto-rebase retry-unpark — the filter runs on the whole `comments_after` batch up front, so it gates the non-empty
+  check, the quoted follow-up, the consumed-watermark advance, and — in `validating` — the `/orchestrator
+  add-review-rounds` review-cap command and the reviewer-respawn nudge; an untrusted comment resumes none of those
+  sessions and does not advance the watermark (it is re-filtered on each later tick, never marked consumed). An
+  untrusted comment therefore neither shifts the drift hash, sets a pending-fix bookmark, routes `in_review` to
+  `fixing`, resumes an awaiting-human decomposer / developer / reviewer / question / documenting session, retries a
+  parked auto-rebase, satisfies the `/orchestrator add-review-rounds` review-cap command, nor reaches any agent
+  prompt.
 
 `_detect_user_content_change` durably persists the baseline on its FIRST encounter via `gh.write_pinned_state`, so an
 early-return tick cannot silently absorb a later edit as the new baseline. On drift the action depends on lifecycle

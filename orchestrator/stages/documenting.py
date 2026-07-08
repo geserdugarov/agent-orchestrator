@@ -77,6 +77,7 @@ from github.Issue import Issue
 
 from .. import config
 from ..agents import AgentResult
+from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import GitHubClient, PinnedState
@@ -414,7 +415,10 @@ def _reconcile_documenting_drift(
     # idempotently retries the reconcile + relabel.
     if pending_unwind and not fresh_drift and state.get("awaiting_human"):
         last_action_id = state.get("last_action_comment_id")
-        if not gh.comments_after(issue, last_action_id):
+        # Only a trusted reply is the "retry the unwind" signal: with
+        # `ALLOWED_ISSUE_AUTHORS` set an outsider comment on the parked
+        # unwind must not fall through to the reconcile-retry block below.
+        if not filter_trusted(gh.comments_after(issue, last_action_id)):
             return True
     if not (fresh_drift or pending_unwind):
         return False
@@ -491,7 +495,10 @@ def _documenting_parked_no_input(
     if state.get("park_reason") in _wf._AUTO_REBASE_PARK_REASONS:
         return True
     last_action_id = state.get("last_action_comment_id")
-    if not gh.comments_after(issue, last_action_id):
+    # Only a trusted reply wakes a parked docs pass: with `ALLOWED_ISSUE_AUTHORS`
+    # set an outsider comment must read as silence so the park survives instead
+    # of falling through to the docs resume in `_run_documenting_dev`.
+    if not filter_trusted(gh.comments_after(issue, last_action_id)):
         return True
     return False
 
@@ -592,7 +599,12 @@ def _run_documenting_dev(
         # the full conversation via `_recent_comments_text`, so the
         # human's latest reply is naturally included.
         last_action_id = state.get("last_action_comment_id")
-        new_comments = gh.comments_after(issue, last_action_id)
+        # Drop untrusted authors before the resume signal / watermark advance:
+        # with `ALLOWED_ISSUE_AUTHORS` set an outsider reply must not resume the
+        # docs pass NOR advance the consumed watermark. Only trusted comments
+        # are consumed, so an outsider reply trailing a trusted one is left
+        # unconsumed; an all-untrusted batch reads as "no new reply".
+        new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
         if not new_comments:
             return None
         consumed_max = max(c.id for c in new_comments)
