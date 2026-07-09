@@ -75,6 +75,24 @@ _WEEKDAY_LABELS: tuple[str, ...] = (
 # row count follows `_WEEKDAY_LABELS` so the matrix and the y-axis labels
 # cannot drift apart; the column span is the hours in a day.
 _HOURS_PER_DAY = 24
+_USAGE_GRID_STEPS = 5
+_HORIZONTAL_BAR_ROW_HEIGHT = 40
+_HORIZONTAL_BAR_EXTRA_HEIGHT = 80
+_REVIEW_BAR_ROW_HEIGHT = 44
+_REVIEW_BAR_EXTRA_HEIGHT = 90
+_HORIZONTAL_BAR_MARGIN = {"l": 160, "r": 64, "b": 32}
+
+_REVIEW_ROUND_LABELS = {
+    "0": "Initial",
+    "1": "Round 1",
+    "2": "Round 2",
+    "3": "Round 3",
+    "4": "Round 4",
+    "5": "Round 5",
+    "6+": "Rounds 6+",
+    "unknown": "No review round",
+}
+_REVIEW_ROUND_ORDER = ("0", "1", "2", "3", "4", "5", "6+", "unknown")
 
 
 def _empty_figure(message: str, *, height: int) -> go.Figure:
@@ -142,6 +160,210 @@ def _nice_axis_max(value: float, steps: int) -> float:
     return nice * mag * steps
 
 
+def _money_text(values: Sequence[float]) -> list[str]:
+    return [theme.fmt_money(v) for v in values]
+
+
+def _monospace_textfont() -> dict[str, object]:
+    return {
+        "color": theme.TEXT,
+        "size": 12,
+        "family": theme.MONO_FONT_FAMILY,
+    }
+
+
+def _two_line_y_ticks(
+    labels: Sequence[str], subs: Sequence[str]
+) -> list[str]:
+    ticks: list[str] = []
+    for label, sub in zip(labels, subs):
+        label_html = f"<b>{label}</b>"
+        if sub:
+            ticks.append(
+                f"{label_html}<br>"
+                f"<span style='color:{theme.MUTED_TEXT};font-size:11px'>"
+                f"{sub}</span>"
+            )
+        else:
+            ticks.append(label_html)
+    return ticks
+
+
+def _reverse_lists(*values: Sequence) -> tuple[list, ...]:
+    return tuple(list(reversed(value)) for value in values)
+
+
+def _horizontal_panel_height(
+    row_count: int,
+    *,
+    height: Optional[int],
+    row_height: int = _HORIZONTAL_BAR_ROW_HEIGHT,
+    extra_height: int = _HORIZONTAL_BAR_EXTRA_HEIGHT,
+) -> int:
+    if height is not None:
+        return height
+    return row_height * max(row_count, 1) + extra_height
+
+
+def _horizontal_legend(*, traceorder: Optional[str] = None) -> dict[str, object]:
+    legend: dict[str, object] = {
+        "orientation": "h",
+        "x": 0,
+        "y": 1.12,
+        "xanchor": "left",
+        "yanchor": "bottom",
+    }
+    if traceorder is not None:
+        legend["traceorder"] = traceorder
+    return legend
+
+
+def _apply_horizontal_cost_layout(
+    fig: go.Figure,
+    *,
+    row_count: int,
+    height: Optional[int] = None,
+    title: Optional[str] = None,
+    barmode: Optional[str] = None,
+    legend: Optional[dict[str, object]] = None,
+    row_height: int = _HORIZONTAL_BAR_ROW_HEIGHT,
+    extra_height: int = _HORIZONTAL_BAR_EXTRA_HEIGHT,
+) -> None:
+    layout = theme.base_layout(title=title)
+    if barmode is not None:
+        layout["barmode"] = barmode
+    if legend is not None:
+        layout["legend"] = legend
+    layout["margin"] = {
+        **_HORIZONTAL_BAR_MARGIN,
+        "t": layout["margin"]["t"],
+    }
+    layout["height"] = _horizontal_panel_height(
+        row_count,
+        height=height,
+        row_height=row_height,
+        extra_height=extra_height,
+    )
+    fig.update_layout(**layout)
+    fig.update_xaxes(
+        title_text="USD", tickprefix="$",
+        showline=False, zeroline=False,
+    )
+    fig.update_yaxes(automargin=True, showline=False, ticks="")
+
+
+def _cost_bar_trace(
+    *,
+    name: str,
+    values: Sequence[float],
+    y_ticks: Sequence[str],
+    color,
+    hover_label: str,
+    offsetgroup: Optional[str] = None,
+    totals: Optional[Sequence[float]] = None,
+) -> go.Bar:
+    trace_kwargs = {
+        "x": list(values),
+        "y": list(y_ticks),
+        "name": name,
+        "orientation": "h",
+        "marker_color": color,
+        "cliponaxis": False,
+        "hovertemplate": (
+            "%{y}<br>" + hover_label + ": $%{x:,.2f}<extra></extra>"
+        ),
+    }
+    if offsetgroup is not None:
+        trace_kwargs["offsetgroup"] = offsetgroup
+    if totals is not None:
+        trace_kwargs["text"] = _money_text(totals)
+        trace_kwargs["textposition"] = "outside"
+        trace_kwargs["textfont"] = _monospace_textfont()
+    return go.Bar(**trace_kwargs)
+
+
+def _add_token_stack_trace(
+    fig: go.Figure,
+    *,
+    days: Sequence[date],
+    values: Sequence[float],
+    name: str,
+    color: str,
+) -> None:
+    fig.add_trace(
+        go.Scatter(
+            x=_date_axis(days),
+            y=list(values),
+            name=name,
+            mode="lines",
+            stackgroup="tokens",
+            line={"width": 0.5, "color": color},
+            fillcolor=color,
+            hovertemplate=(
+                "%{x}<br>" + name + ": %{y:,} tokens<extra></extra>"
+            ),
+        )
+    )
+
+
+def _roll_up_time_series(
+    points: Sequence[TimeSeriesPoint],
+) -> dict[date, dict[str, float]]:
+    daily: dict[date, dict[str, float]] = {}
+    for p in points:
+        bucket = daily.setdefault(
+            p.day,
+            {"input": 0.0, "output": 0.0, "cache": 0.0, "cost": 0.0},
+        )
+        bucket["input"] += float(p.input_tokens or 0)
+        bucket["output"] += float(p.output_tokens or 0)
+        # Total cache band: cache_read + cache_write -- matching the
+        # standalone mock's `r.cr + r.cw` accounting. `cached_tokens`
+        # (the cumulative cached count) is deliberately excluded so
+        # we do not double-count the same prompt slices.
+        bucket["cache"] += float(
+            (p.cache_read_tokens or 0) + (p.cache_write_tokens or 0)
+        )
+        bucket["cost"] += float(p.cost_usd or 0.0)
+    return daily
+
+
+def _ensure_backend_days(
+    daily: dict[date, dict[str, float]],
+    backend_rows_by_day: dict[date, dict[str, float]],
+) -> None:
+    for day in backend_rows_by_day:
+        daily.setdefault(
+            day,
+            {"input": 0.0, "output": 0.0, "cache": 0.0, "cost": 0.0},
+        )
+
+
+def _backend_names(
+    backend_rows_by_day: dict[date, dict[str, float]],
+) -> list[str]:
+    return sorted({
+        backend
+        for by_backend in backend_rows_by_day.values()
+        for backend in by_backend
+    })
+
+
+def _usage_stack_totals(
+    days: Sequence[date],
+    daily: dict[date, dict[str, float]],
+    *,
+    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    mode: str,
+) -> list[float]:
+    if mode == "backend" and backend_rows_by_day:
+        return [sum(backend_rows_by_day.get(day, {}).values()) for day in days]
+    return [
+        daily[day]["input"] + daily[day]["output"] + daily[day]["cache"]
+        for day in days
+    ]
+
+
 def usage_over_time(
     points: Sequence[TimeSeriesPoint],
     *,
@@ -183,29 +405,10 @@ def usage_over_time(
             "No events match the current filters.", height=330,
         )
 
-    daily: dict[date, dict[str, float]] = {}
-    for p in points:
-        bucket = daily.setdefault(
-            p.day,
-            {"input": 0.0, "output": 0.0, "cache": 0.0, "cost": 0.0},
-        )
-        bucket["input"] += float(p.input_tokens or 0)
-        bucket["output"] += float(p.output_tokens or 0)
-        # Total cache band: cache_read + cache_write -- matching the
-        # standalone mock's `r.cr + r.cw` accounting. `cached_tokens`
-        # (the cumulative cached count) is deliberately excluded so
-        # we do not double-count the same prompt slices.
-        bucket["cache"] += float(
-            (p.cache_read_tokens or 0) + (p.cache_write_tokens or 0)
-        )
-        bucket["cost"] += float(p.cost_usd or 0.0)
+    daily = _roll_up_time_series(points)
 
     if mode == "backend" and backend_rows_by_day:
-        for day, by_backend in backend_rows_by_day.items():
-            daily.setdefault(
-                day,
-                {"input": 0.0, "output": 0.0, "cache": 0.0, "cost": 0.0},
-            )
+        _ensure_backend_days(daily, backend_rows_by_day)
 
     days = sorted(daily.keys())
     if not days:
@@ -215,34 +418,22 @@ def usage_over_time(
 
     fig = go.Figure()
     if mode == "backend" and backend_rows_by_day:
-        backends = sorted({
-            b
-            for by_backend in backend_rows_by_day.values()
-            for b in by_backend
-        })
+        backends = _backend_names(backend_rows_by_day)
         # Reverse the legend order so the first backend renders at
         # the bottom of the stack (matching how token type is drawn).
         for backend in backends:
             color = theme.color_for(
                 backend, backends, explicit=theme.BACKEND_COLORS
             )
-            fig.add_trace(
-                go.Scatter(
-                    x=_date_axis(days),
-                    y=[
-                        backend_rows_by_day.get(d, {}).get(backend, 0)
-                        for d in days
-                    ],
-                    name=backend,
-                    mode="lines",
-                    stackgroup="tokens",
-                    line={"width": 0.5, "color": color},
-                    fillcolor=color,
-                    hovertemplate=(
-                        "%{x}<br>" + backend +
-                        ": %{y:,} tokens<extra></extra>"
-                    ),
-                )
+            _add_token_stack_trace(
+                fig,
+                days=days,
+                values=[
+                    backend_rows_by_day.get(day, {}).get(backend, 0)
+                    for day in days
+                ],
+                name=backend,
+                color=color,
             )
     else:
         for band, label in (
@@ -251,20 +442,12 @@ def usage_over_time(
             ("cache", "Cache"),
         ):
             color = theme.TOKEN_TYPE_COLORS[label]
-            fig.add_trace(
-                go.Scatter(
-                    x=_date_axis(days),
-                    y=[daily[d][band] for d in days],
-                    name=label,
-                    mode="lines",
-                    stackgroup="tokens",
-                    line={"width": 0.5, "color": color},
-                    fillcolor=color,
-                    hovertemplate=(
-                        "%{x}<br>" + label +
-                        ": %{y:,} tokens<extra></extra>"
-                    ),
-                )
+            _add_token_stack_trace(
+                fig,
+                days=days,
+                values=[daily[day][band] for day in days],
+                name=label,
+                color=color,
             )
 
     fig.add_trace(
@@ -288,25 +471,18 @@ def usage_over_time(
     # ranges (e.g. 6 token lines from 0 to 1B vs 5 USD lines to $1000)
     # whose gridlines visually drift apart. Only the left (tokens) axis
     # draws the gridlines; the right (USD) axis ticks land on them.
-    if mode == "backend" and backend_rows_by_day:
-        stack_totals = [
-            sum(backend_rows_by_day.get(d, {}).values()) for d in days
-        ]
-    else:
-        stack_totals = [
-            daily[d]["input"] + daily[d]["output"] + daily[d]["cache"]
-            for d in days
-        ]
+    stack_totals = _usage_stack_totals(
+        days, daily, backend_rows_by_day=backend_rows_by_day, mode=mode
+    )
     token_max = max(stack_totals, default=0.0)
     cost_max = max((daily[d]["cost"] for d in days), default=0.0)
-    grid_steps = 5
-    token_top = _nice_axis_max(token_max, grid_steps)
-    cost_top = _nice_axis_max(cost_max, grid_steps)
+    token_top = _nice_axis_max(token_max, _USAGE_GRID_STEPS)
+    cost_top = _nice_axis_max(cost_max, _USAGE_GRID_STEPS)
     layout["yaxis"] = {
         **layout.get("yaxis", {}),
         "title": {"text": "tokens"},
         "range": [0, token_top],
-        "dtick": token_top / grid_steps,
+        "dtick": token_top / _USAGE_GRID_STEPS,
         "rangemode": "tozero",
         "showgrid": True,
     }
@@ -315,7 +491,7 @@ def usage_over_time(
         "overlaying": "y",
         "side": "right",
         "range": [0, cost_top],
-        "dtick": cost_top / grid_steps,
+        "dtick": cost_top / _USAGE_GRID_STEPS,
         "rangemode": "tozero",
         "gridcolor": theme.GRID,
         "linecolor": theme.GRID,
@@ -388,52 +564,31 @@ def cost_horizontal_bars(
     ]
     # Plotly draws the first y-value at the bottom of a horizontal
     # bar chart; reverse so the largest cost sits at the top.
-    labels.reverse()
-    subs.reverse()
-    values.reverse()
-    colors.reverse()
-    text = [theme.fmt_money(v) for v in values]
-    # Compose a Plotly-flavored two-line y-tick where the sub-label
-    # renders in muted gray underneath the bold label.
-    y_ticks = [
-        (
-            f"<b>{lbl}</b><br>"
-            f"<span style='color:{theme.MUTED_TEXT};font-size:11px'>"
-            f"{sub}</span>"
-        )
-        if sub
-        else f"<b>{lbl}</b>"
-        for lbl, sub in zip(labels, subs)
-    ]
+    labels, subs, values, colors = _reverse_lists(
+        labels, subs, values, colors
+    )
+    y_ticks = _two_line_y_ticks(labels, subs)
     fig = go.Figure(
         go.Bar(
             x=values,
             y=y_ticks,
             orientation="h",
             marker_color=colors,
-            text=text,
+            text=_money_text(values),
             textposition="outside",
-            textfont={"color": theme.TEXT, "size": 12,
-                      "family": theme.MONO_FONT_FAMILY},
+            textfont=_monospace_textfont(),
             cliponaxis=False,
             hovertemplate="%{y}: $%{x:,.2f}<extra></extra>",
         )
     )
-    layout = theme.base_layout(title=title)
-    layout["margin"] = {"l": 160, "r": 64, "t": layout["margin"]["t"], "b": 32}
     # Size the panel to the bar count: ~40px per row plus a fixed
     # top / bottom margin. Plotly's 450px default makes a 3-row
     # panel float in an empty box; a 6-row panel still fits inside
     # the same hero-chart height. An explicit `height` (e.g. to match
     # a paired panel) overrides the per-row computation.
-    n_rows = max(len(values), 1)
-    layout["height"] = height if height is not None else 40 * n_rows + 80
-    fig.update_layout(**layout)
-    fig.update_xaxes(
-        title_text="USD", tickprefix="$",
-        showline=False, zeroline=False,
+    _apply_horizontal_cost_layout(
+        fig, title=title, row_count=len(values), height=height
     )
-    fig.update_yaxes(automargin=True, showline=False, ticks="")
     return fig
 
 
@@ -493,26 +648,18 @@ def cost_by_stage(
     cache_colors = [_lighten_hex(c, 0.45) for c in colors]
     # Plotly draws the first y-value at the bottom of a horizontal
     # bar chart; reverse so the largest cost sits at the top.
-    labels.reverse()
-    subs.reverse()
-    no_cache.reverse()
-    cache.reverse()
-    totals.reverse()
-    colors.reverse()
-    cache_colors.reverse()
-    y_ticks = [
-        (
-            f"<b>{lbl}</b><br>"
-            f"<span style='color:{theme.MUTED_TEXT};font-size:11px'>"
-            f"{sub}</span>"
-        )
-        for lbl, sub in zip(labels, subs)
-    ]
-    monofont = {
-        "color": theme.TEXT,
-        "size": 12,
-        "family": theme.MONO_FONT_FAMILY,
-    }
+    (
+        labels,
+        subs,
+        no_cache,
+        cache,
+        totals,
+        colors,
+        cache_colors,
+    ) = _reverse_lists(
+        labels, subs, no_cache, cache, totals, colors, cache_colors
+    )
+    y_ticks = _two_line_y_ticks(labels, subs)
     fig = go.Figure()
     # No-cache trace is added first so it reads as the base segment
     # and cache stacks outward -- matching the issue's "with and
@@ -520,52 +667,31 @@ def cost_by_stage(
     # carries the per-stage total text so the dollar label lands once
     # per bar instead of duplicating on each segment.
     fig.add_trace(
-        go.Bar(
-            x=no_cache,
-            y=y_ticks,
+        _cost_bar_trace(
             name="No cache",
-            orientation="h",
-            marker_color=colors,
-            cliponaxis=False,
-            hovertemplate=(
-                "%{y}<br>No cache: $%{x:,.2f}<extra></extra>"
-            ),
+            values=no_cache,
+            y_ticks=y_ticks,
+            color=colors,
+            hover_label="No cache",
         )
     )
     fig.add_trace(
-        go.Bar(
-            x=cache,
-            y=y_ticks,
+        _cost_bar_trace(
             name="Cache",
-            orientation="h",
-            marker_color=cache_colors,
-            text=[theme.fmt_money(v) for v in totals],
-            textposition="outside",
-            textfont=monofont,
-            cliponaxis=False,
-            hovertemplate=(
-                "%{y}<br>Cache: $%{x:,.2f}<extra></extra>"
-            ),
+            values=cache,
+            y_ticks=y_ticks,
+            color=cache_colors,
+            hover_label="Cache",
+            totals=totals,
         )
     )
-    layout = theme.base_layout()
-    layout["barmode"] = "stack"
-    layout["margin"] = {"l": 160, "r": 64, "t": layout["margin"]["t"], "b": 32}
-    n_rows = max(len(y_ticks), 1)
-    layout["height"] = height if height is not None else 40 * n_rows + 80
-    layout["legend"] = {
-        "orientation": "h",
-        "x": 0,
-        "y": 1.12,
-        "xanchor": "left",
-        "yanchor": "bottom",
-    }
-    fig.update_layout(**layout)
-    fig.update_xaxes(
-        title_text="USD", tickprefix="$",
-        showline=False, zeroline=False,
+    _apply_horizontal_cost_layout(
+        fig,
+        row_count=len(y_ticks),
+        height=height,
+        barmode="stack",
+        legend=_horizontal_legend(),
     )
-    fig.update_yaxes(automargin=True, showline=False, ticks="")
     return fig
 
 
@@ -610,27 +736,23 @@ def cost_by_review_round(
             "No `agent_exit` rows match the current filters.",
             height=height or 120,
         )
-    label_map = {
-        "0": "Initial",
-        "1": "Round 1",
-        "2": "Round 2",
-        "3": "Round 3",
-        "4": "Round 4",
-        "5": "Round 5",
-        "6+": "Rounds 6+",
-        "unknown": "No review round",
-    }
     # Logical sequence before Plotly's horizontal-bar reversal:
     # Initial -> Round 1 -> ... -> No review round.
-    order = ["0", "1", "2", "3", "4", "5", "6+", "unknown"]
     by_bucket = {r.bucket: r for r in rows}
-    ordered_rows = [by_bucket[b] for b in order if b in by_bucket]
+    ordered_rows = [
+        by_bucket[bucket]
+        for bucket in _REVIEW_ROUND_ORDER
+        if bucket in by_bucket
+    ]
     if not ordered_rows:
         return _empty_figure(
             "No development or review runs match the current filters.",
             height=height or 120,
         )
-    labels = [label_map.get(r.bucket, r.bucket) for r in ordered_rows]
+    labels = [
+        _REVIEW_ROUND_LABELS.get(r.bucket, r.bucket)
+        for r in ordered_rows
+    ]
     subs = [
         (
             f"{int(r.developer_runs or 0):,} dev / "
@@ -659,22 +781,20 @@ def cost_by_review_round(
 
     # Plotly draws the first y-value at the bottom of a horizontal
     # grouped bar chart, so reverse to keep Initial at the top.
-    labels.reverse()
-    subs.reverse()
-    dev_no_cache.reverse()
-    dev_cache.reverse()
-    review_no_cache.reverse()
-    review_cache.reverse()
-    dev_totals.reverse()
-    review_totals.reverse()
-    y_ticks = [
-        (
-            f"<b>{lbl}</b><br>"
-            f"<span style='color:{theme.MUTED_TEXT};font-size:11px'>"
-            f"{sub}</span>"
-        )
-        for lbl, sub in zip(labels, subs)
-    ]
+    (
+        labels,
+        subs,
+        dev_no_cache,
+        dev_cache,
+        review_no_cache,
+        review_cache,
+        dev_totals,
+        review_totals,
+    ) = _reverse_lists(
+        labels, subs, dev_no_cache, dev_cache, review_no_cache,
+        review_cache, dev_totals, review_totals,
+    )
+    y_ticks = _two_line_y_ticks(labels, subs)
     dev_color = theme.AGENT_ROLE_COLORS["developer"]
     review_color = theme.AGENT_ROLE_COLORS["reviewer"]
     # 0.45 alpha keeps the cache segment legible on the page
@@ -692,11 +812,6 @@ def cost_by_review_round(
     # offset, the no-cache trace is added before the cache trace so
     # no-cache reads as the base segment and cache stacks outward --
     # matching the issue's "no-cache + cache in stacked form" framing.
-    monofont = {
-        "color": theme.TEXT,
-        "size": 12,
-        "family": theme.MONO_FONT_FAMILY,
-    }
     for name, values, color, offset, totals in (
         (
             "Review (no cache)", review_no_cache, review_color,
@@ -718,48 +833,29 @@ def cost_by_review_round(
         # Only the outer (cache) trace carries the per-role total
         # text so the dollar label still lands once per role bar
         # instead of duplicating on each segment.
-        text = (
-            [theme.fmt_money(v) for v in totals]
-            if totals is not None else None
-        )
         fig.add_trace(
-            go.Bar(
-                x=values,
-                y=y_ticks,
+            _cost_bar_trace(
                 name=name,
-                orientation="h",
-                marker_color=color,
+                values=values,
+                y_ticks=y_ticks,
+                color=color,
                 offsetgroup=offset,
-                text=text,
-                textposition="outside" if text is not None else "none",
-                textfont=monofont if text is not None else None,
-                cliponaxis=False,
-                hovertemplate=(
-                    "%{y}<br>" + name + ": $%{x:,.2f}<extra></extra>"
-                ),
+                totals=totals,
+                hover_label=name,
             )
         )
-    layout = theme.base_layout()
     # `relative` honors `offsetgroup` so same-offset traces stack and
     # different-offset traces sit side-by-side. With all-positive
     # values this acts identically to `stack` per offset.
-    layout["barmode"] = "relative"
-    layout["margin"] = {"l": 160, "r": 64, "t": layout["margin"]["t"], "b": 32}
-    layout["height"] = height if height is not None else 44 * len(y_ticks) + 90
-    layout["legend"] = {
-        "orientation": "h",
-        "x": 0,
-        "y": 1.12,
-        "xanchor": "left",
-        "yanchor": "bottom",
-        "traceorder": "reversed",
-    }
-    fig.update_layout(**layout)
-    fig.update_xaxes(
-        title_text="USD", tickprefix="$",
-        showline=False, zeroline=False,
+    _apply_horizontal_cost_layout(
+        fig,
+        row_count=len(y_ticks),
+        height=height,
+        barmode="relative",
+        legend=_horizontal_legend(traceorder="reversed"),
+        row_height=_REVIEW_BAR_ROW_HEIGHT,
+        extra_height=_REVIEW_BAR_EXTRA_HEIGHT,
     )
-    fig.update_yaxes(automargin=True, showline=False, ticks="")
     return fig
 
 

@@ -462,97 +462,21 @@ def main() -> None:
             return
 
         # Insights + KPI strip ---------------------------------------
-        # Token totals include cache_read + cache_write so the
-        # headline figure matches the standalone mock's
-        # `input + output + cache_read + cache_write` accounting; the
-        # `cached_tokens` cumulative column is deliberately excluded
-        # so the cache band is not double-counted.
         banners = compute_insights(
             summary,
             cost_coverage_rows=cost_coverage_rows,
         )
         if banners:
             st.markdown(_insights_html(banners), unsafe_allow_html=True)
-        total_cost = float(summary.total_cost_usd or 0.0)
-        total_tokens = int(
-            (summary.total_input_tokens or 0)
-            + (summary.total_output_tokens or 0)
-            + (summary.total_cache_read_tokens or 0)
-            + (summary.total_cache_write_tokens or 0)
+        kpis, resolved, rejected = _build_kpi_strip_data(
+            theme=theme,
+            summary=summary,
+            prev_summary=prev_summary,
+            ts_points=ts_points,
+            throughput_rows=throughput_rows,
+            review_round_rows=review_round_rows,
+            days_in_window=days_in_window,
         )
-        total_cost_prev = float(prev_summary.total_cost_usd or 0.0)
-        total_tokens_prev = int(
-            (prev_summary.total_input_tokens or 0)
-            + (prev_summary.total_output_tokens or 0)
-            + (prev_summary.total_cache_read_tokens or 0)
-            + (prev_summary.total_cache_write_tokens or 0)
-        )
-        resolved = sum(int(r.resolved or 0) for r in throughput_rows)
-        rejected = sum(int(r.rejected or 0) for r in throughput_rows)
-        rr_total_cost, rr_rework_cost = rework_totals(review_round_rows)
-        rework_share = (
-            (rr_rework_cost / rr_total_cost) if rr_total_cost > 0 else 0.0
-        )
-
-        # Sparkline series, one entry per day in the window. Daily
-        # tokens mirror the KPI accounting and include the cache band.
-        days = sorted({p.day for p in ts_points})
-        days_index = {d: i for i, d in enumerate(days)}
-        daily_cost = [0.0] * len(days)
-        daily_tokens = [0.0] * len(days)
-        for p in ts_points:
-            i = days_index[p.day]
-            daily_cost[i] += float(p.cost_usd or 0.0)
-            daily_tokens[i] += float(
-                (p.input_tokens or 0)
-                + (p.output_tokens or 0)
-                + (p.cache_read_tokens or 0)
-                + (p.cache_write_tokens or 0)
-            )
-        done_index = {r.day: int(r.resolved or 0) for r in throughput_rows}
-        daily_done = [done_index.get(d, 0) for d in days]
-
-        kpis = [
-            {
-                "label": "Total spend",
-                "value": theme.fmt_money_exact(total_cost),
-                "delta": kpi_delta(total_cost, total_cost_prev),
-                "sub": (
-                    f"{theme.fmt_money(total_cost / days_in_window)}/day"
-                ),
-                "spark": daily_cost,
-                "spark_color": theme.ACCENT,
-            },
-            {
-                "label": "Total tokens",
-                "value": theme.fmt_tokens(total_tokens),
-                "delta": kpi_delta(total_tokens, total_tokens_prev),
-                "sub": f"{theme.fmt_tokens(total_tokens / days_in_window)}/day",
-                "spark": daily_tokens,
-                "spark_color": theme.TOKEN_TYPE_COLORS["Input"],
-            },
-            {
-                "label": "Cost / resolved issue",
-                "value": (
-                    f"${total_cost / resolved:,.2f}"
-                    if resolved > 0 else "—"
-                ),
-                "delta": None,
-                "sub": f"{resolved} resolved · {rejected} rejected",
-                "spark": daily_done,
-                "spark_color": theme.TOKEN_TYPE_COLORS["Cache"],
-            },
-            {
-                "label": "Rework share",
-                "value": f"{rework_share * 100:.0f}%",
-                "delta": None,
-                "sub": (
-                    f"{theme.fmt_money_exact(rr_rework_cost)} in review "
-                    "rounds >= 1"
-                ),
-                "spark": None,
-            },
-        ]
         st.markdown(_kpi_strip_html(kpis), unsafe_allow_html=True)
 
         # Second wave -- the remaining widget reads. The KPI strip
@@ -611,68 +535,11 @@ def main() -> None:
         tz_offset_choice=tz_offset_choice,
     )
 
-    # ── Skill trigger rates ────────────────────────────
-    # Opt-in read-side widget over the `skills_triggered` /
-    # `skills_triggered_count` fields `record_agent_exit` folds into
-    # `extras` when `TRACK_SKILL_TRIGGERS` is on. A `0%` rate is a real
-    # signal ("this role's skill is not firing"), but it cannot tell a
-    # tracked-but-quiet run from one whose tracking was off, so the
-    # caption names the switch when nothing has triggered yet.
-    with st.container(border=True):
-        st.markdown(
-            _card_header_html(
-                "Skill trigger rates",
-                "Share of agent runs that triggered a skill, by role and "
-                "backend (requires TRACK_SKILL_TRIGGERS)",
-            ),
-            unsafe_allow_html=True,
-        )
-        if skill_rows:
-            st.markdown(
-                _skill_triggers_html(skill_rows),
-                unsafe_allow_html=True,
-            )
-            if not any(r.skill_runs for r in skill_rows):
-                st.caption(
-                    "No skill triggers recorded in this window. Enable "
-                    "`TRACK_SKILL_TRIGGERS` (default off) so "
-                    "`record_agent_exit` records which skills each run "
-                    "pulls."
-                )
-            # Second table: the per-skill x (repo, role, backend) trigger
-            # matrix. Folds each repo's skill catalog into the observed
-            # triggers so an offered-but-never-triggered skill surfaces
-            # as an explicit `0` cell; `_skill_matrix_html` renders a
-            # clear fallback notice in place of the table when the read
-            # model returns no catalog-backed matrix (no catalog records
-            # matched and no run fired a skill). Folded into an expander
-            # (collapsed by default, mirroring "Recent agent runs" below)
-            # so the matrix -- capped at 100 rows by the read model
-            # (Runs-with-skill DESC then Runs DESC) and shown by default
-            # repo-ascending then trigger-rate-descending -- does not
-            # dominate the card until the operator opens it.
-            with st.expander(
-                "Per-skill trigger matrix · which skills each "
-                "repo × role × backend cohort reaches for",
-                expanded=False,
-            ):
-                # Clickable column headers re-sort the matrix: each header
-                # anchor writes `mtx_sort` / `mtx_dir` query params, which
-                # this parses back into a (column, direction) pair the
-                # render applies on top of the read model's default order.
-                matrix_sort_key, matrix_sort_desc = parse_skill_matrix_sort(
-                    st.query_params
-                )
-                st.markdown(
-                    _skill_matrix_html(
-                        skill_matrix_rows,
-                        sort_key=matrix_sort_key,
-                        descending=matrix_sort_desc,
-                    ),
-                    unsafe_allow_html=True,
-                )
-        else:
-            st.info("No `agent_exit` rows match the current filters.")
+    _render_skill_triggers(
+        st=st,
+        skill_rows=skill_rows,
+        skill_matrix_rows=skill_matrix_rows,
+    )
 
     _render_recent_runs(
         st=st,
@@ -1243,6 +1110,139 @@ def _build_read_keys(
     return key, prev_key
 
 
+def _summary_total_tokens(summary: Summary) -> int:
+    """Return the dashboard token total used by KPIs and sparklines.
+
+    Cache read/write tokens are counted with input/output so the KPI
+    total matches the hero chart's Cache band. The cumulative
+    `cached_tokens` field is intentionally excluded to avoid double
+    counting reused prompt slices.
+    """
+    return int(
+        (summary.total_input_tokens or 0)
+        + (summary.total_output_tokens or 0)
+        + (summary.total_cache_read_tokens or 0)
+        + (summary.total_cache_write_tokens or 0)
+    )
+
+
+def _time_series_total_tokens(point: Any) -> float:
+    return float(
+        (point.input_tokens or 0)
+        + (point.output_tokens or 0)
+        + (point.cache_read_tokens or 0)
+        + (point.cache_write_tokens or 0)
+    )
+
+
+def _throughput_totals(throughput_rows: Sequence[Any]) -> tuple[int, int]:
+    resolved = sum(int(row.resolved or 0) for row in throughput_rows)
+    rejected = sum(int(row.rejected or 0) for row in throughput_rows)
+    return resolved, rejected
+
+
+def _daily_kpi_series(
+    *, ts_points: Sequence[Any], throughput_rows: Sequence[Any]
+) -> tuple[list[float], list[float], list[int]]:
+    """Return cost/token/resolved sparkline series for KPI cards.
+
+    One entry is emitted per day present in the time-series read. Daily
+    tokens use the same input + output + cache_read + cache_write
+    accounting as the headline token KPI.
+    """
+    days = sorted({point.day for point in ts_points})
+    days_index = {day: i for i, day in enumerate(days)}
+    daily_cost = [0.0] * len(days)
+    daily_tokens = [0.0] * len(days)
+    for point in ts_points:
+        i = days_index[point.day]
+        daily_cost[i] += float(point.cost_usd or 0.0)
+        daily_tokens[i] += _time_series_total_tokens(point)
+
+    done_index = {row.day: int(row.resolved or 0) for row in throughput_rows}
+    daily_done = [done_index.get(day, 0) for day in days]
+    return daily_cost, daily_tokens, daily_done
+
+
+def _build_kpi_strip_data(
+    *,
+    theme: Any,
+    summary: Summary,
+    prev_summary: Summary,
+    ts_points: Sequence[Any],
+    throughput_rows: Sequence[Any],
+    review_round_rows: Sequence[Any],
+    days_in_window: int,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Build the KPI-strip dictionaries plus throughput totals."""
+    total_cost = float(summary.total_cost_usd or 0.0)
+    total_tokens = _summary_total_tokens(summary)
+    total_cost_prev = float(prev_summary.total_cost_usd or 0.0)
+    total_tokens_prev = _summary_total_tokens(prev_summary)
+    resolved, rejected = _throughput_totals(throughput_rows)
+    rr_total_cost, rr_rework_cost = rework_totals(review_round_rows)
+    rework_share = (
+        (rr_rework_cost / rr_total_cost) if rr_total_cost > 0 else 0.0
+    )
+    daily_cost, daily_tokens, daily_done = _daily_kpi_series(
+        ts_points=ts_points,
+        throughput_rows=throughput_rows,
+    )
+    cost_per_resolved = (
+        f"${total_cost / resolved:,.2f}" if resolved > 0 else "—"
+    )
+    kpis = [
+        {
+            "label": "Total spend",
+            "value": theme.fmt_money_exact(total_cost),
+            "delta": kpi_delta(total_cost, total_cost_prev),
+            "sub": f"{theme.fmt_money(total_cost / days_in_window)}/day",
+            "spark": daily_cost,
+            "spark_color": theme.ACCENT,
+        },
+        {
+            "label": "Total tokens",
+            "value": theme.fmt_tokens(total_tokens),
+            "delta": kpi_delta(total_tokens, total_tokens_prev),
+            "sub": f"{theme.fmt_tokens(total_tokens / days_in_window)}/day",
+            "spark": daily_tokens,
+            "spark_color": theme.TOKEN_TYPE_COLORS["Input"],
+        },
+        {
+            "label": "Cost / resolved issue",
+            "value": cost_per_resolved,
+            "delta": None,
+            "sub": f"{resolved} resolved · {rejected} rejected",
+            "spark": daily_done,
+            "spark_color": theme.TOKEN_TYPE_COLORS["Cache"],
+        },
+        {
+            "label": "Rework share",
+            "value": f"{rework_share * 100:.0f}%",
+            "delta": None,
+            "sub": (
+                f"{theme.fmt_money_exact(rr_rework_cost)} in review "
+                "rounds >= 1"
+            ),
+            "spark": None,
+        },
+    ]
+    return kpis, resolved, rejected
+
+
+def _backend_tokens_by_day(
+    backend_daily_rows: Sequence[Any],
+) -> dict[date, dict[str, float]]:
+    backend_by_day: dict[date, dict[str, float]] = {}
+    for row in backend_daily_rows:
+        by_backend = backend_by_day.setdefault(row.day, {})
+        by_backend[row.backend] = (
+            by_backend.get(row.backend, 0.0)
+            + float(row.total_tokens or 0)
+        )
+    return backend_by_day
+
+
 def _render_hero_usage(
     *,
     st: Any,
@@ -1280,21 +1280,15 @@ def _render_hero_usage(
         )
         st.session_state.stack_mode = stack_mode
 
-        backend_by_day: dict[date, dict[str, float]] = {}
-        if stack_mode == "backend":
-            for row in backend_daily_rows:
-                backend_by_day.setdefault(row.day, {})
-                backend_by_day[row.day][row.backend] = (
-                    backend_by_day[row.day].get(row.backend, 0)
-                    + int(row.total_tokens or 0)
-                )
+        backend_by_day = (
+            _backend_tokens_by_day(backend_daily_rows)
+            if stack_mode == "backend" else None
+        )
 
         st.plotly_chart(
             dashboard_charts.usage_over_time(
                 ts_points,
-                backend_rows_by_day=(
-                    backend_by_day if stack_mode == "backend" else None
-                ),
+                backend_rows_by_day=backend_by_day,
                 mode=stack_mode,
                 # The card header already renders the title; suppress
                 # the in-chart title so it is not duplicated.
@@ -1518,6 +1512,79 @@ def _render_activity_heatmap(
             ),
             use_container_width=True,
             config=PLOTLY_CONFIG,
+        )
+
+
+def _render_skill_triggers(
+    *,
+    st: Any,
+    skill_rows: Sequence[SkillTriggerRateRow],
+    skill_matrix_rows: Sequence[SkillTriggerMatrixRow],
+) -> None:
+    """Render the skill-trigger aggregate table and matrix expander.
+
+    The aggregate is an opt-in read-side widget over the
+    `skills_triggered` / `skills_triggered_count` fields
+    `record_agent_exit` folds into `extras` when
+    `TRACK_SKILL_TRIGGERS` is on. A `0%` rate is a real signal ("this
+    role's skill is not firing"), but it cannot tell a tracked-but-quiet
+    run from one whose tracking was off, so the caption names the switch
+    when nothing has triggered yet.
+    """
+    with st.container(border=True):
+        st.markdown(
+            _card_header_html(
+                "Skill trigger rates",
+                "Share of agent runs that triggered a skill, by role and "
+                "backend (requires TRACK_SKILL_TRIGGERS)",
+            ),
+            unsafe_allow_html=True,
+        )
+        if not skill_rows:
+            st.info("No `agent_exit` rows match the current filters.")
+            return
+
+        st.markdown(
+            _skill_triggers_html(skill_rows),
+            unsafe_allow_html=True,
+        )
+        if not any(row.skill_runs for row in skill_rows):
+            st.caption(
+                "No skill triggers recorded in this window. Enable "
+                "`TRACK_SKILL_TRIGGERS` (default off) so "
+                "`record_agent_exit` records which skills each run pulls."
+            )
+        _render_skill_matrix_expander(
+            st=st,
+            skill_matrix_rows=skill_matrix_rows,
+        )
+
+
+def _render_skill_matrix_expander(
+    *,
+    st: Any,
+    skill_matrix_rows: Sequence[SkillTriggerMatrixRow],
+) -> None:
+    """Render the per-skill trigger matrix inside a collapsed expander."""
+    with st.expander(
+        "Per-skill trigger matrix · which skills each "
+        "repo × role × backend cohort reaches for",
+        expanded=False,
+    ):
+        # Clickable column headers re-sort the matrix: each header anchor
+        # writes `mtx_sort` / `mtx_dir` query params, which this parses
+        # back into a (column, direction) pair the render applies on top
+        # of the read model's default order.
+        matrix_sort_key, matrix_sort_desc = parse_skill_matrix_sort(
+            st.query_params
+        )
+        st.markdown(
+            _skill_matrix_html(
+                skill_matrix_rows,
+                sort_key=matrix_sort_key,
+                descending=matrix_sort_desc,
+            ),
+            unsafe_allow_html=True,
         )
 
 
