@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .agents import _filter_agent_env, _register_proc, _unregister_proc
+from .agents import _communicate_bounded, _filter_agent_env, _registered
 from .git_plumbing import _git
 from .workflow_messages import _redact_secrets
 
@@ -146,6 +146,54 @@ class VerifyResult:
     head_after: Optional[str] = None
 
 
+def _combine_output(stdout: str, stderr: str) -> str:
+    """Merge a command's captured stdout and stderr into one block.
+
+    stderr is appended after stdout (newline-separated when stdout did not
+    end in one) so a failing build with all its diagnostics on stderr
+    surfaces in a single block in the park comment.
+    """
+    combined = stdout or ""
+    if stderr:
+        if combined and not combined.endswith("\n"):
+            combined += "\n"
+        combined += stderr
+    return combined
+
+
+def _kill_verify_group(proc: subprocess.Popen) -> None:
+    """SIGKILL a timed-out verify command's whole process group.
+
+    `start_new_session=True` made `proc.pid` a group leader, so one `killpg`
+    tears down the shell AND every descendant (`make -j` workers, pytest-xdist
+    forkers, backgrounded `&` subshells) together -- a plain `proc.kill()`
+    reaps only the shell and lets a survivor keep mutating the worktree after
+    the orchestrator has already posted `verify_timeout` and parked the issue.
+    `os.getpgid(proc.pid)` reads that group id; `ProcessLookupError` /
+    `PermissionError` cover the race where the shell exited between the
+    timeout firing and this call (nothing left to kill).
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _drain_verify_output(proc: subprocess.Popen) -> tuple[str, str]:
+    """Read whatever a killed verify shell buffered, killing harder if it hangs.
+
+    A bounded first drain covers the normal case. If it times out -- a
+    descendant that escaped the group via its own `setsid` is still holding
+    the pipe fd open -- `proc.kill()` reaps the leader and a second bounded
+    drain runs. Returns `("", "")` if both drains time out.
+    """
+    drained = _communicate_bounded(proc, 5)
+    if drained is None:
+        proc.kill()
+        drained = _communicate_bounded(proc, 5)
+    return drained if drained is not None else ("", "")
+
+
 def _run_verify_commands(
     worktree: Path,
     commands: tuple[str, ...],
@@ -234,53 +282,20 @@ def _run_verify_commands(
         # after the orchestrator has stopped -- the same bounded-lifetime
         # guarantee the agent subprocesses already get. `start_new_session=
         # True` above makes `proc.pid` the group leader the sweep targets;
-        # the `finally` clears the registry so a completed command does not
+        # `_registered` clears the registry so a completed command does not
         # leak into it.
-        _register_proc(proc)
-        try:
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                # SIGKILL the WHOLE group so the shell AND every descendant
-                # die together. `os.getpgid(proc.pid)` reads the new group
-                # id we just created; ProcessLookupError covers the narrow
-                # race where the shell exited between TimeoutExpired and
-                # this call (then there is nothing left to kill, which is
-                # fine -- a survivor would still be inside the group and
-                # caught had it existed).
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                # Drain whatever the shell wrote before it was killed. A
-                # bounded second-stage timeout guards against a wedged pipe
-                # (e.g. a descendant that escaped the group via its own
-                # `setsid` and is still holding the fd open); the fallback
-                # `proc.kill()` covers that hostile case.
-                try:
-                    stdout, stderr = proc.communicate(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    try:
-                        stdout, stderr = proc.communicate(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        stdout, stderr = "", ""
-                partial = stdout or ""
-                if stderr:
-                    if partial and not partial.endswith("\n"):
-                        partial += "\n"
-                    partial += stderr
+        with _registered(proc):
+            drained = _communicate_bounded(proc, timeout)
+            if drained is None:
+                _kill_verify_group(proc)
+                partial = _combine_output(*_drain_verify_output(proc))
                 return VerifyResult(
                     status="timeout",
                     command=command,
                     exit_code=None,
                     output=_truncate_verify_output(partial),
                 )
-            combined = stdout or ""
-            if stderr:
-                if combined and not combined.endswith("\n"):
-                    combined += "\n"
-                combined += stderr
+            combined = _combine_output(*drained)
             if proc.returncode != 0:
                 return VerifyResult(
                     status="failed",
@@ -321,8 +336,6 @@ def _run_verify_commands(
                     head_before=head_before,
                     head_after=head_after,
                 )
-        finally:
-            _unregister_proc(proc)
     return VerifyResult(status="ok")
 
 

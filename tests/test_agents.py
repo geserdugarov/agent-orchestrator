@@ -735,6 +735,26 @@ class RunSubprocessRegistrationTest(unittest.TestCase):
             self.assertNotIn(proc, agents._running_procs)
 
 
+class CommunicateBoundedTest(unittest.TestCase):
+    """`_communicate_bounded` is the shared drain primitive both the agent
+    runner and the verify runner call. Its contract: return the captured
+    streams (coercing an absent stream to ``""``) on completion, and ``None``
+    when the drain itself blocks past the cap so the caller can escalate.
+    """
+
+    def test_returns_streams_coercing_absent_to_empty(self) -> None:
+        proc = MagicMock()
+        proc.communicate.return_value = (None, None)
+        self.assertEqual(agents._communicate_bounded(proc, 5), ("", ""))
+
+    def test_returns_none_on_timeout(self) -> None:
+        proc = MagicMock()
+        proc.communicate.side_effect = subprocess.TimeoutExpired(
+            cmd="agent", timeout=5,
+        )
+        self.assertIsNone(agents._communicate_bounded(proc, 5))
+
+
 class InterruptedClassificationTest(unittest.TestCase):
     """A run cut short by SIGTERM/SIGKILL -- the shape the orchestrator's
     shutdown sweep (`terminate_all_running`) produces when it kills an
@@ -777,6 +797,20 @@ class InterruptedClassificationTest(unittest.TestCase):
         )
         self.assertEqual(exit_code, 3)
         self.assertFalse(timed_out)
+        self.assertFalse(interrupted)
+
+    def test_run_subprocess_own_timeout_is_timed_out_not_interrupted(self) -> None:
+        # A child that outlives our own `timeout` drives the timeout branch:
+        # `_terminate_process_group` reaps the group and the run is classified
+        # `timed_out=True`, `interrupted=False`, exit_code=-1 -- distinct from
+        # the shutdown-sweep interruption above even though both signal the
+        # group. Real child + 1s timeout so the whole flatten path is exercised.
+        cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+        stdout, stderr, exit_code, timed_out, interrupted = agents._run_subprocess(
+            cmd, _REAL_CWD, dict(os.environ), 1
+        )
+        self.assertEqual(exit_code, -1)
+        self.assertTrue(timed_out)
         self.assertFalse(interrupted)
 
     def test_run_codex_threads_interrupted_through(self) -> None:
