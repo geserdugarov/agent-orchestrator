@@ -19,9 +19,10 @@ import subprocess
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from . import config
 from .usage import UsageMetrics
@@ -56,6 +57,41 @@ def _unregister_proc(proc: subprocess.Popen) -> None:
         _running_procs.discard(proc)
 
 
+@contextmanager
+def _registered(proc: subprocess.Popen) -> Iterator[subprocess.Popen]:
+    """Keep `proc` in `_running_procs` for the duration of the block.
+
+    The shutdown sweep (`terminate_all_running`) can only reach a group that
+    is in the registry, so every producer registers before its first blocking
+    wait and clears the entry when the run ends -- on a normal return, an
+    early return, or an exception -- so a completed process never leaks into
+    the registry and keeps getting SIGTERMed on the next shutdown.
+    """
+    _register_proc(proc)
+    try:
+        yield proc
+    finally:
+        _unregister_proc(proc)
+
+
+def _communicate_bounded(
+    proc: subprocess.Popen, timeout: float,
+) -> Optional[tuple[str, str]]:
+    """`proc.communicate()` with a wall-clock cap; None if it times out.
+
+    Returns `(stdout, stderr)` with each stream coerced to `""` when the
+    child left it empty. A `None` return means the drain itself blocked past
+    `timeout` -- the caller decides whether to kill harder and retry or fall
+    back to empty output. Only `TimeoutExpired` is swallowed; any other error
+    propagates.
+    """
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    return stdout or "", stderr or ""
+
+
 def _process_group_alive(pgid: int) -> bool:
     """True if process group `pgid` still has a live member.
 
@@ -72,6 +108,36 @@ def _process_group_alive(pgid: int) -> bool:
     return True
 
 
+def _sigkill_unless_group_gone(proc: subprocess.Popen, timeout: float) -> None:
+    """Wait up to `timeout` for `proc`'s leader, then SIGKILL a live group.
+
+    `proc.wait()` only observes the group *leader*: a descendant that ignored
+    SIGTERM keeps running -- and keeps mutating the worktree -- after the
+    leader exits, so leader-exit is not proof the group is gone. We SIGKILL
+    the group unless the leader exited AND a `killpg(_, 0)` probe shows it has
+    no surviving member; a leader still alive at the deadline means a live
+    group, so it is SIGKILLed without a probe. Without this, a build
+    grandchild the agent forked (Maven, gradle, a JVM test runner) could go on
+    writing the worktree after the timeout was recorded -- exactly the
+    post-timeout commit that stranded a clean implementing branch behind
+    `awaiting_human`.
+
+    The `ProcessLookupError` on the SIGKILL is an expected race (the group
+    exited between the probe and the signal) and is swallowed.
+    """
+    leader_exited = True
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        leader_exited = False
+    if leader_exited and not _process_group_alive(proc.pid):
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 def terminate_all_running(grace: float = 5.0) -> int:
     """SIGTERM every in-flight subprocess group, then SIGKILL stragglers.
 
@@ -84,14 +150,8 @@ def terminate_all_running(grace: float = 5.0) -> int:
     whole group (every producer spawns with `start_new_session=True`) so build
     grandchildren a child forked are reaped too. A single shared `grace`
     deadline bounds the total wait regardless of how many groups are in
-    flight; any group still alive at the deadline is SIGKILLed.
-
-    `proc.wait()` only observes the group *leader*: a descendant that ignored
-    SIGTERM keeps running -- and keeps mutating the worktree -- after the
-    leader exits, so leader-exit is not proof the group is gone. We SIGKILL
-    unless the leader exited AND a `killpg(_, 0)` probe shows the group has no
-    surviving member; a leader that hit the deadline is still alive, so its
-    group is SIGKILLed without a probe.
+    flight; `_sigkill_unless_group_gone` SIGKILLs any group still alive at the
+    deadline (see it for the leader-vs-group safety model).
 
     `ProcessLookupError` races are expected (a group may exit between the
     snapshot and the signal) and are swallowed.
@@ -108,17 +168,7 @@ def terminate_all_running(grace: float = 5.0) -> int:
     deadline = time.monotonic() + grace
     for proc in procs:
         remaining = max(0.0, deadline - time.monotonic())
-        leader_exited = True
-        try:
-            proc.wait(timeout=remaining)
-        except subprocess.TimeoutExpired:
-            leader_exited = False
-        if leader_exited and not _process_group_alive(proc.pid):
-            continue
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _sigkill_unless_group_gone(proc, remaining)
     return len(procs)
 
 _UUID_RE = re.compile(
@@ -391,61 +441,83 @@ def _run_subprocess(
     )
     # Register before the first blocking call so a shutdown that fires while
     # this worker is parked in `communicate` can still reach the child group.
-    _register_proc(proc)
-    try:
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            # A child killed by SIGTERM/SIGKILL exits with a negative code; the
-            # most common cause is the shutdown sweep reaching this group while
-            # we were parked in `communicate`. Flag it interrupted so it is not
-            # mistaken for a normal non-timeout completion.
-            interrupted = proc.returncode in _INTERRUPTED_RETURNCODES
-            return stdout or "", stderr or "", proc.returncode, False, interrupted
-        except subprocess.TimeoutExpired:
+    with _registered(proc):
+        drained = _communicate_bounded(proc, timeout)
+        if drained is None:
             # Our own timeout: classified as `timed_out`, not `interrupted`,
             # even though `_terminate_process_group` signals the group below.
+            # A bounded second drain reads whatever the child buffered before
+            # the kill; `("", "")` if that drain itself wedges.
             _terminate_process_group(proc)
-            try:
-                stdout, stderr = proc.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                stdout, stderr = "", ""
-            return stdout or "", stderr or "", -1, True, False
-    finally:
-        _unregister_proc(proc)
+            drained = _communicate_bounded(proc, 10)
+            stdout, stderr = drained if drained is not None else ("", "")
+            return stdout, stderr, -1, True, False
+        # A child killed by SIGTERM/SIGKILL exits with a negative code; the
+        # most common cause is the shutdown sweep reaching this group while we
+        # were parked in `communicate`. Flag it interrupted so it is not
+        # mistaken for a normal non-timeout completion.
+        stdout, stderr = drained
+        interrupted = proc.returncode in _INTERRUPTED_RETURNCODES
+        return stdout, stderr, proc.returncode, False, interrupted
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
     """SIGTERM the whole process group, then SIGKILL if anything survives.
 
-    Mirrors `terminate_all_running`'s safety model. `proc.wait()` only
-    observes the group *leader*: a descendant that ignored SIGTERM keeps
-    running -- and keeps mutating the worktree -- after the leader exits, so
-    leader-exit is not proof the group is gone. We SIGKILL the group unless
-    the leader exited AND a `killpg(_, 0)` probe shows it has no surviving
-    member; a leader still alive at the grace deadline is SIGKILLed without a
-    probe. Without the probe, a build grandchild the agent forked (Maven,
-    gradle, a JVM test runner) could go on writing the worktree after the
-    timeout has already been recorded -- exactly the post-timeout commit that
-    stranded a clean implementing branch behind `awaiting_human`.
+    The per-timeout cleanup for a single agent run.
+    `_sigkill_unless_group_gone` carries the leader-vs-group safety model
+    shared with `terminate_all_running`: after the SIGTERM it waits a grace
+    period for the leader and SIGKILLs the group unless a `killpg(_, 0)` probe
+    proves it empty.
 
-    ProcessLookupError races are expected (the leader may have exited between
-    the Python-side timeout firing and our killpg call) -- swallow them.
+    The initial-SIGTERM `ProcessLookupError` is an expected race (the leader
+    may have exited between the Python-side timeout firing and our killpg
+    call); short-circuit, since an already-gone group needs no further kill.
     """
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
-    leader_exited = True
+    _sigkill_unless_group_gone(proc, timeout=5)
+
+
+@contextmanager
+def _codex_last_message_file() -> Iterator[Path]:
+    """Yield a per-spawn tempfile path for codex's `-o` last-message output.
+
+    The file lives OUTSIDE the worktree so the target repo's `git status`
+    never sees it as untracked. Putting it inside cwd worked when the
+    orchestrator managed its own repo (whose .gitignore covers `.codex-*`),
+    but broke `_worktree_dirty_files` on any target repo without that rule --
+    the orchestrator would park awaiting_human on its own scratch on every
+    codex review pass. Removed when the block exits, tolerating a codex run
+    that never wrote it.
+    """
+    fd, path_str = tempfile.mkstemp(prefix="codex-last-", suffix=".txt")
+    os.close(fd)
+    path = Path(path_str)
     try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        leader_exited = False
-    if leader_exited and not _process_group_alive(proc.pid):
-        return
+        yield path
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _read_last_message(path: Path) -> str:
+    """Read codex's `-o` last-message file, or '' if it is absent/unreadable.
+
+    A run that was interrupted before codex flushed the file leaves it
+    missing; a read error is treated the same way. Callers (the question /
+    timeout paths in workflow.py) already accept an empty last_message.
+    """
+    if not path.exists():
+        return ""
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
 
 
 def _run_codex(
@@ -458,22 +530,13 @@ def _run_codex(
     extra_args: tuple[str, ...] = (),
 ) -> AgentResult:
     timeout = timeout or config.AGENT_TIMEOUT
-    # The -o file lives outside the worktree (per-spawn tempfile) so the
-    # target repo's `git status` never sees it as untracked. Putting it
-    # inside cwd worked when the orchestrator managed its own repo (whose
-    # .gitignore covers `.codex-*`), but broke `_worktree_dirty_files` on
-    # any target repo without that rule -- the orchestrator would park
-    # awaiting_human on its own scratch on every codex review pass.
-    fd, last_msg_path_str = tempfile.mkstemp(prefix="codex-last-", suffix=".txt")
-    os.close(fd)
-    last_msg_path = Path(last_msg_path_str)
     # codex applies `-C` AFTER it has already chdir'd into the subprocess cwd,
     # so a relative path resolves twice (once by Popen, once by codex) and
     # codex hits "No such file or directory (os error 2)". Pass an absolute
     # path so the second resolution is a no-op. WORKTREES_DIR=../wt-...
     # in .env is the common shape that triggers this.
     cwd_abs = Path(cwd).resolve()
-    try:
+    with _codex_last_message_file() as last_msg_path:
         # `codex exec resume` does not accept -C; we rely on subprocess cwd for it.
         # Configured `extra_args` (e.g. `-m gpt-5.5 -c '...'`) are codex global
         # options, so they go BEFORE the `exec` subcommand. The safety/output
@@ -507,27 +570,15 @@ def _run_codex(
         )
 
         sid = resume_session_id or parse_session_id(stdout)
-        last_msg = ""
-        if last_msg_path.exists():
-            try:
-                last_msg = last_msg_path.read_text(errors="replace")
-            except OSError:
-                last_msg = ""
-
         return AgentResult(
             session_id=sid,
-            last_message=last_msg,
+            last_message=_read_last_message(last_msg_path),
             exit_code=exit_code,
             timed_out=timed_out,
             stdout=stdout,
             stderr=stderr,
             interrupted=interrupted,
         )
-    finally:
-        try:
-            last_msg_path.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def _claude_last_message(
