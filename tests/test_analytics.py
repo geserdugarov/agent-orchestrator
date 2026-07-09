@@ -380,6 +380,36 @@ class AnalyticsPruneTest(unittest.TestCase):
             self.assertEqual(len(kept), 3)
             self.assertIn("this is not json", kept[0])
 
+    def test_rewrite_failure_leaves_original_intact(self) -> None:
+        # An OSError from the atomic rewrite (e.g. a full disk hitting
+        # `os.replace`) is downgraded to a logged no-op: the prune returns
+        # 0 and the original file is left untouched rather than truncated,
+        # so analytics stays observability-only. The partial temp file is
+        # cleaned up so no `.prune.*.tmp` orphan is left behind.
+        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "analytics.jsonl"
+            _, analytics = _reload({
+                "ANALYTICS_LOG_PATH": str(path),
+                "ANALYTICS_RETENTION_DAYS": "90",
+            })
+            self._write_lines(path, [
+                {"ts": old_ts, "repo": "o/r", "issue": 1, "event": "x"},
+            ])
+            before = path.read_text(encoding="utf-8")
+            with patch.object(
+                analytics.os, "replace",
+                side_effect=OSError("no space left on device"),
+            ):
+                removed = analytics.prune_old_records(now=now)
+            self.assertEqual(removed, 0)
+            self.assertEqual(path.read_text(encoding="utf-8"), before)
+            leftovers = [
+                p.name for p in Path(td).iterdir() if ".prune." in p.name
+            ]
+            self.assertEqual(leftovers, [])
+
     def test_naive_timestamp_treated_as_utc(self) -> None:
         # Pre-existing records written without tz info (or by an older
         # writer) must still be comparable; treat them as UTC rather than
