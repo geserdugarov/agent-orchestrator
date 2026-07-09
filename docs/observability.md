@@ -547,8 +547,9 @@ care as the trajectory file itself.
 **Page (`orchestrator/trajectory_dashboard.py`).** Reuses the analytics dashboard's `orchestrator/dashboard_theme.py`
 chrome (CSS variables, fonts, `fmt_*` formatters) so the two pages read as one family, and reuses
 `dashboard_state.parse_issue_number` for the issue filter. Streamlit is imported lazily inside `main()` and the
-repo-root `sys.path` shim mirrors `orchestrator/dashboard.py`, so importing the module (or the polling tick) never needs
-the `dashboard` group — `tests/test_trajectory_dashboard.py` guards both the lazy-import and the script-launch
+repo-root `sys.path` shim comes from the shared `orchestrator/script_launch.py` helper (`ensure_repo_root_on_path`)
+that `orchestrator/dashboard.py` also calls, so importing the module (or the polling tick) never needs the
+`dashboard` group — `tests/test_trajectory_dashboard.py` guards both the lazy-import and the script-launch
 `sys.path` shape. The layout is intentionally minimal-but-useful: a sidebar of filters (plus a *Hide synthetic fixtures*
 toggle that drives the reader's `exclude_fixtures`, off by default), a topbar + five-tile KPI strip (runs / issues /
 repos / tool calls / total cost, the last summed from `summarize`'s `total_cost_usd`), a foldable *Recorded runs*

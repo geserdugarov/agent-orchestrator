@@ -90,27 +90,27 @@ Run:
 from __future__ import annotations
 
 import logging
-import sys
 from datetime import date, timedelta
-from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Optional, Sequence
 
-# Streamlit's documented launch -- `streamlit run orchestrator/dashboard.py`
-# -- executes this file as a top-level script via `runpy` with no parent
-# package. The Streamlit launcher prepends the script's own directory
-# (i.e. `orchestrator/`) to `sys.path`, NOT the repo root, so a
-# `from . import ...` raises `ImportError: attempted relative import with
-# no known parent package` before any Streamlit code can render and a
-# bare `from orchestrator import ...` would fail too. Adding the repo
-# root (parent of `orchestrator/`) to `sys.path` makes the absolute
-# imports below work in both contexts: script-launched and package-
-# imported (`import orchestrator.dashboard`). The insert is idempotent
-# -- in the package case the entry is already present and the check
-# is a no-op.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+# `streamlit run orchestrator/dashboard.py` launches this file as a
+# top-level script with only `orchestrator/` on `sys.path`, so the repo
+# root has to be added before the absolute imports below resolve;
+# `orchestrator/script_launch.py` documents why. `__package__` selects the
+# import per launch mode: a package import (`import orchestrator.dashboard`)
+# sets it to `"orchestrator"` and takes the qualified import, so a stray
+# top-level `script_launch` on `sys.path` cannot shadow the helper; a script
+# launch leaves it empty/absent and takes the bare `import script_launch`,
+# which loads the helper from the script's own directory WITHOUT importing
+# the `orchestrator` package before the repo root is on the path (doing so
+# would bind the parent to any stale/installed copy already importable).
+if globals().get("__package__"):
+    from orchestrator.script_launch import ensure_repo_root_on_path
+else:  # script-launched: only `orchestrator/` is on sys.path
+    from script_launch import ensure_repo_root_on_path
+
+ensure_repo_root_on_path(__file__)
 
 from orchestrator import analytics as analytics  # noqa: E402
 from orchestrator.analytics import read as analytics_read  # noqa: E402
