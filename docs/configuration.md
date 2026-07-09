@@ -656,8 +656,10 @@ When each setting's change takes effect:
 - `paused` — Same hard skip as `backlog`, but intended for an already in-flight issue: apply it to freeze processing
   (no handler runs, no worktree is rebased, no PR-stage relabel) without discarding the issue's state, and remove it to
   resume where it left off. Removing the label is the whole resume action, honored on the next poll; there is no
-  un-pause command, and `/orchestrator continue` is unrelated — it replays specific `awaiting_human` parked retry flows,
-  not a `paused` hold. Applying `paused` while a developer agent is mid-run also takes effect: every stage that resumes
+  un-pause command, and `/orchestrator continue` is unrelated — it retries a specific `awaiting_human` session-failure
+  park (`agent_silent` / `agent_timeout`) across the dev stages (`implementing`, `documenting`, `validating`, `fixing`,
+  `resolving_conflict`), not a `paused` hold. Applying `paused` while a developer agent is mid-run also takes effect:
+  every stage that resumes
   a dev agent (`implementing`, `validating`, `documenting`, `in_review`, `fixing`, `resolving_conflict`) re-reads the
   label after the run returns, before any post-agent side effect, and discards the result rather than pushing, opening a
   PR, relabeling, advancing watermarks, or posting comments, so the committed work stays on the branch and republishes
