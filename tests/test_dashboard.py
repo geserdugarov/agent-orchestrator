@@ -89,11 +89,25 @@ CONFIGURED_DB_URL = "postgresql://h/db"
 # data extent spans MAY_1..MAY_28 with its exclusive end at MAY_29, and
 # the 3-day preset opens at MAY_26.
 MAY_1 = date(2026, 5, 1)
+MAY_2 = date(2026, 5, 2)
+MAY_3 = date(2026, 5, 3)
+MAY_4 = date(2026, 5, 4)
+MAY_5 = date(2026, 5, 5)
+MAY_6 = date(2026, 5, 6)
 MAY_7 = date(2026, 5, 7)
+MAY_15 = date(2026, 5, 15)
 MAY_22 = date(2026, 5, 22)
 MAY_26 = date(2026, 5, 26)
 MAY_28 = date(2026, 5, 28)
 MAY_29 = date(2026, 5, 29)
+JAN_1 = date(2026, 1, 1)
+JUN_5_NOON_UTC = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+JUN_5_NOON_NAIVE = datetime(2026, 6, 5, 12, 0)
+
+
+def _utc_midnight(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+
 
 # Incidental first/last-seen timestamps stamped by the issue-summary row
 # builders. Never asserted -- the builders only need a valid ordered pair.
@@ -120,6 +134,12 @@ SECOND_WAVE_READER_NAMES = (
 
 # Canonical drill-down issue number, shared by the parse + cache-key tests.
 ISSUE_NUMBER = 42
+
+# Summary-wide reliability totals used to prove the dashboard ignores
+# recent-run row caps when computing headline tiles.
+FULL_WINDOW_AGENT_RUNS = 250
+FULL_WINDOW_FAILURES = 4
+FULL_WINDOW_TIMEOUTS = 17
 
 # Cache-key fixture inputs: a sample repo plus the event / stage filter
 # selections whose list->tuple normalization the cache key must preserve.
@@ -197,32 +217,24 @@ class ToWindowTest(unittest.TestCase):
         # `analytics_read` uses `ts < end`; midnight on the day after
         # `end_date` is what makes events from `end_date` visible.
         _, dashboard = _reload()
-        window = dashboard.to_window(MAY_1, date(2026, 5, 3))
-        self.assertEqual(
-            window.start, datetime(2026, 5, 1, tzinfo=timezone.utc)
-        )
-        self.assertEqual(
-            window.end, datetime(2026, 5, 4, tzinfo=timezone.utc)
-        )
+        window = dashboard.to_window(MAY_1, MAY_3)
+        self.assertEqual(window.start, _utc_midnight(MAY_1))
+        self.assertEqual(window.end, _utc_midnight(MAY_4))
 
     def test_reversed_range_is_swapped(self) -> None:
         # The Streamlit two-date input lets the user type end < start.
         # Swapping silently keeps the dashboard useful instead of
         # collapsing to an empty SQL window.
         _, dashboard = _reload()
-        window = dashboard.to_window(date(2026, 5, 5), MAY_1)
+        window = dashboard.to_window(MAY_5, MAY_1)
         self.assertEqual(window.start.date(), MAY_1)
-        self.assertEqual(window.end.date(), date(2026, 5, 6))
+        self.assertEqual(window.end.date(), MAY_6)
 
     def test_single_day_window(self) -> None:
         _, dashboard = _reload()
         window = dashboard.to_window(MAY_1, MAY_1)
-        self.assertEqual(
-            window.start, datetime(2026, 5, 1, tzinfo=timezone.utc)
-        )
-        self.assertEqual(
-            window.end, datetime(2026, 5, 2, tzinfo=timezone.utc)
-        )
+        self.assertEqual(window.start, _utc_midnight(MAY_1))
+        self.assertEqual(window.end, _utc_midnight(MAY_2))
 
 
 class ParseIssueNumberTest(unittest.TestCase):
@@ -583,10 +595,10 @@ class PresetWindowTest(unittest.TestCase):
 
     def test_all_preset_covers_full_extent(self) -> None:
         _, dashboard = _reload()
-        extent = self._extent(date(2026, 1, 1), MAY_28)
+        extent = self._extent(JAN_1, MAY_28)
         window = dashboard.preset_window(dashboard.PRESET_ALL, extent)
         self.assertIsNotNone(window)
-        self.assertEqual(window.start.date(), date(2026, 1, 1))
+        self.assertEqual(window.start.date(), JAN_1)
         self.assertEqual(window.end.date(), MAY_29)
 
     def test_custom_preset_returns_none(self) -> None:
@@ -653,7 +665,7 @@ class PreviousWindowTest(unittest.TestCase):
         # `to_window`'s end is exclusive (one day past `end_date`),
         # so the seven-day window spans 7 calendar days; the previous
         # window starts seven days before the current start.
-        self.assertEqual(prev.start.date(), date(2026, 5, 15))
+        self.assertEqual(prev.start.date(), MAY_15)
         self.assertEqual(prev.end.date(), MAY_22)
 
 
@@ -767,21 +779,21 @@ class ReliabilityTileDataTest(unittest.TestCase):
 
     def test_timeouts_sourced_from_summary_full_window(self) -> None:
         _, dashboard = _reload()
-        # Window holds 250 agent runs (far more than the 100-row
-        # recent-runs cap) with 17 timeouts and 4 failures.
+        # Window holds far more agent runs than the recent-runs cap, with
+        # failures and timeouts mixed in.
         summary = self._summary(
-            total_agent_runs=250,
-            failed_agent_runs=4,
-            timed_out_agent_runs=17,
+            total_agent_runs=FULL_WINDOW_AGENT_RUNS,
+            failed_agent_runs=FULL_WINDOW_FAILURES,
+            timed_out_agent_runs=FULL_WINDOW_TIMEOUTS,
         )
         tiles = dashboard.reliability_tile_data(
             summary, resolved=12, rejected=2,
         )
         by_label = {lbl: (val, tone) for val, lbl, tone in tiles}
         # Headline tiles all pulled off Summary directly:
-        self.assertEqual(by_label["Agent runs"][0], 250)
-        self.assertEqual(by_label["Failures"][0], 4)
-        self.assertEqual(by_label["Timeouts"][0], 17)
+        self.assertEqual(by_label["Agent runs"][0], FULL_WINDOW_AGENT_RUNS)
+        self.assertEqual(by_label["Failures"][0], FULL_WINDOW_FAILURES)
+        self.assertEqual(by_label["Timeouts"][0], FULL_WINDOW_TIMEOUTS)
         # Tone flips when the count crosses zero so the CSS class
         # paints the tile.
         self.assertEqual(by_label["Timeouts"][1], "bad")
@@ -1463,16 +1475,16 @@ class ReliabilityTilesHtmlTest(unittest.TestCase):
     def test_tiles_carry_value_label_and_tone(self) -> None:
         _, dashboard = _reload()
         tiles = [
-            (250, "Agent runs", ""),
+            (FULL_WINDOW_AGENT_RUNS, "Agent runs", ""),
             ("0%", "Success rate", "bad"),
-            (17, "Timeouts", "bad"),
+            (FULL_WINDOW_TIMEOUTS, "Timeouts", "bad"),
         ]
         html = dashboard._reliability_tiles_html(
             tiles, fmt_num=lambda n: f"{n}"
         )
         self.assertIn("orch-rel-tiles", html)
-        self.assertIn(">250<", html)       # numeric value via fmt_num
-        self.assertIn(">0%<", html)        # string value passes through
+        self.assertIn(f">{FULL_WINDOW_AGENT_RUNS}<", html)
+        self.assertIn(">0%<", html)  # string value passes through
         self.assertIn(">Timeouts<", html)
         self.assertIn("orch-rel-tile bad", html)
 
@@ -2514,7 +2526,7 @@ class ShiftTsTest(unittest.TestCase):
     def test_aware_ts_converted_to_offset(self) -> None:
         from datetime import timedelta
         _, dashboard = _reload()
-        ts = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+        ts = JUN_5_NOON_UTC
         shifted = dashboard.shift_ts(ts, timedelta(hours=7))
         self.assertEqual(shifted.hour, 19)
         self.assertEqual(shifted.utcoffset(), timedelta(hours=7))
@@ -2522,7 +2534,7 @@ class ShiftTsTest(unittest.TestCase):
     def test_aware_ts_negative_offset(self) -> None:
         from datetime import timedelta
         _, dashboard = _reload()
-        ts = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+        ts = JUN_5_NOON_UTC
         shifted = dashboard.shift_ts(ts, timedelta(hours=-5))
         self.assertEqual(shifted.hour, 7)
         self.assertEqual(shifted.utcoffset(), timedelta(hours=-5))
@@ -2530,9 +2542,9 @@ class ShiftTsTest(unittest.TestCase):
     def test_naive_ts_shifted_in_place(self) -> None:
         from datetime import timedelta
         _, dashboard = _reload()
-        ts = datetime(2026, 6, 5, 12, 0)
+        ts = JUN_5_NOON_NAIVE
         shifted = dashboard.shift_ts(ts, timedelta(hours=7))
-        self.assertEqual(shifted, datetime(2026, 6, 5, 19, 0))
+        self.assertEqual(shifted, JUN_5_NOON_NAIVE.replace(hour=19))
 
 
 if __name__ == "__main__":

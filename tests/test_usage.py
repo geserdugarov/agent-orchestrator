@@ -53,6 +53,8 @@ DEVELOP = "develop"
 REVIEW = "review"
 VERIFY = "verify"
 
+TOKENS_PER_MILLION = 1_000_000
+
 
 # --- Stream frame builders -----------------------------------------------
 # Each returns one decoded stream event; ``_jsonl`` serializes a sequence of
@@ -184,7 +186,7 @@ class ClaudeStreamJsonTest(unittest.TestCase):
         # sonnet rates: input=3, cw5m=3.75, cr=0.30, output=15 (per 1M)
         expected = (
             150 * 3 + 1200 * 3.75 + 6000 * 0.30 + 300 * 15
-        ) / 1_000_000
+        ) / TOKENS_PER_MILLION
         self.assertEqual(metrics.cost_source, "estimated")
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
@@ -201,7 +203,7 @@ class ClaudeStreamJsonTest(unittest.TestCase):
         # opus-4-7 rates: input=5, cw5m=6.25, cw1h=10, cr=0.50, output=25
         expected = (
             0 * 5 + 1000 * 6.25 + 500 * 10 + 0 * 0.50 + 100 * 25
-        ) / 1_000_000
+        ) / TOKENS_PER_MILLION
         self.assertEqual(metrics.cache_write_tokens, 1500)
         self.assertEqual(metrics.cost_source, "estimated")
         assert metrics.cost_usd is not None
@@ -282,7 +284,7 @@ class ClaudeStreamJsonTest(unittest.TestCase):
         # sonnet: input=3, output=15; haiku-3-5: input=0.80, output=4
         expected = (
             (100 * 3 + 50 * 15) + (200 * 0.80 + 100 * 4)
-        ) / 1_000_000
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -314,7 +316,7 @@ class CodexJsonTest(unittest.TestCase):
         uncached = 1000 - 200
         expected = (
             uncached * 1.25 + 200 * 0.125 + 400 * 10
-        ) / 1_000_000
+        ) / TOKENS_PER_MILLION
         self.assertEqual(metrics.cost_source, "estimated")
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
@@ -343,7 +345,7 @@ class CodexJsonTest(unittest.TestCase):
         self.assertEqual(metrics.output_tokens, 100)
         self.assertEqual(metrics.turns, 7)
         # gpt-5-mini rates: input=0.25, cached=0.025, output=2
-        expected = (800 * 0.25 + 0 + 100 * 2) / 1_000_000
+        expected = (800 * 0.25 + 0 + 100 * 2) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -380,7 +382,7 @@ class CodexJsonTest(unittest.TestCase):
         # the fallback only feeds the price lookup.
         self.assertEqual(metrics.models, (GPT_5_CODEX,))
         assert metrics.cost_usd is not None
-        expected = (100 * 1.25 + 0 + 50 * 10) / 1_000_000
+        expected = (100 * 1.25 + 0 + 50 * 10) / TOKENS_PER_MILLION
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
     def test_cached_tokens_without_cached_rate_blocks_estimate(self) -> None:
@@ -412,7 +414,7 @@ class CodexJsonTest(unittest.TestCase):
         uncached = 1000 - 200
         expected = (
             uncached * 5 + 200 * 0.50 + 400 * 30
-        ) / 1_000_000
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -449,7 +451,7 @@ class CodexJsonTest(unittest.TestCase):
         # Long-context tier: input * 5 * 2 + output * 30 * 1.5, /1M.
         expected = (
             300_000 * 5 * 2.0 + 1_000 * 30 * 1.5
-        ) / 1_000_000
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -464,7 +466,7 @@ class CodexJsonTest(unittest.TestCase):
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # Flat rate: input * 5 + output * 30, /1M (no multipliers).
-        expected = (272_000 * 5 + 1_000 * 30) / 1_000_000
+        expected = (272_000 * 5 + 1_000 * 30) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -484,7 +486,7 @@ class CodexJsonTest(unittest.TestCase):
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # Flat pro rates: input=30, output=180; NO multipliers.
-        expected = (300_000 * 30 + 1_000 * 180) / 1_000_000
+        expected = (300_000 * 30 + 1_000 * 180) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -501,7 +503,7 @@ class CodexJsonTest(unittest.TestCase):
         # gpt-5.4 rates: input=2.50, output=15; long-context 2x / 1.5x.
         expected = (
             300_000 * 2.50 * 2.0 + 1_000 * 15 * 1.5
-        ) / 1_000_000
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -514,7 +516,7 @@ class CodexJsonTest(unittest.TestCase):
         self.assertEqual(metrics.cost_source, "estimated")
         expected = (
             300_000 * 30 * 2.0 + 1_000 * 180 * 1.5
-        ) / 1_000_000
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -536,7 +538,7 @@ class CodexJsonTest(unittest.TestCase):
                 self.assertEqual(metrics.cost_source, "estimated")
                 expected = (
                     300_000 * rates["input"] + 1_000 * rates["output"]
-                ) / 1_000_000
+                ) / TOKENS_PER_MILLION
                 assert metrics.cost_usd is not None
                 self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -552,7 +554,7 @@ class CodexJsonTest(unittest.TestCase):
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # Per OpenAI's gpt-5.2-pro page: $21 / $168, no cached rate.
-        expected = (100_000 * 21 + 1_000 * 168) / 1_000_000
+        expected = (100_000 * 21 + 1_000 * 168) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -579,7 +581,7 @@ class CodexJsonTest(unittest.TestCase):
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # Per OpenAI's gpt-5-pro page: $15 / $120, no cached rate.
-        expected = (100_000 * 15 + 1_000 * 120) / 1_000_000
+        expected = (100_000 * 15 + 1_000 * 120) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -608,7 +610,7 @@ class CodexJsonTest(unittest.TestCase):
             uncached * 5 * 2.0
             + 100_000 * 0.50 * 2.0
             + 1_000 * 30 * 1.5
-        ) / 1_000_000
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -1297,7 +1299,7 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         self.assertEqual(len(trajectory.turns), 2)
         turn0, turn1 = trajectory.turns
         # sonnet: input=3, cw5m=3.75, cr=0.30, output=15 (per 1M).
-        expected0 = (12 * 3 + 512 * 3.75 + 18240 * 0.30 + 340 * 15) / 1_000_000
+        expected0 = (12 * 3 + 512 * 3.75 + 18240 * 0.30 + 340 * 15) / TOKENS_PER_MILLION
         self.assertEqual(
             turn0,
             TurnUsage(turn=0, model=SONNET, input_tokens=12,
@@ -1312,7 +1314,7 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         self.assertEqual(turn1.model, HAIKU)
         self.assertEqual(turn1.cache_read_tokens, 0)
         self.assertEqual(turn1.cache_write_tokens, 0)
-        expected1 = (20 * 0.80 + 50 * 4) / 1_000_000
+        expected1 = (20 * 0.80 + 50 * 4) / TOKENS_PER_MILLION
         assert turn1.cost_usd is not None
         self.assertAlmostEqual(turn1.cost_usd, expected1, places=12)
 
@@ -1327,7 +1329,7 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         turn0 = parse_claude_trajectory(stdout).turns[0]
         self.assertEqual(turn0.cache_write_tokens, 1500)
         # opus-4-7: input=5, cw5m=6.25, cw1h=10, cr=0.50, output=25.
-        expected = (1000 * 6.25 + 500 * 10 + 100 * 25) / 1_000_000
+        expected = (1000 * 6.25 + 500 * 10 + 100 * 25) / TOKENS_PER_MILLION
         assert turn0.cost_usd is not None
         self.assertAlmostEqual(turn0.cost_usd, expected, places=12)
 

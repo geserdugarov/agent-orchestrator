@@ -13,6 +13,19 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
+DEFAULT_RETENTION_DAYS = 90
+PRUNE_NOW = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
+FRESH_RECORD_AGE_DAYS = 1
+RECENT_RECORD_AGE_DAYS = 10
+OLD_RECORD_AGE_DAYS = 100
+VERY_OLD_RECORD_AGE_DAYS = 200
+ANCIENT_RECORD_AGE_DAYS = 1000
+
+
+def _ts_days_ago(days: int, *, now: datetime = PRUNE_NOW) -> str:
+    return (now - timedelta(days=days)).isoformat(timespec="seconds")
+
+
 def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {
         "ORCHESTRATOR_SKIP_DOTENV": "1",
@@ -112,7 +125,9 @@ class AnalyticsConfigTest(unittest.TestCase):
 
     def test_default_retention_is_ninety_days(self) -> None:
         _, analytics = _reload()
-        self.assertEqual(analytics.ANALYTICS_RETENTION_DAYS, 90)
+        self.assertEqual(
+            analytics.ANALYTICS_RETENTION_DAYS, DEFAULT_RETENTION_DAYS,
+        )
 
     def test_explicit_path_overrides_default(self) -> None:
         _, analytics = _reload({"ANALYTICS_LOG_PATH": "/var/log/orch/a.jsonl"})
@@ -272,14 +287,14 @@ class AnalyticsPruneTest(unittest.TestCase):
                 fh.write(json.dumps(rec, sort_keys=True) + "\n")
 
     def test_removes_old_records_keeps_recent(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=100)).isoformat(timespec="seconds")
-        new_ts = (now - timedelta(days=10)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(OLD_RECORD_AGE_DAYS, now=now)
+        new_ts = _ts_days_ago(RECENT_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "analytics.jsonl"
             _, analytics = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": "90",
+                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             self._write_lines(path, [
                 {"ts": old_ts, "repo": "o/r", "issue": 1, "event": "x"},
@@ -296,8 +311,8 @@ class AnalyticsPruneTest(unittest.TestCase):
             self.assertEqual(remaining[0]["issue"], 2)
 
     def test_zero_retention_is_no_op(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        ancient = (now - timedelta(days=1000)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        ancient = _ts_days_ago(ANCIENT_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "analytics.jsonl"
             _, analytics = _reload({
@@ -315,8 +330,8 @@ class AnalyticsPruneTest(unittest.TestCase):
 
     def test_negative_retention_is_no_op(self) -> None:
         # Treated identically to the documented `0 = keep forever` knob.
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=100)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(OLD_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "analytics.jsonl"
             _, analytics = _reload({
@@ -336,13 +351,13 @@ class AnalyticsPruneTest(unittest.TestCase):
             self.assertFalse(path.exists())
 
     def test_no_records_old_enough_does_not_rewrite(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        new_ts = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        new_ts = _ts_days_ago(FRESH_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "analytics.jsonl"
             _, analytics = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": "90",
+                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             self._write_lines(path, [
                 {"ts": new_ts, "repo": "o/r", "issue": 1, "event": "x"},
@@ -356,13 +371,13 @@ class AnalyticsPruneTest(unittest.TestCase):
         # Non-JSON lines, JSON without `ts`, and unparseable `ts` strings
         # survive the prune so operators can clean up rather than having
         # the helper silently drop data it cannot interpret.
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "analytics.jsonl"
             _, analytics = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": "90",
+                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("w", encoding="utf-8") as fh:
@@ -386,13 +401,13 @@ class AnalyticsPruneTest(unittest.TestCase):
         # 0 and the original file is left untouched rather than truncated,
         # so analytics stays observability-only. The partial temp file is
         # cleaned up so no `.prune.*.tmp` orphan is left behind.
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "analytics.jsonl"
             _, analytics = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": "90",
+                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             self._write_lines(path, [
                 {"ts": old_ts, "repo": "o/r", "issue": 1, "event": "x"},
@@ -414,15 +429,15 @@ class AnalyticsPruneTest(unittest.TestCase):
         # Pre-existing records written without tz info (or by an older
         # writer) must still be comparable; treat them as UTC rather than
         # raising and aborting the prune.
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_naive = (now - timedelta(days=100)).replace(
+        now = PRUNE_NOW
+        old_naive = (now - timedelta(days=OLD_RECORD_AGE_DAYS)).replace(
             tzinfo=None
         ).isoformat(timespec="seconds")
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "analytics.jsonl"
             _, analytics = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": "90",
+                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             self._write_lines(path, [
                 {"ts": old_naive, "repo": "o/r", "issue": 1, "event": "x"},
@@ -482,9 +497,9 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
         import threading
         with tempfile.TemporaryDirectory(prefix="analytics-race-") as td:
             path = Path(td) / "analytics.jsonl"
-            now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-            old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
-            new_ts = (now - timedelta(days=1)).isoformat(timespec="seconds")
+            now = PRUNE_NOW
+            old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
+            new_ts = _ts_days_ago(FRESH_RECORD_AGE_DAYS, now=now)
             # One old record (will be pruned) plus one recent record
             # (the prune rewrite must keep it). After the rewrite, an
             # appender adds a fresh record concurrently; the prune
@@ -502,7 +517,7 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             )
             _, analytics = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": "90",
+                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
 
             after_read = threading.Event()
@@ -568,9 +583,9 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
         # state through any client method.
         from orchestrator.github import GitHubClient
 
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
-        new_ts = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
+        new_ts = _ts_days_ago(FRESH_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory(prefix="analytics-retention-") as td:
             path = Path(td) / "analytics.jsonl"
             path.write_text(
@@ -587,7 +602,7 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             )
             _, analytics = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
-                "ANALYTICS_RETENTION_DAYS": "90",
+                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             mutators = (
                 "write_pinned_state", "comment", "set_workflow_label",
@@ -942,7 +957,9 @@ class TrajectoryConfigTest(unittest.TestCase):
 
     def test_default_retention_is_ninety_days(self) -> None:
         _, analytics = _reload()
-        self.assertEqual(analytics.TRAJECTORY_RETENTION_DAYS, 90)
+        self.assertEqual(
+            analytics.TRAJECTORY_RETENTION_DAYS, DEFAULT_RETENTION_DAYS,
+        )
 
     def test_zero_retention_means_keep_forever(self) -> None:
         _, analytics = _reload({"TRAJECTORY_RETENTION_DAYS": "0"})
@@ -1054,14 +1071,14 @@ class TrajectoryPruneTest(unittest.TestCase):
                 fh.write(json.dumps(rec, sort_keys=True) + "\n")
 
     def test_removes_old_records_keeps_recent(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=100)).isoformat(timespec="seconds")
-        new_ts = (now - timedelta(days=10)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(OLD_RECORD_AGE_DAYS, now=now)
+        new_ts = _ts_days_ago(RECENT_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
                 "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": "90",
+                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             self._write_lines(path, [
                 {"ts": old_ts, "session_id": "1"},
@@ -1076,8 +1093,8 @@ class TrajectoryPruneTest(unittest.TestCase):
             self.assertEqual([record["session_id"] for record in remaining], ["2"])
 
     def test_zero_retention_is_no_op(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        ancient = (now - timedelta(days=1000)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        ancient = _ts_days_ago(ANCIENT_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
@@ -1091,8 +1108,8 @@ class TrajectoryPruneTest(unittest.TestCase):
             )
 
     def test_negative_retention_is_no_op(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=100)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(OLD_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
@@ -1110,13 +1127,13 @@ class TrajectoryPruneTest(unittest.TestCase):
             self.assertFalse(path.exists())
 
     def test_no_records_old_enough_does_not_rewrite(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        new_ts = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        new_ts = _ts_days_ago(FRESH_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
                 "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": "90",
+                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             self._write_lines(path, [{"ts": new_ts, "session_id": "1"}])
             mtime_before = path.stat().st_mtime_ns
@@ -1124,13 +1141,13 @@ class TrajectoryPruneTest(unittest.TestCase):
             self.assertEqual(path.stat().st_mtime_ns, mtime_before)
 
     def test_malformed_lines_preserved(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
                 "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": "90",
+                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("w", encoding="utf-8") as fh:
@@ -1144,15 +1161,15 @@ class TrajectoryPruneTest(unittest.TestCase):
             self.assertIn("this is not json", kept[0])
 
     def test_naive_timestamp_treated_as_utc(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_naive = (now - timedelta(days=100)).replace(
+        now = PRUNE_NOW
+        old_naive = (now - timedelta(days=OLD_RECORD_AGE_DAYS)).replace(
             tzinfo=None
         ).isoformat(timespec="seconds")
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
                 "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": "90",
+                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             self._write_lines(path, [{"ts": old_naive, "session_id": "1"}])
             self.assertEqual(analytics.prune_trajectory_records(now=now), 1)
@@ -1170,7 +1187,7 @@ class TrajectoryPruneTest(unittest.TestCase):
             path = Path(td) / ("x" * 5000)
             _, analytics = _reload({
                 "TRAJECTORY_LOG_PATH": str(path),
-                "TRAJECTORY_RETENTION_DAYS": "90",
+                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             with self.assertLogs(analytics.log, level="WARNING") as cm:
                 removed = analytics.prune_trajectory_records()
@@ -1203,16 +1220,16 @@ class TrajectorySinkIndependenceTest(unittest.TestCase):
             self.assertFalse(a_path.exists())
 
     def test_prune_trajectory_leaves_analytics_file_untouched(self) -> None:
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             a_path = Path(td) / "analytics.jsonl"
             t_path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
                 "ANALYTICS_LOG_PATH": str(a_path),
-                "ANALYTICS_RETENTION_DAYS": "90",
+                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
                 "TRAJECTORY_LOG_PATH": str(t_path),
-                "TRAJECTORY_RETENTION_DAYS": "90",
+                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             # An equally-old record in BOTH files; pruning trajectory must
             # drop only the trajectory record and never rewrite analytics.
@@ -1233,16 +1250,16 @@ class TrajectorySinkIndependenceTest(unittest.TestCase):
     def test_prune_analytics_leaves_trajectory_file_untouched(self) -> None:
         # Symmetric guard: the analytics prune must not rewrite the
         # trajectory file either.
-        now = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-        old_ts = (now - timedelta(days=200)).isoformat(timespec="seconds")
+        now = PRUNE_NOW
+        old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
             a_path = Path(td) / "analytics.jsonl"
             t_path = Path(td) / "trajectory.jsonl"
             _, analytics = _reload({
                 "ANALYTICS_LOG_PATH": str(a_path),
-                "ANALYTICS_RETENTION_DAYS": "90",
+                "ANALYTICS_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
                 "TRAJECTORY_LOG_PATH": str(t_path),
-                "TRAJECTORY_RETENTION_DAYS": "90",
+                "TRAJECTORY_RETENTION_DAYS": str(DEFAULT_RETENTION_DAYS),
             })
             a_path.write_text(
                 json.dumps({"ts": old_ts, "event": "x"}) + "\n",

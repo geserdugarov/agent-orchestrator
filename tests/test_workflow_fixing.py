@@ -89,6 +89,31 @@ SHA_SAME = "same-sha"
 
 # --- Canonical triggering PR-feedback comment id (and its bookmark) -----
 TRIGGER_ID = 2000
+FOLLOWUP_ID = 2001
+CONCURRENT_COMMENT_ID = 2500
+PARKED_COMMENT_WATERMARK = 2500
+HUMAN_REPLY_ID = 2600
+TRANSIENT_PARK_WATERMARK = 5000
+COMMAND_COMMENT_ID = 9000
+INITIAL_PR_COMMENT_WATERMARK = 1999
+PENDING_FIX_AT_TS = "2026-05-24T00:00:00+00:00"
+EARLIER_PENDING_FIX_AT_TS = "2026-05-23T00:00:00+00:00"
+
+# --- Preserved feedback batch ids used by reconstruction / continue tests --
+BATCH_ISSUE_ID = 2050
+BATCH_PR_CONVERSATION_ID = 2100
+BATCH_INLINE_ID = 40
+BATCH_INLINE_SECOND_ID = 41
+BATCH_SUMMARY_ID = 7
+BATCH_ISSUE_IDS = [BATCH_ISSUE_ID, BATCH_PR_CONVERSATION_ID]
+BATCH_INLINE_IDS = [BATCH_INLINE_ID, BATCH_INLINE_SECOND_ID]
+BATCH_SUMMARY_IDS = [BATCH_SUMMARY_ID]
+BATCH_LATER_ISSUE_ID = 9000
+BATCH_ORCHESTRATOR_NOTE_ID = 2300
+BATCH_INLINE_NOISE_ID = 99
+BATCH_SUMMARY_NOISE_ID = 12
+UNTRUSTED_ISSUE_ID = 2060
+ORCHESTRATOR_PARK_COMMENT_ID = 2050
 
 # --- Recurring comment authors ------------------------------------------
 ALICE = "alice"
@@ -156,10 +181,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             "dev_agent": DEV_AGENT,
             "dev_session_id": DEV_SESSION,
             REVIEW_ROUND: 1,
-            PR_LAST_COMMENT_ID: 1999,
+            PR_LAST_COMMENT_ID: INITIAL_PR_COMMENT_WATERMARK,
             PR_LAST_REVIEW_COMMENT_ID: 0,
             PR_LAST_REVIEW_SUMMARY_ID: 0,
-            PENDING_FIX_AT: "2026-05-24T00:00:00+00:00",
+            PENDING_FIX_AT: PENDING_FIX_AT_TS,
             PENDING_FIX_ISSUE_MAX_ID: TRIGGER_ID,
         }
         if with_pr_number and pr is not None:
@@ -204,7 +229,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks[PUSH_BRANCH].assert_not_called()
         self.assertEqual(gh.label_history, [])
         # Watermark not advanced past the triggering comment yet.
-        self.assertEqual(gh.pinned_data(ISSUE).get(PR_LAST_COMMENT_ID), 1999)
+        self.assertEqual(
+            gh.pinned_data(ISSUE).get(PR_LAST_COMMENT_ID),
+            INITIAL_PR_COMMENT_WATERMARK,
+        )
         self.assertFalse(gh.pinned_data(ISSUE).get(AWAITING_HUMAN))
 
     def test_fixing_past_debounce_resumes_dev(self) -> None:
@@ -344,8 +372,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.posted_comments, [])
         # Watermarks and bookmarks unmoved; awaiting_human not cleared/set.
         data = gh.pinned_data(ISSUE)
-        self.assertEqual(data.get(PR_LAST_COMMENT_ID), 1999)
-        self.assertEqual(data.get(PENDING_FIX_AT), "2026-05-24T00:00:00+00:00")
+        self.assertEqual(
+            data.get(PR_LAST_COMMENT_ID), INITIAL_PR_COMMENT_WATERMARK,
+        )
+        self.assertEqual(data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS)
         self.assertEqual(data.get(PENDING_FIX_ISSUE_MAX_ID), TRIGGER_ID)
         self.assertFalse(data.get(AWAITING_HUMAN))
 
@@ -384,8 +414,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.posted_comments, [])
         data = gh.pinned_data(ISSUE)
-        self.assertEqual(data.get(PR_LAST_COMMENT_ID), 1999)
-        self.assertEqual(data.get(PENDING_FIX_AT), "2026-05-24T00:00:00+00:00")
+        self.assertEqual(
+            data.get(PR_LAST_COMMENT_ID), INITIAL_PR_COMMENT_WATERMARK,
+        )
+        self.assertEqual(data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS)
         self.assertEqual(data.get(PENDING_FIX_ISSUE_MAX_ID), TRIGGER_ID)
         self.assertFalse(data.get(AWAITING_HUMAN))
 
@@ -409,7 +441,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 # The in_review handler sets this when it routes fresh PR
                 # feedback into `fixing`; it discriminates the in_review
                 # route from the validating `CHANGES_REQUESTED` route.
-                PENDING_FIX_AT: "2026-05-23T00:00:00+00:00",
+                PENDING_FIX_AT: EARLIER_PENDING_FIX_AT_TS,
                 PENDING_FIX_ISSUE_MAX_ID: TRIGGER_ID,
                 # Already parked from a prior tick whose dev resume produced
                 # no commit and no ACK marker (the `_on_question` shape).
@@ -431,7 +463,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         data = gh.pinned_data(ISSUE)
         self.assertTrue(data.get(AWAITING_HUMAN))
         # Bookmarks left intact for the eventual human-reply re-entry.
-        self.assertEqual(data.get(PENDING_FIX_AT), "2026-05-23T00:00:00+00:00")
+        self.assertEqual(data.get(PENDING_FIX_AT), EARLIER_PENDING_FIX_AT_TS)
         # The handler short-circuits at the awaiting-human + no-new-feedback
         # gate -- no dev resume, no push.
         mocks[RUN_AGENT].assert_not_called()
@@ -440,8 +472,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
     # --- newer comments extend the debounce window ------------------------
 
     def test_newer_comment_extends_debounce_window(self) -> None:
-        # First tick: an older triggering comment (id=TRIGGER_ID) is past the
-        # window but a newer comment (id=2001) just landed -- the freshest
+        # First tick: an older triggering comment is past the window but a
+        # newer comment just landed -- the freshest
         # timestamp resets the gate. Handler must NOT resume; no agent
         # call, no label change.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -451,7 +483,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             user=FakeUser(ALICE), created_at=long_ago,
         )
         followup = FakeComment(
-            id=2001, body="actually rename it too",
+            id=FOLLOWUP_ID, body="actually rename it too",
             user=FakeUser(ALICE), created_at=just_now,
         )
         pr = self._open_pr()
@@ -474,7 +506,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Tick 1 (in_review handoff already done; we simulate that state):
         # the triggering comment id=TRIGGER_ID sits past the watermark with the
         # bookmark recorded. Before tick 2 fires, a SECOND human comment
-        # id=2001 lands. The rescan picks BOTH up and the followup quotes
+        # followup lands. The rescan picks BOTH up and the followup quotes
         # both surfaces. Both comments are past the debounce window.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         also_old = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -483,7 +515,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             user=FakeUser(ALICE), created_at=long_ago,
         )
         late_arrival = FakeComment(
-            id=2001, body="and rename helper to util",
+            id=FOLLOWUP_ID, body="and rename helper to util",
             user=FakeUser(BOB), created_at=also_old,
         )
         pr = self._open_pr()
@@ -509,7 +541,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("and rename helper to util", prompt)
         # Watermark advanced past BOTH consumed comments.
         self.assertGreaterEqual(
-            gh.pinned_data(ISSUE).get(PR_LAST_COMMENT_ID), 2001,
+            gh.pinned_data(ISSUE).get(PR_LAST_COMMENT_ID), FOLLOWUP_ID,
         )
 
     # --- dev resume + push --> flip to validating ------------------------
@@ -752,7 +784,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # triggering one mid-handler so the bump's `latest_comment_id`
         # candidate would otherwise leap past it.
         concurrent = FakeComment(
-            id=2500, body="actually also rename helper",
+            id=CONCURRENT_COMMENT_ID, body="actually also rename helper",
             user=FakeUser(BOB), created_at=long_ago,
         )
         original_handle_fix_result = workflow._handle_dev_fix_result
@@ -781,9 +813,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         # Watermark advanced past the consumed triggering comment but
         # NOT past the concurrent one -- the next in_review tick must
-        # still see id=2500 as fresh feedback.
+        # still see the concurrent comment as fresh feedback.
         self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
-        self.assertLess(data.get(PR_LAST_COMMENT_ID), 2500)
+        self.assertLess(data.get(PR_LAST_COMMENT_ID), CONCURRENT_COMMENT_ID)
 
     def test_failed_fix_bump_does_not_swallow_concurrent_comment(
         self,
@@ -806,7 +838,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[triggering])
 
         concurrent = FakeComment(
-            id=2500, body="actually also rename helper",
+            id=CONCURRENT_COMMENT_ID, body="actually also rename helper",
             user=FakeUser(BOB), created_at=long_ago,
         )
         original_handle_fix_result = workflow._handle_dev_fix_result
@@ -835,9 +867,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(data.get(AWAITING_HUMAN))
         # Watermark advanced past the consumed triggering comment but
         # NOT past the concurrent one -- the next fixing tick must
-        # still see id=2500 as fresh feedback.
+        # still see the concurrent comment as fresh feedback.
         self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
-        self.assertLess(data.get(PR_LAST_COMMENT_ID), 2500)
+        self.assertLess(data.get(PR_LAST_COMMENT_ID), CONCURRENT_COMMENT_ID)
 
         # Second tick: rescan picks up the concurrent comment so
         # `awaiting_human and not new_feedback` is False; park flags
@@ -871,7 +903,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: PARK_AGENT_TIMEOUT,
-                PR_LAST_COMMENT_ID: 2500,  # already past any old feedback
+                PR_LAST_COMMENT_ID: PARKED_COMMENT_WATERMARK,
             },
         )
 
@@ -892,7 +924,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # new context.
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         reply = FakeComment(
-            id=2600, body="actually try X instead",
+            id=HUMAN_REPLY_ID, body="actually try X instead",
             user=FakeUser(ALICE), created_at=long_ago,
         )
         pr = self._open_pr()
@@ -901,7 +933,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: PARK_AGENT_TIMEOUT,
-                PR_LAST_COMMENT_ID: 2500,
+                PR_LAST_COMMENT_ID: PARKED_COMMENT_WATERMARK,
             },
         )
 
@@ -938,7 +970,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # set it (and bumps the round on push).
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         reply = FakeComment(
-            id=2600, body="here's a clarification: use option B",
+            id=HUMAN_REPLY_ID, body="here's a clarification: use option B",
             user=FakeUser(ALICE), created_at=long_ago,
         )
         pr = self._open_pr()
@@ -947,7 +979,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: PARK_AGENT_TIMEOUT,
-                PR_LAST_COMMENT_ID: 2500,
+                PR_LAST_COMMENT_ID: PARKED_COMMENT_WATERMARK,
                 # validating->fixing route did NOT set pending_fix_at;
                 # only the in_review route sets it. Override the seed's
                 # default to model the validating-route shape.
@@ -993,7 +1025,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: PARK_PUSH_FAILED,
-                PR_LAST_COMMENT_ID: 5000,
+                PR_LAST_COMMENT_ID: TRANSIENT_PARK_WATERMARK,
                 # Validating route did not set pending_fix_at.
                 PENDING_FIX_AT: None,
                 PENDING_FIX_ISSUE_MAX_ID: None,
@@ -1038,7 +1070,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: PARK_PUSH_FAILED,
-                PR_LAST_COMMENT_ID: 5000,
+                PR_LAST_COMMENT_ID: TRANSIENT_PARK_WATERMARK,
                 PENDING_FIX_AT: None,
                 PENDING_FIX_ISSUE_MAX_ID: None,
                 REVIEW_ROUND: 1,
@@ -1077,7 +1109,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: PARK_AGENT_TIMEOUT,
-                PR_LAST_COMMENT_ID: 5000,
+                PR_LAST_COMMENT_ID: TRANSIENT_PARK_WATERMARK,
                 PENDING_FIX_AT: None,
                 PENDING_FIX_ISSUE_MAX_ID: None,
                 REVIEW_ROUND: 1,
@@ -1118,7 +1150,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: PARK_AGENT_TIMEOUT,
-                PR_LAST_COMMENT_ID: 5000,
+                PR_LAST_COMMENT_ID: TRANSIENT_PARK_WATERMARK,
                 PENDING_FIX_AT: None,
                 PENDING_FIX_ISSUE_MAX_ID: None,
                 REVIEW_ROUND: 1,
@@ -1160,10 +1192,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: PARK_AGENT_TIMEOUT,
-                PR_LAST_COMMENT_ID: 5000,
+                PR_LAST_COMMENT_ID: TRANSIENT_PARK_WATERMARK,
                 # in_review route DID set this -- we are mid-fix on a
                 # human PR comment.
-                PENDING_FIX_AT: "2026-05-24T00:00:00+00:00",
+                PENDING_FIX_AT: PENDING_FIX_AT_TS,
                 PENDING_FIX_ISSUE_MAX_ID: TRIGGER_ID,
                 REVIEW_ROUND: 0,
                 # before-SHA equals current HEAD -- the timed-out dev
@@ -1196,7 +1228,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Bookmark untouched so the in_review semantics survive into
         # the next tick after the human replies.
         self.assertEqual(
-            data.get(PENDING_FIX_AT), "2026-05-24T00:00:00+00:00",
+            data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS,
         )
 
     def test_in_review_routed_push_failed_park_not_recovered(
@@ -1215,8 +1247,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: PARK_PUSH_FAILED,
-                PR_LAST_COMMENT_ID: 5000,
-                PENDING_FIX_AT: "2026-05-24T00:00:00+00:00",
+                PR_LAST_COMMENT_ID: TRANSIENT_PARK_WATERMARK,
+                PENDING_FIX_AT: PENDING_FIX_AT_TS,
                 PENDING_FIX_ISSUE_MAX_ID: TRIGGER_ID,
                 REVIEW_ROUND: 0,
             },
@@ -1238,7 +1270,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         # Bookmark and round unchanged.
         self.assertEqual(
-            data.get(PENDING_FIX_AT), "2026-05-24T00:00:00+00:00",
+            data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS,
         )
         self.assertEqual(data.get(REVIEW_ROUND), 0)
 
@@ -1254,7 +1286,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 # Not a transient reason; the dev raised a question and
                 # the human needs to answer.
                 PARK_REASON: PARK_AGENT_QUESTION,
-                PR_LAST_COMMENT_ID: 5000,
+                PR_LAST_COMMENT_ID: TRANSIENT_PARK_WATERMARK,
                 PENDING_FIX_AT: None,
                 PENDING_FIX_ISSUE_MAX_ID: None,
                 REVIEW_ROUND: 1,
@@ -1326,7 +1358,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             pr=pr,
             extra_state={
                 # Watermark already past the recorded bookmark.
-                PR_LAST_COMMENT_ID: 5000,
+                PR_LAST_COMMENT_ID: TRANSIENT_PARK_WATERMARK,
                 PENDING_FIX_ISSUE_MAX_ID: 4900,
             },
         )
@@ -1438,7 +1470,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # ping does not re-trigger a dev resume.
         from orchestrator.workflow_messages import _ORCH_COMMENT_MARKER
         orch_comment = FakeComment(
-            id=2050,
+            id=ORCHESTRATOR_PARK_COMMENT_ID,
             body=f":bell: ready for review/merge\n\n{_ORCH_COMMENT_MARKER}",
             user=FakeUser(ORCHESTRATOR),
             created_at=datetime.now(timezone.utc) - timedelta(hours=1),
@@ -1610,7 +1642,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- stranded-fix deferred publish -----------------------------------
 
-    def _seed_stranded(self, *, reply_id: int = 2600):
+    def _seed_stranded(self, *, reply_id: int = HUMAN_REPLY_ID):
         # Validating-route park (`pending_fix_at` unset) with a human
         # reply past the debounce window -- the live shape of a fix that
         # was committed during an earlier dirty-park, cleaned up by hand,
@@ -1626,7 +1658,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             extra_state={
                 AWAITING_HUMAN: True,
                 PARK_REASON: None,
-                PR_LAST_COMMENT_ID: 2500,
+                PR_LAST_COMMENT_ID: PARKED_COMMENT_WATERMARK,
                 PENDING_FIX_AT: None,
                 PENDING_FIX_ISSUE_MAX_ID: None,
                 REVIEW_ROUND: 2,
@@ -1901,7 +1933,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # --- Tick 2: `/orchestrator continue` retries, does not refuse ----
         issue.comments.append(
             FakeComment(
-                id=9000, body="/orchestrator continue", user=FakeUser(DAVE),
+                id=COMMAND_COMMENT_ID, body="/orchestrator continue", user=FakeUser(DAVE),
             ),
         )
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
@@ -1954,7 +1986,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             # state cleared as if the process just started up.
             extra_state={
                 AWAITING_HUMAN: False,
-                PENDING_FIX_AT: "2026-05-23T00:00:00+00:00",
+                PENDING_FIX_AT: EARLIER_PENDING_FIX_AT_TS,
                 PENDING_FIX_ISSUE_MAX_ID: TRIGGER_ID,
             },
         )
@@ -1999,27 +2031,63 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         # later human comment) that reconstruction must exclude.
         issue = make_issue(ISSUE, label=FIXING)
         issue.comments.extend([
-            FakeComment(id=2050, body="issue thread ask", user=FakeUser(CAROL)),
+            FakeComment(
+                id=BATCH_ISSUE_ID,
+                body="issue thread ask",
+                user=FakeUser(CAROL),
+            ),
             # Later, non-batch human comment (id above the batch): must not
             # be pulled in even though a naive rescan-from-zero would see it.
-            FakeComment(id=9000, body="unrelated later note", user=FakeUser(DAVE)),
+            FakeComment(
+                id=BATCH_LATER_ISSUE_ID,
+                body="unrelated later note",
+                user=FakeUser(DAVE),
+            ),
         ])
         pr = FakePR(
             number=PR_NUMBER, head_branch=BRANCH,
             head=FakePRRef(sha=PR_HEAD_SHA),
             issue_comments=[
-                FakeComment(id=2100, body="pr conv ask", user=FakeUser(ALICE)),
+                FakeComment(
+                    id=BATCH_PR_CONVERSATION_ID,
+                    body="pr conv ask",
+                    user=FakeUser(ALICE),
+                ),
                 # Orchestrator's own park comment: never in the batch.
-                FakeComment(id=2300, body="orchestrator note", user=FakeUser(ORCHESTRATOR)),
+                FakeComment(
+                    id=BATCH_ORCHESTRATOR_NOTE_ID,
+                    body="orchestrator note",
+                    user=FakeUser(ORCHESTRATOR),
+                ),
             ],
             review_comments=[
-                FakeComment(id=40, body="inline ask one", user=FakeUser(ALICE)),
-                FakeComment(id=41, body="inline ask two", user=FakeUser(BOB)),
-                FakeComment(id=99, body="inline non-batch", user=FakeUser(BOB)),
+                FakeComment(
+                    id=BATCH_INLINE_ID,
+                    body="inline ask one",
+                    user=FakeUser(ALICE),
+                ),
+                FakeComment(
+                    id=BATCH_INLINE_SECOND_ID,
+                    body="inline ask two",
+                    user=FakeUser(BOB),
+                ),
+                FakeComment(
+                    id=BATCH_INLINE_NOISE_ID,
+                    body="inline non-batch",
+                    user=FakeUser(BOB),
+                ),
             ],
             reviews=[
-                FakePRReview(id=7, body="please address", state="CHANGES_REQUESTED"),
-                FakePRReview(id=12, body="later review", state="COMMENTED"),
+                FakePRReview(
+                    id=BATCH_SUMMARY_ID,
+                    body="please address",
+                    state="CHANGES_REQUESTED",
+                ),
+                FakePRReview(
+                    id=BATCH_SUMMARY_NOISE_ID,
+                    body="later review",
+                    state="COMMENTED",
+                ),
             ],
         )
         gh = FakeGitHubClient()
@@ -2036,26 +2104,29 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             pr_last_comment_id=8000,
             pr_last_review_comment_id=50,
             pr_last_review_summary_id=10,
-            pending_fix_issue_ids=[2050, 2100],
-            pending_fix_issue_max_id=2100,
-            pending_fix_review_ids=[40, 41],
-            pending_fix_review_max_id=41,
-            pending_fix_review_summary_ids=[7],
-            pending_fix_review_summary_max_id=7,
+            pending_fix_issue_ids=BATCH_ISSUE_IDS,
+            pending_fix_issue_max_id=BATCH_PR_CONVERSATION_ID,
+            pending_fix_review_ids=BATCH_INLINE_IDS,
+            pending_fix_review_max_id=BATCH_INLINE_SECOND_ID,
+            pending_fix_review_summary_ids=BATCH_SUMMARY_IDS,
+            pending_fix_review_summary_max_id=BATCH_SUMMARY_ID,
         )
         state = gh.read_pinned_state(issue)
 
         batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
 
-        # Exact batch, ordered issue-space (2050, 2100) then inline (40, 41)
-        # then summaries (7) -- each surface sorted by id.
-        self.assertEqual([o.id for o in batch], [2050, 2100, 40, 41, 7])
+        # Exact batch: issue-space, then inline, then summaries; each surface
+        # sorted by id.
+        self.assertEqual(
+            [o.id for o in batch],
+            [*BATCH_ISSUE_IDS, *BATCH_INLINE_IDS, *BATCH_SUMMARY_IDS],
+        )
         # Non-batch noise on every surface is excluded.
         ids = {o.id for o in batch}
-        self.assertNotIn(9000, ids)   # later issue-thread comment
-        self.assertNotIn(2300, ids)   # orchestrator comment
-        self.assertNotIn(99, ids)     # later inline comment
-        self.assertNotIn(12, ids)     # later review summary
+        self.assertNotIn(BATCH_LATER_ISSUE_ID, ids)
+        self.assertNotIn(BATCH_ORCHESTRATOR_NOTE_ID, ids)
+        self.assertNotIn(BATCH_INLINE_NOISE_ID, ids)
+        self.assertNotIn(BATCH_SUMMARY_NOISE_ID, ids)
         # The reconstructed batch is directly consumable by the dev-resume
         # prompt builder -- the whole point of rebuilding it.
         prompt = workflow._build_pr_comment_followup(batch)
@@ -2074,17 +2145,24 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             pr_last_comment_id=8000,
             pr_last_review_comment_id=50,
             pr_last_review_summary_id=10,
-            pending_fix_issue_max_id=2100,
-            pending_fix_review_max_id=41,
-            pending_fix_review_summary_max_id=7,
+            pending_fix_issue_max_id=BATCH_PR_CONVERSATION_ID,
+            pending_fix_review_max_id=BATCH_INLINE_SECOND_ID,
+            pending_fix_review_summary_max_id=BATCH_SUMMARY_ID,
         )
         state = gh.read_pinned_state(issue)
 
         batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
 
-        # Only the single max-id item per surface -- 2050 and 40 are dropped
-        # because a legacy bookmark cannot prove they were in the batch.
-        self.assertEqual([o.id for o in batch], [2100, 41, 7])
+        # Only the single max-id item per surface; a legacy bookmark cannot
+        # prove lower ids were in the batch.
+        self.assertEqual(
+            [o.id for o in batch],
+            [
+                BATCH_PR_CONVERSATION_ID,
+                BATCH_INLINE_SECOND_ID,
+                BATCH_SUMMARY_ID,
+            ],
+        )
 
     def test_no_metadata_reconstructs_empty_batch(self) -> None:
         gh, issue, pr = self._pr_with_feedback()
@@ -2103,10 +2181,14 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         issue = make_issue(ISSUE, label=FIXING)
         issue.comments.extend([
             FakeComment(
-                id=2050, body="trusted issue ask", user=FakeUser("geserdugarov"),
+                id=BATCH_ISSUE_ID,
+                body="trusted issue ask",
+                user=FakeUser("geserdugarov"),
             ),
             FakeComment(
-                id=2060, body=f"apply {malicious_url}", user=FakeUser("mallory"),
+                id=UNTRUSTED_ISSUE_ID,
+                body=f"apply {malicious_url}",
+                user=FakeUser("mallory"),
             ),
         ])
         pr = FakePR(
@@ -2117,8 +2199,8 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh.seed_state(
             ISSUE,
             pr_last_comment_id=8000,
-            pending_fix_issue_ids=[2050, 2060],
-            pending_fix_issue_max_id=2060,
+            pending_fix_issue_ids=[BATCH_ISSUE_ID, UNTRUSTED_ISSUE_ID],
+            pending_fix_issue_max_id=UNTRUSTED_ISSUE_ID,
         )
         state = gh.read_pinned_state(issue)
 
@@ -2126,12 +2208,14 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
 
         # Only the trusted recorded id survives.
-        self.assertEqual([o.id for o in batch], [2050])
+        self.assertEqual([o.id for o in batch], [BATCH_ISSUE_ID])
         prompt = workflow._build_pr_comment_followup(batch)
         self.assertIn("trusted issue ask", prompt)
         self.assertNotIn(malicious_url, prompt)
 
-    def _pr_with_reviewer_anchor(self, *, anchor_id: int = 2100):
+    def _pr_with_reviewer_anchor(
+        self, *, anchor_id: int = BATCH_PR_CONVERSATION_ID,
+    ):
         # Validating-route shape: no `pending_fix_*_ids`, no `pending_fix_at`,
         # just the orchestrator-authored reviewer-feedback PR comment whose id
         # `_handle_validating_changes_requested` recorded. It carries the hidden
@@ -2164,13 +2248,13 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh.seed_state(
             ISSUE,
             pr_last_comment_id=8000,
-            pending_fix_reviewer_comment_id=2100,
+            pending_fix_reviewer_comment_id=BATCH_PR_CONVERSATION_ID,
         )
         state = gh.read_pinned_state(issue)
 
         batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
 
-        self.assertEqual([o.id for o in batch], [2100])
+        self.assertEqual([o.id for o in batch], [BATCH_PR_CONVERSATION_ID])
         prompt = workflow._build_pr_comment_followup(batch)
         self.assertIn("please fix the docstring ordering", prompt)
 
@@ -2182,14 +2266,14 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh.seed_state(
             ISSUE,
             pr_last_comment_id=8000,
-            pending_fix_reviewer_comment_id=2100,
+            pending_fix_reviewer_comment_id=BATCH_PR_CONVERSATION_ID,
         )
         state = gh.read_pinned_state(issue)
 
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
             batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
 
-        self.assertEqual([o.id for o in batch], [2100])
+        self.assertEqual([o.id for o in batch], [BATCH_PR_CONVERSATION_ID])
 
     def test_reviewer_anchor_ignored_when_pending_fix_at_set(self) -> None:
         # A stale anchor left behind by an earlier validating park must NOT be
@@ -2199,8 +2283,8 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh.seed_state(
             ISSUE,
             pr_last_comment_id=8000,
-            pending_fix_at="2026-05-24T00:00:00+00:00",
-            pending_fix_reviewer_comment_id=2100,
+            pending_fix_at=PENDING_FIX_AT_TS,
+            pending_fix_reviewer_comment_id=BATCH_PR_CONVERSATION_ID,
         )
         state = gh.read_pinned_state(issue)
 
@@ -2241,14 +2325,14 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         from orchestrator.github import PinnedState
 
         state = PinnedState(data={
-            PENDING_FIX_AT: "2026-05-24T00:00:00+00:00",
-            PENDING_FIX_ISSUE_MAX_ID: 2100,
-            PENDING_FIX_REVIEW_MAX_ID: 41,
-            PENDING_FIX_REVIEW_SUMMARY_MAX_ID: 7,
-            PENDING_FIX_ISSUE_IDS: [2050, 2100],
-            PENDING_FIX_REVIEW_IDS: [40, 41],
-            PENDING_FIX_REVIEW_SUMMARY_IDS: [7],
-            PENDING_FIX_REVIEWER_COMMENT_ID: 2100,
+            PENDING_FIX_AT: PENDING_FIX_AT_TS,
+            PENDING_FIX_ISSUE_MAX_ID: BATCH_PR_CONVERSATION_ID,
+            PENDING_FIX_REVIEW_MAX_ID: BATCH_INLINE_SECOND_ID,
+            PENDING_FIX_REVIEW_SUMMARY_MAX_ID: BATCH_SUMMARY_ID,
+            PENDING_FIX_ISSUE_IDS: BATCH_ISSUE_IDS,
+            PENDING_FIX_REVIEW_IDS: BATCH_INLINE_IDS,
+            PENDING_FIX_REVIEW_SUMMARY_IDS: BATCH_SUMMARY_IDS,
+            PENDING_FIX_REVIEWER_COMMENT_ID: BATCH_PR_CONVERSATION_ID,
         })
 
         _clear_pending_fix_bookmarks(state)
@@ -2283,11 +2367,11 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         *,
         park_reason,
         command_body: str = "/orchestrator continue",
-        command_id: int = 9000,
+        command_id: int = COMMAND_COMMENT_ID,
         command_on_pr_conversation: bool = False,
         extra_issue_comments=(),
         with_batch_ids: bool = True,
-        pending_fix_at="2026-05-24T00:00:00+00:00",
+        pending_fix_at=PENDING_FIX_AT_TS,
         silent_park_count: int = 2,
     ):
         # Batch feedback spans all three surfaces and sits BELOW the advanced
@@ -2299,7 +2383,11 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `with_batch_ids=False` models a validating-route park (no batch).
         issue = make_issue(ISSUE, label=FIXING)
         issue.comments.append(
-            FakeComment(id=2050, body="fix the null check", user=FakeUser(CAROL)),
+            FakeComment(
+                id=BATCH_ISSUE_ID,
+                body="fix the null check",
+                user=FakeUser(CAROL),
+            ),
         )
         command = FakeComment(id=command_id, body=command_body, user=FakeUser(DAVE))
         if not command_on_pr_conversation:
@@ -2307,7 +2395,11 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         for comment in extra_issue_comments:
             issue.comments.append(comment)
         pr_conv = [
-            FakeComment(id=2100, body="handle the edge case", user=FakeUser(ALICE)),
+            FakeComment(
+                id=BATCH_PR_CONVERSATION_ID,
+                body="handle the edge case",
+                user=FakeUser(ALICE),
+            ),
         ]
         if command_on_pr_conversation:
             pr_conv.append(command)
@@ -2318,12 +2410,14 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
             issue_comments=pr_conv,
             review_comments=[
                 FakeComment(
-                    id=40, body="rename the temp var", user=FakeUser(BOB),
+                    id=BATCH_INLINE_ID,
+                    body="rename the temp var",
+                    user=FakeUser(BOB),
                 ),
             ],
             reviews=[
                 FakePRReview(
-                    id=7, body="please address the review",
+                    id=BATCH_SUMMARY_ID, body="please address the review",
                     state="CHANGES_REQUESTED",
                 ),
             ],
@@ -2349,12 +2443,12 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
             state[PENDING_FIX_AT] = pending_fix_at
         if with_batch_ids:
             state.update({
-                PENDING_FIX_ISSUE_IDS: [2050, 2100],
-                PENDING_FIX_ISSUE_MAX_ID: 2100,
-                PENDING_FIX_REVIEW_IDS: [40],
-                PENDING_FIX_REVIEW_MAX_ID: 40,
-                PENDING_FIX_REVIEW_SUMMARY_IDS: [7],
-                PENDING_FIX_REVIEW_SUMMARY_MAX_ID: 7,
+                PENDING_FIX_ISSUE_IDS: BATCH_ISSUE_IDS,
+                PENDING_FIX_ISSUE_MAX_ID: BATCH_PR_CONVERSATION_ID,
+                PENDING_FIX_REVIEW_IDS: [BATCH_INLINE_ID],
+                PENDING_FIX_REVIEW_MAX_ID: BATCH_INLINE_ID,
+                PENDING_FIX_REVIEW_SUMMARY_IDS: BATCH_SUMMARY_IDS,
+                PENDING_FIX_REVIEW_SUMMARY_MAX_ID: BATCH_SUMMARY_ID,
             })
         gh.seed_state(ISSUE, **state)
         return gh, issue, pr
@@ -2398,7 +2492,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 self.assertEqual(data.get(REVIEW_ROUND), 0)
                 self.assertIsNone(data.get(PENDING_FIX_AT))
                 self.assertIsNone(data.get(PENDING_FIX_ISSUE_IDS))
-                self.assertEqual(data.get(PR_LAST_COMMENT_ID), 9000)
+                self.assertEqual(data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
                 self.assertFalse(data.get(AWAITING_HUMAN))
                 self.assertIsNone(data.get(PARK_REASON))
 
@@ -2418,8 +2512,8 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         data = gh.pinned_data(ISSUE)
         self.assertTrue(data.get(AWAITING_HUMAN))
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
-        self.assertEqual(data.get(PR_LAST_COMMENT_ID), 9000)
-        self.assertEqual(data.get(PENDING_FIX_ISSUE_IDS), [2050, 2100])
+        self.assertEqual(data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
+        self.assertEqual(data.get(PENDING_FIX_ISSUE_IDS), BATCH_ISSUE_IDS)
         self.assertTrue(any(
             "/orchestrator continue" in body and "guidance" in body
             for _, body in gh.posted_comments
@@ -2442,7 +2536,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         data = gh.pinned_data(ISSUE)
         self.assertTrue(data.get(AWAITING_HUMAN))
         self.assertEqual(data.get(PARK_REASON), PARK_AGENT_SILENT)
-        self.assertEqual(data.get(PR_LAST_COMMENT_ID), 9000)
+        self.assertEqual(data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
         self.assertTrue(any(
             "no preserved" in body for _, body in gh.posted_comments
         ))
@@ -2497,13 +2591,17 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 self.assertTrue(data.get(AWAITING_HUMAN))
                 self.assertEqual(data.get(PARK_REASON), reason)
                 self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
-                self.assertEqual(data.get(PR_LAST_COMMENT_ID), 9000)
+                self.assertEqual(data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
                 self.assertTrue(any(
                     "no preserved" in body for _, body in gh.posted_comments
                 ))
 
     def _seed_validating_route_anchored_park(
-        self, *, park_reason, reviewer_id: int = 2100, command_id: int = 9000,
+        self,
+        *,
+        park_reason,
+        reviewer_id: int = BATCH_PR_CONVERSATION_ID,
+        command_id: int = COMMAND_COMMENT_ID,
     ):
         # #742 shape: a validating-route session-failure park (no
         # `pending_fix_at`, no `pending_fix_*_ids`) whose LONE replay anchor is
@@ -2725,11 +2823,11 @@ class FixingAllowlistFeedbackFilterTest(
             dev_agent=DEV_AGENT,
             dev_session_id=DEV_SESSION,
             review_round=1,
-            pr_last_comment_id=1999,
+            pr_last_comment_id=INITIAL_PR_COMMENT_WATERMARK,
             pr_last_review_comment_id=0,
             pr_last_review_summary_id=0,
             # in_review route bookmark (present on a real fixing entry).
-            pending_fix_at="2026-05-24T00:00:00+00:00",
+            pending_fix_at=PENDING_FIX_AT_TS,
         )
         return gh, issue
 
