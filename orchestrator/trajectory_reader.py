@@ -35,7 +35,7 @@ import logging
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from orchestrator import analytics
 
@@ -648,30 +648,29 @@ def read_trajectories(path: Optional[Path] = None) -> list[TrajectoryRun]:
     return runs
 
 
+def _distinct_sorted(
+    runs: Sequence[TrajectoryRun], key: Callable[[TrajectoryRun], str]
+) -> tuple[str, ...]:
+    """Distinct, sorted, non-empty values of `key` across `runs`.
+
+    The shared collector behind every `FilterOptions` dimension: an empty
+    value -- a run that omitted that field -- is dropped so the sidebar never
+    offers a blank choice, and the result is sorted for a stable dropdown.
+    """
+    return tuple(sorted({value for value in (key(r) for r in runs) if value}))
+
+
 def filter_options(runs: Sequence[TrajectoryRun]) -> FilterOptions:
     """Collect the distinct, sorted filter values across `runs`.
 
     Empty dimension values are dropped so the sidebar never offers a
     blank choice for a record that omitted (e.g.) its stage.
     """
-    repos: set[str] = set()
-    backends: set[str] = set()
-    roles: set[str] = set()
-    stages: set[str] = set()
-    for r in runs:
-        if r.repo:
-            repos.add(r.repo)
-        if r.backend:
-            backends.add(r.backend)
-        if r.agent_role:
-            roles.add(r.agent_role)
-        if r.stage:
-            stages.add(r.stage)
     return FilterOptions(
-        repos=tuple(sorted(repos)),
-        backends=tuple(sorted(backends)),
-        agent_roles=tuple(sorted(roles)),
-        stages=tuple(sorted(stages)),
+        repos=_distinct_sorted(runs, lambda r: r.repo),
+        backends=_distinct_sorted(runs, lambda r: r.backend),
+        agent_roles=_distinct_sorted(runs, lambda r: r.agent_role),
+        stages=_distinct_sorted(runs, lambda r: r.stage),
     )
 
 

@@ -694,25 +694,31 @@ def _parse_manifest(
     return data, None
 
 
+def _dep_cycle_visit(u: int, children: list[dict], color: list[int]) -> bool:
+    """DFS one node of the children dep graph; True on a back-edge to a node
+    still on the stack.
+
+    `color` is mutated in place (0=unvisited, 1=on-stack, 2=finished) and
+    shared across the whole walk, so a node finished on one root is never
+    re-descended from another.
+    """
+    color[u] = 1
+    for v in (children[u].get("depends_on") or []):
+        if color[v] == 1:
+            return True
+        if color[v] == 0 and _dep_cycle_visit(v, children, color):
+            return True
+    color[u] = 2
+    return False
+
+
 def _has_dep_cycle(children: list[dict]) -> bool:
     """DFS for back-edges in the children dep graph (white/gray/black)."""
-    n = len(children)
-    color = [0] * n  # 0=unvisited, 1=on-stack, 2=finished
-
-    def visit(u: int) -> bool:
-        color[u] = 1
-        for v in (children[u].get("depends_on") or []):
-            if color[v] == 1:
-                return True
-            if color[v] == 0 and visit(v):
-                return True
-        color[u] = 2
-        return False
-
-    for u in range(n):
-        if color[u] == 0 and visit(u):
-            return True
-    return False
+    color = [0] * len(children)  # 0=unvisited, 1=on-stack, 2=finished
+    return any(
+        color[u] == 0 and _dep_cycle_visit(u, children, color)
+        for u in range(len(children))
+    )
 
 
 def _recent_comments_text(issue: Issue, max_chars: int = 4000) -> str:
