@@ -378,9 +378,9 @@ def main() -> None:
 
     repo_filter = None if repo_choice == "All" else repo_choice
     issue_input_parsed = parse_issue_number(issue_input)
-    issue_filter = (
-        issue_input_parsed if repo_filter is not None else None
-    )
+    issue_filter = None
+    if repo_filter:
+        issue_filter = issue_input_parsed
     event_filter = list(event_choice)
     stage_filter = resolve_stage_filter(stage_choice, options.stages)
 
@@ -577,7 +577,9 @@ def _filter_list(values_t: Optional[Sequence[str]]) -> Optional[list[str]]:
     -- `None` means "no filter", an empty selection means "show
     nothing", and the two must stay distinct at the read layer.
     """
-    return list(values_t) if values_t is not None else None
+    if values_t is None:
+        return None
+    return list(values_t)
 
 
 def _scoped_read(getter: Callable[..., Any], /, **filters: Any) -> Any:
@@ -595,6 +597,14 @@ def _scoped_read(getter: Callable[..., Any], /, **filters: Any) -> Any:
         return getter(conn=conn, **filters)
 
 
+def _read_data_extent():
+    return _scoped_read(analytics_read.get_data_extent)
+
+
+def _read_filter_options():
+    return _scoped_read(analytics_read.get_filter_options)
+
+
 def _read_static_metadata(*, st: Any):
     """Read the data extent + filter options through cached wrappers.
 
@@ -605,16 +615,15 @@ def _read_static_metadata(*, st: Any):
     topbar round-trip on every rerun. Returns `(extent, options)`; a read
     error is surfaced as one `st.error` and stops the app.
     """
-    @st.cache_data(show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS)
-    def _read_data_extent():
-        return _scoped_read(analytics_read.get_data_extent)
-
-    @st.cache_data(show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS)
-    def _read_filter_options():
-        return _scoped_read(analytics_read.get_filter_options)
+    read_data_extent = st.cache_data(
+        show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS,
+    )(_read_data_extent)
+    read_filter_options = st.cache_data(
+        show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS,
+    )(_read_filter_options)
 
     try:
-        return _read_data_extent(), _read_filter_options()
+        return read_data_extent(), read_filter_options()
     except analytics_read.AnalyticsReadError as e:
         st.error(
             "Could not load analytics filter options: "
@@ -646,6 +655,153 @@ def _render_no_data(*, st: Any, extent: DataExtent, theme: Any) -> None:
     st.stop()
 
 
+def _read_summary(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_summary,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_prev_kpi(start, end, repo, events_t, stages_t, issue):
+    # Previous-window read for the KPI delta pills and cost-trend
+    # banner only. The full `get_summary` shape is never read off
+    # `prev_summary`, so a thinner reader saves a `GROUP BY` follow-up
+    # while leaving the cache key identical to `_read_summary`.
+    return _scoped_read(
+        analytics_read.get_kpi_prev,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_time_series(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_time_series,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_stage_breakdown(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_stage_breakdown,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_recent_agent_exits(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_recent_agent_exits,
+        limit=DEFAULT_RECENT_AGENT_EXITS,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_top_cost_issues(start, end, repo, events_t, stages_t, issue):
+    # Ask the database for the top-cost issues directly. Reading the
+    # latest N issues by `last_seen` and re-sorting in Python silently
+    # drops older high-cost issues that fall outside the truncated set.
+    return _scoped_read(
+        analytics_read.get_issues,
+        limit=DEFAULT_EXPENSIVE_LIMIT,
+        sort_by=analytics_read.SORT_BY_COST,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_review_round(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_review_round_breakdown,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_backend_efficiency(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_backend_efficiency,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_repo_breakdown(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_repo_breakdown,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_cost_coverage(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_cost_coverage,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_hourly_heatmap(
+    start, end, repo, events_t, stages_t, issue, tz_offset_hours,
+):
+    return _scoped_read(
+        analytics_read.get_hourly_heatmap,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue, tz_offset_hours=tz_offset_hours,
+    )
+
+
+def _read_throughput(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_throughput_breakdown,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_backend_daily_tokens(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_backend_daily_tokens,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_skill_trigger_rates(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_skill_trigger_rates,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
+def _read_skill_trigger_matrix(start, end, repo, events_t, stages_t, issue):
+    return _scoped_read(
+        analytics_read.get_skill_trigger_matrix,
+        start=start, end=end, repo=repo,
+        events=_filter_list(events_t), stages=_filter_list(stages_t),
+        issue=issue,
+    )
+
+
 def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
     """Define the cached per-filter read wrappers and stage them.
 
@@ -672,167 +828,43 @@ def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
     worker threads only return data -- every `st.*` write happens on the
     caller's render thread between the waves.
     """
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_summary(start, end, repo, events_t, stages_t, issue):
-        return _scoped_read(
-            analytics_read.get_summary,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_prev_kpi(start, end, repo, events_t, stages_t, issue):
-        # Previous-window read for the KPI delta pills and cost-trend
-        # banner only. The full `get_summary` shape (per-event / per-stage
-        # breakdowns, distinct-issue / distinct-repo counts, failure /
-        # timeout counters) is never read off `prev_summary`, so a thinner
-        # reader saves a `GROUP BY` follow-up plus a couple of
-        # `COUNT(DISTINCT)`s on every cold load while leaving the cached
-        # wrapper shape (and cache key) identical to `_read_summary`.
-        return _scoped_read(
-            analytics_read.get_kpi_prev,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_time_series(start, end, repo, events_t, stages_t, issue):
-        return _scoped_read(
-            analytics_read.get_time_series,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_stage_breakdown(start, end, repo, events_t, stages_t, issue):
-        return _scoped_read(
-            analytics_read.get_stage_breakdown,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_recent_agent_exits(
-        start, end, repo, events_t, stages_t, issue
-    ):
-        return _scoped_read(
-            analytics_read.get_recent_agent_exits,
-            limit=DEFAULT_RECENT_AGENT_EXITS,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_top_cost_issues(start, end, repo, events_t, stages_t, issue):
-        # Ask the database for the top-cost issues directly. Reading
-        # the latest N issues by `last_seen` and re-sorting in Python
-        # silently drops older high-cost issues that fall outside the
-        # truncated set, so the redesigned "Most expensive issues"
-        # panel must be cost-ordered at the SQL layer.
-        return _scoped_read(
-            analytics_read.get_issues,
-            limit=DEFAULT_EXPENSIVE_LIMIT,
-            sort_by=analytics_read.SORT_BY_COST,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_review_round(start, end, repo, events_t, stages_t, issue):
-        return _scoped_read(
-            analytics_read.get_review_round_breakdown,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_backend_efficiency(
-        start, end, repo, events_t, stages_t, issue
-    ):
-        return _scoped_read(
-            analytics_read.get_backend_efficiency,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_repo_breakdown(start, end, repo, events_t, stages_t, issue):
-        return _scoped_read(
-            analytics_read.get_repo_breakdown,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_cost_coverage(start, end, repo, events_t, stages_t, issue):
-        return _scoped_read(
-            analytics_read.get_cost_coverage,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_hourly_heatmap(
-        start, end, repo, events_t, stages_t, issue, tz_offset_hours,
-    ):
-        return _scoped_read(
-            analytics_read.get_hourly_heatmap,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue, tz_offset_hours=tz_offset_hours,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_throughput(start, end, repo, events_t, stages_t, issue):
-        return _scoped_read(
-            analytics_read.get_throughput_breakdown,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_backend_daily_tokens(
-        start, end, repo, events_t, stages_t, issue
-    ):
-        return _scoped_read(
-            analytics_read.get_backend_daily_tokens,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_skill_trigger_rates(
-        start, end, repo, events_t, stages_t, issue
-    ):
-        return _scoped_read(
-            analytics_read.get_skill_trigger_rates,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
-
-    @st.cache_data(show_spinner=False, ttl=60)
-    def _read_skill_trigger_matrix(
-        start, end, repo, events_t, stages_t, issue
-    ):
-        return _scoped_read(
-            analytics_read.get_skill_trigger_matrix,
-            start=start, end=end, repo=repo,
-            events=_filter_list(events_t), stages=_filter_list(stages_t),
-            issue=issue,
-        )
+    read_summary = st.cache_data(show_spinner=False, ttl=60)(_read_summary)
+    read_prev_kpi = st.cache_data(show_spinner=False, ttl=60)(_read_prev_kpi)
+    read_time_series = st.cache_data(show_spinner=False, ttl=60)(_read_time_series)
+    read_stage_breakdown = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_stage_breakdown)
+    read_recent_agent_exits = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_recent_agent_exits)
+    read_top_cost_issues = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_top_cost_issues)
+    read_review_round = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_review_round)
+    read_backend_efficiency = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_backend_efficiency)
+    read_repo_breakdown = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_repo_breakdown)
+    read_cost_coverage = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_cost_coverage)
+    read_hourly_heatmap = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_hourly_heatmap)
+    read_throughput = st.cache_data(show_spinner=False, ttl=60)(_read_throughput)
+    read_backend_daily_tokens = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_backend_daily_tokens)
+    read_skill_trigger_rates = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_skill_trigger_rates)
+    read_skill_trigger_matrix = st.cache_data(
+        show_spinner=False, ttl=60,
+    )(_read_skill_trigger_matrix)
 
     # Read fan-out. Each entry is `(name, zero-arg callable)` so
     # `_fan_out_reads` can dispatch them across worker threads when
@@ -851,25 +883,25 @@ def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
     # data back to this render thread -- every `st.*` / placeholder
     # write happens on the main thread between waves.
     first_wave_readers: list[tuple[str, Callable[[], Any]]] = [
-        ("summary", lambda: _read_summary(*key)),
-        ("prev_summary", lambda: _read_prev_kpi(*prev_key)),
-        ("ts_points", lambda: _read_time_series(*key)),
-        ("review_round_rows", lambda: _read_review_round(*key)),
-        ("throughput_rows", lambda: _read_throughput(*key)),
-        ("cost_coverage_rows", lambda: _read_cost_coverage(*key)),
+        ("summary", lambda: read_summary(*key)),
+        ("prev_summary", lambda: read_prev_kpi(*prev_key)),
+        ("ts_points", lambda: read_time_series(*key)),
+        ("review_round_rows", lambda: read_review_round(*key)),
+        ("throughput_rows", lambda: read_throughput(*key)),
+        ("cost_coverage_rows", lambda: read_cost_coverage(*key)),
     ]
     second_wave_readers: list[tuple[str, Callable[[], Any]]] = [
-        ("stage_rows", lambda: _read_stage_breakdown(*key)),
-        ("agent_exits", lambda: _read_recent_agent_exits(*key)),
-        ("issues_rows", lambda: _read_top_cost_issues(*key)),
-        ("backend_rows", lambda: _read_backend_efficiency(*key)),
-        ("repo_rows", lambda: _read_repo_breakdown(*key)),
-        ("heatmap_rows", lambda: _read_hourly_heatmap(
+        ("stage_rows", lambda: read_stage_breakdown(*key)),
+        ("agent_exits", lambda: read_recent_agent_exits(*key)),
+        ("issues_rows", lambda: read_top_cost_issues(*key)),
+        ("backend_rows", lambda: read_backend_efficiency(*key)),
+        ("repo_rows", lambda: read_repo_breakdown(*key)),
+        ("heatmap_rows", lambda: read_hourly_heatmap(
             *key, int(tz_offset_choice),
         )),
-        ("backend_daily_rows", lambda: _read_backend_daily_tokens(*key)),
-        ("skill_rows", lambda: _read_skill_trigger_rates(*key)),
-        ("skill_matrix_rows", lambda: _read_skill_trigger_matrix(*key)),
+        ("backend_daily_rows", lambda: read_backend_daily_tokens(*key)),
+        ("skill_rows", lambda: read_skill_trigger_rates(*key)),
+        ("skill_matrix_rows", lambda: read_skill_trigger_matrix(*key)),
     ]
     return first_wave_readers, second_wave_readers
 

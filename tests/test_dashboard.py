@@ -22,7 +22,9 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from contextlib import ExitStack
 from datetime import date, datetime, timezone
+from functools import partial
 from unittest.mock import patch
 
 
@@ -131,6 +133,27 @@ SECOND_WAVE_READER_NAMES = (
     "backend_rows", "repo_rows", "heatmap_rows",
     "backend_daily_rows", "skill_rows", "skill_matrix_rows",
 )
+STATIC_METADATA_READER_NAMES = (
+    "_read_data_extent",
+    "_read_filter_options",
+)
+WIDGET_READER_WRAPPER_NAMES = (
+    "_read_summary",
+    "_read_prev_kpi",
+    "_read_time_series",
+    "_read_stage_breakdown",
+    "_read_recent_agent_exits",
+    "_read_top_cost_issues",
+    "_read_review_round",
+    "_read_backend_efficiency",
+    "_read_repo_breakdown",
+    "_read_cost_coverage",
+    "_read_hourly_heatmap",
+    "_read_throughput",
+    "_read_backend_daily_tokens",
+    "_read_skill_trigger_rates",
+    "_read_skill_trigger_matrix",
+)
 
 # Canonical drill-down issue number, shared by the parse + cache-key tests.
 ISSUE_NUMBER = 42
@@ -156,6 +179,83 @@ SORT_DESC = "desc"
 MTX_SORT_KEYS = (
     "repo", "role", "backend", "skill", "runs", "skill_runs", "rate",
 )
+
+
+def _is_orchestrator_module(name: str) -> bool:
+    return name == "orchestrator" or name.startswith("orchestrator.")
+
+
+def _is_orchestrator_launch_module(name: str) -> bool:
+    return (
+        _is_orchestrator_module(name)
+        or name == "script_launch"
+    )
+
+
+def _is_dashboard_script_launch_module(name: str) -> bool:
+    return name in (
+        "orchestrator.dashboard",
+        "orchestrator.script_launch",
+        "script_launch",
+    )
+
+
+def _clear_modules(predicate) -> None:
+    for name in list(sys.modules):
+        if predicate(name):
+            sys.modules.pop(name, None)
+
+
+def _restore_sys_path(path_entries: list[str]) -> None:
+    sys.path[:] = path_entries
+
+
+def _record_reader_call(name: str, value: int, calls: list[str]) -> int:
+    calls.append(name)
+    return value
+
+
+def _raise_read_error(
+    message: str,
+    calls: list[str] | None = None,
+    call_name: str | None = None,
+) -> None:
+    from orchestrator.analytics.read import AnalyticsReadError
+
+    if calls is None or call_name is None:
+        raise AnalyticsReadError(message)
+    calls.append(call_name)
+    raise AnalyticsReadError(message)
+
+
+def _increment_reader_count(name: str, counts: dict[str, int]) -> str:
+    counts[name] = counts.get(name, 0) + 1
+    return name
+
+
+def _return_value(value: int) -> int:
+    return value
+
+
+def _record_threaded_reader(
+    name: str,
+    calls: dict[str, int],
+    threads: set[int],
+    lock,
+) -> str:
+    import threading
+
+    with lock:
+        calls[name] = calls.get(name, 0) + 1
+        threads.add(threading.get_ident())
+    return name
+
+
+def _sleep_then_return(delay: float, value: str) -> str:
+    import time
+
+    time.sleep(delay)
+    return value
 
 
 class _MainSourceTest(unittest.TestCase):
@@ -353,9 +453,12 @@ class ScriptPathLaunchTest(unittest.TestCase):
         # test session with a half-initialised package.
         saved_modules = {
             module_name: module for module_name, module in sys.modules.items()
-            if module_name == "orchestrator" or module_name.startswith("orchestrator.")
+            if _is_orchestrator_module(module_name)
         }
-        try:
+        with ExitStack() as cleanup:
+            cleanup.callback(sys.modules.update, saved_modules)
+            cleanup.callback(_clear_modules, _is_orchestrator_module)
+            cleanup.callback(_restore_sys_path, original_path)
             # Match Streamlit's launch shape: only the script's
             # directory is on sys.path, the repo root is not.
             resolved_root = repo_root.resolve()
@@ -364,9 +467,7 @@ class ScriptPathLaunchTest(unittest.TestCase):
                 if not p or Path(p).resolve() != resolved_root
             ]
             sys.path.insert(0, str(script_dir))
-            for module_name in list(sys.modules):
-                if module_name == "orchestrator" or module_name.startswith("orchestrator."):
-                    del sys.modules[module_name]
+            _clear_modules(_is_orchestrator_module)
 
             # `run_name="not_main"` keeps the `if __name__ == "__main__":`
             # block from firing, so the test does not require Streamlit
@@ -377,12 +478,6 @@ class ScriptPathLaunchTest(unittest.TestCase):
             )
             self.assertIn("main", namespace)
             self.assertIn("analytics_read", namespace)
-        finally:
-            sys.path[:] = original_path
-            for module_name in list(sys.modules):
-                if module_name == "orchestrator" or module_name.startswith("orchestrator."):
-                    del sys.modules[module_name]
-            sys.modules.update(saved_modules)
 
     def test_stale_parent_package_does_not_shadow_repo_root(self) -> None:
         # Script-launch mode carries only `orchestrator/` on `sys.path`, so
@@ -400,54 +495,42 @@ class ScriptPathLaunchTest(unittest.TestCase):
         dashboard_path = repo_root / "orchestrator" / "dashboard.py"
         script_dir = dashboard_path.parent
 
-        def _is_launch_module(name: str) -> bool:
-            return (
-                name == "orchestrator"
-                or name.startswith("orchestrator.")
-                or name == "script_launch"
-            )
-
         original_path = list(sys.path)
         saved_modules = {
             name: module for name, module in sys.modules.items()
-            if _is_launch_module(name)
+            if _is_orchestrator_launch_module(name)
         }
-        with tempfile.TemporaryDirectory() as decoy_root:
+        with ExitStack() as cleanup:
+            decoy_root = cleanup.enter_context(tempfile.TemporaryDirectory())
+            cleanup.callback(sys.modules.update, saved_modules)
+            cleanup.callback(_clear_modules, _is_orchestrator_launch_module)
+            cleanup.callback(_restore_sys_path, original_path)
             # A bare `orchestrator` package with none of the real submodules,
             # standing in for a stale install that shadows the repo root.
             decoy_pkg = Path(decoy_root) / "orchestrator"
             decoy_pkg.mkdir()
             (decoy_pkg / "__init__.py").write_text("")
-            try:
-                resolved_root = repo_root.resolve()
-                sys.path[:] = [
-                    p for p in sys.path
-                    if not p or Path(p).resolve() != resolved_root
-                ]
-                # Streamlit's shape (script's own dir first), with the decoy
-                # parent reachable just behind it.
-                sys.path.insert(0, decoy_root)
-                sys.path.insert(0, str(script_dir))
-                for name in list(sys.modules):
-                    if _is_launch_module(name):
-                        del sys.modules[name]
+            resolved_root = repo_root.resolve()
+            sys.path[:] = [
+                p for p in sys.path
+                if not p or Path(p).resolve() != resolved_root
+            ]
+            # Streamlit's shape (script's own dir first), with the decoy
+            # parent reachable just behind it.
+            sys.path.insert(0, decoy_root)
+            sys.path.insert(0, str(script_dir))
+            _clear_modules(_is_orchestrator_launch_module)
 
-                namespace = runpy.run_path(
-                    str(dashboard_path), run_name="not_main"
-                )
-                self.assertIn("main", namespace)
-                # The real read model landed -- not the decoy package (which
-                # has no `analytics` submodule and would raise on import).
-                self.assertEqual(
-                    namespace["analytics_read"].__name__,
-                    "orchestrator.analytics.read",
-                )
-            finally:
-                sys.path[:] = original_path
-                for name in list(sys.modules):
-                    if _is_launch_module(name):
-                        del sys.modules[name]
-                sys.modules.update(saved_modules)
+            namespace = runpy.run_path(
+                str(dashboard_path), run_name="not_main"
+            )
+            self.assertIn("main", namespace)
+            # The real read model landed -- not the decoy package (which
+            # has no `analytics` submodule and would raise on import).
+            self.assertEqual(
+                namespace["analytics_read"].__name__,
+                "orchestrator.analytics.read",
+            )
 
     def test_package_import_ignores_stray_top_level_script_launch(self) -> None:
         # A normal package import (`import orchestrator.dashboard`) must
@@ -459,41 +542,29 @@ class ScriptPathLaunchTest(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        def _is_launch_module(name: str) -> bool:
-            return name in (
-                "orchestrator.dashboard",
-                "orchestrator.script_launch",
-                "script_launch",
-            )
-
         original_path = list(sys.path)
         saved_modules = {
             name: module for name, module in sys.modules.items()
-            if _is_launch_module(name)
+            if _is_dashboard_script_launch_module(name)
         }
-        with tempfile.TemporaryDirectory() as stray_dir:
+        with ExitStack() as cleanup:
+            stray_dir = cleanup.enter_context(tempfile.TemporaryDirectory())
+            cleanup.callback(sys.modules.update, saved_modules)
+            cleanup.callback(_clear_modules, _is_dashboard_script_launch_module)
+            cleanup.callback(_restore_sys_path, original_path)
             # A stray top-level `script_launch` that detonates on import, so a
             # bare `import script_launch` during the package import would fail
             # loudly instead of silently binding the wrong helper.
             (Path(stray_dir) / "script_launch.py").write_text(
                 "raise RuntimeError('stray script_launch must not be imported')\n"
             )
-            try:
-                sys.path.insert(0, stray_dir)
-                for name in list(sys.modules):
-                    if _is_launch_module(name):
-                        del sys.modules[name]
-                module = importlib.import_module("orchestrator.dashboard")
-                self.assertTrue(hasattr(module, "main"))
-                # The package path used `orchestrator.script_launch` and never
-                # probed the bare name, so the stray stayed unimported.
-                self.assertNotIn("script_launch", sys.modules)
-            finally:
-                sys.path[:] = original_path
-                for name in list(sys.modules):
-                    if _is_launch_module(name):
-                        del sys.modules[name]
-                sys.modules.update(saved_modules)
+            sys.path.insert(0, stray_dir)
+            _clear_modules(_is_dashboard_script_launch_module)
+            module = importlib.import_module("orchestrator.dashboard")
+            self.assertTrue(hasattr(module, "main"))
+            # The package path used `orchestrator.script_launch` and never
+            # probed the bare name, so the stray stayed unimported.
+            self.assertNotIn("script_launch", sys.modules)
 
 
 class ResolveStageFilterTest(unittest.TestCase):
@@ -1705,6 +1776,9 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
     def _drilldown_source(self) -> str:
         return self._source_of("_render_drilldown")
 
+    def _combined_source(self, names) -> str:
+        return "\n\n".join(self._source_of(name) for name in names)
+
     def test_reads_scope_through_analytics_connection(self) -> None:
         # `_scoped_read` is the one place the per-thread persistent socket
         # is checked out via `analytics_connection`; the cached widget
@@ -1716,8 +1790,8 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
             self._source_of("_scoped_read"),
         )
         for label, src in (
-            ("widget readers", self._readers_source()),
-            ("static metadata", self._metadata_source()),
+            ("widget readers", self._combined_source(WIDGET_READER_WRAPPER_NAMES)),
+            ("static metadata", self._combined_source(STATIC_METADATA_READER_NAMES)),
             ("drill-down", self._drilldown_source()),
         ):
             with self.subTest(source=label):
@@ -1729,33 +1803,13 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # st.cache_data to hash a connection object, which crashes
         # on the unhashable psycopg.Connection and (with a stringy
         # fallback) treats every refreshed conn as a cache miss.
-        src = self._readers_source()
-        wrapper_names = [
-            "_read_summary",
-            "_read_prev_kpi",
-            "_read_time_series",
-            "_read_stage_breakdown",
-            "_read_recent_agent_exits",
-            "_read_top_cost_issues",
-            "_read_review_round",
-            "_read_backend_efficiency",
-            "_read_repo_breakdown",
-            "_read_cost_coverage",
-            "_read_hourly_heatmap",
-            "_read_throughput",
-            "_read_backend_daily_tokens",
-        ]
-        for name in wrapper_names:
+        for name in WIDGET_READER_WRAPPER_NAMES:
             with self.subTest(name=name):
-                # Each wrapper's signature line lives inside
-                # `_widget_readers`; check that none mention `conn` as
-                # a parameter (which would land in the cache key).
+                # Each wrapper's signature is the cache key; `conn`
+                # belongs inside `_scoped_read`, not in the parameter list.
+                src = self._source_of(name)
                 marker = f"def {name}("
                 self.assertIn(marker, src)
-                # Pull the def line(s) up to the closing paren so we
-                # can assert `conn` is not in the parameter list. The
-                # def signatures are short (one or two lines), so a
-                # narrow window around the marker is enough.
                 head = src.index(marker)
                 tail = src.index("):", head)
                 signature = src[head:tail]
@@ -1771,15 +1825,17 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # otherwise a new socket would open per call (the very thing the
         # scoping is supposed to eliminate). The wrappers stay
         # connection-free so `conn` never lands in the cache key.
-        readers_src = self._readers_source()
-        # 15 cached widget wrappers each route through `_scoped_read`.
+        readers_src = self._combined_source(WIDGET_READER_WRAPPER_NAMES)
         self.assertGreaterEqual(
             readers_src.count("_scoped_read("), 15,
             "every widget read should route through `_scoped_read`",
         )
         # The two static-metadata reads route through it too.
         self.assertGreaterEqual(
-            self._metadata_source().count("_scoped_read("), 2,
+            self._combined_source(STATIC_METADATA_READER_NAMES).count(
+                "_scoped_read("
+            ),
+            2,
         )
         # And the per-issue drill-down runs its own scoped read.
         self.assertIn("_scoped_read(", self._drilldown_source())
@@ -1798,21 +1854,15 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # `analytics_read.get_kpi_prev` rather than reusing the
         # full `get_summary` shape -- if it falls back to the heavy
         # path, the cold-load wins from Layer 3 evaporate.
-        src = self._readers_source()
-        marker = "def _read_prev_kpi("
-        self.assertIn(marker, src)
-        head = src.index(marker)
-        # The wrapper body is short; walk to the next `def` (which
-        # bounds the cached wrapper region) so the substring search
-        # below cannot accidentally catch a later wrapper.
-        body = src[head:src.index("\n    def ", head + 1)]
-        self.assertIn("analytics_read.get_kpi_prev", body)
-        self.assertNotIn("analytics_read.get_summary", body)
+        wrapper_src = self._source_of("_read_prev_kpi")
+        self.assertIn("analytics_read.get_kpi_prev", wrapper_src)
+        self.assertNotIn("analytics_read.get_summary", wrapper_src)
         # And the `prev_summary` entry in the reader fan-out must
         # dispatch through `_read_prev_kpi` so the lightweight path
         # is the one that actually fires when the dashboard renders.
+        src = self._readers_source()
         self.assertIn(
-            '("prev_summary", lambda: _read_prev_kpi(*prev_key))',
+            '("prev_summary", lambda: read_prev_kpi(*prev_key))',
             src,
         )
 
@@ -1934,16 +1984,10 @@ class FanOutReadsSequentialTest(unittest.TestCase):
         _, dashboard = _reload()
         order: list[str] = []
 
-        def _make(name: str, value: int):
-            def fn():
-                order.append(name)
-                return value
-            return fn
-
         readers = [
-            ("a", _make("a", 1)),
-            ("b", _make("b", 2)),
-            ("c", _make("c", 3)),
+            ("a", partial(_record_reader_call, "a", 1, order)),
+            ("b", partial(_record_reader_call, "b", 2, order)),
+            ("c", partial(_record_reader_call, "c", 3, order)),
         ]
         results = dashboard._fan_out_reads(readers, parallel=False)
         self.assertEqual(results, {"a": 1, "b": 2, "c": 3})
@@ -1959,19 +2003,11 @@ class FanOutReadsSequentialTest(unittest.TestCase):
         from orchestrator.analytics.read import AnalyticsReadError
         called: list[str] = []
 
-        def _ok():
-            called.append("ok")
-            return 1
-
-        def _boom():
-            called.append("boom")
-            raise AnalyticsReadError("connection refused")
-
-        def _never():
-            called.append("never")
-            return 2
-
-        readers = [("a", _ok), ("b", _boom), ("c", _never)]
+        readers = [
+            ("a", partial(_record_reader_call, "ok", 1, called)),
+            ("b", partial(_raise_read_error, "connection refused", called, "boom")),
+            ("c", partial(_record_reader_call, "never", 2, called)),
+        ]
         with self.assertRaises(AnalyticsReadError):
             dashboard._fan_out_reads(readers, parallel=False)
         self.assertEqual(called, ["ok", "boom"])
@@ -1980,13 +2016,10 @@ class FanOutReadsSequentialTest(unittest.TestCase):
         _, dashboard = _reload()
         counts = {"a": 0, "b": 0}
 
-        def _mk(name):
-            def fn():
-                counts[name] += 1
-                return name
-            return fn
-
-        readers = [("a", _mk("a")), ("b", _mk("b"))]
+        readers = [
+            ("a", partial(_increment_reader_count, "a", counts)),
+            ("b", partial(_increment_reader_count, "b", counts)),
+        ]
         dashboard._fan_out_reads(readers, parallel=False)
         self.assertEqual(counts, {"a": 1, "b": 1})
 
@@ -2001,12 +2034,7 @@ class FanOutReadsParallelTest(unittest.TestCase):
     def test_all_results_returned_keyed_by_name(self) -> None:
         _, dashboard = _reload()
 
-        def _mk(value):
-            def fn():
-                return value
-            return fn
-
-        readers = [(f"r{i}", _mk(i)) for i in range(5)]
+        readers = [(f"r{i}", partial(_return_value, i)) for i in range(5)]
         results = dashboard._fan_out_reads(
             readers, parallel=True, max_workers=4
         )
@@ -2027,15 +2055,10 @@ class FanOutReadsParallelTest(unittest.TestCase):
         threads: set[int] = set()
         lock = threading.Lock()
 
-        def _mk(name):
-            def fn():
-                with lock:
-                    calls[name] = calls.get(name, 0) + 1
-                    threads.add(threading.get_ident())
-                return name
-            return fn
-
-        readers = [(f"r{i}", _mk(f"r{i}")) for i in range(8)]
+        readers = [
+            (f"r{i}", partial(_record_threaded_reader, f"r{i}", calls, threads, lock))
+            for i in range(8)
+        ]
         dashboard._fan_out_reads(
             readers, parallel=True, max_workers=4
         )
@@ -2053,11 +2076,10 @@ class FanOutReadsParallelTest(unittest.TestCase):
         _, dashboard = _reload()
         delay = 0.08
 
-        def _slow():
-            time.sleep(delay)
-            return "ok"
-
-        readers = [(f"r{i}", _slow) for i in range(4)]
+        readers = [
+            (f"r{i}", partial(_sleep_then_return, delay, "ok"))
+            for i in range(4)
+        ]
         t0 = time.perf_counter()
         results = dashboard._fan_out_reads(
             readers, parallel=True, max_workers=4
@@ -2075,18 +2097,14 @@ class FanOutReadsParallelTest(unittest.TestCase):
         _, dashboard = _reload()
         from orchestrator.analytics.read import AnalyticsReadError
 
-        def _boom():
-            raise AnalyticsReadError("query failed")
-
-        def _ok():
-            return 1
-
-        readers = [("ok", _ok), ("boom", _boom)]
-        with self.assertRaises(AnalyticsReadError) as cm:
+        readers = [
+            ("ok", partial(_return_value, 1)),
+            ("boom", partial(_raise_read_error, "query failed")),
+        ]
+        with self.assertRaisesRegex(AnalyticsReadError, "query failed"):
             dashboard._fan_out_reads(
                 readers, parallel=True, max_workers=2
             )
-        self.assertIn("query failed", str(cm.exception))
 
 
 class MainRenderDispatchTest(_MainSourceTest):
@@ -2208,8 +2226,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
     """
 
     def test_matrix_read_calls_matrix_read_model(self) -> None:
-        src = self._source_of("_widget_readers")
-        self.assertIn("def _read_skill_trigger_matrix(", src)
+        src = self._source_of("_read_skill_trigger_matrix")
         self.assertIn("analytics_read.get_skill_trigger_matrix", src)
 
     def test_matrix_read_forwards_scoped_connection(self) -> None:
@@ -2217,12 +2234,9 @@ class SkillMatrixWiringTest(_MainSourceTest):
         # `_scoped_read`, which checks out the scoped thread-local
         # connection and forwards it to the read helper, so the matrix
         # read shares the open socket rather than opening its own.
-        src = self._source_of("_widget_readers")
-        marker = "def _read_skill_trigger_matrix("
-        head = src.index(marker)
-        body = src[head:src.index("\n\n", head)]
-        self.assertIn("_scoped_read(", body)
-        self.assertIn("analytics_read.get_skill_trigger_matrix", body)
+        src = self._source_of("_read_skill_trigger_matrix")
+        self.assertIn("_scoped_read(", src)
+        self.assertIn("analytics_read.get_skill_trigger_matrix", src)
         scoped_src = self._source_of("_scoped_read")
         self.assertIn("analytics_read.analytics_connection()", scoped_src)
         self.assertIn("conn=conn", scoped_src)
@@ -2231,7 +2245,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
         # `conn` must not appear in the wrapper's parameter list -- it
         # would land in the `st.cache_data` key and crash on the
         # unhashable psycopg connection.
-        src = self._source_of("_widget_readers")
+        src = self._source_of("_read_skill_trigger_matrix")
         marker = "def _read_skill_trigger_matrix("
         head = src.index(marker)
         tail = src.index("):", head)
@@ -2241,7 +2255,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
         src = self._source_of("_widget_readers")
         self.assertIn(
             '("skill_matrix_rows", '
-            "lambda: _read_skill_trigger_matrix(*key))",
+            "lambda: read_skill_trigger_matrix(*key))",
             src,
         )
 
@@ -2304,15 +2318,12 @@ class StaticMetadataCacheTest(_MainSourceTest):
 
     def test_extent_reader_decorated_with_longer_ttl(self) -> None:
         src = self._metadata_source()
-        marker = "def _read_data_extent("
+        marker = "read_data_extent = st.cache_data("
         self.assertIn(marker, src)
-        # The cached wrapper must sit directly under
-        # `@st.cache_data(... ttl=STATIC_METADATA_TTL_SECONDS)` --
-        # not the 60 s TTL the per-filter wrappers use.
         head = src.index(marker)
-        # Look back to the decorator just above the def.
-        decorator_window = src[max(0, head - 200):head]
-        self.assertIn("@st.cache_data(", decorator_window)
+        tail = src.index(")(_read_data_extent)", head)
+        decorator_window = src[head:tail]
+        self.assertIn("st.cache_data(", decorator_window)
         self.assertIn(
             "ttl=STATIC_METADATA_TTL_SECONDS", decorator_window
         )
@@ -2320,11 +2331,12 @@ class StaticMetadataCacheTest(_MainSourceTest):
 
     def test_filter_options_reader_decorated_with_longer_ttl(self) -> None:
         src = self._metadata_source()
-        marker = "def _read_filter_options("
+        marker = "read_filter_options = st.cache_data("
         self.assertIn(marker, src)
         head = src.index(marker)
-        decorator_window = src[max(0, head - 200):head]
-        self.assertIn("@st.cache_data(", decorator_window)
+        tail = src.index(")(_read_filter_options)", head)
+        decorator_window = src[head:tail]
+        self.assertIn("st.cache_data(", decorator_window)
         self.assertIn(
             "ttl=STATIC_METADATA_TTL_SECONDS", decorator_window
         )
@@ -2338,9 +2350,10 @@ class StaticMetadataCacheTest(_MainSourceTest):
         # the empty signature so a future refactor cannot silently
         # re-introduce a parameter (e.g. a connection) that would
         # turn into part of the cache key.
-        src = self._metadata_source()
-        for marker in ("def _read_data_extent(", "def _read_filter_options("):
-            with self.subTest(marker=marker):
+        for name in STATIC_METADATA_READER_NAMES:
+            with self.subTest(name=name):
+                src = self._source_of(name)
+                marker = f"def {name}("
                 head = src.index(marker)
                 tail = src.index("):", head)
                 self.assertEqual(src[head:tail + 1], marker + ")")
@@ -2357,8 +2370,8 @@ class StaticMetadataCacheTest(_MainSourceTest):
         self.assertNotIn("get_filter_options(", main_src)
         # The helper itself dispatches through the cached wrappers.
         meta_src = self._metadata_source()
-        self.assertIn("_read_data_extent()", meta_src)
-        self.assertIn("_read_filter_options()", meta_src)
+        self.assertIn("read_data_extent()", meta_src)
+        self.assertIn("read_filter_options()", meta_src)
 
 
 class StagedRenderTest(_MainSourceTest):
@@ -2559,29 +2572,22 @@ class FanOutReadsErrorPropagationTest(unittest.TestCase):
         _, dashboard = _reload()
         from orchestrator.analytics.read import AnalyticsReadError
 
-        def _boom():
-            raise AnalyticsReadError("first wave dead")
-
-        with self.assertRaises(AnalyticsReadError) as cm:
+        with self.assertRaisesRegex(AnalyticsReadError, "first wave dead"):
             dashboard._fan_out_reads(
-                [("summary", _boom)], parallel=False
+                [("summary", partial(_raise_read_error, "first wave dead"))],
+                parallel=False,
             )
-        self.assertIn("first wave dead", str(cm.exception))
 
     def test_parallel_propagates_in_staged_call(self) -> None:
         _, dashboard = _reload()
         from orchestrator.analytics.read import AnalyticsReadError
 
-        def _boom():
-            raise AnalyticsReadError("second wave dead")
-
-        with self.assertRaises(AnalyticsReadError) as cm:
+        with self.assertRaisesRegex(AnalyticsReadError, "second wave dead"):
             dashboard._fan_out_reads(
-                [("repo_rows", _boom)],
+                [("repo_rows", partial(_raise_read_error, "second wave dead"))],
                 parallel=True,
                 max_workers=2,
             )
-        self.assertIn("second wave dead", str(cm.exception))
 
 
 class FormatTzOffsetTest(unittest.TestCase):
