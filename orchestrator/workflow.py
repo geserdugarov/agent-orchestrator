@@ -1257,6 +1257,70 @@ def _drain_scheduler_family_bucket(
             )
 
 
+def _scheduler_per_repo_cap(spec: RepoSpec) -> int:
+    return max(1, int(getattr(spec, "parallel_limit", 1) or 1))
+
+
+def _submit_scheduler_family_bucket(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    scheduler: IssueScheduler,
+    partition: _PollablePartition,
+    per_repo_cap: int,
+) -> None:
+    family_numbers = partition.family_numbers
+    if not family_numbers:
+        return
+
+    submitted = scheduler.submit(
+        spec.slug,
+        _FAMILY_BUCKET_ISSUE,
+        functools.partial(
+            _drain_scheduler_family_bucket, gh, spec, scheduler, family_numbers,
+        ),
+        family=True,
+        cap_exempt=_family_bucket_cap_exempt(partition.family_labels),
+        per_repo_cap=per_repo_cap,
+    )
+    if submitted:
+        return
+
+    # The scheduler logs the precise skip reason (closed, family_slot_held,
+    # cap, ...) inside `submit`; this line gives the dispatch-layer context
+    # -- which issues were waiting on this bucket -- so an operator can
+    # correlate "umbrella not advancing" with a previous tick's bucket
+    # still in flight.
+    log.info(
+        "repo=%s family bucket (%d issues) not submitted this "
+        "tick; next polling pass retries",
+        spec.slug, len(family_numbers),
+    )
+
+
+def _submit_scheduler_fanout_issues(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    scheduler: IssueScheduler,
+    partition: _PollablePartition,
+    per_repo_cap: int,
+) -> None:
+    for n in partition.fanout_numbers:
+        scheduler.submit(
+            spec.slug,
+            n,
+            functools.partial(_refetch_and_process, gh, spec, n),
+            family=False,
+            # A closed issue's handler is a cheap terminal finalization with
+            # no agent spawn -- exempt it from the per-repo / global caps so
+            # a merged-PR or closed-question issue flips to `done` promptly
+            # instead of being starved behind active agent work under
+            # `parallel_limit=1` (mirrors the `_CAP_EXEMPT_FAMILY_LABELS`
+            # exemption for `blocked` / `umbrella`).
+            cap_exempt=(n in partition.fanout_closed),
+            per_repo_cap=per_repo_cap,
+        )
+
+
 def _dispatch_via_scheduler(
     gh: GitHubClient, spec: RepoSpec, scheduler: IssueScheduler,
 ) -> None:
@@ -1332,7 +1396,7 @@ def _dispatch_via_scheduler(
     while a sibling ``validating`` / ``documenting`` agent holds the only
     per-repo slot.
     """
-    per_repo_cap = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
+    per_repo_cap = _scheduler_per_repo_cap(spec)
     # `_partition_pollable_issues` owns the skip-label filtering, per-issue
     # label-read isolation, and the family/fanout split (including the closed
     # fan-out set). `backlog` / `paused` issues are dropped there so a parked,
@@ -1340,50 +1404,14 @@ def _dispatch_via_scheduler(
     # cap-counted, which would reserve the only per-repo slot and starve
     # fanout under `parallel_limit=1`.
     partition = _partition_pollable_issues(gh, spec)
-    family_numbers = partition.family_numbers
-    fanout_numbers = partition.fanout_numbers
 
     # One `family=True` submit per repo drains every family-aware issue
     # sequentially (see `_drain_scheduler_family_bucket`). The bucket is
     # cap-exempt only when every family issue runs a no-agent handler
-    # (`_family_bucket_cap_exempt`); short-circuit `and` keeps the exempt
-    # probe and the submit off the no-family path entirely.
-    if family_numbers and not scheduler.submit(
-        spec.slug,
-        _FAMILY_BUCKET_ISSUE,
-        functools.partial(
-            _drain_scheduler_family_bucket, gh, spec, scheduler, family_numbers,
-        ),
-        family=True,
-        cap_exempt=_family_bucket_cap_exempt(partition.family_labels),
-        per_repo_cap=per_repo_cap,
-    ):
-        # The scheduler logs the precise skip reason (closed, family_slot_held,
-        # cap, ...) inside `submit`; this line gives the dispatch-layer context
-        # -- which issues were waiting on this bucket -- so an operator can
-        # correlate "umbrella not advancing" with a previous tick's bucket
-        # still in flight.
-        log.info(
-            "repo=%s family bucket (%d issues) not submitted this "
-            "tick; next polling pass retries",
-            spec.slug, len(family_numbers),
-        )
-
-    for n in fanout_numbers:
-        scheduler.submit(
-            spec.slug,
-            n,
-            functools.partial(_refetch_and_process, gh, spec, n),
-            family=False,
-            # A closed issue's handler is a cheap terminal finalization with
-            # no agent spawn -- exempt it from the per-repo / global caps so
-            # a merged-PR or closed-question issue flips to `done` promptly
-            # instead of being starved behind active agent work under
-            # `parallel_limit=1` (mirrors the `_CAP_EXEMPT_FAMILY_LABELS`
-            # exemption for `blocked` / `umbrella`).
-            cap_exempt=(n in partition.fanout_closed),
-            per_repo_cap=per_repo_cap,
-        )
+    # (`_family_bucket_cap_exempt`); the helper keeps the exempt probe and
+    # the submit off the no-family path entirely.
+    _submit_scheduler_family_bucket(gh, spec, scheduler, partition, per_repo_cap)
+    _submit_scheduler_fanout_issues(gh, spec, scheduler, partition, per_repo_cap)
 
 
 def _route_issue_to_handler(

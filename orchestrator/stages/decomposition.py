@@ -40,6 +40,7 @@ reference that test patches against `workflow.X` could not affect.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from github.Issue import Issue
@@ -50,6 +51,12 @@ from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import GitHubClient, PinnedState
+
+
+@dataclass(frozen=True)
+class _DecomposerRunPlan:
+    result: Optional[AgentResult]
+    keep_worktree: bool = False
 
 
 def _read_decomposer_session(
@@ -725,6 +732,38 @@ def _dispatch_decomposer_manifest(
     _finalize_split(gh, issue, state, created, dep_graph, is_umbrella)
 
 
+def _prepare_decomposer_run(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+) -> Optional[_DecomposerRunPlan]:
+    # User-content drift FIRST, so it runs BEFORE the half-finished recovery:
+    # otherwise recovery could finalize against a stale manifest when the issue
+    # was edited during a crash window.
+    _reset_decomposing_on_drift(gh, issue, state)
+
+    if _recover_stale_manifest(gh, issue, state):
+        return None
+
+    if _route_disabled_to_implementing(gh, spec, issue, state):
+        return None
+
+    if state.get("awaiting_human"):
+        result = _resume_decomposer_on_human_reply(gh, spec, issue, state)
+        if result is None:
+            # Keep the worktree intact: if a prior tick parked on dirty/commits,
+            # the HITL message asks the operator to inspect and reset it before
+            # resuming, and cleanup here would silently delete that state.
+            return _DecomposerRunPlan(result=None, keep_worktree=True)
+        return _DecomposerRunPlan(result=result)
+
+    result = _spawn_fresh_decomposer(gh, spec, issue, state)
+    if result is None:
+        return None
+    return _DecomposerRunPlan(result=result)
+
+
 def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     from .. import workflow as _wf
 
@@ -738,31 +777,13 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # `origin/<base>`.
     keep_worktree = False
     try:
-        # User-content drift FIRST, so it runs BEFORE the half-finished
-        # recovery -- otherwise the recovery branch would finalize against a
-        # stale manifest when the issue was edited during a crash window.
-        _reset_decomposing_on_drift(gh, issue, state)
-
-        if _recover_stale_manifest(gh, issue, state):
+        run_plan = _prepare_decomposer_run(gh, spec, issue, state)
+        if run_plan is None:
             return
-
-        if _route_disabled_to_implementing(gh, spec, issue, state):
+        keep_worktree = run_plan.keep_worktree
+        if run_plan.result is None:
             return
-
-        if state.get("awaiting_human"):
-            result = _resume_decomposer_on_human_reply(gh, spec, issue, state)
-            if result is None:
-                # No human reply yet. Keep the worktree intact -- if a
-                # prior tick parked on the dirty/commits reason, the
-                # HITL message explicitly asks the operator to inspect
-                # and reset it before resuming, and cleanup here would
-                # silently delete that state on every subsequent poll.
-                keep_worktree = True
-                return
-        else:
-            result = _spawn_fresh_decomposer(gh, spec, issue, state)
-            if result is None:
-                return
+        result = run_plan.result
 
         if _settle_decomposer_run(gh, issue, state, result):
             return

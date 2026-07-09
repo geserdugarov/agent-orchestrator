@@ -26,6 +26,7 @@ reference that test patches against `workflow.X` could not affect.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -108,6 +109,13 @@ _CLAUDE_SESSION_LIMIT_MESSAGE_MARKERS: Tuple[str, ...] = (
     "claude usage limit reached",
     "claude ai usage limit reached",
 )
+
+
+@dataclass(frozen=True)
+class _PreparedDevRun:
+    result: AgentResult
+    before_sha: Optional[str]
+    paused: bool
 
 
 def _read_dev_session(
@@ -1120,10 +1128,10 @@ def _handle_user_content_drift(
 
 def _prepare_dev_run(
     gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
-) -> Optional[Tuple[AgentResult, Optional[str], bool]]:
+) -> Optional[_PreparedDevRun]:
     """Set up and run (or recover) the dev agent for one implementing tick.
 
-    Returns `(result, before_sha, paused)` for the caller to dispose, or None
+    Returns a prepared run for the caller to dispose, or None
     when the tick is already complete and the caller must return:
       * awaiting-human with an `agent_timeout` park and no human reply -> a
         silent `_try_recover_implementing_timeout_park` attempt (state written
@@ -1178,7 +1186,7 @@ def _prepare_dev_run(
         if resumed is None:
             return None
         _, result, paused = resumed
-        return result, before_sha, paused
+        return _PreparedDevRun(result, before_sha, paused)
 
     wt = _wf._ensure_worktree(
         spec, issue.number,
@@ -1250,7 +1258,7 @@ def _prepare_dev_run(
         # decision without a second read.
         paused = _wf._paused_during_agent_run(gh, issue)
     state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
-    return result, before_sha, paused
+    return _PreparedDevRun(result, before_sha, paused)
 
 
 def _dispose_agent_result(
@@ -1343,7 +1351,6 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
     prepared = _prepare_dev_run(gh, spec, issue, state)
     if prepared is None:
         return
-    result, before_sha, paused = prepared
 
     state.set("last_agent_action_at", _wf._now_iso())
 
@@ -1352,7 +1359,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
     # pinned state (the in-memory `awaiting_human=False` / watermark / session
     # mutations in `_prepare_dev_run` are discarded) so the next process
     # retries from durable state. Must precede the disposition below.
-    if _wf._ignore_if_interrupted(issue, result):
+    if _wf._ignore_if_interrupted(issue, prepared.result):
         return
 
     # Live pause applied while the agent ran: honor the single decision made in
@@ -1362,10 +1369,12 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
     # the disposition opens a PR, relabels, parks, or advances pinned state.
     # Once the operator removes the label a later tick republishes the
     # carried-over commit normally.
-    if paused:
+    if prepared.paused:
         return
 
-    _dispose_agent_result(gh, spec, issue, state, result, before_sha)
+    _dispose_agent_result(
+        gh, spec, issue, state, prepared.result, prepared.before_sha,
+    )
 
 
 # GitHub rejects PR (and issue) bodies longer than 65,536 characters. The dev

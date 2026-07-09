@@ -146,6 +146,7 @@ patch could not affect.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -156,6 +157,20 @@ from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import GitHubClient
+
+
+@dataclass(frozen=True)
+class _FixingFeedback:
+    issue_space: list
+    review_comments: list
+    review_summaries: list
+    all_items: list
+
+
+@dataclass(frozen=True)
+class _ParkedFixingDecision:
+    stop: bool
+    replay_batch: Optional[list] = None
 
 
 def _fixing_preflight(gh: GitHubClient, spec: RepoSpec, issue: Issue, state):
@@ -241,13 +256,14 @@ def _fixing_preflight(gh: GitHubClient, spec: RepoSpec, issue: Issue, state):
     return pr
 
 
-def _rescan_fixing_feedback(gh: GitHubClient, issue: Issue, pr, state) -> tuple:
+def _rescan_fixing_feedback(
+    gh: GitHubClient, issue: Issue, pr, state,
+) -> _FixingFeedback:
     """Rescan the four PR-feedback surfaces for comments past the in_review
     watermarks (NOT the `pending_fix_*` bookmarks -- those stay in pinned
     state as the reconstruction source for `_reconstruct_pending_fix_batch`).
 
-    Returns ``(issue_space_new, review_space_new, review_summary_new,
-    new_feedback)`` where `new_feedback` is the three surfaces concatenated
+    Returns the three per-surface batches plus `all_items`, the concatenated
     in prompt order: issue-space (issue-thread + PR-conversation), then
     inline review comments, then review summaries. Untrusted authors are
     dropped from every surface (see `filter_trusted`) so outsider feedback
@@ -302,8 +318,12 @@ def _rescan_fixing_feedback(gh: GitHubClient, issue: Issue, pr, state) -> tuple:
     review_summary_new = filter_trusted(
         sorted(new_pr_reviews, key=lambda r: r.id)
     )
-    new_feedback = issue_space_new + review_space_new + review_summary_new
-    return issue_space_new, review_space_new, review_summary_new, new_feedback
+    return _FixingFeedback(
+        issue_space=issue_space_new,
+        review_comments=review_space_new,
+        review_summaries=review_summary_new,
+        all_items=issue_space_new + review_space_new + review_summary_new,
+    )
 
 
 def _dispatch_parked_fixing(
@@ -312,14 +332,11 @@ def _dispatch_parked_fixing(
     issue: Issue,
     state,
     pr,
-    new_feedback: list,
-    issue_space_new: list,
-    review_space_new: list,
-    review_summary_new: list,
-) -> tuple:
+    feedback: _FixingFeedback,
+) -> _ParkedFixingDecision:
     """Reconcile a `fixing` tick that arrived with `awaiting_human` set.
 
-    Returns ``(stop, replay_batch)``. ``stop=True`` means the tick is fully
+    Returns a decision object. ``stop=True`` means the tick is fully
     handled and the caller must return immediately (auto-rebase park, a
     refused `/orchestrator continue`, a silent validating-route recovery, a
     worktree-drift reroute, or a stay-parked-until-fresh-reply). ``stop=False``
@@ -338,7 +355,7 @@ def _dispatch_parked_fixing(
     # spawn it on a prompt that has nothing to do with the
     # outstanding fix.
     if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
-        return True, None
+        return _ParkedFixingDecision(stop=True)
 
     # `/orchestrator continue` operator command (exact line, so a comment
     # carrying the command AND real guidance still counts). Handled on
@@ -359,16 +376,14 @@ def _dispatch_parked_fixing(
     #     park with no replayable batch: fall through to the normal resume
     #     so that guidance (not a bare continue) drives the dev.
     replay_batch = None
-    continue_cmds = _wf._parse_orchestrator_continue(issue_space_new)
+    continue_cmds = _wf._parse_orchestrator_continue(feedback.issue_space)
     if continue_cmds:
         action, items = _handle_continue_command(
-            gh, issue, state, pr, park_reason, continue_cmds,
-            new_feedback, issue_space_new, review_space_new,
-            review_summary_new,
+            gh, issue, state, pr, park_reason, continue_cmds, feedback,
         )
         if action == "refuse":
             gh.write_pinned_state(issue, state)
-            return True, None
+            return _ParkedFixingDecision(stop=True)
         if action == "replay":
             replay_batch = items
         # "passthrough": fall through to the normal resume below.
@@ -390,7 +405,7 @@ def _dispatch_parked_fixing(
     # (set by the in_review route, unset by the validating route).
     validating_routed = state.get("pending_fix_at") is None
     if (
-        not new_feedback
+        not feedback.all_items
         and park_reason in _wf._VALIDATING_TRANSIENT_PARK_REASONS
         and validating_routed
     ):
@@ -410,7 +425,7 @@ def _dispatch_parked_fixing(
             # through to the bare stay-parked return below and keep
             # waiting for a human comment.
             _reconcile_parked_fixing(gh, spec, issue, state, pr)
-            return True, None
+            return _ParkedFixingDecision(stop=True)
         # Conditions resolved (either no fix landed or a deferred
         # push finished). Clear the park flags and flip back to
         # `validating` so the reviewer re-evaluates the current head
@@ -426,9 +441,9 @@ def _dispatch_parked_fixing(
         _clear_pending_fix_bookmarks(state)
         gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
         gh.write_pinned_state(issue, state)
-        return True, None
+        return _ParkedFixingDecision(stop=True)
 
-    if not new_feedback:
+    if not feedback.all_items:
         # All other awaiting_human shapes (question parks, dirty
         # worktree parks, silent-crash parks, in_review-route
         # transients) stay parked until a fresh human reply lands.
@@ -442,14 +457,16 @@ def _dispatch_parked_fixing(
         # automatic exit from `fixing` for the in_review route is
         # the ACK fast path in the resume tail (on the same tick the
         # dev explicitly marks its no-commit reply with `ACK:`).
-        return True, None
+        return _ParkedFixingDecision(stop=True)
 
     state.set("awaiting_human", False)
     state.set("park_reason", None)
-    return False, replay_batch
+    return _ParkedFixingDecision(stop=False, replay_batch=replay_batch)
 
 
-def _fixing_debounce_open(new_feedback: list, replay_batch) -> bool:
+def _fixing_debounce_open(
+    feedback: _FixingFeedback, replay_batch,
+) -> bool:
     """True while the quiet window is still open: hold the resume until no
     comment has landed for `IN_REVIEW_DEBOUNCE_SECONDS`.
 
@@ -467,7 +484,7 @@ def _fixing_debounce_open(new_feedback: list, replay_batch) -> bool:
         return False
     now = datetime.now(timezone.utc)
     latest_ts: Optional[datetime] = None
-    for c in new_feedback:
+    for c in feedback.all_items:
         ts = _wf._comment_created_at(c)
         if ts is None:
             continue
@@ -505,12 +522,9 @@ def _resume_fixing_and_dispatch_result(
     spec: RepoSpec,
     issue: Issue,
     state,
-    new_feedback: list,
+    feedback: _FixingFeedback,
     replay_batch,
     pending_fix_at_was_set: bool,
-    issue_space_new: list,
-    review_space_new: list,
-    review_summary_new: list,
 ) -> None:
     """Resume the locked dev session over the unread feedback (or a
     preserved `/orchestrator continue` batch), then dispatch the result:
@@ -528,7 +542,7 @@ def _resume_fixing_and_dispatch_result(
     # text -- the whole point of the command is to not lose the review
     # feedback the parked session never addressed.
     followup = _wf._build_pr_comment_followup(
-        replay_batch if replay_batch is not None else new_feedback
+        replay_batch if replay_batch is not None else feedback.all_items
     )
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
@@ -628,7 +642,7 @@ def _resume_fixing_and_dispatch_result(
             after_sha and _wf._stranded_fix_unpushed(spec, wt, state, issue)
         ):
             _advance_consumed_watermarks(
-                state, issue_space_new, review_space_new, review_summary_new,
+                state, feedback,
             )
             _clear_pending_fix_bookmarks(state)
             quoted = "> " + ack_reason.replace("\n", "\n> ")
@@ -679,7 +693,7 @@ def _resume_fixing_and_dispatch_result(
     # sits below it. The legacy in_review pushed-fix path had the same
     # constraint.
     _advance_consumed_watermarks(
-        state, issue_space_new, review_space_new, review_summary_new,
+        state, feedback,
     )
 
     if not pushed:
@@ -716,12 +730,7 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # in_review-route ACK fast path in the resume tail.
     pending_fix_at_was_set = state.get("pending_fix_at") is not None
 
-    (
-        issue_space_new,
-        review_space_new,
-        review_summary_new,
-        new_feedback,
-    ) = _rescan_fixing_feedback(gh, issue, pr, state)
+    feedback = _rescan_fixing_feedback(gh, issue, pr, state)
 
     # `replay_batch` is set only by an accepted `/orchestrator continue`
     # command inside `_dispatch_parked_fixing`: the PRESERVED PR-feedback
@@ -736,11 +745,11 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # would loop on every poll, spamming the same dev-resume prompt.
     replay_batch: Optional[list] = None
     if state.get("awaiting_human"):
-        stop, replay_batch = _dispatch_parked_fixing(
-            gh, spec, issue, state, pr, new_feedback,
-            issue_space_new, review_space_new, review_summary_new,
+        parked = _dispatch_parked_fixing(
+            gh, spec, issue, state, pr, feedback,
         )
-        if stop:
+        replay_batch = parked.replay_batch
+        if parked.stop:
             return
 
     # Watermarks already cover the triggering bookmarks (a prior tick
@@ -749,19 +758,18 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # `validating` so the reviewer re-evaluates against the current
     # head instead of leaving the issue stuck in `fixing` with no
     # work.
-    if not new_feedback:
+    if not feedback.all_items:
         _clear_pending_fix_bookmarks(state)
         gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
         gh.write_pinned_state(issue, state)
         return
 
-    if _fixing_debounce_open(new_feedback, replay_batch):
+    if _fixing_debounce_open(feedback, replay_batch):
         return
 
     _resume_fixing_and_dispatch_result(
-        gh, spec, issue, state, new_feedback, replay_batch,
+        gh, spec, issue, state, feedback, replay_batch,
         pending_fix_at_was_set,
-        issue_space_new, review_space_new, review_summary_new,
     )
 
 
@@ -1042,10 +1050,7 @@ def _reconstruct_pending_fix_batch(gh, issue, pr, state) -> list:
 
 
 def _advance_consumed_watermarks(
-    state,
-    issue_space_new: list,
-    review_space_new: list,
-    review_summary_new: list,
+    state, feedback: _FixingFeedback,
 ) -> None:
     """Advance the three in_review watermarks ONLY to the max id consumed
     per surface, ratcheted against the existing watermark.
@@ -1063,22 +1068,22 @@ def _advance_consumed_watermarks(
     `awaiting_human and not new_feedback` gate would drop it).
     """
     cur_issue_wm = state.get("pr_last_comment_id")
-    if issue_space_new:
-        new_wm = max(c.id for c in issue_space_new)
+    if feedback.issue_space:
+        new_wm = max(c.id for c in feedback.issue_space)
         if isinstance(cur_issue_wm, int):
             new_wm = max(new_wm, cur_issue_wm)
         state.set("pr_last_comment_id", new_wm)
 
     cur_review_wm = state.get("pr_last_review_comment_id")
-    if review_space_new:
-        new_wm = max(c.id for c in review_space_new)
+    if feedback.review_comments:
+        new_wm = max(c.id for c in feedback.review_comments)
         if isinstance(cur_review_wm, int):
             new_wm = max(new_wm, cur_review_wm)
         state.set("pr_last_review_comment_id", new_wm)
 
     cur_summary_wm = state.get("pr_last_review_summary_id")
-    if review_summary_new:
-        new_wm = max(r.id for r in review_summary_new)
+    if feedback.review_summaries:
+        new_wm = max(r.id for r in feedback.review_summaries)
         if isinstance(cur_summary_wm, int):
             new_wm = max(new_wm, cur_summary_wm)
         state.set("pr_last_review_summary_id", new_wm)
@@ -1091,10 +1096,7 @@ def _handle_continue_command(
     pr,
     park_reason,
     continue_cmds: list,
-    new_feedback: list,
-    issue_space_new: list,
-    review_space_new: list,
-    review_summary_new: list,
+    feedback: _FixingFeedback,
 ) -> tuple:
     """Dispatch a `/orchestrator continue` operator command on a parked
     `fixing` issue.
@@ -1150,14 +1152,21 @@ def _handle_continue_command(
         # verbatim into the replay: the resume tail advances the watermarks
         # past all of `new_feedback`, so anything omitted here would be
         # consumed without the dev ever seeing it.
-        return "replay", batch + new_feedback
+        return "replay", batch + feedback.all_items
 
-    if all(_wf._is_bare_orchestrator_continue(c) for c in new_feedback):
+    if all(_wf._is_bare_orchestrator_continue(c) for c in feedback.all_items):
         # Content-free continue with nothing else to act on. Consume only the
         # command comment(s) (`new_feedback` is all bare commands here, so this
         # covers them) so the refusal is not re-posted every tick, then stay
         # parked with a reason.
-        _advance_consumed_watermarks(state, list(continue_cmds), [], [])
+        command_items = list(continue_cmds)
+        command_feedback = _FixingFeedback(
+            issue_space=command_items,
+            review_comments=[],
+            review_summaries=[],
+            all_items=command_items,
+        )
+        _advance_consumed_watermarks(state, command_feedback)
         if park_reason in _wf._CONTINUE_PARK_REASONS:
             message = (
                 f"{config.HITL_MENTIONS} `/orchestrator continue`: no "
