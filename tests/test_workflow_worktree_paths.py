@@ -340,7 +340,7 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
             "orchestrator/geserdugarov__agent-orchestrator/issue-7",
         )
 
-    def test_pinned_branch_outside_orchestrator_namespace_is_ignored(
+    def test_outside_namespace_pinned_branch_is_ignored(
         self,
     ) -> None:
         # A corrupted / foreign pinned `branch` value must not redirect

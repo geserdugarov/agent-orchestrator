@@ -83,7 +83,7 @@ class DecomposingDriftBeforeHalfFinishedRecoveryTest(
     manifest. The drift check must run FIRST so the manifest gets
     re-derived against the new body."""
 
-    def test_drift_with_children_clears_manifest_and_re_runs_decomposer(
+    def test_children_clear_manifest_and_rerun_decomposer(
         self,
     ) -> None:
         # Simulate the recovery shape: parent label is still

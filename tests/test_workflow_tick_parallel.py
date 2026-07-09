@@ -582,7 +582,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # the caller thread).
         self.assertEqual(sorted(fanout_done), [10, 11, 12])
 
-    def test_concurrent_decomposing_and_blocked_do_not_race_child_state(
+    def test_decomposing_and_blocked_do_not_race_child_state(
         self,
     ) -> None:
         # Regression for the reproducer the reviewer flagged: a parent

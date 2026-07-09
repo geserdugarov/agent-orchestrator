@@ -2023,7 +2023,7 @@ class MainRenderDispatchTest(_MainSourceTest):
         # earlier, so anchor on the last occurrence.
         self.assertLess(idxs[-1], src.rindex("_render_drilldown("))
 
-    def test_skill_card_stays_inline_between_heatmap_and_recent_runs(
+    def test_skill_card_stays_between_heatmap_and_runs(
         self,
     ) -> None:
         src = self._main_source()

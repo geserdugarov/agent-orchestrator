@@ -799,7 +799,7 @@ class InterruptedClassificationTest(unittest.TestCase):
         self.assertFalse(timed_out)
         self.assertFalse(interrupted)
 
-    def test_run_subprocess_own_timeout_is_timed_out_not_interrupted(self) -> None:
+    def test_own_timeout_is_timed_out(self) -> None:
         # A child that outlives our own `timeout` drives the timeout branch:
         # `_terminate_process_group` reaps the group and the run is classified
         # `timed_out=True`, `interrupted=False`, exit_code=-1 -- distinct from

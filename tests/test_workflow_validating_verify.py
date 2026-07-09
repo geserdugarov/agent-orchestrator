@@ -417,7 +417,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         self.assertIn("TAIL", run.output)
         self.assertLessEqual(len(run.output), 4096)
 
-    def test_secret_straddling_truncation_boundary_is_fully_redacted(self) -> None:
+    def test_truncation_boundary_secret_fully_redacted(self) -> None:
         # Regression: `_redact_secrets` does `str.replace(value, "***")`
         # on the full value, so a secret whose bytes straddle the
         # truncation cut would no longer match a post-truncation replace
@@ -493,7 +493,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         # exposed to the verify command.)
         self.assertNotIn("ghp_ORCHESTRATOR_PAT_SHOULD_NOT_LEAK", run.output)
 
-    def test_write_credential_locators_stripped_from_verify_environment(self) -> None:
+    def test_strips_write_credential_locators_from_env(self) -> None:
         # Issue #213 review: SSH-agent socket, askpass binaries, and
         # `GIT_SSH_COMMAND` are write-credential pointers, not secret-
         # shaped values. Leaving them in the verify shell lets a
@@ -527,7 +527,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         self.assertNotIn("/tmp/ssh-test/agent.42", run.output)
         self.assertNotIn("/home/op/.ssh/deploy-key", run.output)
 
-    def test_credential_file_locators_stripped_from_verify_environment(self) -> None:
+    def test_strips_credential_file_locators_from_env(self) -> None:
         # Issue #213 review: credential-file LOCATORS (env vars whose
         # value is a path to a file holding the secret) must also be
         # stripped. The verify shell runs as the same OS user as the
@@ -566,7 +566,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         self.assertNotIn("/etc/secrets/gcp.json", run.output)
         self.assertNotIn("/etc/secrets/aws-creds", run.output)
 
-    def test_production_secret_shapes_stripped_from_verify_environment(self) -> None:
+    def test_strips_production_secret_shapes_from_env(self) -> None:
         # Issue #213: GitHub-token aliases are not the only credential
         # shape that should not be inherited by operator-configured
         # verify shell. Production-secret-shaped variables (suffix or
@@ -647,7 +647,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         # And the worktree was clean on detection (not the dirty branch).
         self.assertEqual(run.dirty_files, ())
 
-    def test_dirty_attribution_names_responsible_command_and_keeps_output(self) -> None:
+    def test_dirty_attribution_keeps_command_and_output(self) -> None:
         # Regression: previously the dirty check ran once at the end of
         # the loop, so a dirty failure always blamed `commands[-1]` and
         # discarded every command's captured output. The fix checks

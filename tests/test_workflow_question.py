@@ -240,7 +240,7 @@ class HandleQuestionAwaitingHumanResumeTest(
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.opened_prs, [])
 
-    def test_new_comment_resumes_locked_session_and_advances_watermark(
+    def test_new_comment_resumes_locked_session_and_watermark(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -770,7 +770,7 @@ class HandleQuestionUnsafeParkStabilityTest(
             branch=_issue_branch(304),
         )
 
-    def test_resume_after_unsafe_park_with_re_park_preserves_worktree(
+    def test_repark_preserves_worktree(
         self,
     ) -> None:
         # When the operator replies without resetting (and the
@@ -800,8 +800,8 @@ class HandleQuestionUnsafeParkStabilityTest(
             has_new_commits=True,
         )
         mocks["run_agent"].assert_called_once()
-        data = gh.pinned_data(305)
-        self.assertEqual(data["park_reason"], "question_commits")
+        pinned_state = gh.pinned_data(305)
+        self.assertEqual(pinned_state["park_reason"], "question_commits")
         mocks["_cleanup_question_worktree"].assert_not_called()
 
 
@@ -951,7 +951,7 @@ class QuestionRelabelToImplementingTest(
         self.assertIn("question_commits", last)
         self.assertIn("reset the worktree", last.lower())
 
-    def test_relabel_with_missing_worktree_but_stale_branch_refuses_to_push(
+    def test_missing_worktree_stale_branch_refuses_push(
         self,
     ) -> None:
         # Regression: the worktree directory is gone (a prior safe
@@ -1004,9 +1004,9 @@ class QuestionRelabelToImplementingTest(
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.opened_prs, [])
         # State carries the unsafe-relabel park reason.
-        data = gh.pinned_data(86)
-        self.assertTrue(data["awaiting_human"])
-        self.assertEqual(data["park_reason"], "question_unsafe_relabel")
+        pinned_state = gh.pinned_data(86)
+        self.assertTrue(pinned_state["awaiting_human"])
+        self.assertEqual(pinned_state["park_reason"], "question_unsafe_relabel")
         # Message tells the operator about the branch and how to
         # reset it.
         last = gh.posted_comments[-1][1]
@@ -1801,7 +1801,7 @@ class HandleQuestionResumeTrustFilterTest(
         self.assertNotIn(self._MALICIOUS_URL, prompt)
         self.assertIn("please also handle empty input", prompt)
 
-    def test_consume_new_human_replies_advances_watermark_to_trusted_only(
+    def test_reply_watermark_advances_to_trusted_only(
         self,
     ) -> None:
         # Direct helper check: the consumed watermark advances only past the
@@ -1821,11 +1821,11 @@ class HandleQuestionResumeTrustFilterTest(
             user=FakeUser("mallory"),
         ))
         self._seed_live_session(gh, issue)
-        state = gh.read_pinned_state(issue)
+        pinned_state = gh.read_pinned_state(issue)
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
-            trusted = _consume_new_human_replies(gh, issue, state)
-        self.assertEqual([c.id for c in trusted], [TRUSTED_REPLY_ID])
-        self.assertEqual(state.get("last_action_comment_id"), TRUSTED_REPLY_ID)
+            trusted_comments = _consume_new_human_replies(gh, issue, pinned_state)
+        self.assertEqual([c.id for c in trusted_comments], [TRUSTED_REPLY_ID])
+        self.assertEqual(pinned_state.get("last_action_comment_id"), TRUSTED_REPLY_ID)
 
     def test_all_outsider_batch_does_not_resume(self) -> None:
         gh = FakeGitHubClient()

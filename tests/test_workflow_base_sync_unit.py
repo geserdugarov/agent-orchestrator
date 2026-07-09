@@ -728,14 +728,14 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         # CRITICAL: park survives on disk, watermark NOT advanced.
         # The operator's "retry" comment is still ahead of the
         # watermark so the next refresh tick rediscovers it.
-        state = self.gh.pinned_data(ISSUE)
-        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
+        pinned_state = self.gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_state.get(KEY_AWAITING_HUMAN))
         self.assertEqual(
-            state.get(KEY_PARK_REASON), PARK_PUSH_FAILED,
+            pinned_state.get(KEY_PARK_REASON), PARK_PUSH_FAILED,
         )
-        self.assertEqual(state.get(KEY_LAST_ACTION_COMMENT_ID), 99)
+        self.assertEqual(pinned_state.get(KEY_LAST_ACTION_COMMENT_ID), 99)
 
-    def test_pr_auto_rebase_park_survives_early_exit_when_pr_fetch_fails(
+    def test_auto_rebase_park_survives_pr_fetch_failure(
         self,
     ) -> None:
         # Same regression for the `gh.get_pr()` failure gate: a
@@ -1010,7 +1010,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             rebased[0].get("method"), "crash_recovery_relabel_only",
         )
 
-    def test_pr_crash_recovery_clears_stale_flag_when_head_unchanged(
+    def test_crash_recovery_clears_stale_flag_on_same_head(
         self,
     ) -> None:
         # Scenario 3: a prior tick set the anchor, then died before
@@ -1044,13 +1044,16 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
         merge.assert_called_once()
         push.assert_called_once()
         # Anchor cleared and label flipped to `validating`.
-        state = self.gh.pinned_data(ISSUE)
-        self.assertIsNone(state.get(KEY_PENDING_PUSH_SHA))
+        pinned_state = self.gh.pinned_data(ISSUE)
+        self.assertIsNone(pinned_state.get(KEY_PENDING_PUSH_SHA))
         self.assertIn((ISSUE, LABEL_VALIDATING), self.gh.label_history)
         # Normal-flow rebase event, NOT a crash-recovery one.
-        rebased = [e for e in self.gh.recorded_events if e.get("event") == EVENT_BASE_REBASED]
-        self.assertEqual(len(rebased), 1)
-        self.assertEqual(rebased[0].get("method"), "auto_clean_rebase")
+        base_rebased_events = [
+            event for event in self.gh.recorded_events
+            if event.get("event") == EVENT_BASE_REBASED
+        ]
+        self.assertEqual(len(base_rebased_events), 1)
+        self.assertEqual(base_rebased_events[0].get("method"), "auto_clean_rebase")
 
     def _run_unverifiable_recovery(
         self,
@@ -1189,7 +1192,7 @@ class SyncWorktreeWithBaseUnitTest(unittest.TestCase):
             hardened_mock, push_mock, merge_mock,
         )
 
-    def test_pr_crash_recovery_parks_on_sha_mismatch_zero_ahead_behind(
+    def test_crash_recovery_parks_on_zero_ahead_mismatch(
         self,
     ) -> None:
         # The fourth cannot-verify path: rev-parse returns a DIFFERENT

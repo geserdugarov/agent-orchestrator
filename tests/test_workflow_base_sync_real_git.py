@@ -321,7 +321,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         state = self.gh.pinned_data(7)
         self.assertIsNone(state.get("review_round"))
 
-    def test_pr_open_conflicting_base_advance_relabels_resolving_conflict(
+    def test_open_pr_conflicting_base_relabels_resolving_conflict(
         self,
     ) -> None:
         # When the rebase actually leaves conflicted files, the refresh

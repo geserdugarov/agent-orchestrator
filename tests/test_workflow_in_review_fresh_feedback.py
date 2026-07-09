@@ -60,7 +60,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
                 mergeable=True, check_state="success",
             )
         gh.add_pr(pr)
-        state = dict(
+        seed_state = dict(
             pr_number=pr.number,
             branch=self.BRANCH,
             dev_agent="claude",
@@ -70,11 +70,11 @@ class InReviewRoutesFreshFeedbackToFixingTest(
             pr_last_review_summary_id=0,
         )
         if extra_state:
-            state.update(extra_state)
-        gh.seed_state(880, **state)
+            seed_state.update(extra_state)
+        gh.seed_state(880, **seed_state)
         return gh, issue, pr
 
-    def test_fresh_pr_conversation_comment_flips_to_fixing_no_dev_spawn(
+    def test_pr_conversation_comment_routes_without_dev_spawn(
         self,
     ) -> None:
         # The headline contract: a single fresh PR conversation comment
@@ -115,12 +115,12 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         self.assertIn((880, "fixing"), gh.label_history)
         # Pending-fix metadata records the triggering comment id and an
         # ISO timestamp so the fixing handler has a bookmark.
-        state = gh.pinned_data(880)
-        self.assertEqual(state.get("pending_fix_issue_max_id"), 3000)
-        self.assertIn("pending_fix_at", state)
+        pinned_state = gh.pinned_data(880)
+        self.assertEqual(pinned_state.get("pending_fix_issue_max_id"), 3000)
+        self.assertIn("pending_fix_at", pinned_state)
         # Watermark stays put so the fixing handler can rescan and reach
         # the triggering comment on its next tick.
-        self.assertEqual(state.get("pr_last_comment_id"), 1999)
+        self.assertEqual(pinned_state.get("pr_last_comment_id"), 1999)
 
     def test_route_persists_full_batch_id_lists_all_surfaces(self) -> None:
         # The route must persist the FULL per-surface id lists (not just the
@@ -241,7 +241,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         self.assertNotIn((880, "fixing"), gh.label_history)
         self.assertIn("merged_at", gh.pinned_data(880))
 
-    def test_fresh_issue_thread_comment_routes_to_fixing_despite_drift_hash(
+    def test_issue_thread_comment_wins_over_drift_hash(
         self,
     ) -> None:
         # Regression test for the reviewer's reproducer: a normal fresh
@@ -297,14 +297,14 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         # The issue routed to `fixing` and recorded the triggering
         # bookmark.
         self.assertIn((1660, "fixing"), gh.label_history)
-        state = gh.pinned_data(1660)
-        self.assertEqual(state.get("pending_fix_issue_max_id"), 7000)
-        self.assertIn("pending_fix_at", state)
+        pinned_state = gh.pinned_data(1660)
+        self.assertEqual(pinned_state.get("pending_fix_issue_max_id"), 7000)
+        self.assertIn("pending_fix_at", pinned_state)
         # And the hash was refreshed so the drift path does NOT
         # double-fire on the same comment changes after the fixing
         # handler (or an operator) bounces the issue back to `in_review`.
         self.assertNotEqual(
-            state.get("user_content_hash"),
+            pinned_state.get("user_content_hash"),
             "stale-hash-from-before-the-human-comment",
         )
 
