@@ -274,13 +274,17 @@ def _squash_and_force_push(
     authored under the AGENT_GIT_* identity (via env vars) so attribution
     matches the per-step commits this squash replaces.
     """
+    def _fail(error: str) -> Tuple[bool, Optional[str], int, Optional[str]]:
+        """Uniform failure result -- original commits left on the branch."""
+        return False, None, 0, error
+
     base_ref = f"{spec.remote_name}/{spec.base_branch}"
     mb = _git("merge-base", base_ref, "HEAD", cwd=worktree)
     if mb.returncode != 0:
-        return False, None, 0, f"merge-base failed: {(mb.stderr or '').strip()}"
+        return _fail(f"merge-base failed: {(mb.stderr or '').strip()}")
     base_sha = (mb.stdout or "").strip()
     if not base_sha:
-        return False, None, 0, "merge-base returned empty"
+        return _fail("merge-base returned empty")
 
     # Snapshot the original HEAD BEFORE any destructive step. Every
     # post-reset failure path below restores the branch to this SHA so
@@ -291,7 +295,7 @@ def _squash_and_force_push(
     # update we must NOT clobber).
     original_head = _head_sha(worktree)
     if not original_head:
-        return False, None, 0, "could not read original HEAD"
+        return _fail("could not read original HEAD")
 
     # Dirty-tree refusal is a hard precondition for the whole helper, NOT
     # just the rewrite path: the issue spec lists "dirty tree" alongside
@@ -302,17 +306,14 @@ def _squash_and_force_push(
     # to a human -- handing off to in_review with the dirty state
     # invisible would let the merge land an incomplete head.
     if _worktree_dirty_files(worktree):
-        return False, None, 0, "worktree has uncommitted changes"
+        return _fail("worktree has uncommitted changes")
 
     log_r = _git(
         "log", "--reverse", "--pretty=%s", f"{base_sha}..HEAD",
         cwd=worktree,
     )
     if log_r.returncode != 0:
-        return (
-            False, None, 0,
-            f"git log failed: {(log_r.stderr or '').strip()}",
-        )
+        return _fail(f"git log failed: {(log_r.stderr or '').strip()}")
     subjects = [
         line for line in (log_r.stdout or "").splitlines() if line.strip()
     ]
@@ -339,15 +340,17 @@ def _squash_and_force_push(
 
     reset_r = _git("reset", "--soft", base_sha, cwd=worktree)
     if reset_r.returncode != 0:
-        return (
-            False, None, 0,
-            f"reset --soft failed: {(reset_r.stderr or '').strip()}",
-        )
+        return _fail(f"reset --soft failed: {(reset_r.stderr or '').strip()}")
 
-    def _rollback(reason: str) -> None:
-        """Restore the branch to original_head after a post-reset failure.
-        Best-effort: a rollback failure leaves the worktree in an
-        inconsistent state; logged loudly so an operator notices.
+    def _fail_and_rollback(
+        reason: str, error: str
+    ) -> Tuple[bool, Optional[str], int, Optional[str]]:
+        """Restore the branch to original_head, then report `error`.
+
+        Every post-reset failure routes through here so the dev's original
+        commits survive a squash/push that did not complete. Best-effort:
+        a rollback failure leaves the worktree in an inconsistent state,
+        logged loudly so an operator notices.
         """
         rb = _git("reset", "--hard", original_head, cwd=worktree)
         if rb.returncode != 0:
@@ -357,6 +360,7 @@ def _squash_and_force_push(
                 issue.number, original_head, reason,
                 (rb.stderr or "").strip(),
             )
+        return _fail(error)
 
     # Hardening for the orchestrator-owned squash commit. The agent has
     # write access to .git/hooks, .git/config (templatedir), and any
@@ -390,22 +394,22 @@ def _squash_and_force_push(
         env=commit_env,
     )
     if commit_r.returncode != 0:
-        _rollback("squash commit")
-        return (
-            False, None, 0,
+        return _fail_and_rollback(
+            "squash commit",
             f"squash commit failed: {(commit_r.stderr or '').strip()}",
         )
 
     new_sha = _head_sha(worktree)
     if not new_sha:
-        _rollback("post-commit head read")
-        return False, None, 0, "could not read new HEAD after squash"
+        return _fail_and_rollback(
+            "post-commit head read", "could not read new HEAD after squash"
+        )
 
     if not _push_branch(spec, worktree, branch, force_with_lease=original_head):
-        _rollback("force-push")
-        return False, None, 0, (
+        return _fail_and_rollback(
+            "force-push",
             "force-push with lease rejected (concurrent update on the "
-            "remote, or lease violation); see orchestrator logs"
+            "remote, or lease violation); see orchestrator logs",
         )
 
     return True, new_sha, len(subjects), None
