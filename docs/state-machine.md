@@ -41,8 +41,9 @@ Three non-workflow **control labels** modify behavior without occupying the work
   label is removed, while the read-only decomposer / reviewer / question runs simply re-run from durable state on the
   next tick. Because `paused` is a plain control label, removing it is the entire resume protocol — the next poll
   picks the issue back up from durable state; there is no un-pause command. This is distinct from `/orchestrator
-  continue` (§ `_handle_fixing` `_handle_continue_command`), which replays only specific `awaiting_human` parked
-  *retry* flows: pausing is never a `park_reason`, so a continue command is not an un-pause and does not clear
+  continue` (§ `_handle_fixing` `_handle_continue_command`, plus the shared implementing / documenting handling), which
+  retries only specific `awaiting_human` session-failure parked *retry* flows: pausing is never a `park_reason`, so a
+  continue command is not an un-pause and does not clear
   `paused`. It is unrelated to un-pausing, but not exempt from it — the hard skip fires in `_process_issue` before any
   handler, so a continue comment posted on a paused issue is deferred with everything else until the label is removed.
 - `community_contribution` is applied by the per-tick open-PR sweep when `ALLOWED_ISSUE_AUTHORS` is configured: any open
@@ -283,13 +284,17 @@ watermark).
 `_handle_fixing` and `_handle_question` deliberately skip the drift check. `_handle_fixing` refreshes
 `user_content_hash` itself once it has consumed the PR-side feedback; `_handle_question` runs its own conversation flow.
 
-Non-human content is filtered five ways:
+Non-human content is filtered six ways:
 
 - pinned-state comments by `PINNED_STATE_MARKER`;
 - orchestrator-posted comments by `_ORCH_COMMENT_MARKER` (an HTML comment embedded via `_with_orch_marker`, invisible in
   rendered Markdown, survives id-cap eviction);
 - legacy orchestrator comments by id from `orchestrator_comment_ids`;
 - third-party Bot/App accounts (Dependabot, Renovate, CI bots) via GitHub's `user.type == "Bot"` structural flag;
+- a bare `/orchestrator continue` operator command via `_is_bare_orchestrator_continue` — it is an operator control, not
+  requirements content, so it must not shift the hash and route the nudge through drift handling instead of the stage's
+  intentional session-limit retry (a comment carrying the command *alongside* genuine guidance is not bare, so it still
+  shifts the hash);
 - untrusted authors via `comment_trust.is_trusted_author` when `ALLOWED_ISSUE_AUTHORS` is set (opt-in; empty allowlist
   trusts everyone), so an outsider's comment cannot shift the hash and re-trigger drift on a public repo. The same trust
   helpers filter the conversation text fed to agent prompts: `_recent_comments_text` (implement / review /
@@ -309,8 +314,13 @@ Non-human content is filtered five ways:
   prompt.
 
 `_detect_user_content_change` durably persists the baseline on its FIRST encounter via `gh.write_pinned_state`, so an
-early-return tick cannot silently absorb a later edit as the new baseline. On drift the action depends on lifecycle
-position:
+early-return tick cannot silently absorb a later edit as the new baseline. It also carries a **legacy-hash
+normalization** path: a baseline written by the pre-issue-#729 algorithm counted a bare `/orchestrator continue`
+comment, so after deploy it would compare unequal to the new hash even with no real edit. Before reporting drift the
+helper recomputes with the old algorithm (`_compute_user_content_hash(..., include_bare_continue=True)`); if that
+reproduces the stored baseline the delta is purely the algorithm change, so it persists the new baseline and reports no
+drift — a bare continue outstanding at deploy time cannot fire one false "issue body/content changed" route. On drift
+the action depends on lifecycle position:
 
 - **`decomposing`** — handled inline at the top of `_handle_decomposing`: drop `decomposer_session_id`, wipe
   `children` / `dep_graph` / `expected_children_count` / `umbrella`, clear park flags, post a
@@ -451,6 +461,18 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      commit a descendant the timeout cleanup raced finishes *after* the park is recorded (the observed `#77` shape:
      commit timestamp landed after the timeout event) without needing a human "push it" comment. A real human comment
      takes precedence and drives the normal resume.
+     - **`/orchestrator continue` operator command** (`_handle_parked_continue_command`, run BEFORE the drift check so
+       the bare command is never mis-read as requirement drift). On a retryable session-failure park (`park_reason` in
+       `_CONTINUE_PARK_REASONS` = `agent_silent` / `agent_timeout`) a content-free continue retries the dev
+       intentionally (`_retry_parked_dev_session`): the command watermark is consumed, the session is resumed on a
+       neutral retry prompt — NOT the bare command text, so the dev is grounded on its transcript (or, once
+       `_resume_dev_with_text` rotates it, a fresh respawn preamble) rather than the nudge — and the result disposes
+       through the normal commit / timeout / question paths, with no "issue body changed" notice. A park needing a real
+       answer (any other `park_reason`) consumes the command and posts a refusal (`_refuse_parked_continue`) once, then
+       stays parked (no per-tick loop). A comment carrying the command *alongside* genuine guidance falls through to the
+       normal drift/resume path so the guidance drives the dev (`_continue_command_action` returns `passthrough`). The
+       classifier + parser + refusal live in `workflow_messages` and are shared with `_handle_fixing` and
+       `_handle_documenting`; a bare continue is also dropped from `_compute_user_content_hash` (see above).
   2. Otherwise ensure a per-issue worktree at `<WORKTREES_DIR>/<owner>__<name>/issue-<n>` on branch
      `orchestrator/<owner>__<name>/issue-<n>` (the slug-namespaced branch keeps two RepoSpecs sharing a `target_root`
      from colliding on the same `orchestrator/issue-<n>` ref). Worktrees with unpushed commits are reused (crash
@@ -498,7 +520,14 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
 - **Internal flow**:
   0. **External-merge / closed-issue short-circuit** (identical to `_handle_implementing`).
   1. **`pr_number` missing → park** with `missing_pr_number`. Documenting only runs against an existing PR worktree.
-  2. **User-content drift → relabel back to `validating`** without spawning the docs agent. A title/body edit (or
+  2. **`/orchestrator continue` refusal** (`_refuse_parked_continue_command`, run BEFORE the drift block). A bare
+     continue on a park needing a real answer consumes the command and posts a refusal (`_refuse_parked_continue`) once,
+     then stays parked. A retryable session-failure park (`agent_silent` / `agent_timeout`) and a command carrying
+     genuine guidance both fall through: because a bare continue no longer shifts `user_content_hash`, the drift block
+     below stays silent (no spurious `routing back to validating`) and the retry reruns the FULL docs pass through the
+     awaiting-human resume (step 7). The parser + classifier are shared with `_handle_implementing` / `_handle_fixing`;
+     documenting has no preserved feedback batch, so only the refusal needs interception here.
+  3. **User-content drift → relabel back to `validating`** without spawning the docs agent. A title/body edit (or
      fresh human comment) during the final-docs hop invalidates the prior approval, so the reviewer must re-evaluate
      before any docs work can land. Housekeeping: post a `:pencil2: routing back to validating` notice, advance
      `last_action_comment_id`, refresh `user_content_hash`, clear park flags, reset `review_round=0`. Reconcile the PR
@@ -507,21 +536,21 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
      survives. `docs_drift_unwind_pending` is set while the cleanup is in progress and cleared only on the relabel back
      to `validating`, so an operator unpark on a parked cleanup re-enters the drift block instead of falling through to
      a docs spawn.
-  3. Awaiting-human + no new comment → early return BEFORE the fetch so a transient `fetch_failed` / `diverged_branch`
+  4. Awaiting-human + no new comment → early return BEFORE the fetch so a transient `fetch_failed` / `diverged_branch`
      doesn't re-post its park every tick.
-  4. Ensure the PR worktree (`_ensure_pr_worktree`, restored from `<remote>/<branch>` so the dev's commits are intact)
+  5. Ensure the PR worktree (`_ensure_pr_worktree`, restored from `<remote>/<branch>` so the dev's commits are intact)
      and refresh via `_authed_fetch`. Failure parks with `fetch_failed`.
-  5. Ahead/behind check vs. the just-fetched `<remote>/<branch>`:
+  6. Ahead/behind check vs. the just-fetched `<remote>/<branch>`:
      - `behind > 0` → park with `diverged_branch` (force-pushing would clobber the real PR head).
      - `ahead > 0` recovered commits → synthesize an `AgentResult` and skip the agent; the unified branch below pushes
        the recovered docs commit.
      - `(0, 0)` → fall through.
-  6. Awaiting-human resume: rebuild the FULL docs prompt via `_build_documentation_prompt` (this may be the first time
+  7. Awaiting-human resume: rebuild the FULL docs prompt via `_build_documentation_prompt` (this may be the first time
      the session sees the docs-stage instructions), persist `docs_checked_sha=before_sha` BEFORE the spawn, then
      `_resume_dev_with_text`.
-  7. Fresh spawn: snapshot `before_sha`, persist `docs_checked_sha=before_sha` and `dev_agent` BEFORE invoking the
+  8. Fresh spawn: snapshot `before_sha`, persist `docs_checked_sha=before_sha` and `dev_agent` BEFORE invoking the
      agent, build the prompt (issue body + recent comments + `DOCS: NO_CHANGE` marker contract), then run.
-  8. Branch on result. Every success exit routes to `in_review` via `_advance_after_docs_push` /
+  9. Branch on result. Every success exit routes to `in_review` via `_advance_after_docs_push` /
      `_advance_after_docs_no_change`, which ratchets `pr_last_comment_id` past any issue-thread reply the resume
      consumed so in_review does not bounce over already-addressed feedback. Branches:
      - `interrupted` (shutdown sweep killed the run mid-flight) → ignore the partial result and return WITHOUT writing
@@ -561,6 +590,13 @@ so `DEV_AGENT` flips made mid-flight do not retarget the docs pass either.
      `/orchestrator add-review-rounds N` on its own line (honored only from an allowlisted author when
      `ALLOWED_ISSUE_AUTHORS` is set — an outsider's command is filtered out before the parse), which resets
      `review_round` to `MAX_REVIEW_ROUNDS - N`, clears the park, and falls through to spawn the reviewer this same tick.
+     A second exception: a bare `/orchestrator continue` on a session-failure dev park (`agent_silent` /
+     `agent_timeout`) is intercepted (`_continue_command_action`) and retries the dev on the neutral
+     `_CONTINUE_RETRY_PROMPT` — NOT the literal command, which the dev has no context for — while
+     `_handle_dev_fix_result` still publishes any stranded commit; a bare continue on a park needing a real answer
+     refuses (`_refuse_parked_continue`) and stays parked. A command carrying real guidance, or a normal reply, resumes
+     the dev on that text as before. (Shared with `implementing` / `documenting` / `resolving_conflict`; see the
+     drift-detection section for the bare-continue hash exclusion.)
   2. If `review_round >= MAX_REVIEW_ROUNDS` (default 3), park (`review_cap`). The park comment surfaces the
      `/orchestrator add-review-rounds N` escape hatch.
   3. Otherwise persist `config.REVIEW_AGENT_SPEC` to `review_agent` (traceability only — the reviewer is spawned fresh
@@ -780,7 +816,10 @@ state. The PR comment that triggers a route to `fixing` is the human signal; awa
      worktree / branch by hand if the PR later closes.
   4. **Awaiting-human resume**: when parked from a previous round and a new human comment arrived, resume the dev
      session on the in-progress rebase worktree with the human's text. The post-agent step uses the same
-     `_post_conflict_resolution_result` helper as the fresh path.
+     `_post_conflict_resolution_result` helper as the fresh path. A bare `/orchestrator continue` here is intercepted
+     like `validating`'s: a session-failure park (`agent_silent` / `agent_timeout`) retries the dev on the neutral
+     `_CONTINUE_RETRY_PROMPT` instead of the literal command, a park needing a real answer refuses, and an auto-rebase
+     park is left to the refresh retry-unpark (`_continue_command_action` / `_refuse_parked_continue`).
   5. **Cap check**: if `conflict_round >= MAX_CONFLICT_ROUNDS`, park. Escape: (a) operator relabels off
      `resolving_conflict`, or (b) a new issue comment unparks via the resume branch.
   6. Ensure the PR worktree via `_ensure_pr_worktree` (restores from `<remote>/<branch>`, NOT base —

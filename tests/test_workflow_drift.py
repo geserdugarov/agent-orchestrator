@@ -77,6 +77,85 @@ class ComputeUserContentHashTest(unittest.TestCase):
             workflow._compute_user_content_hash(issue_with_pinned, set()),
         )
 
+    def test_bare_orchestrator_continue_excluded_but_guidance_counts(
+        self,
+    ) -> None:
+        # A bare `/orchestrator continue` is an operator command, not
+        # requirements content: it must not shift the hash (else it routes
+        # through generic drift handling instead of the intentional
+        # session-limit retry, issue #729). The same command carrying real
+        # guidance is NOT bare, so it still shifts the hash.
+        issue = make_issue(1)
+        bare = FakeComment(
+            id=100, body="/orchestrator continue", user=FakeUser("alice"),
+        )
+        guided = FakeComment(
+            id=101, body="/orchestrator continue\nalso rename the flag",
+            user=FakeUser("alice"),
+        )
+        self.assertEqual(
+            workflow._compute_user_content_hash(issue, set()),
+            workflow._compute_user_content_hash(
+                make_issue(1, comments=[bare]), set()
+            ),
+        )
+        self.assertNotEqual(
+            workflow._compute_user_content_hash(issue, set()),
+            workflow._compute_user_content_hash(
+                make_issue(1, comments=[guided]), set()
+            ),
+        )
+
+
+class ContinueCommandActionTest(unittest.TestCase):
+    """`_continue_command_action` classifies an operator `/orchestrator
+    continue` on a parked `implementing` / `documenting` issue. Retryable
+    session-failure parks with a content-free nudge retry; parks needing a
+    real answer refuse; anything else (no command, or a command carrying
+    guidance) passes through to the normal resume / drift path."""
+
+    def _c(self, body: str) -> FakeComment:
+        return FakeComment(id=1, body=body, user=FakeUser("alice"))
+
+    def test_retryable_park_bare_continue_retries(self) -> None:
+        for reason in ("agent_silent", "agent_timeout"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    workflow._continue_command_action(
+                        [self._c("/orchestrator continue")], reason,
+                    ),
+                    "retry",
+                )
+
+    def test_non_retryable_park_bare_continue_refuses(self) -> None:
+        for reason in (None, "dirty_worktree", "diverged_branch"):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    workflow._continue_command_action(
+                        [self._c("/orchestrator continue")], reason,
+                    ),
+                    "refuse",
+                )
+
+    def test_command_with_guidance_passes_through(self) -> None:
+        # The command is present but the comment also carries guidance, so
+        # the normal resume/drift path should feed that guidance to the dev.
+        self.assertEqual(
+            workflow._continue_command_action(
+                [self._c("/orchestrator continue\nrename the flag")],
+                "agent_silent",
+            ),
+            "passthrough",
+        )
+
+    def test_no_command_passes_through(self) -> None:
+        self.assertEqual(
+            workflow._continue_command_action(
+                [self._c("just a normal reply")], "agent_silent",
+            ),
+            "passthrough",
+        )
+
 
 class DetectUserContentChangeTest(unittest.TestCase):
     def test_first_call_persists_durably_and_returns_none(self) -> None:
@@ -137,6 +216,62 @@ class DetectUserContentChangeTest(unittest.TestCase):
         # use the comparison without committing to a state write).
         self.assertEqual(gh.write_state_calls, before)
         self.assertEqual(state.get("user_content_hash"), prior)
+
+    def test_legacy_baseline_with_bare_continue_absorbs_without_drift(
+        self,
+    ) -> None:
+        # A baseline written by the pre-#729 algorithm counted a bare
+        # `/orchestrator continue` comment. After deploy the new algorithm
+        # excludes it, so the hashes differ even though the requirements did
+        # not change. `_detect_user_content_change` must recognize the stored
+        # baseline as the legacy hash and absorb it (persist the new baseline,
+        # report no drift) rather than firing one false "issue body changed".
+        gh = FakeGitHubClient()
+        cont = FakeComment(
+            id=100, body="/orchestrator continue", user=FakeUser("dave"),
+        )
+        issue = make_issue(1, comments=[cont])
+        gh.add_issue(issue)
+        legacy_hash = workflow._compute_user_content_hash(
+            issue, set(), include_bare_continue=True,
+        )
+        new_hash = workflow._compute_user_content_hash(issue, set())
+        self.assertNotEqual(legacy_hash, new_hash)  # the algorithm changed
+        gh.seed_state(1, user_content_hash=legacy_hash)
+        state = gh.read_pinned_state(issue)
+
+        result = workflow._detect_user_content_change(gh, issue, state)
+
+        # No drift reported; the baseline is normalized to the new algorithm
+        # and durably persisted so the next tick is stable.
+        self.assertIsNone(result)
+        self.assertEqual(state.get("user_content_hash"), new_hash)
+        self.assertEqual(gh.pinned_data(1).get("user_content_hash"), new_hash)
+
+    def test_real_edit_alongside_bare_continue_still_drifts(self) -> None:
+        # The legacy-normalization path must not swallow a genuine edit: when
+        # the body actually changed AND a bare continue is present, the legacy
+        # hash (old algorithm over the NEW content) still differs from the
+        # stored baseline, so drift is reported.
+        cont = FakeComment(
+            id=100, body="/orchestrator continue", user=FakeUser("dave"),
+        )
+        old_issue = make_issue(1, body="old", comments=[cont])
+        prior = workflow._compute_user_content_hash(
+            old_issue, set(), include_bare_continue=True,
+        )
+        new_issue = make_issue(1, body="new body", comments=[cont])
+        gh = FakeGitHubClient()
+        gh.add_issue(new_issue)
+        gh.seed_state(1, user_content_hash=prior)
+        state = gh.read_pinned_state(new_issue)
+
+        result = workflow._detect_user_content_change(gh, new_issue, state)
+
+        self.assertEqual(
+            result, workflow._compute_user_content_hash(new_issue, set()),
+        )
+        self.assertIsNotNone(result)
 
 
 class HandlePickupInitializesUserContentHashTest(

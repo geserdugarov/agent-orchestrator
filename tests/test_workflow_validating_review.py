@@ -606,6 +606,86 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
         )
 
 
+class HandleValidatingContinueCommandTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """`/orchestrator continue` on a parked `validating` dev fix is an operator
+    command, not ordinary resume text (issue #729). A session-failure park
+    (`agent_silent` / `agent_timeout`) retries the dev on a neutral prompt
+    without feeding the literal command; a park needing a real answer refuses."""
+
+    def _seed(self, number, *, park_reason, command="/orchestrator continue"):
+        gh = FakeGitHubClient()
+        issue = make_issue(number, label="validating", body="the requirements")
+        issue.comments.append(
+            FakeComment(id=1100, body=command, user=FakeUser("dave"))
+        )
+        gh.add_issue(issue)
+        gh.seed_state(
+            number,
+            awaiting_human=True,
+            park_reason=park_reason,
+            last_action_comment_id=950,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            silent_park_count=1,
+            review_round=1,
+            pr_number=13,
+            branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}",
+            # Current content hash so a bare continue (excluded from the hash)
+            # does not fire drift: the continue gate, not drift, is under test.
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
+        )
+        return gh, issue
+
+    def test_agent_silent_bare_continue_retries_without_literal_command(
+        self,
+    ) -> None:
+        gh, issue = self._seed(7, park_reason="agent_silent")
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dev-sess", last_message="fixed"),
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["aaa", "bbb"],
+        )
+
+        # The dev is resumed on the neutral retry prompt, NOT the literal command.
+        self.assertEqual(mocks["run_agent"].call_count, 1)
+        followup = mocks["run_agent"].call_args.args[1]
+        self.assertIn("session/usage limit", followup)
+        self.assertNotIn("/orchestrator continue", followup)
+        self.assertEqual(
+            mocks["run_agent"].call_args.kwargs.get("resume_session_id"),
+            "dev-sess",
+        )
+        # No spurious drift notice; the fix pushed and the round bumped.
+        self.assertFalse(any(
+            "issue body changed" in body for _, body in gh.posted_comments
+        ))
+        state = gh.pinned_data(7)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertEqual(state.get("review_round"), 2)
+        self.assertEqual(state.get("last_action_comment_id"), 1100)
+
+    def test_bare_continue_on_question_park_refuses(self) -> None:
+        gh, issue = self._seed(8, park_reason=None)
+
+        mocks = self._run(
+            lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        mocks["run_agent"].assert_not_called()
+        self.assertTrue(any(
+            "needs your actual guidance" in body
+            for _, body in gh.posted_comments
+        ))
+        state = gh.pinned_data(8)
+        self.assertTrue(state.get("awaiting_human"))
+
+
 class HandleValidatingReviewCapAddRoundsCommandTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):

@@ -41,20 +41,29 @@ from .workflow_messages import (
     _COMMIT_STYLE_NOTE,
     _FOREGROUND_ONLY_NOTE,
     _ORCH_COMMENT_MARKER,
+    _is_bare_orchestrator_continue,
     _orchestrator_ids,
     _post_issue_comment,
 )
 
 
 def _compute_user_content_hash(
-    issue: Issue, orchestrator_ids: set[int]
+    issue: Issue, orchestrator_ids: set[int],
+    *, include_bare_continue: bool = False,
 ) -> str:
     """SHA-256 over title + body + human-authored comments.
 
     Used by `_detect_user_content_change` so the orchestrator can react
     when a human edits the issue body or adds acceptance criteria after
-    the workflow has already picked it up. Non-human content is filtered
-    five ways:
+    the workflow has already picked it up.
+
+    `include_bare_continue` is the legacy-compat escape hatch: with it True the
+    bare `/orchestrator continue` filter (below) is skipped, reproducing the
+    pre-issue-#729 algorithm. `_detect_user_content_change` uses it to recognize
+    a baseline written by the old algorithm and absorb the one-time delta instead
+    of firing false drift. Default False (the current algorithm).
+
+    Non-human content is filtered six ways:
 
     * pinned-state comment by `PINNED_STATE_MARKER`;
     * orchestrator-posted comments by `_ORCH_COMMENT_MARKER` embedded in
@@ -73,6 +82,13 @@ def _compute_user_content_hash(
       re-triggering drift (and the re-decompose / dev-resume it drives) on
       a public repo. With no allowlist configured everyone is trusted, so
       the default deployment's hash is unchanged.
+    * a bare `/orchestrator continue` operator command by
+      `_is_bare_orchestrator_continue`. The command is an operator control,
+      not requirements content: counting it would shift the hash and route
+      the nudge through generic "issue body/content changed" drift handling
+      instead of the stage's intentional session-limit retry (issue #729).
+      A comment carrying the command ALONGSIDE genuine guidance is NOT bare,
+      so it still shifts the hash and drives the normal drift/resume path.
 
     The orchestrator's OWN comments are dropped by marker/id (above),
     never by login, so a PAT shared with a human reviewer's account does
@@ -95,6 +111,8 @@ def _compute_user_content_hash(
             continue
         if not is_trusted_author(user):
             continue
+        if not include_bare_continue and _is_bare_orchestrator_continue(c):
+            continue
         parts.append(body)
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
 
@@ -114,6 +132,15 @@ def _detect_user_content_change(
     absorbed. The cost is one extra write per legacy issue still missing
     the field on first encounter; in steady state the hash is already set
     and this branch never fires.
+
+    Legacy-hash normalization: an issue whose baseline was written by the
+    pre-issue-#729 algorithm (which counted a bare `/orchestrator continue`
+    comment) compares unequal to the new `current` even when the requirements
+    did not change. Before reporting drift, recompute with the OLD algorithm
+    (`include_bare_continue=True`); if that reproduces the stored baseline the
+    delta is purely the algorithm change, so persist the new baseline and report
+    no drift. This keeps a bare continue outstanding at deploy time from firing
+    one false "issue body/content changed" route.
     """
     orchestrator_ids = _orchestrator_ids(state)
     current = _compute_user_content_hash(issue, orchestrator_ids)
@@ -123,6 +150,13 @@ def _detect_user_content_change(
         gh.write_pinned_state(issue, state)
         return None
     if current == prior:
+        return None
+    legacy = _compute_user_content_hash(
+        issue, orchestrator_ids, include_bare_continue=True,
+    )
+    if legacy == prior:
+        state.set("user_content_hash", current)
+        gh.write_pinned_state(issue, state)
         return None
     return current
 

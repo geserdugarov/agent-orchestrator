@@ -968,6 +968,21 @@ def _handle_validating_awaiting_human(
         state.set("park_reason", None)
         return "spawn_reviewer"
     else:
+        # `/orchestrator continue` on a parked dev fix, BEFORE the generic
+        # comment resume. A session-failure park (`agent_silent` /
+        # `agent_timeout`) retries the dev intentionally on a neutral prompt --
+        # NOT the literal command, which the dev has no context for and would
+        # re-park on -- while a park needing a real answer (a genuine question,
+        # a dirty worktree) refuses. A command carrying real guidance, or a
+        # normal reply, resumes the dev on that text as before.
+        continue_action = (
+            _wf._continue_command_action(new_comments, park_reason)
+            if new_comments else "passthrough"
+        )
+        if continue_action == "refuse":
+            _wf._refuse_parked_continue(gh, issue, state)
+            gh.write_pinned_state(issue, state)
+            return "return"
         wt = _wf._worktree_path(spec, issue.number)
         if not wt.exists():
             wt = _wf._ensure_worktree(
@@ -975,12 +990,26 @@ def _handle_validating_awaiting_human(
                 branch=_wf._resolve_branch_name(state, spec, issue.number),
             )
         before_sha = _wf._head_sha(wt)
-        resumed = _wf._resume_developer_on_human_reply(
-            gh, spec, issue, state, pause_guard=True,
-        )
-        if resumed is None:
-            return "return"
-        wt, result, paused = resumed
+        if continue_action == "retry":
+            # Consume the command watermark and resume on the neutral retry
+            # prompt (not the bare command). `_handle_dev_fix_result` below
+            # still publishes any stranded commit or a fresh fix.
+            state.set(
+                "last_action_comment_id", max(c.id for c in new_comments),
+            )
+            followup = (
+                f"{_wf._CONTINUE_RETRY_PROMPT}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
+            )
+            wt, result, paused = _wf._resume_dev_with_text(
+                gh, spec, issue, state, followup, pause_guard=True,
+            )
+        else:
+            resumed = _wf._resume_developer_on_human_reply(
+                gh, spec, issue, state, pause_guard=True,
+            )
+            if resumed is None:
+                return "return"
+            wt, result, paused = resumed
         state.set("last_agent_action_at", _wf._now_iso())
         if paused:
             # Live pause applied mid-resume: stop before

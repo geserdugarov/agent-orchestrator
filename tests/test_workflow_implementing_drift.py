@@ -423,3 +423,139 @@ class ImplementingDriftAwaitingHumanNoDevSessionTest(
         self.assertGreaterEqual(
             int(state.get("last_action_comment_id")), 500,
         )
+
+
+class ImplementingContinueCommandTest(
+    unittest.TestCase, _PatchedWorkflowMixin,
+):
+    """`/orchestrator continue` on a parked `implementing` issue is an
+    operator command, not requirements drift (issue #729, the #720 shape). A
+    retryable session-failure park retries the dev intentionally without a
+    spurious "issue body changed" notice and without feeding the bare command
+    as guidance; a park needing a real answer refuses; a command carrying real
+    guidance falls through to the normal drift resume so the guidance drives
+    the dev."""
+
+    def _seed_parked(
+        self, number: int, *, park_reason, command_body="/orchestrator continue",
+        drift_neutral=False,
+    ):
+        gh = FakeGitHubClient()
+        issue = make_issue(number, label="implementing", body="the requirements")
+        issue.comments.append(
+            FakeComment(id=9000, body=command_body, user=FakeUser("dave"))
+        )
+        gh.add_issue(issue)
+        # `drift_neutral` seeds the CURRENT content hash so drift is out of the
+        # picture (the refuse path, not a drift no-op, is what's under test);
+        # otherwise a stale hash proves the command handler intercepts BEFORE
+        # drift detection would fire.
+        content_hash = (
+            workflow._compute_user_content_hash(issue, set())
+            if drift_neutral else "stale-hash"
+        )
+        gh.seed_state(
+            number,
+            user_content_hash=content_hash,
+            dev_agent="claude",
+            dev_session_id="dev-sess",
+            awaiting_human=True,
+            park_reason=park_reason,
+            silent_park_count=1,
+            last_action_comment_id=8000,
+            branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}",
+        )
+        return gh, issue
+
+    def test_agent_silent_bare_continue_retries_without_drift_notice(
+        self,
+    ) -> None:
+        # The #720 shape: parked `agent_silent`, stale watermark, human posts
+        # exactly `/orchestrator continue`. The dev session is resumed
+        # intentionally -- no "issue body changed" / "issue content changed"
+        # notice, and the bare command is NOT fed as the dev prompt.
+        gh, issue = self._seed_parked(730, park_reason="agent_silent")
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dev-sess", last_message="finished it"),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["sha-before", "sha-after"],
+        )
+
+        # The dev retry/resume path is entered -- the poisoned but healthy
+        # session is resumed (not rotated), on the neutral retry prompt.
+        mocks["run_agent"].assert_called_once()
+        prompt = mocks["run_agent"].call_args[0][1]
+        self.assertIn("session/usage limit", prompt)
+        self.assertNotIn("/orchestrator continue", prompt)
+        self.assertEqual(
+            mocks["run_agent"].call_args.kwargs.get("resume_session_id"),
+            "dev-sess",
+        )
+        # No drift notice of any kind.
+        self.assertFalse(any(
+            "issue body changed" in body or "issue content changed" in body
+            for _, body in gh.posted_comments
+        ))
+        # The retry produced a commit, so the issue advanced to validating and
+        # the command comment is consumed (won't re-fire next tick).
+        self.assertIn((730, "validating"), gh.label_history)
+        self.assertEqual(len(gh.opened_prs), 1)
+        self.assertEqual(gh.pinned_data(730).get("last_action_comment_id"), 9000)
+
+    def test_bare_continue_on_question_park_refuses_and_does_not_loop(
+        self,
+    ) -> None:
+        # A real agent question parks with `park_reason=None`. A content-free
+        # continue carries no answer, so refuse and stay parked -- and the
+        # refusal must not re-post every tick.
+        gh, issue = self._seed_parked(731, park_reason=None, drift_neutral=True)
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+        # Second tick with no new human comment must not re-refuse or resume.
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+        )
+
+        mocks["run_agent"].assert_not_called()
+        refusals = [
+            body for _, body in gh.posted_comments
+            if "needs your actual guidance" in body
+        ]
+        self.assertEqual(len(refusals), 1)
+        self.assertEqual(gh.opened_prs, [])
+        state = gh.pinned_data(731)
+        self.assertTrue(state.get("awaiting_human"))
+        # Command AND the refusal are consumed so nothing re-fires.
+        self.assertGreaterEqual(
+            int(state.get("last_action_comment_id")), 9000,
+        )
+
+    def test_continue_with_guidance_preserves_guidance(self) -> None:
+        # A `/orchestrator continue` posted ALONGSIDE real guidance is not a
+        # bare command: it falls through to the normal drift resume, which
+        # feeds the guidance to the dev (it must not be dropped).
+        gh, issue = self._seed_parked(
+            732, park_reason="agent_silent",
+            command_body="/orchestrator continue\nrename the flag to --strict",
+        )
+
+        mocks = self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="dev-sess", last_message="done"),
+            has_new_commits=True,
+            dirty_files=(),
+            push_branch=True,
+            head_shas=["sha-before", "sha-after"],
+        )
+
+        mocks["run_agent"].assert_called_once()
+        prompt = mocks["run_agent"].call_args[0][1]
+        self.assertIn("rename the flag to --strict", prompt)

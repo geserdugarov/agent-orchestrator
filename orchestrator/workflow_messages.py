@@ -19,6 +19,10 @@ Covers:
   (`_build_user_content_change_prompt`) lives in `workflow_drift.py`,
   not here.
 * Manifest, review verdict, and drift-ACK parsers.
+* The `/orchestrator continue` operator-command parser + classifier
+  (`_parse_orchestrator_continue`, `_is_bare_orchestrator_continue`,
+  `_continue_command_action`, `_refuse_parked_continue`), shared by the
+  `fixing`, `implementing`, and `documenting` stages.
 * Recent-comment formatting for prompts.
 """
 from __future__ import annotations
@@ -441,6 +445,127 @@ def _drift_ack_reason(last_message: str) -> Optional[str]:
     if not matches:
         return None
     return matches[-1].group(1).strip() or None
+
+
+# Park reasons a `/orchestrator continue` operator command may retry: a dev
+# session that went silent (`agent_silent` -- a poisoned resume that produced
+# no output, or a session/usage-limit stop parked under this reason) or timed
+# out (`agent_timeout`). Both are session-limit / session-failure conditions
+# whose recovery is "retry the dev flow on a fresh or replayed session", not
+# "wait for a human answer". Every other awaiting-human shape -- a real agent
+# question or a dirty worktree (both `park_reason=None`), a stuck push, a
+# missing PR -- needs the human's actual guidance, so the command is refused
+# there. Shared by the `fixing`, `implementing`, and `documenting` stages.
+_CONTINUE_PARK_REASONS = frozenset({"agent_silent", "agent_timeout"})
+
+# `/orchestrator continue` operator command, matched as an EXACT LINE
+# (anchored to line boundaries, mirrors `_ADD_REVIEW_ROUNDS_RE` in
+# `stages.validating`) so prose that mentions the command in backticks cannot
+# fire it. `search` detects the command line inside a larger comment -- so a
+# comment that carries the command AND real guidance still counts as the
+# command -- while `_is_bare_orchestrator_continue` (whole stripped body == the
+# line) tells a content-free nudge apart from a comment that also carries
+# guidance.
+_ORCHESTRATOR_CONTINUE_RE = re.compile(
+    r"^[ \t]*/orchestrator[ \t]+continue[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _parse_orchestrator_continue(comments: list) -> list:
+    """Return the comments whose body contains an exact-line
+    `/orchestrator continue` operator command."""
+    return [
+        c for c in comments if _ORCHESTRATOR_CONTINUE_RE.search(c.body or "")
+    ]
+
+
+def _is_bare_orchestrator_continue(comment) -> bool:
+    """True when the comment's ENTIRE body is the command line and nothing
+    else -- a content-free nudge whose consumption drops no guidance."""
+    return (
+        _ORCHESTRATOR_CONTINUE_RE.fullmatch((comment.body or "").strip())
+        is not None
+    )
+
+
+def _continue_command_action(new_comments: list, park_reason) -> str:
+    """Classify an operator `/orchestrator continue` on a parked dev-session
+    stage (`implementing` / `documenting` / `validating` / `resolving_conflict`)
+    whose park carries no preserved feedback batch to replay -- the counterpart
+    to `fixing`'s richer `_handle_continue_command`, which can reconstruct an
+    in_review batch.
+
+    `new_comments` is the fresh trusted issue-thread comments since the last
+    consumed watermark. Returns:
+
+      * ``"retry"``       -- a retryable session-failure park
+        (`agent_silent` / `agent_timeout`) whose fresh comments are ALL bare
+        continues: retry the parked dev flow intentionally, without feeding
+        the bare command to the dev as guidance.
+      * ``"refuse"``      -- a park that needs real guidance (a genuine agent
+        question, a dirty worktree, a diverged branch, ...) whose fresh
+        comments are ALL bare continues: the command carries no answer, so
+        refuse and stay parked.
+      * ``"passthrough"`` -- no continue command is present, or the command
+        arrived alongside genuine guidance: the caller's normal
+        resume / drift path handles the comments (and feeds that guidance to
+        the dev).
+    """
+    if not _parse_orchestrator_continue(new_comments):
+        return "passthrough"
+    if not all(_is_bare_orchestrator_continue(c) for c in new_comments):
+        return "passthrough"
+    if park_reason in _CONTINUE_PARK_REASONS:
+        return "retry"
+    return "refuse"
+
+
+# Neutral resume prompt for an intentional `/orchestrator continue` retry of a
+# session-failure park, shared by the dev-parking stages (`implementing` /
+# `documenting`'s docs rerun aside, `validating`, `resolving_conflict`).
+# Deliberately NOT the bare command text: the parked dev session already carries
+# its task in the replayed transcript, or is re-grounded from the issue body +
+# recent comments when `_resume_dev_with_text` rotates it to a fresh spawn, so
+# the followup only has to say "carry on".
+_CONTINUE_RETRY_PROMPT = (
+    "Resuming after a session/usage limit or a silent session failure. "
+    "Re-read the issue requirements and the conversation in your transcript, "
+    "then CONTINUE the work already in progress and COMMIT any remaining "
+    "changes in your current worktree. Do NOT push -- the orchestrator pushes "
+    "and re-runs the reviewer."
+)
+
+
+# Refusal posted when a content-free `/orchestrator continue` lands on a
+# dev-parking stage park that needs a real human answer (a genuine agent
+# question or a worktree the dev could not finish). Mirrors the non-retryable
+# refusal `fixing._handle_continue_command` posts.
+_CONTINUE_NEEDS_GUIDANCE_MSG = (
+    f"{config.HITL_MENTIONS} `/orchestrator continue` needs your actual "
+    "guidance here: this park is waiting on a real answer (an agent question, "
+    "or a worktree it could not finish), not a generic continue. Reply with "
+    "the specific change to make, or relabel the issue, to proceed."
+)
+
+
+def _refuse_parked_continue(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> None:
+    """Consume a content-free `/orchestrator continue` and post a refusal on a
+    park that needs real human guidance, leaving the issue parked.
+
+    Shared by the dev-parking stages (`implementing`, `documenting`,
+    `validating`, `resolving_conflict`): a bare continue on a non-retryable
+    park carries no answer, so post a single note and advance the
+    issue watermark past BOTH the command and the refusal (so neither re-fires
+    next tick and the refusal is not re-posted every poll). `awaiting_human`
+    stays set. Mutates in-memory state only; the caller writes pinned state.
+    """
+    _post_issue_comment(gh, issue, state, _CONTINUE_NEEDS_GUIDANCE_MSG)
+    latest = gh.latest_comment_id(issue)
+    if latest is not None:
+        state.set("last_action_comment_id", latest)
 
 
 # Captures the JSON payload between a fenced ```orchestrator-manifest block.

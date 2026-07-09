@@ -479,13 +479,31 @@ def _resume_awaiting_human(
     new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
     if not new_comments:
         return  # no human reply yet
+    # `/orchestrator continue` on a parked rebase, BEFORE the generic comment
+    # resume. A session-failure park (`agent_silent` / `agent_timeout`) retries
+    # the dev intentionally on a neutral prompt -- NOT the literal command,
+    # which the dev has no context for -- while a park needing a real answer
+    # refuses. Auto-rebase parks belong to the refresh retry-unpark, so leave
+    # those (and command-plus-guidance / normal replies) to the resume below.
+    park_reason = state.get("park_reason")
+    continue_action = (
+        "passthrough" if park_reason in _wf._AUTO_REBASE_PARK_REASONS
+        else _wf._continue_command_action(new_comments, park_reason)
+    )
+    if continue_action == "refuse":
+        _wf._refuse_parked_continue(gh, issue, state)
+        gh.write_pinned_state(issue, state)
+        return
     consumed_max = max(c.id for c in new_comments)
     state.set("last_action_comment_id", consumed_max)
-    followup = "\n\n".join(
-        f"@{c.user.login if c.user else 'user'}: {c.body}"
-        for c in new_comments if c.body
-    )
-    followup = f"{followup}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
+    if continue_action == "retry":
+        followup = f"{_wf._CONTINUE_RETRY_PROMPT}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
+    else:
+        followup = "\n\n".join(
+            f"@{c.user.login if c.user else 'user'}: {c.body}"
+            for c in new_comments if c.body
+        )
+        followup = f"{followup}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _wf._ensure_pr_worktree(
