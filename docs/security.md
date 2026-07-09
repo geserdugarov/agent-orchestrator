@@ -222,6 +222,28 @@ The security posture:
   the real trust boundary (see [above](#ai-generated-code-review-tests-and-scans) and
   [`architecture.md#design-constraints`](architecture.md#design-constraints)).
 
+## Pinned-state authentication
+
+The workflow's durable state — the `<!--orchestrator-state ...-->` JSON comment — is authenticated separately from the
+`ALLOWED_ISSUE_AUTHORS` boundary above. That allowlist decides which comments are *workflow input*; it does **not**
+decide which comment holds *authoritative state*. `read_pinned_state` trusts a comment as state only when **both** hold:
+it is authored by the account backing the orchestrator's token (resolved once from `GET /user` and threaded into
+worker-thread clients), **and** its entire body is the state marker — exactly what `write_pinned_state` emits.
+
+- **Author, not marker presence.** Any account can post — or edit an older comment to carry — the hidden state marker.
+  Trusting the first marker by document order would let an outsider preempt the real pinned state and steer agent
+  session fields, branch / PR selection, and terminal branch cleanup (CWE-345). A foreign author's marker is skipped
+  before its body is parsed, so it cannot even shadow state with malformed JSON.
+- **State-only body, not embedded substring.** The author check alone is not enough: the orchestrator posts ordinary
+  comments (e.g. decomposer rationale via `_post_issue_comment`) whose text is attacker-influenced, and does so before
+  the real state comment exists on a manually-labeled issue. Such a comment that merely embeds a marker in prose is not
+  state-only, so it is never mistaken for state — only a comment that is *nothing but* the marker qualifies.
+- **Legacy-safe, no migration.** Existing pinned comments were written by this same account and are state-only by
+  construction, so both checks keep honoring them; state writes keep targeting the trusted comment id once found.
+- **Independent of the comment boundary.** This authenticates *which comment is state*; `ALLOWED_ISSUE_AUTHORS`
+  authenticates *which comments are input*. Both are enforced independently, and the state boundary applies even when
+  the allowlist is unset.
+
 ## Cross-repo awareness disclosure (`EXPOSE_TRACKED_REPOS`)
 
 When more than one repo is configured (`REPOS`) and `EXPOSE_TRACKED_REPOS` is on (the default), working-agent prompts
