@@ -100,6 +100,13 @@ def _arm_shutdown_watchdog(signum: int) -> None:
     ).start()
 
 
+# Hard cap on the shutdown-budget slice reserved for the forced terminate
+# sweep (`_shutdown_terminate_grace`). Matches the default grace
+# `agents.terminate_all_running` gives a SIGTERM'd group before it SIGKILLs,
+# so the reserve covers one full sweep of a child that ignores SIGTERM.
+_TERMINATE_SWEEP_RESERVE_CAP_SECONDS = 5.0
+
+
 def _shutdown_terminate_grace() -> float:
     """Slice of `SHUTDOWN_GRACE_SECONDS` reserved for the forced terminate sweep.
 
@@ -114,7 +121,7 @@ def _shutdown_terminate_grace() -> float:
     larger share, and is never the full budget (which would leave the drain
     no window at all).
     """
-    return min(5.0, config.SHUTDOWN_GRACE_SECONDS / 2)
+    return min(_TERMINATE_SWEEP_RESERVE_CAP_SECONDS, config.SHUTDOWN_GRACE_SECONDS / 2)
 
 
 def _run_shutdown_watchdog(signum: int) -> None:
