@@ -10,8 +10,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
-
 from orchestrator import agents, config, verify, workflow
 
 from tests.fakes import (

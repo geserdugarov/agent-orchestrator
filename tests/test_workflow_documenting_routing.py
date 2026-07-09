@@ -6,11 +6,8 @@ no-`pr_number` park stability checks. Handler-behavior tests live in
 `tests/test_workflow_documenting.py`."""
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow
 

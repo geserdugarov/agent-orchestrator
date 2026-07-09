@@ -16,11 +16,8 @@ these cases establish the pattern for future direct `_run_agent_tracked` paths.
 """
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import MagicMock, patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow
 from orchestrator.github import PAUSED_LABEL

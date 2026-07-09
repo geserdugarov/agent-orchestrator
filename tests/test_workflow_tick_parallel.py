@@ -2,13 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import os
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

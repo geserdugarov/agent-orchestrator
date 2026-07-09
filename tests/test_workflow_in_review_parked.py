@@ -5,12 +5,9 @@ manually-closed issues with a still-open PR, and the stale-park-reason clear
 on the route to fixing."""
 from __future__ import annotations
 
-import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

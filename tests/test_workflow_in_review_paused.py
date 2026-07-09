@@ -10,11 +10,8 @@ unconsumed (the stale hash stands) and the committed work stays on the branch
 until the label is removed."""
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import MagicMock, patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow
 from orchestrator.github import PAUSED_LABEL

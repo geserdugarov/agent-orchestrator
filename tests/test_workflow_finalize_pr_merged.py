@@ -6,10 +6,7 @@ merged-PR finalize on an open vs. already-closed issue, and the terminal
 usage-verdict receipt it posts (tracked before the pinned-state write)."""
 from __future__ import annotations
 
-import os
 import unittest
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow
 

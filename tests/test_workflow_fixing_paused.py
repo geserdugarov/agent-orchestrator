@@ -10,12 +10,9 @@ unconsumed and the committed work stays on the branch until the label is
 removed, when a later tick re-discovers the feedback and republishes."""
 from __future__ import annotations
 
-import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 from orchestrator.github import PAUSED_LABEL

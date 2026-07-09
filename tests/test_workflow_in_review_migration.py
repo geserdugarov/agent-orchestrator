@@ -5,12 +5,9 @@ fallback that keeps a legacy '0' from being displaced by a higher
 last_action_comment_id."""
 from __future__ import annotations
 
-import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

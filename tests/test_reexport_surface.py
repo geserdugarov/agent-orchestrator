@@ -11,10 +11,7 @@ to (or dropped from) the import block cannot silently drift out of `__all__`.
 from __future__ import annotations
 
 import ast
-import os
 import unittest
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import dashboard, workflow, worktrees
 from orchestrator.analytics import read as analytics_read

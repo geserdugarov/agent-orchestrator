@@ -26,37 +26,12 @@ unwinds back to `None`.
 """
 from __future__ import annotations
 
-import os
+from unittest.mock import patch
 
-# `orchestrator.config` reads `DEV_AGENT` / `REVIEW_AGENT` /
-# `DECOMPOSE_AGENT` from the ambient env at import time and exposes both
-# the raw spec (`*_SPEC`) and the parsed name (`config.REVIEW_AGENT`).
-# Tests patch `config.REVIEW_AGENT` to a bare agent name, but stage
-# handlers actually pin `config.REVIEW_AGENT_SPEC`, so an operator's
-# `REVIEW_AGENT="codex -m ..."` shell export leaks into pinned-state
-# assertions and trips `uv run pytest`. Clearing these BEFORE the first
-# `orchestrator.config` import below makes the suite hermetic regardless
-# of the shell environment.
-#
-# `ALLOWED_ISSUE_AUTHORS` is the same class of leak: config reads it at
-# import time, and the comment-trust filter now drops non-allowlisted
-# authors from prompt conversation text and the drift hash. An operator
-# who exported it (a real deployment does) would otherwise see the
-# suite's default fake authors (`alice`, `human`, `geserdugarov`)
-# filtered and dozens of stage tests fail. Clearing it pins the legacy
-# empty-allowlist ("trust everyone") default the stage tests assume;
-# tests that exercise the allowlist patch `config.ALLOWED_ISSUE_AUTHORS`
-# to a populated value inline, which overrides the import-time value.
-for _agent_var in (
-    "DEV_AGENT", "REVIEW_AGENT", "DECOMPOSE_AGENT", "ALLOWED_ISSUE_AUTHORS",
-):
-    os.environ.pop(_agent_var, None)
+import pytest
 
-from unittest.mock import patch  # noqa: E402
-
-import pytest  # noqa: E402
-
-from orchestrator import analytics  # noqa: E402
+from tests import bootstrap as bootstrap
+from orchestrator import analytics
 
 
 @pytest.fixture(autouse=True)

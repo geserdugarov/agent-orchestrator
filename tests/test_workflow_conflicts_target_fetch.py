@@ -6,8 +6,6 @@ import os
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
-
 from orchestrator import config, git_plumbing, workflow
 
 from tests.workflow_helpers import _TEST_SPEC, _temp_git_repo_with_local_config

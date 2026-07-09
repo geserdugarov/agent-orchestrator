@@ -7,11 +7,8 @@ that keeps the dispatcher from falling through to pickup or
 implementing on a `question`-labeled issue."""
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow
 

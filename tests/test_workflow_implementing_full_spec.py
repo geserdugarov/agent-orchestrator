@@ -6,11 +6,8 @@ not just the parsed backend, and resumes / poisoned-session drops must
 preserve the recorded spec across config flips."""
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

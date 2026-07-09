@@ -5,11 +5,8 @@ validating, park-on-failure, and the fresh-feedback scan that covers both the
 issue thread and the PR-conversation surface."""
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

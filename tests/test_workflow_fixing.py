@@ -21,13 +21,10 @@ are covered in `tests/test_workflow_fixing_routing.py`'s
 """
 from __future__ import annotations
 
-import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 from orchestrator.stages.fixing import (

@@ -14,12 +14,9 @@ stages must keep their no-write contract intact alongside the block.
 from __future__ import annotations
 
 import contextlib
-import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

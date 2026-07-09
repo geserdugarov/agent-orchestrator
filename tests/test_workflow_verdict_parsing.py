@@ -10,10 +10,7 @@ historical `orchestrator.workflow._parse_*` re-export as a compatibility
 contract."""
 from __future__ import annotations
 
-import os
 import unittest
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator.workflow_messages import (
     _parse_documentation_verdict,

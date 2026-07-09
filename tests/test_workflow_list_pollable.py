@@ -2,11 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import os
 import unittest
 from unittest import mock
 
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from github import GithubException
 

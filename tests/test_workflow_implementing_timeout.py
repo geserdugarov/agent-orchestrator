@@ -10,12 +10,9 @@ timeout parks tagged `agent_timeout` + `pre_implement_sha` so the next tick
 can publish a late-landing commit without a human comment."""
 from __future__ import annotations
 
-import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

@@ -8,14 +8,11 @@ analytics record per non-None label transition."""
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import analytics, workflow
 from orchestrator.github import BACKLOG_LABEL, PAUSED_LABEL
