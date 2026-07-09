@@ -10,6 +10,8 @@ patch surface stays in one place when a new helper is plumbed through.
 from __future__ import annotations
 
 import contextlib
+import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -41,6 +43,29 @@ _TEST_SPEC = config.RepoSpec(
     target_root=Path("/tmp/orchestrator-test-target-root"),
     base_branch="main",
 )
+
+
+@contextlib.contextmanager
+def _temp_git_repo_with_local_config(pairs):
+    """Yield a real temp git repo whose `.git/config` carries `pairs`.
+
+    `pairs` is a sequence of `(key, value)` tuples applied via
+    `git config --local`. The authenticated-transport hardening tests use
+    this to prove `_unsafe_local_transport_config` and its callers reject
+    real agent-planted `http.proxy` / `http.sslVerify` / url-rewrite config,
+    rather than a mocked probe response that would pass even against the
+    old rewrite-only regexp.
+    """
+    with tempfile.TemporaryDirectory(prefix="orch-transport-test-") as td:
+        subprocess.run(
+            ["git", "init", "-q", td], check=True, capture_output=True,
+        )
+        for key, value in pairs:
+            subprocess.run(
+                ["git", "config", "--local", key, value],
+                cwd=td, check=True, capture_output=True,
+            )
+        yield Path(td)
 
 
 def _agent(

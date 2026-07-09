@@ -21,8 +21,9 @@ through:
   token never appears on argv, with the same hardening envelope as
   `_push_branch`.
 * `_push_branch` -- the only authed push path, which delivers the PAT
-  via askpass and pre-flights against worktree-local url-rewrite
-  rules.
+  via askpass and pre-flights against worktree-local url-rewrite and
+  http transport (proxy / TLS) config via
+  `_unsafe_local_transport_config`.
 
 The worktree naming / layout / creation / cleanup helpers live in
 `worktree_lifecycle.py`; the local-verify runner and its
@@ -172,6 +173,57 @@ def _git_hardened(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
+# Agent-writable git config keys that can hijack a token-bearing git
+# operation. `url.<host>.insteadOf` / `pushInsteadOf` rewrite our auth URL to
+# an attacker host; any `http.*` key (proxy, sslVerify, sslCAInfo, sslCert,
+# sslKey, sslBackend, curloptResolve, ...) can route the request through an
+# attacker proxy, disable TLS verification, or pin DNS while GIT_ASKPASS still
+# hands over GIT_TOKEN. Both families apply from the local config, from any
+# `include.path` file it pulls in, and from the per-worktree `config.worktree`
+# (when `extensions.worktreeConfig` is set) even with global/system config
+# detached, and even when we target an explicit auth URL: `http.*` matches by
+# URL (not by remote name), and a command-line `-c http.proxy=` override cannot
+# beat a more-specific URL-scoped `http.<url>.proxy`. We therefore fail closed
+# and refuse the operation rather than trying to out-override every transport
+# key. (Env-var proxies like `https_proxy` are operator-controlled, not
+# agent-writable, so they stay honored -- only config-file transport settings
+# are rejected.)
+_UNSAFE_TRANSPORT_CONFIG_RE = (
+    r"^(url\..*\.(insteadof|pushinsteadof)|http\..*)$"
+)
+
+
+def _unsafe_local_transport_config(cwd: Path) -> str:
+    """Return non-global git config in `cwd` that could hijack token transport.
+
+    Scans the exact config view a token-bearing fetch/push honors: the local
+    config plus any `include.path` file it pulls in and, when
+    `extensions.worktreeConfig` is set, the per-worktree `config.worktree` --
+    with global/system config detached (the same `GIT_CONFIG_GLOBAL`/`SYSTEM`
+    envelope the fetch/push runs under). It deliberately does NOT scope to
+    `--local`: a `git config --local` probe reads only the raw local file, so
+    it misses `include.path` targets and per-worktree config that the real
+    command still resolves and honors. Returns the matching
+    `git config --get-regexp` lines joined for logging, or "" when the config
+    view is clean; callers refuse to run any GIT_TOKEN-bearing git command
+    while the result is non-empty.
+    """
+    probe = subprocess.run(
+        ["git", "config", "--get-regexp", _UNSAFE_TRANSPORT_CONFIG_RE],
+        cwd=str(cwd), capture_output=True, text=True,
+        env={
+            **os.environ,
+            **_GIT_NO_PROMPT_ENV,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        },
+    )
+    if probe.returncode == 0 and probe.stdout.strip():
+        return probe.stdout.strip()
+    return ""
+
+
 def _authed_fetch(
     spec: RepoSpec, refspec: str, *, cwd: Path
 ) -> subprocess.CompletedProcess:
@@ -185,15 +237,20 @@ def _authed_fetch(
         attacker-controlled binary with GIT_TOKEN in env,
       * a planted `url.<host>.insteadOf` rewrite in the worktree's
         local config OR in `~/.gitconfig` redirecting fetch to an
-        attacker-controlled host.
+        attacker-controlled host,
+      * a planted `http.proxy` / `http.sslVerify=false` (or other
+        `http.*` TLS/proxy key) in the worktree's local config routing
+        the token-bearing fetch through an attacker proxy or disabling
+        certificate verification.
 
     The auth URL carries only the username (`x-access-token`); the
     token itself is read from $GIT_TOKEN by a tempfile askpass script
     so it never appears in argv. Global/system git config is detached
     via `GIT_CONFIG_GLOBAL=/dev/null` / `GIT_CONFIG_SYSTEM=/dev/null`
-    so url-rewrite rules planted there cannot apply. We also refuse
-    to run if the worktree's local config already carries any url
-    rewrite rule, mirroring `_push_branch`'s pre-flight check.
+    so url-rewrite rules planted there cannot apply. We also refuse to
+    run if the worktree's local config carries any url-rewrite rule or
+    `http.*` transport setting (`_unsafe_local_transport_config`),
+    mirroring `_push_branch`'s pre-flight check.
 
     `refspec` is the fetch refspec; pass an explicit form like
     `+refs/heads/<branch>:refs/remotes/origin/<branch>` so single-branch
@@ -227,19 +284,15 @@ def _authed_fetch(
             args=["git", "fetch"], returncode=1, stdout="",
             stderr="GITHUB_TOKEN missing",
         )
-    rewrite = subprocess.run(
-        ["git", "config", "--local", "--get-regexp",
-         r"^url\..*\.(insteadof|pushinsteadof)$"],
-        cwd=str(cwd), capture_output=True, text=True,
-    )
-    if rewrite.returncode == 0 and rewrite.stdout.strip():
+    unsafe = _unsafe_local_transport_config(cwd)
+    if unsafe:
         log.error(
-            "refusing to fetch into %s: worktree .git/config has url "
-            "rewrite rules: %s", cwd, rewrite.stdout.strip(),
+            "refusing to fetch into %s: worktree .git/config has "
+            "transport-hijacking config: %s", cwd, unsafe,
         )
         return subprocess.CompletedProcess(
             args=["git", "fetch"], returncode=1, stdout="",
-            stderr="url rewrite rules in worktree .git/config",
+            stderr="unsafe transport config in worktree .git/config",
         )
     auth_url = f"https://x-access-token@github.com/{spec.slug}.git"
     with tempfile.TemporaryDirectory(prefix="orch-askpass-") as td:
@@ -316,8 +369,10 @@ def _authed_target_fetch(
     applies even with GIT_CONFIG_GLOBAL/SYSTEM detached. Mirror the
     `_authed_fetch` / `_push_branch` pre-flight refusal: bail out if
     `target_root`'s local config carries any
-    `url.<host>.(insteadOf|pushInsteadOf)` rule that could redirect
-    the token-bearing fetch to an attacker-controlled host.
+    `url.<host>.(insteadOf|pushInsteadOf)` rule or `http.*` proxy/TLS
+    setting that could redirect the token-bearing fetch to an
+    attacker-controlled host or strip TLS verification
+    (`_unsafe_local_transport_config`).
 
     Serialized via `_target_root_lock` (`RLock` so a caller already
     holding it -- the worktree creators -- re-enters cleanly) for the
@@ -330,19 +385,15 @@ def _authed_target_fetch(
             args=["git", "fetch"], returncode=1, stdout="",
             stderr="GITHUB_TOKEN missing",
         )
-    rewrite = subprocess.run(
-        ["git", "config", "--local", "--get-regexp",
-         r"^url\..*\.(insteadof|pushinsteadof)$"],
-        cwd=str(spec.target_root), capture_output=True, text=True,
-    )
-    if rewrite.returncode == 0 and rewrite.stdout.strip():
+    unsafe = _unsafe_local_transport_config(spec.target_root)
+    if unsafe:
         log.error(
-            "refusing to fetch into %s: target_root .git/config has url "
-            "rewrite rules: %s", spec.target_root, rewrite.stdout.strip(),
+            "refusing to fetch into %s: target_root .git/config has "
+            "transport-hijacking config: %s", spec.target_root, unsafe,
         )
         return subprocess.CompletedProcess(
             args=["git", "fetch"], returncode=1, stdout="",
-            stderr="url rewrite rules in target_root .git/config",
+            stderr="unsafe transport config in target_root .git/config",
         )
     auth_url = f"https://x-access-token@github.com/{spec.slug}.git"
     refspec = (
@@ -416,8 +467,9 @@ def _push_branch(
     or `.git/config` is attacker-controlled. The agent also writes as the same
     OS user, so it can plant `~/.gitconfig` (or anything pointed at by
     XDG_CONFIG_HOME) before we push. We harden the push so a planted pre-push
-    hook, credential helper, fsmonitor, or url-rewrite rule cannot observe
-    GIT_TOKEN or redirect the push to an attacker-controlled host:
+    hook, credential helper, fsmonitor, url-rewrite rule, or http proxy /
+    TLS override cannot observe GIT_TOKEN or redirect the push to an
+    attacker-controlled host:
       * `core.hooksPath=/dev/null` disables `.git/hooks/*` and any hooksPath
         override the agent set in the local config.
       * `credential.helper=` (empty) clears all inherited credential helpers
@@ -429,8 +481,14 @@ def _push_branch(
         pushInsteadOf rules planted in `~/.gitconfig` (or `/etc/gitconfig`)
         cannot rewrite our auth URL and exfiltrate the askpass token.
       * We also refuse to push if the local config contains any url
-        insteadOf/pushInsteadOf rewrite, since those rewrite our auth URL
-        and would deliver the token to whatever host the agent picked.
+        insteadOf/pushInsteadOf rewrite or any `http.*` transport setting
+        (`_unsafe_local_transport_config`). A rewrite redelivers the token
+        to whatever host the agent picked; a local `http.proxy` /
+        `http.sslVerify=false` (or URL-scoped `http.<url>.*` variant, which a
+        command-line `-c http.proxy=` override cannot beat) would tunnel the
+        token-bearing push through an attacker proxy or disable TLS
+        verification. Env-var proxies (`https_proxy`) are operator-set and
+        stay honored -- only agent-writable config-file transport is rejected.
     """
     # Resolve the token from `spec.slug` rather than the cached
     # `config.GITHUB_TOKEN` (which was looked up once for `config.REPO`),
@@ -442,15 +500,11 @@ def _push_branch(
     if not token:
         log.error("GITHUB_TOKEN missing for %s; cannot push", spec.slug)
         return False
-    rewrite = subprocess.run(
-        ["git", "config", "--local", "--get-regexp",
-         r"^url\..*\.(insteadof|pushinsteadof)$"],
-        cwd=str(worktree), capture_output=True, text=True,
-    )
-    if rewrite.returncode == 0 and rewrite.stdout.strip():
+    unsafe = _unsafe_local_transport_config(worktree)
+    if unsafe:
         log.error(
-            "refusing to push %s: worktree .git/config has url rewrite rules: %s",
-            branch, rewrite.stdout.strip(),
+            "refusing to push %s: worktree .git/config has "
+            "transport-hijacking config: %s", branch, unsafe,
         )
         return False
     auth_url = f"https://x-access-token@github.com/{spec.slug}.git"
