@@ -6,10 +6,7 @@
 backend's CLI surface."""
 from __future__ import annotations
 
-import os
 import unittest
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow
 

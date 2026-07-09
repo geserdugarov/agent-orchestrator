@@ -7,13 +7,10 @@ and per-spec token resolution so multi-repo deployments honor each
 `~/.config/<owner>/<repo>/token` file."""
 from __future__ import annotations
 
-import os
 import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, git_plumbing, workflow
 

@@ -14,11 +14,8 @@ post-agent side effects; those live-guard cases live in
 `test_workflow_paused_agent_guard.py` and the per-stage `_paused` modules."""
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow
 from orchestrator.github import (

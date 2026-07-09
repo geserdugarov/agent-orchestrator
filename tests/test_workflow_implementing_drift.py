@@ -6,10 +6,7 @@ failures on recovered worktrees, and the no-dev-session drift branches park
 or fall through to a fresh spawn with the full implement prompt."""
 from __future__ import annotations
 
-import os
 import unittest
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow
 

@@ -9,8 +9,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
-
 from orchestrator import config, workflow, worktrees
 
 from tests.fakes import FakeComment, FakeGitHubClient, FakeUser, make_issue

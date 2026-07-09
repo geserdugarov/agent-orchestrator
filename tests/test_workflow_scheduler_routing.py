@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import base_sync, config, workflow
 from orchestrator.github import BACKLOG_LABEL, PAUSED_LABEL

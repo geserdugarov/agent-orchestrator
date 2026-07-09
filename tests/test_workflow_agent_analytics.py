@@ -7,14 +7,11 @@ for codex stdout that omits the model field, and the disabled-sink knob."""
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import analytics, config, usage, workflow
 from orchestrator.agents import AgentResult

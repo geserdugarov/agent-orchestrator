@@ -5,12 +5,9 @@ that derive the PR title from the first commit subject (with per-spec base
 branch and remote)."""
 from __future__ import annotations
 
-import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import branch_publication, config, workflow, worktree_lifecycle
 from orchestrator.stages import implementing

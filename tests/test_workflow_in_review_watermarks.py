@@ -4,11 +4,8 @@
 watermark bump and the split issue / inline-review id namespaces."""
 from __future__ import annotations
 
-import os
 import unittest
 from datetime import datetime, timedelta, timezone
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow
 

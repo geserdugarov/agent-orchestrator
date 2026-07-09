@@ -9,12 +9,9 @@ single-writer discipline that leaves an interrupted run's counters
 unpersisted."""
 from __future__ import annotations
 
-import os
 import unittest
 from typing import Optional
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 from orchestrator.github import PinnedState

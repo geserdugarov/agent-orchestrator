@@ -11,8 +11,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
-
 from orchestrator import branch_publication, config, workflow
 
 from tests.fakes import (

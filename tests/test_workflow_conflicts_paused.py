@@ -11,11 +11,8 @@ in-progress rebase / resolved commit stays on the branch and the park (if any)
 stays intact until the label is removed."""
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import MagicMock, patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator.github import PAUSED_LABEL
 

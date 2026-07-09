@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import re
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import base_sync, config, github, workflow
 from orchestrator.state_machine import (

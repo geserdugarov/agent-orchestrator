@@ -7,14 +7,11 @@ the JSONL sink driven by `EVENT_LOG_PATH`."""
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

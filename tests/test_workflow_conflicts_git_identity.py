@@ -6,8 +6,6 @@ import os
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
-
 from orchestrator import config, workflow
 
 

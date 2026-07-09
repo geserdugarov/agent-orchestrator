@@ -11,12 +11,9 @@ feedback. The drift-hash regression also lives here: a stale
 trigger a `validating` flip ahead of the fresh-feedback scan."""
 from __future__ import annotations
 
-import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

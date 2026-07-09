@@ -13,11 +13,8 @@ must stay aligned with, so the two cannot silently drift back apart.
 """
 from __future__ import annotations
 
-import os
 import unittest
 from pathlib import Path
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import workflow_messages
 

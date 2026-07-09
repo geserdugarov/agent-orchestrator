@@ -5,12 +5,9 @@ configurable dev/review backends, silent-session fallback after consecutive
 silent parks, and stale-session immediate retry for the claude CLI."""
 from __future__ import annotations
 
-import os
 import unittest
 from typing import Optional
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 

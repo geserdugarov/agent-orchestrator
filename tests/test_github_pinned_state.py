@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 import unittest
 from unittest.mock import MagicMock, patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator.github import PINNED_STATE_TEMPLATE, GitHubClient
 

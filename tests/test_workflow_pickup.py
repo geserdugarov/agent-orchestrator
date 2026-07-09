@@ -5,11 +5,8 @@ implementing and the `ALLOWED_ISSUE_AUTHORS` allowlist (case-insensitive
 match, empty-list disables filter)."""
 from __future__ import annotations
 
-import os
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, workflow
 
