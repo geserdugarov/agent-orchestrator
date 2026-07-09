@@ -4,7 +4,12 @@
 
 Per-issue state is stored in a single 'pinned' comment whose body matches
 PINNED_STATE_RE. The orchestrator owns this comment and only edits it from
-write_pinned_state.
+write_pinned_state. `read_pinned_state` authenticates that ownership on two
+axes: the comment must be authored by the account backing the token
+(`_bot_login`) AND its whole body must be nothing but the state marker
+(`PINNED_STATE_BODY_RE`). So neither a third party's forged marker comment nor
+an ordinary bot-authored comment that merely embeds the marker in prose can
+preempt durable workflow state.
 """
 from __future__ import annotations
 
@@ -34,6 +39,16 @@ log = logging.getLogger(__name__)
 
 PINNED_STATE_MARKER = "<!--orchestrator-state"
 PINNED_STATE_RE = re.compile(r"<!--orchestrator-state\s+(\{.*?\})\s*-->", re.DOTALL)
+# `read_pinned_state` uses this anchored form so a comment is trusted as state
+# only when its ENTIRE body is the marker -- exactly what `write_pinned_state`
+# emits. An ordinary orchestrator comment (posted via `_post_issue_comment`,
+# whose text is attacker-influenced -- e.g. decomposer rationale) that merely
+# embeds a `<!--orchestrator-state ...-->` substring in surrounding prose is
+# NOT state-only, so it cannot be mistaken for authoritative state before the
+# real state comment exists.
+PINNED_STATE_BODY_RE = re.compile(
+    r"\A\s*<!--orchestrator-state\s+(\{.*?\})\s*-->\s*\Z", re.DOTALL
+)
 PINNED_STATE_TEMPLATE = "<!--orchestrator-state {payload}-->"
 
 # (name, hex color, description) for each workflow label. Order roughly
@@ -211,6 +226,8 @@ class GitHubClient:
         token: Optional[str] = None,
         repo_slug: Optional[str] = None,
         repo_spec: Optional["config.RepoSpec"] = None,
+        *,
+        bot_login: Optional[str] = None,
     ):
         # `repo_spec` wins when both are passed -- the multi-repo caller in
         # main.py threads a spec; legacy callers (and tests) still use the
@@ -245,6 +262,17 @@ class GitHubClient:
         # mid-tick anyway -- a tick is short, the token does not change under
         # it). Treated as an internal detail; callers should not poke at it.
         self._token = token
+        # Login of the account backing this token. `read_pinned_state` trusts
+        # only marker comments authored by this login, so a third party who can
+        # comment on the issue cannot preempt durable workflow state with a
+        # forged `<!--orchestrator-state ...-->` comment (CWE-345). Legacy
+        # pinned comments were authored by this same account, so author
+        # matching keeps honoring them with no migration. Resolved once here;
+        # `_for_worker_thread` threads the value into per-worker clones so the
+        # parallel path adds no `GET /user` call per worker.
+        self._bot_login = (
+            bot_login if bot_login is not None else self._gh.get_user().login
+        )
         # In-memory tail of recently-emitted stage-transition events. Capped
         # so a long-running process can't grow this list unbounded; the file
         # at `config.EVENT_LOG_PATH` (when configured) is the durable record.
@@ -278,12 +306,18 @@ class GitHubClient:
         call is the sole consumer of that requester's state.
 
         Token + slug are reused so the new instance has identical auth and
-        target repo. The in-memory `recorded_events` tail starts empty per
+        target repo. `bot_login` is threaded through so the clone authenticates
+        pinned state against the same account without re-issuing `GET /user`
+        per worker. The in-memory `recorded_events` tail starts empty per
         worker; the durable JSONL sink at `config.EVENT_LOG_PATH` is the
         cross-worker record and write_event_record's open/append is what
         carries event ordering across threads.
         """
-        return GitHubClient(token=self._token, repo_slug=self._repo_slug)
+        return GitHubClient(
+            token=self._token,
+            repo_slug=self._repo_slug,
+            bot_login=self._bot_login,
+        )
 
     def _cached_label(self, name: str) -> Optional[Label]:
         """Resolve a workflow Label object, caching successes for this client.
@@ -523,11 +557,34 @@ class GitHubClient:
         return self.repo.create_issue(title=title, body=full_body, labels=validated)
 
     def read_pinned_state(self, issue: Issue) -> PinnedState:
+        # Durable workflow state must be authenticated to the orchestrator's
+        # own state comment on two axes, because the FIRST marker comment by
+        # document order would otherwise preempt the real pinned state and
+        # steer agent session fields, branch/PR selection, and terminal branch
+        # cleanup (CWE-345):
+        #   1. Author -- trust only comments posted by `_bot_login`, so a third
+        #      party who posts (or edits an older comment to carry) the marker
+        #      cannot win.
+        #   2. State-only body -- trust only a comment whose ENTIRE body is the
+        #      marker (`PINNED_STATE_BODY_RE`), what `write_pinned_state` emits.
+        #      An ordinary bot-authored comment (`_post_issue_comment` posts
+        #      decomposer/agent text that is attacker-influenced, and does so
+        #      BEFORE the real state comment exists on a manually-labeled issue)
+        #      that merely embeds a `<!--orchestrator-state ...-->` substring in
+        #      prose is not state-only, so it cannot be mistaken for state.
+        # `_bot_login` is absent only on clients built via `__new__` in tests --
+        # there the author axis degrades open, but the state-only body axis
+        # still holds.
+        trusted_login = getattr(self, "_bot_login", None)
         for c in issue.get_comments():
             body = c.body or ""
             if PINNED_STATE_MARKER not in body:
                 continue
-            m = PINNED_STATE_RE.search(body)
+            if trusted_login is not None:
+                author = getattr(getattr(c, "user", None), "login", None)
+                if author != trusted_login:
+                    continue
+            m = PINNED_STATE_BODY_RE.match(body)
             if m:
                 try:
                     return PinnedState(comment_id=c.id, data=json.loads(m.group(1)))

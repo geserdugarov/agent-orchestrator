@@ -189,7 +189,11 @@ externally-merged/closed issue can take up to `N-1` extra ticks to finalize. See
 
 Per-issue durable state lives in a single **pinned comment** on the issue (`<!--orchestrator-state {...json...}-->`).
 The schema is defined by `read_pinned_state` / `write_pinned_state` (see `github.PINNED_STATE_MARKER` /
-`PINNED_STATE_RE`). The keys that matter for the state machine fall into a few groups:
+`PINNED_STATE_RE`). `read_pinned_state` trusts a comment as state only when it is authored by the account backing the
+orchestrator's token AND its whole body is the marker, so neither a third party's forged marker nor an ordinary
+bot-authored comment that embeds the marker in prose can preempt state (see
+[pinned-state authentication](security.md#pinned-state-authentication)). The keys that matter for the state machine fall
+into a few groups:
 
 - **Agent identity.** `dev_agent` + `dev_session_id` (locked dev session — see
   [in-flight session lock](workflow.md#in-flight-session-lock--pinned-full-spec-until-the-session-ends)),
