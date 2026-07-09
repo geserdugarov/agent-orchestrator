@@ -105,6 +105,114 @@ class ScriptPathLaunchTest(unittest.TestCase):
                     del sys.modules[module_name]
             sys.modules.update(saved_modules)
 
+    def test_stale_parent_package_does_not_shadow_repo_root(self) -> None:
+        # With only `orchestrator/` on `sys.path`, importing `orchestrator.<x>`
+        # before the shim prepends the repo root would bind the parent
+        # `orchestrator` package to whatever stale copy is importable and route
+        # every later absolute import through it. The shim adds the repo root
+        # without importing `orchestrator.*` first, so the real package
+        # resolves even with a decoy parent behind the script dir on the path.
+        import runpy
+        import tempfile
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / "orchestrator" / "trajectory_dashboard.py"
+        script_dir = script.parent
+
+        def _is_launch_module(name: str) -> bool:
+            return (
+                name == "orchestrator"
+                or name.startswith("orchestrator.")
+                or name == "script_launch"
+            )
+
+        original_path = list(sys.path)
+        saved_modules = {
+            name: module for name, module in sys.modules.items()
+            if _is_launch_module(name)
+        }
+        with tempfile.TemporaryDirectory() as decoy_root:
+            # A bare `orchestrator` package with none of the real submodules,
+            # standing in for a stale install that shadows the repo root.
+            decoy_pkg = Path(decoy_root) / "orchestrator"
+            decoy_pkg.mkdir()
+            (decoy_pkg / "__init__.py").write_text("")
+            try:
+                resolved_root = repo_root.resolve()
+                sys.path[:] = [
+                    p for p in sys.path
+                    if not p or Path(p).resolve() != resolved_root
+                ]
+                sys.path.insert(0, decoy_root)
+                sys.path.insert(0, str(script_dir))
+                for name in list(sys.modules):
+                    if _is_launch_module(name):
+                        del sys.modules[name]
+
+                namespace = runpy.run_path(str(script), run_name="not_main")
+                self.assertIn("main", namespace)
+                # The real reader landed -- not the decoy package (which has no
+                # `trajectory_reader` submodule and would raise on import).
+                self.assertEqual(
+                    namespace["trajectory_reader"].__name__,
+                    "orchestrator.trajectory_reader",
+                )
+            finally:
+                sys.path[:] = original_path
+                for name in list(sys.modules):
+                    if _is_launch_module(name):
+                        del sys.modules[name]
+                sys.modules.update(saved_modules)
+
+    def test_package_import_ignores_stray_top_level_script_launch(self) -> None:
+        # A package import (`import orchestrator.trajectory_dashboard`) must
+        # resolve the shim via `orchestrator.script_launch`, never a bare
+        # `import script_launch`. An unrelated top-level `script_launch.py`
+        # earlier on `sys.path` would otherwise shadow the helper or fail the
+        # import outright, so the package path must not probe the bare name.
+        import importlib
+        import tempfile
+        from pathlib import Path
+
+        def _is_launch_module(name: str) -> bool:
+            return name in (
+                "orchestrator.trajectory_dashboard",
+                "orchestrator.script_launch",
+                "script_launch",
+            )
+
+        original_path = list(sys.path)
+        saved_modules = {
+            name: module for name, module in sys.modules.items()
+            if _is_launch_module(name)
+        }
+        with tempfile.TemporaryDirectory() as stray_dir:
+            # A stray top-level `script_launch` that detonates on import, so a
+            # bare `import script_launch` during the package import would fail
+            # loudly instead of silently binding the wrong helper.
+            (Path(stray_dir) / "script_launch.py").write_text(
+                "raise RuntimeError('stray script_launch must not be imported')\n"
+            )
+            try:
+                sys.path.insert(0, stray_dir)
+                for name in list(sys.modules):
+                    if _is_launch_module(name):
+                        del sys.modules[name]
+                module = importlib.import_module(
+                    "orchestrator.trajectory_dashboard"
+                )
+                self.assertTrue(hasattr(module, "main"))
+                # The package path used `orchestrator.script_launch` and never
+                # probed the bare name, so the stray stayed unimported.
+                self.assertNotIn("script_launch", sys.modules)
+            finally:
+                sys.path[:] = original_path
+                for name in list(sys.modules):
+                    if _is_launch_module(name):
+                        del sys.modules[name]
+                sys.modules.update(saved_modules)
+
 
 class TopbarHtmlTest(unittest.TestCase):
 
