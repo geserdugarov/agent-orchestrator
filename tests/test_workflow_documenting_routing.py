@@ -42,7 +42,7 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
         self.assertIn("documenting", names)
 
-    def test_documenting_label_sits_between_validating_and_in_review(
+    def test_label_sits_between_validating_and_in_review(
         self,
     ) -> None:
         # The happy-path lifecycle is implementing -> validating ->
@@ -120,7 +120,7 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         # leaves the operator in control of the next move.
         self.assertEqual(gh.label_history, [])
 
-    def test_documenting_missing_pr_number_is_idempotent_when_parked(
+    def test_missing_pr_number_is_idempotent_when_parked(
         self,
     ) -> None:
         # A second tick on an already-parked documenting issue (still

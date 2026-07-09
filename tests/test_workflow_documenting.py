@@ -1016,18 +1016,18 @@ class HandleDocumentingInterruptedTest(
         self.assertEqual(mocks[RUN_AGENT].call_count, 1)
         self.assertEqual(gh.write_state_calls, before_writes)
         self.assertNotIn((202, IN_REVIEW), gh.label_history)
-        state = gh.pinned_data(202)
-        self.assertFalse(state.get(AWAITING_HUMAN))
-        self.assertNotIn(DOCS_VERDICT, state)
+        pinned_state = gh.pinned_data(202)
+        self.assertFalse(pinned_state.get(AWAITING_HUMAN))
+        self.assertNotIn(DOCS_VERDICT, pinned_state)
         # The pre-spawn `docs_checked_sha=before_sha` write was discarded.
-        self.assertNotIn(DOCS_CHECKED_SHA, state)
+        self.assertNotIn(DOCS_CHECKED_SHA, pinned_state)
         self.assertEqual(gh.posted_pr_comments, [])
         self.assertFalse(any(
             "agent needs your input" in body or "timed out" in body
             for _, body in gh.posted_comments
         ))
 
-    def test_awaiting_human_resume_interrupted_does_not_consume_reply(
+    def test_awaiting_human_resume_keeps_reply(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -1103,7 +1103,7 @@ class HandleDocumentingParkedSilenceTest(
         gh.seed_state(self.ISSUE, **defaults)
         return gh, issue
 
-    def test_parked_with_no_new_comments_short_circuits_before_fetch(
+    def test_no_new_comments_short_circuits_before_fetch(
         self,
     ) -> None:
         gh, issue = self._seeded(park_reason=PARK_AGENT_QUESTION)
@@ -1124,7 +1124,7 @@ class HandleDocumentingParkedSilenceTest(
         self.assertEqual(gh.posted_pr_comments, [])
         self.assertEqual(gh.write_state_calls, 0)
 
-    def test_parked_with_no_new_comments_does_not_repark_on_fetch_fail(
+    def test_no_new_comments_does_not_repark_on_fetch_fail(
         self,
     ) -> None:
         # If the fetch would have failed on this tick, the parked
@@ -1149,7 +1149,7 @@ class HandleDocumentingParkedSilenceTest(
             gh.pinned_data(self.ISSUE).get(PARK_REASON), PARK_AGENT_QUESTION,
         )
 
-    def test_parked_with_no_new_comments_does_not_repark_on_diverged(
+    def test_no_new_comments_does_not_repark_on_diverged(
         self,
     ) -> None:
         # Same shape for a behind-remote tick.
@@ -1258,9 +1258,9 @@ class HandleDocumentingDriftTest(
         mocks[RUN_AGENT].assert_not_called()
         mocks[PUSH_BRANCH].assert_not_called()
         # Hash updated; notice posted; relabel to validating.
-        state = gh.pinned_data(self.ISSUE)
+        pinned_state = gh.pinned_data(self.ISSUE)
         self.assertNotEqual(
-            state.get("user_content_hash"),
+            pinned_state.get("user_content_hash"),
             "stale-hash-from-original-body",
         )
         self.assertTrue(any(
@@ -1269,9 +1269,9 @@ class HandleDocumentingDriftTest(
         ))
         self.assertIn((self.ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((self.ISSUE, IN_REVIEW), gh.label_history)
-        self.assertEqual(state.get(REVIEW_ROUND), 0)
+        self.assertEqual(pinned_state.get(REVIEW_ROUND), 0)
 
-    def test_body_edit_with_recovered_commit_still_relabels_without_push(
+    def test_body_edit_recovered_commit_relabels_without_push(
         self,
     ) -> None:
         # A prior final-docs tick committed docs and parked before
@@ -1301,8 +1301,8 @@ class HandleDocumentingDriftTest(
             "issue body changed" in body
             for _, body in gh.posted_comments
         ))
-        state = gh.pinned_data(self.ISSUE)
-        self.assertEqual(state.get(REVIEW_ROUND), 0)
+        pinned_state = gh.pinned_data(self.ISSUE)
+        self.assertEqual(pinned_state.get(REVIEW_ROUND), 0)
 
     def test_body_edit_resets_unpushed_local_docs_commit(self) -> None:
         # Regression: drift mid-final-docs-hop must discard any
@@ -1368,8 +1368,8 @@ class HandleDocumentingDriftTest(
         # Drift fetch was attempted before the probe + reset.
         mocks["_authed_fetch"].assert_called()
 
-        state = gh.pinned_data(self.ISSUE)
-        self.assertEqual(state.get(REVIEW_ROUND), 0)
+        pinned_state = gh.pinned_data(self.ISSUE)
+        self.assertEqual(pinned_state.get(REVIEW_ROUND), 0)
 
     def test_body_edit_resets_dirty_worktree_with_no_local_commits(
         self,
@@ -2001,7 +2001,7 @@ class HandleDocumentingFinalDocsHandoffTest(
         mocks[PUSH_BRANCH].assert_called_once()
         self.assertIn((self.ISSUE, IN_REVIEW), gh.label_history)
 
-    def test_user_content_drift_relabels_to_validating_without_spawn(
+    def test_drift_relabels_to_validating_without_spawn(
         self,
     ) -> None:
         # A human body edit during the final-docs hop must reset
@@ -2033,7 +2033,7 @@ class HandleDocumentingFinalDocsHandoffTest(
         state = gh.pinned_data(self.ISSUE)
         self.assertEqual(state.get(REVIEW_ROUND), 0)
 
-    def test_resume_consumed_reply_does_not_replay_as_in_review_feedback(
+    def test_consumed_reply_not_replayed_as_feedback(
         self,
     ) -> None:
         # Lifecycle: validating approves at SHA `approvedSha` and seeds
@@ -2102,10 +2102,10 @@ class HandleDocumentingFinalDocsHandoffTest(
         )
 
         self.assertIn((709, IN_REVIEW), gh.label_history)
-        state = gh.pinned_data(709)
-        self.assertEqual(state.get(LAST_ACTION_COMMENT_ID), 1100)
+        pinned_state = gh.pinned_data(709)
+        self.assertEqual(pinned_state.get(LAST_ACTION_COMMENT_ID), 1100)
         self.assertGreaterEqual(
-            state.get("pr_last_comment_id"), 1100,
+            pinned_state.get("pr_last_comment_id"), 1100,
             "pr_last_comment_id must ratchet past the consumed human "
             "issue-thread reply on the final-docs handoff so the next "
             "in_review tick does not replay it as fresh PR feedback",

@@ -608,7 +608,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         ))
         self.assertEqual(gh.created_child_issues, [])
 
-    def test_decompose_off_ratchets_last_action_past_decomposing_comments(
+    def test_decompose_off_ratchets_past_stage_comments(
         self,
     ) -> None:
         # When DECOMPOSE flips off mid-flight, decomposing-era human
@@ -1242,7 +1242,7 @@ class DecomposerRunUsageAccumulationTest(
         self.assertNotIn("issue_total_tokens", state)
         self.assertFalse(state.get("awaiting_human"))
 
-    def test_interrupted_but_dirty_run_parks_without_persisting_counters(
+    def test_dirty_interruption_parks_without_counters(
         self,
     ) -> None:
         # An interrupted decomposer that nonetheless left changes in the

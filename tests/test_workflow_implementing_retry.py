@@ -1036,7 +1036,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
             "the new session starts its resume budget from zero",
         )
 
-    def test_entry_without_session_id_empty_result_keeps_session_clear(self) -> None:
+    def test_missing_session_empty_result_keeps_clear(self) -> None:
         # The recovery spawn ALSO returns no session id (another hiccup): the
         # session stays unpinned so the next tick fresh-spawns again rather
         # than resuming a phantom id, and the resume budget is not charged.

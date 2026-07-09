@@ -236,7 +236,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(state.get("awaiting_human"))
         self.assertIsNone(state.get("park_reason"))
 
-    def test_reviewer_empty_message_with_zero_exit_does_not_tag_failed(self) -> None:
+    def test_empty_zero_exit_message_not_failed(self) -> None:
         # Defensive: empty last_message but exit_code == 0 is not a
         # crash -- the agent reported success without producing output.
         # Don't tag transient; a clean exit with no text needs human
@@ -520,7 +520,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
 
 
 class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_human_reply_resumes_dev_bumps_round_no_reviewer_this_tick(self) -> None:
+    def test_human_reply_bumps_round_without_reviewer(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(7, label="validating")
         issue.comments.append(
@@ -638,7 +638,7 @@ class HandleValidatingContinueCommandTest(
         )
         return gh, issue
 
-    def test_agent_silent_bare_continue_retries_without_literal_command(
+    def test_silent_bare_continue_retries_without_literal(
         self,
     ) -> None:
         gh, issue = self._seed(7, park_reason="agent_silent")
@@ -1063,18 +1063,18 @@ class ValidatingDevFixInterruptedHelperTest(unittest.TestCase):
         gh.seed_state(7, **state)
         return gh, gh.read_pinned_state(issue), issue
 
-    def test_handle_dev_fix_result_interrupted_returns_false_no_side_effects(
+    def test_result_returns_false_without_side_effects(
         self,
     ) -> None:
         gh, state, issue = self._seeded()
-        result = _agent(
+        agent_result = _agent(
             session_id="dev-sess",
             interrupted=True,
             last_message="partial output before the shutdown SIGTERM",
         )
 
         pushed = workflow._handle_dev_fix_result(
-            gh, _TEST_SPEC, issue, state, Path("/tmp/wt"), result, "sha-before",
+            gh, _TEST_SPEC, issue, state, Path("/tmp/wt"), agent_result, "sha-before",
         )
 
         self.assertFalse(pushed)
@@ -1087,18 +1087,18 @@ class ValidatingDevFixInterruptedHelperTest(unittest.TestCase):
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.posted_pr_comments, [])
 
-    def test_post_user_content_change_result_interrupted_returns_parked(
+    def test_user_content_change_result_returns_parked(
         self,
     ) -> None:
         gh, state, issue = self._seeded()
-        result = _agent(
+        agent_result = _agent(
             session_id="dev-sess",
             interrupted=True,
             last_message="ACK: looks fine",  # partial; must NOT be honored
         )
 
         outcome = workflow._post_user_content_change_result(
-            gh, _TEST_SPEC, issue, state, Path("/tmp/wt"), result, "sha-before",
+            gh, _TEST_SPEC, issue, state, Path("/tmp/wt"), agent_result, "sha-before",
         )
 
         # Reported parked, but WITHOUT swallowing the partial message as an
@@ -1119,7 +1119,7 @@ class ValidatingInterruptedResumeHandlerTest(
     consumption pre-staged before the spawn, so the next tick retries the
     resume rather than treating the input as already handled."""
 
-    def test_user_content_change_interrupted_resume_does_not_persist(
+    def test_user_content_change_resume_does_not_persist(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -1280,7 +1280,7 @@ class HandleValidatingResumeTrustFilterTest(
             "review-cap reset" in body for _, body in gh.posted_comments
         ))
 
-    def test_trusted_add_review_rounds_command_honored_under_allowlist(
+    def test_add_review_rounds_command_honored(
         self,
     ) -> None:
         gh = FakeGitHubClient()

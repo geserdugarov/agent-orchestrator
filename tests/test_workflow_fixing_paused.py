@@ -82,7 +82,7 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return issue
 
-    def test_paused_during_resume_blocks_publish_relabel_and_watermark(
+    def test_resume_blocks_publish_relabel_and_watermark(
         self,
     ) -> None:
         # The handler's `issue` snapshot carries no `paused`; the operator

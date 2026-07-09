@@ -27,7 +27,7 @@ class ListPollableIssuesTest(unittest.TestCase):
         out = list(gh.list_pollable_issues())
         self.assertEqual({issue.number for issue in out}, {1, 2})
 
-    def test_includes_closed_in_review_for_external_merge_finalization(self) -> None:
+    def test_includes_closed_in_review_for_merge_finalization(self) -> None:
         gh = FakeGitHubClient()
         open_issue = make_issue(1, label="implementing")
         closed_in_review = make_issue(7, label="in_review")

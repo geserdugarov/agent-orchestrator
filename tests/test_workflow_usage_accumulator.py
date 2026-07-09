@@ -68,29 +68,29 @@ class AccumulateIssueUsageHelperTest(unittest.TestCase):
         )
         self.assertEqual(state.get("issue_total_tokens"), 140)
 
-    def test_accumulates_across_runs_deduping_sources_and_skipping_none_cost(
+    def test_multiple_runs_dedupe_sources_skip_none_cost(
         self,
     ) -> None:
-        state = PinnedState()
+        usage_state = PinnedState()
         # A priced run, an unpriced run (cost None), and a second priced run
         # sharing the first's source.
         workflow._accumulate_issue_usage(
-            state, _usage(input_tokens=10, cost_usd=1.0, cost_source="estimated"),
+            usage_state, _usage(input_tokens=10, cost_usd=1.0, cost_source="estimated"),
         )
         workflow._accumulate_issue_usage(
-            state,
+            usage_state,
             _usage(input_tokens=5, cost_usd=None, cost_source="unknown-price"),
         )
         workflow._accumulate_issue_usage(
-            state, _usage(output_tokens=7, cost_usd=2.0, cost_source="estimated"),
+            usage_state, _usage(output_tokens=7, cost_usd=2.0, cost_source="estimated"),
         )
-        self.assertEqual(state.get("issue_agent_runs"), 3)
-        self.assertEqual(state.get("issue_total_tokens"), 22)
+        self.assertEqual(usage_state.get("issue_agent_runs"), 3)
+        self.assertEqual(usage_state.get("issue_total_tokens"), 22)
         # None-cost run contributes nothing to the dollar total.
-        self.assertEqual(state.get("issue_total_cost_usd"), 3.0)
+        self.assertEqual(usage_state.get("issue_total_cost_usd"), 3.0)
         # Distinct sources, sorted, for the terminal verdict's (est.)/unknown.
         self.assertEqual(
-            state.get("issue_cost_sources"), ["estimated", "unknown-price"],
+            usage_state.get("issue_cost_sources"), ["estimated", "unknown-price"],
         )
 
     def test_none_usage_is_noop(self) -> None:

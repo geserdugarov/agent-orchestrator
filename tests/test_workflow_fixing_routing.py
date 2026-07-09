@@ -60,7 +60,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
         self.assertIn("fixing", names)
 
-    def test_fixing_label_sits_between_in_review_and_resolving_conflict(
+    def test_label_sits_between_in_review_and_resolving_conflict(
         self,
     ) -> None:
         # Lifecycle order matters: `fixing` is the next stage after
@@ -139,7 +139,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # the operator in control of the next move.
         self.assertEqual(gh.label_history, [])
 
-    def test_fixing_without_pr_number_is_idempotent_when_already_parked(
+    def test_missing_pr_number_is_idempotent_when_parked(
         self,
     ) -> None:
         # A second tick on an already-parked no-PR fixing issue must

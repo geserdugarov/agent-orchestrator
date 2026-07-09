@@ -42,7 +42,7 @@ def _paused_view(number: int) -> object:
 
 
 class ImplementingLivePauseFreshSpawnTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_paused_during_run_blocks_pr_and_relabel_reading_fresh_issue(
+    def test_run_blocks_pr_and_relabel_from_fresh_issue(
         self,
     ) -> None:
         # The handler's `issue` snapshot carries no `paused`; the operator
@@ -79,13 +79,13 @@ class ImplementingLivePauseFreshSpawnTest(unittest.TestCase, _PatchedWorkflowMix
         # Durable state untouched: the fresh session id is discarded and no
         # pinned-state advancement is written, so the next tick resumes intact.
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(1)
-        self.assertNotIn("dev_session_id", state)
-        self.assertFalse(state.get("awaiting_human"))
+        pinned_state = gh.pinned_data(1)
+        self.assertNotIn("dev_session_id", pinned_state)
+        self.assertFalse(pinned_state.get("awaiting_human"))
 
 
 class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_paused_during_resume_skips_poisoned_retry_and_is_not_refetched(
+    def test_poisoned_retry_is_skipped_without_refetch(
         self,
     ) -> None:
         # Awaiting-human resume whose first result is a poisoned Claude session
@@ -117,9 +117,9 @@ class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         before_writes = gh.write_state_calls
 
-        unpaused = make_issue(720, label="implementing")
+        unpaused_view = make_issue(720, label="implementing")
         get_issue_mock = MagicMock(
-            side_effect=[_paused_view(720), unpaused, unpaused],
+            side_effect=[_paused_view(720), unpaused_view, unpaused_view],
         )
         with patch.object(gh, "get_issue", get_issue_mock):
             mocks = self._run(
@@ -141,10 +141,10 @@ class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No pinned-state advancement: the session id, park flag, and action
         # watermark all stay exactly as the prior tick left them.
         self.assertEqual(gh.write_state_calls, before_writes)
-        state = gh.pinned_data(720)
-        self.assertEqual(state.get("dev_session_id"), "sess-old")
-        self.assertTrue(state.get("awaiting_human"))
-        self.assertEqual(state.get("last_action_comment_id"), 900)
+        pinned_state = gh.pinned_data(720)
+        self.assertEqual(pinned_state.get("dev_session_id"), "sess-old")
+        self.assertTrue(pinned_state.get("awaiting_human"))
+        self.assertEqual(pinned_state.get("last_action_comment_id"), 900)
 
 
 class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):

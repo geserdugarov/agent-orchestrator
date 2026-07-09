@@ -462,7 +462,7 @@ class SchedulerWiringTest(unittest.TestCase):
             self.assertEqual(rc, 128 + signal.SIGINT)
             self.assertEqual(submit_results, [True, False])
 
-    def test_signal_during_active_tick_closes_submit_path_multi_repo(
+    def test_active_tick_signal_closes_multi_repo_submit(
         self,
     ) -> None:
         # Same invariant as above but where both repos are already

@@ -651,7 +651,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             "stored codex args must survive across the config flip",
         )
 
-    def test_decomposer_spec_pinned_when_spawn_returns_no_session_id(self) -> None:
+    def test_decomposer_spec_pinned_without_session_id(self) -> None:
         # Same reviewer concern, decomposer side: a fresh decomposer
         # that emits a manifest without surfacing a session id (or
         # parks awaiting human after a question) must still pin

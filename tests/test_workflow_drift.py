@@ -77,7 +77,7 @@ class ComputeUserContentHashTest(unittest.TestCase):
             workflow._compute_user_content_hash(issue_with_pinned, set()),
         )
 
-    def test_bare_orchestrator_continue_excluded_but_guidance_counts(
+    def test_bare_continue_excluded_but_guidance_counts(
         self,
     ) -> None:
         # A bare `/orchestrator continue` is an operator command, not
@@ -217,7 +217,7 @@ class DetectUserContentChangeTest(unittest.TestCase):
         self.assertEqual(gh.write_state_calls, before)
         self.assertEqual(state.get("user_content_hash"), prior)
 
-    def test_legacy_baseline_with_bare_continue_absorbs_without_drift(
+    def test_legacy_bare_continue_baseline_absorbs(
         self,
     ) -> None:
         # A baseline written by the pre-#729 algorithm counted a bare
@@ -558,7 +558,7 @@ class DriftMarksCommentsConsumedTest(
             int(state.get("last_action_comment_id")), 5000,
         )
 
-    def test_in_review_fresh_human_comment_routes_to_fixing_not_drift(
+    def test_in_review_human_comment_routes_to_fixing(
         self,
     ) -> None:
         # Regression for the reviewer's bug: a fresh issue-thread human
@@ -616,7 +616,7 @@ class DriftMarksCommentsConsumedTest(
         # consumed feedback has been fed to the dev.
         self.assertEqual(state.get("pr_last_comment_id"), 0)
 
-    def test_implementing_drift_bumps_last_action_past_human_comment(
+    def test_implementing_bumps_last_action_past_comment(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -708,7 +708,7 @@ class OrchCommentMarkerSurvivesIdCapTest(unittest.TestCase):
     bot comment in the hash and trigger false drift each tick. The body
     marker (`_ORCH_COMMENT_MARKER`) must keep the hash stable."""
 
-    def test_marker_excludes_orchestrator_comment_even_when_id_unknown(
+    def test_excludes_orchestrator_comment_when_id_unknown(
         self,
     ) -> None:
         # Simulate an orchestrator comment whose id has been evicted

@@ -242,7 +242,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             ):
                 self.assertNotIn(forbidden, records[0])
 
-    def test_reviewer_record_carries_review_round_and_resume_context(
+    def test_reviewer_record_carries_round_and_resume(
         self,
     ) -> None:
         # Reviewer spawn carries `agent_spec=REVIEW_AGENT_SPEC` and the
@@ -291,16 +291,16 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 if record.get("agent_role") == "reviewer"
             ]
             self.assertEqual(len(reviewer), 1)
-            rec = reviewer[0]
-            self.assertEqual(rec["stage"], "validating")
-            self.assertEqual(rec["backend"], config.REVIEW_AGENT)
-            self.assertEqual(rec["agent_spec"], config.REVIEW_AGENT_SPEC)
-            self.assertEqual(rec["review_round"], 2)
-            self.assertEqual(rec["retry_count"], 3)
-            self.assertEqual(rec["session_id"], "sess-review")
+            reviewer_record = reviewer[0]
+            self.assertEqual(reviewer_record["stage"], "validating")
+            self.assertEqual(reviewer_record["backend"], config.REVIEW_AGENT)
+            self.assertEqual(reviewer_record["agent_spec"], config.REVIEW_AGENT_SPEC)
+            self.assertEqual(reviewer_record["review_round"], 2)
+            self.assertEqual(reviewer_record["retry_count"], 3)
+            self.assertEqual(reviewer_record["session_id"], "sess-review")
             # Reviewer always spawns fresh; the wrapper drops None-valued
             # extras so `resume_session_id` is absent (not stored as null).
-            self.assertNotIn("resume_session_id", rec)
+            self.assertNotIn("resume_session_id", reviewer_record)
 
     def test_timeout_records_exit_metadata_and_no_cost(self) -> None:
         # A timed-out agent has empty stdout; the parser yields the
@@ -624,7 +624,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
                 "agent_exit", {event["event"] for event in gh.recorded_events},
             )
 
-    def test_analytics_and_skill_events_unchanged_with_usage_surfaced(
+    def test_analytics_and_skill_events_unchanged(
         self,
     ) -> None:
         # Surfacing usage must not perturb the analytics record or the
@@ -634,23 +634,23 @@ class RunUsageSurfacedTest(unittest.TestCase):
         # carries the same metrics.
         with tempfile.TemporaryDirectory(prefix="usage-unchanged-") as td:
             path = Path(td) / "analytics.jsonl"
-            gh, result = self._run(
+            gh, agent_result = self._run(
                 stdout=_claude_stdout_with_skills(skills=("develop", "review")),
                 track=True,
                 analytics_path=path,
             )
             records = self._records(path)
             self.assertEqual(len(records), 1)
-            rec = records[0]
-            self.assertEqual(rec["event"], "agent_exit")
-            self.assertEqual(rec["input_tokens"], 1000)
-            self.assertEqual(rec["output_tokens"], 500)
+            exit_record = records[0]
+            self.assertEqual(exit_record["event"], "agent_exit")
+            self.assertEqual(exit_record["input_tokens"], 1000)
+            self.assertEqual(exit_record["output_tokens"], 500)
             # The record shape is unchanged -- the surfaced field name must
             # not leak into the JSONL record.
-            self.assertNotIn("usage", rec)
+            self.assertNotIn("usage", exit_record)
             # The same numbers are visible on the surfaced metrics object.
-            self.assertEqual(result.usage.input_tokens, 1000)
-            self.assertEqual(result.usage.output_tokens, 500)
+            self.assertEqual(agent_result.usage.input_tokens, 1000)
+            self.assertEqual(agent_result.usage.output_tokens, 500)
             # Skill-trigger audit events are unaffected.
             skill_events = [
                 event for event in gh.recorded_events

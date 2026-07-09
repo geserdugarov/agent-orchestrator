@@ -85,7 +85,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_approval_squashes_and_lands_in_review_without_re_review(
+    def test_lands_in_review_without_re_review(
         self,
     ) -> None:
         # End-to-end: validating approves, squash + force-push runs (mocked
@@ -364,7 +364,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self.assertEqual(body, "fix: typo")
         self.assertNotIn("Squashed commits:", body)
 
-    def test_squash_uses_issue_title_when_no_conventional_first_subject(
+    def test_uses_issue_title_without_conventional_subject(
         self,
     ) -> None:
         # Reset and rebuild the branch with non-conv-commit first subject.

@@ -966,7 +966,7 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
                 "ON CONFLICT (content_hash) DO NOTHING", sql,
             )
 
-    def test_race_backstop_rowcount_distinguishes_inserted_and_duplicate(self) -> None:
+    def test_rowcount_distinguishes_inserted_and_duplicate(self) -> None:
         # Race-safe backstop: model a concurrent writer that landed
         # rows AFTER the startup pre-check completed but BEFORE the
         # batched flush, by holding the pre-check view empty while
@@ -989,12 +989,12 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
             for record in records[:2]:
                 fake.seen_hashes.add(analytics_sync._content_hash(record))
             with patch.object(analytics_sync, "_BATCH_SIZE", 4):
-                result = analytics_sync.sync_jsonl_to_postgres(
+                sync_result = analytics_sync.sync_jsonl_to_postgres(
                     connect=lambda url: fake,
                     json_adapter=lambda v: v,
                 )
-            self.assertEqual(result.inserted, 2)
-            self.assertEqual(result.skipped_duplicate, 2)
+            self.assertEqual(sync_result.inserted, 2)
+            self.assertEqual(sync_result.skipped_duplicate, 2)
             self.assertEqual(len(fake.batches), 1)
             self.assertEqual(len(fake.batches[0][1]), 4)
 

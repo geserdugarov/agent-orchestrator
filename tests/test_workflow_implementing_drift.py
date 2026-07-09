@@ -467,7 +467,7 @@ class ImplementingContinueCommandTest(
         )
         return gh, issue
 
-    def test_agent_silent_bare_continue_retries_without_drift_notice(
+    def test_silent_bare_continue_retries_without_drift_notice(
         self,
     ) -> None:
         # The #720 shape: parked `agent_silent`, stale watermark, human posts
@@ -506,7 +506,7 @@ class ImplementingContinueCommandTest(
         self.assertEqual(len(gh.opened_prs), 1)
         self.assertEqual(gh.pinned_data(730).get("last_action_comment_id"), 9000)
 
-    def test_bare_continue_on_question_park_refuses_and_does_not_loop(
+    def test_question_park_bare_continue_refuses(
         self,
     ) -> None:
         # A real agent question parks with `park_reason=None`. A content-free

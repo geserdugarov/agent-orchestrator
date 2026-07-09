@@ -341,7 +341,7 @@ class ResolvingConflictAwaitingHumanResumeTest(
         self.assertNotIn((200, "validating"), gh.label_history)
         self.assertTrue(state.get("awaiting_human"))
 
-    def test_agent_silent_bare_continue_retries_without_literal_command(
+    def test_silent_bare_continue_retries_without_literal(
         self,
     ) -> None:
         # `/orchestrator continue` on a session-failure rebase park is an

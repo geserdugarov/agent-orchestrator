@@ -255,7 +255,7 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
     park, post a HITL question, consume `awaiting_human`, advance the
     action watermark, or open a PR off a partial result."""
 
-    def test_awaiting_human_resume_interrupted_leaves_state_untouched(
+    def test_awaiting_human_resume_leaves_state(
         self,
     ) -> None:
         gh = FakeGitHubClient()

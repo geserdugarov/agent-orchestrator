@@ -98,7 +98,7 @@ class ValidatingLivePauseDriftResumeTest(
 class ValidatingLivePauseAwaitingHumanTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
-    def test_pause_during_awaiting_human_resume_skips_fix_disposition(
+    def test_resume_skips_fix_disposition(
         self,
     ) -> None:
         # Parked on a question (dev-side, non-transient), a human replied and
