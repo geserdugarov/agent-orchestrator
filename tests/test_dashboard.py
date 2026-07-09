@@ -1522,7 +1522,100 @@ class BuildReadKeysTest(unittest.TestCase):
         self.assertEqual(
             prev_key,
             (prev.start, prev.end, CACHE_REPO, EVENT_NAMES, None,
-             ISSUE_NUMBER),
+            ISSUE_NUMBER),
+        )
+
+
+class DashboardDataPrepTest(unittest.TestCase):
+    """Small data-prep helpers keep `main()` focused on render sequencing."""
+
+    def test_kpi_strip_data_uses_cache_tokens_and_daily_sparks(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator import dashboard_theme as theme
+        from orchestrator.analytics.read import (
+            ReviewRoundBucketRow,
+            ThroughputDayRow,
+            TimeSeriesPoint,
+        )
+
+        summary = dashboard.Summary(
+            total_cost_usd=12.0,
+            total_input_tokens=10,
+            total_output_tokens=20,
+            total_cache_read_tokens=3,
+            total_cache_write_tokens=7,
+        )
+        prev_summary = dashboard.Summary(
+            total_cost_usd=6.0,
+            total_input_tokens=5,
+            total_output_tokens=5,
+            total_cache_read_tokens=5,
+            total_cache_write_tokens=5,
+        )
+        ts_points = [
+            TimeSeriesPoint(
+                day=MAY_1, event="agent_exit", count=1,
+                cost_usd=1.5, input_tokens=10, output_tokens=5,
+                cache_read_tokens=2, cache_write_tokens=3,
+            ),
+            TimeSeriesPoint(
+                day=MAY_1, event="agent_exit", count=1,
+                cost_usd=0.5, input_tokens=1, output_tokens=2,
+            ),
+            TimeSeriesPoint(
+                day=MAY_7, event="agent_exit", count=1,
+                cost_usd=4.0, input_tokens=2, output_tokens=3,
+                cache_read_tokens=1, cache_write_tokens=1,
+            ),
+        ]
+        throughput_rows = [
+            ThroughputDayRow(day=MAY_1, resolved=2, rejected=1),
+            ThroughputDayRow(day=MAY_7, resolved=0, rejected=1),
+        ]
+        review_round_rows = [
+            ReviewRoundBucketRow(bucket="0", runs=2, total_cost_usd=5.0),
+            ReviewRoundBucketRow(bucket="1", runs=1, total_cost_usd=3.0),
+        ]
+
+        kpis, resolved, rejected = dashboard._build_kpi_strip_data(
+            theme=theme,
+            summary=summary,
+            prev_summary=prev_summary,
+            ts_points=ts_points,
+            throughput_rows=throughput_rows,
+            review_round_rows=review_round_rows,
+            days_in_window=2,
+        )
+
+        by_label = {kpi["label"]: kpi for kpi in kpis}
+        self.assertEqual((resolved, rejected), (2, 2))
+        self.assertEqual(by_label["Total tokens"]["value"], "40")
+        self.assertEqual(by_label["Total tokens"]["delta"], 1.0)
+        self.assertEqual(by_label["Total tokens"]["spark"], [23.0, 7.0])
+        self.assertEqual(by_label["Total spend"]["spark"], [2.0, 4.0])
+        self.assertEqual(by_label["Cost / resolved issue"]["value"], "$6.00")
+        self.assertEqual(
+            by_label["Cost / resolved issue"]["spark"], [2, 0],
+        )
+        self.assertEqual(by_label["Rework share"]["value"], "38%")
+
+    def test_backend_tokens_by_day_accumulates_duplicate_cells(self) -> None:
+        _, dashboard = _reload()
+        from orchestrator.analytics.read import BackendDailyTokensRow
+
+        rows = [
+            BackendDailyTokensRow(day=MAY_1, backend="claude", total_tokens=10),
+            BackendDailyTokensRow(day=MAY_1, backend="claude", total_tokens=5),
+            BackendDailyTokensRow(day=MAY_1, backend="codex", total_tokens=3),
+            BackendDailyTokensRow(day=MAY_7, backend="claude", total_tokens=8),
+        ]
+
+        self.assertEqual(
+            dashboard._backend_tokens_by_day(rows),
+            {
+                MAY_1: {"claude": 15.0, "codex": 3.0},
+                MAY_7: {"claude": 8.0},
+            },
         )
 
 
@@ -1999,9 +2092,7 @@ class FanOutReadsParallelTest(unittest.TestCase):
 class MainRenderDispatchTest(_MainSourceTest):
     """`main()` dispatches its body through focused `_render_*` helpers
     -- the sidebar / date filter bar up top, then the widget cards in
-    top-to-bottom page order after the fan-out. The skill-trigger card
-    stays inline in `main()` between the heatmap and recent-runs
-    helpers (its wiring is source-inspected by `SkillMatrixWiringTest`).
+    top-to-bottom page order after the fan-out.
     """
 
     def test_render_helpers_called_in_page_order(self) -> None:
@@ -2014,6 +2105,7 @@ class MainRenderDispatchTest(_MainSourceTest):
             "_render_issues_and_backends(",
             "_render_repo_and_reliability(",
             "_render_activity_heatmap(",
+            "_render_skill_triggers(",
             "_render_recent_runs(",
         ]
         idxs = [src.index(marker) for marker in order]
@@ -2028,7 +2120,7 @@ class MainRenderDispatchTest(_MainSourceTest):
     ) -> None:
         src = self._main_source()
         heatmap = src.index("_render_activity_heatmap(")
-        skill = src.index("_skill_triggers_html(skill_rows)")
+        skill = src.index("_render_skill_triggers(")
         recent = src.index("_render_recent_runs(")
         self.assertLess(heatmap, skill)
         self.assertLess(skill, recent)
@@ -2110,7 +2202,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
     """The per-skill trigger matrix rides the same cached / fan-out
     read pattern as every other widget (its wrapper lives in
     `_widget_readers`) and renders as the second table under the
-    "Skill trigger rates" aggregate (inline in `main`). Streamlit is
+    "Skill trigger rates" aggregate. Streamlit is
     not installed for the default sync, so these inspect the rendered
     sources rather than driving the page under Streamlit.
     """
@@ -2156,32 +2248,32 @@ class SkillMatrixWiringTest(_MainSourceTest):
     def test_matrix_rendered_as_second_table_under_aggregate(self) -> None:
         # The matrix is the SECOND table: it renders after the aggregate
         # `_skill_triggers_html(skill_rows)` table, inside the same card.
-        src = self._main_source()
+        src = self._source_of("_render_skill_triggers")
         agg = src.index("_skill_triggers_html(skill_rows)")
-        matrix = src.index("_skill_matrix_html(")
+        matrix = src.index("_render_skill_matrix_expander(")
         self.assertLess(agg, matrix)
 
     def test_matrix_only_renders_when_aggregate_has_rows(self) -> None:
-        # The matrix render sits inside the `if skill_rows:` branch, so
-        # the empty-panel path still shows the single no-rows notice
-        # rather than a fallback for each table.
-        src = self._main_source()
-        branch = src.index("if skill_rows:")
+        # The matrix render sits after the empty aggregate's early return,
+        # so the no-rows path still shows the single notice rather than a
+        # fallback for each table.
+        src = self._source_of("_render_skill_triggers")
+        branch = src.index("if not skill_rows:")
         else_branch = src.index(
             'st.info("No `agent_exit` rows match the current filters.")',
             branch,
         )
-        matrix = src.index("_skill_matrix_html(")
+        matrix = src.index("_render_skill_matrix_expander(")
         self.assertLess(branch, matrix)
-        self.assertLess(matrix, else_branch)
+        self.assertLess(else_branch, matrix)
 
     def test_matrix_rendered_inside_collapsed_expander(self) -> None:
         # The matrix folds into a collapsed expander (mirroring the
         # "Recent agent runs" block) so it does not dominate the card by
         # default. The `_skill_matrix_html` render must sit after an
         # `st.expander(..., expanded=False)` opened for the matrix.
-        src = self._main_source()
-        expander = src.index('with st.expander(\n                "Per-skill')
+        src = self._source_of("_render_skill_matrix_expander")
+        expander = src.index('with st.expander(\n        "Per-skill')
         matrix = src.index("_skill_matrix_html(")
         self.assertLess(expander, matrix)
         # The expander block carrying the matrix opens collapsed.

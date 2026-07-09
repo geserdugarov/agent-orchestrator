@@ -35,6 +35,57 @@ from orchestrator.analytics.read import (
 from orchestrator.dashboard_kpis import InsightBanner
 
 
+def _table_css(table_class: str, *, extra_rules: str = "") -> str:
+    """Return the shared inline CSS block for compact dashboard tables."""
+    return f"""
+<style>
+  .{table_class} {{ width: 100%; border-collapse: collapse;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12.5px; }}
+  .{table_class} thead th {{ color: var(--orch-muted);
+    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
+    text-transform: uppercase; text-align: left;
+    padding: 4px 6px 8px; border-bottom: 1px solid var(--orch-border); }}
+  .{table_class} thead th.r {{ text-align: right; }}
+  .{table_class} tbody td {{ padding: 8px 6px; vertical-align: middle;
+    border-bottom: 1px solid var(--orch-grid); }}
+  .{table_class} tbody tr:last-child td {{ border-bottom: 0; }}
+  .{table_class} td.r {{ text-align: right; font-family:
+    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums; color: var(--orch-ink); }}
+{extra_rules}
+</style>
+"""
+
+
+def _table_head_html(columns: Sequence[tuple[str, bool]]) -> str:
+    cells = []
+    for label, right in columns:
+        cls = ' class="r"' if right else ""
+        cells.append(f"<th{cls}>{html.escape(label)}</th>")
+    return "<thead><tr>" + "".join(cells) + "</tr></thead>"
+
+
+def _table_html(
+    *, table_class: str, css: str, head: str, rows: Sequence[str]
+) -> str:
+    return (
+        css
+        + f'<table class="{table_class}">'
+        + head
+        + "<tbody>" + "".join(rows) + "</tbody>"
+        + "</table>"
+    )
+
+
+def _relative_width_pct(value: float, maximum: float) -> float:
+    return (value / maximum * 100.0) if maximum > 0 else 0.0
+
+
+def _short_repo_name(repo: str) -> str:
+    return repo.split("/")[-1] if "/" in repo else repo
+
+
 def _sparkline_svg(
     values: Sequence[float], *, color: str, w: int = 96, h: int = 26
 ) -> str:
@@ -187,6 +238,88 @@ def _kpi_strip_html(kpis: Sequence[dict]) -> str:
     return '<div class="orch-kpis">' + "".join(cells) + '</div>'
 
 
+_ISSUES_TABLE_COLUMNS = (
+    ("Issue", False),
+    ("Cost", True),
+    ("Runs", True),
+    ("Review rds", True),
+    ("Retries", True),
+    ("Status", True),
+)
+
+_ISSUES_TABLE_EXTRA_CSS = """
+  .orch-issues td.strong { font-weight: 600; }
+  .orch-issue-cell { display: flex; flex-direction: column;
+    gap: 4px; }
+  .orch-issue-name { color: var(--orch-ink); font-weight: 500; }
+  .orch-issue-num { color: var(--orch-muted); font-weight: 400;
+    margin-left: 2px; }
+  .orch-issue-bar { display: block; height: 4px; border-radius: 2px;
+    background: var(--orch-grid); overflow: hidden; }
+  .orch-issue-bar > span { display: block; height: 100%;
+    background: var(--orch-accent); border-radius: 2px; }
+  .orch-pill { display: inline-block; padding: 2px 9px;
+    border-radius: 999px; font-size: 11.5px; font-weight: 500;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+  .orch-pill.ok { background: rgba(26, 163, 154, 0.14);
+    color: var(--orch-success); }
+  .orch-pill.bad { background: rgba(217, 83, 74, 0.14);
+    color: var(--orch-danger); }
+  .orch-badge-warn { color: var(--orch-warn); font-weight: 600; }
+"""
+
+
+def _issue_status_pill(failed: int) -> str:
+    if failed:
+        return f'<span class="orch-pill bad">{failed} fail</span>'
+    return '<span class="orch-pill ok">clean</span>'
+
+
+def _review_round_html(review_rounds: int) -> str:
+    if review_rounds >= 3:
+        return f'<span class="orch-badge-warn">{review_rounds}</span>'
+    return str(review_rounds)
+
+
+def _issue_table_row_html(row: IssueSummaryRow, *, max_cost: float) -> str:
+    short = _short_repo_name(row.repo)
+    cost = float(row.total_cost_usd or 0.0)
+    bar_pct = _relative_width_pct(cost, max_cost)
+    cost_text = (
+        f"${row.total_cost_usd:,.2f}"
+        if row.total_cost_usd is not None
+        else "—"
+    )
+    review_rounds = (
+        int(row.max_review_round)
+        if row.max_review_round is not None
+        else 0
+    )
+    retries = (
+        int(row.max_retry_count)
+        if row.max_retry_count is not None
+        else 0
+    )
+    failed = int(row.failed_agent_runs or 0)
+    return (
+        "<tr>"
+        "<td>"
+        '<div class="orch-issue-cell">'
+        f'<span><span class="orch-issue-name">{html.escape(short)}</span>'
+        f' <span class="orch-issue-num">#{int(row.issue)}</span></span>'
+        f'<span class="orch-issue-bar"><span style="width:{bar_pct:.1f}%">'
+        "</span></span>"
+        "</div>"
+        "</td>"
+        f'<td class="r strong">{html.escape(cost_text)}</td>'
+        f'<td class="r">{int(row.agent_exits or 0)}</td>'
+        f'<td class="r">{_review_round_html(review_rounds)}</td>'
+        f'<td class="r">{retries}</td>'
+        f'<td class="r">{_issue_status_pill(failed)}</td>'
+        "</tr>"
+    )
+
+
 def _issues_table_html(rows: Sequence[IssueSummaryRow]) -> str:
     """Render the "Most expensive issues" table to inline HTML.
 
@@ -210,108 +343,60 @@ def _issues_table_html(rows: Sequence[IssueSummaryRow]) -> str:
         (float(r.total_cost_usd or 0.0) for r in rows),
         default=0.0,
     ) or 1.0
-    css = """
-<style>
-  .orch-issues { width: 100%; border-collapse: collapse;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 12.5px; }
-  .orch-issues thead th { color: var(--orch-muted);
-    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
-    text-transform: uppercase; text-align: left;
-    padding: 4px 6px 8px; border-bottom: 1px solid var(--orch-border); }
-  .orch-issues thead th.r { text-align: right; }
-  .orch-issues tbody td { padding: 8px 6px; vertical-align: middle;
-    border-bottom: 1px solid var(--orch-grid); }
-  .orch-issues tbody tr:last-child td { border-bottom: 0; }
-  .orch-issues td.r { text-align: right; font-family:
-    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-variant-numeric: tabular-nums; color: var(--orch-ink); }
-  .orch-issues td.strong { font-weight: 600; }
-  .orch-issue-cell { display: flex; flex-direction: column;
-    gap: 4px; }
-  .orch-issue-name { color: var(--orch-ink); font-weight: 500; }
-  .orch-issue-num { color: var(--orch-muted); font-weight: 400;
-    margin-left: 2px; }
-  .orch-issue-bar { display: block; height: 4px; border-radius: 2px;
-    background: var(--orch-grid); overflow: hidden; }
-  .orch-issue-bar > span { display: block; height: 100%;
-    background: var(--orch-accent); border-radius: 2px; }
-  .orch-pill { display: inline-block; padding: 2px 9px;
-    border-radius: 999px; font-size: 11.5px; font-weight: 500;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-  .orch-pill.ok { background: rgba(26, 163, 154, 0.14);
-    color: var(--orch-success); }
-  .orch-pill.bad { background: rgba(217, 83, 74, 0.14);
-    color: var(--orch-danger); }
-  .orch-badge-warn { color: var(--orch-warn); font-weight: 600; }
-</style>
-"""
-    body: list[str] = []
-    for r in rows:
-        short = r.repo.split("/")[-1] if "/" in r.repo else r.repo
-        cost = float(r.total_cost_usd or 0.0)
-        bar_pct = (cost / max_cost * 100.0) if max_cost > 0 else 0.0
-        cost_text = (
-            f"${r.total_cost_usd:,.2f}"
-            if r.total_cost_usd is not None
-            else "—"
-        )
-        review_rounds = (
-            int(r.max_review_round)
-            if r.max_review_round is not None
-            else 0
-        )
-        retries = (
-            int(r.max_retry_count)
-            if r.max_retry_count is not None
-            else 0
-        )
-        failed = int(r.failed_agent_runs or 0)
-        if failed:
-            pill = f'<span class="orch-pill bad">{failed} fail</span>'
-        else:
-            pill = '<span class="orch-pill ok">clean</span>'
-        # High review-round counts get a warning color so the
-        # operator can spot rework-heavy issues without reading the
-        # number.
-        review_html = (
-            f'<span class="orch-badge-warn">{review_rounds}</span>'
-            if review_rounds >= 3
-            else str(review_rounds)
-        )
-        body.append(
-            "<tr>"
-            "<td>"
-            '<div class="orch-issue-cell">'
-            f'<span><span class="orch-issue-name">{html.escape(short)}</span>'
-            f' <span class="orch-issue-num">#{int(r.issue)}</span></span>'
-            f'<span class="orch-issue-bar"><span style="width:{bar_pct:.1f}%">'
-            "</span></span>"
-            "</div>"
-            "</td>"
-            f'<td class="r strong">{html.escape(cost_text)}</td>'
-            f'<td class="r">{int(r.agent_exits or 0)}</td>'
-            f'<td class="r">{review_html}</td>'
-            f'<td class="r">{retries}</td>'
-            f'<td class="r">{pill}</td>'
-            "</tr>"
-        )
-    head = (
-        "<thead><tr>"
-        "<th>Issue</th>"
-        '<th class="r">Cost</th>'
-        '<th class="r">Runs</th>'
-        '<th class="r">Review rds</th>'
-        '<th class="r">Retries</th>'
-        '<th class="r">Status</th>'
-        "</tr></thead>"
+    css = _table_css("orch-issues", extra_rules=_ISSUES_TABLE_EXTRA_CSS)
+    body = [
+        _issue_table_row_html(row, max_cost=max_cost)
+        for row in rows
+    ]
+    return _table_html(
+        table_class="orch-issues",
+        css=css,
+        head=_table_head_html(_ISSUES_TABLE_COLUMNS),
+        rows=body,
     )
+
+
+_SKILL_TRIGGERS_TABLE_COLUMNS = (
+    ("Role", False),
+    ("Backend", False),
+    ("Runs", True),
+    ("Skill runs", True),
+    ("Trigger rate", True),
+    ("Triggers", True),
+)
+
+_SKILL_TRIGGERS_EXTRA_CSS = """
+  .orch-skills td.strong { font-weight: 600; color: var(--orch-ink); }
+  .orch-skill-rate { display: flex; align-items: center; gap: 8px;
+    justify-content: flex-end; }
+  .orch-skill-bar { display: block; height: 4px; width: 64px;
+    border-radius: 2px; background: var(--orch-grid); overflow: hidden; }
+  .orch-skill-bar > span { display: block; height: 100%;
+    background: var(--orch-accent); border-radius: 2px; }
+  .orch-skill-pct { min-width: 34px; color: var(--orch-ink); }
+"""
+
+
+def _skill_trigger_row_html(
+    row: SkillTriggerRateRow, *, max_rate: float
+) -> str:
+    role = row.agent_role or "unknown"
+    backend = row.backend or "unknown"
+    rate_pct = row.rate * 100.0
+    bar_pct = _relative_width_pct(row.rate, max_rate)
     return (
-        css
-        + '<table class="orch-issues">'
-        + head
-        + "<tbody>" + "".join(body) + "</tbody>"
-        + "</table>"
+        "<tr>"
+        f'<td class="strong">{html.escape(role)}</td>'
+        f'<td>{html.escape(backend)}</td>'
+        f'<td class="r">{int(row.runs)}</td>'
+        f'<td class="r">{int(row.skill_runs)}</td>'
+        '<td class="r"><span class="orch-skill-rate">'
+        '<span class="orch-skill-bar">'
+        f'<span style="width:{bar_pct:.1f}%"></span></span>'
+        f'<span class="orch-skill-pct">{rate_pct:.0f}%</span>'
+        "</span></td>"
+        f'<td class="r">{int(row.total_triggers)}</td>'
+        "</tr>"
     )
 
 
@@ -332,68 +417,18 @@ def _skill_triggers_html(rows: Sequence[SkillTriggerRateRow]) -> str:
     only consumer -- and reuses the shared `var(--orch-*)` theme tokens.
     """
     max_rate = max((r.rate for r in rows), default=0.0) or 1.0
-    css = """
-<style>
-  .orch-skills { width: 100%; border-collapse: collapse;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 12.5px; }
-  .orch-skills thead th { color: var(--orch-muted);
-    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
-    text-transform: uppercase; text-align: left;
-    padding: 4px 6px 8px; border-bottom: 1px solid var(--orch-border); }
-  .orch-skills thead th.r { text-align: right; }
-  .orch-skills tbody td { padding: 8px 6px; vertical-align: middle;
-    border-bottom: 1px solid var(--orch-grid); }
-  .orch-skills tbody tr:last-child td { border-bottom: 0; }
-  .orch-skills td.r { text-align: right; font-family:
-    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-variant-numeric: tabular-nums; color: var(--orch-ink); }
-  .orch-skills td.strong { font-weight: 600; color: var(--orch-ink); }
-  .orch-skill-rate { display: flex; align-items: center; gap: 8px;
-    justify-content: flex-end; }
-  .orch-skill-bar { display: block; height: 4px; width: 64px;
-    border-radius: 2px; background: var(--orch-grid); overflow: hidden; }
-  .orch-skill-bar > span { display: block; height: 100%;
-    background: var(--orch-accent); border-radius: 2px; }
-  .orch-skill-pct { min-width: 34px; color: var(--orch-ink); }
-</style>
-"""
-    body: list[str] = []
-    for r in rows:
-        role = r.agent_role or "unknown"
-        backend = r.backend or "unknown"
-        rate_pct = r.rate * 100.0
-        bar_pct = (r.rate / max_rate * 100.0) if max_rate > 0 else 0.0
-        body.append(
-            "<tr>"
-            f'<td class="strong">{html.escape(role)}</td>'
-            f'<td>{html.escape(backend)}</td>'
-            f'<td class="r">{int(r.runs)}</td>'
-            f'<td class="r">{int(r.skill_runs)}</td>'
-            '<td class="r"><span class="orch-skill-rate">'
-            '<span class="orch-skill-bar">'
-            f'<span style="width:{bar_pct:.1f}%"></span></span>'
-            f'<span class="orch-skill-pct">{rate_pct:.0f}%</span>'
-            "</span></td>"
-            f'<td class="r">{int(r.total_triggers)}</td>'
-            "</tr>"
-        )
-    head = (
-        "<thead><tr>"
-        "<th>Role</th>"
-        "<th>Backend</th>"
-        '<th class="r">Runs</th>'
-        '<th class="r">Skill runs</th>'
-        '<th class="r">Trigger rate</th>'
-        '<th class="r">Triggers</th>'
-        "</tr></thead>"
+    css = _table_css(
+        "orch-skills", extra_rules=_SKILL_TRIGGERS_EXTRA_CSS
     )
-    return (
-        css
-        + '<table class="orch-skills">'
-        + head
-        + "<tbody>" + "".join(body) + "</tbody>"
-        + "</table>"
+    body = [
+        _skill_trigger_row_html(row, max_rate=max_rate)
+        for row in rows
+    ]
+    return _table_html(
+        table_class="orch-skills",
+        css=css,
+        head=_table_head_html(_SKILL_TRIGGERS_TABLE_COLUMNS),
+        rows=body,
     )
 
 
@@ -409,6 +444,16 @@ SKILL_MATRIX_EMPTY_MESSAGE = (
     "has recorded a repo skill catalog and at least one run's triggered "
     "skills."
 )
+
+_SKILL_MATRIX_EXTRA_CSS = """
+  .orch-skillmatrix td.strong { font-weight: 600; color: var(--orch-ink); }
+  .orch-skillmatrix-zero { color: var(--orch-muted-soft); }
+  .orch-skillmatrix thead th a.orch-skillmatrix-h { color: inherit;
+    text-decoration: none; cursor: pointer; }
+  .orch-skillmatrix thead th a.orch-skillmatrix-h:hover {
+    color: var(--orch-ink); text-decoration: underline; }
+  .orch-skillmatrix-sort { margin-left: 3px; color: var(--orch-accent); }
+"""
 
 # Column model for the per-skill trigger matrix. Each entry is
 # `(param key, header label, right-aligned?, sort-value function)`. The
@@ -527,6 +572,38 @@ def _skill_matrix_header_html(active_key: Optional[str], descending: bool) -> st
     return "<thead><tr>" + "".join(cells) + "</tr></thead>"
 
 
+def _muted_zero_html(value: str) -> str:
+    return f'<span class="orch-skillmatrix-zero">{value}</span>'
+
+
+def _skill_matrix_row_html(row: SkillTriggerMatrixRow) -> str:
+    repo = row.repo or "unknown"
+    role = row.agent_role or "unknown"
+    backend = row.backend or "unknown"
+    skill = row.skill or "unknown"
+    runs = int(row.runs)
+    skill_runs = int(row.skill_runs)
+    skill_runs_html = (
+        _muted_zero_html("0") if skill_runs == 0 else str(skill_runs)
+    )
+    rate_html = (
+        _muted_zero_html("0%")
+        if skill_runs == 0
+        else f"{row.rate * 100.0:.0f}%"
+    )
+    return (
+        "<tr>"
+        f'<td class="strong">{html.escape(repo)}</td>'
+        f'<td>{html.escape(role)}</td>'
+        f'<td>{html.escape(backend)}</td>'
+        f'<td>{html.escape(skill)}</td>'
+        f'<td class="r">{runs}</td>'
+        f'<td class="r">{skill_runs_html}</td>'
+        f'<td class="r">{rate_html}</td>'
+        "</tr>"
+    )
+
+
 def _skill_matrix_html(
     rows: Sequence[SkillTriggerMatrixRow],
     *,
@@ -577,79 +654,18 @@ def _skill_matrix_html(
             f"{html.escape(SKILL_MATRIX_EMPTY_MESSAGE)}"
             "</div>"
         )
-    css = """
-<style>
-  .orch-skillmatrix { width: 100%; border-collapse: collapse;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 12.5px; }
-  .orch-skillmatrix thead th { color: var(--orch-muted);
-    font-size: 11px; font-weight: 500; letter-spacing: 0.05em;
-    text-transform: uppercase; text-align: left;
-    padding: 4px 6px 8px; border-bottom: 1px solid var(--orch-border); }
-  .orch-skillmatrix thead th.r { text-align: right; }
-  .orch-skillmatrix tbody td { padding: 8px 6px; vertical-align: middle;
-    border-bottom: 1px solid var(--orch-grid); }
-  .orch-skillmatrix tbody tr:last-child td { border-bottom: 0; }
-  .orch-skillmatrix td.r { text-align: right; font-family:
-    ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-variant-numeric: tabular-nums; color: var(--orch-ink); }
-  .orch-skillmatrix td.strong { font-weight: 600; color: var(--orch-ink); }
-  .orch-skillmatrix-zero { color: var(--orch-muted-soft); }
-  .orch-skillmatrix thead th a.orch-skillmatrix-h { color: inherit;
-    text-decoration: none; cursor: pointer; }
-  .orch-skillmatrix thead th a.orch-skillmatrix-h:hover {
-    color: var(--orch-ink); text-decoration: underline; }
-  .orch-skillmatrix-sort { margin-left: 3px; color: var(--orch-accent); }
-</style>
-"""
     rows = (
         _sort_skill_matrix_rows(rows, sort_key, descending)
         if sort_key is not None
         else _default_sort_skill_matrix_rows(rows)
     )
-    body: list[str] = []
-    for r in rows:
-        repo = r.repo or "unknown"
-        role = r.agent_role or "unknown"
-        backend = r.backend or "unknown"
-        skill = r.skill or "unknown"
-        runs = int(r.runs)
-        skill_runs = int(r.skill_runs)
-        # A `0` "Runs with skill" is an offered-but-never-triggered
-        # catalog cell -- mute it so the cells that actually fired stand
-        # out at a glance. The cohort `Runs` total is never muted (it is
-        # always >= 1 for a cohort that ran).
-        skill_runs_html = (
-            '<span class="orch-skillmatrix-zero">0</span>'
-            if skill_runs == 0
-            else str(skill_runs)
-        )
-        # The rate is derived from the two counts above, so mute it on the
-        # same offered-but-never-triggered signal that mutes `skill_runs`:
-        # a `0%` cell reads as quiet-but-offered, not as a live rate.
-        rate_html = (
-            '<span class="orch-skillmatrix-zero">0%</span>'
-            if skill_runs == 0
-            else f"{r.rate * 100.0:.0f}%"
-        )
-        body.append(
-            "<tr>"
-            f'<td class="strong">{html.escape(repo)}</td>'
-            f'<td>{html.escape(role)}</td>'
-            f'<td>{html.escape(backend)}</td>'
-            f'<td>{html.escape(skill)}</td>'
-            f'<td class="r">{runs}</td>'
-            f'<td class="r">{skill_runs_html}</td>'
-            f'<td class="r">{rate_html}</td>'
-            "</tr>"
-        )
-    head = _skill_matrix_header_html(sort_key, descending)
-    return (
-        css
-        + '<table class="orch-skillmatrix">'
-        + head
-        + "<tbody>" + "".join(body) + "</tbody>"
-        + "</table>"
+    return _table_html(
+        table_class="orch-skillmatrix",
+        css=_table_css(
+            "orch-skillmatrix", extra_rules=_SKILL_MATRIX_EXTRA_CSS
+        ),
+        head=_skill_matrix_header_html(sort_key, descending),
+        rows=[_skill_matrix_row_html(row) for row in rows],
     )
 
 
@@ -728,25 +744,8 @@ def _backend_efficiency_card_html(
     handle so this module stays free of the theme import (and the
     lazy-import invariant the dashboard relies on).
     """
-    tokens = int(
-        (row.total_input_tokens or 0)
-        + (row.total_output_tokens or 0)
-        + (row.total_cache_read_tokens or 0)
-        + (row.total_cache_write_tokens or 0)
-    )
-    cost_per_m = (
-        (row.total_cost_usd / (tokens / 1_000_000))
-        if tokens > 0 else 0.0
-    )
-    cost_per_run = (
-        (row.total_cost_usd / row.runs)
-        if row.runs > 0 else 0.0
-    )
-    cache_read = int(row.total_cache_read_tokens or 0)
-    input_tok = int(row.total_input_tokens or 0)
-    cache_hit_pct = (
-        (cache_read / (cache_read + input_tok) * 100)
-        if (cache_read + input_tok) > 0 else 0.0
+    tokens, cost_per_m, cost_per_run, cache_hit_pct = (
+        _backend_efficiency_metrics(row)
     )
     color = theme.color_for(
         row.backend, explicit=theme.BACKEND_COLORS
@@ -785,6 +784,53 @@ def _backend_efficiency_card_html(
     )
 
 
+def _backend_efficiency_metrics(
+    row: BackendEfficiencyRow,
+) -> tuple[int, float, float, float]:
+    tokens = int(
+        (row.total_input_tokens or 0)
+        + (row.total_output_tokens or 0)
+        + (row.total_cache_read_tokens or 0)
+        + (row.total_cache_write_tokens or 0)
+    )
+    cost_per_m = (
+        (row.total_cost_usd / (tokens / 1_000_000))
+        if tokens > 0 else 0.0
+    )
+    cost_per_run = (
+        (row.total_cost_usd / row.runs)
+        if row.runs > 0 else 0.0
+    )
+    cache_read = int(row.total_cache_read_tokens or 0)
+    input_tok = int(row.total_input_tokens or 0)
+    cache_input_total = cache_read + input_tok
+    cache_hit_pct = (
+        (cache_read / cache_input_total * 100)
+        if cache_input_total > 0 else 0.0
+    )
+    return tokens, cost_per_m, cost_per_run, cache_hit_pct
+
+
+def _cost_coverage_weights(
+    rows: Sequence[CostCoverageRow],
+) -> tuple[list[int], int]:
+    total_tokens = sum(int(row.total_tokens or 0) for row in rows)
+    if total_tokens > 0:
+        return [int(row.total_tokens or 0) for row in rows], total_tokens
+    weights = [int(row.runs or 0) for row in rows]
+    return weights, sum(weights) or 1
+
+
+def _cost_source_color(
+    cost_source: str, cost_sources: Sequence[str], theme
+) -> str:
+    return theme.color_for(
+        cost_source,
+        cost_sources,
+        explicit=theme.COST_SOURCE_COLORS,
+    )
+
+
 def _cost_coverage_bar_html(
     rows: Sequence[CostCoverageRow], *, theme
 ) -> str:
@@ -798,22 +844,13 @@ def _cost_coverage_bar_html(
     `agent_exit` rows that never reported usage). Colors / formatters
     come from the caller's `dashboard_theme` handle.
     """
-    total_tokens = sum(int(r.total_tokens or 0) for r in rows)
-    if total_tokens > 0:
-        weights = [int(r.total_tokens or 0) for r in rows]
-        total = total_tokens
-    else:
-        weights = [int(r.runs or 0) for r in rows]
-        total = sum(weights) or 1
+    weights, total = _cost_coverage_weights(rows)
+    cost_sources = [row.cost_source for row in rows]
     segs = []
     legend = []
     for r, w in zip(rows, weights):
         pct = w / total * 100
-        color = theme.color_for(
-            r.cost_source,
-            [r.cost_source for r in rows],
-            explicit=theme.COST_SOURCE_COLORS,
-        )
+        color = _cost_source_color(r.cost_source, cost_sources, theme)
         segs.append(
             f'<span style="width:{pct:.1f}%;background:{color}" '
             f'title="{html.escape(r.cost_source)}"></span>'
