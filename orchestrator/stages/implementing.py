@@ -6,9 +6,13 @@ Owns `_handle_implementing` plus the developer-side primitives the rest
 of the workflow re-uses: per-issue dev session lookup, resume on human
 reply, poisoned-session recovery, stale-session detection, the 24h
 retry budget, the post-agent disposition helpers (`_on_commits`,
-`_on_question`, `_on_dirty_worktree`), and the next-tick agent-timeout
+`_on_question`, `_on_dirty_worktree`), the next-tick agent-timeout
 recovery (`_try_recover_implementing_timeout_park`) that publishes a clean
-commit a descendant finished around an implementer timeout.
+commit a descendant finished around an implementer timeout, and the parked
+`/orchestrator continue` operator command (`_handle_parked_continue_command`
+/ `_retry_parked_dev_session`) that retries a session-failure park before
+the drift path instead of letting the bare command read as requirement
+drift. The command parser + classifier are shared via `workflow_messages`.
 
 ALL workflow-owned helpers (`_park_awaiting_human`, `_run_agent_tracked`,
 `_now_iso`, the worktree plumbing, the drift / manifest / messaging
@@ -854,6 +858,100 @@ def _handle_stale_question_park(
     return False
 
 
+def _retry_parked_dev_session(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+    new_comments: list,
+) -> None:
+    """Resume the locked dev session as an intentional `/orchestrator continue`
+    retry of a session-failure park (`agent_silent` / `agent_timeout`), then
+    dispose the result exactly like the awaiting-human resume path.
+
+    Unlike the generic human-reply resume this does NOT feed the bare command
+    text to the dev (`_wf._CONTINUE_RETRY_PROMPT` instead): the poisoned session
+    already carries the issue context in its transcript, or `_resume_dev_with_text`
+    rotates it to a re-grounded fresh spawn. The command comment(s) are marked
+    consumed up front so the retry does not re-fire next tick -- every fresh
+    comment is a bare continue here (the classifier's retry precondition), so
+    this drops no guidance. `user_content_hash` is deliberately NOT refreshed:
+    a bare continue never shifts it, and masking it here would swallow a real
+    body edit that landed in the same window before the dev could see it.
+    """
+    from .. import workflow as _wf
+
+    state.set("last_action_comment_id", max(c.id for c in new_comments))
+    wt = _wf._worktree_path(spec, issue.number)
+    if not wt.exists():
+        wt = _wf._ensure_worktree(
+            spec, issue.number,
+            branch=_wf._resolve_branch_name(state, spec, issue.number),
+        )
+    before_sha = _wf._head_sha(wt)
+    followup = f"{_wf._CONTINUE_RETRY_PROMPT}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
+    wt, result, paused = _resume_dev_with_text(
+        gh, spec, issue, state, followup, pause_guard=True,
+    )
+    state.set("last_agent_action_at", _wf._now_iso())
+    state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
+    # A shutdown-killed or live-paused resume leaves durable state untouched so
+    # the next process re-detects and re-runs the retry (mirrors the drift and
+    # fresh-spawn dispositions).
+    if _wf._ignore_if_interrupted(issue, result):
+        return
+    if paused:
+        return
+    _dispose_agent_result(gh, spec, issue, state, result, before_sha)
+
+
+def _handle_parked_continue_command(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+) -> bool:
+    """Handle an operator `/orchestrator continue` on a parked `implementing`
+    issue BEFORE generic user-content-drift / resume processing.
+
+    `/orchestrator continue` is the recovery signal for a dev session that hit
+    a session/usage limit or a silent failure (`_park_session_limit` /
+    `_park_silent_failure` tag both `agent_silent`; an implementer timeout tags
+    `agent_timeout`). Counting the bare command as an ordinary comment routed
+    it through "issue body/content changed" drift handling and resumed the dev
+    for the wrong reason (issue #729); a bare continue no longer shifts
+    `user_content_hash`, and this handler routes it deliberately instead.
+
+    Returns True when the command was fully handled this tick (an intentional
+    retry ran, or a refusal was posted) and the caller must return. Returns
+    False to fall through to the normal flow: the issue is not parked, the park
+    belongs to the refresh-time rebase loop, there is no new comment, no
+    continue command is present, or the command arrived alongside genuine
+    guidance (which the normal resume / drift path feeds to the dev).
+    """
+    from .. import workflow as _wf
+
+    if not state.get("awaiting_human"):
+        return False
+    park_reason = state.get("park_reason")
+    # Auto-rebase parks belong to the `_sync_pr_worktree_to_base` retry loop;
+    # the operator's comment is that loop's "retry the rebase" signal, so leave
+    # it for the refresh to own (mirrors `_dispatch_parked_fixing`).
+    if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
+        return False
+    new_comments = filter_trusted(
+        gh.comments_after(issue, state.get("last_action_comment_id"))
+    )
+    if not new_comments:
+        return False
+    action = _wf._continue_command_action(new_comments, park_reason)
+    if action == "passthrough":
+        return False
+    if action == "refuse":
+        _wf._refuse_parked_continue(gh, issue, state)
+        gh.write_pinned_state(issue, state)
+        return True
+    _retry_parked_dev_session(gh, spec, issue, state, new_comments)
+    return True
+
+
 def _handle_user_content_drift(
     gh: GitHubClient,
     spec: RepoSpec,
@@ -1221,6 +1319,13 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
     # clear it when the worktree/branch are clean, or refuse the relabel when
     # it would ship question-agent work. See `_handle_stale_question_park`.
     if _handle_stale_question_park(gh, spec, issue, state):
+        return
+
+    # Operator `/orchestrator continue` on a parked dev session: retry a
+    # session-failure park intentionally (or refuse a park that needs real
+    # guidance) BEFORE the drift / resume paths, so the bare command is not
+    # mis-handled as user-content drift. See `_handle_parked_continue_command`.
+    if _handle_parked_continue_command(gh, spec, issue, state):
         return
 
     # User-content drift: a human edited the issue title/body after the dev

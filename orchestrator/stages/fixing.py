@@ -146,7 +146,6 @@ patch could not affect.
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -157,47 +156,6 @@ from ..comment_trust import filter_trusted
 from ..config import RepoSpec
 from ..state_machine import WorkflowLabel
 from ..github import GitHubClient
-
-
-# Park reasons `/orchestrator continue` may retry: a dev session that went
-# silent (`agent_silent`, a poisoned resume that produced no output) or timed
-# out (`agent_timeout`). Both are session-limit / session-failure conditions
-# whose recovery is "retry the fix on a fresh session", not "wait for a human
-# answer". Every other awaiting-human shape -- a real agent question or a
-# dirty worktree (both `park_reason=None`), a stuck push, a missing PR --
-# needs the human's actual guidance, so the command is refused there.
-_CONTINUE_PARK_REASONS = frozenset({"agent_silent", "agent_timeout"})
-
-# `/orchestrator continue` operator command, matched as an EXACT LINE
-# (anchored to line boundaries, mirrors `_ADD_REVIEW_ROUNDS_RE` in
-# `stages.validating`) so prose that mentions the command in backticks
-# cannot fire it. `search` detects the command line inside a larger comment
-# -- so a comment that carries the command AND real guidance still counts as
-# the command -- while `_is_bare_orchestrator_continue` (whole stripped body
-# == the line) tells a content-free nudge apart from a comment that also
-# carries guidance, which governs whether an un-replayable park is refused or
-# resumed on that guidance.
-_ORCHESTRATOR_CONTINUE_RE = re.compile(
-    r"^[ \t]*/orchestrator[ \t]+continue[ \t]*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
-def _parse_orchestrator_continue(comments: list) -> list:
-    """Return the comments whose body contains an exact-line
-    `/orchestrator continue` operator command."""
-    return [
-        c for c in comments if _ORCHESTRATOR_CONTINUE_RE.search(c.body or "")
-    ]
-
-
-def _is_bare_orchestrator_continue(comment) -> bool:
-    """True when the comment's ENTIRE body is the command line and nothing
-    else -- a content-free nudge whose consumption drops no guidance."""
-    return (
-        _ORCHESTRATOR_CONTINUE_RE.fullmatch((comment.body or "").strip())
-        is not None
-    )
 
 
 def _fixing_preflight(gh: GitHubClient, spec: RepoSpec, issue: Issue, state):
@@ -401,7 +359,7 @@ def _dispatch_parked_fixing(
     #     park with no replayable batch: fall through to the normal resume
     #     so that guidance (not a bare continue) drives the dev.
     replay_batch = None
-    continue_cmds = _parse_orchestrator_continue(issue_space_new)
+    continue_cmds = _wf._parse_orchestrator_continue(issue_space_new)
     if continue_cmds:
         action, items = _handle_continue_command(
             gh, issue, state, pr, park_reason, continue_cmds,
@@ -1177,7 +1135,7 @@ def _handle_continue_command(
 
     batch = (
         _reconstruct_pending_fix_batch(gh, issue, pr, state)
-        if park_reason in _CONTINUE_PARK_REASONS else []
+        if park_reason in _wf._CONTINUE_PARK_REASONS else []
     )
     if batch:
         _wf._drop_poisoned_dev_session(state)
@@ -1194,13 +1152,13 @@ def _handle_continue_command(
         # consumed without the dev ever seeing it.
         return "replay", batch + new_feedback
 
-    if all(_is_bare_orchestrator_continue(c) for c in new_feedback):
+    if all(_wf._is_bare_orchestrator_continue(c) for c in new_feedback):
         # Content-free continue with nothing else to act on. Consume only the
         # command comment(s) (`new_feedback` is all bare commands here, so this
         # covers them) so the refusal is not re-posted every tick, then stay
         # parked with a reason.
         _advance_consumed_watermarks(state, list(continue_cmds), [], [])
-        if park_reason in _CONTINUE_PARK_REASONS:
+        if park_reason in _wf._CONTINUE_PARK_REASONS:
             message = (
                 f"{config.HITL_MENTIONS} `/orchestrator continue`: no "
                 "preserved PR-feedback batch is on file to replay for this "

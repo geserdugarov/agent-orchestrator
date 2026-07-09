@@ -32,10 +32,15 @@ os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 from orchestrator import config, workflow
 from orchestrator.stages.fixing import (
     _clear_pending_fix_bookmarks,
-    _is_bare_orchestrator_continue,
-    _parse_orchestrator_continue,
     _pending_fix_id_set,
     _reconstruct_pending_fix_batch,
+)
+# The `/orchestrator continue` parser lives in `workflow_messages` and is reached
+# through the `workflow` facade (`_wf._parse_orchestrator_continue`), so the
+# tests target the facade boundary rather than the stage module.
+from orchestrator.workflow import (
+    _is_bare_orchestrator_continue,
+    _parse_orchestrator_continue,
 )
 
 from tests.fakes import (

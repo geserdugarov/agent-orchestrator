@@ -888,6 +888,96 @@ class HandleDocumentingAwaitingHumanResumeTest(
         self.assertEqual(state.get(DOCS_CHECKED_SHA), SHA_PR_HEAD)
 
 
+class HandleDocumentingContinueCommandTest(
+    unittest.TestCase, _PatchedWorkflowMixin
+):
+    """`/orchestrator continue` on a parked `documenting` issue is an operator
+    command, not requirements drift (issue #729, the #717 shape). A retryable
+    session-failure park reruns the docs pass without the spurious "issue body
+    changed; routing back to `validating`" notice; a park needing a real answer
+    refuses."""
+
+    def _seed(self, number: int, *, park_reason, body="/orchestrator continue"):
+        gh = FakeGitHubClient()
+        issue = make_issue(number, label=DOCUMENTING, body="the requirements")
+        issue.comments.append(
+            FakeComment(id=9000, body=body, user=FakeUser("dave"))
+        )
+        gh.add_issue(issue)
+        # The current content hash (a bare continue does not shift it), so
+        # drift is a no-op and cannot fire on its own -- proving the retry
+        # reruns the docs pass rather than routing back to `validating`.
+        gh.seed_state(
+            number,
+            pr_number=47,
+            branch=_branch(number),
+            awaiting_human=True,
+            park_reason=park_reason,
+            last_action_comment_id=8000,
+            dev_agent=DEV_AGENT,
+            dev_session_id=DEV_SESSION,
+            silent_park_count=1,
+            user_content_hash=workflow._compute_user_content_hash(issue, set()),
+        )
+        return gh, issue
+
+    def test_agent_silent_bare_continue_reruns_docs_without_drift(self) -> None:
+        # The #717 shape: parked `agent_silent` docs pass, human posts exactly
+        # `/orchestrator continue`. The docs pass reruns (full documentation
+        # prompt) with NO "issue body changed" / "routing back to validating"
+        # notice, and the issue is NOT rerouted to `validating`.
+        gh, issue = self._seed(730, park_reason=PARK_AGENT_SILENT)
+
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(
+                session_id=DEV_SESSION,
+                last_message="docs: documented the flag",
+            ),
+            push_branch=True,
+            head_shas=[SHA_BEFORE, SHA_AFTER],
+            branch_ahead_behind=(0, 0),
+        )
+
+        # The docs pass reran on the full documentation prompt.
+        mocks[RUN_AGENT].assert_called_once()
+        prompt = (
+            mocks[RUN_AGENT].call_args.kwargs.get("prompt")
+            or mocks[RUN_AGENT].call_args.args[1]
+        )
+        self.assertIn("DOCS: NO_CHANGE", prompt)
+        # No drift notice, and no reroute to validating.
+        self.assertFalse(any(
+            "issue body changed" in body or "routing back to" in body
+            for _, body in gh.posted_comments
+        ))
+        self.assertNotIn((730, VALIDATING), gh.label_history)
+        # The commit advanced the issue to in_review; command consumed.
+        self.assertIn((730, IN_REVIEW), gh.label_history)
+        self.assertEqual(gh.pinned_data(730).get(LAST_ACTION_COMMENT_ID), 9000)
+
+    def test_bare_continue_on_question_park_refuses(self) -> None:
+        # A real docs-agent question parks with `park_reason=None`. A
+        # content-free continue carries no answer, so refuse and stay parked
+        # -- no docs rerun, no reroute.
+        gh, issue = self._seed(731, park_reason=None)
+
+        mocks = self._run(
+            lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
+            run_agent=_agent(),
+            branch_ahead_behind=(0, 0),
+        )
+
+        mocks[RUN_AGENT].assert_not_called()
+        self.assertTrue(any(
+            "needs your actual guidance" in body
+            for _, body in gh.posted_comments
+        ))
+        self.assertNotIn((731, VALIDATING), gh.label_history)
+        self.assertNotIn((731, IN_REVIEW), gh.label_history)
+        self.assertTrue(gh.pinned_data(731).get(AWAITING_HUMAN))
+
+
 class HandleDocumentingInterruptedTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):

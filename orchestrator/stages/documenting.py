@@ -877,6 +877,45 @@ def _dispose_documenting_outcome(
     gh.write_pinned_state(issue, state)
 
 
+def _refuse_parked_continue_command(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> bool:
+    """Refuse a content-free `/orchestrator continue` on a `documenting` park
+    that needs real human guidance, BEFORE the drift / resume paths.
+
+    Documenting has no preserved feedback batch to replay, so a bare continue
+    resolves to just two shapes: a retryable session-failure park
+    (`agent_silent` / `agent_timeout`) whose awaiting-human resume reruns the
+    FULL documentation prompt, and a park that needs a real answer. A bare
+    continue no longer shifts `user_content_hash`, so `_reconcile_documenting_drift`
+    stays silent and the retry falls through to `_run_documenting_dev`'s resume
+    (issue #729) -- only the refusal needs interception here.
+
+    Returns True when a content-free continue on a non-retryable park was
+    refused (command consumed, note posted, state written) and the caller must
+    return. Returns False to fall through: not parked, an auto-rebase park (the
+    refresh loop owns the nudge), no new comment, no bare continue, a retryable
+    park, or a command posted alongside genuine guidance.
+    """
+    from .. import workflow as _wf
+
+    if not state.get("awaiting_human"):
+        return False
+    park_reason = state.get("park_reason")
+    if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
+        return False
+    new_comments = filter_trusted(
+        gh.comments_after(issue, state.get("last_action_comment_id"))
+    )
+    if not new_comments:
+        return False
+    if _wf._continue_command_action(new_comments, park_reason) != "refuse":
+        return False
+    _wf._refuse_parked_continue(gh, issue, state)
+    gh.write_pinned_state(issue, state)
+    return True
+
+
 def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     from .. import workflow as _wf
 
@@ -888,6 +927,14 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     if pr_number is None:
         _park_documenting_without_pr(gh, issue, state)
+        return
+
+    # Operator `/orchestrator continue` on a park that needs real guidance:
+    # refuse before the drift / resume paths. Retryable session-failure parks
+    # and command-plus-guidance comments fall through -- a bare continue does
+    # not shift `user_content_hash`, so the retryable resume reruns the docs
+    # prompt without a spurious drift notice. See `_refuse_parked_continue_command`.
+    if _refuse_parked_continue_command(gh, issue, state):
         return
 
     branch = _wf._resolve_branch_name(state, spec, issue.number)

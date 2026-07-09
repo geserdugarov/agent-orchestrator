@@ -341,6 +341,103 @@ class ResolvingConflictAwaitingHumanResumeTest(
         self.assertNotIn((200, "validating"), gh.label_history)
         self.assertTrue(state.get("awaiting_human"))
 
+    def test_agent_silent_bare_continue_retries_without_literal_command(
+        self,
+    ) -> None:
+        # `/orchestrator continue` on a session-failure rebase park is an
+        # operator command, not resume text (issue #729): retry the dev on a
+        # neutral prompt, NOT the literal command. (No `user_content_hash`
+        # seeded, so the first-encounter drift baseline is recorded silently.)
+        gh, issue, pr = self._seed(
+            extra_state={
+                "awaiting_human": True,
+                "park_reason": "agent_silent",
+                "conflict_round": 1,
+                "last_action_comment_id": 1000,
+                "silent_park_count": 1,
+            },
+        )
+        issue.comments.append(
+            FakeComment(
+                id=2000, body="/orchestrator continue", user=FakeUser("dave"),
+            )
+        )
+
+        mocks, merge_mock, _ = self._run_with_merge(
+            gh, issue,
+            merge_succeeded=True,
+            head_shas=["beforehead", "merged"],
+            push_branch=True,
+            run_agent_result=_agent(
+                session_id="dev-sess", last_message="resolved",
+            ),
+        )
+
+        mocks["run_agent"].assert_called_once()
+        prompt = mocks["run_agent"].call_args.args[1]
+        self.assertIn("session/usage limit", prompt)
+        self.assertNotIn("/orchestrator continue", prompt)
+        self.assertEqual(
+            mocks["run_agent"].call_args.kwargs.get("resume_session_id"),
+            "dev-sess",
+        )
+        merge_mock.assert_not_called()
+        mocks["_push_branch"].assert_called_once()
+        self.assertFalse(any(
+            "issue body changed" in body for _, body in gh.posted_comments
+        ))
+        self.assertIn((200, "validating"), gh.label_history)
+        state = gh.pinned_data(200)
+        self.assertFalse(state.get("awaiting_human"))
+        self.assertEqual(state.get("conflict_round"), 2)
+        self.assertEqual(state.get("last_action_comment_id"), 2000)
+
+    def test_bare_continue_on_question_park_refuses(self) -> None:
+        # A genuine agent question parks with `park_reason=None`. A content-free
+        # continue carries no answer, so refuse and stay parked -- no dev resume,
+        # no rebase, no label flip.
+        gh, issue, pr = self._seed(
+            extra_state={
+                "awaiting_human": True,
+                "park_reason": None,
+                "conflict_round": 1,
+                "last_action_comment_id": 1000,
+            },
+        )
+        issue.comments.append(
+            FakeComment(
+                id=2000, body="/orchestrator continue", user=FakeUser("dave"),
+            )
+        )
+
+        merge_mock = MagicMock(return_value=(True, []))
+        git_mock = MagicMock(
+            return_value=MagicMock(returncode=0, stdout="", stderr="")
+        )
+        with patch.object(
+            workflow, "_rebase_base_into_worktree", merge_mock
+        ), patch.object(workflow, "_git", git_mock), patch.object(
+            workflow, "_git_hardened", git_mock,
+        ):
+            mocks = self._run(
+                lambda: workflow._handle_resolving_conflict(
+                    gh, _TEST_SPEC, issue,
+                ),
+                run_agent=_agent(),
+                push_branch=True,
+            )
+
+        mocks["run_agent"].assert_not_called()
+        merge_mock.assert_not_called()
+        mocks["_push_branch"].assert_not_called()
+        self.assertTrue(any(
+            "needs your actual guidance" in body
+            for _, body in gh.posted_comments
+        ))
+        self.assertNotIn((200, "validating"), gh.label_history)
+        state = gh.pinned_data(200)
+        self.assertTrue(state.get("awaiting_human"))
+
 
 if __name__ == "__main__":
     unittest.main()
