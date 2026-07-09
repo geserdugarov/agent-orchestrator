@@ -40,6 +40,30 @@ _FILTER_OPTION_COLUMNS: tuple[str, ...] = (
 )
 
 
+def _int_or_none(raw: Any) -> Optional[int]:
+    if raw is None:
+        return None
+    return int(raw)
+
+
+def _float_or_none(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    return float(raw)
+
+
+def _bool_or_none(raw: Any) -> Optional[bool]:
+    if raw is None:
+        return None
+    return bool(raw)
+
+
+def _empty_filter_selected(values: Optional[Sequence[str]]) -> bool:
+    if values is None:
+        return False
+    return len(values) == 0
+
+
 def get_filter_options(
     *,
     db_url: Optional[str] = None,
@@ -254,22 +278,14 @@ def get_recent_agent_exits(
                 stage=stage,
                 agent_role=agent_role,
                 backend=backend,
-                duration_s=float(duration_s) if duration_s is not None else None,
-                exit_code=int(exit_code) if exit_code is not None else None,
-                timed_out=bool(timed_out) if timed_out is not None else None,
-                review_round=(
-                    int(review_round) if review_round is not None else None
-                ),
-                retry_count=(
-                    int(retry_count) if retry_count is not None else None
-                ),
-                input_tokens=(
-                    int(input_tokens) if input_tokens is not None else None
-                ),
-                output_tokens=(
-                    int(output_tokens) if output_tokens is not None else None
-                ),
-                cost_usd=float(cost_usd) if cost_usd is not None else None,
+                duration_s=_float_or_none(duration_s),
+                exit_code=_int_or_none(exit_code),
+                timed_out=_bool_or_none(timed_out),
+                review_round=_int_or_none(review_round),
+                retry_count=_int_or_none(retry_count),
+                input_tokens=_int_or_none(input_tokens),
+                output_tokens=_int_or_none(output_tokens),
+                cost_usd=_float_or_none(cost_usd),
                 cost_source=cost_source,
             )
         )
@@ -415,24 +431,12 @@ def get_issues(
                 last_seen=last_seen,
                 latest_stage=latest_stage,
                 agent_exits=int(agent_exits or 0),
-                total_cost_usd=(
-                    float(total_cost_usd)
-                    if total_cost_usd is not None
-                    else None
-                ),
+                total_cost_usd=_float_or_none(total_cost_usd),
                 total_input_tokens=int(total_input_tokens or 0),
                 total_output_tokens=int(total_output_tokens or 0),
-                max_review_round=(
-                    int(max_review_round)
-                    if max_review_round is not None
-                    else None
-                ),
+                max_review_round=_int_or_none(max_review_round),
                 failed_agent_runs=int(failed_agent_runs or 0),
-                max_retry_count=(
-                    int(max_retry_count)
-                    if max_retry_count is not None
-                    else None
-                ),
+                max_retry_count=_int_or_none(max_retry_count),
             )
         )
     return out
@@ -464,9 +468,9 @@ def get_issue_events(
     url = _resolve_db_url(db_url)
     if conn is None and not url:
         return []
-    if events is not None and not events:
+    if _empty_filter_selected(events):
         return []
-    if stages is not None and not stages:
+    if _empty_filter_selected(stages):
         return []
     connect_fn = connect or _default_connect
     conditions = ["repo = %s", "issue = %s"]
@@ -511,12 +515,12 @@ def get_issue_events(
                 ts=ts,
                 event=event,
                 stage=stage,
-                duration_s=float(duration_s) if duration_s is not None else None,
+                duration_s=_float_or_none(duration_s),
                 result=result,
                 agent_role=agent_role,
                 backend=backend,
-                exit_code=int(exit_code) if exit_code is not None else None,
-                cost_usd=float(cost_usd) if cost_usd is not None else None,
+                exit_code=_int_or_none(exit_code),
+                cost_usd=_float_or_none(cost_usd),
             )
         )
     return out

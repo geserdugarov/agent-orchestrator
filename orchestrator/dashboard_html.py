@@ -86,6 +86,28 @@ def _short_repo_name(repo: str) -> str:
     return repo.split("/")[-1] if "/" in repo else repo
 
 
+def _sparkline_y(value: float, *, lo: float, span: float, pad: int, h: int) -> float:
+    return pad + (1 - (value - lo) / span) * (h - pad * 2)
+
+
+def _int_or_zero(raw: object) -> int:
+    if raw is None:
+        return 0
+    return int(raw)
+
+
+def _money_or_dash(raw: object) -> str:
+    if raw is None:
+        return "—"
+    return f"${raw:,.2f}"
+
+
+def _plural_s(count: int) -> str:
+    if count == 1:
+        return ""
+    return "s"
+
+
 def _sparkline_svg(
     values: Sequence[float], *, color: str, w: int = 96, h: int = 26
 ) -> str:
@@ -97,17 +119,19 @@ def _sparkline_svg(
     so the layout slot stays consistent across KPIs.
     """
     nums = [float(v or 0) for v in values]
-    if not nums or max(nums) == min(nums) == 0:
+    if len(nums) == 0 or max(nums) == min(nums) == 0:
         return f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}"></svg>'
     lo, hi = min(nums), max(nums)
     span = max(hi - lo, 1e-9)
     pad = 2
     step = (w - pad * 2) / max(len(nums) - 1, 1)
-
-    def y(v: float) -> float:
-        return pad + (1 - (v - lo) / span) * (h - pad * 2)
-
-    points = [(pad + i * step, y(v)) for i, v in enumerate(nums)]
+    points = [
+        (
+            pad + i * step,
+            _sparkline_y(v, lo=lo, span=span, pad=pad, h=h),
+        )
+        for i, v in enumerate(nums)
+    ]
     poly = " ".join(f"{x:.1f},{yv:.1f}" for x, yv in points)
     area_path = (
         "M" + f"{points[0][0]:.1f},{h - pad:.1f}"
@@ -146,10 +170,10 @@ def _delta_pill(value: Optional[float], *, invert: bool = False) -> str:
         return ""
     pct_str = f"{abs(value) * 100:.1f}%"
     if value > 0:
-        cls = "up" if not invert else "down"
+        cls = "down" if invert else "up"
         arrow = "▲"
     else:
-        cls = "down" if not invert else "up"
+        cls = "up" if invert else "down"
         arrow = "▼"
     return f'<span class="orch-delta {cls}">{arrow} {pct_str}</span>'
 
@@ -176,7 +200,7 @@ def _topbar_html(
         )
     sub = (
         f"{html.escape(range_label)} · "
-        f"{distinct_repos} repo{'s' if distinct_repos != 1 else ''} · "
+        f"{distinct_repos} repo{_plural_s(distinct_repos)} · "
         f"{fmt_num(total_events)} events"
     )
     return (
@@ -201,7 +225,7 @@ def _filter_meta_html(
     return (
         '<div class="orch-filter-meta">'
         f'{from_d.isoformat()} → {to_d.isoformat()} · '
-        f'{days} day{"s" if days != 1 else ""} · '
+        f'{days} day{_plural_s(days)} · '
         f'{fmt_num(runs)} runs'
         '</div>'
     )
@@ -285,21 +309,9 @@ def _issue_table_row_html(row: IssueSummaryRow, *, max_cost: float) -> str:
     short = _short_repo_name(row.repo)
     cost = float(row.total_cost_usd or 0.0)
     bar_pct = _relative_width_pct(cost, max_cost)
-    cost_text = (
-        f"${row.total_cost_usd:,.2f}"
-        if row.total_cost_usd is not None
-        else "—"
-    )
-    review_rounds = (
-        int(row.max_review_round)
-        if row.max_review_round is not None
-        else 0
-    )
-    retries = (
-        int(row.max_retry_count)
-        if row.max_retry_count is not None
-        else 0
-    )
+    cost_text = _money_or_dash(row.total_cost_usd)
+    review_rounds = _int_or_zero(row.max_review_round)
+    retries = _int_or_zero(row.max_retry_count)
     failed = int(row.failed_agent_runs or 0)
     return (
         "<tr>"
@@ -643,7 +655,7 @@ def _skill_matrix_html(
     the local CSS sits inline next to the table and reuses the shared
     `var(--orch-*)` theme tokens.
     """
-    if not rows:
+    if len(rows) == 0:
         # Self-contained inline style so the notice still reads as muted
         # body copy without the table's `<style>` block (skipped on this
         # early-return path).
@@ -654,11 +666,10 @@ def _skill_matrix_html(
             f"{html.escape(SKILL_MATRIX_EMPTY_MESSAGE)}"
             "</div>"
         )
-    rows = (
-        _sort_skill_matrix_rows(rows, sort_key, descending)
-        if sort_key is not None
-        else _default_sort_skill_matrix_rows(rows)
-    )
+    if sort_key is None:
+        rows = _default_sort_skill_matrix_rows(rows)
+    else:
+        rows = _sort_skill_matrix_rows(rows, sort_key, descending)
     return _table_html(
         table_class="orch-skillmatrix",
         css=_table_css(

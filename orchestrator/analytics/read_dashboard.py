@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from functools import partial
 from typing import Any, Callable, Optional, Sequence
 
 from .connection import _default_connect
@@ -63,6 +64,30 @@ def _as_skill_names(value: Any) -> list[str]:
     if not isinstance(value, (list, tuple)):
         return []
     return [s for s in value if isinstance(s, str)]
+
+
+def _label_or_unknown(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    return str(value)
+
+
+def _row_label(row: Sequence[Any], index: int) -> str:
+    if len(row) <= index:
+        return "unknown"
+    return _label_or_unknown(row[index])
+
+
+def _skill_matrix_order_key(
+    key: tuple[str, str, str, str],
+    *,
+    counts: dict[tuple[str, str, str, str], int],
+    cohort_runs: dict[tuple[str, str, str], int],
+) -> tuple:
+    repo, role, backend, skill = key
+    skill_runs = counts.get(key, 0)
+    total = cohort_runs.get((repo, role, backend), 0)
+    return (-skill_runs, -total, repo, role, backend, skill)
 
 
 # Default cap on the rows `get_skill_trigger_matrix` returns. The
@@ -311,8 +336,8 @@ def get_skill_trigger_rates(
         total_triggers = row[4] if len(row) > 4 else 0
         out.append(
             SkillTriggerRateRow(
-                agent_role=str(role) if role is not None else "unknown",
-                backend=str(backend) if backend is not None else "unknown",
+                agent_role=_label_or_unknown(role),
+                backend=_label_or_unknown(backend),
                 runs=int(runs or 0),
                 skill_runs=int(skill_runs or 0),
                 total_triggers=int(total_triggers or 0),
@@ -433,13 +458,9 @@ def get_skill_trigger_matrix(
     cohort_runs: dict[tuple[str, str, str], int] = {}
     counts: dict[tuple[str, str, str, str], int] = {}
     for row in run_rows:
-        r_repo = str(row[0]) if row[0] is not None else "unknown"
-        role = (
-            str(row[1]) if len(row) > 1 and row[1] is not None else "unknown"
-        )
-        backend = (
-            str(row[2]) if len(row) > 2 and row[2] is not None else "unknown"
-        )
+        r_repo = _label_or_unknown(row[0])
+        role = _row_label(row, 1)
+        backend = _row_label(row, 2)
         cohort = (r_repo, role, backend)
         # One agent-exit row == one run in the cohort, regardless of how
         # many (or whether any) skills it fired.
@@ -455,33 +476,33 @@ def get_skill_trigger_matrix(
     #    the catalog is missing, so the fall-back path emits only the
     #    observed-trigger cells.
     keys: set[tuple[str, str, str, str]] = set(counts)
-    for (c_repo, role, backend) in cohort_runs:
-        for skill in catalog.get(c_repo, ()):
-            keys.add((c_repo, role, backend, skill))
+    for (catalog_repo, catalog_role, catalog_backend) in cohort_runs:
+        for catalog_skill in catalog.get(catalog_repo, ()):
+            keys.add((catalog_repo, catalog_role, catalog_backend, catalog_skill))
 
-    def _order(key: tuple[str, str, str, str]) -> tuple:
-        k_repo, role, backend, skill = key
-        skill_runs = counts.get(key, 0)
-        total = cohort_runs.get((k_repo, role, backend), 0)
-        # Runs-with-skill DESC, then cohort runs DESC (negated for the
-        # ascending sort), then a stable repo / role / backend / skill
-        # tiebreak so equal-weight rows keep a deterministic order.
-        return (-skill_runs, -total, k_repo, role, backend, skill)
-
-    ordered = sorted(keys, key=_order)
+    ordered = sorted(
+        keys,
+        key=partial(
+            _skill_matrix_order_key,
+            counts=counts,
+            cohort_runs=cohort_runs,
+        ),
+    )
     if limit > 0:
         ordered = ordered[:limit]
 
     out: list[SkillTriggerMatrixRow] = []
     for key in ordered:
-        k_repo, role, backend, skill = key
+        matrix_repo, matrix_role, matrix_backend, matrix_skill = key
         out.append(
             SkillTriggerMatrixRow(
-                repo=k_repo,
-                skill=skill,
-                agent_role=role,
-                backend=backend,
-                runs=cohort_runs.get((k_repo, role, backend), 0),
+                repo=matrix_repo,
+                skill=matrix_skill,
+                agent_role=matrix_role,
+                backend=matrix_backend,
+                runs=cohort_runs.get(
+                    (matrix_repo, matrix_role, matrix_backend), 0
+                ),
                 skill_runs=counts.get(key, 0),
             )
         )
