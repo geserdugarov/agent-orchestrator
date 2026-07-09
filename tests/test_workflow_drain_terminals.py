@@ -21,10 +21,24 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    EVENT_PR_CLOSED_WITHOUT_MERGE,
+    EVENT_PR_MERGED,
+    LABEL_DONE,
+    LABEL_FIXING,
+    LABEL_IN_REVIEW,
+    LABEL_REJECTED,
+    LABEL_RESOLVING_CONFLICT,
+    STATE_CLOSED,
+    STATE_OPEN,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
+    _issue_branch,
 )
+
+
+DEFAULT_HEAD_SHA = "cafe1234"
+MERGE_METHOD_EXTERNAL = "external"
 
 
 class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -54,14 +68,14 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # down the fixing body). No label change, no state writes, no
         # cleanup, no events.
         gh = FakeGitHubClient()
-        issue = make_issue(310, label="fixing")
+        issue = make_issue(310, label=LABEL_FIXING)
         gh.add_issue(issue)
         state = self._state_with_pr_number(gh, 310, 31000)
 
         result = self._run(
             lambda: self.assertFalse(
                 workflow._drain_review_pr_terminals(
-                    gh, _TEST_SPEC, issue, state, None, stage="fixing",
+                    gh, _TEST_SPEC, issue, state, None, stage=LABEL_FIXING,
                 )
             ),
             run_agent=_agent(),
@@ -77,12 +91,12 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # the helper returning False for a "nothing terminal" state so
         # the caller can continue with the same `pr`.
         gh = FakeGitHubClient()
-        issue = make_issue(311, label="in_review")
+        issue = make_issue(311, label=LABEL_IN_REVIEW)
         gh.add_issue(issue)
         pr = FakePR(
-            number=31100, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-311",
-            head=FakePRRef(sha="cafe1234"),
-            merged=False, state="open",
+            number=31100, head_branch=_issue_branch(311),
+            head=FakePRRef(sha=DEFAULT_HEAD_SHA),
+            merged=False, state=STATE_OPEN,
         )
         gh.add_pr(pr)
         state = self._state_with_pr_number(gh, 311, 31100)
@@ -90,7 +104,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         result = self._run(
             lambda: self.assertFalse(
                 workflow._drain_review_pr_terminals(
-                    gh, _TEST_SPEC, issue, state, pr, stage="in_review",
+                    gh, _TEST_SPEC, issue, state, pr, stage=LABEL_IN_REVIEW,
                 )
             ),
             run_agent=_agent(),
@@ -106,44 +120,45 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `pr_merged` with `merge_method="external"` and the supplied
         # stage, close the issue if still open, and run branch cleanup.
         gh = FakeGitHubClient()
-        issue = make_issue(312, label="fixing")
+        issue = make_issue(312, label=LABEL_FIXING)
         gh.add_issue(issue)
         pr = FakePR(
-            number=31200, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-312",
-            head=FakePRRef(sha="cafe1234"),
-            merged=True, state="closed",
+            number=31200, head_branch=_issue_branch(312),
+            head=FakePRRef(sha=DEFAULT_HEAD_SHA),
+            merged=True, state=STATE_CLOSED,
         )
         gh.add_pr(pr)
         state = self._state_with_pr_number(
             gh, 312, 31200, review_round=2, conflict_round=0,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-312",
+            branch=_issue_branch(312),
         )
 
         result = self._run(
             lambda: self.assertTrue(
                 workflow._drain_review_pr_terminals(
-                    gh, _TEST_SPEC, issue, state, pr, stage="fixing",
+                    gh, _TEST_SPEC, issue, state, pr, stage=LABEL_FIXING,
                 )
             ),
             run_agent=_agent(),
         )
 
-        self.assertIn((312, "done"), gh.label_history)
+        self.assertIn((312, LABEL_DONE), gh.label_history)
         self.assertIn("merged_at", state.data)
         self.assertTrue(issue.closed)
         result["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 312,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-312",
+            branch=_issue_branch(312),
         )
         merged_events = [
-            event for event in gh.recorded_events if event["event"] == "pr_merged"
+            event for event in gh.recorded_events
+            if event["event"] == EVENT_PR_MERGED
         ]
         self.assertEqual(len(merged_events), 1)
         event = merged_events[0]
-        self.assertEqual(event["stage"], "fixing")
+        self.assertEqual(event["stage"], LABEL_FIXING)
         self.assertEqual(event["pr_number"], 31200)
-        self.assertEqual(event["merge_method"], "external")
-        self.assertEqual(event["sha"], "cafe1234")
+        self.assertEqual(event["merge_method"], MERGE_METHOD_EXTERNAL)
+        self.assertEqual(event["sha"], DEFAULT_HEAD_SHA)
         self.assertEqual(event["review_round"], 2)
 
     def test_closed_unmerged_pr_finalizes_to_rejected(
@@ -155,43 +170,43 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # The branch is dead weight once the PR is gone, mirroring the
         # merged-PR cleanup order.
         gh = FakeGitHubClient()
-        issue = make_issue(313, label="resolving_conflict")
+        issue = make_issue(313, label=LABEL_RESOLVING_CONFLICT)
         gh.add_issue(issue)
         pr = FakePR(
-            number=31300, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-313",
+            number=31300, head_branch=_issue_branch(313),
             head=FakePRRef(sha="dead0001"),
-            merged=False, state="closed",
+            merged=False, state=STATE_CLOSED,
         )
         gh.add_pr(pr)
         state = self._state_with_pr_number(
             gh, 313, 31300, review_round=3, conflict_round=2,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-313",
+            branch=_issue_branch(313),
         )
 
         result = self._run(
             lambda: self.assertTrue(
                 workflow._drain_review_pr_terminals(
                     gh, _TEST_SPEC, issue, state, pr,
-                    stage="resolving_conflict",
+                    stage=LABEL_RESOLVING_CONFLICT,
                 )
             ),
             run_agent=_agent(),
         )
 
-        self.assertIn((313, "rejected"), gh.label_history)
+        self.assertIn((313, LABEL_REJECTED), gh.label_history)
         self.assertIn("closed_without_merge_at", state.data)
         self.assertTrue(issue.closed)
         result["_cleanup_terminal_branch"].assert_called_once_with(
             gh, _TEST_SPEC, 313,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-313",
+            branch=_issue_branch(313),
         )
         closed_events = [
             event for event in gh.recorded_events
-            if event["event"] == "pr_closed_without_merge"
+            if event["event"] == EVENT_PR_CLOSED_WITHOUT_MERGE
         ]
         self.assertEqual(len(closed_events), 1)
         event = closed_events[0]
-        self.assertEqual(event["stage"], "resolving_conflict")
+        self.assertEqual(event["stage"], LABEL_RESOLVING_CONFLICT)
         self.assertEqual(event["pr_number"], 31300)
         self.assertEqual(event["sha"], "dead0001")
         self.assertEqual(event["review_round"], 3)
@@ -208,13 +223,13 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # emit either -- `pr_closed_without_merge` is reserved for the
         # genuine closed-PR arc above.
         gh = FakeGitHubClient()
-        issue = make_issue(314, label="in_review")
+        issue = make_issue(314, label=LABEL_IN_REVIEW)
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=31400, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-314",
-            head=FakePRRef(sha="cafe1234"),
-            merged=False, state="open",
+            number=31400, head_branch=_issue_branch(314),
+            head=FakePRRef(sha=DEFAULT_HEAD_SHA),
+            merged=False, state=STATE_OPEN,
         )
         gh.add_pr(pr)
         state = self._state_with_pr_number(gh, 314, 31400)
@@ -222,13 +237,13 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         result = self._run(
             lambda: self.assertTrue(
                 workflow._drain_review_pr_terminals(
-                    gh, _TEST_SPEC, issue, state, pr, stage="in_review",
+                    gh, _TEST_SPEC, issue, state, pr, stage=LABEL_IN_REVIEW,
                 )
             ),
             run_agent=_agent(),
         )
 
-        self.assertIn((314, "rejected"), gh.label_history)
+        self.assertIn((314, LABEL_REJECTED), gh.label_history)
         self.assertIn("closed_without_merge_at", state.data)
         # The PR is still open and may be reopened / salvaged, so the
         # branch must survive this exit.
@@ -236,11 +251,14 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No `pr_closed_without_merge` emit for the open-PR case.
         self.assertEqual(
             [event for event in gh.recorded_events
-             if event["event"] == "pr_closed_without_merge"],
+             if event["event"] == EVENT_PR_CLOSED_WITHOUT_MERGE],
             [],
         )
         self.assertEqual(
-            [event for event in gh.recorded_events if event["event"] == "pr_merged"],
+            [
+                event for event in gh.recorded_events
+                if event["event"] == EVENT_PR_MERGED
+            ],
             [],
         )
 
@@ -258,12 +276,12 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # silently lose `conflict_round` from `pr_merged` /
         # `pr_closed_without_merge` events.
         gh = FakeGitHubClient()
-        issue = make_issue(316, label="resolving_conflict")
+        issue = make_issue(316, label=LABEL_RESOLVING_CONFLICT)
         gh.add_issue(issue)
         pr = FakePR(
-            number=31600, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-316",
+            number=31600, head_branch=_issue_branch(316),
             head=FakePRRef(sha="feed1234"),
-            merged=True, state="closed",
+            merged=True, state=STATE_CLOSED,
         )
         gh.add_pr(pr)
         # Deliberately omit `conflict_round` from the pinned state.
@@ -273,30 +291,31 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             lambda: self.assertTrue(
                 workflow._drain_review_pr_terminals(
                     gh, _TEST_SPEC, issue, state, pr,
-                    stage="resolving_conflict",
+                    stage=LABEL_RESOLVING_CONFLICT,
                 )
             ),
             run_agent=_agent(),
         )
 
         merged_events = [
-            event for event in gh.recorded_events if event["event"] == "pr_merged"
+            event for event in gh.recorded_events
+            if event["event"] == EVENT_PR_MERGED
         ]
         self.assertEqual(len(merged_events), 1)
         merged_event = merged_events[0]
-        self.assertEqual(merged_event["stage"], "resolving_conflict")
+        self.assertEqual(merged_event["stage"], LABEL_RESOLVING_CONFLICT)
         # Field must be present (build_event_record drops None), and
         # the coerced default must be 0.
         self.assertIn("conflict_round", merged_event)
         self.assertEqual(merged_event["conflict_round"], 0)
 
         # Same coercion for the closed-without-merge arc.
-        issue2 = make_issue(317, label="resolving_conflict")
+        issue2 = make_issue(317, label=LABEL_RESOLVING_CONFLICT)
         gh.add_issue(issue2)
         pr2 = FakePR(
-            number=31700, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-317",
+            number=31700, head_branch=_issue_branch(317),
             head=FakePRRef(sha="feed5678"),
-            merged=False, state="closed",
+            merged=False, state=STATE_CLOSED,
         )
         gh.add_pr(pr2)
         state2 = self._state_with_pr_number(gh, 317, 31700)
@@ -305,7 +324,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             lambda: self.assertTrue(
                 workflow._drain_review_pr_terminals(
                     gh, _TEST_SPEC, issue2, state2, pr2,
-                    stage="resolving_conflict",
+                    stage=LABEL_RESOLVING_CONFLICT,
                 )
             ),
             run_agent=_agent(),
@@ -313,7 +332,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         closed_events = [
             event for event in gh.recorded_events
-            if event["event"] == "pr_closed_without_merge"
+            if event["event"] == EVENT_PR_CLOSED_WITHOUT_MERGE
         ]
         self.assertEqual(len(closed_events), 1)
         closed_event = closed_events[0]
@@ -328,12 +347,12 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `in_review` / `fixing` and start emitting a `conflict_round=0`
         # field on states that never had the counter.
         gh = FakeGitHubClient()
-        issue = make_issue(318, label="in_review")
+        issue = make_issue(318, label=LABEL_IN_REVIEW)
         gh.add_issue(issue)
         pr = FakePR(
-            number=31800, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-318",
+            number=31800, head_branch=_issue_branch(318),
             head=FakePRRef(sha="cafe5678"),
-            merged=True, state="closed",
+            merged=True, state=STATE_CLOSED,
         )
         gh.add_pr(pr)
         state = self._state_with_pr_number(gh, 318, 31800)
@@ -341,14 +360,15 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self._run(
             lambda: self.assertTrue(
                 workflow._drain_review_pr_terminals(
-                    gh, _TEST_SPEC, issue, state, pr, stage="in_review",
+                    gh, _TEST_SPEC, issue, state, pr, stage=LABEL_IN_REVIEW,
                 )
             ),
             run_agent=_agent(),
         )
 
         merged_events = [
-            event for event in gh.recorded_events if event["event"] == "pr_merged"
+            event for event in gh.recorded_events
+            if event["event"] == EVENT_PR_MERGED
         ]
         self.assertEqual(len(merged_events), 1)
         self.assertNotIn("conflict_round", merged_events[0])
@@ -362,13 +382,13 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # finalizes the label, but must not crash trying to re-close
         # what GitHub already closed.
         gh = FakeGitHubClient()
-        issue = make_issue(315, label="fixing")
+        issue = make_issue(315, label=LABEL_FIXING)
         issue.closed = True
         gh.add_issue(issue)
         pr = FakePR(
-            number=31500, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-315",
+            number=31500, head_branch=_issue_branch(315),
             head=FakePRRef(sha="feed0001"),
-            merged=True, state="closed",
+            merged=True, state=STATE_CLOSED,
         )
         gh.add_pr(pr)
         state = self._state_with_pr_number(gh, 315, 31500)
@@ -376,19 +396,20 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self._run(
             lambda: self.assertTrue(
                 workflow._drain_review_pr_terminals(
-                    gh, _TEST_SPEC, issue, state, pr, stage="fixing",
+                    gh, _TEST_SPEC, issue, state, pr, stage=LABEL_FIXING,
                 )
             ),
             run_agent=_agent(),
         )
 
-        self.assertIn((315, "done"), gh.label_history)
+        self.assertIn((315, LABEL_DONE), gh.label_history)
         self.assertTrue(issue.closed)
         merged_events = [
-            event for event in gh.recorded_events if event["event"] == "pr_merged"
+            event for event in gh.recorded_events
+            if event["event"] == EVENT_PR_MERGED
         ]
         self.assertEqual(len(merged_events), 1)
-        self.assertEqual(merged_events[0]["stage"], "fixing")
+        self.assertEqual(merged_events[0]["stage"], LABEL_FIXING)
 
     def test_each_terminal_arc_posts_tracked_usage_verdict(self) -> None:
         # All three terminal arcs -- merged -> done, closed -> rejected, and
@@ -397,9 +418,16 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         # arc's `write_pinned_state`, so its id rides the persisted state.
         cases = [
             # (issue, pr, merged, pr_state, issue_closed, stage)
-            (320, 32000, True, "closed", False, "in_review"),
-            (321, 32100, False, "closed", False, "fixing"),
-            (322, 32200, False, "open", True, "resolving_conflict"),
+            (320, 32000, True, STATE_CLOSED, False, LABEL_IN_REVIEW),
+            (321, 32100, False, STATE_CLOSED, False, LABEL_FIXING),
+            (
+                322,
+                32200,
+                False,
+                STATE_OPEN,
+                True,
+                LABEL_RESOLVING_CONFLICT,
+            ),
         ]
         for n, prn, merged, pr_state, issue_closed, stage in cases:
             with self.subTest(stage=stage):
@@ -409,8 +437,8 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 gh.add_issue(issue)
                 pr = FakePR(
                     number=prn,
-                    head_branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{n}",
-                    head=FakePRRef(sha="cafe1234"),
+                    head_branch=_issue_branch(n),
+                    head=FakePRRef(sha=DEFAULT_HEAD_SHA),
                     merged=merged, state=pr_state,
                 )
                 gh.add_pr(pr)

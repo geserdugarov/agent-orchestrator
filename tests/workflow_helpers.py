@@ -33,15 +33,57 @@ def _manifest(payload: str) -> str:
     return f"```orchestrator-manifest\n{payload}\n```"
 
 
+TEST_REPO_SLUG = "geserdugarov/agent-orchestrator"
+TEST_BASE_BRANCH = "main"
+
+LABEL_DECOMPOSING = "decomposing"
+LABEL_DOCUMENTING = "documenting"
+LABEL_DONE = "done"
+LABEL_FIXING = "fixing"
+LABEL_IMPLEMENTING = "implementing"
+LABEL_IN_REVIEW = "in_review"
+LABEL_REJECTED = "rejected"
+LABEL_RESOLVING_CONFLICT = "resolving_conflict"
+LABEL_VALIDATING = "validating"
+
+STATE_CLOSED = "closed"
+STATE_OPEN = "open"
+
+BACKEND_CLAUDE = "claude"
+BACKEND_CODEX = "codex"
+
+ROLE_DEVELOPER = "developer"
+ROLE_REVIEWER = "reviewer"
+
+EVENT_AGENT_EXIT = "agent_exit"
+EVENT_AGENT_SPAWN = "agent_spawn"
+EVENT_AGENT_TRAJECTORY = "agent_trajectory"
+EVENT_PR_CLOSED_WITHOUT_MERGE = "pr_closed_without_merge"
+EVENT_PR_MERGED = "pr_merged"
+EVENT_SKILL_TRIGGERED = "skill_triggered"
+EVENT_STAGE_ENTER = "stage_enter"
+EVENT_STAGE_EVALUATION = "stage_evaluation"
+
+VERDICT_APPROVED = "approved"
+VERDICT_CHANGES_REQUESTED = "changes_requested"
+VERDICT_UNKNOWN = "unknown"
+REVIEW_APPROVED_MESSAGE = "LGTM\n\nVERDICT: APPROVED"
+REVIEW_CHANGES_REQUESTED_MESSAGE = "1. Fix typo\n\nVERDICT: CHANGES_REQUESTED"
+
+
+def _issue_branch(issue_number: int, slug: str = TEST_REPO_SLUG) -> str:
+    return f"orchestrator/{slug.replace('/', '__')}/issue-{issue_number}"
+
+
 _FAKE_WT = Path("/tmp/orchestrator-test-wt-doesnt-matter")
 # Tests don't shell out (the worktree/git helpers are mocked), so the values
 # only need to be plausible -- the slug/base reach `_build_review_prompt`,
 # `_push_branch`, and the `find_open_pr` / `open_pr` call sites and are
 # inspected by some assertions; nothing else cares.
 _TEST_SPEC = config.RepoSpec(
-    slug="geserdugarov/agent-orchestrator",
+    slug=TEST_REPO_SLUG,
     target_root=Path("/tmp/orchestrator-test-target-root"),
-    base_branch="main",
+    base_branch=TEST_BASE_BRANCH,
 )
 
 
@@ -287,7 +329,7 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
     happens.
     """
 
-    BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-200"
+    BRANCH = _issue_branch(200)
     PR_NUMBER = 800
 
     def _seed(
@@ -298,12 +340,12 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
         head_shas=("before", "after"),
         push_branch: bool = True,
         run_agent_result=None,
-        pr_state: str = "open",
+        pr_state: str = STATE_OPEN,
         pr_merged: bool = False,
         extra_state=None,
     ):
         gh = FakeGitHubClient()
-        issue = make_issue(200, label="resolving_conflict")
+        issue = make_issue(200, label=LABEL_RESOLVING_CONFLICT)
         gh.add_issue(issue)
         pr = FakePR(
             number=self.PR_NUMBER, head_branch=self.BRANCH,
@@ -314,7 +356,7 @@ class _ResolvingConflictMixin(_PatchedWorkflowMixin):
         gh.add_pr(pr)
         state = dict(
             pr_number=self.PR_NUMBER, branch=self.BRANCH,
-            dev_agent="claude", dev_session_id="dev-sess",
+            dev_agent=BACKEND_CLAUDE, dev_session_id="dev-sess",
             review_round=2,
             conflict_round=0,
         )

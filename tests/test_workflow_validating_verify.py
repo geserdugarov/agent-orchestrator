@@ -17,10 +17,34 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    LABEL_DOCUMENTING,
+    LABEL_IN_REVIEW,
+    LABEL_VALIDATING,
+    REVIEW_APPROVED_MESSAGE,
+    REVIEW_CHANGES_REQUESTED_MESSAGE,
+    TEST_BASE_BRANCH,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
+    _issue_branch,
 )
+
+
+ISSUE = 7
+PR_NUMBER = 21
+DEV_SESSION = "dev-sess"
+REVIEW_SHA = "rev-sha"
+VERIFY_PYTEST = "pytest -q"
+VERIFY_SLOW = "pytest --slow"
+VERIFY_FAILED = "failed"
+VERIFY_TIMEOUT = "timeout"
+VERIFY_HEAD_CHANGED = "head_changed"
+VERIFY_DIRTY = "dirty"
+VERIFY_OK = "ok"
+PARK_VERIFY_FAILED = "verify_failed"
+PARK_VERIFY_TIMEOUT = "verify_timeout"
+PARK_VERIFY_HEAD_CHANGED = "verify_head_changed"
+PARK_VERIFY_DIRTY = "verify_dirty"
 
 
 def shutil_quote(s: str) -> str:
@@ -41,16 +65,16 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def _seeded(self, **state):
         gh = FakeGitHubClient()
-        issue = make_issue(7, label="validating")
+        issue = make_issue(ISSUE, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         defaults = dict(
-            pr_number=21,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-7",
-            codex_session_id="dev-sess",
+            pr_number=PR_NUMBER,
+            branch=_issue_branch(ISSUE),
+            codex_session_id=DEV_SESSION,
             review_round=0,
         )
         defaults.update(state)
-        gh.seed_state(7, **defaults)
+        gh.seed_state(ISSUE, **defaults)
         return gh, issue
 
     def test_default_empty_verify_is_a_noop_on_approval(self) -> None:
@@ -61,8 +85,8 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded()
         mocks = self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-            head_shas=("rev-sha",),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
+            head_shas=(REVIEW_SHA,),
         )
 
         self.assertEqual(mocks["_run_verify_commands"].call_count, 1)
@@ -72,8 +96,8 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(call.args[1], config.VERIFY_COMMANDS)
         self.assertEqual(config.VERIFY_COMMANDS, ())
         # Handoff completed normally through the final-docs hop.
-        self.assertIn((7, "documenting"), gh.label_history)
-        state = gh.pinned_data(7)
+        self.assertIn((ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        state = gh.pinned_data(ISSUE)
         self.assertFalse(state.get("awaiting_human"))
         self.assertIsNone(state.get("park_reason"))
 
@@ -85,27 +109,27 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(_parse_verify_commands(""), ())
         self.assertEqual(
-            _parse_verify_commands("pytest -q;ruff check ."),
-            ("pytest -q", "ruff check ."),
+            _parse_verify_commands(f"{VERIFY_PYTEST};ruff check ."),
+            (VERIFY_PYTEST, "ruff check ."),
         )
         self.assertEqual(
-            _parse_verify_commands("pytest -q\nruff check .\n"),
-            ("pytest -q", "ruff check ."),
+            _parse_verify_commands(f"{VERIFY_PYTEST}\nruff check .\n"),
+            (VERIFY_PYTEST, "ruff check ."),
         )
         self.assertEqual(
-            _parse_verify_commands("\n#comment\npytest -q\n\n"),
-            ("pytest -q",),
+            _parse_verify_commands(f"\n#comment\n{VERIFY_PYTEST}\n\n"),
+            (VERIFY_PYTEST,),
         )
 
     def test_verify_success_keeps_approval_flow(self) -> None:
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
-        with patch.object(config, "VERIFY_COMMANDS", ("pytest -q",)):
+        with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
             mocks = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-                head_shas=("rev-sha",),
-                verify_result=VerifyResult(status="ok"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
+                head_shas=(REVIEW_SHA,),
+                verify_result=VerifyResult(status=VERIFY_OK),
             )
 
         mocks["_run_verify_commands"].assert_called_once()
@@ -115,34 +139,34 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
             ":white_check_mark:" in body
             for _, body in gh.posted_pr_comments
         ))
-        self.assertIn((7, "documenting"), gh.label_history)
-        state = gh.pinned_data(7)
+        self.assertIn((ISSUE, LABEL_DOCUMENTING), gh.label_history)
+        state = gh.pinned_data(ISSUE)
         self.assertFalse(state.get("awaiting_human"))
 
     def test_verify_failed_parks(self) -> None:
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
         run = VerifyResult(
-            status="failed",
-            command="pytest -q",
+            status=VERIFY_FAILED,
+            command=VERIFY_PYTEST,
             exit_code=2,
             output="E   AssertionError: bad\nTAIL_MARKER",
         )
-        with patch.object(config, "VERIFY_COMMANDS", ("pytest -q",)):
+        with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
             self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-                head_shas=("rev-sha",),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
+                head_shas=(REVIEW_SHA,),
                 verify_result=run,
             )
 
-        state = gh.pinned_data(7)
+        state = gh.pinned_data(ISSUE)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertEqual(state.get("park_reason"), "verify_failed")
+        self.assertEqual(state.get("park_reason"), PARK_VERIFY_FAILED)
         # No in_review or documenting handoff -- the verify gate fires
         # BEFORE the approval / squash / final-docs route is reached.
-        self.assertNotIn((7, "in_review"), gh.label_history)
-        self.assertNotIn((7, "documenting"), gh.label_history)
+        self.assertNotIn((ISSUE, LABEL_IN_REVIEW), gh.label_history)
+        self.assertNotIn((ISSUE, LABEL_DOCUMENTING), gh.label_history)
         # No approval comment (gate fires BEFORE the approval post).
         self.assertFalse(any(
             ":white_check_mark:" in body
@@ -150,7 +174,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         ))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("local verification failed", last_comment)
-        self.assertIn("pytest -q", last_comment)
+        self.assertIn(VERIFY_PYTEST, last_comment)
         self.assertIn("exited with code 2", last_comment)
         self.assertIn("TAIL_MARKER", last_comment)
 
@@ -158,27 +182,27 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
         run = VerifyResult(
-            status="timeout",
-            command="pytest --slow",
+            status=VERIFY_TIMEOUT,
+            command=VERIFY_SLOW,
             exit_code=None,
             output="hanging...",
         )
-        with patch.object(config, "VERIFY_COMMANDS", ("pytest --slow",)), \
+        with patch.object(config, "VERIFY_COMMANDS", (VERIFY_SLOW,)), \
              patch.object(config, "VERIFY_TIMEOUT", 123):
             self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-                head_shas=("rev-sha",),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
+                head_shas=(REVIEW_SHA,),
                 verify_result=run,
             )
 
-        state = gh.pinned_data(7)
+        state = gh.pinned_data(ISSUE)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertEqual(state.get("park_reason"), "verify_timeout")
-        self.assertNotIn((7, "in_review"), gh.label_history)
-        self.assertNotIn((7, "documenting"), gh.label_history)
+        self.assertEqual(state.get("park_reason"), PARK_VERIFY_TIMEOUT)
+        self.assertNotIn((ISSUE, LABEL_IN_REVIEW), gh.label_history)
+        self.assertNotIn((ISSUE, LABEL_DOCUMENTING), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
-        self.assertIn("pytest --slow", last_comment)
+        self.assertIn(VERIFY_SLOW, last_comment)
         self.assertIn("timed out after 123s", last_comment)
 
     def test_verify_head_changed_parks(self) -> None:
@@ -190,7 +214,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
         run = VerifyResult(
-            status="head_changed",
+            status=VERIFY_HEAD_CHANGED,
             command="sh -c 'git commit -am autofix'",
             exit_code=0,
             output="",
@@ -200,18 +224,18 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         with patch.object(config, "VERIFY_COMMANDS", ("sh -c 'git commit -am autofix'",)):
             self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-                head_shas=("rev-sha",),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
+                head_shas=(REVIEW_SHA,),
                 verify_result=run,
             )
 
-        state = gh.pinned_data(7)
+        state = gh.pinned_data(ISSUE)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertEqual(state.get("park_reason"), "verify_head_changed")
+        self.assertEqual(state.get("park_reason"), PARK_VERIFY_HEAD_CHANGED)
         # No in_review / documenting handoff and no approval / squash
         # side effects.
-        self.assertNotIn((7, "in_review"), gh.label_history)
-        self.assertNotIn((7, "documenting"), gh.label_history)
+        self.assertNotIn((ISSUE, LABEL_IN_REVIEW), gh.label_history)
+        self.assertNotIn((ISSUE, LABEL_DOCUMENTING), gh.label_history)
         self.assertFalse(any(
             ":white_check_mark:" in body
             for _, body in gh.posted_pr_comments
@@ -226,24 +250,24 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
         run = VerifyResult(
-            status="dirty",
-            command="pytest -q",
+            status=VERIFY_DIRTY,
+            command=VERIFY_PYTEST,
             exit_code=0,
             dirty_files=("build/artifact.bin", "tests/cache"),
         )
-        with patch.object(config, "VERIFY_COMMANDS", ("pytest -q",)):
+        with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
             self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
-                head_shas=("rev-sha",),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
+                head_shas=(REVIEW_SHA,),
                 verify_result=run,
             )
 
-        state = gh.pinned_data(7)
+        state = gh.pinned_data(ISSUE)
         self.assertTrue(state.get("awaiting_human"))
-        self.assertEqual(state.get("park_reason"), "verify_dirty")
-        self.assertNotIn((7, "in_review"), gh.label_history)
-        self.assertNotIn((7, "documenting"), gh.label_history)
+        self.assertEqual(state.get("park_reason"), PARK_VERIFY_DIRTY)
+        self.assertNotIn((ISSUE, LABEL_IN_REVIEW), gh.label_history)
+        self.assertNotIn((ISSUE, LABEL_DOCUMENTING), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("build/artifact.bin", last_comment)
 
@@ -252,15 +276,15 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         from orchestrator.worktrees import VerifyResult
         review = _agent(
             session_id="rev-sess",
-            last_message="1. Fix typo\n\nVERDICT: CHANGES_REQUESTED",
+            last_message=REVIEW_CHANGES_REQUESTED_MESSAGE,
         )
-        dev_fix = _agent(session_id="dev-sess", last_message="fixed")
+        dev_fix = _agent(session_id=DEV_SESSION, last_message="fixed")
         # The verify mock should not be called -- assert by setting a
         # failing result that would otherwise park the issue.
         verify_fail = VerifyResult(
-            status="failed", command="pytest -q", exit_code=1, output="bad",
+            status=VERIFY_FAILED, command=VERIFY_PYTEST, exit_code=1, output="bad",
         )
-        with patch.object(config, "VERIFY_COMMANDS", ("pytest -q",)):
+        with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
             mocks = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
                 run_agent=[review, dev_fix],
@@ -273,17 +297,17 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["_run_verify_commands"].assert_not_called()
         # Standard CHANGES_REQUESTED handling: PR review comment + dev resume.
         self.assertEqual(mocks["run_agent"].call_count, 2)
-        self.assertEqual(gh.pinned_data(7).get("review_round"), 1)
-        state = gh.pinned_data(7)
+        self.assertEqual(gh.pinned_data(ISSUE).get("review_round"), 1)
+        state = gh.pinned_data(ISSUE)
         self.assertFalse(state.get("awaiting_human"))
 
     def test_unknown_verdict_does_not_run_verify(self) -> None:
         gh, issue = self._seeded()
         from orchestrator.worktrees import VerifyResult
         verify_fail = VerifyResult(
-            status="failed", command="pytest -q", exit_code=1, output="bad",
+            status=VERIFY_FAILED, command=VERIFY_PYTEST, exit_code=1, output="bad",
         )
-        with patch.object(config, "VERIFY_COMMANDS", ("pytest -q",)):
+        with patch.object(config, "VERIFY_COMMANDS", (VERIFY_PYTEST,)):
             mocks = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
@@ -293,13 +317,16 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks["_run_verify_commands"].assert_not_called()
-        state = gh.pinned_data(7)
+        state = gh.pinned_data(ISSUE)
         # Park comes from the unknown-verdict path, NOT the verify gate;
         # confirm by checking the comment text (the unknown-verdict park
         # does not persist `park_reason` to pinned state for the
         # non-silent-crash case).
         self.assertTrue(state.get("awaiting_human"))
-        self.assertNotIn(state.get("park_reason"), ("verify_failed", "verify_timeout", "verify_dirty"))
+        self.assertNotIn(
+            state.get("park_reason"),
+            (PARK_VERIFY_FAILED, PARK_VERIFY_TIMEOUT, PARK_VERIFY_DIRTY),
+        )
         self.assertIn("did not emit a VERDICT line", gh.posted_comments[-1][1])
 
 
@@ -310,7 +337,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         # Initialize a git repo so the dirty-detection branch works.
         subprocess.run(
-            ["git", "init", "-q", "-b", "main", str(self.tmp)],
+            ["git", "init", "-q", "-b", TEST_BASE_BRANCH, str(self.tmp)],
             check=True,
         )
         subprocess.run(
@@ -335,14 +362,14 @@ class RunVerifyCommandsTest(unittest.TestCase):
 
     def test_empty_commands_short_circuits_to_ok(self) -> None:
         run = workflow._run_verify_commands(self.tmp, (), 60)
-        self.assertEqual(run.status, "ok")
+        self.assertEqual(run.status, VERIFY_OK)
         self.assertIsNone(run.command)
 
     def test_all_commands_pass_returns_ok(self) -> None:
         run = workflow._run_verify_commands(
             self.tmp, ("true", "echo hello"), 60,
         )
-        self.assertEqual(run.status, "ok")
+        self.assertEqual(run.status, VERIFY_OK)
 
     def test_non_zero_exit_names_first_failing_command(self) -> None:
         run = workflow._run_verify_commands(
@@ -350,7 +377,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             ("true", "sh -c 'echo boom 1>&2; exit 3'", "true"),
             60,
         )
-        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.status, VERIFY_FAILED)
         self.assertEqual(run.command, "sh -c 'echo boom 1>&2; exit 3'")
         self.assertEqual(run.exit_code, 3)
         self.assertIn("boom", run.output)
@@ -360,7 +387,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         run = workflow._run_verify_commands(
             self.tmp, ("sleep 5",), timeout=1,
         )
-        self.assertEqual(run.status, "timeout")
+        self.assertEqual(run.status, VERIFY_TIMEOUT)
         self.assertEqual(run.command, "sleep 5")
         self.assertIsNone(run.exit_code)
 
@@ -385,7 +412,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             f"(sleep 2 && touch {marker}) & sleep 10"
         )
         run = workflow._run_verify_commands(self.tmp, (cmd,), timeout=1)
-        self.assertEqual(run.status, "timeout")
+        self.assertEqual(run.status, VERIFY_TIMEOUT)
         # Wait well past when the background touch would have fired.
         # 3s gives the background its full 2s + 1s of slack.
         import time
@@ -400,7 +427,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         run = workflow._run_verify_commands(
             self.tmp, ("sh -c 'echo leak > leftover.txt'",), 60,
         )
-        self.assertEqual(run.status, "dirty")
+        self.assertEqual(run.status, VERIFY_DIRTY)
         self.assertIn("leftover.txt", run.dirty_files)
 
     def test_output_truncated_to_budget(self) -> None:
@@ -410,7 +437,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             (f"sh -c 'printf %s {shutil_quote(big)}; exit 1'",),
             60,
         )
-        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.status, VERIFY_FAILED)
         # Tail preserved, leading bulk trimmed.
         self.assertIn("TAIL", run.output)
         self.assertLessEqual(len(run.output), 4096)
@@ -444,7 +471,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         cmd = f"sh -c 'printf %s {shlex.quote(payload)}; exit 1'"
         with patch.dict(_os.environ, {"VERIFY_TEST_API_KEY": secret}):
             run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.status, VERIFY_FAILED)
         # The full secret must be gone -- baseline check.
         self.assertNotIn(secret, run.output)
         # And no 8+ char substring of the secret survives either.
@@ -481,7 +508,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             {"GITHUB_TOKEN": "ghp_ORCHESTRATOR_PAT_SHOULD_NOT_LEAK"},
         ):
             run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.status, VERIFY_FAILED)
         # The verify environment must NOT carry GITHUB_TOKEN through.
         self.assertIn("TOKEN_PRESENT=NO", run.output)
         # And the original token value must not appear verbatim. (This
@@ -516,7 +543,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             },
         ):
             run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.status, VERIFY_FAILED)
         self.assertIn("SSH_AUTH=NO", run.output)
         self.assertIn("SSH_ASK=NO", run.output)
         self.assertIn("GIT_ASK=NO", run.output)
@@ -554,7 +581,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             },
         ):
             run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.status, VERIFY_FAILED)
         self.assertIn("ORCH_TF=NO", run.output)
         self.assertIn("GAC=NO", run.output)
         self.assertIn("AWS_SCF=NO", run.output)
@@ -598,7 +625,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             },
         ):
             run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.status, VERIFY_FAILED)
         self.assertIn("STRIPE_PRESENT=NO", run.output)
         self.assertIn("DBPW_PRESENT=NO", run.output)
         self.assertIn("DEPLOY_PRESENT=NO", run.output)
@@ -638,7 +665,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             "git commit -q -m \"chore: verify-time auto-fix\"'"
         )
         run = workflow._run_verify_commands(self.tmp, (cmd,), 60)
-        self.assertEqual(run.status, "head_changed")
+        self.assertEqual(run.status, VERIFY_HEAD_CHANGED)
         self.assertEqual(run.command, cmd)
         self.assertEqual(run.head_before, head_before)
         self.assertNotEqual(run.head_after, head_before)
@@ -658,7 +685,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
             "true",                                              # should never run
         )
         run = workflow._run_verify_commands(self.tmp, cmds, 60)
-        self.assertEqual(run.status, "dirty")
+        self.assertEqual(run.status, VERIFY_DIRTY)
         # Named command is the SECOND command (the one that left the
         # tree dirty), NOT `commands[-1]`.
         self.assertEqual(run.command, cmds[1])
@@ -694,7 +721,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
              patch.object(verify, "_head_sha", return_value="sha"):
             run = verify._run_verify_commands(self.tmp, ("true",), 60)
 
-        self.assertEqual(run.status, "ok")
+        self.assertEqual(run.status, VERIFY_OK)
         self.assertTrue(
             seen.get("during"), "verify child not registered during the run",
         )

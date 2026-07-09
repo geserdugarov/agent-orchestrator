@@ -18,10 +18,15 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    LABEL_IMPLEMENTING,
+    LABEL_VALIDATING,
+    REVIEW_APPROVED_MESSAGE,
+    REVIEW_CHANGES_REQUESTED_MESSAGE,
     _FAKE_WT,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
+    _issue_branch,
 )
 
 
@@ -76,7 +81,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_fresh_dev_spawn_stores_full_spec_with_args(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(67001, label="implementing")
+        issue = make_issue(67001, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
 
         self._enter(self._patch_dev_config(
@@ -108,12 +113,12 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # flags, and silently dropping them on a resume changes what
         # the agent actually sees mid-flight.
         gh = FakeGitHubClient()
-        issue = make_issue(67002, label="validating")
+        issue = make_issue(67002, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(
             67002,
             pr_number=67002,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67002",
+            branch=_issue_branch(67002),
             dev_agent=self._CODEX_SPEC,
             dev_session_id="dev-67002",
             review_round=0,
@@ -125,7 +130,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         review = _agent(
             session_id="rev-67002",
-            last_message="1. Tighten\n\nVERDICT: CHANGES_REQUESTED",
+            last_message=REVIEW_CHANGES_REQUESTED_MESSAGE,
         )
         dev_fix = _agent(session_id="dev-67002", last_message="fixed")
 
@@ -151,7 +156,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # must still resume on codex with no args -- that is what those
         # deployments had at the time the session was spawned.
         gh = FakeGitHubClient()
-        issue = make_issue(67003, label="implementing")
+        issue = make_issue(67003, label=LABEL_IMPLEMENTING)
         issue.comments.append(
             FakeComment(id=2100, body="please retry", user=FakeUser("alice"))
         )
@@ -162,7 +167,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             last_action_comment_id=2000,
             dev_agent="codex",  # legacy bare-backend pinned form.
             dev_session_id="dev-legacy-spec",
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67003",
+            branch=_issue_branch(67003),
         )
 
         # Flip current config to a spec with args -- which the resume must IGNORE.
@@ -190,7 +195,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # use codex regardless of any current config flip, and MUST pass
         # no args (the spec at the time was bare codex).
         gh = FakeGitHubClient()
-        issue = make_issue(67004, label="implementing")
+        issue = make_issue(67004, label=LABEL_IMPLEMENTING)
         issue.comments.append(
             FakeComment(id=2200, body="retry", user=FakeUser("alice"))
         )
@@ -200,7 +205,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             awaiting_human=True,
             last_action_comment_id=2100,
             codex_session_id="sess-legacy-67004",
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67004",
+            branch=_issue_branch(67004),
         )
 
         self._enter(self._patch_dev_config(
@@ -227,7 +232,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # backend+args (a poisoned session is a transcript problem,
         # not a backend-selection problem).
         gh = FakeGitHubClient()
-        issue = make_issue(67005, label="implementing")
+        issue = make_issue(67005, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(
             67005,
@@ -263,7 +268,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # so a subsequent env flip to claude cannot retroactively switch
         # the backend.
         gh = FakeGitHubClient()
-        issue = make_issue(67006, label="implementing")
+        issue = make_issue(67006, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(
             67006,
@@ -300,12 +305,12 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_fresh_reviewer_spawn_stores_full_spec(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(67010, label="validating")
+        issue = make_issue(67010, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(
             67010,
             pr_number=67010,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67010",
+            branch=_issue_branch(67010),
             dev_agent="claude",
             dev_session_id="dev-67010",
             review_round=0,
@@ -319,7 +324,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=_agent(
                 session_id="rev-67010",
-                last_message="LGTM\n\nVERDICT: APPROVED",
+                last_message=REVIEW_APPROVED_MESSAGE,
             ),
         )
 
@@ -338,12 +343,12 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # comments must say so. We test both approval and CHANGES_REQUESTED
         # paths since both posted hardcoded text before the fix.
         gh = FakeGitHubClient()
-        issue = make_issue(67011, label="validating")
+        issue = make_issue(67011, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(
             67011,
             pr_number=67011,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67011",
+            branch=_issue_branch(67011),
             dev_agent="codex",
             dev_session_id="dev-67011",
             review_round=0,
@@ -355,7 +360,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=_agent(
                 session_id="rev-67011",
-                last_message="LGTM\n\nVERDICT: APPROVED",
+                last_message=REVIEW_APPROVED_MESSAGE,
             ),
         )
 
@@ -369,12 +374,12 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_changes_requested_pr_comment_uses_configured_backend(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(67012, label="validating")
+        issue = make_issue(67012, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(
             67012,
             pr_number=67012,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-67012",
+            branch=_issue_branch(67012),
             dev_agent="codex",
             dev_session_id="dev-67012",
             review_round=0,
@@ -384,7 +389,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         review = _agent(
             session_id="rev-67012",
-            last_message="1. tighten\n\nVERDICT: CHANGES_REQUESTED",
+            last_message=REVIEW_CHANGES_REQUESTED_MESSAGE,
         )
         dev_fix = _agent(session_id="dev-67012", last_message="fixed")
 
@@ -558,7 +563,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # would silently retarget the next validating dev-fix resume
         # at a backend that never ran on this issue.
         gh = FakeGitHubClient()
-        issue = make_issue(67030, label="implementing")
+        issue = make_issue(67030, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
 
         self._enter(self._patch_dev_config(
@@ -589,7 +594,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # ticks. The next resume MUST stick with the spec that was
         # actually running, not retarget at the new config.
         gh = FakeGitHubClient()
-        issue = make_issue(67031, label="implementing")
+        issue = make_issue(67031, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
 
         # First tick: codex spawn, no session id, agent question -> park
