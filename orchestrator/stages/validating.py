@@ -38,6 +38,7 @@ reference that test patches against `workflow.X` could not affect.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -61,6 +62,14 @@ _ADD_REVIEW_ROUNDS_RE = re.compile(
     r"^\s*/orchestrator\s+add-review-rounds\s+(\d+)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+
+
+@dataclass(frozen=True)
+class _ReviewerRun:
+    wt: Path
+    round_n: int
+    pr_number: Any
+    result: AgentResult
 
 
 def _parse_add_review_rounds(
@@ -1351,57 +1360,43 @@ def _handle_validating_changes_requested(
     gh.write_pinned_state(issue, state)
 
 
-def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _park_review_cap(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    round_n: int,
+) -> None:
     from .. import workflow as _wf
 
-    state = gh.read_pinned_state(issue)
-    pr_number = state.get("pr_number")
+    _wf._park_awaiting_human(
+        gh, issue, state,
+        f"{config.HITL_MENTIONS} review still has comments after "
+        f"{round_n} round(s); manual intervention needed. To grant "
+        "more rounds without losing the PR/worktree, reply with "
+        "`/orchestrator add-review-rounds N` "
+        "(N = additional rounds, e.g. `1`).",
+        reason="review_cap",
+    )
+    # `_park_awaiting_human` clears `park_reason` by contract; the
+    # awaiting-human branch needs this transient reason to route the
+    # operator's `/orchestrator add-review-rounds` command.
+    state.set("park_reason", "review_cap")
+    gh.write_pinned_state(issue, state)
 
-    if _finalize_validating_terminal(gh, spec, issue, state):
-        return
 
-    # User-content drift resume runs before the awaiting-human and reviewer
-    # branches: a body edit mid-review must resume the dev on the new body
-    # rather than re-review stale work. Returns True when it fully handled the
-    # tick; a reviewer-side (`reviewer_timeout` / `reviewer_failed`) or
-    # `review_cap` park defers to the awaiting-human branch below (that branch
-    # owns the human's "retry" / `/orchestrator add-review-rounds` comment).
-    if _resume_dev_on_validating_drift(gh, spec, issue, state):
-        return
-
-    # Awaiting-human path: human replied after a park (or a transient
-    # condition self-resolved). The helper resumes the dev on their feedback,
-    # recovers transient parks silently, or clears a reviewer-side / review-cap
-    # park into a reviewer re-run. "return" -> the tick is fully handled;
-    # "spawn_reviewer" -> fall through to the round-cap check and reviewer
-    # spawn below.
-    if state.get("awaiting_human"):
-        if _handle_validating_awaiting_human(
-            gh, spec, issue, state
-        ) == "return":
-            return
+def _run_reviewer_round(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+    pr_number,
+) -> Optional[_ReviewerRun]:
+    from .. import workflow as _wf
 
     round_n = int(state.get("review_round") or 0)
     if round_n >= config.MAX_REVIEW_ROUNDS:
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} review still has comments after "
-            f"{round_n} round(s); manual intervention needed. To grant "
-            "more rounds without losing the PR/worktree, reply with "
-            "`/orchestrator add-review-rounds N` "
-            "(N = additional rounds, e.g. `1`).",
-            reason="review_cap",
-        )
-        # Persist the park reason so the next tick's awaiting-human
-        # branch can route the operator's `/orchestrator add-review-rounds`
-        # comment through the cap-reset path (it gates on
-        # `park_reason == "review_cap"`). `_park_awaiting_human` clears
-        # `park_reason` to None by contract (the `reason=` kwarg only
-        # feeds the audit event), so callers that need a transient or
-        # cap-specific reason re-set it themselves.
-        state.set("park_reason", "review_cap")
-        gh.write_pinned_state(issue, state)
-        return
+        _park_review_cap(gh, issue, state, round_n)
+        return None
 
     wt = _wf._ensure_worktree(
         spec, issue.number,
@@ -1441,7 +1436,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # is removed. Nothing is stranded: the reviewer is read-only and spawns
     # fresh each round.
     if _wf._paused_during_agent_run(gh, issue):
-        return
+        return None
     _wf._accumulate_issue_usage(state, review.usage)
     if review.session_id:
         state.set("last_review_session_id", review.session_id)
@@ -1456,8 +1451,26 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # next process re-spawns the reviewer. Must precede the timeout/verdict
     # branches.
     if _wf._ignore_if_interrupted(issue, review):
-        return
+        return None
 
+    return _ReviewerRun(
+        wt=wt,
+        round_n=round_n,
+        pr_number=pr_number,
+        result=review,
+    )
+
+
+def _dispatch_reviewer_result(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+    reviewer_run: _ReviewerRun,
+) -> None:
+    from .. import workflow as _wf
+
+    review = reviewer_run.result
     if review.timed_out:
         _wf._park_awaiting_human(
             gh, issue, state,
@@ -1478,13 +1491,18 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         issue_number=issue.number,
         stage="validating",
         verdict=verdict,
-        review_round=round_n,
-        pr_number=int(pr_number) if pr_number is not None else None,
+        review_round=reviewer_run.round_n,
+        pr_number=(
+            int(reviewer_run.pr_number)
+            if reviewer_run.pr_number is not None else None
+        ),
         session_id=review.session_id,
     )
 
     if verdict == "approved":
-        _finalize_validating_approval(gh, spec, issue, state, wt, pr_number)
+        _finalize_validating_approval(
+            gh, spec, issue, state, reviewer_run.wt, reviewer_run.pr_number,
+        )
         return
 
     if verdict == "unknown":
@@ -1497,5 +1515,41 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # on any park the issue stays on `fixing` and the fixing handler owns the
     # awaiting-human rescan.
     _handle_validating_changes_requested(
-        gh, spec, issue, state, wt, pr_number, review, body, round_n,
+        gh, spec, issue, state, reviewer_run.wt, reviewer_run.pr_number,
+        review, body, reviewer_run.round_n,
     )
+
+
+def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+    state = gh.read_pinned_state(issue)
+    pr_number = state.get("pr_number")
+
+    if _finalize_validating_terminal(gh, spec, issue, state):
+        return
+
+    # User-content drift resume runs before the awaiting-human and reviewer
+    # branches: a body edit mid-review must resume the dev on the new body
+    # rather than re-review stale work. Returns True when it fully handled the
+    # tick; a reviewer-side (`reviewer_timeout` / `reviewer_failed`) or
+    # `review_cap` park defers to the awaiting-human branch below (that branch
+    # owns the human's "retry" / `/orchestrator add-review-rounds` comment).
+    if _resume_dev_on_validating_drift(gh, spec, issue, state):
+        return
+
+    # Awaiting-human path: human replied after a park (or a transient
+    # condition self-resolved). The helper resumes the dev on their feedback,
+    # recovers transient parks silently, or clears a reviewer-side / review-cap
+    # park into a reviewer re-run. "return" -> the tick is fully handled;
+    # "spawn_reviewer" -> fall through to the round-cap check and reviewer
+    # spawn below.
+    if state.get("awaiting_human"):
+        if _handle_validating_awaiting_human(
+            gh, spec, issue, state
+        ) == "return":
+            return
+
+    reviewer_run = _run_reviewer_round(gh, spec, issue, state, pr_number)
+    if reviewer_run is None:
+        return
+
+    _dispatch_reviewer_result(gh, spec, issue, state, reviewer_run)
