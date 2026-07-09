@@ -761,3 +761,69 @@ class DrainVerifyOutputTest(unittest.TestCase):
         )
         self.assertEqual(verify._drain_verify_output(proc), ("", ""))
         proc.kill.assert_called_once()
+
+
+class WorktreeDirtyFilesHardeningTest(unittest.TestCase):
+    """`_worktree_dirty_files` runs its `git status` probe through the
+    hardened git path, so an agent-planted `core.fsmonitor` in the worktree
+    config cannot execute with the orchestrator's process environment. Every
+    caller passes an agent-writable worktree, so the probe is hardened
+    unconditionally. Real modifications are still reported; only fsmonitor
+    execution and the global-config trust boundary are dropped.
+    """
+
+    def _git(self, *args: str, cwd: Path) -> None:
+        subprocess.run(
+            ["git", *args], cwd=str(cwd), check=True,
+            capture_output=True, text=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+
+    def setUp(self) -> None:
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="orch-dirty-hardening-"))
+        self.addCleanup(shutil.rmtree, str(self.tmpdir), ignore_errors=True)
+        self.work = self.tmpdir / "work"
+        self.work.mkdir()
+        self._git("init", "-q", "-b", TEST_BASE_BRANCH, cwd=self.work)
+        self._git("config", "user.email", "t@t", cwd=self.work)
+        self._git("config", "user.name", "t", cwd=self.work)
+        (self.work / "seed").write_text("x\n")
+        self._git("add", ".", cwd=self.work)
+        self._git("commit", "-q", "-m", "seed", cwd=self.work)
+
+    def test_planted_fsmonitor_not_executed_but_dirty_still_reported(self) -> None:
+        # Hook + marker live outside the worktree so they are not themselves
+        # untracked files. The `/`+NUL response is fsmonitor v1 for "assume
+        # everything changed" -- a scan hint only, so a clean tree reads clean.
+        marker = self.tmpdir / "fsmonitor_ran.txt"
+        hook = self.tmpdir / "fsmonitor_hook.sh"
+        hook.write_text(
+            "#!/bin/sh\n"
+            "printf ran >> '" + str(marker) + "'\n"
+            "printf '/\\000'\n"
+        )
+        hook.chmod(0o755)
+        self._git("config", "core.fsmonitor", str(hook), cwd=self.work)
+
+        (self.work / "leftover.txt").write_text("leak\n")
+        # Prove the planted hook is genuinely honored: a plain, unhardened
+        # index refresh fires it. Without this the empty-marker assertion
+        # below could pass simply because the hook was never wired.
+        self._git("status", "--porcelain", cwd=self.work)
+        self.assertTrue(
+            marker.exists() and marker.read_text(),
+            "planted fsmonitor never fired for a plain git status; the test "
+            "cannot detect a regression",
+        )
+        marker.unlink()
+
+        dirty = verify._worktree_dirty_files(self.work)
+
+        # The real modification is still reported...
+        self.assertIn("leftover.txt", dirty)
+        # ...but the hardened probe never executed the planted helper with
+        # our process environment attached.
+        self.assertFalse(
+            marker.exists() and marker.read_text(),
+            "hardened dirty probe executed the planted core.fsmonitor",
+        )

@@ -533,6 +533,77 @@ class SquashHelperRealGitTest(unittest.TestCase):
         status = self._git("status", "--porcelain", cwd=self.work)
         self.assertEqual(status.strip(), "")
 
+    def test_squash_helper_never_executes_planted_fsmonitor(self) -> None:
+        # Every index-refreshing git command in the squash helper -- the
+        # pre-rewrite dirty check, the soft reset, the squash commit, and the
+        # post-push rollback `reset --hard` -- runs inside a worktree whose
+        # `.git/config` the agent can write. A planted `core.fsmonitor` helper
+        # would run during any of them with the orchestrator's process
+        # environment (ambient secrets) attached, so each must go through the
+        # hardened git path that disables fsmonitor. This drives the whole
+        # helper to the rollback branch (push mocked to fail) and asserts the
+        # planted hook fired NOWHERE inside it -- while first proving the hook
+        # is genuinely usable, so the negative assertion is not vacuous.
+        marker = self.tmpdir / "fsmonitor_invocations.txt"
+        hook = self.tmpdir / "fsmonitor_hook.sh"
+        # Hook + marker live outside the worktree so they don't show up as
+        # untracked files (which would trip the dirty check). The hook records
+        # the invoking git command from the parent process's cmdline so a
+        # failure names the offending command. The `/`+NUL response is
+        # fsmonitor v1 for "assume everything changed" -- a scan hint only, so
+        # a genuinely clean tree still reads clean.
+        hook.write_text(
+            "#!/bin/sh\n"
+            "tr '\\0' ' ' < /proc/$PPID/cmdline >> '" + str(marker) + "'\n"
+            "printf '\\n' >> '" + str(marker) + "'\n"
+            "printf '/\\000'\n"
+        )
+        hook.chmod(0o755)
+        self._git("config", "core.fsmonitor", str(hook), cwd=self.work)
+
+        # Prove the planted hook is honored by this worktree config: a plain,
+        # unhardened index refresh fires it. Without this the empty-marker
+        # assertion below could pass simply because the hook was never wired.
+        self._git("status", "--porcelain", cwd=self.work)
+        self.assertTrue(
+            marker.exists() and marker.read_text().strip(),
+            "planted fsmonitor never fired even for a plain git status; the "
+            "test cannot detect a regression",
+        )
+        marker.unlink()
+
+        original_head = self._git(
+            "rev-parse", "HEAD", cwd=self.work,
+        ).strip()
+        original_subjects = self._commits_on_branch()
+        self.assertEqual(len(original_subjects), 3)
+
+        issue = self._make_issue()
+        with patch.object(config, "BASE_BRANCH", "main"), \
+             patch.object(branch_publication, "_push_branch", return_value=False):
+            success, _, _, err = workflow._squash_and_force_push(
+                _TEST_SPEC, self.work, self.branch, issue,
+            )
+
+        fired = marker.read_text() if marker.exists() else ""
+        # The security property: no git command inside the squash helper
+        # executed the planted fsmonitor. A plain `_git` dirty check / reset
+        # would appear here with the orchestrator environment attached.
+        self.assertEqual(
+            fired, "",
+            f"a git command inside the squash helper executed the planted "
+            f"fsmonitor: {fired!r}",
+        )
+        # Push failed, so the rollback ran and restored the original commits.
+        self.assertFalse(success)
+        self.assertIn("force-push", err or "")
+        self.assertEqual(
+            self._git("rev-parse", "HEAD", cwd=self.work).strip(),
+            original_head,
+            "rollback must restore HEAD to the pre-squash SHA",
+        )
+        self.assertEqual(self._commits_on_branch(), original_subjects)
+
     def test_squash_commit_uses_orchestrator_identity(self) -> None:
         # The squash commit must be authored under AGENT_GIT_NAME /
         # AGENT_GIT_EMAIL regardless of the dev's commit identity. This

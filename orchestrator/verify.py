@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Optional
 
 from .agents import _communicate_bounded, _filter_agent_env, _registered
-from .git_plumbing import _git
+from .git_plumbing import _git, _git_hardened
 from .workflow_messages import _redact_secrets
 
 log = logging.getLogger(__name__)
@@ -78,8 +78,18 @@ def _worktree_dirty_files(worktree: Path) -> list[str]:
     branch. The orchestrator's own scratch (codex's `-o` file) lives outside
     the worktree (a per-spawn tempfile in `_run_codex`), so it never surfaces
     here regardless of the target repo's .gitignore.
+
+    Hardened unconditionally: `git status --porcelain` refreshes the index,
+    which spawns a configured `core.fsmonitor` helper -- and the agent can
+    plant one in the worktree's `.git/config` or in `~/.gitconfig` (same OS
+    user), so a plain probe would execute it with the orchestrator's process
+    environment (ambient secrets) attached. Every call site is an
+    agent-writable worktree, so there is no trusted caller that would want
+    the unhardened form. Detaching global/system config also drops a global
+    `core.excludesFile` from the untracked filter; the repo's own tracked
+    `.gitignore` still applies, which is the intended trust boundary.
     """
-    r = _git("status", "--porcelain", cwd=worktree)
+    r = _git_hardened("status", "--porcelain", cwd=worktree)
     if r.returncode != 0:
         return []
     paths: list[str] = []

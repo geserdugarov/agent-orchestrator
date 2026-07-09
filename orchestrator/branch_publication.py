@@ -305,6 +305,9 @@ def _squash_and_force_push(
     # changes (operator scratch, agent side-effect) must still surface
     # to a human -- handing off to in_review with the dirty state
     # invisible would let the merge land an incomplete head.
+    # (`_worktree_dirty_files` is hardened against a planted
+    # `core.fsmonitor`, the same vector the squash resets and commit
+    # below guard against.)
     if _worktree_dirty_files(worktree):
         return _fail("worktree has uncommitted changes")
 
@@ -338,7 +341,11 @@ def _squash_and_force_push(
     # body would just trip the next reviewer's commit-style check.
     message = subject + "\n"
 
-    reset_r = _git("reset", "--soft", base_sha, cwd=worktree)
+    # `_git_hardened`, not `_git`: `reset --soft` refreshes the index and
+    # would otherwise execute an agent-planted `core.fsmonitor` helper with
+    # our process environment (ambient secrets) attached. The AGENT_GIT
+    # identity it also injects is inert here -- only HEAD moves, no commit.
+    reset_r = _git_hardened("reset", "--soft", base_sha, cwd=worktree)
     if reset_r.returncode != 0:
         return _fail(f"reset --soft failed: {(reset_r.stderr or '').strip()}")
 
@@ -351,8 +358,12 @@ def _squash_and_force_push(
         commits survive a squash/push that did not complete. Best-effort:
         a rollback failure leaves the worktree in an inconsistent state,
         logged loudly so an operator notices.
+
+        `_git_hardened` for the same reason as the squash soft-reset above:
+        this index-touching `reset --hard` must not execute an agent-planted
+        `core.fsmonitor` with our process environment attached.
         """
-        rb = _git("reset", "--hard", original_head, cwd=worktree)
+        rb = _git_hardened("reset", "--hard", original_head, cwd=worktree)
         if rb.returncode != 0:
             log.error(
                 "issue=#%s rollback to %s after %s failed; worktree may be "
