@@ -71,6 +71,11 @@ _WEEKDAY_LABELS: tuple[str, ...] = (
     "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat",
 )
 
+# The activity heatmap is a fixed 7-weekday-row x 24-hour-column grid. The
+# row count follows `_WEEKDAY_LABELS` so the matrix and the y-axis labels
+# cannot drift apart; the column span is the hours in a day.
+_HOURS_PER_DAY = 24
+
 
 def _empty_figure(message: str, *, height: int) -> go.Figure:
     """Return a placeholder figure with a centered annotation.
@@ -808,16 +813,17 @@ def hour_weekday_heatmap(
     caller is responsible for passing the matching offset to
     `get_hourly_heatmap` so the cells already reflect that zone.
     """
-    matrix = [[0] * 24 for _ in range(7)]
+    weekdays = len(_WEEKDAY_LABELS)
+    matrix = [[0] * _HOURS_PER_DAY for _ in range(weekdays)]
     for p in points:
-        if 0 <= int(p.weekday) < 7 and 0 <= int(p.hour) < 24:
+        if 0 <= int(p.weekday) < weekdays and 0 <= int(p.hour) < _HOURS_PER_DAY:
             matrix[int(p.weekday)][int(p.hour)] = int(
                 getattr(p, "total_tokens", 0) or 0
             )
     fig = go.Figure(
         go.Heatmap(
             z=matrix,
-            x=[f"{h:02d}" for h in range(24)],
+            x=[f"{h:02d}" for h in range(_HOURS_PER_DAY)],
             y=list(_WEEKDAY_LABELS),
             colorscale=[
                 [0.0, theme.CARD_BG],
