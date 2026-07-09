@@ -16,20 +16,30 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    EVENT_AGENT_SPAWN,
+    LABEL_DOCUMENTING,
+    LABEL_FIXING,
+    LABEL_IN_REVIEW,
+    LABEL_VALIDATING,
+    REVIEW_APPROVED_MESSAGE,
+    REVIEW_CHANGES_REQUESTED_MESSAGE,
+    ROLE_DEVELOPER,
+    ROLE_REVIEWER,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
+    _issue_branch,
 )
 
 
 class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
     def _seeded(self, **state):
         gh = FakeGitHubClient()
-        issue = make_issue(5, label="validating")
+        issue = make_issue(5, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         defaults = dict(
             pr_number=11,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-5",
+            branch=_issue_branch(5),
             codex_session_id="dev-sess",
             review_round=0,
         )
@@ -41,14 +51,14 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded()
         mocks = self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
 
         self.assertEqual(mocks["run_agent"].call_count, 1)
         # Approval routes through `documenting` for the final docs pass
         # before in_review picks up.
-        self.assertIn((5, "documenting"), gh.label_history)
-        self.assertNotIn((5, "in_review"), gh.label_history)
+        self.assertIn((5, LABEL_DOCUMENTING), gh.label_history)
+        self.assertNotIn((5, LABEL_IN_REVIEW), gh.label_history)
         self.assertTrue(any(
             ":white_check_mark: codex review approved" in body
             for _, body in gh.posted_pr_comments
@@ -58,7 +68,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded()
         review = _agent(
             session_id="rev-sess",
-            last_message="1. Fix typo\n\nVERDICT: CHANGES_REQUESTED",
+            last_message=REVIEW_CHANGES_REQUESTED_MESSAGE,
         )
         dev_fix = _agent(session_id="dev-sess", last_message="fixed")
 
@@ -89,18 +99,18 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # back to `validating` so the reviewer re-evaluates the new head
         # on the next tick. No documenting hop -- the docs pass only runs
         # as the final-docs handoff after approval.
-        self.assertIn((5, "fixing"), gh.label_history)
+        self.assertIn((5, LABEL_FIXING), gh.label_history)
         # The trailing label entry must be `validating` so the next tick
         # picks up via `_handle_validating`.
-        self.assertEqual(gh.label_history[-1], (5, "validating"))
+        self.assertEqual(gh.label_history[-1], (5, LABEL_VALIDATING))
         # The `fixing` flip happens BEFORE the `validating` flip so an
         # external observer sees the active work labeled `fixing` for the
         # duration of the dev subprocess.
-        fixing_idx = gh.label_history.index((5, "fixing"))
-        validating_idx = gh.label_history.index((5, "validating"))
+        fixing_idx = gh.label_history.index((5, LABEL_FIXING))
+        validating_idx = gh.label_history.index((5, LABEL_VALIDATING))
         self.assertLess(fixing_idx, validating_idx)
-        self.assertNotIn((5, "documenting"), gh.label_history)
-        self.assertNotIn((5, "in_review"), gh.label_history)
+        self.assertNotIn((5, LABEL_DOCUMENTING), gh.label_history)
+        self.assertNotIn((5, LABEL_IN_REVIEW), gh.label_history)
 
     def test_unknown_verdict_parks_with_quoted_message(self) -> None:
         gh, issue = self._seeded()
@@ -120,7 +130,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # subprocess stderr in addition -- skip the diagnostic block.
         self.assertNotIn("Reviewer stderr", last_comment)
         # Label stays validating: no in_review transition.
-        self.assertNotIn((5, "in_review"), gh.label_history)
+        self.assertNotIn((5, LABEL_IN_REVIEW), gh.label_history)
 
     def test_empty_review_park_surfaces_stderr_and_exit_code(self) -> None:
         # Codex hit a Cloudflare interstitial: the agent exited with
@@ -199,7 +209,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(state.get("park_reason"), "reviewer_timeout")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("reviewer timed out", last_comment)
-        self.assertNotIn((5, "in_review"), gh.label_history)
+        self.assertNotIn((5, LABEL_IN_REVIEW), gh.label_history)
 
     def test_reviewer_silent_crash_parks_reviewer_failed(self) -> None:
         # The reviewer agent crashed (e.g. codex returned `Error: No such
@@ -252,11 +262,11 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
 class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMixin):
     def _seeded(self, **state):
         gh = FakeGitHubClient()
-        issue = make_issue(6, label="validating")
+        issue = make_issue(6, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         defaults = dict(
             pr_number=12,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-6",
+            branch=_issue_branch(6),
             codex_session_id="dev-sess",
             review_round=0,
         )
@@ -267,7 +277,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
     def _changes_requested_review(self):
         return _agent(
             session_id="rev-sess",
-            last_message="1. Fix typo\n\nVERDICT: CHANGES_REQUESTED",
+            last_message=REVIEW_CHANGES_REQUESTED_MESSAGE,
         )
 
     def test_dev_fix_timeout_parks_agent_timeout(self) -> None:
@@ -302,8 +312,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # spawn so a parked subprocess leaves the active job labeled
         # `fixing` (the fixing handler then owns the awaiting-human
         # rescan + dev resume cycle on subsequent ticks).
-        self.assertIn((6, "fixing"), gh.label_history)
-        self.assertNotIn((6, "validating"), gh.label_history)
+        self.assertIn((6, LABEL_FIXING), gh.label_history)
+        self.assertNotIn((6, LABEL_VALIDATING), gh.label_history)
 
     def test_dev_fix_no_new_commit_parks_round_unchanged(self) -> None:
         gh, issue = self._seeded()
@@ -327,8 +337,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # The pre-spawn label flip is observed even on the no-commit park
         # path (the fixing handler then handles the awaiting-human rescan
         # on the next tick).
-        self.assertIn((6, "fixing"), gh.label_history)
-        self.assertNotIn((6, "validating"), gh.label_history)
+        self.assertIn((6, LABEL_FIXING), gh.label_history)
+        self.assertNotIn((6, LABEL_VALIDATING), gh.label_history)
 
     def test_dev_fix_dirty_parks_round_unchanged(self) -> None:
         gh, issue = self._seeded()
@@ -349,8 +359,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted change", last_comment)
         self.assertIn("leftover.py", last_comment)
-        self.assertIn((6, "fixing"), gh.label_history)
-        self.assertNotIn((6, "validating"), gh.label_history)
+        self.assertIn((6, LABEL_FIXING), gh.label_history)
+        self.assertNotIn((6, LABEL_VALIDATING), gh.label_history)
 
     def test_dev_fix_push_fail_parks_round_unchanged(self) -> None:
         gh, issue = self._seeded()
@@ -374,8 +384,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertEqual(state.get("park_reason"), "push_failed")
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("git push failed", last_comment)
-        self.assertIn((6, "fixing"), gh.label_history)
-        self.assertNotIn((6, "validating"), gh.label_history)
+        self.assertIn((6, LABEL_FIXING), gh.label_history)
+        self.assertNotIn((6, LABEL_VALIDATING), gh.label_history)
 
     def test_review_round_at_cap_parks_without_spawning_reviewer(self) -> None:
         gh, issue = self._seeded(review_round=config.MAX_REVIEW_ROUNDS)
@@ -411,21 +421,21 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
 
         # Both flips landed in order: first `fixing` (pre-spawn), then
         # `validating` (post-push) so the reviewer reruns on the next tick.
-        self.assertIn((6, "fixing"), gh.label_history)
-        self.assertIn((6, "validating"), gh.label_history)
-        fixing_idx = gh.label_history.index((6, "fixing"))
-        validating_idx = gh.label_history.index((6, "validating"))
+        self.assertIn((6, LABEL_FIXING), gh.label_history)
+        self.assertIn((6, LABEL_VALIDATING), gh.label_history)
+        fixing_idx = gh.label_history.index((6, LABEL_FIXING))
+        validating_idx = gh.label_history.index((6, LABEL_VALIDATING))
         self.assertLess(fixing_idx, validating_idx)
         # The dev work is tagged with `stage="fixing"` for analytics so
         # spend on a CHANGES_REQUESTED fix is not double-counted against
         # the validating bucket alongside the reviewer/verify spend.
         dev_spawns = [
             e for e in gh.recorded_events
-            if e["event"] == "agent_spawn"
-            and e.get("agent_role") == "developer"
+            if e["event"] == EVENT_AGENT_SPAWN
+            and e.get("agent_role") == ROLE_DEVELOPER
         ]
         self.assertEqual(len(dev_spawns), 1)
-        self.assertEqual(dev_spawns[0]["stage"], "fixing")
+        self.assertEqual(dev_spawns[0]["stage"], LABEL_FIXING)
 
     def test_dev_fix_interrupted_skips_write_and_does_not_push(self) -> None:
         # A shutdown-killed CHANGES_REQUESTED dev resume is ignored: the
@@ -456,8 +466,8 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         mocks["_push_branch"].assert_not_called()
         # Pre-spawn flip landed; the issue did NOT bounce to validating this
         # tick (that happens on a later tick after a clean re-review).
-        self.assertIn((6, "fixing"), gh.label_history)
-        self.assertNotIn((6, "validating"), gh.label_history)
+        self.assertIn((6, LABEL_FIXING), gh.label_history)
+        self.assertNotIn((6, LABEL_VALIDATING), gh.label_history)
         state = gh.pinned_data(6)
         # Post-spawn write skipped: the resume-budget charge from
         # `_resume_dev_with_text` never persisted.
@@ -492,7 +502,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertIsNotNone(state.get("pending_fix_reviewer_comment_id"))
         # The in_review-route discriminator is NOT set on this route.
         self.assertIsNone(state.get("pending_fix_at"))
-        self.assertIn((6, "fixing"), gh.label_history)
+        self.assertIn((6, LABEL_FIXING), gh.label_history)
 
     def test_changes_requested_pushed_fix_clears_reviewer_anchor(self) -> None:
         # On a pushed inline fix this reviewer round is addressed, so the
@@ -513,13 +523,13 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         state = gh.pinned_data(6)
         self.assertIsNone(state.get("pending_fix_reviewer_comment_id"))
         self.assertEqual(state.get("review_round"), 3)
-        self.assertEqual(gh.label_history[-1], (6, "validating"))
+        self.assertEqual(gh.label_history[-1], (6, LABEL_VALIDATING))
 
 
 class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_human_reply_bumps_round_without_reviewer(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(7, label="validating")
+        issue = make_issue(7, label=LABEL_VALIDATING)
         issue.comments.append(
             FakeComment(id=1100, body="use sqlite please", user=FakeUser("alice"))
         )
@@ -531,7 +541,7 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
             codex_session_id="dev-sess",
             review_round=1,
             pr_number=13,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-7",
+            branch=_issue_branch(7),
         )
 
         mocks = self._run(
@@ -557,8 +567,8 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
         # A successful awaiting-human resume stays on `validating` (no
         # documenting hop) so the reviewer re-runs against the new head
         # on the next tick.
-        self.assertNotIn((7, "documenting"), gh.label_history)
-        self.assertNotIn((7, "in_review"), gh.label_history)
+        self.assertNotIn((7, LABEL_DOCUMENTING), gh.label_history)
+        self.assertNotIn((7, LABEL_IN_REVIEW), gh.label_history)
 
     def test_successful_dev_fix_resets_silent_park_streak(self) -> None:
         # The validating / in_review fix paths exit on `_handle_dev_fix_result`
@@ -568,7 +578,7 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
         # resume could tip an otherwise-healthy session past the
         # fresh-session threshold.
         gh = FakeGitHubClient()
-        issue = make_issue(70, label="validating")
+        issue = make_issue(70, label=LABEL_VALIDATING)
         issue.comments.append(
             FakeComment(id=1100, body="please fix it", user=FakeUser("alice"))
         )
@@ -581,7 +591,7 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
             dev_session_id="dev-sess",
             review_round=1,
             pr_number=14,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-70",
+            branch=_issue_branch(70),
             # Carryover from an earlier silent park; one short of the
             # fresh-session threshold.
             silent_park_count=1,
@@ -613,7 +623,7 @@ class HandleValidatingContinueCommandTest(
 
     def _seed(self, number, *, park_reason, command="/orchestrator continue"):
         gh = FakeGitHubClient()
-        issue = make_issue(number, label="validating", body="the requirements")
+        issue = make_issue(number, label=LABEL_VALIDATING, body="the requirements")
         issue.comments.append(
             FakeComment(id=1100, body=command, user=FakeUser("dave"))
         )
@@ -628,7 +638,7 @@ class HandleValidatingContinueCommandTest(
             silent_park_count=1,
             review_round=1,
             pr_number=13,
-            branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}",
+            branch=_issue_branch(number),
             # Current content hash so a bare continue (excluded from the hash)
             # does not fire drift: the continue gate, not drift, is under test.
             user_content_hash=workflow._compute_user_content_hash(issue, set()),
@@ -697,7 +707,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
 
     def _seeded(self, *, comment_body: Optional[str] = None, **state):
         gh = FakeGitHubClient()
-        issue = make_issue(80, label="validating")
+        issue = make_issue(80, label=LABEL_VALIDATING)
         if comment_body is not None:
             issue.comments.append(
                 FakeComment(id=1100, body=comment_body, user=FakeUser("alice"))
@@ -711,7 +721,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             dev_session_id="dev-sess",
             dev_agent="codex",
             pr_number=15,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-80",
+            branch=_issue_branch(80),
         )
         defaults.update(state)
         gh.seed_state(80, **defaults)
@@ -730,7 +740,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         mocks = self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                last_message="LGTM\n\nVERDICT: APPROVED",
+                last_message=REVIEW_APPROVED_MESSAGE,
             ),
             head_shas=["aaa"],
         )
@@ -749,8 +759,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         self.assertEqual(mocks["run_agent"].call_count, 1)
         reviewer_spawns = [
             e for e in gh.recorded_events
-            if e["event"] == "agent_spawn"
-            and e.get("agent_role") == "reviewer"
+            if e["event"] == EVENT_AGENT_SPAWN
+            and e.get("agent_role") == ROLE_REVIEWER
         ]
         self.assertEqual(len(reviewer_spawns), 1)
         self.assertEqual(
@@ -776,7 +786,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
 
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=["aaa"],
         )
 
@@ -805,7 +815,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
 
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=["aaa"],
         )
 
@@ -917,13 +927,13 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         # itself surfaces the command so an operator who has never seen
         # the syntax can copy/paste it from the issue thread.
         gh = FakeGitHubClient()
-        issue = make_issue(81, label="validating")
+        issue = make_issue(81, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(
             81,
             review_round=config.MAX_REVIEW_ROUNDS,
             pr_number=16,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-81",
+            branch=_issue_branch(81),
         )
 
         self._run(
@@ -942,13 +952,13 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         # `/orchestrator add-review-rounds` parser never runs -- the
         # command would silently fall through to the dev-resume branch.
         gh = FakeGitHubClient()
-        issue = make_issue(82, label="validating")
+        issue = make_issue(82, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(
             82,
             review_round=config.MAX_REVIEW_ROUNDS,
             pr_number=17,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-82",
+            branch=_issue_branch(82),
         )
 
         self._run(
@@ -970,13 +980,13 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         # resets. Pre-seeded tests above cover the command parser in
         # isolation; this one closes the loop on the production sequence.
         gh = FakeGitHubClient()
-        issue = make_issue(83, label="validating")
+        issue = make_issue(83, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(
             83,
             review_round=config.MAX_REVIEW_ROUNDS,
             pr_number=18,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-83",
+            branch=_issue_branch(83),
             pickup_comment_id=900,
             dev_session_id="dev-sess",
             dev_agent="codex",
@@ -1012,7 +1022,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         # Tick 2: command processes through the cap-reset path.
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=["aaa"],
         )
         tick2 = gh.pinned_data(83)
@@ -1037,8 +1047,8 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         ))
         reviewer_spawns = [
             e for e in gh.recorded_events
-            if e["event"] == "agent_spawn"
-            and e.get("agent_role") == "reviewer"
+            if e["event"] == EVENT_AGENT_SPAWN
+            and e.get("agent_role") == ROLE_REVIEWER
         ]
         self.assertEqual(len(reviewer_spawns), 1)
         self.assertEqual(
@@ -1055,7 +1065,7 @@ class ValidatingDevFixInterruptedHelperTest(unittest.TestCase):
 
     def _seeded(self, **state):
         gh = FakeGitHubClient()
-        issue = make_issue(7, label="validating")
+        issue = make_issue(7, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(7, **state)
         return gh, gh.read_pinned_state(issue), issue
@@ -1120,7 +1130,7 @@ class ValidatingInterruptedResumeHandlerTest(
         self,
     ) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(8, label="validating")
+        issue = make_issue(8, label=LABEL_VALIDATING)
         issue.comments.append(
             FakeComment(id=1200, body="tweak the wording", user=FakeUser("alice"))
         )
@@ -1135,7 +1145,7 @@ class ValidatingInterruptedResumeHandlerTest(
             dev_session_id="dev-sess",
             review_round=1,
             pr_number=18,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-8",
+            branch=_issue_branch(8),
         )
 
         mocks = self._run(
@@ -1162,7 +1172,7 @@ class ValidatingInterruptedResumeHandlerTest(
 
     def test_awaiting_human_interrupted_resume_does_not_persist(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(9, label="validating")
+        issue = make_issue(9, label=LABEL_VALIDATING)
         issue.comments.append(
             FakeComment(id=1300, body="please retry", user=FakeUser("alice"))
         )
@@ -1180,7 +1190,7 @@ class ValidatingInterruptedResumeHandlerTest(
             dev_session_id="dev-sess",
             review_round=1,
             pr_number=19,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-9",
+            branch=_issue_branch(9),
         )
 
         mocks = self._run(
@@ -1216,7 +1226,7 @@ class HandleValidatingResumeTrustFilterTest(
     _ALLOWLIST = ("geserdugarov",)
 
     def _seed_cap_park(self, gh, *, author, body):
-        issue = make_issue(90, label="validating")
+        issue = make_issue(90, label=LABEL_VALIDATING)
         issue.comments.append(
             FakeComment(id=1100, body=body, user=FakeUser(author))
         )
@@ -1230,12 +1240,12 @@ class HandleValidatingResumeTrustFilterTest(
             dev_session_id="dev-sess",
             dev_agent="codex",
             pr_number=17,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-90",
+            branch=_issue_branch(90),
         )
         return issue
 
     def _seed_reviewer_timeout_park(self, gh, *, author):
-        issue = make_issue(91, label="validating")
+        issue = make_issue(91, label=LABEL_VALIDATING)
         issue.comments.append(
             FakeComment(id=1200, body="please retry", user=FakeUser(author))
         )
@@ -1249,7 +1259,7 @@ class HandleValidatingResumeTrustFilterTest(
             dev_session_id="dev-sess",
             dev_agent="codex",
             pr_number=18,
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-91",
+            branch=_issue_branch(91),
         )
         return issue
 
@@ -1288,7 +1298,7 @@ class HandleValidatingResumeTrustFilterTest(
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
             mocks = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=["aaa"],
             )
         # A trusted operator's command resets the cap and reruns the reviewer
@@ -1326,7 +1336,7 @@ class HandleValidatingResumeTrustFilterTest(
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
             mocks = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=["aaa"],
             )
         # The trusted nudge re-spawns the reviewer this tick and advances the
@@ -1334,8 +1344,8 @@ class HandleValidatingResumeTrustFilterTest(
         self.assertEqual(mocks["run_agent"].call_count, 1)
         reviewer_spawns = [
             e for e in gh.recorded_events
-            if e["event"] == "agent_spawn"
-            and e.get("agent_role") == "reviewer"
+            if e["event"] == EVENT_AGENT_SPAWN
+            and e.get("agent_role") == ROLE_REVIEWER
         ]
         self.assertEqual(len(reviewer_spawns), 1)
         self.assertEqual(gh.pinned_data(91).get("last_action_comment_id"), 1200)

@@ -18,7 +18,14 @@ from orchestrator import analytics, workflow
 from orchestrator.github import BACKLOG_LABEL, PAUSED_LABEL
 
 from tests.fakes import FakeGitHubClient, FakeLabel, make_issue
-from tests.workflow_helpers import _TEST_SPEC
+from tests.workflow_helpers import (
+    EVENT_STAGE_ENTER,
+    EVENT_STAGE_EVALUATION,
+    LABEL_IMPLEMENTING,
+    LABEL_VALIDATING,
+    TEST_REPO_SLUG,
+    _TEST_SPEC,
+)
 
 
 class StageEvaluationAnalyticsTest(unittest.TestCase):
@@ -47,20 +54,20 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="analytics-stageval-") as td:
             path = Path(td) / "analytics.jsonl"
             gh = FakeGitHubClient()
-            issue = make_issue(8001, label="implementing")
+            issue = make_issue(8001, label=LABEL_IMPLEMENTING)
             gh.add_issue(issue)
             with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(workflow, "_handle_implementing"):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
             records = [
                 record for record in self._records(path)
-                if record.get("event") == "stage_evaluation"
+                if record.get("event") == EVENT_STAGE_EVALUATION
                 and record.get("issue") == 8001
             ]
         self.assertEqual(len(records), 1)
         rec = records[0]
-        self.assertEqual(rec["repo"], "geserdugarov/agent-orchestrator")
-        self.assertEqual(rec["stage"], "implementing")
+        self.assertEqual(rec["repo"], TEST_REPO_SLUG)
+        self.assertEqual(rec["stage"], LABEL_IMPLEMENTING)
         self.assertEqual(rec["result"], "ok")
         self.assertIn("duration_s", rec)
         self.assertGreaterEqual(rec["duration_s"], 0)
@@ -84,7 +91,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
                 workflow._process_issue(gh, _TEST_SPEC, issue)
             records = [
                 record for record in self._records(path)
-                if record.get("event") == "stage_evaluation"
+                if record.get("event") == EVENT_STAGE_EVALUATION
                 and record.get("issue") == 8002
             ]
         self.assertEqual(len(records), 1)
@@ -104,7 +111,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="analytics-err-") as td:
             path = Path(td) / "analytics.jsonl"
             gh = FakeGitHubClient()
-            issue = make_issue(8003, label="validating")
+            issue = make_issue(8003, label=LABEL_VALIDATING)
             gh.add_issue(issue)
             with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
                  patch.object(
@@ -115,12 +122,12 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
                 self.assertIs(ctx.exception, sentinel)
             records = [
                 record for record in self._records(path)
-                if record.get("event") == "stage_evaluation"
+                if record.get("event") == EVENT_STAGE_EVALUATION
                 and record.get("issue") == 8003
             ]
         self.assertEqual(len(records), 1)
         rec = records[0]
-        self.assertEqual(rec["stage"], "validating")
+        self.assertEqual(rec["stage"], LABEL_VALIDATING)
         self.assertEqual(rec["result"], "error")
         self.assertIn("duration_s", rec)
 
@@ -135,7 +142,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
                 with tempfile.TemporaryDirectory(prefix="analytics-skip-") as td:
                     path = Path(td) / "analytics.jsonl"
                     gh = FakeGitHubClient()
-                    issue = make_issue(8004, label="implementing")
+                    issue = make_issue(8004, label=LABEL_IMPLEMENTING)
                     issue.labels.append(FakeLabel(skip_label))
                     gh.add_issue(issue)
                     with patch.object(analytics, "ANALYTICS_LOG_PATH", path), \
@@ -151,7 +158,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="analytics-off-") as td:
             sentinel = Path(td) / "must-not-be-created.jsonl"
             gh = FakeGitHubClient()
-            issue = make_issue(8005, label="implementing")
+            issue = make_issue(8005, label=LABEL_IMPLEMENTING)
             gh.add_issue(issue)
             with patch.object(analytics, "ANALYTICS_LOG_PATH", None), \
                  patch.object(workflow, "_handle_implementing"):
@@ -185,18 +192,18 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
                 gh = FakeGitHubClient()
                 issue = make_issue(8101)
                 gh.add_issue(issue)
-                gh.set_workflow_label(issue, "implementing")
-                gh.set_workflow_label(issue, "validating")
+                gh.set_workflow_label(issue, LABEL_IMPLEMENTING)
+                gh.set_workflow_label(issue, LABEL_VALIDATING)
             records = self._records(path)
         self.assertEqual(len(records), 2)
         self.assertEqual(
             [record["stage"] for record in records],
-            ["implementing", "validating"],
+            [LABEL_IMPLEMENTING, LABEL_VALIDATING],
         )
         for record in records:
-            self.assertEqual(record["event"], "stage_enter")
+            self.assertEqual(record["event"], EVENT_STAGE_ENTER)
             self.assertEqual(record["issue"], 8101)
-            self.assertEqual(record["repo"], "geserdugarov/agent-orchestrator")
+            self.assertEqual(record["repo"], TEST_REPO_SLUG)
             datetime.fromisoformat(record["ts"])
 
     def test_label_cleared_to_none_does_not_emit_record(self) -> None:
@@ -207,7 +214,7 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
             path = Path(td) / "analytics.jsonl"
             with patch.object(analytics, "ANALYTICS_LOG_PATH", path):
                 gh = FakeGitHubClient()
-                issue = make_issue(8102, label="implementing")
+                issue = make_issue(8102, label=LABEL_IMPLEMENTING)
                 gh.add_issue(issue)
                 gh.set_workflow_label(issue, None)
         self.assertEqual(self._records(path), [])

@@ -17,7 +17,24 @@ from orchestrator import analytics, config, usage, workflow
 from orchestrator.agents import AgentResult
 
 from tests.fakes import FakeGitHubClient, FakePR, make_issue
-from tests.workflow_helpers import _FAKE_WT, _PatchedWorkflowMixin, _TEST_SPEC
+from tests.workflow_helpers import (
+    BACKEND_CLAUDE,
+    BACKEND_CODEX,
+    EVENT_AGENT_EXIT,
+    EVENT_AGENT_SPAWN,
+    EVENT_AGENT_TRAJECTORY,
+    EVENT_SKILL_TRIGGERED,
+    LABEL_IMPLEMENTING,
+    LABEL_VALIDATING,
+    REVIEW_APPROVED_MESSAGE,
+    ROLE_DEVELOPER,
+    ROLE_REVIEWER,
+    TEST_BASE_BRANCH,
+    TEST_REPO_SLUG,
+    _FAKE_WT,
+    _PatchedWorkflowMixin,
+    _TEST_SPEC,
+)
 
 
 def _codex_stdout_no_model(
@@ -139,7 +156,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             path = Path(td) / "analytics.jsonl"
             stdout = _claude_stdout(total_cost_usd=0.0123)
             gh = FakeGitHubClient()
-            issue = make_issue(101, label="implementing")
+            issue = make_issue(101, label=LABEL_IMPLEMENTING)
             gh.add_issue(issue)
             self._run(
                 lambda: workflow._handle_implementing(
@@ -162,11 +179,11 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             rec = records[0]
             # Audit context — same shape `agent_exit` uses, so an
             # operator can correlate sinks one-to-one.
-            self.assertEqual(rec["event"], "agent_exit")
-            self.assertEqual(rec["repo"], "geserdugarov/agent-orchestrator")
+            self.assertEqual(rec["event"], EVENT_AGENT_EXIT)
+            self.assertEqual(rec["repo"], TEST_REPO_SLUG)
             self.assertEqual(rec["issue"], 101)
-            self.assertEqual(rec["stage"], "implementing")
-            self.assertEqual(rec["agent_role"], "developer")
+            self.assertEqual(rec["stage"], LABEL_IMPLEMENTING)
+            self.assertEqual(rec["agent_role"], ROLE_DEVELOPER)
             self.assertEqual(rec["backend"], config.DEV_AGENT)
             # Configured spec: implementing's fresh-spawn branch persists
             # DEV_AGENT_SPEC in pinned state before invoking the wrapper.
@@ -204,7 +221,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh = FakeGitHubClient()
             issue = make_issue(
                 102,
-                label="implementing",
+                label=LABEL_IMPLEMENTING,
                 body=f"please use token {secret_marker}",
             )
             gh.add_issue(issue)
@@ -250,12 +267,12 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             path = Path(td) / "analytics.jsonl"
             stdout = _claude_stdout(msg_id="msg-review")
             gh = FakeGitHubClient()
-            issue = make_issue(103, label="validating")
+            issue = make_issue(103, label=LABEL_VALIDATING)
             gh.add_issue(issue)
             pr = FakePR(
                 number=44,
                 head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-103",
-                base_branch="main",
+                base_branch=TEST_BASE_BRANCH,
                 mergeable=True,
                 check_state="success",
                 approved=False,
@@ -272,7 +289,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                     ),
                     run_agent=AgentResult(
                         session_id="sess-review",
-                        last_message="VERDICT: APPROVED",
+                        last_message=REVIEW_APPROVED_MESSAGE,
                         exit_code=0,
                         timed_out=False,
                         stdout=stdout,
@@ -285,11 +302,11 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             records = self._exit_records(path)
             reviewer = [
                 record for record in records
-                if record.get("agent_role") == "reviewer"
+                if record.get("agent_role") == ROLE_REVIEWER
             ]
             self.assertEqual(len(reviewer), 1)
             reviewer_record = reviewer[0]
-            self.assertEqual(reviewer_record["stage"], "validating")
+            self.assertEqual(reviewer_record["stage"], LABEL_VALIDATING)
             self.assertEqual(reviewer_record["backend"], config.REVIEW_AGENT)
             self.assertEqual(reviewer_record["agent_spec"], config.REVIEW_AGENT_SPEC)
             self.assertEqual(reviewer_record["review_round"], 2)
@@ -306,7 +323,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
         with tempfile.TemporaryDirectory(prefix="analytics-timeout-") as td:
             path = Path(td) / "analytics.jsonl"
             gh = FakeGitHubClient()
-            issue = make_issue(104, label="implementing")
+            issue = make_issue(104, label=LABEL_IMPLEMENTING)
             gh.add_issue(issue)
             self._run(
                 lambda: workflow._handle_implementing(
@@ -346,7 +363,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             path = Path(td) / "analytics.jsonl"
             stdout = _claude_stdout()
             gh = FakeGitHubClient()
-            issue = make_issue(105, label="implementing")
+            issue = make_issue(105, label=LABEL_IMPLEMENTING)
             gh.add_issue(issue)
             self._run(
                 lambda: workflow._handle_implementing(
@@ -366,11 +383,11 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
 
             spawns = [
                 event for event in gh.recorded_events
-                if event["event"] == "agent_spawn"
+                if event["event"] == EVENT_AGENT_SPAWN
             ]
             exits = [
                 event for event in gh.recorded_events
-                if event["event"] == "agent_exit"
+                if event["event"] == EVENT_AGENT_EXIT
             ]
             self.assertEqual(len(spawns), 1)
             self.assertEqual(len(exits), 1)
@@ -388,7 +405,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
         with tempfile.TemporaryDirectory(prefix="analytics-off-") as td:
             sentinel = Path(td) / "must-not-exist.jsonl"
             gh = FakeGitHubClient()
-            issue = make_issue(106, label="implementing")
+            issue = make_issue(106, label=LABEL_IMPLEMENTING)
             gh.add_issue(issue)
             self._run(
                 lambda: workflow._handle_implementing(
@@ -408,7 +425,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(list(Path(td).iterdir()), [])
             # Audit events are still captured in memory.
             self.assertIn(
-                "agent_exit",
+                EVENT_AGENT_EXIT,
                 {event["event"] for event in gh.recorded_events},
             )
 
@@ -437,9 +454,9 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 gh = FakeGitHubClient()
                 workflow._run_agent_tracked(
                     gh, 107,
-                    agent_role="developer",
-                    stage="implementing",
-                    backend="codex",
+                    agent_role=ROLE_DEVELOPER,
+                    stage=LABEL_IMPLEMENTING,
+                    backend=BACKEND_CODEX,
                     prompt="ignored",
                     cwd=_FAKE_WT,
                     agent_spec="codex -m gpt-5-codex",
@@ -450,7 +467,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             records = self._exit_records(path)
             self.assertEqual(len(records), 1)
             rec = records[0]
-            self.assertEqual(rec["backend"], "codex")
+            self.assertEqual(rec["backend"], BACKEND_CODEX)
             self.assertEqual(rec["agent_spec"], "codex -m gpt-5-codex")
             # Fallback wired the configured model into both the model
             # list and the cost estimate.
@@ -485,9 +502,9 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 gh = FakeGitHubClient()
                 workflow._run_agent_tracked(
                     gh, 108,
-                    agent_role="developer",
-                    stage="implementing",
-                    backend="claude",
+                    agent_role=ROLE_DEVELOPER,
+                    stage=LABEL_IMPLEMENTING,
+                    backend=BACKEND_CLAUDE,
                     prompt="ignored",
                     cwd=_FAKE_WT,
                     agent_spec="claude --model claude-opus-4-7",
@@ -521,7 +538,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
         self,
         *,
         stdout: str,
-        backend: str = "claude",
+        backend: str = BACKEND_CLAUDE,
         track: bool = False,
         analytics_path: Optional[Path] = None,
         extra_args: tuple[str, ...] = (),
@@ -541,8 +558,8 @@ class RunUsageSurfacedTest(unittest.TestCase):
             )
             result = workflow._run_agent_tracked(
                 gh, 401,
-                agent_role="developer",
-                stage="implementing",
+                agent_role=ROLE_DEVELOPER,
+                stage=LABEL_IMPLEMENTING,
                 backend=backend,
                 prompt="ignored",
                 cwd=_FAKE_WT,
@@ -570,7 +587,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
             analytics_path=None,
         )
         self.assertIsInstance(result.usage, usage.UsageMetrics)
-        self.assertEqual(result.usage.backend, "claude")
+        self.assertEqual(result.usage.backend, BACKEND_CLAUDE)
         self.assertEqual(result.usage.input_tokens, 1234)
         self.assertEqual(result.usage.output_tokens, 567)
         self.assertEqual(result.usage.cache_read_tokens, 100)
@@ -581,7 +598,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
         self.assertAlmostEqual(result.usage.cost_usd, 0.0123)
         # The lifecycle audit still fired even with the sink disabled.
         self.assertIn(
-            "agent_exit", {event["event"] for event in gh.recorded_events},
+            EVENT_AGENT_EXIT, {event["event"] for event in gh.recorded_events},
         )
 
     def test_usage_reflects_spec_fallback_model(self) -> None:
@@ -590,7 +607,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
         # -> `fallback_model`) is visible on `.usage` too.
         _, result = self._run(
             stdout=_codex_stdout_no_model(),
-            backend="codex",
+            backend=BACKEND_CODEX,
             extra_args=("-m", "gpt-5-codex"),
         )
         self.assertIsNotNone(result.usage)
@@ -618,7 +635,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
             self.assertEqual(self._records(path), [])
             # Lifecycle audit events fired before the analytics parse ran.
             self.assertIn(
-                "agent_exit", {event["event"] for event in gh.recorded_events},
+                EVENT_AGENT_EXIT, {event["event"] for event in gh.recorded_events},
             )
 
     def test_analytics_and_skill_events_unchanged(
@@ -639,7 +656,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
             records = self._records(path)
             self.assertEqual(len(records), 1)
             exit_record = records[0]
-            self.assertEqual(exit_record["event"], "agent_exit")
+            self.assertEqual(exit_record["event"], EVENT_AGENT_EXIT)
             self.assertEqual(exit_record["input_tokens"], 1000)
             self.assertEqual(exit_record["output_tokens"], 500)
             # The record shape is unchanged -- the surfaced field name must
@@ -651,7 +668,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
             # Skill-trigger audit events are unaffected.
             skill_events = [
                 event for event in gh.recorded_events
-                if event["event"] == "skill_triggered"
+                if event["event"] == EVENT_SKILL_TRIGGERED
             ]
             self.assertEqual(
                 [event["skill"] for event in skill_events], ["develop", "review"],
@@ -716,7 +733,7 @@ class TrajectoryRecordingTest(unittest.TestCase):
         prompt: str,
         traj_path: Optional[Path],
         analytics_path: Optional[Path] = None,
-        backend: str = "claude",
+        backend: str = BACKEND_CLAUDE,
         track: bool = False,
     ) -> AgentResult:
         gh = FakeGitHubClient()
@@ -734,8 +751,8 @@ class TrajectoryRecordingTest(unittest.TestCase):
             )
             return workflow._run_agent_tracked(
                 gh, 301,
-                agent_role="developer",
-                stage="implementing",
+                agent_role=ROLE_DEVELOPER,
+                stage=LABEL_IMPLEMENTING,
                 backend=backend,
                 prompt=prompt,
                 cwd=_FAKE_WT,
@@ -757,9 +774,9 @@ class TrajectoryRecordingTest(unittest.TestCase):
             )
             workflow._run_agent_tracked(
                 gh, 302,
-                agent_role="developer",
-                stage="implementing",
-                backend="claude",
+                agent_role=ROLE_DEVELOPER,
+                stage=LABEL_IMPLEMENTING,
+                backend=BACKEND_CLAUDE,
                 prompt="PROMPT-MARKER-XYZ",
                 cwd=_FAKE_WT,
             )
@@ -781,10 +798,10 @@ class TrajectoryRecordingTest(unittest.TestCase):
             traj = self._records(t_path)
             self.assertEqual(len(traj), 1)
             rec = traj[0]
-            self.assertEqual(rec["event"], "agent_trajectory")
+            self.assertEqual(rec["event"], EVENT_AGENT_TRAJECTORY)
             self.assertEqual(rec["issue"], 301)
-            self.assertEqual(rec["stage"], "implementing")
-            self.assertEqual(rec["agent_role"], "developer")
+            self.assertEqual(rec["stage"], LABEL_IMPLEMENTING)
+            self.assertEqual(rec["agent_role"], ROLE_DEVELOPER)
             self.assertEqual(rec["user_input"], "implement the widget")
             self.assertEqual(rec["output"], "implemented")
             self.assertEqual(
@@ -794,7 +811,7 @@ class TrajectoryRecordingTest(unittest.TestCase):
             # Baseline agent_exit analytics record still written, sans prompt.
             base = self._records(a_path)
             self.assertEqual(len(base), 1)
-            self.assertEqual(base[0]["event"], "agent_exit")
+            self.assertEqual(base[0]["event"], EVENT_AGENT_EXIT)
             self.assertNotIn("user_input", base[0])
 
     def test_no_trajectory_record_when_sink_off(self) -> None:
@@ -840,15 +857,16 @@ class TrajectoryRecordingTest(unittest.TestCase):
                 )
                 workflow._run_agent_tracked(
                     gh, 303,
-                    agent_role="developer",
-                    stage="implementing",
-                    backend="claude",
+                    agent_role=ROLE_DEVELOPER,
+                    stage=LABEL_IMPLEMENTING,
+                    backend=BACKEND_CLAUDE,
                     prompt="p",
                     cwd=_FAKE_WT,
-                    agent_spec="claude",
+                    agent_spec=BACKEND_CLAUDE,
                 )
             skill_events = [
-                event for event in gh.recorded_events if event["event"] == "skill_triggered"
+                event for event in gh.recorded_events
+                if event["event"] == EVENT_SKILL_TRIGGERED
             ]
             self.assertEqual([event["skill"] for event in skill_events], ["develop"])
             self.assertFalse(t_path.exists())
@@ -875,9 +893,9 @@ class TrajectorySinkHermeticityTest(unittest.TestCase):
             )
             workflow._run_agent_tracked(
                 gh, 562,
-                agent_role="developer",
-                stage="implementing",
-                backend="claude",
+                agent_role=ROLE_DEVELOPER,
+                stage=LABEL_IMPLEMENTING,
+                backend=BACKEND_CLAUDE,
                 prompt="implement the widget",
                 cwd=_FAKE_WT,
             )
@@ -938,7 +956,10 @@ class SkillTriggeredEventTest(unittest.TestCase):
 
     @staticmethod
     def _skill_events(gh: FakeGitHubClient) -> list[dict]:
-        return [event for event in gh.recorded_events if event["event"] == "skill_triggered"]
+        return [
+            event for event in gh.recorded_events
+            if event["event"] == EVENT_SKILL_TRIGGERED
+        ]
 
     def _run(
         self,
@@ -946,7 +967,7 @@ class SkillTriggeredEventTest(unittest.TestCase):
         *,
         stdout: str,
         track: bool,
-        backend: str = "claude",
+        backend: str = BACKEND_CLAUDE,
         review_round: Optional[int] = 2,
         retry_count: Optional[int] = 1,
     ) -> AgentResult:
@@ -969,8 +990,8 @@ class SkillTriggeredEventTest(unittest.TestCase):
             )
             return workflow._run_agent_tracked(
                 gh, 201,
-                agent_role="developer",
-                stage="implementing",
+                agent_role=ROLE_DEVELOPER,
+                stage=LABEL_IMPLEMENTING,
                 backend=backend,
                 prompt="ignored",
                 cwd=_FAKE_WT,
@@ -993,15 +1014,15 @@ class SkillTriggeredEventTest(unittest.TestCase):
         events = self._skill_events(gh)
         self.assertEqual([event["skill"] for event in events], ["develop", "review"])
         for event in events:
-            self.assertEqual(event["agent"], "claude")
-            self.assertEqual(event["agent_role"], "developer")
-            self.assertEqual(event["stage"], "implementing")
+            self.assertEqual(event["agent"], BACKEND_CLAUDE)
+            self.assertEqual(event["agent_role"], ROLE_DEVELOPER)
+            self.assertEqual(event["stage"], LABEL_IMPLEMENTING)
             self.assertEqual(event["review_round"], 2)
             self.assertEqual(event["retry_count"], 1)
         # The baseline audit lifecycle events still fire alongside.
         kinds = {event["event"] for event in gh.recorded_events}
-        self.assertIn("agent_spawn", kinds)
-        self.assertIn("agent_exit", kinds)
+        self.assertIn(EVENT_AGENT_SPAWN, kinds)
+        self.assertIn(EVENT_AGENT_EXIT, kinds)
 
     def test_switch_off_emits_no_skill_events(self) -> None:
         # Default-off: a skill-bearing stream produces the lifecycle events
@@ -1015,7 +1036,7 @@ class SkillTriggeredEventTest(unittest.TestCase):
         )
         self.assertEqual(self._skill_events(gh), [])
         self.assertIn(
-            "agent_exit", {event["event"] for event in gh.recorded_events},
+            EVENT_AGENT_EXIT, {event["event"] for event in gh.recorded_events},
         )
 
     def test_no_triggers_emits_no_skill_events(self) -> None:
@@ -1057,9 +1078,9 @@ class SkillTriggeredEventTest(unittest.TestCase):
             )
             workflow._run_agent_tracked(
                 gh, 202,
-                agent_role="reviewer",
-                stage="validating",
-                backend="codex",
+                agent_role=ROLE_REVIEWER,
+                stage=LABEL_VALIDATING,
+                backend=BACKEND_CODEX,
                 prompt="ignored",
                 cwd=_FAKE_WT,
             )
@@ -1074,7 +1095,7 @@ class SkillTriggeredEventTest(unittest.TestCase):
         # and `_run_agent_tracked` still returns the AgentResult.
         class _RaisingOnSkillGH(FakeGitHubClient):
             def emit_event(self, event, **kwargs):
-                if event == "skill_triggered":
+                if event == EVENT_SKILL_TRIGGERED:
                     raise RuntimeError("emit boom")
                 return super().emit_event(event, **kwargs)
 
@@ -1089,4 +1110,4 @@ class SkillTriggeredEventTest(unittest.TestCase):
         # The raising path emitted no skill event, but the lifecycle events
         # (which do not raise) still landed.
         self.assertEqual(self._skill_events(gh), [])
-        self.assertIn("agent_exit", {event["event"] for event in gh.recorded_events})
+        self.assertIn(EVENT_AGENT_EXIT, {event["event"] for event in gh.recorded_events})

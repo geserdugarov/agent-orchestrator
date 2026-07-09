@@ -17,44 +17,65 @@ from orchestrator.workflow_messages import (
     _parse_review_verdict,
 )
 
+from tests.workflow_helpers import (
+    VERDICT_APPROVED,
+    VERDICT_CHANGES_REQUESTED,
+    VERDICT_UNKNOWN,
+)
+
+
+REVIEW_APPROVED_BODY = "Looks good."
+REVIEW_APPROVED_MARKER = "VERDICT: APPROVED"
+REVIEW_CHANGES_REQUESTED_MARKER = "VERDICT: CHANGES_REQUESTED"
+DOCS_NO_CHANGE = "no_change"
+DOCS_NO_CHANGE_MARKER = "DOCS: NO_CHANGE"
+
 
 class ParseReviewVerdictTest(unittest.TestCase):
     def test_approved_alone_on_line(self) -> None:
         self.assertEqual(
-            _parse_review_verdict("Looks good.\n\nVERDICT: APPROVED"),
-            ("approved", "Looks good."),
+            _parse_review_verdict(
+                f"{REVIEW_APPROVED_BODY}\n\n{REVIEW_APPROVED_MARKER}"
+            ),
+            (VERDICT_APPROVED, REVIEW_APPROVED_BODY),
         )
 
     def test_changes_requested_with_numbered_list(self) -> None:
-        msg = "1. Fix typo in README\n2. Add a test for the empty case\n\nVERDICT: CHANGES_REQUESTED"
+        msg = (
+            "1. Fix typo in README\n2. Add a test for the empty case\n\n"
+            f"{REVIEW_CHANGES_REQUESTED_MARKER}"
+        )
         verdict, body = _parse_review_verdict(msg)
-        self.assertEqual(verdict, "changes_requested")
+        self.assertEqual(verdict, VERDICT_CHANGES_REQUESTED)
         self.assertIn("1. Fix typo in README", body)
         self.assertNotIn("VERDICT", body)
 
     def test_inline_marker_is_accepted(self) -> None:
         self.assertEqual(
-            _parse_review_verdict("All good. VERDICT: APPROVED"),
-            ("approved", "All good."),
+            _parse_review_verdict(f"All good. {REVIEW_APPROVED_MARKER}"),
+            (VERDICT_APPROVED, "All good."),
         )
 
     def test_case_insensitive(self) -> None:
         verdict, _ = _parse_review_verdict("verdict: approved")
-        self.assertEqual(verdict, "approved")
+        self.assertEqual(verdict, VERDICT_APPROVED)
 
     def test_last_marker_wins(self) -> None:
-        msg = "I considered VERDICT: APPROVED but a test fails.\nVERDICT: CHANGES_REQUESTED"
+        msg = (
+            f"I considered {REVIEW_APPROVED_MARKER} but a test fails.\n"
+            f"{REVIEW_CHANGES_REQUESTED_MARKER}"
+        )
         verdict, _ = _parse_review_verdict(msg)
-        self.assertEqual(verdict, "changes_requested")
+        self.assertEqual(verdict, VERDICT_CHANGES_REQUESTED)
 
     def test_no_marker_returns_unknown(self) -> None:
         self.assertEqual(
             _parse_review_verdict("looks fine to me"),
-            ("unknown", "looks fine to me"),
+            (VERDICT_UNKNOWN, "looks fine to me"),
         )
 
     def test_empty_message_returns_unknown(self) -> None:
-        self.assertEqual(_parse_review_verdict(""), ("unknown", ""))
+        self.assertEqual(_parse_review_verdict(""), (VERDICT_UNKNOWN, ""))
 
 
 class ParseDocumentationVerdictTest(unittest.TestCase):
@@ -74,25 +95,26 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
     def test_no_change_marker_alone_on_line(self) -> None:
         self.assertEqual(
             _parse_documentation_verdict(
-                "Diff is internal-only; nothing user-visible changed.\n\nDOCS: NO_CHANGE"
+                "Diff is internal-only; nothing user-visible changed."
+                f"\n\n{DOCS_NO_CHANGE_MARKER}"
             ),
-            ("no_change", "Diff is internal-only; nothing user-visible changed."),
+            (DOCS_NO_CHANGE, "Diff is internal-only; nothing user-visible changed."),
         )
 
     def test_no_change_marker_case_insensitive(self) -> None:
         verdict, _ = _parse_documentation_verdict("docs: no_change")
-        self.assertEqual(verdict, "no_change")
+        self.assertEqual(verdict, DOCS_NO_CHANGE)
 
     def test_last_marker_wins(self) -> None:
         # Mirrors `_parse_review_verdict`'s "last marker wins" rule so a
         # template/sample reference earlier in the body loses to the
         # concluding line.
         msg = (
-            "I almost wrote DOCS: NO_CHANGE but actually the README is "
-            "stale, so I'll commit a fix.\n\nDOCS: NO_CHANGE"
+            f"I almost wrote {DOCS_NO_CHANGE_MARKER} but actually the README is "
+            f"stale, so I'll commit a fix.\n\n{DOCS_NO_CHANGE_MARKER}"
         )
         verdict, _ = _parse_documentation_verdict(msg)
-        self.assertEqual(verdict, "no_change")
+        self.assertEqual(verdict, DOCS_NO_CHANGE)
 
     def test_ambiguous_no_change_text_is_not_accepted(self) -> None:
         # Plain prose that sounds like a no-change result must NOT pass
@@ -101,7 +123,7 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
         verdict, body = _parse_documentation_verdict(
             "Looks like no docs changes needed."
         )
-        self.assertEqual(verdict, "unknown")
+        self.assertEqual(verdict, VERDICT_UNKNOWN)
         self.assertIn("no docs changes needed", body)
 
     def test_update_description_without_marker_is_unknown(self) -> None:
@@ -112,7 +134,7 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
         verdict, _ = _parse_documentation_verdict(
             "Updated README.md with the new flag."
         )
-        self.assertEqual(verdict, "unknown")
+        self.assertEqual(verdict, VERDICT_UNKNOWN)
 
     def test_inline_marker_in_prose_is_unknown(self) -> None:
         # The marker must start its own line. An inline reference
@@ -120,29 +142,31 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
         # NO_CHANGE because the README is stale" -- is exactly the kind
         # of ambiguous no-commit text the issue forbids accepting.
         verdict, _ = _parse_documentation_verdict(
-            "I cannot conclude DOCS: NO_CHANGE because README is stale."
+            f"I cannot conclude {DOCS_NO_CHANGE_MARKER} because README is stale."
         )
-        self.assertEqual(verdict, "unknown")
+        self.assertEqual(verdict, VERDICT_UNKNOWN)
 
     def test_non_final_marker_followed_by_text_is_unknown(self) -> None:
         # The marker must be the FINAL non-whitespace content. A marker
         # line followed by an unresolved question must be rejected so an
         # agent's follow-up clarification can't silently close the stage.
         verdict, _ = _parse_documentation_verdict(
-            "DOCS: NO_CHANGE\nBut I have a question about the API."
+            f"{DOCS_NO_CHANGE_MARKER}\nBut I have a question about the API."
         )
-        self.assertEqual(verdict, "unknown")
+        self.assertEqual(verdict, VERDICT_UNKNOWN)
 
     def test_marker_with_trailing_punctuation_is_unknown(self) -> None:
         # `DOCS: NO_CHANGE.` (trailing punctuation) is rejected; the
         # contract is a machine-readable marker, not a sentence. Without
         # this, a markdown-trained agent's habit of ending sentences
         # with periods would silently mask the stricter rule.
-        verdict, _ = _parse_documentation_verdict("All clear.\n\nDOCS: NO_CHANGE.")
-        self.assertEqual(verdict, "unknown")
+        verdict, _ = _parse_documentation_verdict(
+            f"All clear.\n\n{DOCS_NO_CHANGE_MARKER}."
+        )
+        self.assertEqual(verdict, VERDICT_UNKNOWN)
 
     def test_empty_message_returns_unknown(self) -> None:
-        self.assertEqual(_parse_documentation_verdict(""), ("unknown", ""))
+        self.assertEqual(_parse_documentation_verdict(""), (VERDICT_UNKNOWN, ""))
 
 
 class VerdictParserReexportTest(unittest.TestCase):
