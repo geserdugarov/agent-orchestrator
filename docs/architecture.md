@@ -216,7 +216,8 @@ lock, and the resume mechanic are documented in [`workflow.md`](workflow.md). Wh
 - **Codex command**:
   `codex exec [-C cwd | resume <sid>] --dangerously-bypass-approvals-and-sandbox --json -o <tempfile> <prompt>`. The
   `-o` path is a per-spawn `tempfile.mkstemp` outside the worktree (so target repos without `.codex-*` in `.gitignore`
-  don't see it as untracked); `last_message` is read from it and the tempfile is unlinked in a `finally` block.
+  don't see it as untracked); `last_message` is read from it and the tempfile is cleaned up on any exit path by a
+  per-spawn context manager (`_codex_last_message_file`).
 - **Claude command**:
   `claude -p --dangerously-skip-permissions --output-format stream-json --include-partial-messages --verbose <prompt>`
   (with `--resume <sid>` when resuming). `last_message` is parsed from the stream-json: prefers the terminal
