@@ -142,6 +142,23 @@ class SyncResult:
     duration_s: float = 0.0
 
 
+@dataclass
+class _SyncCounters:
+    """Mutable tallies threaded through the ingest loop.
+
+    `_ingest_records`, `_flush_batch`, and `_note_malformed_line` update
+    these in place instead of closing over `nonlocal` locals, so each helper
+    lives at module scope and can be unit-tested on its own. The final counts
+    are folded into the frozen `SyncResult` once the sync returns.
+    """
+
+    inserted: int = 0
+    skipped_duplicate: int = 0
+    skipped_malformed: int = 0
+    total_lines: int = 0
+    malformed_lines: list[int] = field(default_factory=list)
+
+
 def _canonical_json(record: dict) -> str:
     """Stable JSON form used for the content hash.
 
@@ -352,6 +369,32 @@ def _default_json_adapter(value: Any) -> Any:
     return Json(value)
 
 
+def _rollback_quietly(conn: Any, message: str) -> None:
+    """Roll `conn` back, downgrading a rollback failure to a logged no-op.
+
+    A rollback that itself raises leaves cleanup to the driver; there is
+    nothing more the sync can do, so `message` is logged and the failure is
+    swallowed rather than masking the original error that triggered the
+    rollback.
+    """
+    try:
+        conn.rollback()
+    except Exception:
+        log.exception(message)
+
+
+def _close_quietly(conn: Any) -> None:
+    """Close `conn`, downgrading a close failure to a logged no-op.
+
+    The committed rows are already durable, so a driver whose `close` raises
+    must not turn a successful sync into a failure.
+    """
+    try:
+        conn.close()
+    except Exception:
+        log.exception("analytics_sync: connection close failed")
+
+
 def _refresh_daily_rollup(conn: Any) -> None:
     """Refresh the daily rollup materialized view after a successful sync.
 
@@ -391,12 +434,156 @@ def _refresh_daily_rollup(conn: Any) -> None:
             "analytics_sync: refresh of %s failed; sync still committed",
             _DAILY_ROLLUP_VIEW,
         )
-        try:
-            conn.rollback()
-        except Exception:
-            log.exception(
-                "analytics_sync: rollback after refresh failure failed"
-            )
+        _rollback_quietly(
+            conn, "analytics_sync: rollback after refresh failure failed"
+        )
+
+
+def _emit_progress(counters: _SyncCounters, start: float) -> None:
+    """Log one progress record: cumulative counts + elapsed wall-clock.
+
+    Fired after every batched `executemany` flush so an operator can watch a
+    multi-thousand-record replay advance.
+    """
+    log.info(
+        "analytics_sync: progress lines=%d inserted=%d duplicate=%d "
+        "malformed=%d elapsed=%.3fs",
+        counters.total_lines, counters.inserted, counters.skipped_duplicate,
+        counters.skipped_malformed, time.monotonic() - start,
+    )
+
+
+def _flush_batch(
+    cur: Any,
+    insert_sql: str,
+    batch: list[tuple],
+    counters: _SyncCounters,
+    start: float,
+) -> None:
+    """Flush the accumulated row batch in one `executemany`, then clear it.
+
+    A single `executemany` per batch collapses N protocol round-trips into
+    one pipeline; `ON CONFLICT (content_hash) DO NOTHING` in the INSERT stays
+    the server-side dedup backstop. psycopg's rowcount on `executemany` is the
+    total rows inserted across the batch, so the duplicate count is
+    `len(batch) - rowcount`. A driver that reports -1 falls back to counting
+    the whole batch as inserted -- the database is the authority and
+    `inserted` stays a lower bound only if a driver bug strips the count
+    entirely. A no-op on an empty batch, so the caller can invoke it
+    unconditionally at EOF.
+    """
+    if not batch:
+        return
+    cur.executemany(insert_sql, batch)
+    rowcount = getattr(cur, "rowcount", len(batch))
+    if rowcount < 0:
+        rowcount = len(batch)
+    counters.inserted += rowcount
+    counters.skipped_duplicate += len(batch) - rowcount
+    batch.clear()
+    _emit_progress(counters, start)
+
+
+def _note_malformed_line(
+    counters: _SyncCounters, line_number: int, log_path: Path, reason: str,
+) -> None:
+    """Count and log one skipped malformed line without aborting the sync.
+
+    `reason` names why the line was rejected (`not JSON`, `JSON not an
+    object`, `missing/invalid required keys`). The line number is logged so
+    the operator can clean it up out-of-band; the sync never rewrites the
+    JSONL file.
+    """
+    counters.skipped_malformed += 1
+    counters.malformed_lines.append(line_number)
+    log.warning(
+        "analytics_sync: skipping line %d (%s) in %s",
+        line_number, reason, log_path,
+    )
+
+
+def _ingest_records(
+    conn: Any,
+    log_path: Path,
+    insert_sql: str,
+    source_path_str: Optional[str],
+    json_adapter_fn: Callable[[Any], Any],
+    counters: _SyncCounters,
+    start: float,
+) -> None:
+    """Stream `log_path` into `conn` under one cursor, batching valid rows.
+
+    A startup pre-check pulls every persisted `content_hash` into a Python
+    set so already-present records are skipped before they ever reach the
+    wire: one server-side scan over the unique
+    `analytics_events_content_hash_idx` replaces what would otherwise be one
+    per-row round-trip per duplicate. The `WHERE content_hash IS NOT NULL`
+    predicate filters legacy pre-`content_hash` rows so they do not pollute
+    the set; `ON CONFLICT (content_hash) DO NOTHING` in `_flush_batch` stays
+    the authoritative dedup backstop for a racing concurrent writer.
+
+    Each input line is then classified: blank lines are skipped silently,
+    malformed lines are counted and logged, a hash already known (from the
+    pre-check or earlier in this same file) is counted as a duplicate without
+    a round-trip, and a genuinely-new row is appended to a `_BATCH_SIZE`
+    buffer flushed through `_flush_batch`. The trailing partial batch is
+    flushed at EOF. All tallies land on `counters`; the caller commits and
+    closes the connection.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT content_hash FROM analytics_events "
+            "WHERE content_hash IS NOT NULL"
+        )
+        existing_hashes: set[str] = {
+            row[0] for row in cur if row[0] is not None
+        }
+
+        batch: list[tuple] = []
+        with Path(log_path).open("r", encoding="utf-8") as fh:
+            for line_number, raw_line in enumerate(fh, start=1):
+                counters.total_lines += 1
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    _note_malformed_line(
+                        counters, line_number, log_path, "not JSON"
+                    )
+                    continue
+                if not isinstance(record, dict):
+                    _note_malformed_line(
+                        counters, line_number, log_path, "JSON not an object"
+                    )
+                    continue
+                split = _split_row(record)
+                if split is None:
+                    _note_malformed_line(
+                        counters, line_number, log_path,
+                        "missing/invalid required keys",
+                    )
+                    continue
+                columns, extras = split
+                content_hash = _content_hash(record)
+                if content_hash in existing_hashes:
+                    counters.skipped_duplicate += 1
+                    continue
+                batch.append(
+                    _row_values(
+                        columns,
+                        extras,
+                        source_path_str,
+                        line_number,
+                        content_hash,
+                        json_adapter_fn,
+                    )
+                )
+                existing_hashes.add(content_hash)
+                if len(batch) >= _BATCH_SIZE:
+                    _flush_batch(cur, insert_sql, batch, counters, start)
+        _flush_batch(cur, insert_sql, batch, counters, start)
 
 
 def sync_jsonl_to_postgres(
@@ -451,11 +638,7 @@ def sync_jsonl_to_postgres(
     source_path_str = str(log_path)
     redacted_url = _redact_db_url(db_url)
 
-    inserted = 0
-    skipped_duplicate = 0
-    skipped_malformed = 0
-    total_lines = 0
-    malformed_lines: list[int] = []
+    counters = _SyncCounters()
 
     start = time.monotonic()
     log.info(
@@ -468,123 +651,21 @@ def sync_jsonl_to_postgres(
         redacted_url, time.monotonic() - start,
     )
 
-    def _emit_progress() -> None:
-        log.info(
-            "analytics_sync: progress lines=%d inserted=%d duplicate=%d "
-            "malformed=%d elapsed=%.3fs",
-            total_lines, inserted, skipped_duplicate, skipped_malformed,
-            time.monotonic() - start,
-        )
-
     try:
-        with conn.cursor() as cur:
-            # Startup pre-check: pull every persisted `content_hash`
-            # into a Python set so already-present records are skipped
-            # before they ever reach the wire. One server-side scan
-            # over the unique `analytics_events_content_hash_idx`
-            # replaces what would otherwise be one per-row round-trip
-            # per duplicate. The `WHERE content_hash IS NOT NULL`
-            # predicate filters legacy pre-`content_hash` rows so they
-            # do not pollute the set. `ON CONFLICT (content_hash) DO
-            # NOTHING` in `_flush_batch` stays the authoritative dedup
-            # backstop, so any racing concurrent writer still hits the
-            # server-side arbiter.
-            cur.execute(
-                "SELECT content_hash FROM analytics_events "
-                "WHERE content_hash IS NOT NULL"
-            )
-            existing_hashes: set[str] = {
-                row[0] for row in cur if row[0] is not None
-            }
-
-            batch: list[tuple] = []
-
-            def _flush_batch() -> None:
-                # Single `executemany` per batch collapses N protocol
-                # round-trips into one pipeline; `ON CONFLICT
-                # (content_hash) DO NOTHING` is still the server-side
-                # dedup backstop. psycopg's rowcount on `executemany`
-                # is the total rows inserted across the batch, so the
-                # duplicate count is `len(batch) - rowcount`. A driver
-                # that reports -1 falls back to counting the whole
-                # batch as inserted -- the database is the authority
-                # and `inserted` stays a lower bound only if a driver
-                # bug strips the count entirely.
-                nonlocal inserted, skipped_duplicate
-                if not batch:
-                    return
-                cur.executemany(insert_sql, batch)
-                rowcount = getattr(cur, "rowcount", len(batch))
-                if rowcount < 0:
-                    rowcount = len(batch)
-                inserted += rowcount
-                skipped_duplicate += len(batch) - rowcount
-                batch.clear()
-                _emit_progress()
-
-            with Path(log_path).open("r", encoding="utf-8") as fh:
-                for line_number, raw_line in enumerate(fh, start=1):
-                    total_lines += 1
-                    stripped = raw_line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        record = json.loads(stripped)
-                    except json.JSONDecodeError:
-                        skipped_malformed += 1
-                        malformed_lines.append(line_number)
-                        log.warning(
-                            "analytics_sync: skipping line %d (not JSON) in %s",
-                            line_number, log_path,
-                        )
-                        continue
-                    if not isinstance(record, dict):
-                        skipped_malformed += 1
-                        malformed_lines.append(line_number)
-                        log.warning(
-                            "analytics_sync: skipping line %d (JSON not an object) in %s",
-                            line_number, log_path,
-                        )
-                        continue
-                    split = _split_row(record)
-                    if split is None:
-                        skipped_malformed += 1
-                        malformed_lines.append(line_number)
-                        log.warning(
-                            "analytics_sync: skipping line %d (missing/invalid required keys) in %s",
-                            line_number, log_path,
-                        )
-                        continue
-                    columns, extras = split
-                    content_hash = _content_hash(record)
-                    # In-Python skip: a hash already known to be in
-                    # the database (from the startup pre-check) or
-                    # already queued earlier in the same input file
-                    # never enters the batch buffer, so the wire only
-                    # carries genuinely-new rows. Intra-file duplicates
-                    # are filtered against the same set so two
-                    # identical records in one JSONL file do not cost
-                    # two round-trips.
-                    if content_hash in existing_hashes:
-                        skipped_duplicate += 1
-                        continue
-                    values = _row_values(
-                        columns,
-                        extras,
-                        source_path_str,
-                        line_number,
-                        content_hash,
-                        json_adapter_fn,
-                    )
-                    batch.append(values)
-                    existing_hashes.add(content_hash)
-                    if len(batch) >= _BATCH_SIZE:
-                        _flush_batch()
-            _flush_batch()
+        _ingest_records(
+            conn,
+            Path(log_path),
+            insert_sql,
+            source_path_str,
+            json_adapter_fn,
+            counters,
+            start,
+        )
         log.info(
             "analytics_sync: committing transaction (lines=%d inserted=%d "
             "duplicate=%d malformed=%d elapsed=%.3fs)",
-            total_lines, inserted, skipped_duplicate, skipped_malformed,
+            counters.total_lines, counters.inserted,
+            counters.skipped_duplicate, counters.skipped_malformed,
             time.monotonic() - start,
         )
         conn.commit()
@@ -609,30 +690,24 @@ def sync_jsonl_to_postgres(
         # keeps small (one row per day per key tuple).
         _refresh_daily_rollup(conn)
     except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            log.exception("analytics_sync: rollback failed")
+        _rollback_quietly(conn, "analytics_sync: rollback failed")
         raise
     finally:
-        try:
-            conn.close()
-        except Exception:
-            log.exception("analytics_sync: connection close failed")
+        _close_quietly(conn)
 
     duration_s = round(time.monotonic() - start, 3)
     log.info(
         "analytics_sync: completed in %.3fs (inserted=%d duplicate=%d "
         "malformed=%d total_lines=%d source=%s)",
-        duration_s, inserted, skipped_duplicate, skipped_malformed,
-        total_lines, log_path,
+        duration_s, counters.inserted, counters.skipped_duplicate,
+        counters.skipped_malformed, counters.total_lines, log_path,
     )
     return SyncResult(
-        inserted=inserted,
-        skipped_duplicate=skipped_duplicate,
-        skipped_malformed=skipped_malformed,
-        total_lines=total_lines,
-        malformed_line_numbers=tuple(malformed_lines),
+        inserted=counters.inserted,
+        skipped_duplicate=counters.skipped_duplicate,
+        skipped_malformed=counters.skipped_malformed,
+        total_lines=counters.total_lines,
+        malformed_line_numbers=tuple(counters.malformed_lines),
         duration_s=duration_s,
     )
 

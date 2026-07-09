@@ -626,6 +626,57 @@ class AnalyticsSyncTransactionTest(unittest.TestCase):
             self.assertEqual(fake.close_called, 1)
 
 
+class FlushBatchRowcountTest(unittest.TestCase):
+    """`_flush_batch` derives inserted-vs-duplicate from the cursor's
+    per-`executemany` rowcount. A driver that strips the count entirely
+    (reports -1) falls back to counting the whole batch as inserted, so
+    `inserted` stays a lower bound rather than the count going negative.
+    """
+
+    def test_negative_rowcount_counts_whole_batch_as_inserted(self) -> None:
+        _, analytics_sync = _reload()
+
+        class _Cur:
+            rowcount = -1
+
+            def __init__(self) -> None:
+                self.calls: list[list[tuple]] = []
+
+            def executemany(self, sql: str, params_seq) -> None:
+                # Materialize so a generator caller is not double-spent.
+                self.calls.append(list(params_seq))
+
+        cur = _Cur()
+        counters = analytics_sync._SyncCounters()
+        batch = [("a",), ("b",), ("c",)]
+        analytics_sync._flush_batch(
+            cur, "INSERT ...", batch, counters, start=0.0,
+        )
+        self.assertEqual(counters.inserted, 3)
+        self.assertEqual(counters.skipped_duplicate, 0)
+        # The buffer is cleared so the caller can refill it, and the whole
+        # batch reached the wire in a single `executemany`.
+        self.assertEqual(batch, [])
+        self.assertEqual(len(cur.calls), 1)
+        self.assertEqual(len(cur.calls[0]), 3)
+
+    def test_empty_batch_is_a_noop(self) -> None:
+        _, analytics_sync = _reload()
+
+        class _Cur:
+            rowcount = 0
+
+            def executemany(self, sql: str, params_seq) -> None:
+                raise AssertionError("executemany must not run on empty batch")
+
+        counters = analytics_sync._SyncCounters()
+        analytics_sync._flush_batch(
+            _Cur(), "INSERT ...", [], counters, start=0.0,
+        )
+        self.assertEqual(counters.inserted, 0)
+        self.assertEqual(counters.skipped_duplicate, 0)
+
+
 class AnalyticsSyncCliTest(unittest.TestCase):
     """The CLI prints a one-line summary on success and exits 1 on
     failure so a cron / systemd unit can surface the error.

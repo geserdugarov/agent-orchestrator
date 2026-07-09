@@ -16,6 +16,45 @@ from typing import Any, Callable, Optional, Sequence
 from .connection import AnalyticsReadError, _close_quietly
 
 
+def _execute_select(
+    conn: Any, sql: str, params: Sequence[Any],
+) -> list[tuple]:
+    """Run one SELECT on `conn` and return every row as a tuple.
+
+    Neither opens nor closes `conn` -- the caller owns its lifetime. Any
+    driver-level exception (cursor, execute, or fetch) is wrapped in
+    `AnalyticsReadError` so callers have one type to catch.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+    except Exception as e:
+        raise AnalyticsReadError(f"analytics query failed: {e}") from e
+    return list(rows or [])
+
+
+def _connect_for_read(
+    connect_fn: Callable[[str], Any], db_url: Optional[str],
+) -> Any:
+    """Open a fresh read connection, normalizing failures to
+    `AnalyticsReadError`.
+
+    An `AnalyticsReadError` the factory already raised (the default psycopg
+    factory wraps its own connect failure) passes through unchanged rather
+    than being double-wrapped; any other exception is wrapped so the caller
+    sees a single type regardless of which driver raised it.
+    """
+    try:
+        return connect_fn(db_url)
+    except AnalyticsReadError:
+        raise
+    except Exception as e:
+        raise AnalyticsReadError(
+            f"could not connect to analytics database: {e}"
+        ) from e
+
+
 def _query(
     connect_fn: Callable[[str], Any],
     db_url: Optional[str],
@@ -38,32 +77,9 @@ def _query(
     or the fetch.
     """
     if conn is not None:
-        try:
-            with conn.cursor() as cur:
-                cur.execute(sql, tuple(params))
-                rows = cur.fetchall()
-        except Exception as e:
-            raise AnalyticsReadError(
-                f"analytics query failed: {e}"
-            ) from e
-        return list(rows or [])
+        return _execute_select(conn, sql, params)
+    opened = _connect_for_read(connect_fn, db_url)
     try:
-        opened = connect_fn(db_url)
-    except AnalyticsReadError:
-        raise
-    except Exception as e:
-        raise AnalyticsReadError(
-            f"could not connect to analytics database: {e}"
-        ) from e
-    try:
-        try:
-            with opened.cursor() as cur:
-                cur.execute(sql, tuple(params))
-                rows = cur.fetchall()
-        except Exception as e:
-            raise AnalyticsReadError(
-                f"analytics query failed: {e}"
-            ) from e
+        return _execute_select(opened, sql, params)
     finally:
         _close_quietly(opened)
-    return list(rows or [])
