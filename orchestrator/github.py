@@ -129,6 +129,24 @@ def hard_skip_control_label(issue: Issue) -> Optional[str]:
     return None
 
 
+def _iter_new_non_pr_issues(
+    issues: Iterable[Issue], seen: set[int]
+) -> Iterable[Issue]:
+    """Yield each non-PR issue in `issues` not already in `seen`, recording it.
+
+    The open poll and every per-label closed-sweep query in
+    `list_pollable_issues` share this filter: the Issues API returns pull
+    requests too, so PRs are skipped, and `seen` is shared across the queries
+    so an issue matching more than one of them surfaces exactly once. `seen`
+    is mutated in place, which is what carries that dedup state (and the
+    open-before-closed ordering) across the successive `yield from` calls.
+    """
+    for issue in issues:
+        if issue.pull_request is None and issue.number not in seen:
+            seen.add(issue.number)
+            yield issue
+
+
 def _write_event_record(record: dict) -> None:
     """Append one JSONL line to `config.EVENT_LOG_PATH` if configured.
 
@@ -346,10 +364,7 @@ class GitHubClient:
         }
         if since is not None:
             kwargs["since"] = since
-        for issue in self.repo.get_issues(**kwargs):
-            if issue.pull_request is None and issue.number not in seen:
-                seen.add(issue.number)
-                yield issue
+        yield from _iter_new_non_pr_issues(self.repo.get_issues(**kwargs), seen)
 
         # The closed-issue recovery sweep below issues one GET per non-terminal
         # label, per repo. That fixed cost -- paid every tick regardless of how
@@ -365,10 +380,10 @@ class GitHubClient:
         # PyGithub's Repository.get_issues(labels=...) expects Label OBJECTS
         # and reads `label.name`; passing a raw string list raises a
         # TypeError before the sweep yields anything. Because that exception
-        # propagates out of this generator on the second `for` -- past the
-        # per-issue try/except in `tick()` -- it would silently break every
-        # tick after open issues processed and leave externally-merged
-        # in_review issues stuck closed-but-labeled forever. Resolve each
+        # propagates out of this generator when the sweep query is iterated
+        # -- past the per-issue try/except in `tick()` -- it would silently
+        # break every tick after open issues processed and leave externally-
+        # merged in_review issues stuck closed-but-labeled forever. Resolve each
         # Label via the per-client cache (`_cached_label`); treat a missing
         # label as "nothing to sweep" and skip rather than raising.
         # Multi-label-OR is achieved by issuing one query per label (the
@@ -390,10 +405,9 @@ class GitHubClient:
             }
             if since is not None:
                 closed_kwargs["since"] = since
-            for issue in self.repo.get_issues(**closed_kwargs):
-                if issue.pull_request is None and issue.number not in seen:
-                    seen.add(issue.number)
-                    yield issue
+            yield from _iter_new_non_pr_issues(
+                self.repo.get_issues(**closed_kwargs), seen
+            )
 
     @staticmethod
     def workflow_label(issue: Issue) -> Optional[WorkflowLabel]:
