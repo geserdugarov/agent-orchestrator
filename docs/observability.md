@@ -867,6 +867,9 @@ that delegates the static-metadata read (`_read_static_metadata`), the staged wi
 `_render_empty_window`), and every filter / widget section (the `_render_*` helpers) plus the per-issue drill-down to
 focused module-level helpers — alongside compatibility re-exports of every pure helper under its original name, so
 `streamlit run orchestrator/dashboard.py` and the historical `orchestrator.dashboard.*` import surface are unchanged.
+The repo-root `sys.path` shim that lets `streamlit run` resolve the absolute `orchestrator.*` imports is factored
+into the shared import-light `orchestrator/script_launch.py` helper (`ensure_repo_root_on_path`), which
+`orchestrator/trajectory_dashboard.py` also calls.
 The pure helpers live in three import-light modules (stdlib plus `orchestrator.analytics`, so they hold
 the lazy-import invariant): `orchestrator/dashboard_state.py` (date / window math, preset and timezone vocabulary,
 stage-filter / cache-key resolution, the issue-number parser, the DB-config banner check, and the read fan-out switch),
