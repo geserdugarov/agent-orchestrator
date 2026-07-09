@@ -18,7 +18,7 @@ dev = ["pytest>=8", "ruff>=0.15.16"]
 # the default `dev` group so `uv sync --locked` keeps installing the
 # orchestrator's runtime + tests minimal; install with
 # `uv sync --group dashboard` before running `streamlit run`.
-dashboard = ["streamlit>=1.36", "plotly>=5.20"]
+dashboard = ["streamlit>=1.36", "plotly>=6.8.0"]
 
 [tool.pytest.ini_options]
 # Surface skip reasons in the run summary by default. The suite carries
