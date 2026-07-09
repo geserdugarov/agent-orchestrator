@@ -701,6 +701,33 @@ def main() -> None:
     )
 
 
+def _filter_list(values_t: Optional[Sequence[str]]) -> Optional[list[str]]:
+    """Convert a cached filter tuple back to the read model's list arg.
+
+    `cache_key` stores the event / stage multiselects as hashable
+    tuples so they can key `st.cache_data`; the `analytics.read`
+    getters take lists. Converting per read keeps the tri-state intact
+    -- `None` means "no filter", an empty selection means "show
+    nothing", and the two must stay distinct at the read layer.
+    """
+    return list(values_t) if values_t is not None else None
+
+
+def _scoped_read(getter: Callable[..., Any], /, **filters: Any) -> Any:
+    """Run one windowed read on the per-thread analytics connection.
+
+    Checks out the thread-local connection via `analytics_connection()`
+    and forwards it to `getter` alongside the resolved filter kwargs, so
+    every cached reader shares one open socket per render pass instead of
+    opening (and hashing) a connection per call. The cached wrappers stay
+    connection-free: `conn` is supplied here and never lands in their
+    `st.cache_data` key (a raw `psycopg.Connection` is unhashable and
+    would make every reload look like a cache miss).
+    """
+    with analytics_read.analytics_connection() as conn:
+        return getter(conn=conn, **filters)
+
+
 def _read_static_metadata(*, st: Any):
     """Read the data extent + filter options through cached wrappers.
 
@@ -713,13 +740,11 @@ def _read_static_metadata(*, st: Any):
     """
     @st.cache_data(show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS)
     def _read_data_extent():
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_data_extent(conn=conn)
+        return _scoped_read(analytics_read.get_data_extent)
 
     @st.cache_data(show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS)
     def _read_filter_options():
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_filter_options(conn=conn)
+        return _scoped_read(analytics_read.get_filter_options)
 
     try:
         return _read_data_extent(), _read_filter_options()
@@ -760,14 +785,16 @@ def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
     Returns `(first_wave_readers, second_wave_readers)` -- each a list of
     `(name, zero-arg callable)` pairs `_fan_out_reads` dispatches.
 
-    Connection scoping: each wrapper checks out a thread-local analytics
-    connection inside its body via `analytics_connection()` rather than
-    threading a connection through the cache key (a raw `psycopg.Connection`
-    is not hashable and would crash the wrapper, and every reload would
-    otherwise look like a cache miss). The thread-local persists across
-    wrappers in the same render pass, so the first cache-miss pays the
-    psycopg handshake and the rest reuse the open socket. The cache key
-    stays the filter tuple `(start, end, repo, events_t, stages_t, issue)`.
+    Connection scoping: each wrapper delegates its read to `_scoped_read`,
+    which checks out the thread-local analytics connection via
+    `analytics_connection()` and forwards it to the read helper rather
+    than threading a connection through the cache key (a raw
+    `psycopg.Connection` is not hashable and would crash the wrapper, and
+    every reload would otherwise look like a cache miss). The thread-local
+    persists across reads in the same render pass, so the first cache-miss
+    pays the psycopg handshake and the rest reuse the open socket. The
+    cache key stays the filter tuple `(start, end, repo, events_t,
+    stages_t, issue)`.
 
     Split into two staged waves so the topbar / filter meta / insight
     banners / KPI strip can paint as soon as their inputs are available
@@ -780,69 +807,58 @@ def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
     """
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_summary(start, end, repo, events_t, stages_t, issue):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_summary(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_summary,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_prev_kpi(start, end, repo, events_t, stages_t, issue):
-        # Previous-window read for the KPI delta pills and
-        # cost-trend banner only. The full `get_summary` shape (per-
-        # event / per-stage breakdowns, distinct-issue / distinct-
-        # repo counts, failure / timeout counters) is never read off
-        # `prev_summary`, so a thinner reader saves a `GROUP BY`
-        # follow-up plus a couple of `COUNT(DISTINCT)`s on every
-        # cold load while leaving the cached wrapper shape (and
-        # cache key) identical to `_read_summary`.
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_kpi_prev(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        # Previous-window read for the KPI delta pills and cost-trend
+        # banner only. The full `get_summary` shape (per-event / per-stage
+        # breakdowns, distinct-issue / distinct-repo counts, failure /
+        # timeout counters) is never read off `prev_summary`, so a thinner
+        # reader saves a `GROUP BY` follow-up plus a couple of
+        # `COUNT(DISTINCT)`s on every cold load while leaving the cached
+        # wrapper shape (and cache key) identical to `_read_summary`.
+        return _scoped_read(
+            analytics_read.get_kpi_prev,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_time_series(start, end, repo, events_t, stages_t, issue):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_time_series(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_time_series,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_stage_breakdown(start, end, repo, events_t, stages_t, issue):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_stage_breakdown(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_stage_breakdown,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_recent_agent_exits(
         start, end, repo, events_t, stages_t, issue
     ):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_recent_agent_exits(
-                limit=DEFAULT_RECENT_AGENT_EXITS,
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_recent_agent_exits,
+            limit=DEFAULT_RECENT_AGENT_EXITS,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_top_cost_issues(start, end, repo, events_t, stages_t, issue):
@@ -851,126 +867,105 @@ def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
         # silently drops older high-cost issues that fall outside the
         # truncated set, so the redesigned "Most expensive issues"
         # panel must be cost-ordered at the SQL layer.
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_issues(
-                limit=DEFAULT_EXPENSIVE_LIMIT,
-                sort_by=analytics_read.SORT_BY_COST,
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_issues,
+            limit=DEFAULT_EXPENSIVE_LIMIT,
+            sort_by=analytics_read.SORT_BY_COST,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_review_round(start, end, repo, events_t, stages_t, issue):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_review_round_breakdown(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_review_round_breakdown,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_backend_efficiency(
         start, end, repo, events_t, stages_t, issue
     ):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_backend_efficiency(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_backend_efficiency,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_repo_breakdown(start, end, repo, events_t, stages_t, issue):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_repo_breakdown(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_repo_breakdown,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_cost_coverage(start, end, repo, events_t, stages_t, issue):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_cost_coverage(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_cost_coverage,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_hourly_heatmap(
         start, end, repo, events_t, stages_t, issue, tz_offset_hours,
     ):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_hourly_heatmap(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                tz_offset_hours=tz_offset_hours,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_hourly_heatmap,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue, tz_offset_hours=tz_offset_hours,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_throughput(start, end, repo, events_t, stages_t, issue):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_throughput_breakdown(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_throughput_breakdown,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_backend_daily_tokens(
         start, end, repo, events_t, stages_t, issue
     ):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_backend_daily_tokens(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_backend_daily_tokens,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_skill_trigger_rates(
         start, end, repo, events_t, stages_t, issue
     ):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_skill_trigger_rates(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_skill_trigger_rates,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     @st.cache_data(show_spinner=False, ttl=60)
     def _read_skill_trigger_matrix(
         start, end, repo, events_t, stages_t, issue
     ):
-        with analytics_read.analytics_connection() as conn:
-            return analytics_read.get_skill_trigger_matrix(
-                start=start, end=end, repo=repo,
-                events=list(events_t) if events_t is not None else None,
-                stages=list(stages_t) if stages_t is not None else None,
-                issue=issue,
-                conn=conn,
-            )
+        return _scoped_read(
+            analytics_read.get_skill_trigger_matrix,
+            start=start, end=end, repo=repo,
+            events=_filter_list(events_t), stages=_filter_list(stages_t),
+            issue=issue,
+        )
 
     # Read fan-out. Each entry is `(name, zero-arg callable)` so
     # `_fan_out_reads` can dispatch them across worker threads when
@@ -1596,16 +1591,15 @@ def _render_drilldown(
         )
         return
     try:
-        with analytics_read.analytics_connection() as conn:
-            trace = analytics_read.get_issue_events(
-                repo=repo_filter,
-                issue=issue_input_parsed,
-                start=window.start,
-                end=window.end,
-                events=list(event_filter) if event_filter is not None else None,
-                stages=list(stage_filter) if stage_filter is not None else None,
-                conn=conn,
-            )
+        trace = _scoped_read(
+            analytics_read.get_issue_events,
+            repo=repo_filter,
+            issue=issue_input_parsed,
+            start=window.start,
+            end=window.end,
+            events=_filter_list(event_filter),
+            stages=_filter_list(stage_filter),
+        )
     except analytics_read.AnalyticsReadError as e:
         st.error(f"Issue drill-down failed: {e}")
         return

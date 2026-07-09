@@ -1471,11 +1471,13 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
     connection-free -- a raw `psycopg.Connection` is not a hashable
     cache key and every reload would otherwise look like a cache miss.
 
-    The cached widget wrappers live in the `_widget_readers` helper and
-    the static metadata reads in `_read_static_metadata`, so these
-    inspect those helper sources (plus `_render_drilldown`) -- the
-    suite stays hermetic against the dashboard dependency group
-    (Streamlit + Plotly are opt-in).
+    The cached wrappers (in `_widget_readers` and `_read_static_metadata`)
+    and the per-issue drill-down all funnel their reads through the shared
+    `_scoped_read` primitive, which owns the `analytics_connection()`
+    checkout and the `conn=conn` forwarding, so these inspect
+    `_scoped_read`'s source plus the wrappers that route through it -- the
+    suite stays hermetic against the dashboard dependency group (Streamlit
+    + Plotly are opt-in).
     """
 
     def _readers_source(self) -> str:
@@ -1488,19 +1490,22 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         return self._source_of("_render_drilldown")
 
     def test_reads_scope_through_analytics_connection(self) -> None:
-        # The cached widget wrappers, the static metadata reads, and
-        # the per-issue drill-down all check out the per-thread
-        # persistent socket via `analytics_connection` so it is reused
-        # across widgets.
+        # `_scoped_read` is the one place the per-thread persistent socket
+        # is checked out via `analytics_connection`; the cached widget
+        # wrappers, the static metadata reads, and the per-issue drill-down
+        # all route their reads through it so the socket is reused across
+        # widgets.
+        self.assertIn(
+            "analytics_read.analytics_connection()",
+            self._source_of("_scoped_read"),
+        )
         for label, src in (
             ("widget readers", self._readers_source()),
             ("static metadata", self._metadata_source()),
             ("drill-down", self._drilldown_source()),
         ):
             with self.subTest(source=label):
-                self.assertIn(
-                    "analytics_read.analytics_connection()", src,
-                )
+                self.assertIn("_scoped_read(", src)
 
     def test_cached_wrappers_do_not_accept_conn_arg(self) -> None:
         # Each `_read_*` wrapper's positional parameter list is the
@@ -1544,26 +1549,29 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
                     "(it would become part of the cache key)",
                 )
 
-    def test_wrappers_pass_conn_kwarg_to_read_helpers(self) -> None:
-        # Inside each wrapper's body, the conn from
-        # `analytics_connection()` must be forwarded to the read
-        # helper -- otherwise we open a new socket per call (the very
-        # thing the refactor is supposed to eliminate).
+    def test_wrappers_forward_scoped_connection(self) -> None:
+        # Each cached reader delegates to `_scoped_read`, which opens the
+        # thread-local connection and forwards it to the read helper --
+        # otherwise a new socket would open per call (the very thing the
+        # scoping is supposed to eliminate). The wrappers stay
+        # connection-free so `conn` never lands in the cache key.
         readers_src = self._readers_source()
-        # 15 cached widget wrappers each forward the scoped connection.
+        # 15 cached widget wrappers each route through `_scoped_read`.
         self.assertGreaterEqual(
-            readers_src.count("conn=conn"), 15,
-            "every widget read should forward the scoped connection "
-            "from `analytics_connection`",
+            readers_src.count("_scoped_read("), 15,
+            "every widget read should route through `_scoped_read`",
         )
-        # The two static-metadata reads forward it too.
+        # The two static-metadata reads route through it too.
         self.assertGreaterEqual(
-            self._metadata_source().count("conn=conn"), 2,
+            self._metadata_source().count("_scoped_read("), 2,
         )
         # And the per-issue drill-down runs its own scoped read.
-        drilldown_src = self._drilldown_source()
-        self.assertIn("analytics_read.analytics_connection()", drilldown_src)
-        self.assertIn("conn=conn", drilldown_src)
+        self.assertIn("_scoped_read(", self._drilldown_source())
+        # `_scoped_read` is the single place the scoped connection is
+        # opened and forwarded to the read helper.
+        scoped_src = self._source_of("_scoped_read")
+        self.assertIn("analytics_read.analytics_connection()", scoped_src)
+        self.assertIn("conn=conn", scoped_src)
 
     def test_prev_summary_reader_uses_lightweight_kpi_path(self) -> None:
         # Layer 3 split the previous-window read off `get_summary`
@@ -1582,8 +1590,8 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # bounds the cached wrapper region) so the substring search
         # below cannot accidentally catch a later wrapper.
         body = src[head:src.index("\n    def ", head + 1)]
-        self.assertIn("analytics_read.get_kpi_prev(", body)
-        self.assertNotIn("analytics_read.get_summary(", body)
+        self.assertIn("analytics_read.get_kpi_prev", body)
+        self.assertNotIn("analytics_read.get_summary", body)
         # And the `prev_summary` entry in the reader fan-out must
         # dispatch through `_read_prev_kpi` so the lightweight path
         # is the one that actually fires when the dashboard renders.
@@ -1987,18 +1995,22 @@ class SkillMatrixWiringTest(_MainSourceTest):
     def test_matrix_read_calls_matrix_read_model(self) -> None:
         src = self._source_of("_widget_readers")
         self.assertIn("def _read_skill_trigger_matrix(", src)
-        self.assertIn("analytics_read.get_skill_trigger_matrix(", src)
+        self.assertIn("analytics_read.get_skill_trigger_matrix", src)
 
     def test_matrix_read_forwards_scoped_connection(self) -> None:
-        # Reuse the cached-read pattern: the scoped thread-local
-        # connection is forwarded to the read helper so the matrix read
-        # shares the open socket rather than opening its own.
+        # Reuse the cached-read pattern: the matrix wrapper delegates to
+        # `_scoped_read`, which checks out the scoped thread-local
+        # connection and forwards it to the read helper, so the matrix
+        # read shares the open socket rather than opening its own.
         src = self._source_of("_widget_readers")
         marker = "def _read_skill_trigger_matrix("
         head = src.index(marker)
         body = src[head:src.index("\n\n", head)]
-        self.assertIn("analytics_read.analytics_connection()", body)
-        self.assertIn("conn=conn", body)
+        self.assertIn("_scoped_read(", body)
+        self.assertIn("analytics_read.get_skill_trigger_matrix", body)
+        scoped_src = self._source_of("_scoped_read")
+        self.assertIn("analytics_read.analytics_connection()", scoped_src)
+        self.assertIn("conn=conn", scoped_src)
 
     def test_matrix_read_wrapper_takes_no_conn_in_cache_key(self) -> None:
         # `conn` must not appear in the wrapper's parameter list -- it
