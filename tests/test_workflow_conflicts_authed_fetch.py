@@ -10,7 +10,7 @@ os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, git_plumbing, workflow
 
-from tests.workflow_helpers import _TEST_SPEC
+from tests.workflow_helpers import _TEST_SPEC, _temp_git_repo_with_local_config
 
 
 class AuthedFetchHardeningTest(unittest.TestCase):
@@ -18,7 +18,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
     by `_handle_resolving_conflict`. Mirrors `_push_branch`'s security
     envelope: askpass-based auth, detached global/system config, blocked
     hooks/fsmonitor/credential helpers, refusal to run when the worktree
-    carries url-rewrite rules.
+    carries url-rewrite rules or http.* proxy/TLS transport config.
     """
 
     def test_askpass_token_and_blocks_inherited_config(self) -> None:
@@ -32,7 +32,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         fetch_result = MagicMock(returncode=0, stdout="", stderr="")
 
         def fake_run(args, **kwargs):
-            if args and args[:3] == ["git", "config", "--local"]:
+            if args and args[:3] == ["git", "config", "--get-regexp"]:
                 return rewrite_check
             captured["args"] = args
             captured["env"] = kwargs.get("env")
@@ -90,7 +90,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
 
         def fake_run(args, **kwargs):
             runs.append(args)
-            if args and args[:3] == ["git", "config", "--local"]:
+            if args and args[:3] == ["git", "config", "--get-regexp"]:
                 return rewrite_check
             return fetch_result
 
@@ -108,6 +108,30 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         # Only the rewrite probe ran -- the fetch was refused.
         self.assertEqual(len(runs), 1)
         self.assertNotEqual(fetch.returncode, 0)
+
+    def test_refuses_on_real_local_http_proxy(self) -> None:
+        # The url-rewrite refusal test above mocks the config probe, so it
+        # can't prove the broadened regexp actually catches http.* keys. Use
+        # real git config resolution: a worktree carrying `http.proxy` must
+        # make `_authed_fetch` fail closed before the token-bearing fetch runs.
+        from unittest.mock import patch as mock_patch
+
+        with _temp_git_repo_with_local_config(
+            [("http.proxy", "http://evil.example:8080")]
+        ) as repo, mock_patch.object(
+            workflow.config, "_resolve_github_token",
+            return_value="fake-token-xyz",
+        ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
+            fetch = workflow._authed_fetch(
+                _TEST_SPEC,
+                "+refs/heads/main:refs/remotes/origin/main",
+                cwd=repo,
+            )
+        self.assertNotEqual(fetch.returncode, 0)
+        self.assertTrue(
+            any("http.proxy" in line for line in cm.output),
+            f"expected http.proxy in refusal log, got {cm.output!r}",
+        )
 
     def test_no_token_returns_failure_without_subprocess(self) -> None:
         from unittest.mock import patch as mock_patch, MagicMock
@@ -146,7 +170,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
         captured: dict[str, object] = {}
 
         def fake_run(args, **kwargs):
-            if args and args[:3] == ["git", "config", "--local"]:
+            if args and args[:3] == ["git", "config", "--get-regexp"]:
                 return rewrite_check
             captured["args"] = args
             captured["env"] = kwargs.get("env")

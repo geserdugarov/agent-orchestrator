@@ -10,7 +10,7 @@ os.environ.setdefault("ORCHESTRATOR_SKIP_DOTENV", "1")
 
 from orchestrator import config, git_plumbing, workflow
 
-from tests.workflow_helpers import _TEST_SPEC
+from tests.workflow_helpers import _TEST_SPEC, _temp_git_repo_with_local_config
 
 
 class AuthedTargetFetchTest(unittest.TestCase):
@@ -141,7 +141,7 @@ class AuthedTargetFetchTest(unittest.TestCase):
 
         def fake_run(args, **kwargs):
             runs.append(args)
-            if args and args[:3] == ["git", "config", "--local"]:
+            if args and args[:3] == ["git", "config", "--get-regexp"]:
                 return rewrite_check
             return fetch_result
 
@@ -154,11 +154,38 @@ class AuthedTargetFetchTest(unittest.TestCase):
 
         # Only the rewrite probe ran; the token-bearing fetch did NOT.
         self.assertEqual(len(runs), 1)
-        self.assertEqual(runs[0][:3], ["git", "config", "--local"])
+        self.assertEqual(runs[0][:3], ["git", "config", "--get-regexp"])
         self.assertNotEqual(fetch.returncode, 0)
         # And the token NEVER reached the (skipped) fetch subprocess env.
         for arg in runs[0]:
             self.assertNotIn("super-secret-token", str(arg))
+
+    def test_refuses_on_real_local_ssl_verify_disabled(self) -> None:
+        # A linked worktree can disable TLS verification in the parent clone's
+        # local config via `git config --local http.sslVerify false`; the
+        # token-bearing target fetch must fail closed on it, not just on url
+        # rewrites. Real git config resolution (not a mocked probe) proves the
+        # broadened regexp catches http.* transport keys.
+        from unittest.mock import patch as mock_patch
+
+        with _temp_git_repo_with_local_config(
+            [("http.sslVerify", "false")]
+        ) as repo:
+            spec = config.RepoSpec(
+                slug="geserdugarov/agent-orchestrator",
+                target_root=repo,
+                base_branch="main",
+            )
+            with mock_patch.object(
+                workflow.config, "_resolve_github_token",
+                return_value="super-secret-token",
+            ), self.assertLogs(git_plumbing.log, level="ERROR") as cm:
+                fetch = workflow._authed_target_fetch(spec, "main")
+        self.assertNotEqual(fetch.returncode, 0)
+        self.assertTrue(
+            any("sslverify" in line.lower() for line in cm.output),
+            f"expected sslVerify in refusal log, got {cm.output!r}",
+        )
 
     def test_missing_token_returns_failure_without_subprocess(self) -> None:
         # When the per-spec token file is missing, fail loudly with the

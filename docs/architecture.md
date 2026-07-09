@@ -270,7 +270,11 @@ The orchestrator (not the agent) pushes. The push is hardened against the agent-
 - Token delivered via `GIT_ASKPASS` tempfile, never argv.
 - Detaches from `~/.gitconfig` and `/etc/gitconfig` (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`).
 - Disables `core.hooksPath`, `credential.helper`, `core.fsmonitor`.
-- Refuses to push if the worktree's local config has any `url.*.insteadOf` / `pushInsteadOf` rewrite.
+- Refuses to push if the config the push resolves — the worktree's local config plus any `include.path` file or
+  per-worktree `config.worktree` it pulls in, with global/system detached — carries any `url.*.insteadOf` /
+  `pushInsteadOf` rewrite or any `http.*` proxy/TLS setting (e.g. `http.proxy`, `http.sslVerify=false`) that could
+  tunnel the token-bearing push through an attacker proxy or disable certificate verification. Env-var proxies
+  (`https_proxy`) are operator-set and stay honored — only agent-writable config-file transport is rejected.
 - Pushes via explicit refspec `HEAD:refs/heads/<branch>` (no upstream stored).
 
 ## Observability
@@ -383,7 +387,7 @@ the sync / read-model / dashboard wiring, and the usage parser's cost-precedence
    │  (codex or claude,          │         │  ─ GIT_ASKPASS tempfile     │
    │   per-issue worktree)       │         │  ─ no global/system config  │
    │  ─ env: GH tokens stripped  │         │  ─ hooks/helper disabled    │
-   │  ─ env: GIT_AUTHOR/COMMITTER│         │  ─ refuses url-rewrite      │
+   │  ─ env: GIT_AUTHOR/COMMITTER│         │  ─ refuses url/http cfg     │
    │     stamped (orchestrator)  │         └──────────────┬──────────────┘
    │  ─ provider auth left alone │                        │
    │  ─ --bypass / --skip perms  │                        │
