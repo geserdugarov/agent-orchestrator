@@ -15,6 +15,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 
+SAMPLE_TIMESTAMP = "2026-05-25T12:00:00+00:00"
+SAMPLE_NAIVE_TIMESTAMP = "2026-05-25T12:00:00"
+TEST_BATCH_SIZE = 3
+PARTIAL_BATCH_RECORD_COUNT = TEST_BATCH_SIZE + 2
+CLI_CLOCK_TOLERANCE_SECONDS = 5
+
+
 def _hermetic_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {
         "ORCHESTRATOR_SKIP_DOTENV": "1",
@@ -186,7 +193,7 @@ def _sample_record(
     *,
     issue: int = 1,
     event: str = "stage_enter",
-    ts: str = "2026-05-25T12:00:00+00:00",
+    ts: str = SAMPLE_TIMESTAMP,
     **extras,
 ) -> dict:
     record = {
@@ -197,6 +204,10 @@ def _sample_record(
     }
     record.update(extras)
     return record
+
+
+def _sample_records(count: int) -> list[dict]:
+    return [_sample_record(issue=issue) for issue in range(1, count + 1)]
 
 
 class AnalyticsDbUrlConfigTest(unittest.TestCase):
@@ -291,10 +302,11 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
     def test_inserts_each_record_once(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [
+            records = [
                 _sample_record(issue=1, event="stage_enter", stage="implementing"),
                 _sample_record(issue=2, event="agent_exit", duration_s=12.5),
-            ])
+            ]
+            _write_jsonl(path, records)
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
@@ -304,11 +316,11 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,
             )
-            self.assertEqual(result.inserted, 2)
+            self.assertEqual(result.inserted, len(records))
             self.assertEqual(result.skipped_duplicate, 0)
             self.assertEqual(result.skipped_malformed, 0)
-            self.assertEqual(result.total_lines, 2)
-            self.assertEqual(len(fake.inserts), 2)
+            self.assertEqual(result.total_lines, len(records))
+            self.assertEqual(len(fake.inserts), len(records))
             # Two commits: one for the events insert, one after the
             # post-commit refresh of `analytics_daily_rollup`.
             self.assertEqual(fake.commit_called, 2)
@@ -318,17 +330,16 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
     def test_promoted_columns_and_extras_split(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [
-                _sample_record(
-                    event="agent_exit",
-                    stage="implementing",
-                    duration_s=42.0,
-                    backend="claude",
-                    session_id="sess-abc",
-                    input_tokens=100,
-                    custom_future_key="something-new",
-                ),
-            ])
+            record = _sample_record(
+                event="agent_exit",
+                stage="implementing",
+                duration_s=42.0,
+                backend="claude",
+                session_id="sess-abc",
+                input_tokens=100,
+                custom_future_key="something-new",
+            )
+            _write_jsonl(path, [record])
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
@@ -340,13 +351,16 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
             )
             sql, params = fake.inserts[0]
             promoted = analytics_sync._PROMOTED_COLUMNS
-            self.assertEqual(params[promoted.index("repo")], "owner/repo")
-            self.assertEqual(params[promoted.index("issue")], 1)
-            self.assertEqual(params[promoted.index("event")], "agent_exit")
-            self.assertEqual(params[promoted.index("stage")], "implementing")
-            self.assertEqual(params[promoted.index("backend")], "claude")
-            self.assertEqual(params[promoted.index("session_id")], "sess-abc")
-            self.assertEqual(params[promoted.index("input_tokens")], 100)
+            for column in (
+                "repo",
+                "issue",
+                "event",
+                "stage",
+                "backend",
+                "session_id",
+                "input_tokens",
+            ):
+                self.assertEqual(params[promoted.index(column)], record[column])
             # Extras column lives after the promoted block.
             extras_idx = len(promoted)
             self.assertEqual(
@@ -367,7 +381,7 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
         # text in some configurations.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record(ts="2026-05-25T12:00:00+00:00")])
+            _write_jsonl(path, [_sample_record(ts=SAMPLE_TIMESTAMP)])
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
@@ -392,10 +406,8 @@ class AnalyticsSyncDedupTest(unittest.TestCase):
     def test_second_run_inserts_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [
-                _sample_record(issue=1),
-                _sample_record(issue=2),
-            ])
+            records = _sample_records(2)
+            _write_jsonl(path, records)
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
@@ -409,11 +421,11 @@ class AnalyticsSyncDedupTest(unittest.TestCase):
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,
             )
-            self.assertEqual(first.inserted, 2)
+            self.assertEqual(first.inserted, len(records))
             self.assertEqual(second.inserted, 0)
-            self.assertEqual(second.skipped_duplicate, 2)
+            self.assertEqual(second.skipped_duplicate, len(records))
             # Only the 2 originals are durably persisted.
-            self.assertEqual(len(fake.inserts), 2)
+            self.assertEqual(len(fake.inserts), len(records))
 
     def test_post_prune_renumbering_does_not_duplicate(self) -> None:
         # The realistic post-prune scenario: file had 3 records, the
@@ -423,11 +435,12 @@ class AnalyticsSyncDedupTest(unittest.TestCase):
         # Content-hash dedup keeps them out.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [
+            original_records = [
                 _sample_record(issue=1, event="a"),
                 _sample_record(issue=2, event="b"),
                 _sample_record(issue=3, event="c"),
-            ])
+            ]
+            _write_jsonl(path, original_records)
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
@@ -438,16 +451,14 @@ class AnalyticsSyncDedupTest(unittest.TestCase):
                 json_adapter=lambda v: v,
             )
             # Operator runs prune; file now has only #2 + #3 at lines 1 + 2.
-            _write_jsonl(path, [
-                _sample_record(issue=2, event="b"),
-                _sample_record(issue=3, event="c"),
-            ])
+            retained_records = original_records[1:]
+            _write_jsonl(path, retained_records)
             second = analytics_sync.sync_jsonl_to_postgres(
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,
             )
             self.assertEqual(second.inserted, 0)
-            self.assertEqual(second.skipped_duplicate, 2)
+            self.assertEqual(second.skipped_duplicate, len(retained_records))
 
 
 class AnalyticsSyncMalformedTest(unittest.TestCase):
@@ -580,8 +591,7 @@ class AnalyticsSyncMalformedTest(unittest.TestCase):
         # rather than being rejected as malformed.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            naive = "2026-05-25T12:00:00"
-            _write_jsonl(path, [_sample_record(ts=naive)])
+            _write_jsonl(path, [_sample_record(ts=SAMPLE_NAIVE_TIMESTAMP)])
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
@@ -783,7 +793,7 @@ class AnalyticsSyncCliTest(unittest.TestCase):
         err_ts = datetime.strptime(err_match.group(1), "%Y-%m-%d %H:%M:%S")
         delta = abs((out_ts - err_ts).total_seconds())
         self.assertLess(
-            delta, 5,
+            delta, CLI_CLOCK_TOLERANCE_SECONDS,
             f"stdout and stderr timestamps disagree by {delta}s: "
             f"out={out_match.group(1)} err={err_match.group(1)}",
         )
@@ -792,7 +802,8 @@ class AnalyticsSyncCliTest(unittest.TestCase):
         # would land outside this window on a TZ-skewed host.
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         self.assertLess(
-            abs((out_ts - now_utc).total_seconds()), 5,
+            abs((out_ts - now_utc).total_seconds()),
+            CLI_CLOCK_TOLERANCE_SECONDS,
             "stdout summary timestamp is not UTC",
         )
         self.assertLess(
@@ -949,19 +960,21 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
             })
-            with patch.object(analytics_sync, "_BATCH_SIZE", 3):
-                records = [_sample_record(issue=i) for i in range(1, 4)]
+            with patch.object(
+                analytics_sync, "_BATCH_SIZE", TEST_BATCH_SIZE,
+            ):
+                records = _sample_records(TEST_BATCH_SIZE)
                 _write_jsonl(path, records)
                 fake = _FakeConnection()
                 result = analytics_sync.sync_jsonl_to_postgres(
                     connect=lambda url: fake,
                     json_adapter=lambda v: v,
                 )
-            self.assertEqual(result.inserted, 3)
+            self.assertEqual(result.inserted, len(records))
             self.assertEqual(result.skipped_duplicate, 0)
             self.assertEqual(len(fake.batches), 1)
             sql, params_list = fake.batches[0]
-            self.assertEqual(len(params_list), 3)
+            self.assertEqual(len(params_list), TEST_BATCH_SIZE)
             self.assertIn(
                 "ON CONFLICT (content_hash) DO NOTHING", sql,
             )
@@ -982,21 +995,26 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
             })
-            records = [_sample_record(issue=i) for i in range(1, 5)]
+            records = _sample_records(TEST_BATCH_SIZE + 1)
             _write_jsonl(path, records)
             fake = _FakeConnection()
             fake.pre_check_hashes = set()
-            for record in records[:2]:
+            racing_records = records[:2]
+            for record in racing_records:
                 fake.seen_hashes.add(analytics_sync._content_hash(record))
-            with patch.object(analytics_sync, "_BATCH_SIZE", 4):
+            with patch.object(analytics_sync, "_BATCH_SIZE", len(records)):
                 sync_result = analytics_sync.sync_jsonl_to_postgres(
                     connect=lambda url: fake,
                     json_adapter=lambda v: v,
                 )
-            self.assertEqual(sync_result.inserted, 2)
-            self.assertEqual(sync_result.skipped_duplicate, 2)
+            self.assertEqual(
+                sync_result.inserted, len(records) - len(racing_records),
+            )
+            self.assertEqual(
+                sync_result.skipped_duplicate, len(racing_records),
+            )
             self.assertEqual(len(fake.batches), 1)
-            self.assertEqual(len(fake.batches[0][1]), 4)
+            self.assertEqual(len(fake.batches[0][1]), len(records))
 
     def test_final_partial_batch_flushed_at_eof(self) -> None:
         # 5 records with `_BATCH_SIZE=3` yields one full batch of 3
@@ -1009,19 +1027,23 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
             })
-            records = [_sample_record(issue=i) for i in range(1, 6)]
+            records = _sample_records(PARTIAL_BATCH_RECORD_COUNT)
             _write_jsonl(path, records)
             fake = _FakeConnection()
-            with patch.object(analytics_sync, "_BATCH_SIZE", 3):
+            with patch.object(
+                analytics_sync, "_BATCH_SIZE", TEST_BATCH_SIZE,
+            ):
                 result = analytics_sync.sync_jsonl_to_postgres(
                     connect=lambda url: fake,
                     json_adapter=lambda v: v,
                 )
-            self.assertEqual(result.inserted, 5)
+            self.assertEqual(result.inserted, len(records))
             self.assertEqual(result.skipped_duplicate, 0)
             self.assertEqual(len(fake.batches), 2)
-            self.assertEqual(len(fake.batches[0][1]), 3)
-            self.assertEqual(len(fake.batches[1][1]), 2)
+            self.assertEqual(len(fake.batches[0][1]), TEST_BATCH_SIZE)
+            self.assertEqual(
+                len(fake.batches[1][1]), len(records) - TEST_BATCH_SIZE,
+            )
             # Two commits: one for the events insert, one after the
             # post-commit refresh of `analytics_daily_rollup`.
             self.assertEqual(fake.commit_called, 2)
@@ -1131,7 +1153,7 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
         # whole startup tax; fan-out per row would defeat the point.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record(issue=i) for i in range(1, 4)])
+            _write_jsonl(path, _sample_records(TEST_BATCH_SIZE))
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
@@ -1164,29 +1186,30 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
         # per-row round-trip.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            records = [_sample_record(issue=i) for i in range(1, 4)]
+            records = _sample_records(TEST_BATCH_SIZE)
             _write_jsonl(path, records)
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
             })
             fake = _FakeConnection()
-            for record in records[:2]:
+            existing_records = records[:-1]
+            for record in existing_records:
                 fake.seen_hashes.add(analytics_sync._content_hash(record))
             result = analytics_sync.sync_jsonl_to_postgres(
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,
             )
         self.assertEqual(result.inserted, 1)
-        self.assertEqual(result.skipped_duplicate, 2)
-        self.assertEqual(result.total_lines, 3)
+        self.assertEqual(result.skipped_duplicate, len(existing_records))
+        self.assertEqual(result.total_lines, len(records))
         # The batched `executemany` only carries the new third record;
         # the two pre-skipped rows never enter the batch buffer.
         self.assertEqual(len(fake.batches), 1)
         self.assertEqual(len(fake.batches[0][1]), 1)
-        third_hash = analytics_sync._content_hash(records[2])
+        new_record_hash = analytics_sync._content_hash(records[-1])
         batched_hashes = {params[-1] for params in fake.batches[0][1]}
-        self.assertEqual(batched_hashes, {third_hash})
+        self.assertEqual(batched_hashes, {new_record_hash})
 
     def test_intra_file_duplicates_filtered_before_executemany(self) -> None:
         # Two identical records back-to-back in the same JSONL file
@@ -1224,7 +1247,8 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
         # SELECT just returns no rows.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [_sample_record(issue=i) for i in range(1, 4)])
+            records = _sample_records(TEST_BATCH_SIZE)
+            _write_jsonl(path, records)
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
@@ -1242,10 +1266,10 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
             if sql.lstrip().upper().startswith("SELECT")
         ]
         self.assertEqual(len(select_calls), 1)
-        self.assertEqual(result.inserted, 3)
+        self.assertEqual(result.inserted, len(records))
         self.assertEqual(result.skipped_duplicate, 0)
         self.assertEqual(len(fake.batches), 1)
-        self.assertEqual(len(fake.batches[0][1]), 3)
+        self.assertEqual(len(fake.batches[0][1]), len(records))
 
 
 class AnalyticsSyncProgressTest(unittest.TestCase):
@@ -1307,10 +1331,12 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": "postgresql://h/db",
             })
-            records = [_sample_record(issue=i) for i in range(1, 6)]
+            records = _sample_records(PARTIAL_BATCH_RECORD_COUNT)
             _write_jsonl(path, records)
             fake = _FakeConnection()
-            with patch.object(analytics_sync, "_BATCH_SIZE", 3):
+            with patch.object(
+                analytics_sync, "_BATCH_SIZE", TEST_BATCH_SIZE,
+            ):
                 with self.assertLogs(
                     "orchestrator.analytics.sync", level="INFO"
                 ) as cm:
@@ -1320,10 +1346,10 @@ class AnalyticsSyncProgressTest(unittest.TestCase):
                     )
         progress_lines = [line for line in cm.output if "progress lines=" in line]
         self.assertEqual(len(progress_lines), 2)
-        self.assertIn("lines=3", progress_lines[0])
-        self.assertIn("inserted=3", progress_lines[0])
-        self.assertIn("lines=5", progress_lines[1])
-        self.assertIn("inserted=5", progress_lines[1])
+        self.assertIn(f"lines={TEST_BATCH_SIZE}", progress_lines[0])
+        self.assertIn(f"inserted={TEST_BATCH_SIZE}", progress_lines[0])
+        self.assertIn(f"lines={len(records)}", progress_lines[1])
+        self.assertIn(f"inserted={len(records)}", progress_lines[1])
 
     def test_completed_log_carries_duration_s(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1420,7 +1446,7 @@ class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
         # when the new JSONL file carries only duplicates.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            records = [_sample_record(issue=i) for i in range(1, 3)]
+            records = _sample_records(2)
             _write_jsonl(path, records)
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
@@ -1434,7 +1460,7 @@ class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
                 json_adapter=lambda v: v,
             )
         self.assertEqual(result.inserted, 0)
-        self.assertEqual(result.skipped_duplicate, 2)
+        self.assertEqual(result.skipped_duplicate, len(records))
         refresh_sqls = [
             sql for sql, _ in fake.select_calls
             if "REFRESH MATERIALIZED VIEW" in sql
@@ -1594,26 +1620,27 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
         self._apply_schema()
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [
+            records = [
                 _sample_record(issue=1, event="stage_enter", stage="ready"),
                 _sample_record(issue=2, event="agent_exit", duration_s=3.0),
                 _sample_record(issue=3, event="stage_evaluation",
                                stage="validating", duration_s=1.5,
                                result="ok"),
-            ])
+            ]
+            _write_jsonl(path, records)
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": self.db_url,
             })
             first = analytics_sync.sync_jsonl_to_postgres()
-            self.assertEqual(first.inserted, 3)
+            self.assertEqual(first.inserted, len(records))
             self.assertEqual(first.skipped_duplicate, 0)
-            self.assertEqual(self._row_count(), 3)
+            self.assertEqual(self._row_count(), len(records))
 
             second = analytics_sync.sync_jsonl_to_postgres()
             self.assertEqual(second.inserted, 0)
-            self.assertEqual(second.skipped_duplicate, 3)
-            self.assertEqual(self._row_count(), 3)
+            self.assertEqual(second.skipped_duplicate, len(records))
+            self.assertEqual(self._row_count(), len(records))
 
     def test_analytics_agent_runs_view_derives_fields(self) -> None:
         # Apply the DDL, insert one `agent_exit` row carrying the
@@ -1627,28 +1654,27 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
         self._apply_schema()
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [
-                _sample_record(
-                    issue=42,
-                    event="agent_exit",
-                    stage="implementing",
-                    agent_role="developer",
-                    backend="codex",
-                    review_round=4,
-                    retry_count=1,
-                    duration_s=12.5,
-                    exit_code=0,
-                    timed_out=False,
-                    input_tokens=300,
-                    output_tokens=150,
-                    cached_tokens=50,
-                    cache_read_tokens=20,
-                    cache_write_tokens=10,
-                    models=["gpt-5-codex"],
-                    cost_usd=0.0042,
-                    cost_source="estimated",
-                ),
-            ])
+            agent_run = _sample_record(
+                issue=42,
+                event="agent_exit",
+                stage="implementing",
+                agent_role="developer",
+                backend="codex",
+                review_round=4,
+                retry_count=1,
+                duration_s=12.5,
+                exit_code=0,
+                timed_out=False,
+                input_tokens=300,
+                output_tokens=150,
+                cached_tokens=50,
+                cache_read_tokens=20,
+                cache_write_tokens=10,
+                models=["gpt-5-codex"],
+                cost_usd=0.0042,
+                cost_source="estimated",
+            )
+            _write_jsonl(path, [agent_run])
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": self.db_url,
@@ -1661,7 +1687,8 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
                     cur.execute(
                         "SELECT model, total_tokens, total_cache_tokens, "
                         "review_round_bucket, failed, has_cost, cost_source "
-                        "FROM analytics_agent_runs WHERE issue = 42"
+                        "FROM analytics_agent_runs WHERE issue = %s",
+                        (agent_run["issue"],),
                     )
                     row = cur.fetchone()
         self.assertIsNotNone(row)
@@ -1669,9 +1696,17 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
             model, total_tokens, total_cache, bucket,
             failed, has_cost, cost_source,
         ) = row
-        self.assertEqual(model, "gpt-5-codex")
-        self.assertEqual(total_tokens, 450)
-        self.assertEqual(total_cache, 80)
+        self.assertEqual(model, agent_run["models"][0])
+        self.assertEqual(
+            total_tokens,
+            agent_run["input_tokens"] + agent_run["output_tokens"],
+        )
+        self.assertEqual(
+            total_cache,
+            agent_run["cached_tokens"]
+            + agent_run["cache_read_tokens"]
+            + agent_run["cache_write_tokens"],
+        )
         self.assertEqual(bucket, "3-5")
         self.assertFalse(failed)
         self.assertTrue(has_cost)
@@ -1691,31 +1726,47 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
         self._apply_schema()
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a.jsonl"
-            _write_jsonl(path, [
-                _sample_record(
-                    issue=7, event="agent_exit", stage="implementing",
-                    backend="claude", cost_source="reported",
-                    duration_s=4.0, exit_code=0, timed_out=False,
-                    input_tokens=100, output_tokens=50,
-                    cached_tokens=5, cache_read_tokens=3,
-                    cache_write_tokens=2, cost_usd=0.10,
-                ),
-                _sample_record(
-                    issue=7, event="agent_exit", stage="implementing",
-                    backend="claude", cost_source="reported",
-                    ts="2026-05-25T13:30:00+00:00",
-                    duration_s=6.0, exit_code=1, timed_out=True,
-                    input_tokens=200, output_tokens=80,
-                    cached_tokens=10, cache_read_tokens=4,
-                    cache_write_tokens=1, cost_usd=0.20,
-                ),
-            ])
+            successful_run = _sample_record(
+                issue=7,
+                event="agent_exit",
+                stage="implementing",
+                backend="claude",
+                cost_source="reported",
+                duration_s=4.0,
+                exit_code=0,
+                timed_out=False,
+                input_tokens=100,
+                output_tokens=50,
+                cached_tokens=5,
+                cache_read_tokens=3,
+                cache_write_tokens=2,
+                cost_usd=0.10,
+            )
+            failed_run = _sample_record(
+                issue=successful_run["issue"],
+                event="agent_exit",
+                stage="implementing",
+                backend="claude",
+                cost_source="reported",
+                ts="2026-05-25T13:30:00+00:00",
+                duration_s=6.0,
+                exit_code=1,
+                timed_out=True,
+                input_tokens=200,
+                output_tokens=80,
+                cached_tokens=10,
+                cache_read_tokens=4,
+                cache_write_tokens=1,
+                cost_usd=0.20,
+            )
+            runs = [successful_run, failed_run]
+            _write_jsonl(path, runs)
             _, analytics_sync = _reload({
                 "ANALYTICS_LOG_PATH": str(path),
                 "ANALYTICS_DB_URL": self.db_url,
             })
             result = analytics_sync.sync_jsonl_to_postgres()
-            self.assertEqual(result.inserted, 2)
+            self.assertEqual(result.inserted, len(runs))
 
             with psycopg.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
@@ -1726,7 +1777,8 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
                         "duration_s_sum, duration_s_count, "
                         "failed_count, timed_out_count, event_count "
                         "FROM analytics_daily_rollup "
-                        "WHERE issue = 7"
+                        "WHERE issue = %s",
+                        (successful_run["issue"],),
                     )
                     row = cur.fetchone()
         self.assertIsNotNone(row)
@@ -1735,21 +1787,39 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
             total_cost, dur_sum, dur_count,
             failed_count, timed_out_count, event_count,
         ) = row
-        self.assertEqual(total_in, 300)
-        self.assertEqual(total_out, 130)
-        self.assertEqual(total_cached, 15)
-        self.assertEqual(total_cr, 7)
-        self.assertEqual(total_cw, 3)
+        self.assertEqual(
+            total_in, sum(run["input_tokens"] for run in runs),
+        )
+        self.assertEqual(
+            total_out, sum(run["output_tokens"] for run in runs),
+        )
+        self.assertEqual(
+            total_cached, sum(run["cached_tokens"] for run in runs),
+        )
+        self.assertEqual(
+            total_cr, sum(run["cache_read_tokens"] for run in runs),
+        )
+        self.assertEqual(
+            total_cw, sum(run["cache_write_tokens"] for run in runs),
+        )
         # Numeric comparison: the schema uses NUMERIC(20, 10), so the
         # sum may come back as a Decimal. Cast both sides to float for
         # the comparison so an exact-decimal mismatch on the literal
         # does not blow up the assertion.
-        self.assertAlmostEqual(float(total_cost), 0.30, places=6)
-        self.assertEqual(dur_sum, 10.0)
-        self.assertEqual(dur_count, 2)
-        self.assertEqual(failed_count, 1)
-        self.assertEqual(timed_out_count, 1)
-        self.assertEqual(event_count, 2)
+        self.assertAlmostEqual(
+            float(total_cost), sum(run["cost_usd"] for run in runs), places=6,
+        )
+        self.assertEqual(
+            dur_sum, sum(run["duration_s"] for run in runs),
+        )
+        self.assertEqual(dur_count, len(runs))
+        self.assertEqual(
+            failed_count, sum(run["exit_code"] != 0 for run in runs),
+        )
+        self.assertEqual(
+            timed_out_count, sum(run["timed_out"] for run in runs),
+        )
+        self.assertEqual(event_count, len(runs))
 
 
 if __name__ == "__main__":
