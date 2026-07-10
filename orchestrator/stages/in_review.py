@@ -40,11 +40,11 @@ from typing import Optional
 
 from github.Issue import Issue
 
-from .. import config
-from ..comment_trust import filter_trusted
-from ..config import RepoSpec
-from ..state_machine import WorkflowLabel
-from ..github import (
+from orchestrator import config
+from orchestrator.comment_trust import filter_trusted
+from orchestrator.config import RepoSpec
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import (
     GitHubClient,
     PinnedState,
 )
@@ -219,7 +219,7 @@ def _drop_orchestrator_comments(comments, orchestrator_ids) -> list:
     body marker: older state can miss an id, and the bounded id list can
     eventually evict it, but the marker stays on the GitHub comment.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     return [
         c for c in comments
@@ -255,7 +255,7 @@ def _scan_fresh_pr_feedback(
     Untrusted authors are dropped from every surface (see `filter_trusted`)
     so outsider feedback cannot bookmark a pending fix or route to `fixing`.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     issue_wm = _issue_side_watermark(state)
     review_wm = state.get("pr_last_review_comment_id")
@@ -301,7 +301,7 @@ def _stay_parked(state: PinnedState, new_comments: list) -> bool:
       refresh in control of the comment; routing here would consume it as
       feedback and silently drop the retry intent.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if not state.get("awaiting_human"):
         return False
@@ -349,7 +349,7 @@ def _route_feedback_to_fixing(
     reconstruction bound for issues parked before the lists were recorded. Each
     list is already sorted ascending by id (sorted at scan time).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state.set("pending_fix_at", _wf._now_iso())
     if issue_space_new:
@@ -408,7 +408,7 @@ def _build_drift_resume_prompt(issue: Issue, unread_pr_conv: list) -> str:
     comments so the dev sees both surfaces before the watermark bump consumes
     them.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     comments_text = _wf._recent_comments_text(issue)
     if unread_pr_conv:
@@ -443,7 +443,7 @@ def _handle_user_content_drift(
     against the updated body. Docs do not run on the drift exit: the single
     docs pass is deferred to the final-docs handoff after reviewer approval.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is None:
@@ -559,7 +559,7 @@ def _handle_mergeable_gate(
     final-docs handoff covers that head OR GitHub carries a real APPROVED
     review on that head, and no standing CHANGES_REQUESTED veto exists.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     mergeable = gh.pr_is_mergeable(pr)
     if mergeable is None:
@@ -648,7 +648,7 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     updated body. Docs do not run on the drift exit: the single docs
     pass is deferred to the final-docs handoff after reviewer approval.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")

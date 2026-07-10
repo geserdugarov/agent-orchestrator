@@ -46,18 +46,18 @@ from typing import Any, Optional
 
 from github.Issue import Issue
 
-from . import analytics, config
-from .agents import AgentResult, run_agent
-from .config import RepoSpec
-from .usage import UsageMetrics
-from .state_machine import WorkflowLabel
-from .github import (
+from orchestrator import analytics, config
+from orchestrator.agents import AgentResult, run_agent
+from orchestrator.config import RepoSpec
+from orchestrator.usage import UsageMetrics
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import (
     COMMUNITY_CONTRIBUTION_LABEL,
     GitHubClient,
     PinnedState,
     hard_skip_control_label,
 )
-from .scheduler import IssueScheduler
+from orchestrator.scheduler import IssueScheduler
 
 # Compatibility facade: `workflow.py` keeps the dispatcher, the tick loop,
 # the unlabeled-pickup handler, and `_park_awaiting_human` / `_run_agent_tracked`.
@@ -73,178 +73,178 @@ from .scheduler import IssueScheduler
 # The redundant `as <name>` aliasing is the pyflakes/ruff convention marking
 # an intentional re-export so F401 does not flag the name as unused.
 
-from .workflow_drift import (
+from orchestrator.workflow_drift import (
     _build_user_content_change_prompt as _build_user_content_change_prompt,
 )
-from .workflow_drift import _compute_user_content_hash as _compute_user_content_hash
-from .workflow_drift import (
+from orchestrator.workflow_drift import _compute_user_content_hash as _compute_user_content_hash
+from orchestrator.workflow_drift import (
     _detect_user_content_change as _detect_user_content_change,
 )
-from .workflow_drift import (
+from orchestrator.workflow_drift import (
     _mark_drift_comments_consumed as _mark_drift_comments_consumed,
 )
-from .workflow_drift import _route_drift_to_decomposing as _route_drift_to_decomposing
-from .workflow_messages import _orchestrator_ids, _post_issue_comment
-from .workflow_messages import _MANIFEST_RE as _MANIFEST_RE
-from .workflow_messages import _FOREGROUND_ONLY_NOTE as _FOREGROUND_ONLY_NOTE
-from .workflow_messages import _ORCH_COMMENT_MARKER as _ORCH_COMMENT_MARKER
-from .workflow_messages import _STDERR_TAIL_BUDGET as _STDERR_TAIL_BUDGET
-from .workflow_messages import (
+from orchestrator.workflow_drift import _route_drift_to_decomposing as _route_drift_to_decomposing
+from orchestrator.workflow_messages import _orchestrator_ids, _post_issue_comment
+from orchestrator.workflow_messages import _MANIFEST_RE as _MANIFEST_RE
+from orchestrator.workflow_messages import _FOREGROUND_ONLY_NOTE as _FOREGROUND_ONLY_NOTE
+from orchestrator.workflow_messages import _ORCH_COMMENT_MARKER as _ORCH_COMMENT_MARKER
+from orchestrator.workflow_messages import _STDERR_TAIL_BUDGET as _STDERR_TAIL_BUDGET
+from orchestrator.workflow_messages import (
     _build_conflict_resolution_prompt as _build_conflict_resolution_prompt,
 )
-from .workflow_messages import _build_decompose_prompt as _build_decompose_prompt
-from .workflow_messages import (
+from orchestrator.workflow_messages import _build_decompose_prompt as _build_decompose_prompt
+from orchestrator.workflow_messages import (
     _build_documentation_prompt as _build_documentation_prompt,
 )
-from .workflow_messages import _build_fix_prompt as _build_fix_prompt
-from .workflow_messages import _build_implement_prompt as _build_implement_prompt
-from .workflow_messages import (
+from orchestrator.workflow_messages import _build_fix_prompt as _build_fix_prompt
+from orchestrator.workflow_messages import _build_implement_prompt as _build_implement_prompt
+from orchestrator.workflow_messages import (
     _build_fresh_respawn_preamble as _build_fresh_respawn_preamble,
 )
-from .workflow_messages import (
+from orchestrator.workflow_messages import (
     _build_pr_comment_followup as _build_pr_comment_followup,
 )
-from .workflow_messages import (
+from orchestrator.workflow_messages import (
     _build_question_followup_prompt as _build_question_followup_prompt,
 )
-from .workflow_messages import _build_question_prompt as _build_question_prompt
-from .workflow_messages import _build_review_prompt as _build_review_prompt
-from .workflow_messages import (
+from orchestrator.workflow_messages import _build_question_prompt as _build_question_prompt
+from orchestrator.workflow_messages import _build_review_prompt as _build_review_prompt
+from orchestrator.workflow_messages import (
     _build_single_decision_comment as _build_single_decision_comment,
 )
-from .workflow_messages import (
+from orchestrator.workflow_messages import (
     _build_tracked_repos_context as _build_tracked_repos_context,
 )
-from .workflow_messages import _drift_ack_reason as _drift_ack_reason
-from .workflow_messages import _CONTINUE_PARK_REASONS as _CONTINUE_PARK_REASONS
-from .workflow_messages import _CONTINUE_RETRY_PROMPT as _CONTINUE_RETRY_PROMPT
-from .workflow_messages import (
+from orchestrator.workflow_messages import _drift_ack_reason as _drift_ack_reason
+from orchestrator.workflow_messages import _CONTINUE_PARK_REASONS as _CONTINUE_PARK_REASONS
+from orchestrator.workflow_messages import _CONTINUE_RETRY_PROMPT as _CONTINUE_RETRY_PROMPT
+from orchestrator.workflow_messages import (
     _parse_orchestrator_continue as _parse_orchestrator_continue,
 )
-from .workflow_messages import (
+from orchestrator.workflow_messages import (
     _is_bare_orchestrator_continue as _is_bare_orchestrator_continue,
 )
-from .workflow_messages import (
+from orchestrator.workflow_messages import (
     _continue_command_action as _continue_command_action,
 )
-from .workflow_messages import (
+from orchestrator.workflow_messages import (
     _refuse_parked_continue as _refuse_parked_continue,
 )
-from .workflow_messages import (
+from orchestrator.workflow_messages import (
     _format_stderr_diagnostics as _format_stderr_diagnostics,
 )
-from .workflow_messages import (
+from orchestrator.workflow_messages import (
     _parse_documentation_verdict as _parse_documentation_verdict,
 )
-from .workflow_messages import _parse_manifest as _parse_manifest
-from .workflow_messages import _parse_review_verdict as _parse_review_verdict
-from .workflow_messages import _post_pr_comment as _post_pr_comment
-from .workflow_messages import _recent_comments_text as _recent_comments_text
-from .workflow_messages import _redact_secrets as _redact_secrets
-from .workflow_messages import _stderr_log_tail as _stderr_log_tail
-from .workflow_messages import _with_orch_marker as _with_orch_marker
-from .base_sync import (
+from orchestrator.workflow_messages import _parse_manifest as _parse_manifest
+from orchestrator.workflow_messages import _parse_review_verdict as _parse_review_verdict
+from orchestrator.workflow_messages import _post_pr_comment as _post_pr_comment
+from orchestrator.workflow_messages import _recent_comments_text as _recent_comments_text
+from orchestrator.workflow_messages import _redact_secrets as _redact_secrets
+from orchestrator.workflow_messages import _stderr_log_tail as _stderr_log_tail
+from orchestrator.workflow_messages import _with_orch_marker as _with_orch_marker
+from orchestrator.base_sync import (
     _AUTO_REBASE_PARK_REASONS as _AUTO_REBASE_PARK_REASONS,
 )
-from .base_sync import (
+from orchestrator.base_sync import (
     _refresh_base_and_worktrees as _refresh_base_and_worktrees,
 )
-from .base_sync import _rebase_base_into_worktree as _rebase_base_into_worktree
-from .base_sync import _rebase_in_progress as _rebase_in_progress
-from .base_sync import (
+from orchestrator.base_sync import _rebase_base_into_worktree as _rebase_base_into_worktree
+from orchestrator.base_sync import _rebase_in_progress as _rebase_in_progress
+from orchestrator.base_sync import (
     _sync_pr_worktree_to_base as _sync_pr_worktree_to_base,
 )
-from .base_sync import _sync_worktree_with_base as _sync_worktree_with_base
+from orchestrator.base_sync import _sync_worktree_with_base as _sync_worktree_with_base
 # TODO(remove after 2026-08-24): remove this compatibility re-export with
 # base_sync._merge_base_into_worktree.
-from .base_sync import _merge_base_into_worktree as _merge_base_into_worktree
-from .skill_catalog import _emit_repo_skill_catalog as _emit_repo_skill_catalog
-from .worktrees import _authed_fetch as _authed_fetch
-from .worktrees import _authed_target_fetch as _authed_target_fetch
-from .worktrees import _branch_ahead_behind as _branch_ahead_behind
-from .worktrees import (
+from orchestrator.base_sync import _merge_base_into_worktree as _merge_base_into_worktree
+from orchestrator.skill_catalog import _emit_repo_skill_catalog as _emit_repo_skill_catalog
+from orchestrator.worktrees import _authed_fetch as _authed_fetch
+from orchestrator.worktrees import _authed_target_fetch as _authed_target_fetch
+from orchestrator.worktrees import _branch_ahead_behind as _branch_ahead_behind
+from orchestrator.worktrees import (
     _branch_has_unpushed_commits as _branch_has_unpushed_commits,
 )
-from .worktrees import _branch_name as _branch_name
-from .worktrees import _cleanup_decompose_worktree as _cleanup_decompose_worktree
-from .worktrees import _cleanup_question_worktree as _cleanup_question_worktree
-from .worktrees import _cleanup_terminal_branch as _cleanup_terminal_branch
-from .worktrees import _decompose_worktree_path as _decompose_worktree_path
-from .worktrees import _ensure_decompose_worktree as _ensure_decompose_worktree
-from .worktrees import _ensure_pr_worktree as _ensure_pr_worktree
-from .worktrees import _ensure_worktree as _ensure_worktree
-from .worktrees import _first_commit_subject as _first_commit_subject
-from .worktrees import _git as _git
-from .worktrees import _git_hardened as _git_hardened
-from .worktrees import _has_new_commits as _has_new_commits
-from .worktrees import _head_sha as _head_sha
-from .worktrees import _infer_subject_prefix as _infer_subject_prefix
-from .worktrees import _is_conventional_subject as _is_conventional_subject
-from .worktrees import _is_prefixed_subject as _is_prefixed_subject
-from .worktrees import (
+from orchestrator.worktrees import _branch_name as _branch_name
+from orchestrator.worktrees import _cleanup_decompose_worktree as _cleanup_decompose_worktree
+from orchestrator.worktrees import _cleanup_question_worktree as _cleanup_question_worktree
+from orchestrator.worktrees import _cleanup_terminal_branch as _cleanup_terminal_branch
+from orchestrator.worktrees import _decompose_worktree_path as _decompose_worktree_path
+from orchestrator.worktrees import _ensure_decompose_worktree as _ensure_decompose_worktree
+from orchestrator.worktrees import _ensure_pr_worktree as _ensure_pr_worktree
+from orchestrator.worktrees import _ensure_worktree as _ensure_worktree
+from orchestrator.worktrees import _first_commit_subject as _first_commit_subject
+from orchestrator.worktrees import _git as _git
+from orchestrator.worktrees import _git_hardened as _git_hardened
+from orchestrator.worktrees import _has_new_commits as _has_new_commits
+from orchestrator.worktrees import _head_sha as _head_sha
+from orchestrator.worktrees import _infer_subject_prefix as _infer_subject_prefix
+from orchestrator.worktrees import _is_conventional_subject as _is_conventional_subject
+from orchestrator.worktrees import _is_prefixed_subject as _is_prefixed_subject
+from orchestrator.worktrees import (
     _pr_title_from_commit_or_issue as _pr_title_from_commit_or_issue,
 )
-from .worktrees import _push_branch as _push_branch
-from .worktrees import _resolve_branch_name as _resolve_branch_name
-from .worktrees import _run_verify_commands as _run_verify_commands
-from .worktrees import _sanitize_branch_segment as _sanitize_branch_segment
-from .worktrees import _sanitize_slug as _sanitize_slug
-from .worktrees import _squash_and_force_push as _squash_and_force_push
-from .worktrees import _worktree_dirty_files as _worktree_dirty_files
-from .worktrees import _worktree_path as _worktree_path
-from .stages.conflicts import (
+from orchestrator.worktrees import _push_branch as _push_branch
+from orchestrator.worktrees import _resolve_branch_name as _resolve_branch_name
+from orchestrator.worktrees import _run_verify_commands as _run_verify_commands
+from orchestrator.worktrees import _sanitize_branch_segment as _sanitize_branch_segment
+from orchestrator.worktrees import _sanitize_slug as _sanitize_slug
+from orchestrator.worktrees import _squash_and_force_push as _squash_and_force_push
+from orchestrator.worktrees import _worktree_dirty_files as _worktree_dirty_files
+from orchestrator.worktrees import _worktree_path as _worktree_path
+from orchestrator.stages.conflicts import (
     _handle_resolving_conflict as _handle_resolving_conflict,
 )
-from .stages.decomposition import _handle_blocked as _handle_blocked
-from .stages.decomposition import _handle_decomposing as _handle_decomposing
-from .stages.decomposition import _handle_ready as _handle_ready
-from .stages.decomposition import _handle_umbrella as _handle_umbrella
-from .stages.decomposition import _read_decomposer_session as _read_decomposer_session
-from .stages.documenting import _handle_documenting as _handle_documenting
-from .stages.fixing import _handle_fixing as _handle_fixing
-from .stages.implementing import (
+from orchestrator.stages.decomposition import _handle_blocked as _handle_blocked
+from orchestrator.stages.decomposition import _handle_decomposing as _handle_decomposing
+from orchestrator.stages.decomposition import _handle_ready as _handle_ready
+from orchestrator.stages.decomposition import _handle_umbrella as _handle_umbrella
+from orchestrator.stages.decomposition import _read_decomposer_session as _read_decomposer_session
+from orchestrator.stages.documenting import _handle_documenting as _handle_documenting
+from orchestrator.stages.fixing import _handle_fixing as _handle_fixing
+from orchestrator.stages.implementing import (
     _SILENT_PARKS_BEFORE_FRESH_SESSION as _SILENT_PARKS_BEFORE_FRESH_SESSION,
 )
-from .stages.implementing import (
+from orchestrator.stages.implementing import (
     _check_and_increment_retry_budget as _check_and_increment_retry_budget,
 )
-from .stages.implementing import _handle_implementing as _handle_implementing
-from .stages.implementing import (
+from orchestrator.stages.implementing import _handle_implementing as _handle_implementing
+from orchestrator.stages.implementing import (
     _is_stale_session_failure as _is_stale_session_failure,
 )
-from .stages.implementing import (
+from orchestrator.stages.implementing import (
     _is_context_overflow_failure as _is_context_overflow_failure,
 )
-from .stages.implementing import (
+from orchestrator.stages.implementing import (
     _is_session_limit_message as _is_session_limit_message,
 )
-from .stages.implementing import (
+from orchestrator.stages.implementing import (
     _drop_poisoned_dev_session as _drop_poisoned_dev_session,
 )
-from .stages.implementing import (
+from orchestrator.stages.implementing import (
     _is_poisoned_session_failure as _is_poisoned_session_failure,
 )
-from .stages.implementing import _on_dirty_worktree as _on_dirty_worktree
-from .stages.implementing import _on_question as _on_question
-from .stages.implementing import _read_dev_session as _read_dev_session
-from .stages.implementing import _resume_dev_with_text as _resume_dev_with_text
-from .stages.implementing import (
+from orchestrator.stages.implementing import _on_dirty_worktree as _on_dirty_worktree
+from orchestrator.stages.implementing import _on_question as _on_question
+from orchestrator.stages.implementing import _read_dev_session as _read_dev_session
+from orchestrator.stages.implementing import _resume_dev_with_text as _resume_dev_with_text
+from orchestrator.stages.implementing import (
     _resume_developer_on_human_reply as _resume_developer_on_human_reply,
 )
-from .stages.in_review import _comment_created_at as _comment_created_at
-from .stages.in_review import _handle_in_review as _handle_in_review
-from .stages.question import _handle_question as _handle_question
-from .stages.validating import (
+from orchestrator.stages.in_review import _comment_created_at as _comment_created_at
+from orchestrator.stages.in_review import _handle_in_review as _handle_in_review
+from orchestrator.stages.question import _handle_question as _handle_question
+from orchestrator.stages.validating import (
     _VALIDATING_TRANSIENT_PARK_REASONS as _VALIDATING_TRANSIENT_PARK_REASONS,
 )
-from .stages.validating import _handle_dev_fix_result as _handle_dev_fix_result
-from .stages.validating import _handle_validating as _handle_validating
-from .stages.validating import _latest_pr_comment_ids as _latest_pr_comment_ids
-from .stages.validating import (
+from orchestrator.stages.validating import _handle_dev_fix_result as _handle_dev_fix_result
+from orchestrator.stages.validating import _handle_validating as _handle_validating
+from orchestrator.stages.validating import _latest_pr_comment_ids as _latest_pr_comment_ids
+from orchestrator.stages.validating import (
     _post_user_content_change_result as _post_user_content_change_result,
 )
-from .stages.validating import _stranded_fix_unpushed as _stranded_fix_unpushed
-from .stages.validating import (
+from orchestrator.stages.validating import _stranded_fix_unpushed as _stranded_fix_unpushed
+from orchestrator.stages.validating import (
     _try_recover_validating_transient_park as _try_recover_validating_transient_park,
 )
 

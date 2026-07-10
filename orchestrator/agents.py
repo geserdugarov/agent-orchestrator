@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from . import config
-from .usage import UsageMetrics
+from orchestrator import config
+from orchestrator.usage import UsageMetrics
 
 log = logging.getLogger(__name__)
 

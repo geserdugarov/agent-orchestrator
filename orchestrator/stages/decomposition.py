@@ -45,12 +45,12 @@ from typing import Optional, Tuple
 
 from github.Issue import Issue
 
-from .. import config
-from ..agents import AgentResult
-from ..comment_trust import filter_trusted
-from ..config import RepoSpec
-from ..state_machine import WorkflowLabel
-from ..github import GitHubClient, PinnedState
+from orchestrator import config
+from orchestrator.agents import AgentResult
+from orchestrator.comment_trust import filter_trusted
+from orchestrator.config import RepoSpec
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import GitHubClient, PinnedState
 
 
 @dataclass(frozen=True)
@@ -105,7 +105,7 @@ def _resume_decomposer_on_human_reply(
     `decomposer_session_id`; resuming across backends would need an
     inter-backend session bridge that does not exist.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     last_action_id = state.get("last_action_comment_id")
     # Drop untrusted authors up front (mirrors `_resume_developer_on_human_reply`):
@@ -167,7 +167,7 @@ def _reset_decomposing_on_drift(
     `decomposing`, so we mutate state in place and fall through -- the
     caller keeps running and spawns the decomposer this tick.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is None:
@@ -232,7 +232,7 @@ def _recover_stale_manifest(
     pre-dates `expected_children_count` still routes through the
     `children`-only branch and finalizes.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     expected_raw = state.get("expected_children_count")
     children_recorded = state.get("children") or []
@@ -326,7 +326,7 @@ def _route_disabled_to_implementing(
     because new decompositions are now disabled would strand work, which
     is not what a kill switch should do.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if config.DECOMPOSE:
         return False
@@ -373,7 +373,7 @@ def _spawn_fresh_decomposer(
     Returns the agent result, or None when the retry budget is exhausted
     (the budget helper already wrote the park; caller must return).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if not _wf._check_and_increment_retry_budget(
         gh, issue, state, stage="decomposing"
@@ -423,7 +423,7 @@ def _park_unparsed_manifest(
     (question / silence, `error` None). Both park; the resume on the next
     comment runs through the awaiting_human branch of `_handle_decomposing`.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     last_msg = result.last_message or ""
     if error is not None:
@@ -474,7 +474,7 @@ def _finalize_single_decision(
     fields -- the single decision is already valid, so no cosmetic field
     should park it.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     _wf._post_issue_comment(
         gh, issue, state,
@@ -508,7 +508,7 @@ def _create_child_issues(
       3. Seed child pinned state. Failure here parks but parent state
          already records the child, so no respawn happens.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     created: list[Tuple[int, dict]] = []
     dep_graph: dict[str, list[int]] = {}
@@ -605,7 +605,7 @@ def _finalize_split(
     final parent-state write, so a crash here cannot leave a runnable
     orphan child against a `decomposing`-labeled parent.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     summary = "\n".join(
         f"- #{n}: {child['title']}" for n, child in created
@@ -658,7 +658,7 @@ def _settle_decomposer_run(
     preserve the worktree) stays inline in `_handle_decomposing` so
     `keep_worktree` is set BEFORE the park's side effects run.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     # Live pause: an operator applied `paused` / `backlog` while the
     # decomposer ran (fresh spawn or awaiting-human resume). Dispatch only
@@ -707,7 +707,7 @@ def _dispatch_decomposer_manifest(
     finalizes a `single` decision to `ready`, or creates the `split`
     children and finalizes the parent to `blocked` / `umbrella`.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     last_msg = result.last_message or ""
     parsed, error = _wf._parse_manifest(last_msg)
@@ -765,7 +765,7 @@ def _prepare_decomposer_run(
 
 
 def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
 
@@ -848,7 +848,7 @@ def _route_parent_drift(
     orphans in the notice (the new manifest may overlap; the operator
     closes the obsolete ones manually).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is None:
@@ -871,7 +871,7 @@ def _read_child_labels(
     / umbrella within a tick, so a child's own label flip cannot race this
     read.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     child_labels: dict[int, Optional[str]] = {}
     child_issues: dict[int, Issue] = {}
@@ -897,7 +897,7 @@ def _park_rejected_children(
     Idempotent by `awaiting_human` so a rejected child does not re-park
     every tick.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     rejected = [n for n, lbl in child_labels.items() if lbl == "rejected"]
     if not rejected:
@@ -939,7 +939,7 @@ def _park_manually_closed_children(
     that the closed-in_review sweep finalizes on the next tick, NOT a manual
     override.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     manually_closed = [
         n for n, ci in child_issues.items()
@@ -1021,7 +1021,7 @@ def _log_held_children(
     completion. Logged only when something is held to keep a healthy parent
     from spamming the tick log. `parent_kind` is `"blocked"` or `"umbrella"`.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if not held:
         return
@@ -1044,7 +1044,7 @@ def _handle_ready(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     `implementing`, so the validating handoff watermark and the in_review
     legacy migration have an anchor comment they can key on.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
     # User-content drift before implementation has started: route back to
@@ -1108,7 +1108,7 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     `resolving_conflict`) may run concurrently alongside, but their
     handlers do not write across parent/child boundaries.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
     children = state.get("children") or []
@@ -1187,7 +1187,7 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     `ready` -- there is no implementation pass for an umbrella, so the
     only terminal path is "every child resolved -> close".
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
 

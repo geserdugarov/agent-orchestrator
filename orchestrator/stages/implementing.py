@@ -32,12 +32,12 @@ from typing import Optional, Tuple
 
 from github.Issue import Issue
 
-from .. import config
-from ..agents import AgentResult
-from ..comment_trust import filter_trusted
-from ..config import RepoSpec
-from ..state_machine import WorkflowLabel
-from ..github import GitHubClient, PinnedState
+from orchestrator import config
+from orchestrator.agents import AgentResult
+from orchestrator.comment_trust import filter_trusted
+from orchestrator.config import RepoSpec
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import GitHubClient, PinnedState
 
 
 # After this many consecutive `agent_silent` parks on the same
@@ -281,7 +281,7 @@ def _check_and_increment_retry_budget(
     Caller writes pinned state after this returns; on the False branch we have
     already parked, so caller's pinned-state write commits the park.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
     from datetime import datetime, timedelta, timezone
 
     cap = config.MAX_RETRIES_PER_DAY
@@ -344,7 +344,7 @@ def _resolve_dev_session_for_resume(
     caller and its returned id persisted -- and is NOT charged against the
     resume budget, whose checks require a non-None session id.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     dev_spec, dev_backend, dev_args, dev_sid = _read_dev_session(state)
     silent_count = int(state.get("silent_park_count") or 0)
@@ -389,7 +389,7 @@ def _build_dev_spawn_prompt(
     the block builder returns "" -- otherwise the composed prompt would list
     the tracked repos twice.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if not fresh:
         return followup_text
@@ -489,7 +489,7 @@ def _resume_dev_with_text(
     is propagated, not re-fetched, so there is no window where the caller reads
     the label differently than the helper did.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
@@ -634,7 +634,7 @@ def _resume_developer_on_human_reply(
         return None
     consumed_max = max(c.id for c in new_comments)
     state.set("last_action_comment_id", consumed_max)
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     followup = "\n\n".join(
         f"@{c.user.login if c.user else 'user'}: {c.body}"
@@ -662,7 +662,7 @@ def _publish_committed_work(
     and user-content-drift dispositions so each handles a committed worktree
     identically.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     dirty = _wf._worktree_dirty_files(wt)
     if dirty:
@@ -684,7 +684,7 @@ def _park_agent_timeout(
     commit a lingering descendant finishes after this point without waiting for
     a human reply.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     _wf._park_awaiting_human(
         gh, issue, state,
@@ -720,7 +720,7 @@ def _try_recover_implementing_timeout_park(
     normal ":sparkles: PR opened" comment via `_on_commits` -- publishing the
     branch is the entire point of the recovery. It must not spawn the agent.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
@@ -800,7 +800,7 @@ def _handle_stale_question_park(
     watermark seed cannot replay it as fresh PR feedback) before the caller
     falls through to the fresh-spawn path.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     park_reason = state.get("park_reason")
     if not (
@@ -887,7 +887,7 @@ def _retry_parked_dev_session(
     a bare continue never shifts it, and masking it here would swallow a real
     body edit that landed in the same window before the dev could see it.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state.set("last_action_comment_id", max(c.id for c in new_comments))
     wt = _wf._worktree_path(spec, issue.number)
@@ -934,7 +934,7 @@ def _handle_parked_continue_command(
     continue command is present, or the command arrived alongside genuine
     guidance (which the normal resume / drift path feeds to the dev).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if not state.get("awaiting_human"):
         return False
@@ -986,7 +986,7 @@ def _handle_user_content_drift(
     rules out routing back to `decomposing`; the locked session decides what to
     do with the new body instead.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state.set("user_content_hash", new_hash)
     # "Has a dev session ever spawned" is keyed off the persisted role
@@ -1143,7 +1143,7 @@ def _prepare_dev_run(
     to tell a commit produced by THIS run from carried-over commits already on
     the branch.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if state.get("awaiting_human"):
         # Transient timeout-park recovery: a prior tick parked this issue on
@@ -1278,7 +1278,7 @@ def _dispose_agent_result(
     to `origin/<base>`) is what distinguishes a commit produced by THIS run
     from carried-over commits already on the branch.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if result.timed_out:
         # The implementer can commit clean work and then get killed by the
@@ -1304,7 +1304,7 @@ def _dispose_agent_result(
 
 
 def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
 
@@ -1427,7 +1427,7 @@ def _derive_pr_title(spec: RepoSpec, issue: Issue, wt: Path) -> str:
     recognizable `<type>:` prefix, one is inferred from recent base-branch
     history (`_infer_subject_prefix`) and applied to the issue title.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     first_subject = _wf._first_commit_subject(spec, wt)
     fallback_prefix = _wf._infer_subject_prefix(spec, wt, issue)
@@ -1469,7 +1469,7 @@ def _reuse_or_open_pr(
     Opening a new PR posts the ":sparkles: PR opened" comment and emits the
     `pr_opened` event; reuse only logs.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     pr = gh.find_open_pr(branch=branch, base=spec.base_branch)
     if pr is not None:
@@ -1543,7 +1543,7 @@ def _on_commits(
     state: PinnedState,
     result: AgentResult,
 ) -> None:
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     wt = _wf._worktree_path(spec, issue.number)
     branch = _wf._resolve_branch_name(state, spec, issue.number)
@@ -1580,7 +1580,7 @@ def _park_session_limit(
     (`agent_session_limit`) for observability -- the pinned `park_reason` stays
     `agent_silent` (the control field `/orchestrator continue` keys off).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     quoted = "> " + raw.replace("\n", "\n> ")
     _wf._post_issue_comment(
@@ -1599,7 +1599,7 @@ def _park_real_question(
     gh: GitHubClient, issue: Issue, state: PinnedState, raw: str
 ) -> str:
     """Park a genuine agent clarification question awaiting a human reply."""
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     quoted = "> " + raw.replace("\n", "\n> ")
     _wf._post_issue_comment(
@@ -1628,7 +1628,7 @@ def _park_silent_failure(
     drop the dev session id after enough consecutive silent parks, and surface
     the situation accurately instead of impersonating a real question park.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     diag = _wf._format_stderr_diagnostics(result, "Agent")
     _wf._post_issue_comment(
@@ -1683,7 +1683,7 @@ def _on_dirty_worktree(
     to the human and resume the codex session on their reply, identical to the
     question path.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     shown = dirty[:10]
     files_md = "\n".join(f"- `{p}`" for p in shown)

@@ -49,9 +49,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .agents import _communicate_bounded, _filter_agent_env, _registered
-from .git_plumbing import _git, _git_hardened
-from .workflow_messages import _redact_secrets
+from orchestrator.agents import _communicate_bounded, _filter_agent_env, _registered
+from orchestrator.git_plumbing import _git, _git_hardened
+from orchestrator.workflow_messages import _redact_secrets
 
 log = logging.getLogger(__name__)
 

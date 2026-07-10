@@ -99,7 +99,7 @@ row-level detail or aggregate columns the rollup does not carry
 """
 from __future__ import annotations
 
-from .connection import (
+from orchestrator.analytics.connection import (
     AnalyticsReadError as AnalyticsReadError,
     analytics_connection as analytics_connection,
     close_thread_local_connection as close_thread_local_connection,
@@ -109,7 +109,7 @@ from .connection import (
     _is_broken_connection_exc as _is_broken_connection_exc,
     _thread_local as _thread_local,
 )
-from .read_dashboard import (
+from orchestrator.analytics.read_dashboard import (
     get_backend_daily_tokens as get_backend_daily_tokens,
     get_cost_coverage as get_cost_coverage,
     get_hourly_heatmap as get_hourly_heatmap,
@@ -117,7 +117,7 @@ from .read_dashboard import (
     get_skill_trigger_matrix as get_skill_trigger_matrix,
     get_skill_trigger_rates as get_skill_trigger_rates,
 )
-from .read_models import (
+from orchestrator.analytics.read_models import (
     AgentExitRow as AgentExitRow,
     BackendDailyTokensRow as BackendDailyTokensRow,
     BackendEfficiencyRow as BackendEfficiencyRow,
@@ -137,7 +137,7 @@ from .read_models import (
     ThroughputDayRow as ThroughputDayRow,
     TimeSeriesPoint as TimeSeriesPoint,
 )
-from .read_raw import (
+from orchestrator.analytics.read_raw import (
     SORT_BY_COST as SORT_BY_COST,
     SORT_BY_LAST_SEEN as SORT_BY_LAST_SEEN,
     get_data_extent as get_data_extent,
@@ -147,7 +147,7 @@ from .read_raw import (
     get_issues as get_issues,
     get_recent_agent_exits as get_recent_agent_exits,
 )
-from .read_rollup import (
+from orchestrator.analytics.read_rollup import (
     get_backend_efficiency as get_backend_efficiency,
     get_kpi_prev as get_kpi_prev,
     get_repo_breakdown as get_repo_breakdown,

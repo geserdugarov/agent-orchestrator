@@ -152,11 +152,11 @@ from typing import Optional
 
 from github.Issue import Issue
 
-from .. import config
-from ..comment_trust import filter_trusted
-from ..config import RepoSpec
-from ..state_machine import WorkflowLabel
-from ..github import GitHubClient
+from orchestrator import config
+from orchestrator.comment_trust import filter_trusted
+from orchestrator.config import RepoSpec
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import GitHubClient
 
 
 @dataclass(frozen=True)
@@ -183,7 +183,7 @@ def _fixing_preflight(gh: GitHubClient, spec: RepoSpec, issue: Issue, state):
     left alone, a missing-PR park was posted, or the PR fetch failed -- and
     the caller must return immediately.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     pr_number = state.get("pr_number")
     # Bind `pr` up front so the post-terminal guard below can branch on
@@ -269,7 +269,7 @@ def _rescan_fixing_feedback(
     dropped from every surface (see `filter_trusted`) so outsider feedback
     never reaches the dev-resume prompt or extends the debounce window.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     # Mirror `_handle_in_review`'s fallback: if no PR-side watermark
     # exists yet (an in_review tick that routed to `fixing` before
@@ -344,7 +344,7 @@ def _dispatch_parked_fixing(
     the preserved feedback batch when an accepted `/orchestrator continue`
     replays it, otherwise ``None``.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     park_reason = state.get("park_reason")
     # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to
@@ -478,7 +478,7 @@ def _fixing_debounce_open(
     (`replay_batch` set) skips the wait entirely -- it is a deliberate
     operator signal, not chatter to debounce.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if replay_batch is not None:
         return False
@@ -535,7 +535,7 @@ def _resume_fixing_and_dispatch_result(
     dev resume, the user-content hash refresh, the interrupted / live-paused
     guards, the consumed-watermark advance, and the route round bookkeeping.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     # On an accepted `/orchestrator continue`, resume on the PRESERVED batch
     # (plus any new feedback that came with the command), not the command
@@ -811,7 +811,7 @@ def _reconcile_parked_fixing(
     untouched so the eventual `in_review` re-entry still re-discovers the
     feedback (mirrors the refresh-time conflict detour).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
@@ -1133,7 +1133,7 @@ def _handle_continue_command(
         caller runs the normal resume so that guidance (not a bare continue)
         drives the dev.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     batch = (
         _reconstruct_pending_fix_batch(gh, issue, pr, state)

@@ -46,9 +46,9 @@ import os
 from pathlib import Path
 from typing import Iterable, Optional
 
-from . import analytics
-from .config import RepoSpec
-from .git_plumbing import _git
+from orchestrator import analytics
+from orchestrator.config import RepoSpec
+from orchestrator.git_plumbing import _git
 
 log = logging.getLogger(__name__)
 

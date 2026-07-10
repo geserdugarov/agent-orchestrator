@@ -45,12 +45,12 @@ from typing import Any, Optional, Tuple
 
 from github.Issue import Issue
 
-from .. import config
-from ..agents import AgentResult
-from ..comment_trust import filter_trusted
-from ..config import RepoSpec
-from ..state_machine import WorkflowLabel
-from ..github import GitHubClient, PinnedState
+from orchestrator import config
+from orchestrator.agents import AgentResult
+from orchestrator.comment_trust import filter_trusted
+from orchestrator.config import RepoSpec
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import GitHubClient, PinnedState
 
 
 # Operator escape hatch for `park_reason=review_cap`. Resets the review
@@ -136,7 +136,7 @@ def _stranded_fix_unpushed(
     not reconciled) all report False so the caller falls back to the
     question park instead of pushing blind.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if _wf._worktree_dirty_files(wt):
         return False
@@ -179,7 +179,7 @@ def _handle_dev_fix_result(
     read (e.g. the fixing handler's ACK fast path); passing it avoids a
     redundant `_head_sha` call. When None it is read here.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if result.interrupted:
         # A shutdown-killed run is not a considered result: its partial
@@ -302,7 +302,7 @@ def _post_user_content_change_result(
     "existing work satisfies" comment AND continue the workflow with
     `awaiting_human=False`, stranding the real question.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if result.interrupted:
         # Shutdown-killed: ignore the run. Report "parked" WITHOUT posting an
@@ -405,7 +405,7 @@ def _try_recover_validating_transient_park(
     Callers should not mutate the round themselves; this is the only
     write path while the park flags are still set.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     park_reason = state.get("park_reason")
     if park_reason == "push_failed":
@@ -533,7 +533,7 @@ def _seed_watermark_past_self(
     advance past historical content; the orchestrator_comment_ids id-set
     filter in `_handle_in_review` drops recorded bot comments at scan time.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if pickup_comment_id is None:
         # Legacy state without a pickup anchor: refuse to advance. We
@@ -601,7 +601,7 @@ def _latest_pr_comment_ids(
     when this returns None so the in_review legacy migration cannot then
     advance past human inline feedback either.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     orchestrator_ids = _wf._orchestrator_ids(state)
     pickup_id_raw = state.get("pickup_comment_id")
@@ -689,7 +689,7 @@ def _park_verify_failure(
     `verify_timeout`, or `verify_dirty`) so dashboards and future
     transient-recovery logic can branch on the failure mode.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     reason = _VERIFY_STATUS_TO_REASON.get(verify.status, "verify_failed")
     detail = _verify_failure_detail(verify)
@@ -744,7 +744,7 @@ def _finalize_validating_terminal(
     back to `in_review`. The in_review / fixing handlers carry equivalent
     terminal checks.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if _wf._finalize_if_pr_merged(gh, spec, issue, state):
         return True
@@ -782,7 +782,7 @@ def _resume_dev_on_validating_drift(
     command would never be parsed. The new baseline hash is persisted here
     either way so the next tick's drift check has a stable comparison point.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is None:
@@ -869,7 +869,7 @@ def _handle_validating_awaiting_human(
     reset, reviewer timeout / silent crash) and the caller should fall through
     to the round-cap check and reviewer spawn.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     # Transient-park recovery: when the original park reason is something
     # that can resolve without a human comment (a push race that the
@@ -1065,7 +1065,7 @@ def _seed_in_review_handoff_watermarks(
     legacy `last_action_comment_id` watermark -- so we log and return without
     seeding.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if pr_number is None:
         return
@@ -1138,7 +1138,7 @@ def _finalize_validating_approval(
     final docs pass before in_review picks up; the watermarks, approval, and
     squash comment seeded here are preserved across the documenting hop.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     verify = _wf._run_verify_commands(
         wt, config.VERIFY_COMMANDS, config.VERIFY_TIMEOUT,
@@ -1201,7 +1201,7 @@ def _park_reviewer_no_verdict(
     VERDICT line is left as `reviewer_no_verdict` for human adjudication, and
     stderr diagnostics are suppressed (the human is reading real model output).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     raw = (review.last_message or "").strip() or "(reviewer produced no final message)"
     quoted = "> " + raw.replace("\n", "\n> ")
@@ -1268,7 +1268,7 @@ def _handle_validating_changes_requested(
     is a standalone key cleared on the pushed-fix exit here and inside
     `_clear_pending_fix_bookmarks`.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     feedback = body.strip() or (review.last_message or "").strip()
     reviewer_comment = None
@@ -1366,7 +1366,7 @@ def _park_review_cap(
     state: PinnedState,
     round_n: int,
 ) -> None:
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     _wf._park_awaiting_human(
         gh, issue, state,
@@ -1391,7 +1391,7 @@ def _run_reviewer_round(
     state: PinnedState,
     pr_number,
 ) -> Optional[_ReviewerRun]:
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     round_n = int(state.get("review_round") or 0)
     if round_n >= config.MAX_REVIEW_ROUNDS:
@@ -1468,7 +1468,7 @@ def _dispatch_reviewer_result(
     state: PinnedState,
     reviewer_run: _ReviewerRun,
 ) -> None:
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     review = reviewer_run.result
     if review.timed_out:

@@ -35,12 +35,12 @@ from typing import Optional, Tuple
 
 from github.Issue import Issue
 
-from .. import config
-from ..agents import AgentResult
-from ..comment_trust import filter_trusted
-from ..config import RepoSpec
-from ..state_machine import WorkflowLabel
-from ..github import GitHubClient, PinnedState
+from orchestrator import config
+from orchestrator.agents import AgentResult
+from orchestrator.comment_trust import filter_trusted
+from orchestrator.config import RepoSpec
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import GitHubClient, PinnedState
 
 
 # Park reasons whose underlying condition keeps the per-issue
@@ -144,7 +144,7 @@ def _build_question_resume_prompt(
     first-tick run would, with the human's reply visible in the conversation
     block via `_recent_comments_text`.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if question_sid is None:
         return _wf._build_question_prompt(
@@ -162,7 +162,7 @@ def _resume_question_on_human_reply(
     Returns the AgentResult, or None if no new comments arrived since
     the last park (caller should return without writing state).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     new_comments = _consume_new_human_replies(gh, issue, state)
     if new_comments is None:
@@ -219,14 +219,14 @@ def _park_question(
     reason re-set it themselves -- see the `_park_awaiting_human`
     docstring).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     _wf._park_awaiting_human(gh, issue, state, message, reason=reason)
     state.set("park_reason", reason)
 
 
 def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
 

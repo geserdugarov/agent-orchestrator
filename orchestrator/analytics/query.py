@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional, Sequence
 
-from .connection import AnalyticsReadError, _close_quietly
+from orchestrator.analytics.connection import AnalyticsReadError, _close_quietly
 
 
 def _execute_select(

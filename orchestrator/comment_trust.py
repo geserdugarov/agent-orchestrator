@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, List, Optional, TypeVar
 
-from . import config
+from orchestrator import config
 
 _T = TypeVar("_T")
 

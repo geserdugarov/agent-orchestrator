@@ -66,10 +66,10 @@ from typing import List, Optional, Tuple
 
 from github.Issue import Issue
 
-from . import config
-from .config import RepoSpec
-from .git_plumbing import _GIT_NO_PROMPT_ENV, _git, _git_hardened, _push_branch
-from .verify import _head_sha, _worktree_dirty_files
+from orchestrator import config
+from orchestrator.config import RepoSpec
+from orchestrator.git_plumbing import _GIT_NO_PROMPT_ENV, _git, _git_hardened, _push_branch
+from orchestrator.verify import _head_sha, _worktree_dirty_files
 
 log = logging.getLogger(__name__)
 

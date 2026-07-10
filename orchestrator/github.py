@@ -27,8 +27,8 @@ from github.Label import Label
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
-from . import analytics, config
-from .state_machine import (
+from orchestrator import analytics, config
+from orchestrator.state_machine import (
     ControlLabel,
     WorkflowLabel,
     coerce_workflow_label,

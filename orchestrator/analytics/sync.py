@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .. import analytics as _analytics
+from orchestrator import analytics as _analytics
 
 log = logging.getLogger(__name__)
 

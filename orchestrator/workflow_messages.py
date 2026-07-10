@@ -34,11 +34,11 @@ from typing import Optional, Tuple
 
 from github.Issue import Issue
 
-from . import config
-from .agents import AgentResult
-from .comment_trust import is_trusted_author
-from .config import RepoSpec
-from .github import GitHubClient, PinnedState
+from orchestrator import config
+from orchestrator.agents import AgentResult
+from orchestrator.comment_trust import is_trusted_author
+from orchestrator.config import RepoSpec
+from orchestrator.github import GitHubClient, PinnedState
 
 
 # Cap on `orchestrator_comment_ids`. The watermark always advances, so older

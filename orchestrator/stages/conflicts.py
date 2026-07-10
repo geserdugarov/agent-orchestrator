@@ -35,12 +35,12 @@ from typing import Optional
 
 from github.Issue import Issue
 
-from .. import config
-from ..agents import AgentResult
-from ..comment_trust import filter_trusted
-from ..config import RepoSpec
-from ..state_machine import WorkflowLabel
-from ..github import (
+from orchestrator import config
+from orchestrator.agents import AgentResult
+from orchestrator.comment_trust import filter_trusted
+from orchestrator.config import RepoSpec
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import (
     GitHubClient,
     PinnedState,
 )
@@ -111,7 +111,7 @@ def _already_rebased_onto_base(spec: RepoSpec, wt: Path) -> bool:
     would incorrectly enable the force-publish path without proving HEAD
     is on the current base.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     fetch = _wf._authed_fetch(
         spec,
@@ -157,7 +157,7 @@ def _handle_resolving_conflict(
     `review_round`; validation must re-approve the rebased branch before
     any merge gate can pass.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")
@@ -388,7 +388,7 @@ def _resume_on_user_content_change(
     shutdown-sweep-interrupted / live-paused short-circuits, which return
     without writing so the drift stays unconsumed and re-runs next process.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state.set("user_content_hash", new_hash)
     _wf._post_pr_comment(
@@ -468,7 +468,7 @@ def _resume_awaiting_human(
     state when no reply has arrived yet or a live pause landed mid-run; on
     a real reply the shared funnel owns the push / relabel / state write.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     last_action_id = state.get("last_action_comment_id")
     # Drop untrusted authors up front (mirrors `_resume_developer_on_human_reply`):
@@ -550,7 +550,7 @@ def _guard_diverged_worktree(
     the recovered-push router can force-publish it. Every other case
     (including `behind == 0`) returns `(False, None)`.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     publish_lease: Optional[str] = None
     if behind > 0:
@@ -623,7 +623,7 @@ def _push_recovered_commits(
     NOT a rebase, so the combined push+rebase round is owned by the rebase
     path).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     # Dirty check before pushing recovered work: if the previous
     # tick crashed before its own dirty check ran, the worktree
@@ -736,7 +736,7 @@ def _publish_clean_rebase(
     force-pushes the rebased head and flips to `validating`. The caller
     returns immediately after; every exit writes pinned state.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     # Dirty check before EITHER clean-rebase exit (no-op flip OR
     # rebased-head push): a pre-existing uncommitted edit (left by a
@@ -843,7 +843,7 @@ def _resolve_conflicts_with_agent(
     `before_sha`). Returns without touching durable state when a live
     pause lands mid-run.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     fix_prompt = _wf._build_conflict_resolution_prompt(
         f"{spec.remote_name}/{spec.base_branch}", conflicted_files,
@@ -891,7 +891,7 @@ def _post_conflict_resolution_result(
     against the resolved branch; the single docs pass is deferred to the
     post-approval handoff to `documenting` in `_handle_validating`.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     # Interrupt / timeout / still-mid-rebase dispositions park (or, for the
     # shutdown-sweep interrupt, silently drop) and signal the caller to stop.
@@ -934,7 +934,7 @@ def _park_stalled_conflict_result(
     timeout, and a rebase left mid-flight. Returns False to let the caller
     inspect HEAD for a completed resolution.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     # Shutdown-sweep interruption: a conflict-resolution run the orchestrator
     # killed mid-flight has no trustworthy result, so ignore it and return
@@ -992,7 +992,7 @@ def _finalize_conflict_resolution(
     reviewer re-runs against the resolved branch. Writes pinned state on
     every exit.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     branch = _wf._resolve_branch_name(state, spec, issue.number)
     pushed = _wf._push_branch(

@@ -43,10 +43,10 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from . import config
-from .config import RepoSpec
-from .git_plumbing import _authed_target_fetch, _git, _target_root_lock
-from .github import GitHubClient, PinnedState
+from orchestrator import config
+from orchestrator.config import RepoSpec
+from orchestrator.git_plumbing import _authed_target_fetch, _git, _target_root_lock
+from orchestrator.github import GitHubClient, PinnedState
 
 log = logging.getLogger(__name__)
 
