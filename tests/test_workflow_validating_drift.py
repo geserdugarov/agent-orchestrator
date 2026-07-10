@@ -16,6 +16,7 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    REVIEW_APPROVED_MESSAGE,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
@@ -220,7 +221,7 @@ class ValidatingTransientParkRecoveryTest(
 
         review = _agent(
             session_id="rev-sess",
-            last_message="LGTM\n\nVERDICT: APPROVED",
+            last_message=REVIEW_APPROVED_MESSAGE,
         )
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
             mocks = self._run(
@@ -255,7 +256,7 @@ class ValidatingTransientParkRecoveryTest(
 
         review = _agent(
             session_id="rev-sess",
-            last_message="LGTM\n\nVERDICT: APPROVED",
+            last_message=REVIEW_APPROVED_MESSAGE,
         )
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
             mocks = self._run(

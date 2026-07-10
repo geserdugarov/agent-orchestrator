@@ -164,11 +164,34 @@ FULL_WINDOW_AGENT_RUNS = 250
 FULL_WINDOW_FAILURES = 4
 FULL_WINDOW_TIMEOUTS = 17
 
+# Dashboard domain values are local to these pure-helper fixtures; keeping
+# them here avoids coupling the dashboard suite to workflow-stage helpers.
+EVENT_AGENT_EXIT = "agent_exit"
+EVENT_STAGE_ENTER = "stage_enter"
+STAGE_IMPLEMENTING = "implementing"
+STAGE_VALIDATING = "validating"
+ROLE_DEVELOPER = "developer"
+ROLE_REVIEWER = "reviewer"
+BACKEND_CLAUDE = "claude"
+BACKEND_CODEX = "codex"
+COST_SOURCE_REPORTED = "reported"
+COST_SOURCE_UNKNOWN_PRICE = "unknown-price"
+
+KPI_AGENT_RUNS = "Agent runs"
+KPI_FAILURES = "Failures"
+KPI_TIMEOUTS = "Timeouts"
+KPI_TOTAL_TOKENS = "Total tokens"
+COLUMN_RUNS = "Runs"
+
+SCOPED_READ_CALL_FRAGMENT = "_scoped_read("
+REPO_C_CELL_FRAGMENT = ">c/repo<"
+ROLE_WITH_MARKUP = "dev<&>"
+
 # Cache-key fixture inputs: a sample repo plus the event / stage filter
 # selections whose list->tuple normalization the cache key must preserve.
 CACHE_REPO = "acme/widgets"
-EVENT_NAMES = ("agent_exit", "stage_enter")
-STAGE_NAMES = ("implementing",)
+EVENT_NAMES = (EVENT_AGENT_EXIT, EVENT_STAGE_ENTER)
+STAGE_NAMES = (STAGE_IMPLEMENTING,)
 
 # Skill-matrix sort contract: the query-param names the clickable headers
 # write, the two direction tokens, and the column keys in header order.
@@ -581,8 +604,8 @@ class ResolveStageFilterTest(unittest.TestCase):
     def test_all_selected_collapses_to_none(self) -> None:
         _, dashboard = _reload()
         result = dashboard.resolve_stage_filter(
-            selected=["implementing", "validating"],
-            available=("implementing", "validating"),
+            selected=[STAGE_IMPLEMENTING, STAGE_VALIDATING],
+            available=(STAGE_IMPLEMENTING, STAGE_VALIDATING),
         )
         self.assertIsNone(result)
 
@@ -604,17 +627,17 @@ class ResolveStageFilterTest(unittest.TestCase):
         _, dashboard = _reload()
         result = dashboard.resolve_stage_filter(
             selected=[],
-            available=("implementing", "validating"),
+            available=(STAGE_IMPLEMENTING, STAGE_VALIDATING),
         )
         self.assertEqual(result, [])
 
     def test_proper_subset_passes_through(self) -> None:
         _, dashboard = _reload()
         result = dashboard.resolve_stage_filter(
-            selected=["implementing"],
-            available=("implementing", "validating"),
+            selected=[STAGE_IMPLEMENTING],
+            available=(STAGE_IMPLEMENTING, STAGE_VALIDATING),
         )
-        self.assertEqual(result, ["implementing"])
+        self.assertEqual(result, [STAGE_IMPLEMENTING])
 
 
 class PresetWindowTest(unittest.TestCase):
@@ -806,8 +829,8 @@ class ComputeInsightsTest(unittest.TestCase):
         from orchestrator.analytics.read import CostCoverageRow
         summary = self._summary()
         cov = [
-            CostCoverageRow(cost_source="reported", runs=70),
-            CostCoverageRow(cost_source="unknown-price", runs=20),
+            CostCoverageRow(cost_source=COST_SOURCE_REPORTED, runs=70),
+            CostCoverageRow(cost_source=COST_SOURCE_UNKNOWN_PRICE, runs=20),
             CostCoverageRow(cost_source="unknown", runs=10),
         ]
         banners = dashboard.compute_insights(
@@ -827,8 +850,8 @@ class ComputeInsightsTest(unittest.TestCase):
         from orchestrator.analytics.read import CostCoverageRow
         summary = self._summary()
         cov = [
-            CostCoverageRow(cost_source="reported", runs=99),
-            CostCoverageRow(cost_source="unknown-price", runs=1),
+            CostCoverageRow(cost_source=COST_SOURCE_REPORTED, runs=99),
+            CostCoverageRow(cost_source=COST_SOURCE_UNKNOWN_PRICE, runs=1),
         ]
         self.assertEqual(
             dashboard.compute_insights(summary, cost_coverage_rows=cov),
@@ -862,13 +885,13 @@ class ReliabilityTileDataTest(unittest.TestCase):
         )
         by_label = {lbl: (val, tone) for val, lbl, tone in tiles}
         # Headline tiles all pulled off Summary directly:
-        self.assertEqual(by_label["Agent runs"][0], FULL_WINDOW_AGENT_RUNS)
-        self.assertEqual(by_label["Failures"][0], FULL_WINDOW_FAILURES)
-        self.assertEqual(by_label["Timeouts"][0], FULL_WINDOW_TIMEOUTS)
+        self.assertEqual(by_label[KPI_AGENT_RUNS][0], FULL_WINDOW_AGENT_RUNS)
+        self.assertEqual(by_label[KPI_FAILURES][0], FULL_WINDOW_FAILURES)
+        self.assertEqual(by_label[KPI_TIMEOUTS][0], FULL_WINDOW_TIMEOUTS)
         # Tone flips when the count crosses zero so the CSS class
         # paints the tile.
-        self.assertEqual(by_label["Timeouts"][1], "bad")
-        self.assertEqual(by_label["Failures"][1], "warn")
+        self.assertEqual(by_label[KPI_TIMEOUTS][1], "bad")
+        self.assertEqual(by_label[KPI_FAILURES][1], "warn")
 
     def test_zero_runs_does_not_divide_by_zero(self) -> None:
         # Empty window: success rate collapses to 0% (no runs, no
@@ -883,9 +906,9 @@ class ReliabilityTileDataTest(unittest.TestCase):
         )
         tiles = dashboard.reliability_tile_data(summary)
         by_label = {lbl: val for val, lbl, _ in tiles}
-        self.assertEqual(by_label["Agent runs"], 0)
+        self.assertEqual(by_label[KPI_AGENT_RUNS], 0)
         self.assertEqual(by_label["Success rate"], "0%")
-        self.assertEqual(by_label["Timeouts"], 0)
+        self.assertEqual(by_label[KPI_TIMEOUTS], 0)
 
     def test_clean_window_has_neutral_tones(self) -> None:
         # No failures, no timeouts: the warn / bad tones drop off
@@ -898,8 +921,8 @@ class ReliabilityTileDataTest(unittest.TestCase):
         )
         tiles = dashboard.reliability_tile_data(summary)
         by_label = {lbl: tone for _, lbl, tone in tiles}
-        self.assertEqual(by_label["Failures"], "")
-        self.assertEqual(by_label["Timeouts"], "")
+        self.assertEqual(by_label[KPI_FAILURES], "")
+        self.assertEqual(by_label[KPI_TIMEOUTS], "")
 
 
 class ReworkTotalsTest(unittest.TestCase):
@@ -957,7 +980,7 @@ class TopExpensiveIssuesTest(unittest.TestCase):
             event_count=events,
             first_seen=FIRST_SEEN,
             last_seen=LAST_SEEN,
-            latest_stage="implementing",
+            latest_stage=STAGE_IMPLEMENTING,
             agent_exits=1,
             total_cost_usd=cost,
             total_input_tokens=0,
@@ -1020,7 +1043,7 @@ class IssuesTableHtmlTest(unittest.TestCase):
             event_count=10,
             first_seen=FIRST_SEEN,
             last_seen=LAST_SEEN,
-            latest_stage="implementing",
+            latest_stage=STAGE_IMPLEMENTING,
             agent_exits=4,
             total_cost_usd=cost,
             total_input_tokens=0,
@@ -1034,7 +1057,7 @@ class IssuesTableHtmlTest(unittest.TestCase):
         _, dashboard = _reload()
         rows = [self._row(REPO_A, 1, 12.0)]
         html = dashboard._issues_table_html(rows)
-        for header in ("Issue", "Cost", "Runs", "Review rds",
+        for header in ("Issue", "Cost", COLUMN_RUNS, "Review rds",
                        "Retries", "Status"):
             self.assertIn(f">{header}<", html)
 
@@ -1095,15 +1118,15 @@ class SkillTriggersHtmlTest(unittest.TestCase):
 
     def test_columns_present(self) -> None:
         _, dashboard = _reload()
-        rows = [self._row("developer", "claude", 9, 3, 3)]
+        rows = [self._row(ROLE_DEVELOPER, BACKEND_CLAUDE, 9, 3, 3)]
         html = dashboard._skill_triggers_html(rows)
-        for header in ("Role", "Backend", "Runs", "Skill runs",
+        for header in ("Role", "Backend", COLUMN_RUNS, "Skill runs",
                        "Trigger rate", "Triggers"):
             self.assertIn(f">{header}<", html)
 
     def test_rate_rendered_as_percent(self) -> None:
         _, dashboard = _reload()
-        rows = [self._row("developer", "claude", 4, 1, 1)]
+        rows = [self._row(ROLE_DEVELOPER, BACKEND_CLAUDE, 4, 1, 1)]
         html = dashboard._skill_triggers_html(rows)
         # 1 of 4 runs triggered a skill -> 25%.
         self.assertIn(">25%<", html)
@@ -1111,8 +1134,8 @@ class SkillTriggersHtmlTest(unittest.TestCase):
     def test_rate_bar_relative_to_busiest_group(self) -> None:
         _, dashboard = _reload()
         rows = [
-            self._row("developer", "claude", 10, 10, 10),  # rate 1.0
-            self._row("reviewer", "codex", 10, 5, 5),       # rate 0.5
+            self._row(ROLE_DEVELOPER, BACKEND_CLAUDE, 10, 10, 10),  # rate 1.0
+            self._row(ROLE_REVIEWER, BACKEND_CODEX, 10, 5, 5),       # rate 0.5
         ]
         html = dashboard._skill_triggers_html(rows)
         # Full-width bar on the 100%-rate group, half-width on the 50%.
@@ -1123,17 +1146,17 @@ class SkillTriggersHtmlTest(unittest.TestCase):
         # A quiet reviewer (0 skill runs) is a real signal, not a
         # dropped row: it renders as an explicit 0% with an empty bar.
         _, dashboard = _reload()
-        rows = [self._row("reviewer", "codex", 5, 0, 0)]
+        rows = [self._row(ROLE_REVIEWER, BACKEND_CODEX, 5, 0, 0)]
         html = dashboard._skill_triggers_html(rows)
         self.assertIn(">0%<", html)
         self.assertIn("width:0.0%", html)
 
     def test_role_html_escaped(self) -> None:
         _, dashboard = _reload()
-        rows = [self._row("dev<&>", "claude", 1, 0, 0)]
+        rows = [self._row(ROLE_WITH_MARKUP, BACKEND_CLAUDE, 1, 0, 0)]
         html = dashboard._skill_triggers_html(rows)
         self.assertIn("dev&lt;&amp;&gt;", html)
-        self.assertNotIn("dev<&>", html)
+        self.assertNotIn(ROLE_WITH_MARKUP, html)
 
 
 class SkillMatrixHtmlTest(unittest.TestCase):
@@ -1159,10 +1182,10 @@ class SkillMatrixHtmlTest(unittest.TestCase):
 
     def test_columns_match_issue_spec(self) -> None:
         _, dashboard = _reload()
-        rows = [self._row("owner/repo", "develop", "developer", "claude", 2)]
+        rows = [self._row("owner/repo", "develop", ROLE_DEVELOPER, BACKEND_CLAUDE, 2)]
         html = dashboard._skill_matrix_html(rows)
         for header in ("Repo", "Role", "Backend", "Skill",
-                       "Runs", "Runs with skill", "Trigger rate"):
+                       COLUMN_RUNS, "Runs with skill", "Trigger rate"):
             self.assertIn(f">{header}<", html)
 
     def test_cell_values_rendered(self) -> None:
@@ -1170,7 +1193,7 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         # Distinct cohort total (Runs) and trigger count (Runs with skill)
         # so both columns are exercised independently.
         rows = [self._row(
-            "owner/repo", "develop", "developer", "claude", 5, skill_runs=3,
+            "owner/repo", "develop", ROLE_DEVELOPER, BACKEND_CLAUDE, 5, skill_runs=3,
         )]
         html = dashboard._skill_matrix_html(rows)
         # Full repo path (not just the trailing component) so two repos
@@ -1192,7 +1215,7 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         # missing, while the cohort `Runs` total stays a plain number.
         _, dashboard = _reload()
         rows = [self._row(
-            "owner/repo", "review", "developer", "claude", 4, skill_runs=0,
+            "owner/repo", "review", ROLE_DEVELOPER, BACKEND_CLAUDE, 4, skill_runs=0,
         )]
         html = dashboard._skill_matrix_html(rows)
         self.assertIn("orch-skillmatrix-zero", html)
@@ -1207,14 +1230,14 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         # Every free-text cell is HTML-escaped so a skill / repo / role
         # name carrying markup cannot break out of the table.
         _, dashboard = _reload()
-        rows = [self._row("o/<r&>", "sk<i>ll", "dev<&>", "back<end>", 1)]
+        rows = [self._row("o/<r&>", "sk<i>ll", ROLE_WITH_MARKUP, "back<end>", 1)]
         html = dashboard._skill_matrix_html(rows)
         self.assertIn("o/&lt;r&amp;&gt;", html)
         self.assertIn("sk&lt;i&gt;ll", html)
         self.assertIn("dev&lt;&amp;&gt;", html)
         self.assertIn("back&lt;end&gt;", html)
         self.assertNotIn("<r&>", html)
-        self.assertNotIn("dev<&>", html)
+        self.assertNotIn(ROLE_WITH_MARKUP, html)
 
     def test_empty_rows_render_fallback_not_table(self) -> None:
         # No catalog records matched and no run fired a skill -> there
@@ -1261,9 +1284,9 @@ class SkillMatrixSortTest(unittest.TestCase):
         # Distinct repo / runs values per row so an ordering assertion can
         # key off either without ambiguity.
         return [
-            self._row("b/repo", "alpha", "developer", "claude", 2, 1),
-            self._row("a/repo", "beta", "reviewer", "codex", 9, 9),
-            self._row("c/repo", "gamma", "developer", "claude", 5, 0),
+            self._row("b/repo", "alpha", ROLE_DEVELOPER, BACKEND_CLAUDE, 2, 1),
+            self._row("a/repo", "beta", ROLE_REVIEWER, BACKEND_CODEX, 9, 9),
+            self._row("c/repo", "gamma", ROLE_DEVELOPER, BACKEND_CLAUDE, 5, 0),
         ]
 
     def test_headers_are_clickable_self_targeting_sort_links(self) -> None:
@@ -1318,13 +1341,13 @@ class SkillMatrixSortTest(unittest.TestCase):
             self._rows(), sort_key="runs", descending=False,
         )
         # runs 2 < 5 < 9 -> repos b, c, a in that order.
-        self.assertLess(asc.index(">b/repo<"), asc.index(">c/repo<"))
-        self.assertLess(asc.index(">c/repo<"), asc.index(">a/repo<"))
+        self.assertLess(asc.index(">b/repo<"), asc.index(REPO_C_CELL_FRAGMENT))
+        self.assertLess(asc.index(REPO_C_CELL_FRAGMENT), asc.index(">a/repo<"))
         desc = dashboard._skill_matrix_html(
             self._rows(), sort_key="runs", descending=True,
         )
-        self.assertLess(desc.index(">a/repo<"), desc.index(">c/repo<"))
-        self.assertLess(desc.index(">c/repo<"), desc.index(">b/repo<"))
+        self.assertLess(desc.index(">a/repo<"), desc.index(REPO_C_CELL_FRAGMENT))
+        self.assertLess(desc.index(REPO_C_CELL_FRAGMENT), desc.index(">b/repo<"))
 
     def test_unsorted_render_defaults_repo_asc_then_rate_desc(self) -> None:
         # No sort key -> the default view orders rows by repo ascending,
@@ -1333,9 +1356,9 @@ class SkillMatrixSortTest(unittest.TestCase):
         # so both keys are exercised (skills identify the rows uniquely).
         _, dashboard = _reload()
         rows = [
-            self._row("b/repo", "alpha", "developer", "claude", 4, 1),
-            self._row("a/repo", "beta", "developer", "claude", 4, 1),
-            self._row("a/repo", "gamma", "reviewer", "codex", 4, 3),
+            self._row("b/repo", "alpha", ROLE_DEVELOPER, BACKEND_CLAUDE, 4, 1),
+            self._row("a/repo", "beta", ROLE_DEVELOPER, BACKEND_CLAUDE, 4, 1),
+            self._row("a/repo", "gamma", ROLE_REVIEWER, BACKEND_CODEX, 4, 3),
         ]
         html = dashboard._skill_matrix_html(rows)
         # Within a/repo, rate descending: gamma (75%) precedes beta (25%).
@@ -1461,12 +1484,12 @@ class BackendEfficiencyCardHtmlTest(unittest.TestCase):
         _, dashboard = _reload()
         from orchestrator import dashboard_theme as theme
         row = self._row(
-            backend="claude", runs=4, total_cost_usd=8.0,
+            backend=BACKEND_CLAUDE, runs=4, total_cost_usd=8.0,
             total_input_tokens=1_000_000, total_output_tokens=0,
             total_cache_read_tokens=1_000_000, total_cache_write_tokens=0,
         )
         html = dashboard._backend_efficiency_card_html(row, theme=theme)
-        self.assertIn("claude", html)
+        self.assertIn(BACKEND_CLAUDE, html)
         self.assertIn("4 runs", html)
         # tokens = 2M -> $8 / 2M = $4.00 / 1M tok.
         self.assertIn("$4.00 / 1M tok", html)
@@ -1478,7 +1501,7 @@ class BackendEfficiencyCardHtmlTest(unittest.TestCase):
     def test_zero_tokens_and_runs_do_not_divide_by_zero(self) -> None:
         _, dashboard = _reload()
         from orchestrator import dashboard_theme as theme
-        row = self._row(backend="codex", runs=0, total_cost_usd=0.0)
+        row = self._row(backend=BACKEND_CODEX, runs=0, total_cost_usd=0.0)
         html = dashboard._backend_efficiency_card_html(row, theme=theme)
         self.assertIn("$0.00 / 1M tok", html)
         self.assertIn("0% cache hit", html)
@@ -1511,8 +1534,8 @@ class CostCoverageBarHtmlTest(unittest.TestCase):
         from orchestrator import dashboard_theme as theme
         # 750 / 1000 tokens = 75% by tokens, NOT 10% by run count.
         rows = [
-            self._row("reported", 1, 750),
-            self._row("unknown-price", 9, 250),
+            self._row(COST_SOURCE_REPORTED, 1, 750),
+            self._row(COST_SOURCE_UNKNOWN_PRICE, 9, 250),
         ]
         html = dashboard._cost_coverage_bar_html(rows, theme=theme)
         self.assertIn("Cost attribution coverage", html)
@@ -1523,7 +1546,7 @@ class CostCoverageBarHtmlTest(unittest.TestCase):
         _, dashboard = _reload()
         from orchestrator import dashboard_theme as theme
         # No token volume yet -> size by run share: 3 / 4 = 75%.
-        rows = [self._row("reported", 3, 0), self._row("unknown", 1, 0)]
+        rows = [self._row(COST_SOURCE_REPORTED, 3, 0), self._row("unknown", 1, 0)]
         html = dashboard._cost_coverage_bar_html(rows, theme=theme)
         self.assertIn("width:75.0%", html)
 
@@ -1546,9 +1569,9 @@ class ReliabilityTilesHtmlTest(unittest.TestCase):
     def test_tiles_carry_value_label_and_tone(self) -> None:
         _, dashboard = _reload()
         tiles = [
-            (FULL_WINDOW_AGENT_RUNS, "Agent runs", ""),
+            (FULL_WINDOW_AGENT_RUNS, KPI_AGENT_RUNS, ""),
             ("0%", "Success rate", "bad"),
-            (FULL_WINDOW_TIMEOUTS, "Timeouts", "bad"),
+            (FULL_WINDOW_TIMEOUTS, KPI_TIMEOUTS, "bad"),
         ]
         html = dashboard._reliability_tiles_html(
             tiles, fmt_num=lambda n: f"{n}"
@@ -1625,16 +1648,16 @@ class DashboardDataPrepTest(unittest.TestCase):
         )
         ts_points = [
             TimeSeriesPoint(
-                day=MAY_1, event="agent_exit", count=1,
+                day=MAY_1, event=EVENT_AGENT_EXIT, count=1,
                 cost_usd=1.5, input_tokens=10, output_tokens=5,
                 cache_read_tokens=2, cache_write_tokens=3,
             ),
             TimeSeriesPoint(
-                day=MAY_1, event="agent_exit", count=1,
+                day=MAY_1, event=EVENT_AGENT_EXIT, count=1,
                 cost_usd=0.5, input_tokens=1, output_tokens=2,
             ),
             TimeSeriesPoint(
-                day=MAY_7, event="agent_exit", count=1,
+                day=MAY_7, event=EVENT_AGENT_EXIT, count=1,
                 cost_usd=4.0, input_tokens=2, output_tokens=3,
                 cache_read_tokens=1, cache_write_tokens=1,
             ),
@@ -1660,9 +1683,9 @@ class DashboardDataPrepTest(unittest.TestCase):
 
         by_label = {kpi["label"]: kpi for kpi in kpis}
         self.assertEqual((resolved, rejected), (2, 2))
-        self.assertEqual(by_label["Total tokens"]["value"], "40")
-        self.assertEqual(by_label["Total tokens"]["delta"], 1.0)
-        self.assertEqual(by_label["Total tokens"]["spark"], [23.0, 7.0])
+        self.assertEqual(by_label[KPI_TOTAL_TOKENS]["value"], "40")
+        self.assertEqual(by_label[KPI_TOTAL_TOKENS]["delta"], 1.0)
+        self.assertEqual(by_label[KPI_TOTAL_TOKENS]["spark"], [23.0, 7.0])
         self.assertEqual(by_label["Total spend"]["spark"], [2.0, 4.0])
         self.assertEqual(by_label["Cost / resolved issue"]["value"], "$6.00")
         self.assertEqual(
@@ -1675,17 +1698,17 @@ class DashboardDataPrepTest(unittest.TestCase):
         from orchestrator.analytics.read import BackendDailyTokensRow
 
         rows = [
-            BackendDailyTokensRow(day=MAY_1, backend="claude", total_tokens=10),
-            BackendDailyTokensRow(day=MAY_1, backend="claude", total_tokens=5),
-            BackendDailyTokensRow(day=MAY_1, backend="codex", total_tokens=3),
-            BackendDailyTokensRow(day=MAY_7, backend="claude", total_tokens=8),
+            BackendDailyTokensRow(day=MAY_1, backend=BACKEND_CLAUDE, total_tokens=10),
+            BackendDailyTokensRow(day=MAY_1, backend=BACKEND_CLAUDE, total_tokens=5),
+            BackendDailyTokensRow(day=MAY_1, backend=BACKEND_CODEX, total_tokens=3),
+            BackendDailyTokensRow(day=MAY_7, backend=BACKEND_CLAUDE, total_tokens=8),
         ]
 
         self.assertEqual(
             dashboard._backend_tokens_by_day(rows),
             {
-                MAY_1: {"claude": 15.0, "codex": 3.0},
-                MAY_7: {"claude": 8.0},
+                MAY_1: {BACKEND_CLAUDE: 15.0, BACKEND_CODEX: 3.0},
+                MAY_7: {BACKEND_CLAUDE: 8.0},
             },
         )
 
@@ -1795,7 +1818,7 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
             ("drill-down", self._drilldown_source()),
         ):
             with self.subTest(source=label):
-                self.assertIn("_scoped_read(", src)
+                self.assertIn(SCOPED_READ_CALL_FRAGMENT, src)
 
     def test_cached_wrappers_do_not_accept_conn_arg(self) -> None:
         # Each `_read_*` wrapper's positional parameter list is the
@@ -1827,18 +1850,18 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # connection-free so `conn` never lands in the cache key.
         readers_src = self._combined_source(WIDGET_READER_WRAPPER_NAMES)
         self.assertGreaterEqual(
-            readers_src.count("_scoped_read("), 15,
+            readers_src.count(SCOPED_READ_CALL_FRAGMENT), 15,
             "every widget read should route through `_scoped_read`",
         )
         # The two static-metadata reads route through it too.
         self.assertGreaterEqual(
             self._combined_source(STATIC_METADATA_READER_NAMES).count(
-                "_scoped_read("
+                SCOPED_READ_CALL_FRAGMENT
             ),
             2,
         )
         # And the per-issue drill-down runs its own scoped read.
-        self.assertIn("_scoped_read(", self._drilldown_source())
+        self.assertIn(SCOPED_READ_CALL_FRAGMENT, self._drilldown_source())
         # `_scoped_read` is the single place the scoped connection is
         # opened and forwarded to the read helper.
         scoped_src = self._source_of("_scoped_read")
@@ -2235,7 +2258,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
         # connection and forwards it to the read helper, so the matrix
         # read shares the open socket rather than opening its own.
         src = self._source_of("_read_skill_trigger_matrix")
-        self.assertIn("_scoped_read(", src)
+        self.assertIn(SCOPED_READ_CALL_FRAGMENT, src)
         self.assertIn("analytics_read.get_skill_trigger_matrix", src)
         scoped_src = self._source_of("_scoped_read")
         self.assertIn("analytics_read.analytics_connection()", scoped_src)

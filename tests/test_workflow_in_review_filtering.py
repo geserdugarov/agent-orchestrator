@@ -21,6 +21,7 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    REVIEW_APPROVED_MESSAGE,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
@@ -147,7 +148,7 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Step 1: validating approves; watermark seed must STOP at id=950.
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         last_comment_id = gh.pinned_data(101).get("pr_last_comment_id")
         self.assertIsNotNone(last_comment_id)

@@ -13,6 +13,23 @@ from unittest.mock import MagicMock, patch
 from orchestrator import base_sync, config, workflow
 
 from tests.fakes import FakeGitHubClient, FakePR, make_issue
+from tests.workflow_helpers import (
+    LABEL_IMPLEMENTING,
+    LABEL_IN_REVIEW,
+    LABEL_RESOLVING_CONFLICT,
+    LABEL_VALIDATING,
+    STATE_OPEN,
+)
+
+REPO_SLUG = "acme/widget"
+BASE_BRANCH = "main"
+PR_BRANCH = "orchestrator/acme__widget/issue-7"
+KEY_CONFLICT_ROUND = "conflict_round"
+KEY_REVIEW_ROUND = "review_round"
+
+
+def _branch(issue_number: int) -> str:
+    return f"orchestrator/acme__widget/issue-{issue_number}"
 
 
 class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
@@ -38,7 +55,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
 
         self.remote = self.tmpdir / "remote.git"
         subprocess.run(
-            ["git", "init", "--bare", "-b", "main", str(self.remote)],
+            ["git", "init", "--bare", "-b", BASE_BRANCH, str(self.remote)],
             check=True, capture_output=True,
         )
         self.work = self.tmpdir / "work"
@@ -54,14 +71,14 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         (self.work / "README.md").write_text("hello\n")
         self._git("add", ".", cwd=self.work)
         self._git("commit", "-m", "initial", cwd=self.work, env_extra=author_env)
-        self._git("push", "origin", "main", cwd=self.work)
+        self._git("push", "origin", BASE_BRANCH, cwd=self.work)
 
         # Per-issue worktree branched off origin/main, with one local commit.
         self.wt_root = self.tmpdir / "worktrees" / "acme__widget"
         self.wt_root.mkdir(parents=True)
         self.wt = self.wt_root / "issue-7"
         self._git(
-            "worktree", "add", "-b", "orchestrator/acme__widget/issue-7",
+            "worktree", "add", "-b", PR_BRANCH,
             str(self.wt), "origin/main", cwd=self.work,
         )
         (self.wt / "feature.py").write_text("feature\n")
@@ -72,15 +89,15 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         )
 
         self.spec = config.RepoSpec(
-            slug="acme/widget",
+            slug=REPO_SLUG,
             target_root=self.work,
-            base_branch="main",
+            base_branch=BASE_BRANCH,
         )
         # Default: per-issue worktree #7 is in `implementing` (no PR yet),
         # so the refresh is allowed to rebase it onto base. Tests that want
         # the PR-skip path call `_seed_pr_state(7)`.
         self.gh = FakeGitHubClient()
-        self.gh.add_issue(make_issue(7, label="implementing"))
+        self.gh.add_issue(make_issue(7, label=LABEL_IMPLEMENTING))
 
         # `_authed_target_fetch` would otherwise dial out to
         # `https://x-access-token@github.com/acme/widget.git`, which
@@ -105,15 +122,15 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
 
     def _seed_pr_state(
         self, issue_number: int, pr_number: int = 999, *,
-        merged: bool = False, state: str = "open",
+        merged: bool = False, state: str = STATE_OPEN,
     ) -> None:
         self.gh.seed_state(
             issue_number, pr_number=pr_number,
-            branch=f"orchestrator/acme__widget/issue-{issue_number}",
+            branch=_branch(issue_number),
         )
         self.gh.add_pr(FakePR(
             number=pr_number,
-            head_branch=f"orchestrator/acme__widget/issue-{issue_number}",
+            head_branch=_branch(issue_number),
             merged=merged, state=state,
         ))
 
@@ -122,7 +139,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         commit edits `feature.py` so a base rebase of the per-issue branch
         will conflict with the local feature commit.
         """
-        self._git("checkout", "main", cwd=self.work)
+        self._git("checkout", BASE_BRANCH, cwd=self.work)
         path = self.work / ("feature.py" if conflicting else "extra.txt")
         path.write_text("base side\n")
         self._git("add", ".", cwd=self.work)
@@ -130,7 +147,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
             "commit", "-m", "base advance", cwd=self.work,
             env_extra=self._author_env,
         )
-        self._git("push", "origin", "main", cwd=self.work)
+        self._git("push", "origin", BASE_BRANCH, cwd=self.work)
 
     def _wt_head(self) -> str:
         return self._git("rev-parse", "HEAD", cwd=self.wt).strip()
@@ -202,19 +219,19 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # `resolving_conflict`. `resolving_conflict` is reserved for
         # rebases that actually leave conflicted files.
         self.gh = FakeGitHubClient()
-        self.gh.add_issue(make_issue(7, label="in_review"))
+        self.gh.add_issue(make_issue(7, label=LABEL_IN_REVIEW))
         self.gh.seed_state(
-            7, pr_number=42, branch="orchestrator/acme__widget/issue-7", review_round=4,
+            7, pr_number=42, branch=PR_BRANCH, review_round=4,
         )
         self.gh.add_pr(FakePR(
-            number=42, head_branch="orchestrator/acme__widget/issue-7",
-            merged=False, state="open",
+            number=42, head_branch=PR_BRANCH,
+            merged=False, state=STATE_OPEN,
         ))
         # Publish the orchestrator branch to the bare remote so the
         # force-with-lease check has a known SHA to compare against
         # (the production PR flow does the same first push when
         # `_handle_implementing` opens the PR).
-        self._git("push", "origin", "orchestrator/acme__widget/issue-7", cwd=self.wt)
+        self._git("push", "origin", PR_BRANCH, cwd=self.wt)
         self._advance_base(conflicting=False)
         head_before = self._wt_head()
 
@@ -253,16 +270,16 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertTrue(self._is_clean())
         # The push was issued with force-with-lease pinned to the
         # pre-rebase SHA (= the remote PR head at the time).
-        self.assertEqual(captured.get("branch"), "orchestrator/acme__widget/issue-7")
+        self.assertEqual(captured.get("branch"), PR_BRANCH)
         self.assertEqual(captured.get("force_with_lease"), head_before)
         # Label flipped to `validating`, NOT `resolving_conflict`.
-        self.assertIn((7, "validating"), self.gh.label_history)
-        self.assertNotIn((7, "resolving_conflict"), self.gh.label_history)
+        self.assertIn((7, LABEL_VALIDATING), self.gh.label_history)
+        self.assertNotIn((7, LABEL_RESOLVING_CONFLICT), self.gh.label_history)
         # `review_round` reset so the reviewer re-runs against the new head.
         state = self.gh.pinned_data(7)
-        self.assertEqual(state.get("review_round"), 0)
+        self.assertEqual(state.get(KEY_REVIEW_ROUND), 0)
         # No `conflict_round` seeded -- this was not a conflict path.
-        self.assertIsNone(state.get("conflict_round"))
+        self.assertIsNone(state.get(KEY_CONFLICT_ROUND))
 
     def test_pr_open_clean_rebase_push_failure_resets_local_head(self) -> None:
         # Regression for issue #413 review: a clean local rebase whose
@@ -275,15 +292,15 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # SHA so the worktree matches the still-stale remote PR head
         # and the next refresh tick picks the work up again.
         self.gh = FakeGitHubClient()
-        self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
+        self.gh.add_issue(make_issue(7, label=LABEL_IN_REVIEW))
+        self.gh.seed_state(7, pr_number=42, branch=PR_BRANCH)
         self.gh.add_pr(FakePR(
-            number=42, head_branch="orchestrator/acme__widget/issue-7",
-            merged=False, state="open",
+            number=42, head_branch=PR_BRANCH,
+            merged=False, state=STATE_OPEN,
         ))
         # Publish the branch so the lease has a real SHA to compare
         # against, then advance base cleanly.
-        self._git("push", "origin", "orchestrator/acme__widget/issue-7", cwd=self.wt)
+        self._git("push", "origin", PR_BRANCH, cwd=self.wt)
         self._advance_base(conflicting=False)
         head_before = self._wt_head()
 
@@ -317,7 +334,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertEqual(self.gh.posted_pr_comments, [])
         # `review_round` was NOT reset since we did not flip the label.
         state = self.gh.pinned_data(7)
-        self.assertIsNone(state.get("review_round"))
+        self.assertIsNone(state.get(KEY_REVIEW_ROUND))
 
     def test_open_pr_conflicting_base_relabels_resolving_conflict(
         self,
@@ -327,11 +344,11 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # can drive the dev agent to resolve them. This is the only path
         # that still enters `resolving_conflict` from the refresh.
         self.gh = FakeGitHubClient()
-        self.gh.add_issue(make_issue(7, label="in_review"))
-        self.gh.seed_state(7, pr_number=42, branch="orchestrator/acme__widget/issue-7")
+        self.gh.add_issue(make_issue(7, label=LABEL_IN_REVIEW))
+        self.gh.seed_state(7, pr_number=42, branch=PR_BRANCH)
         self.gh.add_pr(FakePR(
-            number=42, head_branch="orchestrator/acme__widget/issue-7",
-            merged=False, state="open",
+            number=42, head_branch=PR_BRANCH,
+            merged=False, state=STATE_OPEN,
         ))
         self._advance_base(conflicting=True)
         head_before = self._wt_head()
@@ -350,10 +367,10 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # No push was issued -- the dev agent will resolve the conflict.
         push.assert_not_called()
         # Label flipped to `resolving_conflict`.
-        self.assertIn((7, "resolving_conflict"), self.gh.label_history)
+        self.assertIn((7, LABEL_RESOLVING_CONFLICT), self.gh.label_history)
         # `conflict_round` initialized to 0.
         state = self.gh.pinned_data(7)
-        self.assertEqual(state.get("conflict_round"), 0)
+        self.assertEqual(state.get(KEY_CONFLICT_ROUND), 0)
 
 
 if __name__ == "__main__":

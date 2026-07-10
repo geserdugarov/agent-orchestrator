@@ -14,6 +14,8 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    EVENT_PR_CLOSED_WITHOUT_MERGE,
+    EVENT_PR_MERGED,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
@@ -156,7 +158,7 @@ class ResolvingConflictEventEmissionTest(
     def test_pr_merged_event_on_external_merge(self) -> None:
         gh, issue, pr = self._seed(pr_state="closed", pr_merged=True)
         self._run_with_merge(gh, issue)
-        merged = self._events_of(gh, "pr_merged")
+        merged = self._events_of(gh, EVENT_PR_MERGED)
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["stage"], "resolving_conflict")
         self.assertEqual(merged[0]["pr_number"], self.PR_NUMBER)
@@ -166,7 +168,7 @@ class ResolvingConflictEventEmissionTest(
     def test_pr_closed_without_merge_event(self) -> None:
         gh, issue, pr = self._seed(pr_state="closed", pr_merged=False)
         self._run_with_merge(gh, issue)
-        closed = self._events_of(gh, "pr_closed_without_merge")
+        closed = self._events_of(gh, EVENT_PR_CLOSED_WITHOUT_MERGE)
         self.assertEqual(len(closed), 1)
         self.assertEqual(closed[0]["stage"], "resolving_conflict")
         self.assertEqual(closed[0]["pr_number"], self.PR_NUMBER)

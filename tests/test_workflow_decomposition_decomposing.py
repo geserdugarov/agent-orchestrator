@@ -15,12 +15,45 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    BACKEND_CLAUDE,
+    BACKEND_CODEX,
+    KEY_AWAITING_HUMAN,
+    KEY_ISSUE_AGENT_RUNS,
+    KEY_ISSUE_TOTAL_TOKENS,
+    KEY_LAST_ACTION_COMMENT_ID,
+    KEY_PARENT_NUMBER,
+    LABEL_BLOCKED,
+    LABEL_DECOMPOSING,
+    LABEL_IMPLEMENTING,
+    LABEL_READY,
+    LABEL_UMBRELLA,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
     _iso_hours_ago,
     _manifest,
 )
+
+KEY_DECOMPOSER_AGENT = "decomposer_agent"
+KEY_DECOMPOSER_SESSION_ID = "decomposer_session_id"
+KEY_CHILDREN = "children"
+KEY_UMBRELLA = "umbrella"
+CLEANUP_DECOMPOSE_WORKTREE = "_cleanup_decompose_worktree"
+RUN_AGENT = "run_agent"
+DECOMPOSER_SESSION = "dec-sess"
+DEV_SESSION = "dev-sess"
+TRUSTED_AUTHOR = "alice"
+CREATED_AT = "2026-05-03T00:00:00+00:00"
+
+SINGLE_MANIFEST_PAYLOAD = '{"decision": "single", "rationale": "fits"}'
+SPLIT_MANIFEST = _manifest(
+    '{"decision": "split", "children": ['
+    '{"title": "A", "body": "a"},'
+    '{"title": "B", "body": "b"}'
+    ']}'
+)
+READ_ONLY_FRAGMENT = "read-only"
+IMPLEMENTED_MESSAGE = "implemented"
 
 
 class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -42,22 +75,22 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             self._run(
                 lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
-                    session_id="dec-sess", last_message=manifest
+                    session_id=DECOMPOSER_SESSION, last_message=manifest
                 ),
             )
 
         # First label flip is to decomposing; the single-decision path then
         # flips it to ready on the same tick.
-        self.assertEqual(gh.label_history[0], (10, "decomposing"))
-        self.assertIn((10, "ready"), gh.label_history)
+        self.assertEqual(gh.label_history[0], (10, LABEL_DECOMPOSING))
+        self.assertIn((10, LABEL_READY), gh.label_history)
         self.assertTrue(any(
-            "decomposing" in body
+            LABEL_DECOMPOSING in body
             for _, body in gh.posted_comments
         ))
 
     def test_decompose_decision_single_flips_to_ready(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(11, label="decomposing")
+        issue = make_issue(11, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
             '{"decision": "single", "rationale": "fits in one context"}'
@@ -66,16 +99,16 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dec-sess", last_message=manifest
+                session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
         )
 
-        self.assertIn((11, "ready"), gh.label_history)
+        self.assertIn((11, LABEL_READY), gh.label_history)
         # No children created.
         self.assertEqual(gh.created_child_issues, [])
         state = gh.pinned_data(11)
-        self.assertEqual(state.get("decomposer_agent"), config.DECOMPOSE_AGENT)
-        self.assertEqual(state.get("decomposer_session_id"), "dec-sess")
+        self.assertEqual(state.get(KEY_DECOMPOSER_AGENT), config.DECOMPOSE_AGENT)
+        self.assertEqual(state.get(KEY_DECOMPOSER_SESSION_ID), DECOMPOSER_SESSION)
         self.assertIn("decomposed_at", state)
         # Rationale surfaced in a comment.
         self.assertTrue(any(
@@ -87,7 +120,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # (affected files + notes) into the issue thread so the implementer
         # inherits it via `_recent_comments_text` at spawn.
         gh = FakeGitHubClient()
-        issue = make_issue(73, label="decomposing")
+        issue = make_issue(73, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
             '{"decision": "single", "rationale": "fits", '
@@ -97,10 +130,10 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
-        self.assertIn((73, "ready"), gh.label_history)
+        self.assertIn((73, LABEL_READY), gh.label_history)
         context_comment = next(
             body for n, body in gh.posted_comments
             if n == 73 and ":mag:" in body
@@ -113,7 +146,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_decompose_decision_split_creates_children(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(12, label="decomposing")
+        issue = make_issue(12, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
             '{"decision": "split", "rationale": "two pieces", "children": ['
@@ -127,22 +160,22 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dec-sess", last_message=manifest
+                session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
         )
 
         # Parent is now blocked; both children created with `ready`.
-        self.assertIn((12, "blocked"), gh.label_history)
+        self.assertIn((12, LABEL_BLOCKED), gh.label_history)
         self.assertEqual(len(gh.created_child_issues), 2)
         for child in gh.created_child_issues:
             self.assertEqual(
-                [l.name for l in child.labels], ["ready"],
+                [l.name for l in child.labels], [LABEL_READY],
             )
             self.assertIn(f"Parent: #{12}", child.body)
 
         state = gh.pinned_data(12)
         self.assertEqual(
-            state.get("children"),
+            state.get(KEY_CHILDREN),
             [c.number for c in gh.created_child_issues],
         )
         # No deps -> dep_graph not persisted.
@@ -162,7 +195,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # the `umbrella` label and `_handle_umbrella` will close it once
         # every child reaches `done`.
         gh = FakeGitHubClient()
-        issue = make_issue(50, label="decomposing")
+        issue = make_issue(50, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
             '{"decision": "split", "umbrella": true, '
@@ -175,28 +208,28 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dec-sess", last_message=manifest
+                session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
         )
 
         # Parent reached `umbrella`, NOT `blocked`.
         labels = [lbl for n, lbl in gh.label_history if n == 50]
-        self.assertIn("umbrella", labels)
-        self.assertNotIn("blocked", labels)
+        self.assertIn(LABEL_UMBRELLA, labels)
+        self.assertNotIn(LABEL_BLOCKED, labels)
         # Children created normally, with no-dep activation -> `ready`.
         self.assertEqual(len(gh.created_child_issues), 2)
         for child in gh.created_child_issues:
-            self.assertEqual([l.name for l in child.labels], ["ready"])
+            self.assertEqual([l.name for l in child.labels], [LABEL_READY])
         # `umbrella` flag persisted on parent state so the
         # half-finished recovery path can read it back after a SIGKILL.
-        self.assertTrue(gh.pinned_data(50).get("umbrella"))
+        self.assertTrue(gh.pinned_data(50).get(KEY_UMBRELLA))
         # Summary comment mentions umbrella so a human glancing at the
         # thread sees what label the parent landed on.
         last_comment = next(
             body for n, body in gh.posted_comments if n == 50
             and ":bookmark_tabs:" in body
         )
-        self.assertIn("umbrella", last_comment)
+        self.assertIn(LABEL_UMBRELLA, last_comment)
 
     def test_decompose_split_non_umbrella_default_marks_blocked(
         self,
@@ -206,7 +239,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # parent re-enters implementation after children resolve, the
         # legacy behavior.
         gh = FakeGitHubClient()
-        issue = make_issue(51, label="decomposing")
+        issue = make_issue(51, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
             '{"decision": "split", "children": ['
@@ -217,20 +250,20 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dec-sess", last_message=manifest
+                session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
         )
 
         labels = [lbl for n, lbl in gh.label_history if n == 51]
-        self.assertIn("blocked", labels)
-        self.assertNotIn("umbrella", labels)
+        self.assertIn(LABEL_BLOCKED, labels)
+        self.assertNotIn(LABEL_UMBRELLA, labels)
         # State records umbrella=False explicitly so a stale True from a
         # prior aborted decomposition cannot survive into recovery.
-        self.assertEqual(gh.pinned_data(51).get("umbrella"), False)
+        self.assertEqual(gh.pinned_data(51).get(KEY_UMBRELLA), False)
 
     def test_decompose_split_with_deps_persists_dep_graph(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(13, label="decomposing")
+        issue = make_issue(13, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
             '{"decision": "split", "children": ['
@@ -242,15 +275,15 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dec-sess", last_message=manifest
+                session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
         )
 
         children = gh.created_child_issues
         self.assertEqual(len(children), 2)
         # child[0] has no deps -> ready; child[1] depends on [0] -> blocked.
-        self.assertEqual([l.name for l in children[0].labels], ["ready"])
-        self.assertEqual([l.name for l in children[1].labels], ["blocked"])
+        self.assertEqual([l.name for l in children[0].labels], [LABEL_READY])
+        self.assertEqual([l.name for l in children[1].labels], [LABEL_BLOCKED])
 
         state = gh.pinned_data(13)
         self.assertEqual(state.get("dep_graph"), {"1": [0]})
@@ -259,7 +292,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # rather than as an unattributed `blocked` parent.
         for child in children:
             self.assertEqual(
-                gh.pinned_data(child.number).get("parent_number"), 13,
+                gh.pinned_data(child.number).get(KEY_PARENT_NUMBER), 13,
             )
 
     def test_decompose_parks_if_decomposer_left_commits(self) -> None:
@@ -269,54 +302,54 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # and push decomposer-authored work as if it were implementation.
         # Defensive park is the surface that catches this.
         gh = FakeGitHubClient()
-        issue = make_issue(40, label="decomposing")
+        issue = make_issue(40, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
-        manifest = _manifest('{"decision": "single", "rationale": "fits"}')
+        manifest = _manifest(SINGLE_MANIFEST_PAYLOAD)
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
             has_new_commits=True,
         )
 
         state = gh.pinned_data(40)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         # Did NOT advance to ready -- the operator must clean up first.
-        self.assertNotIn((40, "ready"), gh.label_history)
+        self.assertNotIn((40, LABEL_READY), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
-        self.assertIn("read-only", last_comment)
+        self.assertIn(READ_ONLY_FRAGMENT, last_comment)
 
     def test_decompose_parks_if_decomposer_left_dirty_files(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(41, label="decomposing")
+        issue = make_issue(41, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
-        manifest = _manifest('{"decision": "single", "rationale": "fits"}')
+        manifest = _manifest(SINGLE_MANIFEST_PAYLOAD)
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
             dirty_files=("foo.py",),
         )
 
         state = gh.pinned_data(41)
-        self.assertTrue(state.get("awaiting_human"))
-        self.assertNotIn((41, "ready"), gh.label_history)
+        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
+        self.assertNotIn((41, LABEL_READY), gh.label_history)
         last_comment = gh.posted_comments[-1][1]
-        self.assertIn("read-only", last_comment)
+        self.assertIn(READ_ONLY_FRAGMENT, last_comment)
 
     def test_decompose_malformed_manifest_parks(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(14, label="decomposing")
+        issue = make_issue(14, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         bad = _manifest("{not really json")
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=bad),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=bad),
         )
 
         state = gh.pinned_data(14)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("manifest invalid", last_comment)
         # Last decomposer message quoted into the HITL ping so the human
@@ -324,24 +357,24 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("not really json", last_comment)
         # Decomposer session recorded so the resume on human reply uses
         # the right backend even if DECOMPOSE_AGENT flips between ticks.
-        self.assertEqual(state.get("decomposer_session_id"), "dec-sess")
+        self.assertEqual(state.get(KEY_DECOMPOSER_SESSION_ID), DECOMPOSER_SESSION)
 
     def test_decompose_no_manifest_question_parks(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(15, label="decomposing")
+        issue = make_issue(15, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dec-sess",
+                session_id=DECOMPOSER_SESSION,
                 last_message="Should the new commands accept a --json flag?",
                 stderr="benign warning",
             ),
         )
 
         state = gh.pinned_data(15)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("needs your input", last_comment)
         self.assertIn("--json flag", last_comment)
@@ -354,14 +387,14 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # the park so the operator can tell a CF / quota / auth failure
         # apart from a model that just had no opinion.
         gh = FakeGitHubClient()
-        issue = make_issue(115, label="decomposing")
+        issue = make_issue(115, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
 
         with self.assertLogs("orchestrator.workflow", level="WARNING") as logs:
             self._run(
                 lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
-                    session_id="dec-sess",
+                    session_id=DECOMPOSER_SESSION,
                     last_message="",
                     stderr="rate limit exceeded; retry after 60s",
                     exit_code=3,
@@ -381,43 +414,38 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_decompose_resume_on_human_reply(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(16, label="decomposing")
+        issue = make_issue(16, label=LABEL_DECOMPOSING)
         issue.comments.append(FakeComment(
-            id=1100, body="please split into 2", user=FakeUser("alice"),
+            id=1100, body="please split into 2", user=FakeUser(TRUSTED_AUTHOR),
         ))
         gh.add_issue(issue)
         gh.seed_state(
             16,
             awaiting_human=True,
             last_action_comment_id=900,
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
-        manifest = _manifest(
-            '{"decision": "split", "children": ['
-            '{"title": "A", "body": "a"},'
-            '{"title": "B", "body": "b"}'
-            ']}'
-        )
+        manifest = SPLIT_MANIFEST
 
         mocks = self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dec-sess", last_message=manifest
+                session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
         )
 
         # Resume happened with the human comment quoted, on the locked
         # backend.
-        mocks["run_agent"].assert_called_once()
-        call = mocks["run_agent"].call_args
-        self.assertEqual(call.args[0], "claude")
-        self.assertEqual(call.kwargs.get("resume_session_id"), "dec-sess")
+        mocks[RUN_AGENT].assert_called_once()
+        call = mocks[RUN_AGENT].call_args
+        self.assertEqual(call.args[0], BACKEND_CLAUDE)
+        self.assertEqual(call.kwargs.get("resume_session_id"), DECOMPOSER_SESSION)
         self.assertIn("please split into 2", call.args[1])
 
-        self.assertIn((16, "blocked"), gh.label_history)
+        self.assertIn((16, LABEL_BLOCKED), gh.label_history)
         self.assertEqual(len(gh.created_child_issues), 2)
-        self.assertFalse(gh.pinned_data(16).get("awaiting_human"))
+        self.assertFalse(gh.pinned_data(16).get(KEY_AWAITING_HUMAN))
 
     def test_resume_filters_untrusted_reply(self) -> None:
         # With `ALLOWED_ISSUE_AUTHORS` set, an outsider reply on a parked
@@ -426,7 +454,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # comment id only -- the trailing outsider comment is left unconsumed.
         malicious_url = "https://example.invalid/malicious-patch.zip"
         gh = FakeGitHubClient()
-        issue = make_issue(17, label="decomposing")
+        issue = make_issue(17, label=LABEL_DECOMPOSING)
         issue.comments.append(FakeComment(
             id=1100, body="please split into A and B",
             user=FakeUser("geserdugarov"),
@@ -440,63 +468,58 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             17,
             awaiting_human=True,
             last_action_comment_id=900,
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
-        manifest = _manifest(
-            '{"decision": "split", "children": ['
-            '{"title": "A", "body": "a"},'
-            '{"title": "B", "body": "b"}'
-            ']}'
-        )
+        manifest = SPLIT_MANIFEST
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
             mocks = self._run(
                 lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-                run_agent=_agent(session_id="dec-sess", last_message=manifest),
+                run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
             )
-        prompt = mocks["run_agent"].call_args.args[1]
+        prompt = mocks[RUN_AGENT].call_args.args[1]
         self.assertNotIn(malicious_url, prompt)
         self.assertIn("please split into A and B", prompt)
-        self.assertEqual(gh.pinned_data(17)["last_action_comment_id"], 1100)
+        self.assertEqual(gh.pinned_data(17)[KEY_LAST_ACTION_COMMENT_ID], 1100)
 
     def test_decompose_agent_locked_on_resume(self) -> None:
         # Pinned state recorded `decomposer_agent="claude"`. Even after
         # DECOMPOSE_AGENT flips to "codex", the resume must stick with
         # claude -- session ids do not bridge across backends.
         gh = FakeGitHubClient()
-        issue = make_issue(17, label="decomposing")
+        issue = make_issue(17, label=LABEL_DECOMPOSING)
         issue.comments.append(FakeComment(
-            id=1100, body="any update?", user=FakeUser("alice"),
+            id=1100, body="any update?", user=FakeUser(TRUSTED_AUTHOR),
         ))
         gh.add_issue(issue)
         gh.seed_state(
             17,
             awaiting_human=True,
             last_action_comment_id=900,
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
         manifest = _manifest(
             '{"decision": "single", "rationale": "trivial"}'
         )
 
-        with patch.object(config, "DECOMPOSE_AGENT", "codex"):
+        with patch.object(config, "DECOMPOSE_AGENT", BACKEND_CODEX):
             mocks = self._run(
                 lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
-                    session_id="dec-sess", last_message=manifest
+                    session_id=DECOMPOSER_SESSION, last_message=manifest
                 ),
             )
 
-        self.assertEqual(mocks["run_agent"].call_args.args[0], "claude")
+        self.assertEqual(mocks[RUN_AGENT].call_args.args[0], BACKEND_CLAUDE)
         self.assertEqual(
-            mocks["run_agent"].call_args.kwargs.get("resume_session_id"),
-            "dec-sess",
+            mocks[RUN_AGENT].call_args.kwargs.get("resume_session_id"),
+            DECOMPOSER_SESSION,
         )
 
     def test_decompose_retry_cap_parks(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(18, label="decomposing")
+        issue = make_issue(18, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         gh.seed_state(
             18,
@@ -509,8 +532,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        mocks["run_agent"].assert_not_called()
-        self.assertTrue(gh.pinned_data(18).get("awaiting_human"))
+        mocks[RUN_AGENT].assert_not_called()
+        self.assertTrue(gh.pinned_data(18).get(KEY_AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn(
             f"hit retry cap ({config.MAX_RETRIES_PER_DAY}/day) for decomposing",
@@ -530,20 +553,20 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             self._run(
                 lambda: workflow._handle_pickup(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
-                    session_id="dev-sess", last_message="done"
+                    session_id=DEV_SESSION, last_message="done"
                 ),
                 has_new_commits=[False, True],
                 push_branch=True,
             )
 
         self.assertNotIn(
-            "decomposing", [lbl for _, lbl in gh.label_history],
+            LABEL_DECOMPOSING, [lbl for _, lbl in gh.label_history],
         )
-        self.assertIn((19, "implementing"), gh.label_history)
+        self.assertIn((19, LABEL_IMPLEMENTING), gh.label_history)
         self.assertEqual(gh.created_child_issues, [])
         state = gh.pinned_data(19)
-        self.assertNotIn("decomposer_agent", state)
-        self.assertNotIn("decomposer_session_id", state)
+        self.assertNotIn(KEY_DECOMPOSER_AGENT, state)
+        self.assertNotIn(KEY_DECOMPOSER_SESSION_ID, state)
 
     def test_decompose_off_routes_decomposing_label_to_implementing(
         self,
@@ -556,14 +579,14 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # decomposer, producing manifests and child issues that the
         # operator explicitly disabled.
         gh = FakeGitHubClient()
-        issue = make_issue(20, label="decomposing")
+        issue = make_issue(20, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         gh.seed_state(
             20,
             awaiting_human=True,
             park_reason="(test) decomposer asked a question",
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
             last_action_comment_id=900,
             pickup_comment_id=100,
         )
@@ -572,7 +595,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             mocks = self._run(
                 lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
-                    session_id="dev-sess", last_message="implemented"
+                    session_id=DEV_SESSION, last_message=IMPLEMENTED_MESSAGE
                 ),
                 has_new_commits=[False, True],
                 push_branch=True,
@@ -580,22 +603,22 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # The agent that did run was the dev agent (legacy implementing
         # took over), not the decomposer.
-        mocks["run_agent"].assert_called_once()
+        mocks[RUN_AGENT].assert_called_once()
         self.assertEqual(
-            mocks["run_agent"].call_args.args[0], config.DEV_AGENT,
+            mocks[RUN_AGENT].call_args.args[0], config.DEV_AGENT,
             "kill switch must route to the dev backend, not decomposer",
         )
 
         # Label transitioned to implementing. Must never have routed
         # through `blocked` (that would have implied children created).
         labels = [lbl for _, lbl in gh.label_history]
-        self.assertIn("implementing", labels)
-        self.assertNotIn("blocked", labels)
+        self.assertIn(LABEL_IMPLEMENTING, labels)
+        self.assertNotIn(LABEL_BLOCKED, labels)
 
         # Decomposer-side park state cleared so `_handle_implementing`'s
         # awaiting_human resume branch doesn't fire on stale state.
         state = gh.pinned_data(20)
-        self.assertFalse(state.get("awaiting_human"))
+        self.assertFalse(state.get(KEY_AWAITING_HUMAN))
         self.assertIsNone(state.get("park_reason"))
 
         # Routing comment posted; no children created.
@@ -619,12 +642,12 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # replay `_handle_ready` already prevents on the single-decision
         # happy path.
         gh = FakeGitHubClient()
-        issue = make_issue(21, label="decomposing")
+        issue = make_issue(21, label=LABEL_DECOMPOSING)
         # Decomposer-era HITL comments newer than the parked
         # last_action_comment_id (which is anchored on the original
         # pickup or an earlier decomposer round).
         issue.comments.append(FakeComment(
-            id=950, body="please reconsider", user=FakeUser("alice"),
+            id=950, body="please reconsider", user=FakeUser(TRUSTED_AUTHOR),
         ))
         issue.comments.append(FakeComment(
             id=960, body="the title is wrong", user=FakeUser("bob"),
@@ -634,8 +657,8 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             21,
             awaiting_human=True,
             park_reason="(test) decomposer asked a question",
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
             last_action_comment_id=900,
             pickup_comment_id=100,
         )
@@ -644,14 +667,14 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             self._run(
                 lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
-                    session_id="dev-sess", last_message="implemented"
+                    session_id=DEV_SESSION, last_message=IMPLEMENTED_MESSAGE
                 ),
                 has_new_commits=[False, True],
                 push_branch=True,
             )
 
         state = gh.pinned_data(21)
-        last_action = state.get("last_action_comment_id")
+        last_action = state.get(KEY_LAST_ACTION_COMMENT_ID)
         # Must be past the highest decomposing-era comment so the
         # in_review watermark seed treats them as already-consumed.
         self.assertIsInstance(last_action, int)
@@ -663,10 +686,10 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # consumed everything and a later high-id comment hasn't been
         # posted yet), the kill-switch path must NOT lower it.
         gh = FakeGitHubClient()
-        issue = make_issue(22, label="decomposing")
+        issue = make_issue(22, label=LABEL_DECOMPOSING)
         # One older comment; latest visible id is 500.
         issue.comments.append(FakeComment(
-            id=500, body="early note", user=FakeUser("alice"),
+            id=500, body="early note", user=FakeUser(TRUSTED_AUTHOR),
         ))
         gh.add_issue(issue)
         gh.seed_state(
@@ -680,7 +703,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             self._run(
                 lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
-                    session_id="dev-sess", last_message="implemented"
+                    session_id=DEV_SESSION, last_message=IMPLEMENTED_MESSAGE
                 ),
                 has_new_commits=[False, True],
                 push_branch=True,
@@ -688,7 +711,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # Must not regress below the previously persisted high water mark.
         self.assertGreaterEqual(
-            gh.pinned_data(22).get("last_action_comment_id"), 10000,
+            gh.pinned_data(22).get(KEY_LAST_ACTION_COMMENT_ID), 10000,
         )
 
     def test_decompose_off_still_finalizes_half_finished_split(self) -> None:
@@ -700,20 +723,20 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # disabled rollout can still finalize the in-flight state to
         # `blocked` without spawning the decomposer.
         gh = FakeGitHubClient()
-        parent = make_issue(50, label="decomposing")
+        parent = make_issue(50, label=LABEL_DECOMPOSING)
         gh.add_issue(parent)
         for child_number in (101, 102):
-            child = make_issue(child_number, label="blocked")
+            child = make_issue(child_number, label=LABEL_BLOCKED)
             gh.add_issue(child)
             gh.seed_state(
                 child_number, parent_number=50,
-                created_at="2026-05-03T00:00:00+00:00",
+                created_at=CREATED_AT,
             )
         gh.seed_state(
             50,
             children=[101, 102],
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
 
         with patch.object(config, "DECOMPOSE", False):
@@ -722,10 +745,10 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 run_agent=_agent(),
             )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         labels = [lbl for _, lbl in gh.label_history]
-        self.assertIn("blocked", labels)
-        self.assertNotIn("implementing", labels)
+        self.assertIn(LABEL_BLOCKED, labels)
+        self.assertNotIn(LABEL_IMPLEMENTING, labels)
         self.assertEqual(gh.created_child_issues, [])
 
     def test_decompose_persists_children_incrementally(self) -> None:
@@ -737,7 +760,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # the contract by snapshotting the parent's persisted `children`
         # list at the moment each child creation begins.
         gh = FakeGitHubClient()
-        issue = make_issue(80, label="decomposing")
+        issue = make_issue(80, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
             '{"decision": "split", "children": ['
@@ -751,14 +774,14 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         real_create = gh.create_child_issue
 
         def spy_create(**kwargs):
-            snapshots.append(list(gh.pinned_data(80).get("children") or []))
+            snapshots.append(list(gh.pinned_data(80).get(KEY_CHILDREN) or []))
             return real_create(**kwargs)
 
         gh.create_child_issue = spy_create
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
         # iter 0: no children yet. iter 1: child[0] already persisted.
@@ -768,7 +791,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(len(snapshots[1]), 1)
         self.assertEqual(len(snapshots[2]), 2)
         self.assertEqual(
-            len(gh.pinned_data(80).get("children") or []), 3,
+            len(gh.pinned_data(80).get(KEY_CHILDREN) or []), 3,
         )
 
     def test_half_finished_recovery_flips_to_blocked(self) -> None:
@@ -779,24 +802,24 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # transition. The parent's `_handle_blocked` activates no-dep
         # children on a subsequent tick.
         gh = FakeGitHubClient()
-        issue = make_issue(50, label="decomposing")
+        issue = make_issue(50, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         # Children already exist on GitHub with `parent_number` seeded --
         # the crash happened AFTER both child seeds, between the parent's
         # last incremental write and the parent label flip.
         for child_number in (101, 102):
-            child = make_issue(child_number, label="blocked")
+            child = make_issue(child_number, label=LABEL_BLOCKED)
             gh.add_issue(child)
             gh.seed_state(
                 child_number, parent_number=50,
-                created_at="2026-05-03T00:00:00+00:00",
+                created_at=CREATED_AT,
             )
         gh.seed_state(
             50,
             children=[101, 102],
-            decomposed_at="2026-05-03T00:00:00+00:00",
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposed_at=CREATED_AT,
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
 
         mocks = self._run(
@@ -805,26 +828,26 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         # Decomposer was NOT respawned; no new children were created.
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.created_child_issues, [])
-        self.assertIn((50, "blocked"), gh.label_history)
+        self.assertIn((50, LABEL_BLOCKED), gh.label_history)
         # Children + decomposed_at preserved.
         state = gh.pinned_data(50)
-        self.assertEqual(state.get("children"), [101, 102])
+        self.assertEqual(state.get(KEY_CHILDREN), [101, 102])
 
     def test_half_finished_recovery_with_awaiting_human_holds(self) -> None:
         # If the prior tick parked awaiting_human after partial child
         # creation, the recovery must NOT silently flip the parent to
         # `blocked`; the human's intervention is still required.
         gh = FakeGitHubClient()
-        issue = make_issue(51, label="decomposing")
+        issue = make_issue(51, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         gh.seed_state(
             51,
             children=[201],
             awaiting_human=True,
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
 
         mocks = self._run(
@@ -832,11 +855,11 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.created_child_issues, [])
         # Label NOT flipped; human still owns it.
-        self.assertNotIn((51, "blocked"), gh.label_history)
-        self.assertTrue(gh.pinned_data(51).get("awaiting_human"))
+        self.assertNotIn((51, LABEL_BLOCKED), gh.label_history)
+        self.assertTrue(gh.pinned_data(51).get(KEY_AWAITING_HUMAN))
 
     def test_partial_children_recovery_parks(self) -> None:
         # SIGKILL between iterations leaves a partial `children` list
@@ -846,15 +869,15 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # persisted up-front, the recovery distinguishes partial from
         # complete and parks awaiting human.
         gh = FakeGitHubClient()
-        issue = make_issue(52, label="decomposing")
+        issue = make_issue(52, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         gh.seed_state(
             52,
             children=[101],
             expected_children_count=3,
-            decomposed_at="2026-05-03T00:00:00+00:00",
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposed_at=CREATED_AT,
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
 
         mocks = self._run(
@@ -862,12 +885,12 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.created_child_issues, [])
         # Parked, not finalized to blocked.
-        self.assertNotIn((52, "blocked"), gh.label_history)
+        self.assertNotIn((52, LABEL_BLOCKED), gh.label_history)
         state = gh.pinned_data(52)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("crashed mid-way", last_comment)
         self.assertIn("1 of 3", last_comment)
@@ -884,13 +907,13 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # different manifest produced duplicate child issues alongside
         # the orphan.
         gh = FakeGitHubClient()
-        issue = make_issue(53, label="decomposing")
+        issue = make_issue(53, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         gh.seed_state(
             53,
             expected_children_count=2,
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
 
         mocks = self._run(
@@ -898,11 +921,11 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.created_child_issues, [])
-        self.assertNotIn((53, "blocked"), gh.label_history)
+        self.assertNotIn((53, LABEL_BLOCKED), gh.label_history)
         state = gh.pinned_data(53)
-        self.assertTrue(state.get("awaiting_human"))
+        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("crashed mid-way", last_comment)
         self.assertIn("0 of 2", last_comment)
@@ -919,15 +942,15 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `_handle_implementing` reads the stale park and sits waiting on
         # a human reply that never comes.
         gh = FakeGitHubClient()
-        parent = make_issue(60, label="decomposing")
+        parent = make_issue(60, label=LABEL_DECOMPOSING)
         gh.add_issue(parent)
         # First child seeded normally; second is the orphan.
-        child_a = make_issue(601, label="blocked")
-        child_b = make_issue(602, label="blocked")
+        child_a = make_issue(601, label=LABEL_BLOCKED)
+        child_b = make_issue(602, label=LABEL_BLOCKED)
         gh.add_issue(child_a)
         gh.add_issue(child_b)
         gh.seed_state(
-            601, parent_number=60, created_at="2026-05-03T00:00:00+00:00",
+            601, parent_number=60, created_at=CREATED_AT,
         )
         gh.seed_state(
             602,
@@ -939,9 +962,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             60,
             children=[601, 602],
             expected_children_count=2,
-            decomposed_at="2026-05-03T00:00:00+00:00",
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposed_at=CREATED_AT,
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
 
         mocks = self._run(
@@ -949,16 +972,16 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertEqual(gh.created_child_issues, [])
-        self.assertIn((60, "blocked"), gh.label_history)
+        self.assertIn((60, LABEL_BLOCKED), gh.label_history)
         # Orphan got parent_number seeded and stale park cleared.
         orphan_state = gh.pinned_data(602)
-        self.assertEqual(orphan_state.get("parent_number"), 60)
-        self.assertFalse(orphan_state.get("awaiting_human"))
+        self.assertEqual(orphan_state.get(KEY_PARENT_NUMBER), 60)
+        self.assertFalse(orphan_state.get(KEY_AWAITING_HUMAN))
         # Healthy child untouched.
         healthy_state = gh.pinned_data(601)
-        self.assertEqual(healthy_state.get("parent_number"), 60)
+        self.assertEqual(healthy_state.get(KEY_PARENT_NUMBER), 60)
 
     def test_decompose_split_persists_expected_count_first(self) -> None:
         # `expected_children_count` MUST be on the parent before any
@@ -967,14 +990,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `expected_children_count`, and the recovery (legacy branch)
         # incorrectly finalizes to `blocked`.
         gh = FakeGitHubClient()
-        issue = make_issue(82, label="decomposing")
+        issue = make_issue(82, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
-        manifest = _manifest(
-            '{"decision": "split", "children": ['
-            '{"title": "A", "body": "a"},'
-            '{"title": "B", "body": "b"}'
-            ']}'
-        )
+        manifest = SPLIT_MANIFEST
 
         seen_expected: list[Optional[int]] = []
         real_create = gh.create_child_issue
@@ -989,7 +1007,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
         self.assertEqual(seen_expected[0], 2)
@@ -1002,7 +1020,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # an orphan child (parent doesn't know about it), and the next
         # tick re-spawns the decomposer to create a duplicate.
         gh = FakeGitHubClient()
-        issue = make_issue(83, label="decomposing")
+        issue = make_issue(83, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
             '{"decision": "split", "children": ['
@@ -1020,7 +1038,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 # Child write -- parent state should already have the
                 # child number recorded by now.
                 seen_children_before_child_seed.append(
-                    list(gh.pinned_data(83).get("children") or [])
+                    list(gh.pinned_data(83).get(KEY_CHILDREN) or [])
                 )
             return real_write(target_issue, state)
 
@@ -1028,7 +1046,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
         # Exactly one child was created and its pinned state was seeded
@@ -1048,15 +1066,15 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # eventual implementer (after children merged to main) would
         # commit on a stale base.
         gh = FakeGitHubClient()
-        issue = make_issue(70, label="decomposing")
+        issue = make_issue(70, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
-            '{"decision": "single", "rationale": "fits"}'
+            SINGLE_MANIFEST_PAYLOAD
         )
 
         mocks = self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
         mocks["_ensure_decompose_worktree"].assert_called_with(_TEST_SPEC, 70)
@@ -1064,24 +1082,24 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Cleanup runs at function exit so the next consumer of issue 70
         # (here _handle_ready -> _handle_implementing on the next tick)
         # starts from a fresh checkout.
-        mocks["_cleanup_decompose_worktree"].assert_called_with(_TEST_SPEC, 70)
+        mocks[CLEANUP_DECOMPOSE_WORKTREE].assert_called_with(_TEST_SPEC, 70)
 
     def test_decompose_skips_cleanup_on_dirty_park(self) -> None:
         # Operator inspection requires the decomposer's worktree to
         # outlive the dirty/commits park.
         gh = FakeGitHubClient()
-        issue = make_issue(71, label="decomposing")
+        issue = make_issue(71, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
-        manifest = _manifest('{"decision": "single", "rationale": "fits"}')
+        manifest = _manifest(SINGLE_MANIFEST_PAYLOAD)
 
         mocks = self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
             has_new_commits=True,
         )
 
-        self.assertTrue(gh.pinned_data(71).get("awaiting_human"))
-        mocks["_cleanup_decompose_worktree"].assert_not_called()
+        self.assertTrue(gh.pinned_data(71).get(KEY_AWAITING_HUMAN))
+        mocks[CLEANUP_DECOMPOSE_WORKTREE].assert_not_called()
 
     def test_decompose_skips_cleanup_while_awaiting_human(self) -> None:
         # On the tick AFTER a dirty/commits park, awaiting_human is True
@@ -1090,14 +1108,14 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # to inspect and reset it, and a subsequent-tick cleanup would
         # silently delete that state out from under them.
         gh = FakeGitHubClient()
-        issue = make_issue(73, label="decomposing")
+        issue = make_issue(73, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         gh.seed_state(
             73,
             awaiting_human=True,
             last_action_comment_id=999,
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
 
         mocks = self._run(
@@ -1105,15 +1123,15 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(),
         )
 
-        mocks["run_agent"].assert_not_called()
-        mocks["_cleanup_decompose_worktree"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
+        mocks[CLEANUP_DECOMPOSE_WORKTREE].assert_not_called()
 
     def test_decompose_handles_non_string_rationale(self) -> None:
         # JSON-valid manifest with a non-string rationale (`[1,2,3]`,
         # `{}`, `42`) must not crash the handler at `.strip()` after
         # the agent already ran. Coerce to the placeholder.
         gh = FakeGitHubClient()
-        issue = make_issue(72, label="decomposing")
+        issue = make_issue(72, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         manifest = _manifest(
             '{"decision": "single", "rationale": [1, 2, 3]}'
@@ -1121,11 +1139,11 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
-        self.assertIn((72, "ready"), gh.label_history)
-        self.assertFalse(gh.pinned_data(72).get("awaiting_human"))
+        self.assertIn((72, LABEL_READY), gh.label_history)
+        self.assertFalse(gh.pinned_data(72).get(KEY_AWAITING_HUMAN))
         rationale_comment = next(
             body for n, body in gh.posted_comments
             if n == 72 and ":mag:" in body
@@ -1145,58 +1163,58 @@ class DecomposerRunUsageAccumulationTest(
 
     def test_fresh_run_persists_one_run(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(620, label="decomposing")
+        issue = make_issue(620, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
-        manifest = _manifest('{"decision": "single", "rationale": "fits"}')
+        manifest = _manifest(SINGLE_MANIFEST_PAYLOAD)
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(session_id="dec-sess", last_message=manifest),
+            run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
         state = gh.pinned_data(620)
-        self.assertEqual(state["issue_agent_runs"], 1)
-        self.assertEqual(state["issue_total_tokens"], 0)
+        self.assertEqual(state[KEY_ISSUE_AGENT_RUNS], 1)
+        self.assertEqual(state[KEY_ISSUE_TOTAL_TOKENS], 0)
         self.assertEqual(state["issue_cost_sources"], ["no-usage"])
 
     def test_resume_counts_one_exit(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(621, label="decomposing")
+        issue = make_issue(621, label=LABEL_DECOMPOSING)
         issue.comments.append(FakeComment(
-            id=1100, body="please split", user=FakeUser("alice"),
+            id=1100, body="please split", user=FakeUser(TRUSTED_AUTHOR),
         ))
         gh.add_issue(issue)
         gh.seed_state(
             621,
             awaiting_human=True,
             last_action_comment_id=900,
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
         )
 
         self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dec-sess",
+                session_id=DECOMPOSER_SESSION,
                 last_message=_manifest(
-                    '{"decision": "single", "rationale": "fits"}'
+                    SINGLE_MANIFEST_PAYLOAD
                 ),
             ),
         )
 
         # Exactly one real resume exit folded.
-        self.assertEqual(gh.pinned_data(621)["issue_agent_runs"], 1)
+        self.assertEqual(gh.pinned_data(621)[KEY_ISSUE_AGENT_RUNS], 1)
 
     def test_no_new_comment_resume_leaves_counters_untouched(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(622, label="decomposing")
+        issue = make_issue(622, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         gh.seed_state(
             622,
             awaiting_human=True,
             last_action_comment_id=900,
-            decomposer_agent="claude",
-            decomposer_session_id="dec-sess",
+            decomposer_agent=BACKEND_CLAUDE,
+            decomposer_session_id=DECOMPOSER_SESSION,
             user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
 
@@ -1207,14 +1225,14 @@ class DecomposerRunUsageAccumulationTest(
 
         # No reply -> the resume returns before spawning, so no run is
         # counted and no counter key is created.
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         state = gh.pinned_data(622)
-        self.assertNotIn("issue_agent_runs", state)
-        self.assertNotIn("issue_total_tokens", state)
+        self.assertNotIn(KEY_ISSUE_AGENT_RUNS, state)
+        self.assertNotIn(KEY_ISSUE_TOTAL_TOKENS, state)
 
     def test_interrupted_run_does_not_persist_counters(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(623, label="decomposing")
+        issue = make_issue(623, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
         gh.seed_state(
             623,
@@ -1235,9 +1253,9 @@ class DecomposerRunUsageAccumulationTest(
         # so neither the folded counters nor a silent/invalid park reach
         # GitHub.
         state = gh.pinned_data(623)
-        self.assertNotIn("issue_agent_runs", state)
-        self.assertNotIn("issue_total_tokens", state)
-        self.assertFalse(state.get("awaiting_human"))
+        self.assertNotIn(KEY_ISSUE_AGENT_RUNS, state)
+        self.assertNotIn(KEY_ISSUE_TOTAL_TOKENS, state)
+        self.assertFalse(state.get(KEY_AWAITING_HUMAN))
 
     def test_dirty_interruption_parks_without_counters(
         self,
@@ -1250,23 +1268,23 @@ class DecomposerRunUsageAccumulationTest(
         # interrupted run or a counter would persist despite the run being
         # killed.
         gh = FakeGitHubClient()
-        issue = make_issue(624, label="decomposing")
+        issue = make_issue(624, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
 
         mocks = self._run(
             lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
             run_agent=_agent(
-                session_id="dec-sess", last_message="", interrupted=True,
+                session_id=DECOMPOSER_SESSION, last_message="", interrupted=True,
             ),
             has_new_commits=True,
         )
 
         state = gh.pinned_data(624)
-        self.assertTrue(state.get("awaiting_human"))
-        self.assertIn("read-only", gh.posted_comments[-1][1])
+        self.assertTrue(state.get(KEY_AWAITING_HUMAN))
+        self.assertIn(READ_ONLY_FRAGMENT, gh.posted_comments[-1][1])
         # Worktree kept for inspection (the dirty park's contract).
-        mocks["_cleanup_decompose_worktree"].assert_not_called()
+        mocks[CLEANUP_DECOMPOSE_WORKTREE].assert_not_called()
         # The park wrote pinned state, but the killed run's usage was NOT
         # folded, so no counter accrued.
-        self.assertNotIn("issue_agent_runs", state)
-        self.assertNotIn("issue_total_tokens", state)
+        self.assertNotIn(KEY_ISSUE_AGENT_RUNS, state)
+        self.assertNotIn(KEY_ISSUE_TOTAL_TOKENS, state)

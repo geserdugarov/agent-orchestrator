@@ -18,6 +18,7 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    REVIEW_APPROVED_MESSAGE,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
@@ -339,7 +340,7 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks_v = self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=("newhead42",),
         )
         self.assertEqual(mocks_v["run_agent"].call_count, 1)
@@ -429,7 +430,7 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
 
         # Approval relabels to `documenting` (the final-docs hop); the

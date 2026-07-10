@@ -23,6 +23,7 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    REVIEW_APPROVED_MESSAGE,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
@@ -95,7 +96,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
             mocks_v = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 # Squash: success, new local HEAD = SQUASHED_SHA, 3 commits
                 # collapsed to 1.
@@ -176,7 +177,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
             mocks = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 squash_result=(
                     False, None, 0,
@@ -221,7 +222,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         with patch.object(config, "SQUASH_ON_APPROVAL", False):
             mocks = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
             )
 
@@ -245,7 +246,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
             self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 # Helper success no-op: nothing to squash.
                 squash_result=(True, self.REVIEWED_SHA, 0, None),
