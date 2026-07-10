@@ -44,7 +44,7 @@ class ColorForTest(unittest.TestCase):
             theme.CATEGORICAL_PALETTE[1],
         )
 
-    def test_unknown_key_in_domain_falls_through_to_hash(self) -> None:
+    def test_unknown_domain_key_uses_hash(self) -> None:
         # `domain` is provided but the key is not in it -- the helper
         # should still return a palette color rather than raising.
         color = theme.color_for("zzz", ["a", "b"])
@@ -208,7 +208,7 @@ class PageCssTest(unittest.TestCase):
         # (the embedded browser dropped that compound selector).
         self.assertNotIn(":not(:has(", theme.PAGE_CSS)
 
-    def test_top_toolbar_made_transparent_and_click_through(self) -> None:
+    def test_top_toolbar_is_clear_and_click_through(self) -> None:
         # Streamlit's top toolbar is a `<header>`, so the historical
         # `div`-scoped rule never matched and the bar stayed opaque,
         # clipping the top of the topbar card. The rule must target the
@@ -233,7 +233,7 @@ class PageCssTest(unittest.TestCase):
         )
         self.assertIn("align-items: stretch", theme.PAGE_CSS)
 
-    def test_segmented_control_has_visible_selected_state(self) -> None:
+    def test_segmented_control_shows_selection(self) -> None:
         # The earlier draft just hid the radio dot, leaving the
         # active option indistinguishable from the inactive ones.
         # The redesigned rule wraps the radiogroup in a chip-colored
@@ -282,7 +282,7 @@ class StandaloneTokenMirrorTest(unittest.TestCase):
         self.assertEqual(theme.GRID_GAP, "16px")
         self.assertEqual(theme.CONTENT_MAX_WIDTH, "1480px")
 
-    def test_page_css_uses_radius_and_max_width_tokens(self) -> None:
+    def test_page_css_uses_radius_and_width_tokens(self) -> None:
         # `1480px` and `14px` need to surface in the CSS string, not
         # just the Python tokens, so the rendered layout matches.
         self.assertIn("1480px", theme.PAGE_CSS)

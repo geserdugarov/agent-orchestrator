@@ -71,7 +71,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         gh.seed_state(880, **seed_state)
         return gh, issue, pr
 
-    def test_pr_conversation_comment_routes_without_dev_spawn(
+    def test_pr_comment_routes_without_dev_spawn(
         self,
     ) -> None:
         # The headline contract: a single fresh PR conversation comment
@@ -119,7 +119,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         # the triggering comment on its next tick.
         self.assertEqual(pinned_state.get("pr_last_comment_id"), 1999)
 
-    def test_route_persists_full_batch_id_lists_all_surfaces(self) -> None:
+    def test_route_persists_ids_for_all_surfaces(self) -> None:
         # The route must persist the FULL per-surface id lists (not just the
         # max ids) so a later fixing tick can reconstruct the exact batch
         # after the watermarks advance past it. Seed feedback that spans all
@@ -185,7 +185,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         # Watermarks stay put so the fixing rescan can still reach them.
         self.assertEqual(state.get("pr_last_comment_id"), 1999)
 
-    def test_no_fresh_feedback_pings_hitl_for_manual_merge(self) -> None:
+    def test_no_feedback_pings_for_manual_merge(self) -> None:
         # The in_review -> fixing route must NOT preempt the mergeable /
         # HITL-ping path: an approved, mergeable, green PR with no fresh
         # PR comments earns a one-shot HITL ping (the orchestrator never
@@ -218,7 +218,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
             gh.pinned_data(880).get("ready_ping_sha"), "cafe1234",
         )
 
-    def test_no_fresh_feedback_preserves_pr_merged_terminal(self) -> None:
+    def test_no_feedback_keeps_merged_terminal(self) -> None:
         # Existing terminal PR handling must still finalize the issue to
         # `done` on an external merge -- the fixing route is gated on
         # fresh PR feedback and must not preempt the merged-PR branch.
@@ -238,7 +238,7 @@ class InReviewRoutesFreshFeedbackToFixingTest(
         self.assertNotIn((880, "fixing"), gh.label_history)
         self.assertIn("merged_at", gh.pinned_data(880))
 
-    def test_issue_thread_comment_wins_over_drift_hash(
+    def test_issue_comment_wins_over_drift(
         self,
     ) -> None:
         # Regression test for the reviewer's reproducer: a normal fresh

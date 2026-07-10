@@ -239,7 +239,7 @@ class PerRepoCapEnforcementTest(unittest.TestCase):
 
 
 class FamilyGateTest(unittest.TestCase):
-    def test_only_one_family_worker_per_repo_in_flight(self) -> None:
+    def test_one_family_worker_per_repo(self) -> None:
         # Per-repo cap is generous so the family slot is the ONLY
         # reason the second submit must be skipped.
         sched = IssueScheduler(global_cap=10, per_repo_cap=10)
@@ -345,7 +345,7 @@ class ShutdownDrainRaceTest(unittest.TestCase):
     accepted submit's failure ends up in the log.
     """
 
-    def test_shutdown_blocks_until_callback_registered(self) -> None:
+    def test_blocks_until_callback_is_registered(self) -> None:
         """Deterministic race: gate ``Future.add_done_callback`` on a
         barrier so it cannot finish registering until we release it.
         While submit is blocked inside its lock-held critical section,
@@ -418,7 +418,7 @@ class ShutdownDrainRaceTest(unittest.TestCase):
             )
             self.assertEqual(sched.active_count(), 0)
 
-    def test_every_accepted_failure_logged_under_shutdown_race(self) -> None:
+    def test_shutdown_race_logs_each_accepted_failure(self) -> None:
         for trial in range(5):
             sched = IssueScheduler(global_cap=8, per_repo_cap=8)
             accepted = 0
@@ -466,7 +466,7 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
     catches any completion that landed between the two shutdowns.
     """
 
-    def test_wait_true_after_wait_false_blocks_until_exit(self) -> None:
+    def test_wait_true_after_false_blocks_until_exit(self) -> None:
         sched = IssueScheduler(global_cap=2, per_repo_cap=2)
         start = threading.Event()
         release = threading.Event()
@@ -504,7 +504,7 @@ class ShutdownRepeatableWaitTest(unittest.TestCase):
         finally:
             release.set()
 
-    def test_wait_true_after_wait_false_drains_completion(self) -> None:
+    def test_wait_true_after_false_drains_completion(self) -> None:
         # A worker that finishes between the two shutdown calls must
         # still have its failure logged by the second call's reap.
         sched = IssueScheduler(global_cap=2, per_repo_cap=2)
@@ -728,7 +728,7 @@ class TrackActiveContextManagerTest(unittest.TestCase):
         finally:
             release_bucket.set()
 
-    def test_duplicate_claim_returns_false_without_stealing_marker(
+    def test_duplicate_claim_keeps_existing_marker(
         self,
     ) -> None:
         # The drain must skip `_process_issue` when `claimed` is False;
@@ -894,7 +894,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         finally:
             release.set()
 
-    def test_cap_exempt_submit_still_honors_family_mutex(self) -> None:
+    def test_submit_honors_family_mutex(self) -> None:
         # The cap exemption only bypasses the cap counters; family-aware
         # submits still serialize per repo so an exempt no-agent family
         # bucket cannot overlap with a regular (non-exempt) family worker.
@@ -925,7 +925,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         finally:
             release.set()
 
-    def test_cap_exempt_submit_still_honors_duplicate_active(self) -> None:
+    def test_submit_honors_duplicate_active(self) -> None:
         # A cap-exempt submit for an already-in-flight key is rejected.
         # `is_active` returns True for an exempt-submitted key so a
         # follow-up fanout submit cannot slip past the duplicate gate.
@@ -962,7 +962,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         finally:
             release.set()
 
-    def test_cap_exempt_pool_is_independent_of_global_cap(self) -> None:
+    def test_pool_is_independent_of_global_cap(self) -> None:
         # Regression: a prior implementation sized the cap-exempt
         # executor at ``global_cap``. With ``global_cap=1`` and two
         # no-agent family buckets on different repos, the second
@@ -1011,7 +1011,7 @@ class CapExemptSubmitTest(unittest.TestCase):
         finally:
             release.set()
 
-    def test_cap_exempt_completion_clears_marker_and_family_slot(self) -> None:
+    def test_completion_clears_marker_and_family_slot(self) -> None:
         # Completing an exempt family submit must release BOTH its
         # tracked-set marker (so `is_active` flips back to False) and
         # the family mutex (so the next family submit on this repo is

@@ -75,7 +75,7 @@ class HandleValidatingClosedIssueTest(
     returns False.
     """
 
-    def test_closed_validating_with_open_pr_flips_to_rejected(self) -> None:
+    def test_open_pr_marks_closed_issue_rejected(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(121, label="validating")
         issue.closed = True
@@ -106,7 +106,7 @@ class HandleValidatingClosedIssueTest(
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
 
-class ValidatingApprovalRoutesThroughDocumentingTest(
+class ApprovalThroughDocumentingTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
     """Issue #266: after `VERDICT: APPROVED` + verify + squash/force-push,
@@ -177,7 +177,7 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
             for _, body in gh.posted_pr_comments
         ))
 
-    def test_verify_failure_does_not_relabel_to_documenting(self) -> None:
+    def test_verify_failure_keeps_validating(self) -> None:
         # Local-verify gate fires BEFORE the approval/squash/handoff, so
         # a failed verify must leave the issue parked on `validating`
         # with no relabel to documenting or in_review.
@@ -201,7 +201,7 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         self.assertNotIn((9, "documenting"), gh.label_history)
         self.assertNotIn((9, "in_review"), gh.label_history)
 
-    def test_squash_failure_does_not_relabel_to_documenting(self) -> None:
+    def test_squash_failure_keeps_validating(self) -> None:
         # Squash failure parks awaiting human on `validating`; no
         # relabel to documenting fires, since the original commits (now
         # stale w.r.t. the operator's intended squashed head) sit on

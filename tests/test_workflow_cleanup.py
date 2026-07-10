@@ -79,7 +79,7 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         self.assertEqual(branch_call.args[2], self.BRANCH)
         self.assertEqual(gh.deleted_remote_branches, [self.BRANCH])
 
-    def test_skips_worktree_remove_when_worktree_absent(self) -> None:
+    def test_skips_remove_without_worktree(self) -> None:
         # Worktree may already be gone if the operator cleaned it up by hand
         # or a prior tick removed it. Helper should still drop the local
         # branch and request the remote delete instead of erroring out.

@@ -50,7 +50,7 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn((4, "validating"), gh.label_history)
         self.assertEqual(gh.pinned_data(4).get("pr_number"), 42)
 
-    def test_legacy_pinned_branch_anchors_pr_lookup_and_push(self) -> None:
+    def test_legacy_branch_anchors_lookup_and_push(self) -> None:
         # Regression: an in-flight issue that was already running before
         # branches were slug-namespaced has `state["branch"]` pinned to
         # the legacy `orchestrator/issue-<n>` form and a live PR whose
@@ -88,7 +88,7 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # State stays pinned to the legacy branch.
         self.assertEqual(gh.pinned_data(4).get("branch"), LEGACY)
 
-    def test_on_commits_persists_branch_for_branchless_resume(self) -> None:
+    def test_persists_branch_for_branchless_resume(self) -> None:
         # Regression: a state that lacks `branch` going into `_on_commits`
         # (the awaiting-human resume path skips the fresh-spawn
         # `state.set("branch", ...)` block) would, before this fix, leave
@@ -160,7 +160,7 @@ class FormatPrAgentMessageTest(unittest.TestCase):
         self.assertEqual(out, msg)
         self.assertNotIn(implementing._PR_BODY_TRUNCATION_MARKER, out)
 
-    def test_long_message_truncated_with_visible_marker(self) -> None:
+    def test_long_message_capped_with_marker(self) -> None:
         msg = "word " * 20000  # ~100k chars, well over the cap
         out = implementing._format_pr_agent_message(msg)
         # Explicit, visible truncation marker is present.
@@ -176,7 +176,7 @@ class FormatPrAgentMessageTest(unittest.TestCase):
         self.assertTrue(out.rstrip().endswith(
             implementing._PR_BODY_TRUNCATION_MARKER))
 
-    def test_truncation_lands_on_a_boundary_not_mid_token(self) -> None:
+    def test_cap_lands_on_token_boundary(self) -> None:
         # A single unbroken run with one space near the cap: the cut must
         # fall back to the word boundary rather than slicing mid-token.
         head = "a" * (implementing._PR_BODY_AGENT_MESSAGE_CAP - 5)
@@ -201,7 +201,7 @@ class OnCommitsBodyTruncationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     _GITHUB_BODY_LIMIT = 65536
 
-    def test_long_agent_message_body_capped_and_marked(self) -> None:
+    def test_long_body_is_capped_and_marked(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(60, label="implementing", title="add a thing")
         gh.add_issue(issue)
@@ -269,7 +269,7 @@ class RepoLocalCommitStylePromptTest(unittest.TestCase):
         self.assertIn("subject line only", prompt)
         self.assertIn("Co-Authored-By", prompt)
 
-    def test_implement_prompt_teaches_repo_local_style(self) -> None:
+    def test_implement_prompt_teaches_local_style(self) -> None:
         issue = make_issue(7, title="add a thing", body="please add a thing")
         self._assert_repo_local_style(
             workflow._build_implement_prompt(
@@ -279,18 +279,18 @@ class RepoLocalCommitStylePromptTest(unittest.TestCase):
         self._assert_repo_local_style(
             workflow._build_fix_prompt("please fix the typo"))
 
-    def test_pr_comment_followup_teaches_repo_local_style(self) -> None:
+    def test_followup_teaches_local_style(self) -> None:
         comments = [FakeComment(id=42, body="please rename foo to bar",
                                 user=FakeUser("alice"))]
         self._assert_repo_local_style(
             workflow._build_pr_comment_followup(comments))
 
-    def test_user_content_change_prompt_teaches_repo_local_style(self) -> None:
+    def test_content_change_teaches_local_style(self) -> None:
         issue = make_issue(7, title="add a thing", body="please add a thing")
         self._assert_repo_local_style(
             workflow._build_user_content_change_prompt(issue, comments_text=""))
 
-    def test_documentation_prompt_does_not_mandate_docs_prefix(self) -> None:
+    def test_docs_prompt_does_not_require_prefix(self) -> None:
         issue = make_issue(7, title="add a thing", body="please add a thing")
         prompt = workflow._build_documentation_prompt(
             _TEST_SPEC, issue, comments_text="", specs=[_TEST_SPEC])
@@ -310,7 +310,7 @@ class ForegroundOnlyPromptTest(unittest.TestCase):
 
     MARKER = "NEVER start a background job"
 
-    def test_dev_facing_prompts_carry_foreground_only_note(self) -> None:
+    def test_dev_prompts_have_foreground_note(self) -> None:
         issue = make_issue(7, title="add a thing", body="please add a thing")
         comments = [FakeComment(id=42, body="please rename foo to bar",
                                 user=FakeUser("alice"))]
@@ -349,7 +349,7 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         return gh, issue
 
-    def test_pr_title_uses_conventional_first_commit_subject(self) -> None:
+    def test_uses_conventional_commit_subject(self) -> None:
         gh, issue = self._seeded(issue_number=30)
 
         self._run(
@@ -368,7 +368,7 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Traceability still in body.
         self.assertIn(f"Resolves #{issue.number}", pr.body)
 
-    def test_pr_title_uses_scoped_conventional_first_commit_subject(self) -> None:
+    def test_uses_scoped_conventional_subject(self) -> None:
         gh, issue = self._seeded(issue_number=31)
 
         self._run(
@@ -384,7 +384,7 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(gh.opened_prs[0].title, "fix(api)!: drop legacy endpoint")
 
-    def test_pr_title_falls_back_to_feat_for_unconventional(self) -> None:
+    def test_unconventional_falls_back_to_feat(self) -> None:
         gh, issue = self._seeded(issue_number=32)
 
         self._run(
@@ -401,7 +401,7 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(pr.title, "feat: add a sparkly thing")
         self.assertIn(f"Resolves #{issue.number}", pr.body)
 
-    def test_pr_title_falls_back_to_fix_for_bug_labelled_issue(self) -> None:
+    def test_bug_label_falls_back_to_fix(self) -> None:
         gh, issue = self._seeded(issue_number=33, label_name="bug")
 
         self._run(
@@ -430,7 +430,7 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(gh.opened_prs[0].title, "feat: add a sparkly thing")
 
-    def test_pr_title_uses_conventional_issue_title_in_fallback(self) -> None:
+    def test_fallback_uses_conventional_issue_title(self) -> None:
         # Issue title already conventional -> use it directly so we don't
         # produce a doubled `feat: feat: ...` form.
         gh = FakeGitHubClient()
@@ -467,7 +467,7 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(gh.opened_prs[0].title, "event: add the winter gala")
 
-    def test_pr_title_fallback_uses_inferred_repo_prefix(self) -> None:
+    def test_fallback_uses_inferred_repo_prefix(self) -> None:
         # First commit subject is unprefixed, so the orchestrator must
         # synthesize a title -- and it honors the repo-local prefix that
         # `_infer_subject_prefix` reads from base history instead of `feat:`.
@@ -532,7 +532,7 @@ class PrefixedSubjectHelperTest(unittest.TestCase):
     accepts any lowercase `<token>: <subject>` prefix, so repo-local styles
     survive, while still rejecting prose and bare prefixes."""
 
-    def test_accepts_conventional_and_repo_local_prefixes(self) -> None:
+    def test_accepts_conventional_and_local_prefixes(self) -> None:
         for subject in (
             "feat: add thing",
             "fix(api)!: drop endpoint",

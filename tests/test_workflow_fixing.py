@@ -212,7 +212,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- debounce expiry --------------------------------------------------
 
-    def test_fixing_within_debounce_window_does_not_resume(self) -> None:
+    def test_debounce_window_does_not_resume(self) -> None:
         # Triggering comment is fresh (created `now`); IN_REVIEW_DEBOUNCE_SECONDS
         # has not elapsed, so the handler must NOT resume the dev. No agent
         # spawn, no label change, watermarks untouched.
@@ -551,7 +551,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- dev resume + push --> flip to validating ------------------------
 
-    def test_pushed_fix_flips_to_validating_with_reset_state(self) -> None:
+    def test_pushed_fix_resets_and_enters_validating(self) -> None:
         # A pushed fix flips DIRECTLY back to `validating` so the
         # reviewer agent re-evaluates the freshened diff next tick.
         # Docs do not run on the pushed-fix exit -- the single docs
@@ -592,7 +592,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Watermark advanced past the consumed comment.
         self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
 
-    def test_dev_timeout_parks_and_advances_watermarks(self) -> None:
+    def test_timeout_parks_and_advances_watermarks(self) -> None:
         # On dev timeout `_handle_dev_fix_result` parks awaiting human.
         # The fixing handler still advances the in_review watermarks past
         # the consumed feedback so the next tick does not replay it and
@@ -685,7 +685,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("add a test for this branch", prompt)
         self.assertIn("please update the doc string", prompt)
 
-    def test_consumed_issue_comment_refreshes_user_content_hash(
+    def test_consumed_comment_refreshes_content_hash(
         self,
     ) -> None:
         # When fixing feeds a fresh issue-thread comment to the dev,
@@ -739,7 +739,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             pinned_data.get(USER_CONTENT_HASH), "stale-hash-pre-comment",
         )
 
-    def test_failed_fix_also_refreshes_user_content_hash(self) -> None:
+    def test_failed_fix_refreshes_content_hash(self) -> None:
         # Symmetric guard for the failure path: the dev saw the
         # comment via the resume prompt even when the push failed,
         # so the hash baseline must move with the consumption.
@@ -770,7 +770,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             pinned_data.get(USER_CONTENT_HASH), "stale-hash-pre-comment",
         )
 
-    def test_pushed_fix_bump_does_not_swallow_concurrent_comment(
+    def test_pushed_bump_keeps_concurrent_comment(
         self,
     ) -> None:
         # Race window: a human posts an issue-thread comment AFTER the
@@ -827,7 +827,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
         self.assertLess(pinned_data.get(PR_LAST_COMMENT_ID), CONCURRENT_COMMENT_ID)
 
-    def test_failed_fix_bump_does_not_swallow_concurrent_comment(
+    def test_failed_bump_keeps_concurrent_comment(
         self,
     ) -> None:
         # Symmetric guard for the failure path: a human posts an
@@ -902,7 +902,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- awaiting-human gate (parked from prior failed resume) ----------
 
-    def test_awaiting_human_with_no_new_feedback_is_no_op(self) -> None:
+    def test_no_new_feedback_is_noop(self) -> None:
         # After a prior failed tick parked the issue and bumped the
         # watermark past the original triggering comment, a poll with no
         # fresh human reply must be a no-op -- no agent spawn, no comment
@@ -927,7 +927,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.label_history, [])
 
-    def test_awaiting_human_with_fresh_reply_resumes_dev(self) -> None:
+    def test_fresh_reply_resumes_dev(self) -> None:
         # The human typed a reply after the park. The fresh comment is
         # past the bumped watermark and past the debounce window, so the
         # handler clears the park flags and resumes the dev with the
@@ -968,7 +968,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
 
-    def test_validating_routed_fix_bumps_round_instead_of_reset(self) -> None:
+    def test_validating_fix_bumps_instead_of_resets(self) -> None:
         # A parked CHANGES_REQUESTED dev fix (label flipped to `fixing`
         # by `_handle_validating`) is finished off via a human reply.
         # The pushed fix must BUMP `review_round`, not reset it: we are
@@ -1016,7 +1016,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Flipped back to validating so the reviewer re-evaluates next tick.
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
-    def test_push_failed_park_silently_recovers_when_push_lands(
+    def test_push_failure_park_recovers_on_success(
         self,
     ) -> None:
         # A `_handle_validating` CHANGES_REQUESTED dev fix can park
@@ -1068,7 +1068,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Flipped back to validating so the reviewer reruns next tick.
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
-    def test_push_failed_park_stays_stuck_when_push_still_fails(
+    def test_push_failure_park_stays_on_failure(
         self,
     ) -> None:
         # The remote is still rejecting the push. The recovery branch
@@ -1105,7 +1105,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Did NOT re-post the park comment (would be repetitive churn).
         self.assertEqual(gh.posted_comments, [])
 
-    def test_agent_timeout_park_clears_when_no_commit_landed(self) -> None:
+    def test_timeout_park_clears_without_commit(self) -> None:
         # An `agent_timeout` park with `pre_dev_fix_sha == head_sha` means
         # the timeout produced no new commit. The recovery branch clears
         # the park flags WITHOUT bumping the round (nothing landed) and
@@ -1148,7 +1148,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # a future park does not re-use a stale value.
         self.assertIsNone(pinned_data.get(PRE_DEV_FIX_SHA))
 
-    def test_agent_timeout_park_finishes_push_when_dev_committed(
+    def test_timeout_park_pushes_dev_commit(
         self,
     ) -> None:
         # The dev committed before the timeout killed it; recovery
@@ -1185,7 +1185,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(pinned_data.get(REVIEW_ROUND), 2)
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
-    def test_in_review_routed_agent_timeout_park_not_recovered(
+    def test_review_timeout_park_not_recovered(
         self,
     ) -> None:
         # Regression: the transient recovery branch must NOT fire on
@@ -1241,7 +1241,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             pinned_data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS,
         )
 
-    def test_in_review_routed_push_failed_park_not_recovered(
+    def test_review_push_park_not_recovered(
         self,
     ) -> None:
         # Same gate, push_failed flavor: on the in_review route a
@@ -1284,7 +1284,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(pinned_data.get(REVIEW_ROUND), 0)
 
-    def test_non_transient_park_stays_silent_without_recovery(self) -> None:
+    def test_nontransient_park_stays_silent(self) -> None:
         # Park reasons that REQUIRE a human comment to unstick (an
         # agent question, a dirty worktree) must not be silently
         # recovered. The handler returns early as before.
@@ -1320,7 +1320,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(pinned_data.get(REVIEW_ROUND), 1)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
 
-    def test_in_review_routed_fix_resets_round_to_zero(self) -> None:
+    def test_review_fix_resets_round_to_zero(self) -> None:
         # Companion to the test above: the in_review->fixing route
         # (which sets `pending_fix_at` when fresh PR feedback lands after
         # reviewer approval) MUST reset `review_round` to 0 on a pushed
@@ -1358,7 +1358,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- no unread feedback at all --------------------------------------
 
-    def test_no_unread_feedback_bounces_back_to_validating(self) -> None:
+    def test_no_unread_feedback_returns_to_validating(self) -> None:
         # Defensive recovery: if the rescan finds nothing (watermarks
         # already cover the bookmarks), there is no fix work to do.
         # Bounce the label back to `validating` so the reviewer
@@ -1388,7 +1388,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- PR fetch failure bails this tick instead of crashing -----------
 
-    def test_get_pr_failure_for_open_issue_bails_without_crash(self) -> None:
+    def test_open_issue_pr_error_bails_cleanly(self) -> None:
         # If `gh.get_pr` raises for an open `fixing` issue, the handler
         # used to fall through into the rescan with `pr=None` and crash
         # at `gh.pr_conversation_comments_after(pr, ...)`. The guard
@@ -1418,7 +1418,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.posted_comments, [])
         self.assertFalse(gh.pinned_data(ISSUE).get(AWAITING_HUMAN))
 
-    def test_missing_pr_last_comment_id_falls_back_to_last_action(
+    def test_missing_pr_comment_id_uses_last_action(
         self,
     ) -> None:
         # `_handle_in_review` can route to `fixing` with
@@ -1473,7 +1473,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- orchestrator comments are filtered from the rescan -------------
 
-    def test_orchestrator_park_comment_is_filtered_from_rescan(self) -> None:
+    def test_park_comment_filtered_from_rescan(self) -> None:
         # A prior tick may have posted an orchestrator comment with id
         # past the watermark. The rescan filters orchestrator-authored
         # comments (by recorded id AND by hidden body marker) so a HITL
@@ -1509,7 +1509,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- crash/restart and failure-path coverage ------------------------
 
-    def test_missing_dev_session_resumes_via_fresh_spawn(self) -> None:
+    def test_missing_dev_session_spawns_fresh(self) -> None:
         # `dev_session_id` may be absent on a `fixing` issue whose prior
         # dev session was dropped by the silent-park fallback, or on
         # legacy state that pre-dates session tracking. The fixing
@@ -1553,7 +1553,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
 
-    def test_push_failure_parks_in_fixing_with_transient_reason(self) -> None:
+    def test_push_error_parks_with_transient_reason(self) -> None:
         # Push failure on the dev fix -> park awaiting_human in `fixing`
         # with the transient `push_failed` reason. The workflow label
         # MUST stay at `fixing` so the operator can see where the issue
@@ -1703,7 +1703,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(pinned_data.get(REVIEW_ROUND), 3)
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
-    def test_no_commit_stranded_fix_behind_remote_parks(self) -> None:
+    def test_stranded_fix_behind_remote_parks(self) -> None:
         # Remote PR branch moved past our local view (behind > 0):
         # pushing would race a head we have not reconciled, so the
         # handler must fall back to the question park.
@@ -1724,7 +1724,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
 
-    def test_no_commit_stranded_fix_fetch_failure_parks(self) -> None:
+    def test_stranded_fix_fetch_error_parks(self) -> None:
         # The pre-push fetch failed; without a current view of the
         # remote PR head the ahead/behind comparison is meaningless, so
         # the handler must not push and falls back to the question park.
@@ -1765,7 +1765,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks[PUSH_BRANCH].assert_not_called()
         self.assertTrue(gh.pinned_data(ISSUE).get(AWAITING_HUMAN))
 
-    def test_no_commit_stranded_fix_push_failure_parks_transient(self) -> None:
+    def test_stranded_fix_push_error_parks_transient(self) -> None:
         # The deferred publish reuses the shared push tail, so a failed
         # push lands the standard `push_failed` transient park (which the
         # next tick's silent recovery can retry).
@@ -1788,7 +1788,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(pinned_data.get(PARK_REASON), PARK_PUSH_FAILED)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
 
-    def test_ack_stranded_fix_publishes_instead_of_in_review(self) -> None:
+    def test_ack_stranded_fix_publishes(self) -> None:
         # in_review route (`pending_fix_at` set): the dev ACKs a no-commit
         # resume, but the clean worktree HEAD is strictly ahead of the
         # remote PR branch -- a fix a prior parked run committed that
@@ -1831,7 +1831,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Watermark advanced past the consumed feedback.
         self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
 
-    def test_ack_stranded_behind_remote_keeps_in_review(self) -> None:
+    def test_behind_remote_ack_keeps_in_review(self) -> None:
         # The remote PR branch moved past the local view (behind > 0):
         # `_stranded_fix_unpushed` is conservative and reports False
         # rather than racing a head we have not reconciled, so the ACK
@@ -1900,7 +1900,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             int(pinned_data.get("silent_park_count") or 0), 1,
         )
 
-    def test_session_limit_parks_then_continue_retries(
+    def test_session_limit_continue_retries(
         self,
     ) -> None:
         # #705 regression, #699 shape: a Claude session-limit notice arrives
@@ -1974,7 +1974,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertFalse(final.get(AWAITING_HUMAN))
         self.assertIsNone(final.get(PARK_REASON))
 
-    def test_restart_with_pending_feedback_resumes_from_watermarks(
+    def test_restart_resumes_feedback_from_watermarks(
         self,
     ) -> None:
         # Crash/restart contract: the orchestrator has no in-memory
@@ -2107,7 +2107,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh.add_pr(pr)
         return gh, issue, pr
 
-    def test_reconstructs_exact_batch_after_watermarks_advanced(self) -> None:
+    def test_exact_batch_after_watermark_advance(self) -> None:
         gh, issue, pr = self._pr_with_feedback()
         # Watermarks advanced PAST the whole batch, as they would be after a
         # dev resume consumed it: a rescan from these would find nothing.
@@ -2185,7 +2185,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
 
         self.assertEqual(_reconstruct_pending_fix_batch(gh, issue, pr, state), [])
 
-    def test_reconstruction_drops_untrusted_recorded_ids(self) -> None:
+    def test_drops_untrusted_recorded_ids(self) -> None:
         # An issue parked before the trust gate shipped can carry an untrusted
         # author's id in `pending_fix_*_ids`. With `ALLOWED_ISSUE_AUTHORS` set,
         # reconstruction must re-apply the allowlist so the `/orchestrator
@@ -2257,7 +2257,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh.add_pr(pr)
         return gh, issue, pr
 
-    def test_reconstructs_validating_route_reviewer_anchor(self) -> None:
+    def test_validating_route_restores_anchor(self) -> None:
         # No id lists / no `pending_fix_at`; the lone anchor is the recorded
         # reviewer PR comment. Reconstruction must re-fetch it by id even
         # though it is orchestrator-authored and the watermark has advanced.
@@ -2278,7 +2278,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         prompt = workflow._build_pr_comment_followup(batch)
         self.assertIn("please fix the docstring ordering", prompt)
 
-    def test_reviewer_anchor_survives_author_allowlist(self) -> None:
+    def test_anchor_survives_author_allowlist(self) -> None:
         # The anchor is the orchestrator's own reviewer output, so it must be
         # replayed even when the allowlist does NOT list the orchestrator's
         # login -- it is prepended OUTSIDE `filter_trusted`.
@@ -2298,7 +2298,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             [BATCH_PR_CONVERSATION_ID],
         )
 
-    def test_reviewer_anchor_ignored_when_pending_fix_at_set(self) -> None:
+    def test_pending_fix_at_ignores_anchor(self) -> None:
         # A stale anchor left behind by an earlier validating park must NOT be
         # prepended to an in_review-route batch (`pending_fix_at` set): the
         # route discriminator gates it out.
@@ -2313,7 +2313,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
 
         self.assertEqual(_reconstruct_pending_fix_batch(gh, issue, pr, state), [])
 
-    def test_reviewer_anchor_missing_comment_yields_empty(self) -> None:
+    def test_missing_anchor_comment_yields_empty(self) -> None:
         # The anchor id points at a comment that no longer exists (deleted, or
         # a PR read that returned without it): reconstruction yields an empty
         # batch so the caller's refusal holds.
@@ -2327,7 +2327,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
 
         self.assertEqual(_reconstruct_pending_fix_batch(gh, issue, pr, state), [])
 
-    def test_id_set_prefers_list_and_rejects_bool_max_id(self) -> None:
+    def test_id_set_prefers_list_rejects_bool_max(self) -> None:
         from orchestrator.github import PinnedState
 
         # Full list present -> used verbatim (the max id is ignored).
@@ -2481,7 +2481,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         "rename the temp var", "please address the review",
     )
 
-    def test_replays_preserved_batch_on_session_failure_park(self) -> None:
+    def test_session_error_park_replays_saved_batch(self) -> None:
         # Both session-failure reasons: the command drops the poisoned session
         # and replays the FULL preserved batch on a fresh spawn, then the
         # pushed fix routes back to `validating` with the round reset.
@@ -2564,7 +2564,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
             "no preserved" in body for _, body in gh.posted_comments
         ))
 
-    def test_continue_alongside_genuine_feedback_resumes_normally(self) -> None:
+    def test_continue_with_feedback_resumes_normally(self) -> None:
         # A `/orchestrator continue` posted ALONGSIDE genuine guidance on an
         # unsafe park is NOT intercepted: the other comment is the real answer
         # the park was waiting on, so the normal awaiting-human resume runs on
@@ -2591,7 +2591,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Live session resumed (not dropped) -- this is a real dev question.
         self.assertEqual(call.kwargs.get("resume_session_id"), POISONED_SESSION)
 
-    def test_validating_route_session_failure_refuses_continue(self) -> None:
+    def test_validating_error_refuses_continue(self) -> None:
         # A validating-route park (no `pending_fix_at`, no preserved batch, and
         # no `pending_fix_reviewer_comment_id` anchor) on a session-failure
         # reason must NOT resume the dev on the bare command text. With nothing
@@ -2678,7 +2678,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_validating_route_anchor_replays_reviewer_feedback(self) -> None:
+    def test_validating_anchor_replays_feedback(self) -> None:
         # #742: a validating-route park after a session limit, with the reviewer
         # feedback anchored in `pending_fix_reviewer_comment_id`. A bare
         # `/orchestrator continue` must REPLAY that reviewer feedback on a fresh
@@ -2722,7 +2722,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 # Anchor cleared on the pushed fix so it is not replayed again.
                 self.assertIsNone(pinned_data.get(PENDING_FIX_REVIEWER_COMMENT_ID))
 
-    def test_command_mixed_with_guidance_is_not_swallowed(self) -> None:
+    def test_command_with_guidance_is_not_swallowed(self) -> None:
         # A PR-conversation comment mixing real guidance with a
         # `/orchestrator continue` line IS the command (exact-line match), so
         # on an eligible in_review park it REPLAYS the preserved batch on a
@@ -2758,7 +2758,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
             for _, body in gh.posted_comments
         ))
 
-    def test_parse_orchestrator_continue_matches_exact_line(self) -> None:
+    def test_parser_matches_exact_continue_line(self) -> None:
         cmd = FakeComment(id=1, body="/orchestrator continue")
         cmd_ws = FakeComment(id=2, body="  /Orchestrator  Continue  ")
         cmd_trailing = FakeComment(id=3, body="/orchestrator continue\n")
@@ -2859,7 +2859,7 @@ class FixingAllowlistFeedbackFilterTest(
         )
         return gh, issue
 
-    def test_outsider_feedback_does_not_resume_on_any_surface(self) -> None:
+    def test_outsider_feedback_never_resumes(self) -> None:
         for surface in self._SURFACES:
             with self.subTest(surface=surface):
                 gh, issue = self._seed(
@@ -2882,7 +2882,7 @@ class FixingAllowlistFeedbackFilterTest(
                 mocks[PUSH_BRANCH].assert_not_called()
                 self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
-    def test_allowed_feedback_resumes_and_prompts_on_any_surface(self) -> None:
+    def test_allowed_feedback_resumes_on_all_surfaces(self) -> None:
         for surface in self._SURFACES:
             with self.subTest(surface=surface):
                 gh, issue = self._seed(surface, self.ALLOWED_BODY, self.ALLOWED)

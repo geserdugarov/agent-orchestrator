@@ -23,7 +23,7 @@ class ResolvingConflictDirtyParkingTest(
     incomplete tree.
     """
 
-    def test_agent_left_dirty_worktree_parks_awaiting_human(self) -> None:
+    def test_dirty_worktree_parks_for_human(self) -> None:
         gh, issue, pr = self._seed()
 
         merge_mock = MagicMock(return_value=(False, ["a.py"]))
@@ -55,7 +55,7 @@ class ResolvingConflictDirtyParkingTest(
         self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((200, "validating"), gh.label_history)
 
-    def test_agent_left_rebase_in_progress_parks_without_push(self) -> None:
+    def test_rebase_in_progress_parks_without_push(self) -> None:
         gh, issue, pr = self._seed()
         mocks, merge_mock, git_mock = self._run_with_merge(
             gh, issue,
@@ -78,7 +78,7 @@ class ResolvingConflictDirtyParkingTest(
         self.assertIn("rebase is still in progress", last_comment)
         self.assertIn("I resolved one stop", last_comment)
 
-    def test_dirty_recovered_commits_parks_without_push(self) -> None:
+    def test_recovered_commits_park_without_push(self) -> None:
         # Crash recovery with leftover dirty files: a previous tick
         # committed a resolution but ALSO left uncommitted edits, then
         # crashed before the dirty check ran. Pushing now would publish
@@ -108,7 +108,7 @@ class ResolvingConflictDirtyParkingTest(
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted", last_comment)
 
-    def test_dirty_clean_rebase_with_new_commit_parks_without_push(self) -> None:
+    def test_new_commit_rebase_parks_without_push(self) -> None:
         # Clean rebase produced a new HEAD but the
         # worktree carries pre-existing dirty files. Pushing the merge
         # rebased branch without those edits would publish an incomplete branch.
@@ -125,7 +125,7 @@ class ResolvingConflictDirtyParkingTest(
         state = gh.pinned_data(200)
         self.assertTrue(state.get("awaiting_human"))
 
-    def test_dirty_clean_rebase_no_op_parks_without_flip(self) -> None:
+    def test_noop_rebase_parks_without_label_flip(self) -> None:
         # Clean no-op rebase (HEAD didn't change because base hadn't
         # moved) but the worktree carries dirty files. The reviewer
         # at validating reads the worktree directly, so flipping with a

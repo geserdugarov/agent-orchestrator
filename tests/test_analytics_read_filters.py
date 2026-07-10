@@ -95,7 +95,7 @@ class RecentAgentExitsFilterTest(unittest.TestCase):
         self.assertEqual(params[3], "owner/r")
         self.assertEqual(params[-1], 10)
 
-    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+    def test_other_event_filter_skips_query(self) -> None:
         # If the operator deselects `agent_exit` from the events
         # multiselect, the recent-runs widget logically has no rows
         # -- it is by definition about `agent_exit`. Short-circuit
@@ -108,7 +108,7 @@ class RecentAgentExitsFilterTest(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
 
-    def test_event_filter_including_agent_exit_runs_query(self) -> None:
+    def test_agent_exit_filter_runs_query(self) -> None:
         # Selection includes `agent_exit`; the SQL still hard-AND's
         # `event = 'agent_exit'` and the function returns rows.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})

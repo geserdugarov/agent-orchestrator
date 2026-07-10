@@ -26,7 +26,7 @@ from tests.workflow_helpers import (
 class HandleImplementingResumeOnHashChangeTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
-    def test_body_drift_resumes_dev_session_not_re_decompose(self) -> None:
+    def test_body_drift_resumes_without_redecompose(self) -> None:
         # The spec rules out re-decomposing mid-implementation. Once a dev
         # session exists, the handler must instead notify the human and
         # resume the locked dev session with the new body so it can decide
@@ -78,7 +78,7 @@ class HandleImplementingResumeOnHashChangeTest(
             for _, body in gh.posted_comments
         ))
 
-    def test_no_dev_session_falls_through_to_fresh_spawn(self) -> None:
+    def test_no_session_falls_through_to_fresh(self) -> None:
         # Pre-spawn implementing (ready -> implementing on the same tick,
         # but the dev hasn't run yet): a hash change should just persist
         # the new value and let the fresh-spawn path pick up the new body
@@ -132,7 +132,7 @@ class ImplementingDriftInterruptedResumeTest(
     re-runs the resume. It must NOT route through `_on_question` / the ack
     path / a timeout park off the partial result."""
 
-    def test_drift_resume_interrupted_leaves_state_untouched(self) -> None:
+    def test_interrupted_resume_keeps_state(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(62, label="implementing", body="new requirements")
         gh.add_issue(issue)
@@ -185,7 +185,7 @@ class ImplementingDriftHeadShaDeltaTest(
     against commits that never had a chance to address the edited
     requirements."""
 
-    def test_recovered_unpushed_commits_do_not_mask_empty_resume(
+    def test_recovered_commits_expose_empty_resume(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -232,7 +232,7 @@ class ImplementingDriftHeadShaDeltaTest(
         self.assertEqual(state.get("park_reason"), "agent_silent")
 
 
-class ImplementingDriftNoDevSessionRecoveredCommitsTest(
+class NoSessionRecoveredCommitsDriftTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
     """Reviewer point 1: when implementing drift fires with NO recorded
@@ -241,7 +241,7 @@ class ImplementingDriftNoDevSessionRecoveredCommitsTest(
     has seen the edited issue body. Park awaiting human and let the
     operator decide whether to discard the recovered work or accept it."""
 
-    def test_drift_with_recovered_commits_and_no_session_parks(
+    def test_recovered_commits_without_session_park(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -280,7 +280,7 @@ class ImplementingDriftNoDevSessionRecoveredCommitsTest(
         # re-firing the drift park on the same edit.
         self.assertNotEqual(state.get("user_content_hash"), "stale-hash")
 
-    def test_drift_no_session_no_recovered_commits_falls_through(
+    def test_no_session_or_commits_falls_through(
         self,
     ) -> None:
         # The fall-through path is still correct when there are NO
@@ -315,7 +315,7 @@ class ImplementingDriftNoDevSessionRecoveredCommitsTest(
         self.assertEqual(len(gh.opened_prs), 1)
 
 
-class ImplementingDriftAwaitingHumanNoDevSessionTest(
+class AwaitingHumanNoSessionDriftTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
     """Reviewer point: implementing drift with no recorded `dev_session_id`
@@ -332,7 +332,7 @@ class ImplementingDriftAwaitingHumanNoDevSessionTest(
     the full implement prompt (which quotes `issue.body` and the
     conversation via `_recent_comments_text`)."""
 
-    def test_body_edit_only_clears_park_and_fresh_spawns(self) -> None:
+    def test_body_edit_clears_park_and_spawns_fresh(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
             1200, label="implementing", body="updated requirements",
@@ -376,7 +376,7 @@ class ImplementingDriftAwaitingHumanNoDevSessionTest(
         # PR opened from the fresh spawn.
         self.assertEqual(len(gh.opened_prs), 1)
 
-    def test_body_edit_with_new_comment_uses_full_implement_prompt(
+    def test_new_comment_body_edit_uses_full_prompt(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -464,7 +464,7 @@ class ImplementingContinueCommandTest(
         )
         return gh, issue
 
-    def test_silent_bare_continue_retries_without_drift_notice(
+    def test_bare_continue_retries_without_notice(
         self,
     ) -> None:
         # The #720 shape: parked `agent_silent`, stale watermark, human posts
@@ -535,7 +535,7 @@ class ImplementingContinueCommandTest(
             int(state.get("last_action_comment_id")), 9000,
         )
 
-    def test_continue_with_guidance_preserves_guidance(self) -> None:
+    def test_guided_continue_keeps_guidance(self) -> None:
         # A `/orchestrator continue` posted ALONGSIDE real guidance is not a
         # bare command: it falls through to the normal drift resume, which
         # feeds the guidance to the dev (it must not be dropped).

@@ -193,7 +193,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertEqual(head_before, self._wt_head())
         self.assertTrue(self._is_clean())
 
-    def test_dirty_worktree_skipped_without_disturbing_changes(self) -> None:
+    def test_dirty_worktree_skips_without_changes(self) -> None:
         self._advance_base(conflicting=False)
         # Plant an uncommitted edit in the worktree -- mirrors a mid-flight
         # agent edit. The base rebase must NOT run.
@@ -208,7 +208,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         self.assertTrue((self.wt / "scratch.py").exists())
         self.assertFalse((self.wt / "extra.txt").exists())
 
-    def test_pr_open_clean_base_advance_routes_to_validating(
+    def test_clean_base_advance_routes_to_validating(
         self,
     ) -> None:
         # The #402-style case: an open PR branch is merely behind base
@@ -281,7 +281,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         # No `conflict_round` seeded -- this was not a conflict path.
         self.assertIsNone(state.get(KEY_CONFLICT_ROUND))
 
-    def test_pr_open_clean_rebase_push_failure_resets_local_head(self) -> None:
+    def test_push_failure_resets_local_head(self) -> None:
         # Regression for issue #413 review: a clean local rebase whose
         # push fails (lease rejection on a diverged remote, transient
         # network error, etc.) must NOT leave local HEAD on the
@@ -336,7 +336,7 @@ class RefreshBaseAndWorktreesRealGitTest(unittest.TestCase):
         state = self.gh.pinned_data(7)
         self.assertIsNone(state.get(KEY_REVIEW_ROUND))
 
-    def test_open_pr_conflicting_base_relabels_resolving_conflict(
+    def test_conflicting_base_routes_to_conflict(
         self,
     ) -> None:
         # When the rebase actually leaves conflicted files, the refresh

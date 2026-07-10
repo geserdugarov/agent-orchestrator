@@ -126,7 +126,7 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
         self.assertEqual(verdict, VERDICT_UNKNOWN)
         self.assertIn("no docs changes needed", body)
 
-    def test_update_description_without_marker_is_unknown(self) -> None:
+    def test_update_without_marker_is_unknown(self) -> None:
         # The 'updated' outcome is signalled by the new commit on the
         # branch, not by the parser. A message describing an update but
         # lacking the no-change marker must therefore stay 'unknown' so
@@ -146,7 +146,7 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
         )
         self.assertEqual(verdict, VERDICT_UNKNOWN)
 
-    def test_non_final_marker_followed_by_text_is_unknown(self) -> None:
+    def test_nonfinal_marker_then_text_is_unknown(self) -> None:
         # The marker must be the FINAL non-whitespace content. A marker
         # line followed by an unresolved question must be rejected so an
         # agent's follow-up clarification can't silently close the stage.
@@ -155,7 +155,7 @@ class ParseDocumentationVerdictTest(unittest.TestCase):
         )
         self.assertEqual(verdict, VERDICT_UNKNOWN)
 
-    def test_marker_with_trailing_punctuation_is_unknown(self) -> None:
+    def test_trailing_punctuation_is_unknown(self) -> None:
         # `DOCS: NO_CHANGE.` (trailing punctuation) is rejected; the
         # contract is a machine-readable marker, not a sentence. Without
         # this, a markdown-trained agent's habit of ending sentences
@@ -176,7 +176,7 @@ class VerdictParserReexportTest(unittest.TestCase):
     working. The facade name must resolve to the same object the focused
     `workflow_messages` module defines."""
 
-    def test_workflow_facade_reexports_the_focused_parsers(self) -> None:
+    def test_facade_reexports_focused_parsers(self) -> None:
         from orchestrator import workflow, workflow_messages
 
         self.assertIs(

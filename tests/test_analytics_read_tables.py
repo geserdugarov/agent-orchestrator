@@ -70,7 +70,7 @@ class StageBreakdownExtensionTest(unittest.TestCase):
     cache_cost_usd / no_cache_cost_usd so the panel can stack
     cache vs no-cache spend per stage."""
 
-    def test_rolls_up_cost_tokens_runs_and_cache_split(self) -> None:
+    def test_rolls_up_cost_tokens_runs_and_cache(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         # 9-tuple shape: stage / events / avg_dur / cost / input /

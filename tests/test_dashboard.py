@@ -308,7 +308,7 @@ class _MainSourceTest(unittest.TestCase):
 
 class DefaultDateRangeTest(unittest.TestCase):
 
-    def test_default_window_covers_n_days_including_today(self) -> None:
+    def test_window_includes_today_and_n_days(self) -> None:
         _, dashboard = _reload()
         start, end = dashboard.default_date_range(
             today=MAY_28, days=7
@@ -502,7 +502,7 @@ class ScriptPathLaunchTest(unittest.TestCase):
             self.assertIn("main", namespace)
             self.assertIn("analytics_read", namespace)
 
-    def test_stale_parent_package_does_not_shadow_repo_root(self) -> None:
+    def test_stale_parent_cannot_shadow_repo(self) -> None:
         # Script-launch mode carries only `orchestrator/` on `sys.path`, so
         # importing `orchestrator.<x>` before the shim prepends the repo root
         # would bind the parent `orchestrator` package to whatever stale copy
@@ -555,7 +555,7 @@ class ScriptPathLaunchTest(unittest.TestCase):
                 "orchestrator.analytics.read",
             )
 
-    def test_package_import_ignores_stray_top_level_script_launch(self) -> None:
+    def test_package_import_ignores_stray_script(self) -> None:
         # A normal package import (`import orchestrator.dashboard`) must
         # resolve the shim via `orchestrator.script_launch`, never a bare
         # `import script_launch`. An unrelated top-level `script_launch.py`
@@ -752,7 +752,7 @@ class PreviousWindowTest(unittest.TestCase):
         self.assertEqual(prev.end, win.start)
         self.assertEqual(prev.end - prev.start, win.end - win.start)
 
-    def test_seven_day_window_yields_seven_day_previous(self) -> None:
+    def test_seven_day_window_has_seven_day_prior(self) -> None:
         _, dashboard = _reload()
         win = dashboard.to_window(MAY_22, MAY_28)
         prev = dashboard.previous_window(win)
@@ -871,7 +871,7 @@ class ReliabilityTileDataTest(unittest.TestCase):
         from orchestrator.analytics.read import Summary
         return Summary(**kw)
 
-    def test_timeouts_sourced_from_summary_full_window(self) -> None:
+    def test_timeouts_use_full_window_summary(self) -> None:
         _, dashboard = _reload()
         # Window holds far more agent runs than the recent-runs cap, with
         # failures and timeouts mixed in.
@@ -1061,7 +1061,7 @@ class IssuesTableHtmlTest(unittest.TestCase):
                        "Retries", "Status"):
             self.assertIn(f">{header}<", html)
 
-    def test_status_pill_renders_clean_when_no_failures(self) -> None:
+    def test_clean_pill_without_failures(self) -> None:
         _, dashboard = _reload()
         rows = [self._row(REPO_A, 1, 4.0, failed=0)]
         html = dashboard._issues_table_html(rows)
@@ -1069,7 +1069,7 @@ class IssuesTableHtmlTest(unittest.TestCase):
         self.assertIn(">clean<", html)
         self.assertNotIn('class="orch-pill bad"', html)
 
-    def test_status_pill_renders_fail_when_failures_present(self) -> None:
+    def test_fail_pill_with_failures(self) -> None:
         _, dashboard = _reload()
         rows = [self._row(REPO_A, 1, 4.0, failed=3)]
         html = dashboard._issues_table_html(rows)
@@ -1208,7 +1208,7 @@ class SkillMatrixHtmlTest(unittest.TestCase):
         # a whole percent, matching the aggregate table's format.
         self.assertIn(">60%<", html)
 
-    def test_zero_count_row_renders_explicit_muted_zero(self) -> None:
+    def test_zero_count_renders_muted_zero(self) -> None:
         # An offered-but-never-triggered catalog cell is a real
         # "offered but quiet" signal, not a dropped row: its "Runs with
         # skill" renders as an explicit (muted) 0 rather than going
@@ -1289,7 +1289,7 @@ class SkillMatrixSortTest(unittest.TestCase):
             self._row("c/repo", "gamma", ROLE_DEVELOPER, BACKEND_CLAUDE, 5, 0),
         ]
 
-    def test_headers_are_clickable_self_targeting_sort_links(self) -> None:
+    def test_headers_link_to_self_for_sorting(self) -> None:
         _, dashboard = _reload()
         html = dashboard._skill_matrix_html(self._rows())
         # Every column is an in-tab anchor pointing at its own sort param.
@@ -1306,7 +1306,7 @@ class SkillMatrixSortTest(unittest.TestCase):
         # class still appears in the CSS block, so match the span markup).
         self.assertNotIn('<span class="orch-skillmatrix-sort">', html)
 
-    def test_active_descending_column_shows_down_arrow_and_flips(self) -> None:
+    def test_descending_shows_down_arrow_and_flips(self) -> None:
         _, dashboard = _reload()
         html = dashboard._skill_matrix_html(
             self._rows(), sort_key="runs", descending=True,
@@ -1323,7 +1323,7 @@ class SkillMatrixSortTest(unittest.TestCase):
             f"?{MTX_SORT_PARAM}=runs&{MTX_DIR_PARAM}={SORT_ASC}", html
         )
 
-    def test_active_ascending_column_shows_up_arrow_and_flips(self) -> None:
+    def test_ascending_shows_up_arrow_and_flips(self) -> None:
         _, dashboard = _reload()
         html = dashboard._skill_matrix_html(
             self._rows(), sort_key="repo", descending=False,
@@ -1349,7 +1349,7 @@ class SkillMatrixSortTest(unittest.TestCase):
         self.assertLess(desc.index(">a/repo<"), desc.index(REPO_C_CELL_FRAGMENT))
         self.assertLess(desc.index(REPO_C_CELL_FRAGMENT), desc.index(">b/repo<"))
 
-    def test_unsorted_render_defaults_repo_asc_then_rate_desc(self) -> None:
+    def test_unsorted_defaults_repo_asc_rate_desc(self) -> None:
         # No sort key -> the default view orders rows by repo ascending,
         # then trigger rate descending within each repo, so each repo's
         # hottest skills lead. Two rows share a repo with different rates
@@ -1498,7 +1498,7 @@ class BackendEfficiencyCardHtmlTest(unittest.TestCase):
         # $8 / 4 runs = $2.00 / run.
         self.assertIn("$2.00 / run", html)
 
-    def test_zero_tokens_and_runs_do_not_divide_by_zero(self) -> None:
+    def test_zero_tokens_and_runs_avoid_division(self) -> None:
         _, dashboard = _reload()
         from orchestrator import dashboard_theme as theme
         row = self._row(backend=BACKEND_CODEX, runs=0, total_cost_usd=0.0)
@@ -1623,7 +1623,7 @@ class BuildReadKeysTest(unittest.TestCase):
 class DashboardDataPrepTest(unittest.TestCase):
     """Small data-prep helpers keep `main()` focused on render sequencing."""
 
-    def test_kpi_strip_data_uses_cache_tokens_and_daily_sparks(self) -> None:
+    def test_kpis_use_cache_tokens_and_daily_sparks(self) -> None:
         _, dashboard = _reload()
         from orchestrator import dashboard_theme as theme
         from orchestrator.analytics.read import (
@@ -1693,7 +1693,7 @@ class DashboardDataPrepTest(unittest.TestCase):
         )
         self.assertEqual(by_label["Rework share"]["value"], "38%")
 
-    def test_backend_tokens_by_day_accumulates_duplicate_cells(self) -> None:
+    def test_backend_day_tokens_sum_duplicate_cells(self) -> None:
         _, dashboard = _reload()
         from orchestrator.analytics.read import BackendDailyTokensRow
 
@@ -1868,7 +1868,7 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         self.assertIn("analytics_read.analytics_connection()", scoped_src)
         self.assertIn("conn=conn", scoped_src)
 
-    def test_prev_summary_reader_uses_lightweight_kpi_path(self) -> None:
+    def test_prev_summary_uses_lightweight_kpi_path(self) -> None:
         # Layer 3 split the previous-window read off `get_summary`
         # so the dashboard only pays for the scalars it actually
         # reads off `prev_summary` (cost / token totals + agent-run
@@ -1899,7 +1899,7 @@ class AnalyticsConnectionExposureTest(unittest.TestCase):
     and any shutdown hook that wants to drain the thread-local.
     """
 
-    def test_analytics_connection_is_a_context_manager(self) -> None:
+    def test_connection_is_a_context_manager(self) -> None:
         _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
         self.assertTrue(
             hasattr(dashboard.analytics_read, "analytics_connection")
@@ -1981,7 +1981,7 @@ class FacadeReExportCompatibilityTest(unittest.TestCase):
     against the facade rather than raising `ImportError`.
     """
 
-    def test_parallel_reads_internals_reexported_from_state(self) -> None:
+    def test_parallel_read_internals_are_reexported(self) -> None:
         _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
         import orchestrator.dashboard_state as state
         # Each facade name is the very object the extracted module
@@ -2003,7 +2003,7 @@ class FanOutReadsSequentialTest(unittest.TestCase):
     and so tests can inject fake readers without booting Streamlit.
     """
 
-    def test_results_keyed_by_name_in_submission_order(self) -> None:
+    def test_results_keep_name_and_submit_order(self) -> None:
         _, dashboard = _reload()
         order: list[str] = []
 
@@ -2065,7 +2065,7 @@ class FanOutReadsParallelTest(unittest.TestCase):
             results, {f"r{i}": i for i in range(5)}
         )
 
-    def test_each_reader_runs_exactly_once_on_a_worker(self) -> None:
+    def test_each_reader_runs_once_on_worker(self) -> None:
         # Re-entrant workers must not re-submit a reader (and
         # the dispatch logic must not double-collect). The set of
         # observed thread ids should be > 1 to confirm actual
@@ -2156,7 +2156,7 @@ class MainRenderDispatchTest(_MainSourceTest):
         # earlier, so anchor on the last occurrence.
         self.assertLess(idxs[-1], src.rindex("_render_drilldown("))
 
-    def test_skill_card_stays_between_heatmap_and_runs(
+    def test_skill_card_between_heatmap_and_runs(
         self,
     ) -> None:
         src = self._main_source()
@@ -2166,7 +2166,7 @@ class MainRenderDispatchTest(_MainSourceTest):
         self.assertLess(heatmap, skill)
         self.assertLess(skill, recent)
 
-    def test_read_and_error_branches_dispatch_to_helpers(self) -> None:
+    def test_read_and_error_paths_use_helpers(self) -> None:
         # `main` dispatches the staged read fan-out and the empty /
         # error rendering branches through focused helpers rather than
         # inlining the cached wrappers, the fan-out, the load log, and
@@ -2264,7 +2264,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
         self.assertIn("analytics_read.analytics_connection()", scoped_src)
         self.assertIn("conn=conn", scoped_src)
 
-    def test_matrix_read_wrapper_takes_no_conn_in_cache_key(self) -> None:
+    def test_read_cache_key_omits_connection(self) -> None:
         # `conn` must not appear in the wrapper's parameter list -- it
         # would land in the `st.cache_data` key and crash on the
         # unhashable psycopg connection.
@@ -2282,7 +2282,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
             src,
         )
 
-    def test_matrix_rendered_as_second_table_under_aggregate(self) -> None:
+    def test_matrix_is_second_aggregate_table(self) -> None:
         # The matrix is the SECOND table: it renders after the aggregate
         # `_skill_triggers_html(skill_rows)` table, inside the same card.
         src = self._source_of("_render_skill_triggers")
@@ -2290,7 +2290,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
         matrix = src.index("_render_skill_matrix_expander(")
         self.assertLess(agg, matrix)
 
-    def test_matrix_only_renders_when_aggregate_has_rows(self) -> None:
+    def test_matrix_needs_aggregate_rows(self) -> None:
         # The matrix render sits after the empty aggregate's early return,
         # so the no-rows path still shows the single notice rather than a
         # fallback for each table.
@@ -2304,7 +2304,7 @@ class SkillMatrixWiringTest(_MainSourceTest):
         self.assertLess(branch, matrix)
         self.assertLess(else_branch, matrix)
 
-    def test_matrix_rendered_inside_collapsed_expander(self) -> None:
+    def test_matrix_is_in_collapsed_expander(self) -> None:
         # The matrix folds into a collapsed expander (mirroring the
         # "Recent agent runs" block) so it does not dominate the card by
         # default. The `_skill_matrix_html` render must sit after an
@@ -2352,7 +2352,7 @@ class StaticMetadataCacheTest(_MainSourceTest):
         )
         self.assertIn("show_spinner=False", decorator_window)
 
-    def test_filter_options_reader_decorated_with_longer_ttl(self) -> None:
+    def test_filter_options_use_longer_ttl(self) -> None:
         src = self._metadata_source()
         marker = "read_filter_options = st.cache_data("
         self.assertIn(marker, src)
@@ -2425,7 +2425,7 @@ class StagedRenderTest(_MainSourceTest):
         # The staged reader lists live in the `_widget_readers` helper.
         return self._source_of("_widget_readers")
 
-    def test_first_wave_carries_only_kpi_topbar_inputs(self) -> None:
+    def test_first_wave_has_only_topbar_inputs(self) -> None:
         # The six reads in the first wave are exactly the inputs the
         # topbar / filter meta / insight banners / KPI strip consume.
         # Pin the set so a future refactor that adds (or drops) a
@@ -2442,7 +2442,7 @@ class StagedRenderTest(_MainSourceTest):
             with self.subTest(name=name):
                 self.assertNotIn(f'"{name}"', wave)
 
-    def test_second_wave_carries_the_remaining_widget_reads(self) -> None:
+    def test_second_wave_has_remaining_reads(self) -> None:
         src = self._readers_source()
         wave = self._wave_block(src, "second_wave_readers")
         for name in SECOND_WAVE_READER_NAMES:
@@ -2502,7 +2502,7 @@ class StagedRenderTest(_MainSourceTest):
         self.assertLess(spinner_head, first)
         self.assertLess(spinner_head, second)
 
-    def test_widget_rendering_runs_on_main_thread_not_workers(self) -> None:
+    def test_widgets_render_on_main_thread(self) -> None:
         # Worker threads in `_fan_out_reads` only return data -- the
         # `st.*` / `topbar_slot.markdown(...)` calls all live in
         # `main()` itself, on the main render thread. We assert this

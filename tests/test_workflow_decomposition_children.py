@@ -12,7 +12,7 @@ class CreateChildIssueAlwaysUsesParentRepoTest(unittest.TestCase):
     than the parent. Worth a regression test anyway.
     """
 
-    def test_calls_self_repo_create_issue_with_parent_link(self) -> None:
+    def test_creates_child_in_repo_with_parent_link(self) -> None:
         from unittest.mock import MagicMock
         from orchestrator.github import GitHubClient
 

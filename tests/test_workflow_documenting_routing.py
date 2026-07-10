@@ -25,7 +25,7 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
     non-existent handler to advance it.
     """
 
-    def test_documenting_label_is_recognized_as_workflow_label(self) -> None:
+    def test_label_is_recognized(self) -> None:
         from orchestrator.github import WORKFLOW_LABELS
 
         self.assertIn("documenting", WORKFLOW_LABELS)
@@ -39,7 +39,7 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
         self.assertIn("documenting", names)
 
-    def test_label_sits_between_validating_and_in_review(
+    def test_label_between_validating_and_in_review(
         self,
     ) -> None:
         # The happy-path lifecycle is implementing -> validating ->
@@ -66,7 +66,7 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         # single-threaded family bucket and defeat fan-out concurrency.
         self.assertNotIn("documenting", workflow._FAMILY_AWARE_LABELS)
 
-    def test_documenting_label_is_in_pr_refresh_detour_set(self) -> None:
+    def test_label_is_in_pr_refresh_detours(self) -> None:
         # Behind-base PR-having worktrees need to be routed through
         # `resolving_conflict` by the pre-tick refresh. The brief final-
         # docs hop is PR-having (its sibling labels validating /
@@ -97,7 +97,7 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         impl.assert_not_called()
         val.assert_not_called()
 
-    def test_documenting_without_pr_number_parks_awaiting_human(self) -> None:
+    def test_missing_pr_parks_awaiting_human(self) -> None:
         # End-to-end with the real handler: a manually-applied
         # `documenting` label on an issue with no pinned `pr_number`
         # cannot anchor on a dev PR worktree, so the handler parks
@@ -117,7 +117,7 @@ class DocumentingLabelRoutingTest(unittest.TestCase):
         # leaves the operator in control of the next move.
         self.assertEqual(gh.label_history, [])
 
-    def test_missing_pr_number_is_idempotent_when_parked(
+    def test_missing_pr_park_is_idempotent(
         self,
     ) -> None:
         # A second tick on an already-parked documenting issue (still

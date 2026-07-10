@@ -171,7 +171,7 @@ class RecordRepoSkillCatalogShapeTest(unittest.TestCase):
         self.assertIsInstance(record["ts"], str)
         self.assertNotIn("stage", record)
 
-    def test_empty_catalog_keeps_skills_available_drops_skill_paths(
+    def test_empty_catalog_keeps_skills_drops_paths(
         self,
     ) -> None:
         # An empty catalog still records `skills_available: []` (the
@@ -383,7 +383,7 @@ class DiscoverLocalSkillsTest(unittest.TestCase):
                 names = skill_catalog.discover_local_skills(cwd)
         self.assertEqual(names, ("imagegen", "openai-docs", "skill-installer"))
 
-    def test_repo_local_wins_position_over_global_duplicate(self) -> None:
+    def test_repo_skill_precedes_global_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td) / "wt"
             home = Path(td) / "codexhome"

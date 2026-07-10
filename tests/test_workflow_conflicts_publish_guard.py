@@ -77,7 +77,7 @@ class ResolvingConflictPublishGuardUnitTest(unittest.TestCase):
                 conflicts._already_rebased_onto_base(_TEST_SPEC, Path("/tmp/x")),
             )
 
-    def test_already_rebased_fails_closed_on_fetch_failure(self) -> None:
+    def test_rebased_probe_fails_closed_on_fetch(self) -> None:
         # Without proving HEAD is on the CURRENT base tip, we cannot
         # let the force-publish path enable. A stale
         # `<remote>/<base>` ref would let `rev-list HEAD..<remote>/<base>`

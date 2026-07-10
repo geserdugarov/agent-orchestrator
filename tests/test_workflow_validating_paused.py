@@ -49,7 +49,7 @@ def _paused_view(number: int) -> object:
 class ValidatingLivePauseDriftResumeTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
-    def test_pause_during_drift_resume_skips_result_handler(self) -> None:
+    def test_drift_pause_skips_result_handler(self) -> None:
         # A human edited the issue body (stale seeded hash -> drift fires), so
         # the handler resumes the dev on the new body. `paused` is applied
         # during that resume: the guard must stop BEFORE
@@ -151,7 +151,7 @@ class ValidatingLivePauseAwaitingHumanTest(
 class ValidatingLivePauseChangesRequestedTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
-    def test_pause_during_reviewer_change_fix_keeps_fixing_label(self) -> None:
+    def test_fix_pause_keeps_fixing_label(self) -> None:
         # The reviewer returns CHANGES_REQUESTED, so the handler posts the
         # feedback, flips to `fixing` (durable, pre-spawn), and resumes the dev
         # with the fix prompt. `paused` applied during that resume must stop

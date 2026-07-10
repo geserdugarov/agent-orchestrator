@@ -62,7 +62,7 @@ class ValidatingPushedFixesStayOnValidatingTest(
         gh.seed_state(issue_number, **defaults)
         return gh, issue
 
-    def test_changes_requested_pushed_fix_stays_on_validating(self) -> None:
+    def test_pushed_fix_stays_validating(self) -> None:
         gh, issue = self._validating_issue(issue_number=301, review_round=1)
         review = _agent(
             session_id="rev-sess",
@@ -85,7 +85,7 @@ class ValidatingPushedFixesStayOnValidatingTest(
         self.assertNotIn((301, "documenting"), gh.label_history)
         self.assertNotIn((301, "in_review"), gh.label_history)
 
-    def test_changes_requested_no_commit_stays_on_validating(self) -> None:
+    def test_no_commit_stays_validating(self) -> None:
         # The dev asked a question instead of committing -- no push, no
         # round bump, no documenting handoff. The issue parks awaiting
         # human via `_on_question`.
@@ -113,7 +113,7 @@ class ValidatingPushedFixesStayOnValidatingTest(
         self.assertNotIn((302, "documenting"), gh.label_history)
         self.assertNotIn((302, "in_review"), gh.label_history)
 
-    def test_awaiting_human_resume_stays_on_validating_on_push(self) -> None:
+    def test_human_resume_push_stays_validating(self) -> None:
         gh, issue = self._validating_issue(
             issue_number=303,
             awaiting_human=True,
@@ -196,7 +196,7 @@ class ValidatingPushedFixesStayOnValidatingTest(
             for _, body in gh.posted_comments
         ))
 
-    def test_reviewer_timeout_recovery_keeps_validating_label(self) -> None:
+    def test_reviewer_recovery_keeps_label(self) -> None:
         # No commit happened during a reviewer-side park (the reviewer
         # crashed, the dev never ran). Recovery clears the flags and
         # stays on `validating` -- the PR head is unchanged.
@@ -222,7 +222,7 @@ class ValidatingPushedFixesStayOnValidatingTest(
         self.assertEqual(state.get("review_round"), 1)
         self.assertNotIn((306, "documenting"), gh.label_history)
 
-    def test_agent_timeout_clean_recovery_keeps_validating_label(self) -> None:
+    def test_clean_dev_recovery_keeps_label(self) -> None:
         # The dev session timed out without producing a new commit (HEAD
         # unchanged from the pre-agent watermark). Recovery clears the
         # flags and stays on validating.
@@ -249,7 +249,7 @@ class ValidatingPushedFixesStayOnValidatingTest(
         self.assertEqual(state.get("review_round"), 1)
         self.assertNotIn((307, "documenting"), gh.label_history)
 
-    def test_agent_timeout_pushed_recovery_stays_on_validating(self) -> None:
+    def test_pushed_dev_recovery_stays_validating(self) -> None:
         # The dev committed before the timeout killed it; recovery
         # finishes the push. A new SHA landed on the PR but the issue
         # stays on `validating` so the reviewer re-evaluates on the
@@ -323,7 +323,7 @@ class ValidatingToInReviewHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_in_review_after_approval_does_not_replay_comments(self) -> None:
+    def test_approval_handoff_does_not_replay(self) -> None:
         # End-to-end: validating approves -> in_review tick pings HITL
         # without resuming the dev on the orchestrator's own automated
         # comments. This is the concrete bug guarded by the watermark

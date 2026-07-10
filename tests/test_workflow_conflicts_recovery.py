@@ -23,7 +23,7 @@ class ResolvingConflictRecoveryPushTest(
     through to the rebase path for a single combined round.
     """
 
-    def test_unpushed_local_commits_pushed_on_recovery(self) -> None:
+    def test_recovery_pushes_local_commits(self) -> None:
         # Crash recovery: a previous tick committed a conflict resolution
         # but crashed before `_push_branch` returned (or before the post-
         # push state write landed). The next tick must push the local
@@ -95,7 +95,7 @@ class ResolvingConflictRecoveryPushTest(
         self.assertTrue(state.get("awaiting_human"))
         self.assertNotIn((200, "validating"), gh.label_history)
 
-    def test_recovered_push_stale_base_falls_through_to_rebase(self) -> None:
+    def test_stale_base_falls_through_to_rebase(self) -> None:
         # The `fixing` drift router
         # (`_reconcile_parked_fixing`) reroutes here
         # when a stuck `push_failed` / `agent_timeout` park has

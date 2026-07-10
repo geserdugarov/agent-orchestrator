@@ -53,7 +53,7 @@ class BuildDocumentationPromptTest(unittest.TestCase):
         self.assertIn("roadmap", prompt)
         self.assertIn("out of scope", prompt)
 
-    def test_does_not_mandate_docs_prefix_for_updated_case(self) -> None:
+    def test_updated_case_does_not_require_prefix(self) -> None:
         # The docs pass must no longer force the `docs:` Conventional-Commit
         # type: the agent mirrors the repo's own recent commit style, so a
         # project-specific prefix (`event:`, `career:`, ...) is allowed for a
@@ -67,7 +67,7 @@ class BuildDocumentationPromptTest(unittest.TestCase):
         self.assertIn("repository-local", prompt)
         self.assertIn("subject line only", prompt)
 
-    def test_specifies_machine_readable_no_change_marker(self) -> None:
+    def test_specifies_machine_no_change_marker(self) -> None:
         prompt = self._build()
         self.assertIn("DOCS: NO_CHANGE", prompt)
 
@@ -160,7 +160,7 @@ class RedactSecretsTest(unittest.TestCase):
     def test_empty_input_passthrough(self) -> None:
         self.assertEqual(workflow._redact_secrets(""), "")
 
-    def test_diagnostics_block_redacts_before_truncation(self) -> None:
+    def test_diagnostics_redact_before_truncation(self) -> None:
         # Park comments cap the surfaced tail at 1KB. If we redacted after
         # slicing, a key that spans the cut would survive in the visible
         # tail. Pad noise so the secret would otherwise straddle the cap.
@@ -190,7 +190,7 @@ class RedactSecretsTest(unittest.TestCase):
             )
         self.assertNotIn("sk-proj-loglinevaluexyz", tail)
 
-    def test_diagnostics_redacts_multiline_secret_at_eof(self) -> None:
+    def test_diagnostics_redact_multiline_eof_secret(self) -> None:
         # Regression for the rstrip-before-redact ordering bug: a
         # multi-line secret whose env value itself ends in `\n` (e.g. a
         # PEM/SSH key) echoed at the end of stderr. If rstrip ran first,

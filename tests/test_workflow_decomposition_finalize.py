@@ -105,7 +105,7 @@ class ChildMergedPrAutoFinalizeTest(
             for n, body in gh.posted_comments if n == 80
         ))
 
-    def test_blocked_still_parks_when_child_pr_not_merged(self) -> None:
+    def test_unmerged_child_pr_keeps_parent_parked(self) -> None:
         # Regression guard: when the child PR is closed-without-merge,
         # the finalize helper must NOT flip the child to `done`. The
         # original manually-closed park still fires.

@@ -40,7 +40,7 @@ class HandleImplementingTimeoutDispositionTest(
         gh.add_issue(issue)
         return gh, issue
 
-    def test_timeout_no_commit_parks_with_agent_timeout(self) -> None:
+    def test_no_commit_parks_as_timeout(self) -> None:
         # HEAD did not advance past the pre-agent SHA: the timeout produced no
         # commit. Park awaiting human, no push, no PR -- but tag the park
         # `agent_timeout` and persist `pre_implement_sha` for next-tick
@@ -93,7 +93,7 @@ class HandleImplementingTimeoutDispositionTest(
         self.assertFalse(data.get("awaiting_human"))
         self.assertIsNone(data.get("pre_implement_sha"))
 
-    def test_timeout_dirty_commit_parks_without_pushing(self) -> None:
+    def test_dirty_commit_parks_without_push(self) -> None:
         # HEAD advanced but the tree carries uncommitted edits. Pushing would
         # publish an incomplete branch, so park for inspection instead.
         gh, issue = self._seeded()
@@ -160,7 +160,7 @@ class HandleImplementingTimeoutRecoveryTest(
         self.assertIsNone(data.get("park_reason"))
         self.assertIsNone(data.get("pre_implement_sha"))
 
-    def test_parked_timeout_outsider_only_comment_still_recovers(self) -> None:
+    def test_outsider_only_comment_still_recovers(self) -> None:
         # A late clean commit landed on an `agent_timeout` park (the #77 shape).
         # With `ALLOWED_ISSUE_AUTHORS` set, an outsider-only comment must read as
         # silence so the silent recovery still publishes the commit -- the raw

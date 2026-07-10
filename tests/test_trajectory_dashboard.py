@@ -105,7 +105,7 @@ class ScriptPathLaunchTest(unittest.TestCase):
                     del sys.modules[module_name]
             sys.modules.update(saved_modules)
 
-    def test_stale_parent_package_does_not_shadow_repo_root(self) -> None:
+    def test_stale_parent_cannot_shadow_repo(self) -> None:
         # With only `orchestrator/` on `sys.path`, importing `orchestrator.<x>`
         # before the shim prepends the repo root would bind the parent
         # `orchestrator` package to whatever stale copy is importable and route
@@ -165,7 +165,7 @@ class ScriptPathLaunchTest(unittest.TestCase):
                         del sys.modules[name]
                 sys.modules.update(saved_modules)
 
-    def test_package_import_ignores_stray_top_level_script_launch(self) -> None:
+    def test_package_import_ignores_stray_script(self) -> None:
         # A package import (`import orchestrator.trajectory_dashboard`) must
         # resolve the shim via `orchestrator.script_launch`, never a bare
         # `import script_launch`. An unrelated top-level `script_launch.py`
@@ -473,7 +473,7 @@ class RunUsageHtmlTest(unittest.TestCase):
     def test_pre_usage_record_renders_nothing(self) -> None:
         self.assertEqual(_td()._run_usage_html(_run()), "")
 
-    def test_unpriced_run_names_source_without_dollars(self) -> None:
+    def test_unpriced_run_names_source_without_cost(self) -> None:
         run = _run(run_usage={"models": [], "cost_source": "no-usage"})
         html = _td()._run_usage_html(run)
         # Unpriced -> the cost chip names the source, no dollar figure.
@@ -556,7 +556,7 @@ class TimelineUsageBoundaryTest(unittest.TestCase):
             if entry.turn is None:
                 self.assertIsNone(strip)
 
-    def test_pre_usage_run_pairs_every_entry_with_none(self) -> None:
+    def test_pre_usage_run_pairs_entries_with_none(self) -> None:
         run = _run(steps=[{"kind": "tool_call", "name": "Bash"},
                           {"kind": "tool_result", "tool_id": "t"}])
         paired = _td()._timeline_with_usage(run)

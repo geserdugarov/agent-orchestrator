@@ -99,7 +99,7 @@ class AwaitingHumanParkStaysParkedTest(
         )
         self.assertIsNone(state.get("pending_fix_at"))
 
-    def test_unmergeable_stays_parked_when_pr_becomes_mergeable(self) -> None:
+    def test_mergeable_pr_stays_parked(self) -> None:
         # Even if the PR silently becomes mergeable (rebase resolved a
         # conflict, branch protection dropped), the handler does NOT
         # auto-recover -- the orchestrator never merges from in_review.
@@ -158,7 +158,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_manually_closed_with_open_pr_marks_rejected(self) -> None:
+    def test_open_pr_marks_rejected(self) -> None:
         gh, issue, pr = self._setup()
 
         mocks = self._run(
@@ -179,7 +179,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         # that, or it fires once the PR itself is closed.
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
-    def test_manually_closed_then_pr_closed_requires_manual_cleanup(self) -> None:
+    def test_later_pr_close_needs_manual_cleanup(self) -> None:
         # Documents the known caveat: once the orchestrator flips the
         # closed-issue to `rejected`, the issue falls outside the
         # closed-issue sweep (`list_pollable_issues` only sweeps closed
@@ -206,7 +206,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
             "cannot observe the later PR close; cleanup must be manual.",
         )
 
-    def test_manually_closed_does_not_resume_dev_on_new_comments(self) -> None:
+    def test_new_comments_do_not_resume_dev(self) -> None:
         # Even with new PR feedback past the watermark, a manually-closed
         # issue should not spawn a dev fix -- the human closing the issue
         # superseded any open feedback.
@@ -228,7 +228,7 @@ class ManuallyClosedInReviewIssueTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_not_called()
         self.assertIn((250, "rejected"), gh.label_history)
 
-    def test_external_merge_with_closed_issue_finalizes_done(self) -> None:
+    def test_external_merge_finalizes_done(self) -> None:
         # The original closed-issue sweep purpose: a Resolves #N footer
         # auto-closes the issue when the PR merges. Issue closed AND PR
         # merged must still flip to `done`, not `rejected`.
@@ -266,7 +266,7 @@ class StaleParkReasonClearedOnFixingRouteTest(
     PR_NUMBER = 1200
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-700"
 
-    def test_stale_park_reason_cleared_on_route_to_fixing(self) -> None:
+    def test_fixing_route_clears_stale_reason(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Tick 0 already parked for unmergeable; the human posted a

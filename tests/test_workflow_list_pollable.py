@@ -25,7 +25,7 @@ class ListPollableIssuesTest(unittest.TestCase):
         out = list(gh.list_pollable_issues())
         self.assertEqual({issue.number for issue in out}, {1, 2})
 
-    def test_includes_closed_in_review_for_merge_finalization(self) -> None:
+    def test_closed_review_included_for_merge_finish(self) -> None:
         gh = FakeGitHubClient()
         open_issue = make_issue(1, label="implementing")
         closed_in_review = make_issue(7, label="in_review")
@@ -38,7 +38,7 @@ class ListPollableIssuesTest(unittest.TestCase):
         out = {issue.number for issue in gh.list_pollable_issues()}
         self.assertEqual(out, {1, 7})
 
-    def test_includes_closed_question_for_terminal_cleanup(self) -> None:
+    def test_closed_question_included_for_cleanup(self) -> None:
         # A human closing a `question`-labeled Q&A issue is the terminal
         # signal `_handle_question` consumes to finalize the issue to
         # `done` and clean up the per-issue worktree/branch. Without the
@@ -103,7 +103,7 @@ class ClosedSweepCadenceTest(unittest.TestCase):
             out = {issue.number for issue in gh.list_pollable_issues()}
             self.assertEqual(out, {1, 7})
 
-    def test_throttled_sweep_runs_on_first_then_every_nth_call(self) -> None:
+    def test_sweep_runs_first_then_every_nth_call(self) -> None:
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label="implementing"))
         closed = make_issue(7, label="in_review")

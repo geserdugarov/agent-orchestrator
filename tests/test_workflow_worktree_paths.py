@@ -23,7 +23,7 @@ class WorktreePathSlugNamespaceTest(unittest.TestCase):
             base_branch="main",
         )
 
-    def test_same_issue_number_different_slugs_no_collision(self) -> None:
+    def test_distinct_slugs_same_number_never_collide(self) -> None:
         spec_a = self._spec("alice/repo")
         spec_b = self._spec("bob/repo")
         path_a = workflow._worktree_path(spec_a, 7)
@@ -44,7 +44,7 @@ class WorktreePathSlugNamespaceTest(unittest.TestCase):
             workflow._decompose_worktree_path(spec_b, 7),
         )
 
-    def test_implement_and_decompose_share_repo_namespace(self) -> None:
+    def test_stages_share_repo_namespace(self) -> None:
         # `WORKTREES_DIR/<slug>/issue-N` and `WORKTREES_DIR/<slug>/decompose-N`
         # share the per-repo subdirectory so cleanup on the parent dir
         # also reaps the decomposer scratch.
@@ -111,7 +111,7 @@ class BranchNameSlugNamespaceTest(unittest.TestCase):
     sanitized slug so each spec lives on its own branch.
     """
 
-    def test_same_issue_number_different_slugs_distinct_branches(self) -> None:
+    def test_same_number_distinct_slugs_make_branches(self) -> None:
         spec_a = config.RepoSpec(
             slug="geserdugarov/lance-open-source",
             target_root=Path("/tmp/shared-clone"),
@@ -185,7 +185,7 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
         # git-ref-safe.
         self.assertRegex(out, r"^owner__foo_lock__h[0-9a-f]{16}$")
 
-    def test_double_dot_anywhere_collapses_to_underscore(self) -> None:
+    def test_double_dot_collapses_to_underscore(self) -> None:
         out = workflow._sanitize_branch_segment("owner/foo..bar")
         self.assertRegex(out, r"^owner__foo_bar__h[0-9a-f]{16}$")
         # Triple+ dot runs collapse to a single `_` too.
@@ -246,7 +246,7 @@ class SanitizeBranchSegmentTest(unittest.TestCase):
             workflow._sanitize_branch_segment(repo_slug),
         )
 
-    def test_check_ref_format_accepts_branch_for_pathological_slugs(
+    def test_git_accepts_pathological_slug_branch(
         self,
     ) -> None:
         # Verify against the actual git binary: every branch the
@@ -329,7 +329,7 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
             "orchestrator/issue-7",
         )
 
-    def test_no_pinned_branch_falls_back_to_namespaced_default(self) -> None:
+    def test_no_pinned_uses_namespaced_default(self) -> None:
         spec = self._spec()
         state = self._state({})
         self.assertEqual(
@@ -337,7 +337,7 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
             "orchestrator/geserdugarov__agent-orchestrator/issue-7",
         )
 
-    def test_outside_namespace_pinned_branch_is_ignored(
+    def test_outside_namespace_pin_is_ignored(
         self,
     ) -> None:
         # A corrupted / foreign pinned `branch` value must not redirect
@@ -373,7 +373,7 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
                 f"bad pinned value {bad!r} did not fall back",
             )
 
-    def test_legacy_pr_without_pinned_branch_uses_legacy_ref(self) -> None:
+    def test_unpinned_legacy_pr_uses_legacy_ref(self) -> None:
         # Pre-slug-namespacing in-flight PR: pinned state recorded
         # `pr_number` but no `branch` (the early implementations did
         # not always persist `branch`). The live PR head is on the
@@ -390,7 +390,7 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
             "orchestrator/issue-7",
         )
 
-    def test_legacy_pr_with_pinned_branch_still_honors_pinned(self) -> None:
+    def test_pinned_legacy_pr_honors_pin(self) -> None:
         # Belt-and-suspenders: a legacy in-flight PR that DID persist
         # `branch` (the consistent half of the pre-slug-namespacing
         # behavior) is still resolved via the pinned value, not via
@@ -406,7 +406,7 @@ class ResolveBranchNameLegacyMigrationTest(unittest.TestCase):
             "orchestrator/issue-7",
         )
 
-    def test_fresh_pr_with_pinned_namespaced_branch_wins(self) -> None:
+    def test_fresh_pr_namespaced_pin_wins(self) -> None:
         # A PR opened AFTER slug-namespacing landed has both
         # `pr_number` and the namespaced `branch` set. The
         # pr_number-fallback must not override the pinned value, or

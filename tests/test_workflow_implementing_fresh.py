@@ -30,7 +30,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No prior pinned state; simulate just-after-pickup.
         return gh, issue
 
-    def test_commits_clean_tree_opens_pr_and_flips_label(self) -> None:
+    def test_clean_commits_open_pr_and_flip_label(self) -> None:
         gh, issue = self._seeded()
         self._run(
             lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
@@ -63,7 +63,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn("codex_session_id", state)
         self.assertEqual(state["review_round"], 0)
 
-    def test_commits_with_dirty_tree_parks_without_pushing(self) -> None:
+    def test_dirty_commits_park_without_push(self) -> None:
         gh, issue = self._seeded()
         dirty = [f"file_{i}.py" for i in range(15)]
         mocks = self._run(
@@ -83,7 +83,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn("file_10.py", last_comment)
         self.assertIn("… (5 more)", last_comment)
 
-    def test_no_commits_with_message_parks_as_question(self) -> None:
+    def test_no_commits_message_parks_as_question(self) -> None:
         gh, issue = self._seeded()
         self._run(
             lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
@@ -101,7 +101,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNone(state.get("park_reason"))
         self.assertEqual(state.get("silent_park_count", 0), 0)
 
-    def test_no_commits_no_message_parks_as_silent_failure(self) -> None:
+    def test_empty_run_parks_as_silent_failure(self) -> None:
         # Empty `last_message` AND no commits is the poisoned-resume shape
         # documented in #24: a session killed mid-stream (e.g. by a Claude
         # rate limit) consistently returns empty results on every resume.
@@ -126,7 +126,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No quoted empty-message body either.
         self.assertNotIn("> (agent did not produce a final message)", last_comment)
 
-    def test_silent_failure_park_includes_stderr_diagnostics(self) -> None:
+    def test_silent_park_includes_stderr(self) -> None:
         # Same shape as the silent-failure park, but the agent left
         # something on stderr (e.g. a Cloudflare blob, an auth error).
         # The park comment must surface that tail and the exit code so
@@ -172,7 +172,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
 
 class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_no_new_comments_returns_without_writing_state(self) -> None:
+    def test_no_comments_return_without_state_write(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(2, label="implementing")
         gh.add_issue(issue)
@@ -202,7 +202,7 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
         self.assertTrue(gh.pinned_data(2).get("awaiting_human"))
         self.assertEqual(gh.pinned_data(2).get("codex_session_id"), "sess-old")
 
-    def test_new_comments_resume_with_session_and_clear_awaiting(self) -> None:
+    def test_new_comments_resume_and_clear_park(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(2, label="implementing")
         issue.comments.append(
@@ -293,7 +293,7 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
             for _, body in gh.posted_comments
         ))
 
-    def test_fresh_spawn_interrupted_does_not_persist_session_or_pr(
+    def test_interrupted_spawn_keeps_session_pr_clear(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -326,7 +326,7 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
 
 
 class HandleImplementingRecoveredWorktreeTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_recovered_worktree_skips_codex_and_pushes(self) -> None:
+    def test_recovered_tree_skips_agent_and_pushes(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(3, label="implementing")
         gh.add_issue(issue)

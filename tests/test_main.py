@@ -55,7 +55,7 @@ def _reload_main(env: dict[str, str]):
 
 
 class PollingLoopFanOutTest(unittest.TestCase):
-    def test_once_calls_tick_for_every_configured_spec(self) -> None:
+    def test_once_ticks_every_configured_spec(self) -> None:
         with tempfile.TemporaryDirectory() as td, _reload_main({
             "REPOS": (
                 f"alpha/one|{td}|main\n"
@@ -97,7 +97,7 @@ class PollingLoopFanOutTest(unittest.TestCase):
             for slug in ("alpha/one", "beta/two"):
                 clients_by_slug[slug].ensure_workflow_labels.assert_called_once()
 
-    def test_per_repo_tick_exception_does_not_block_other_repos(self) -> None:
+    def test_repo_tick_error_does_not_block_others(self) -> None:
         # The whole point of catching per-repo failures: one repo wedged in
         # an unhandled error must not stop the others from advancing. With
         # parallel fan-out the exception is isolated inside the per-repo
@@ -209,7 +209,7 @@ class PollingLoopFanOutTest(unittest.TestCase):
                 {"alpha/one", "beta/two", "gamma/three"},
             )
 
-    def test_label_initialization_happens_once_per_spec(self) -> None:
+    def test_labels_initialize_once_per_spec(self) -> None:
         # `ensure_workflow_labels` must run exactly once per configured
         # repo at startup -- not on every tick. Re-running the label
         # bootstrap on each tick would burn API calls on a no-op and
@@ -404,7 +404,7 @@ class SchedulerWiringTest(unittest.TestCase):
                 "scheduler not shut down on signal-induced exit",
             )
 
-    def test_signal_during_active_tick_closes_submit_path(
+    def test_signal_closes_active_submit_path(
         self,
     ) -> None:
         # Regression for issue #316 review feedback: `_running=False`
@@ -462,7 +462,7 @@ class SchedulerWiringTest(unittest.TestCase):
             self.assertEqual(rc, 128 + signal.SIGINT)
             self.assertEqual(submit_results, [True, False])
 
-    def test_active_tick_signal_closes_multi_repo_submit(
+    def test_signal_closes_multi_repo_submit(
         self,
     ) -> None:
         # Same invariant as above but where both repos are already
@@ -522,7 +522,7 @@ class SchedulerWiringTest(unittest.TestCase):
             self.assertEqual(rc, 128 + signal.SIGINT)
             self.assertEqual(beta_submit_after_signal, [False])
 
-    def test_scheduler_global_cap_bounds_workers_across_repos(
+    def test_global_cap_bounds_cross_repo_workers(
         self,
     ) -> None:
         # End-to-end coverage that the scheduler main built actually
@@ -608,7 +608,7 @@ class SignalHandlingTest(unittest.TestCase):
     next poll iteration.
     """
 
-    def test_sigint_during_tick_yields_signal_exit_code(self) -> None:
+    def test_sigint_tick_yields_signal_exit(self) -> None:
         # The first repo to start triggers SIGINT. Both repos may
         # complete (parallel ticks can't be cancelled mid-run without
         # leaving worktrees inconsistent), but the loop must exit with
@@ -705,7 +705,7 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
     once per polling iteration regardless of repo count.
     """
 
-    def test_prune_called_each_tick_in_single_repo_mode(self) -> None:
+    def test_single_repo_prunes_each_tick(self) -> None:
         # The legacy single-repo path stays in-thread and must still
         # call the prune wrapper so retention is actually applied.
         with _reload_main({
@@ -731,7 +731,7 @@ class AnalyticsRetentionLoopWiringTest(unittest.TestCase):
             self.assertEqual(rc, 0)
             prune.assert_called_once_with()
 
-    def test_prune_called_once_per_tick_in_multi_repo_mode(self) -> None:
+    def test_multi_repo_prunes_once_per_tick(self) -> None:
         # The multi-repo path fans repo ticks out across a thread pool;
         # the wrapper runs once at the end (not once per repo) so the
         # observability sink is processed exactly once per polling
@@ -796,7 +796,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             clients.append((spec, gh))
         return clients
 
-    def test_long_running_handler_does_not_block_next_poll(
+    def test_long_handler_does_not_block_next_poll(
         self,
     ) -> None:
         # Pass 1 submits a blocking worker for repo alpha; the tick
@@ -876,7 +876,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             finally:
                 alpha_release.set()
 
-    def test_same_issue_not_launched_twice_across_polls(
+    def test_issue_not_relaunched_across_polls(
         self,
     ) -> None:
         # Pass 1 submits a blocking worker for issue #7. Pass 2 sees the
@@ -931,7 +931,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             with run_lock:
                 self.assertEqual(run_count["n"], 1)
 
-    def test_worker_completion_clears_in_flight_marker(
+    def test_worker_finish_clears_in_flight_marker(
         self,
     ) -> None:
         # Pass 1 dispatches a worker that finishes promptly. The
@@ -991,7 +991,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             with run_lock:
                 self.assertEqual(run_count["n"], 2)
 
-    def test_reap_called_once_per_polling_pass_in_single_repo_mode(
+    def test_single_repo_reaps_once_per_poll(
         self,
     ) -> None:
         # Failures recorded in the scheduler's completion queue between
@@ -1020,7 +1020,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             # Exactly one reap per polling pass.
             self.assertEqual(reap.call_count, 1)
 
-    def test_reap_called_once_per_polling_pass_in_multi_repo_mode(
+    def test_multi_repo_reaps_once_per_poll(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as td, _reload_main({
@@ -1046,7 +1046,7 @@ class AsyncPollingDispatchTest(unittest.TestCase):
             # One reap for the whole polling pass, not per repo.
             self.assertEqual(reap.call_count, 1)
 
-    def test_reap_called_once_across_real_dispatch_multi_repo(
+    def test_real_multi_repo_dispatch_reaps_once(
         self,
     ) -> None:
         # Regression for the multi-repo reap-cadence violation: the
@@ -1122,7 +1122,7 @@ class ShutdownWatchdogTest(unittest.TestCase):
                 main_mod._run_shutdown_watchdog(signal.SIGTERM)
             self.assertEqual(forced, [signal.SIGTERM])
 
-    def test_watchdog_returns_clean_when_drain_completes(self) -> None:
+    def test_clean_return_after_drain_completes(self) -> None:
         with _reload_main(self._LEGACY) as main_mod:
             # Drain already finished: the watchdog must return without ever
             # touching the process even though grace has not elapsed.
@@ -1135,7 +1135,7 @@ class ShutdownWatchdogTest(unittest.TestCase):
                 main_mod._run_shutdown_watchdog(signal.SIGTERM)
             self.assertEqual(forced, [])
 
-    def test_force_exit_terminates_agents_then_hard_exits(self) -> None:
+    def test_force_exit_terminates_then_hard_exits(self) -> None:
         with _reload_main(self._LEGACY) as main_mod:
             with patch.object(
                 main_mod.agents, "terminate_all_running",
@@ -1152,7 +1152,7 @@ class ShutdownWatchdogTest(unittest.TestCase):
             )
             os_exit.assert_called_once_with(128 + signal.SIGTERM)
 
-    def test_watchdog_drain_window_reserves_terminate_grace(self) -> None:
+    def test_drain_window_reserves_terminate_grace(self) -> None:
         # The hard ceiling is `SHUTDOWN_GRACE_SECONDS`. `_force_exit`'s own
         # SIGTERM->SIGKILL sweep takes up to `_shutdown_terminate_grace()`, so
         # the watchdog must wait only `grace - reserve` for the drain; adding

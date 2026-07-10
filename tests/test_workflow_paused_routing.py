@@ -34,7 +34,7 @@ class PausedLabelSkipsProcessingTest(unittest.TestCase):
     orchestrator from advancing the state machine until a human removes it.
     """
 
-    def test_in_flight_issue_with_paused_skips_dispatch(self) -> None:
+    def test_in_flight_paused_issue_skips_dispatch(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(752, label="implementing")
         issue.labels.append(FakeLabel(PAUSED_LABEL))

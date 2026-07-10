@@ -148,7 +148,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             if line.strip()
         ]
 
-    def test_implementing_spawn_appends_analytics_record(self) -> None:
+    def test_implementing_spawn_appends_record(self) -> None:
         # End-to-end: an implementing tick spawns the dev agent, the
         # wrapper parses usage from a realistic claude stream-json stdout
         # and appends one well-formed JSONL line to the configured sink.
@@ -208,7 +208,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             # before the spawn (the spawn ran under retry budget #1).
             self.assertEqual(rec["retry_count"], 1)
 
-    def test_record_excludes_prompt_stdout_stderr_and_secrets(self) -> None:
+    def test_excludes_prompt_stdout_stderr_secrets(self) -> None:
         # The sink is a usage/cost surface, not a debugging mirror.
         # `result.stdout` may contain user-issue text and we must never
         # store it (nor the prompt the agent was sent, nor stderr which
@@ -316,7 +316,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             # extras so `resume_session_id` is absent (not stored as null).
             self.assertNotIn("resume_session_id", reviewer_record)
 
-    def test_timeout_records_exit_metadata_and_no_cost(self) -> None:
+    def test_timeout_records_exit_metadata_no_cost(self) -> None:
         # A timed-out agent has empty stdout; the parser yields the
         # `no-usage` sentinel and `cost_usd` stays unset rather than
         # being stored as null. The exit metadata still rides along.
@@ -354,7 +354,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(rec["input_tokens"], 0)
             self.assertEqual(rec["output_tokens"], 0)
 
-    def test_audit_events_unchanged_alongside_analytics_record(self) -> None:
+    def test_audit_events_unchanged_with_record(self) -> None:
         # Preserving the existing audit schema is a hard requirement:
         # one `agent_spawn` + one `agent_exit` per invocation, both
         # appearing in the in-memory capture even though the analytics
@@ -429,7 +429,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
                 {event["event"] for event in gh.recorded_events},
             )
 
-    def test_codex_stream_without_model_uses_spec_fallback(self) -> None:
+    def test_codex_no_model_uses_spec_fallback(self) -> None:
         # Reviewer-flagged regression: a codex run whose stdout includes
         # usage frames but omits the `model` field used to record
         # `models=[]` and `cost_source="unknown-price"` even when the
@@ -480,7 +480,7 @@ class AgentAnalyticsTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(rec["cached_tokens"], 500)
             self.assertEqual(rec["output_tokens"], 800)
 
-    def test_claude_stream_with_model_ignores_spec_fallback(self) -> None:
+    def test_claude_model_ignores_spec_fallback(self) -> None:
         # Companion guard: when the stream itself carries a model
         # (claude always does, codex usually does), the spec fallback
         # must not override it. The configured spec names a different
@@ -579,7 +579,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
         )
         self.assertIsNone(result.usage)
 
-    def test_returned_result_carries_parsed_usage_without_sink(self) -> None:
+    def test_result_carries_usage_without_sink(self) -> None:
         # Sink OFF: the parsed metrics still reach the caller off `.usage`,
         # proving the plumbing is independent of the observability sink.
         gh, result = self._run(
@@ -614,7 +614,7 @@ class RunUsageSurfacedTest(unittest.TestCase):
         self.assertEqual(list(result.usage.models), ["gpt-5-codex"])
         self.assertEqual(result.usage.cost_source, "estimated")
 
-    def test_usage_parse_failure_leaves_usage_none_fail_open(self) -> None:
+    def test_parse_failure_leaves_none_and_fails_open(self) -> None:
         # A raising usage parser must NOT propagate: `record_agent_exit`
         # returns early, no analytics record is written, `.usage` stays None,
         # and the wrapper still returns the AgentResult with its lifecycle
@@ -783,7 +783,7 @@ class TrajectoryRecordingTest(unittest.TestCase):
         self.assertEqual(rec_mock.call_count, 1)
         self.assertEqual(rec_mock.call_args.kwargs["prompt"], "PROMPT-MARKER-XYZ")
 
-    def test_trajectory_written_with_redacted_user_input(self) -> None:
+    def test_redacts_user_input(self) -> None:
         with tempfile.TemporaryDirectory(prefix="traj-on-") as td:
             t_path = Path(td) / "trajectory.jsonl"
             a_path = Path(td) / "analytics.jsonl"
@@ -833,7 +833,7 @@ class TrajectoryRecordingTest(unittest.TestCase):
             self.assertEqual(len(base), 1)
             self.assertNotIn("user_input", base[0])
 
-    def test_trajectory_failure_preserves_skill_events(self) -> None:
+    def test_failure_keeps_skill_events(self) -> None:
         # A trajectory-parse failure must not cost the `skill_triggered`
         # audit events: they are driven by the value `record_agent_exit`
         # returns before the trajectory block runs.
@@ -905,7 +905,7 @@ class TrajectorySinkHermeticityTest(unittest.TestCase):
         # TRAJECTORY_LOG_PATH for the duration of every test.
         self.assertIsNone(analytics.TRAJECTORY_LOG_PATH)
 
-    def test_configured_sink_is_not_written_when_pinned_off(self) -> None:
+    def test_pinned_off_sink_is_not_written(self) -> None:
         with tempfile.TemporaryDirectory(prefix="traj-guard-") as td:
             configured = Path(td) / "operator-trajectories.jsonl"
             a_path = Path(td) / "analytics.jsonl"
@@ -1000,7 +1000,7 @@ class SkillTriggeredEventTest(unittest.TestCase):
                 retry_count=retry_count,
             )
 
-    def test_switch_on_emits_one_event_per_distinct_skill(self) -> None:
+    def test_emits_once_per_distinct_skill(self) -> None:
         # develop fires twice, review once: two events in first-seen order,
         # one per DISTINCT skill (the repeat does not double-emit).
         gh = FakeGitHubClient()

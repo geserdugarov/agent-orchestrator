@@ -166,7 +166,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(5).get("ready_ping_sha"), self.SQUASHED_SHA,
         )
 
-    def test_squash_failure_parks_awaiting_human_without_relabel(self) -> None:
+    def test_failure_parks_without_relabel(self) -> None:
         # Push rejected / lease violation / dirty tree all surface as
         # `success=False`. The orchestrator parks awaiting_human, leaves
         # the issue in `validating`, and does NOT seed watermarks (the
@@ -235,7 +235,7 @@ class SquashOnApprovalTest(unittest.TestCase, _PatchedWorkflowMixin):
         # final-docs hop) regardless of SQUASH_ON_APPROVAL.
         self.assertIn((5, "documenting"), gh.label_history)
 
-    def test_squash_with_only_one_commit_does_not_post_notice(self) -> None:
+    def test_single_commit_posts_no_notice(self) -> None:
         # The helper returns `squashed_count=0` when there's only one
         # commit on top of base -- nothing to squash. The orchestrator
         # must skip the squash PR comment (the helper returns the same
@@ -363,7 +363,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self.assertEqual(body, "fix: typo")
         self.assertNotIn("Squashed commits:", body)
 
-    def test_uses_issue_title_without_conventional_subject(
+    def test_issue_title_used_without_conventional(
         self,
     ) -> None:
         # Reset and rebuild the branch with non-conv-commit first subject.
@@ -391,7 +391,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         subject = self._git("log", "-1", "--pretty=%s", cwd=self.work).strip()
         self.assertEqual(subject, "feat: rename frobnicator")
 
-    def test_squash_preserves_custom_repo_prefix_first_subject(self) -> None:
+    def test_keeps_custom_prefix_first_subject(self) -> None:
         # A repo-local first-commit prefix that is NOT a Conventional type
         # (e.g. a careers site's `career:`) must be reused verbatim as the
         # squash subject -- previously it would have been discarded for a
@@ -421,7 +421,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         subject = self._git("log", "-1", "--pretty=%s", cwd=self.work).strip()
         self.assertEqual(subject, "career: add a senior role")
 
-    def test_squash_infers_repo_prefix_from_base_history(self) -> None:
+    def test_infers_prefix_from_base_history(self) -> None:
         # No reusable first-commit subject, so the squash subject is
         # synthesized -- and it honors the repo-local `event:` prefix that
         # dominates recent base-branch history instead of defaulting to
@@ -500,7 +500,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
             original_head,
         )
 
-    def test_rollback_restores_branch_when_force_push_fails(self) -> None:
+    def test_push_failure_rollback_restores_branch(self) -> None:
         # The whole point of saving original_head: a push failure after
         # the soft-reset + squash commit must not leave the branch
         # pointing at the squash commit. The original commits must still
@@ -534,7 +534,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         status = self._git("status", "--porcelain", cwd=self.work)
         self.assertEqual(status.strip(), "")
 
-    def test_squash_helper_never_executes_planted_fsmonitor(self) -> None:
+    def test_never_executes_planted_fsmonitor(self) -> None:
         # Every index-refreshing git command in the squash helper -- the
         # pre-rewrite dirty check, the soft reset, the squash commit, and the
         # post-push rollback `reset --hard` -- runs inside a worktree whose
@@ -658,7 +658,7 @@ class SquashHelperRealGitTest(unittest.TestCase):
         self.assertTrue((self.work / "scratch.txt").exists())
         pm.assert_not_called()
 
-    def test_dirty_worktree_with_single_commit_still_fails(self) -> None:
+    def test_dirty_single_commit_still_fails(self) -> None:
         # The dirty-tree refusal is a precondition for the whole helper,
         # not just the rewrite path. A one-commit branch (squash would
         # be a no-op) with an uncommitted file must still fail so the

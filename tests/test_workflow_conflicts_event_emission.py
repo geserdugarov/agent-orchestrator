@@ -85,7 +85,7 @@ class ResolvingConflictEventEmissionTest(
                 head_shas=head_shas,
             )
 
-    def test_merge_attempt_success_on_clean_base_rebase(self) -> None:
+    def test_clean_rebase_emits_merge_success(self) -> None:
         gh, issue, pr = self._seed()
         self._run_with_merge(
             gh, issue, merge_succeeded=True,
@@ -111,7 +111,7 @@ class ResolvingConflictEventEmissionTest(
         self.assertEqual(len(attempts), 1)
         self.assertEqual(attempts[0]["result"], "conflict")
 
-    def test_conflict_round_incremented_on_clean_base_rebase_push(self) -> None:
+    def test_clean_rebase_push_bumps_round(self) -> None:
         gh, issue, pr = self._seed()
         self._run_with_merge(
             gh, issue, merge_succeeded=True,
@@ -127,7 +127,7 @@ class ResolvingConflictEventEmissionTest(
         # SHA is the after-rebase HEAD captured before the push.
         self.assertEqual(rounds[0]["sha"], "merged")
 
-    def test_conflict_round_incremented_on_base_up_to_date_no_op(self) -> None:
+    def test_up_to_date_noop_bumps_round(self) -> None:
         gh, issue, pr = self._seed()
         self._run_with_merge(
             gh, issue, merge_succeeded=True,
@@ -140,7 +140,7 @@ class ResolvingConflictEventEmissionTest(
         self.assertEqual(len(rounds), 1)
         self.assertEqual(rounds[0]["outcome"], "base_up_to_date")
 
-    def test_conflict_round_incremented_after_agent_resolves(self) -> None:
+    def test_agent_resolution_bumps_round(self) -> None:
         gh, issue, pr = self._seed()
         self._run_with_merge(
             gh, issue, merge_succeeded=False,

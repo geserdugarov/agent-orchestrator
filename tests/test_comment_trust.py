@@ -81,7 +81,7 @@ class FilterTrustedTest(unittest.TestCase):
         ]
         self.assertEqual(filter_trusted(comments, allowed=()), comments)
 
-    def test_allowlist_drops_untrusted_preserves_order(self) -> None:
+    def test_allowlist_drops_untrusted_keeps_order(self) -> None:
         allowed = ("alice",)
         comments = [
             FakeComment(1, "ok", FakeUser("Alice")),

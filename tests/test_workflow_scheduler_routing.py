@@ -153,7 +153,7 @@ class TickViaSchedulerTest(unittest.TestCase):
         with count_lock:
             self.assertEqual(call_count, 2)
 
-    def test_same_repo_fanout_proceeds_when_limits_allow(self) -> None:
+    def test_same_repo_fanout_runs_with_capacity(self) -> None:
         # Three non-family issues on the same repo with the scheduler's
         # per-repo cap set wide enough to admit all three. The dispatch
         # loop must submit each one and the scheduler must let all three
@@ -204,7 +204,7 @@ class TickViaSchedulerTest(unittest.TestCase):
 
         self.assertEqual(sorted(passed), [1, 2, 3])
 
-    def test_per_repo_cap_skips_overflow_until_slot_frees(self) -> None:
+    def test_repo_cap_defers_until_slot_frees(self) -> None:
         # With `parallel_limit=2` and three eligible non-family issues,
         # the first two are accepted and the third is skipped this
         # tick. After one of the in-flight workers exits, a follow-up
@@ -303,7 +303,7 @@ class TickViaSchedulerTest(unittest.TestCase):
         # All three issues eventually ran exactly once between the two ticks.
         self.assertEqual(sorted(seen), [10, 11, 12])
 
-    def test_family_aware_drains_sequentially_within_one_bucket(self) -> None:
+    def test_family_bucket_drains_in_order(self) -> None:
         # All family-aware issues this tick are folded into ONE bucket
         # task that drains them sequentially. The bucket holds the family
         # slot for the whole drain so a concurrent tick mid-drain cannot
@@ -455,7 +455,7 @@ class TickViaSchedulerTest(unittest.TestCase):
             release.set()
         self._wait_idle(sched, REPO_SLUG)
 
-    def test_family_drain_marks_in_progress_issue_as_active(self) -> None:
+    def test_family_drain_marks_issue_active(self) -> None:
         # The bucket task wraps each per-issue iteration in
         # `scheduler.track_active` so `is_active(repo, n)` reports True
         # for the issue currently being processed inside the bucket.
@@ -490,7 +490,7 @@ class TickViaSchedulerTest(unittest.TestCase):
         # After completion, #42's per-iteration claim is released.
         self.assertFalse(sched.is_active(REPO_SLUG, 42))
 
-    def test_family_drain_skips_issue_already_in_flight(self) -> None:
+    def test_family_drain_skips_active_issue(self) -> None:
         # Cross-tick race: tick N classifies #50 as fanout (e.g.
         # `implementing`) and submits it. Before that worker finishes,
         # something relabels #50 into a family-aware state and tick N+1
@@ -557,7 +557,7 @@ class TickViaSchedulerTest(unittest.TestCase):
             fanout_release.set()
         self._wait_idle(sched, REPO_SLUG)
 
-    def test_unlabeled_pickup_is_treated_as_family_aware(self) -> None:
+    def test_unlabeled_pickup_is_family_aware(self) -> None:
         # An unlabeled issue routes through `_handle_pickup`, which can
         # create children and seed their pinned state -- a cross-issue
         # write, same as decomposing/blocked/umbrella. Dispatch must
@@ -786,7 +786,7 @@ class TickViaSchedulerTest(unittest.TestCase):
         finally:
             release.set()
 
-    def test_scheduler_path_uses_per_worker_client_and_refetches(
+    def test_workers_use_own_clients_and_refetch(
         self,
     ) -> None:
         # The scheduler dispatch must mirror the legacy parallel path:
@@ -864,7 +864,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
             timer.cancel()
         self.assertEqual(sched.active_count(repo_slug), 0)
 
-    def test_umbrella_only_bucket_runs_when_cap_saturated(self) -> None:
+    def test_umbrella_bucket_ignores_saturated_cap(self) -> None:
         # Per-repo cap is 1 and a fanout `implementing` issue already
         # holds the slot. A pure umbrella bucket on the same repo must
         # still run this tick: the dispatcher submits it cap-exempt so
@@ -910,7 +910,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
                 ev.set()
         self._wait_idle(sched, REPO_SLUG)
 
-    def test_umbrella_only_bucket_does_not_inflate_counters(self) -> None:
+    def test_umbrella_bucket_keeps_counters(self) -> None:
         # While an umbrella-only bucket is in flight, the scheduler's
         # `active_count` must report ZERO cap-counted workers: the
         # bucket sentinel lives in the cap-exempt tracked set. Without
@@ -946,7 +946,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
             release.set()
         self._wait_idle(sched, REPO_SLUG)
 
-    def test_mixed_family_bucket_still_counts_against_caps(self) -> None:
+    def test_mixed_family_bucket_counts_against_caps(self) -> None:
         # When the bucket has a non-umbrella family entry (decomposing
         # here), the cap-exempt path must NOT engage -- the
         # decomposing handler invokes an agent and is real work. A
@@ -1000,7 +1000,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
                 ev.set()
         self._wait_idle(sched, REPO_SLUG)
 
-    def test_blocked_only_bucket_runs_when_cap_saturated(self) -> None:
+    def test_blocked_bucket_ignores_saturated_cap(self) -> None:
         # Regression for the blocked-parent deadlock: `_handle_blocked` is
         # a pure child-poll / dep-graph walk -- no agent, no worktree --
         # exactly like umbrella. With per-repo cap 1 and a fanout child
@@ -1050,7 +1050,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
                 ev.set()
         self._wait_idle(sched, REPO_SLUG)
 
-    def test_blocked_only_bucket_does_not_inflate_counters(self) -> None:
+    def test_blocked_bucket_keeps_counters(self) -> None:
         # A `blocked`-only bucket is in flight but the scheduler's
         # cap counters must read ZERO: the bucket sentinel lives in the
         # cap-exempt tracked set, so a follow-up fanout submit on a
@@ -1083,7 +1083,7 @@ class UmbrellaCapExemptionTest(unittest.TestCase):
             release.set()
         self._wait_idle(sched, REPO_SLUG)
 
-    def test_blocked_with_decomposing_bucket_still_counts(self) -> None:
+    def test_mixed_blocked_bucket_still_counts(self) -> None:
         # The cap-exemption requires EVERY family entry to be a no-agent
         # handler. A bucket mixing `blocked` (no agent) with `decomposing`
         # (spawns the decomposer agent) must stay cap-counted -- `blocked`
@@ -1228,7 +1228,7 @@ class BacklogDispatchFilterTest(unittest.TestCase):
     def test_paused_only_does_not_starve_fanout(self) -> None:
         self._assert_parked_does_not_starve_fanout(PAUSED_LABEL)
 
-    def test_backlog_does_not_make_blocked_bucket_cap_counted(self) -> None:
+    def test_backlog_blocked_bucket_stays_exempt(self) -> None:
         # The production regression: a `blocked` parent and a parked
         # `backlog` issue share the family bucket. The backlog issue (label
         # None) used to force `cap_exempt=False`, so the bucket reserved the

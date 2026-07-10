@@ -87,7 +87,7 @@ class PromptBuilderTrustFilterTest(unittest.TestCase):
             ),
         }
 
-    def test_outsider_content_absent_allowed_present_everywhere(self) -> None:
+    def test_only_allowed_content_reaches_prompts(self) -> None:
         issue = _issue_with_comments()
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", (_ALLOWED_AUTHOR,)):
             comments_text = workflow._recent_comments_text(issue)
@@ -102,7 +102,7 @@ class DriftHashTrustFilterTest(unittest.TestCase):
     def _hash(self, issue) -> str:
         return workflow._compute_user_content_hash(issue, set())
 
-    def test_outsider_leaves_hash_unchanged_allowed_shifts_it(self) -> None:
+    def test_only_allowed_content_changes_hash(self) -> None:
         base = make_issue(736, title="t", body="b")
         outsider = make_issue(
             736, title="t", body="b",

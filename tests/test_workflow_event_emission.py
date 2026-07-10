@@ -47,7 +47,7 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
     JSONL sink so workflow tests can assert on either surface.
     """
 
-    def test_set_workflow_label_records_stage_enter_event(self) -> None:
+    def test_label_change_records_stage_enter(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(1)
         gh.add_issue(issue)
@@ -91,7 +91,7 @@ class StageEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         ]
         self.assertIn(LABEL_DECOMPOSING, stages)
 
-    def test_event_log_path_writes_one_jsonl_object_per_line(self) -> None:
+    def test_event_log_writes_one_object_per_line(self) -> None:
         # End-to-end: a configured EVENT_LOG_PATH receives one parseable
         # JSONL object per transition, with the documented schema.
         with tempfile.TemporaryDirectory(prefix="evlog-") as td:
@@ -157,7 +157,7 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
     def _events(gh, event_name: str) -> list[dict]:
         return [event for event in gh.recorded_events if event["event"] == event_name]
 
-    def test_fresh_developer_spawn_emits_paired_events(self) -> None:
+    def test_fresh_dev_spawn_emits_event_pair(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(1, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
@@ -186,7 +186,7 @@ class AgentLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(spawn["retry_count"], 1)
         self.assertEqual(exit_event["retry_count"], 1)
 
-    def test_reviewer_spawn_carries_review_round_and_retry_count(self) -> None:
+    def test_reviewer_spawn_has_round_and_retry(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(2, label=LABEL_VALIDATING)
         gh.add_issue(issue)

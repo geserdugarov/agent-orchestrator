@@ -183,7 +183,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn((204, "done"), gh.label_history)
         self.assertTrue(issue.closed)
 
-    def test_merged_finalize_posts_tracked_usage_verdict(self) -> None:
+    def test_posts_tracked_usage_verdict(self) -> None:
         # The terminal finalize surfaces the cumulative usage verdict as a
         # tracked comment posted BEFORE `write_pinned_state`, so its id is
         # persisted in `orchestrator_comment_ids` alongside the merge stamp.
@@ -228,7 +228,7 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(205).get("orchestrator_comment_ids", []),
         )
 
-    def test_merged_finalize_without_counters_posts_no_verdict(self) -> None:
+    def test_no_counters_posts_no_verdict(self) -> None:
         # No agent ever ran against this issue (external-merge of a
         # never-worked issue): the finalize skips the zero receipt.
         gh = FakeGitHubClient()

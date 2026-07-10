@@ -31,7 +31,7 @@ class InReviewParkWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
     the issue to `fixing` against it.
     """
 
-    def test_unmergeable_park_does_not_replay_on_next_tick(self) -> None:
+    def test_park_does_not_replay_next_tick(self) -> None:
         # An unmergeable PR parks awaiting human on the first tick. The
         # park message is recorded as orchestrator-authored and the
         # watermark is bumped past it; subsequent ticks must not surface
@@ -137,7 +137,7 @@ class InReviewSplitWatermarkTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(state.get("pending_fix_review_max_id"), 42)
         self.assertEqual(state.get("pr_last_review_comment_id"), 41)
 
-    def test_id_overlap_across_spaces_does_not_drop_comments(self) -> None:
+    def test_cross_space_id_overlap_keeps_comments(self) -> None:
         # Inline review comment id (5) is LOWER than the issue-comment
         # watermark (1000). With one merged-id watermark this comment would
         # be silently filtered out; with split watermarks it gets through

@@ -158,7 +158,7 @@ class DocumentationSpawnTrackedReposTest(
         self.assertIn(_BLOCK_MARKER, prompt)
         self.assertIn("documentation pass", prompt)
 
-    def test_fresh_respawn_docs_pass_carries_block_once(self) -> None:
+    def test_fresh_docs_respawn_has_block_once(self) -> None:
         # `dev_agent` set but NO `dev_session_id` -> the docs prompt (which
         # already carries the block) goes through `_resume_dev_with_text`'s
         # transcript-less fresh-spawn path, which prepends the re-grounding
@@ -379,7 +379,7 @@ class QuestionSpawnTrackedReposTest(
             )
         self.assertNotIn(_BLOCK_MARKER, _prompt_of(mocks["run_agent"]))
 
-    def test_recovery_without_session_id_carries_block(self) -> None:
+    def test_no_session_recovery_has_block(self) -> None:
         # No `question_session_id` -> a transcript-less FRESH spawn. The
         # handler must send the full question prompt (block included) so the
         # recovery run sees the same context a first-tick spawn would, rather
@@ -418,7 +418,7 @@ class QuestionSpawnTrackedReposTest(
         self.assertIn("acme/sibling", prompt)
         self.assertIn("answering a standing question", prompt)
 
-    def test_live_session_resume_followup_is_block_free(self) -> None:
+    def test_live_resume_followup_omits_block(self) -> None:
         # A live `question_session_id` resumes in place: the followup prompt
         # carries only the human's reply, never the block (the session already
         # saw the initial block at spawn).

@@ -258,7 +258,7 @@ class AnalyticsAppendTest(unittest.TestCase):
             self.assertEqual(rec1["pr_number"], 5)
             self.assertNotIn("stage", rec1)
 
-    def test_append_creates_missing_parent_directories(self) -> None:
+    def test_creates_missing_parent_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a" / "b" / "c" / "analytics.jsonl"
             _, analytics = _reload({"ANALYTICS_LOG_PATH": str(path)})
@@ -487,7 +487,7 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             # No raise: the wrapper logs and swallows.
             analytics.prune_with_retention_logging()
 
-    def test_concurrent_append_during_prune_is_not_lost(self) -> None:
+    def test_parallel_append_survives_prune(self) -> None:
         # Regression: under the scheduler-driven dispatch in
         # `main._run_tick`, `workflow.tick` returns as soon as the
         # per-issue callables have been submitted to the scheduler,
@@ -583,7 +583,7 @@ class PruneWithRetentionLoggingTest(unittest.TestCase):
             # (issue=2) and the concurrent append (issue=99) survive.
             self.assertEqual(issues, [2, 99])
 
-    def test_helper_rewrites_file_without_github_writes(self) -> None:
+    def test_prune_rewrites_without_github_writes(self) -> None:
         # "Analytics is not authoritative workflow state" enforced at
         # the boundary: the prune helper takes no GitHub client and the
         # real `prune_old_records` implementation never imports `github`
@@ -770,7 +770,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
             self.assertNotIn(key, on_none[0])
         self.assertEqual(set(off[0]), set(on_none[0]))
 
-    def test_skill_args_and_stdout_never_reach_the_record(self) -> None:
+    def test_args_and_stdout_absent_from_record(self) -> None:
         # Privacy: the `Skill` tool's `args` can echo issue/user content; the
         # record carries the skill NAME but never the args payload nor the
         # raw stdout. Mirrors the usage-sink redaction contract.
@@ -791,7 +791,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         for forbidden in ("args", "stdout", "prompt"):
             self.assertNotIn(forbidden, rec)
 
-    def test_available_field_recorded_from_real_init_skills(self) -> None:
+    def test_real_init_records_available_field(self) -> None:
         # The offered-set wiring exercised end-to-end through the real claude
         # extractor (no stub): a `system`/`init` frame carrying a `skills`
         # array lands as `skills_available`, independent of what triggered.
@@ -810,7 +810,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         self.assertEqual(rec["skills_triggered_count"], 1)
         self.assertEqual(rec["skills_available"], ["develop", "review"])
 
-    def test_available_recorded_independently_of_triggered(self) -> None:
+    def test_available_independent_of_triggered(self) -> None:
         # Offered but nothing triggered: `skills_available` is written while
         # `skills_triggered` / `_count` stay dropped -- the asymmetry that
         # tells "offered but unused" from "never available."
@@ -828,7 +828,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         self.assertNotIn("skills_triggered", rec)
         self.assertNotIn("skills_triggered_count", rec)
 
-    def test_skill_parse_failure_still_emits_baseline_record(self) -> None:
+    def test_parse_failure_keeps_baseline_record(self) -> None:
         # A skill-parser bug must NOT drop the usage/cost record: the inner
         # fail-open guard logs and falls through with the skill fields unset.
         _, analytics = _reload()
@@ -1033,7 +1033,7 @@ class TrajectoryAppendTest(unittest.TestCase):
             self.assertEqual(json.loads(lines[0])["session_id"], "a")
             self.assertEqual(json.loads(lines[1])["n"], 2)
 
-    def test_append_creates_missing_parent_directories(self) -> None:
+    def test_creates_missing_parent_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "a" / "b" / "c" / "trajectory.jsonl"
             _, analytics = _reload({"TRAJECTORY_LOG_PATH": str(path)})
@@ -1185,7 +1185,7 @@ class TrajectoryPruneTest(unittest.TestCase):
             self.assertEqual(analytics.prune_trajectory_records(now=now), 1)
             self.assertEqual(path.read_text(encoding="utf-8"), "")
 
-    def test_existence_probe_oserror_is_downgraded_to_warning(self) -> None:
+    def test_probe_oserror_becomes_warning(self) -> None:
         # `Path.exists()` re-raises OSErrors that don't mean "absent"
         # (e.g. ENAMETOOLONG on an over-long path). That probe runs
         # before the read/rewrite try-block, so without its own guard
@@ -1216,7 +1216,7 @@ class TrajectorySinkIndependenceTest(unittest.TestCase):
         _, analytics = _reload()
         self.assertIsNot(analytics._FILE_LOCK, analytics._TRAJECTORY_FILE_LOCK)
 
-    def test_append_trajectory_does_not_touch_analytics_file(self) -> None:
+    def test_append_leaves_analytics_file_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             a_path = Path(td) / "analytics.jsonl"
             t_path = Path(td) / "trajectory.jsonl"
@@ -1229,7 +1229,7 @@ class TrajectorySinkIndependenceTest(unittest.TestCase):
             # The analytics file was never opened by the trajectory append.
             self.assertFalse(a_path.exists())
 
-    def test_prune_trajectory_leaves_analytics_file_untouched(self) -> None:
+    def test_prune_leaves_analytics_file_untouched(self) -> None:
         now = PRUNE_NOW
         old_ts = _ts_days_ago(VERY_OLD_RECORD_AGE_DAYS, now=now)
         with tempfile.TemporaryDirectory() as td:
@@ -1257,7 +1257,7 @@ class TrajectorySinkIndependenceTest(unittest.TestCase):
             # Analytics file is byte-for-byte unchanged.
             self.assertEqual(a_path.read_text(encoding="utf-8"), a_before)
 
-    def test_prune_analytics_leaves_trajectory_file_untouched(self) -> None:
+    def test_analytics_prune_ignores_trajectory(self) -> None:
         # Symmetric guard: the analytics prune must not rewrite the
         # trajectory file either.
         now = PRUNE_NOW
@@ -1528,7 +1528,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             expected_turn,
         )
 
-    def test_sink_off_writes_no_trajectory_and_no_user_input(self) -> None:
+    def test_sink_off_writes_no_trajectory_or_input(self) -> None:
         # Default off: a prompt is passed but, with the trajectory sink
         # disabled, no trajectory file is created and the baseline
         # `agent_exit` record never carries `user_input`.
@@ -1552,7 +1552,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self.assertEqual(recs[0]["event"], "agent_exit")
             self.assertNotIn("user_input", recs[0])
 
-    def test_sink_on_writes_redacted_trajectory_record(self) -> None:
+    def test_sink_on_writes_redacted_trajectory(self) -> None:
         # Sink on: a single `agent_trajectory` record carries the redacted
         # user_input, the offered tools, the ordered steps with their
         # tool_call input / tool_result content, and the final output --
@@ -1634,7 +1634,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self.assertNotIn("turns", rec)
             self.assertTrue(all("turn" not in step for step in rec["steps"]))
 
-    def test_text_turns_redacted_truncated_and_recorded(self) -> None:
+    def test_text_turns_redacted_capped_and_recorded(self) -> None:
         # New timeline items -- assistant / user text turns -- are stored as
         # their own steps and get the same treatment as tool payloads: stream
         # order preserved, secrets masked, over-long text head/tail truncated,
@@ -1724,7 +1724,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self.assertIn("***", rec["steps"][0]["content"])
             self.assertIn("***", rec["steps"][1]["content"])
 
-    def test_multiline_secret_in_tool_payload_redacted(self) -> None:
+    def test_multiline_tool_secret_is_redacted(self) -> None:
         # Regression: dict / list tool payloads are redacted leaf-by-leaf
         # BEFORE JSON serialization. A multiline secret env value would
         # otherwise have its newlines escaped by `json.dumps` (`\n` -> the
@@ -1910,7 +1910,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             # uncapped run produced -- one step of overshoot plus the envelope.
             self.assertLess(len(raw), analytics._TRAJECTORY_RECORD_BUDGET * 2)
 
-    def test_parser_failure_keeps_baseline_and_returns_skills(self) -> None:
+    def test_parser_failure_keeps_baseline_and_skills(self) -> None:
         # The trajectory parse rides its own fail-open guard: a parser bug
         # logs and is swallowed, leaving the baseline `agent_exit` record AND
         # the skill-trigger return value (which drives the audit events)
@@ -2030,7 +2030,7 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
         traj_recs = _read_records(t_path) if t_path else []
         return _read_records(a_path), traj_recs
 
-    def test_codex_agent_exit_records_discovered_available(self) -> None:
+    def test_agent_exit_records_discovered_skills(self) -> None:
         _, analytics = _reload()
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td) / "wt"
@@ -2047,7 +2047,7 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
         self.assertEqual(rec["skills_available"], ["develop", "review"])
         self.assertNotIn("skills_triggered", rec)
 
-    def test_codex_trajectory_records_discovered_available(self) -> None:
+    def test_trajectory_records_discovered_skills(self) -> None:
         _, analytics = _reload()
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td) / "wt"

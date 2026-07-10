@@ -107,7 +107,7 @@ class ClaudeLastMessageTest(unittest.TestCase):
         ]
         self.assertEqual(_claude_last_message("\n".join(events)), "final answer")
 
-    def test_falls_back_to_assistant_text_when_no_result(self) -> None:
+    def test_falls_back_to_text_without_result(self) -> None:
         events = [
             json.dumps({"type": "assistant", "message": {
                 "content": [
@@ -118,7 +118,7 @@ class ClaudeLastMessageTest(unittest.TestCase):
         ]
         self.assertEqual(_claude_last_message("\n".join(events)), "hello world")
 
-    def test_returns_empty_when_no_recognizable_events(self) -> None:
+    def test_empty_without_known_events(self) -> None:
         self.assertEqual(_claude_last_message(""), "")
         self.assertEqual(
             _claude_last_message('{"type":"system","subtype":"init"}'),
@@ -324,7 +324,7 @@ class FilterAgentEnvTest(unittest.TestCase):
         self.assertNotIn("GH_HOST", filtered_env)
         self.assertEqual(filtered_env.get("PATH"), "/usr/bin")
 
-    def test_drops_write_credential_locators_in_both_modes(self) -> None:
+    def test_write_locators_stripped_in_both_modes(self) -> None:
         # `_AGENT_WRITE_CREDENTIAL_LOCATORS` is stripped regardless of
         # the `allow_provider_auth` flag -- the verify path (False) and
         # the agent path (True) must both refuse to forward SSH agent /
@@ -347,7 +347,7 @@ class FilterAgentEnvTest(unittest.TestCase):
         for name in _AGENT_PROVIDER_AUTH_ALLOWLIST:
             self.assertEqual(filtered_env.get(name), "value-long-enough")
 
-    def test_allow_provider_auth_false_strips_provider_keys(self) -> None:
+    def test_provider_auth_block_strips_keys(self) -> None:
         # Verify-command path passes `allow_provider_auth=False` so the
         # agent's own provider keys are also stripped. A hostile
         # dependency executed under the verify shell would otherwise
@@ -395,7 +395,7 @@ class FilterAgentEnvTest(unittest.TestCase):
 
 
 class RunCodexCwdTest(unittest.TestCase):
-    def test_dash_C_receives_absolute_path_for_relative_cwd(self) -> None:
+    def test_dash_C_gets_full_path_for_relative_cwd(self) -> None:
         # codex applies `-C` AFTER it has already chdir'd into the subprocess
         # cwd, so a relative path resolves twice and codex hits "No such file
         # or directory (os error 2)". Pinning this guarantees the path passed
@@ -454,7 +454,7 @@ class RunAgentExtraArgsTest(unittest.TestCase):
             )
         return list(run_mock.call_args.args[0])
 
-    def test_codex_fresh_injects_extra_args_before_exec(self) -> None:
+    def test_codex_fresh_adds_args_before_exec(self) -> None:
         # Codex global options (`-m`, `-c`) must appear BEFORE the `exec`
         # subcommand; the parser rejects them after the subcommand. The
         # safety/output flags and prompt must remain on the argv tail.
@@ -470,7 +470,7 @@ class RunAgentExtraArgsTest(unittest.TestCase):
         self.assertIn("--json", argv)
         self.assertEqual(argv[-1], "p")
 
-    def test_codex_resume_injects_extra_args_before_exec(self) -> None:
+    def test_codex_resume_adds_args_before_exec(self) -> None:
         sid = "11111111-2222-3333-4444-555555555555"
         argv = self._argv_for(
             "codex",
@@ -483,7 +483,7 @@ class RunAgentExtraArgsTest(unittest.TestCase):
         # extra args must NOT have displaced them.
         self.assertEqual(argv[-2:], [sid, "p"])
 
-    def test_claude_fresh_injects_extra_args_before_safety_flags(self) -> None:
+    def test_claude_fresh_adds_args_before_safety(self) -> None:
         argv = self._argv_for(
             "claude",
             extra_args=("--model", "claude-opus-4-7", "--effort", "high"),
@@ -497,7 +497,7 @@ class RunAgentExtraArgsTest(unittest.TestCase):
         self.assertIn("--output-format", argv)
         self.assertEqual(argv[-1], "p")
 
-    def test_claude_resume_keeps_extra_args_and_resume_flag(self) -> None:
+    def test_claude_resume_keeps_args_and_flag(self) -> None:
         sid = "deadbeef-1234-1234-1234-1234deadbeef"
         argv = self._argv_for(
             "claude",
@@ -511,7 +511,7 @@ class RunAgentExtraArgsTest(unittest.TestCase):
         self.assertEqual(argv[argv.index("--resume") + 1], sid)
         self.assertEqual(argv[-1], "p")
 
-    def test_default_empty_extra_args_leaves_argv_unchanged(self) -> None:
+    def test_empty_default_keeps_argv_unchanged(self) -> None:
         # Backward compat: callers that don't pass `extra_args` still get
         # the legacy argv with no inserted tokens. Sanity-checks both
         # backends so a future refactor that changes argv shape under
@@ -536,7 +536,7 @@ class TerminateAllRunningTest(unittest.TestCase):
             self.assertEqual(agents.terminate_all_running(), 0)
         killpg.assert_not_called()
 
-    def test_sigterms_each_group_and_no_sigkill_when_fully_exited(self) -> None:
+    def test_no_sigkill_after_all_groups_exit(self) -> None:
         # Both leaders exit on SIGTERM and the signal-0 group probe reports the
         # group empty, so no SIGKILL is sent -- the clean-shutdown path.
         proc1, proc2 = MagicMock(), MagicMock()
@@ -563,7 +563,7 @@ class TerminateAllRunningTest(unittest.TestCase):
         self.assertNotIn((111, signal.SIGKILL), sent)
         self.assertNotIn((222, signal.SIGKILL), sent)
 
-    def test_sigkills_group_when_descendant_survives_leader_exit(self) -> None:
+    def test_sigkill_if_child_outlives_leader(self) -> None:
         # Regression: the leader exits on SIGTERM but a descendant in the same
         # group ignored it. `proc.wait()` returns, yet the signal-0 probe shows
         # the group still alive, so the group must be SIGKILLed -- otherwise the
@@ -646,7 +646,7 @@ class TerminateProcessGroupTest(unittest.TestCase):
     the timeout has already been recorded.
     """
 
-    def test_sigkills_group_when_descendant_survives_leader_exit(self) -> None:
+    def test_sigkill_if_child_outlives_leader(self) -> None:
         # The leader exits on SIGTERM but a descendant in the same group
         # ignored it. `proc.wait()` returns, yet the signal-0 probe shows the
         # group still alive, so the group must be SIGKILLed.
@@ -696,7 +696,7 @@ class TerminateProcessGroupTest(unittest.TestCase):
         self.assertIn((779, signal.SIGKILL), calls)
         self.assertNotIn((779, 0), calls)  # no probe when the leader is alive
 
-    def test_initial_sigterm_processlookup_returns_without_kill(self) -> None:
+    def test_first_sigterm_lookup_needs_no_kill(self) -> None:
         # The group already exited between the timeout firing and the killpg;
         # the ProcessLookupError race short-circuits before any wait/SIGKILL.
         proc = MagicMock()
@@ -772,7 +772,7 @@ class InterruptedClassificationTest(unittest.TestCase):
         ]
         return agents._run_subprocess(cmd, _REAL_CWD, dict(os.environ), 30)
 
-    def test_run_subprocess_flags_sigterm_exit_interrupted(self) -> None:
+    def test_sigterm_exit_marked_interrupted(self) -> None:
         stdout, stderr, exit_code, timed_out, interrupted = self._kill_self(
             signal.SIGTERM
         )
@@ -780,7 +780,7 @@ class InterruptedClassificationTest(unittest.TestCase):
         self.assertFalse(timed_out)
         self.assertTrue(interrupted)
 
-    def test_run_subprocess_flags_sigkill_exit_interrupted(self) -> None:
+    def test_sigkill_exit_marked_interrupted(self) -> None:
         stdout, stderr, exit_code, timed_out, interrupted = self._kill_self(
             signal.SIGKILL
         )
@@ -788,7 +788,7 @@ class InterruptedClassificationTest(unittest.TestCase):
         self.assertFalse(timed_out)
         self.assertTrue(interrupted)
 
-    def test_run_subprocess_clean_exit_not_interrupted(self) -> None:
+    def test_clean_exit_not_interrupted(self) -> None:
         # A normal non-zero failure (exit 3) is a completed run, NOT an
         # interruption -- the two must stay distinguishable downstream.
         cmd = [sys.executable, "-c", "import sys; sys.exit(3)"]
@@ -880,7 +880,7 @@ class ClaudeLastMessageGatingTest(unittest.TestCase):
             "final",
         )
 
-    def test_interrupted_run_without_result_event_is_empty(self) -> None:
+    def test_interrupted_no_result_is_empty(self) -> None:
         with patch(
             "orchestrator.agents.subprocess.Popen",
             return_value=_completed(
@@ -891,7 +891,7 @@ class ClaudeLastMessageGatingTest(unittest.TestCase):
         self.assertTrue(result.interrupted)
         self.assertEqual(result.last_message, "")
 
-    def test_nonzero_run_without_result_event_is_empty(self) -> None:
+    def test_nonzero_no_result_is_empty(self) -> None:
         with patch(
             "orchestrator.agents.subprocess.Popen",
             return_value=_completed(stdout=self._PARTIAL, returncode=1),
@@ -901,7 +901,7 @@ class ClaudeLastMessageGatingTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertEqual(result.last_message, "")
 
-    def test_interrupted_run_with_result_event_keeps_it(self) -> None:
+    def test_interrupted_result_is_kept(self) -> None:
         # A run that emitted the terminal result before being killed still
         # surfaces that result -- the gate only suppresses the partial-chunk
         # fallback, never the documented final-message channel.

@@ -427,7 +427,7 @@ class AnalyticsSyncDedupTest(unittest.TestCase):
             # Only the 2 originals are durably persisted.
             self.assertEqual(len(fake.inserts), len(records))
 
-    def test_post_prune_renumbering_does_not_duplicate(self) -> None:
+    def test_post_prune_renumbering_stays_unique(self) -> None:
         # The realistic post-prune scenario: file had 3 records, the
         # prune dropped record #1, leaving #2 + #3 at line numbers 1
         # and 2. A naive (source_path, source_line) key would
@@ -643,7 +643,7 @@ class FlushBatchRowcountTest(unittest.TestCase):
     `inserted` stays a lower bound rather than the count going negative.
     """
 
-    def test_negative_rowcount_counts_whole_batch_as_inserted(self) -> None:
+    def test_negative_rowcount_marks_batch_inserted(self) -> None:
         _, analytics_sync = _reload()
 
         class _Cur:
@@ -811,7 +811,7 @@ class AnalyticsSyncCliTest(unittest.TestCase):
             "log timestamp is not UTC",
         )
 
-    def test_cli_stdout_carries_timestamp_and_duration(self) -> None:
+    def test_stdout_has_timestamp_and_duration(self) -> None:
         # Operators run the sync from a terminal and expect a timestamped,
         # one-line summary with the elapsed wall-clock so a multi-thousand
         # record replay surfaces its cost without grepping the log lines.
@@ -867,7 +867,7 @@ class AnalyticsSyncConnectionLogTest(unittest.TestCase):
         self.assertNotIn("u:secret", joined)
         self.assertIn("***@h:5432", joined)
 
-    def test_redact_db_url_without_credentials_passes_through(self) -> None:
+    def test_no_credentials_url_passes_through(self) -> None:
         _, analytics_sync = _reload()
         self.assertEqual(
             analytics_sync._redact_db_url("postgresql://h:5432/db"),
@@ -881,7 +881,7 @@ class AnalyticsSyncConnectionLogTest(unittest.TestCase):
             analytics_sync._redact_db_url("postgresql://user@h/db"),
         )
 
-    def test_redact_db_url_strips_query_string_password(self) -> None:
+    def test_password_query_param_is_redacted(self) -> None:
         # libpq accepts `postgresql://h/db?user=u&password=secret` --
         # netloc-only redaction would leak the password into the
         # operator's stdout. Both forms must collapse to ***.
@@ -897,7 +897,7 @@ class AnalyticsSyncConnectionLogTest(unittest.TestCase):
         self.assertIn("password=", redacted)
         self.assertIn("***", redacted)
 
-    def test_redact_db_url_strips_query_string_sslpassword(self) -> None:
+    def test_sslpassword_query_param_is_redacted(self) -> None:
         # `sslpassword` decrypts the SSL client key; same threat model
         # as `password` itself.
         _, analytics_sync = _reload()
@@ -907,7 +907,7 @@ class AnalyticsSyncConnectionLogTest(unittest.TestCase):
         self.assertNotIn("ssl-secret", redacted)
         self.assertIn("sslpassword=", redacted)
 
-    def test_redact_db_url_query_params_case_insensitive(self) -> None:
+    def test_query_params_are_case_insensitive(self) -> None:
         # libpq treats parameter names as case-insensitive; uppercase
         # spellings must redact identically so a `?PASSWORD=secret`
         # URL does not slip past the filter.
@@ -917,7 +917,7 @@ class AnalyticsSyncConnectionLogTest(unittest.TestCase):
         )
         self.assertNotIn("secret", redacted)
 
-    def test_connect_log_redacts_query_string_password(self) -> None:
+    def test_connect_log_redacts_query_password(self) -> None:
         # End-to-end regression: a query-string-password URL must not
         # leak the password into the connection log.
         with tempfile.TemporaryDirectory() as td:
@@ -979,7 +979,7 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
                 "ON CONFLICT (content_hash) DO NOTHING", sql,
             )
 
-    def test_rowcount_distinguishes_inserted_and_duplicate(self) -> None:
+    def test_rowcount_separates_inserted_duplicate(self) -> None:
         # Race-safe backstop: model a concurrent writer that landed
         # rows AFTER the startup pre-check completed but BEFORE the
         # batched flush, by holding the pre-check view empty while
@@ -1148,7 +1148,7 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
     backstop for the rare concurrent-writer race.
     """
 
-    def test_pre_check_select_issued_once_before_input_read(self) -> None:
+    def test_select_runs_once_before_input_read(self) -> None:
         # A single SELECT against the unique content_hash index is the
         # whole startup tax; fan-out per row would defeat the point.
         with tempfile.TemporaryDirectory() as td:
@@ -1177,7 +1177,7 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
         self.assertIn("analytics_events", sql)
         self.assertIn("content_hash IS NOT NULL", sql)
 
-    def test_startup_pre_check_skips_already_present_hashes(self) -> None:
+    def test_startup_skips_existing_hashes(self) -> None:
         # Seed the fake's database-state set with two of the three
         # records' hashes; the pre-check SELECT picks them up and the
         # in-Python filter skips them before the batch accumulator
@@ -1211,7 +1211,7 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
         batched_hashes = {params[-1] for params in fake.batches[0][1]}
         self.assertEqual(batched_hashes, {new_record_hash})
 
-    def test_intra_file_duplicates_filtered_before_executemany(self) -> None:
+    def test_duplicates_removed_before_batch_write(self) -> None:
         # Two identical records back-to-back in the same JSONL file
         # share a content_hash. The first occurrence is queued and
         # adds its hash to the in-Python skip set; the second hits the
@@ -1712,7 +1712,7 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
         self.assertTrue(has_cost)
         self.assertEqual(cost_source, "estimated")
 
-    def test_daily_rollup_aggregates_after_sync_refresh(self) -> None:
+    def test_daily_rollup_refreshes_after_sync(self) -> None:
         # End-to-end Layer 4: insert two `agent_exit` rows on the same
         # UTC day with matching key columns, run the sync (which triggers
         # the post-commit `REFRESH MATERIALIZED VIEW`), and assert the

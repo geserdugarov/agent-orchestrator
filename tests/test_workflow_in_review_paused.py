@@ -29,7 +29,7 @@ def _paused_view(number: int) -> object:
 
 
 class InReviewLivePauseDriftTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_paused_during_drift_resume_blocks_relabel_and_bump(self) -> None:
+    def test_drift_pause_blocks_relabel_and_bump(self) -> None:
         # A body edit (seeded hash mismatch) drives the drift resume. The
         # operator applies `paused` only after the run starts, so it appears
         # solely on the freshly fetched view -- a guard consulting the stale

@@ -76,7 +76,7 @@ class RollupReadCutoverTest(unittest.TestCase):
                 f"analytics_agent_runs",
             )
 
-    def test_window_predicate_uses_day_with_date_params(self) -> None:
+    def test_window_uses_day_and_date_params(self) -> None:
         # The dashboard's `to_window` produces midnight-aligned UTC
         # datetimes; the rollup is keyed by `day` (a UTC date), so
         # the helper must project `start`/`end` to `.date()` before
@@ -174,7 +174,7 @@ class RollupReadCutoverTest(unittest.TestCase):
                 f"predicate when the stages multiselect is cleared",
             )
 
-    def test_summary_recovers_token_and_timeout_aggregates(self) -> None:
+    def test_summary_recovers_token_timeout_totals(self) -> None:
         # The dashboard's KPI strip reads `total_input_tokens`,
         # `total_output_tokens`, `total_cache_read_tokens`,
         # `total_cache_write_tokens`, `total_cost_usd`, and
@@ -217,7 +217,7 @@ class RollupReadCutoverTest(unittest.TestCase):
         self.assertIn("SUM(total_cache_read_tokens)", sql)
         self.assertIn("SUM(total_cache_write_tokens)", sql)
 
-    def test_stage_breakdown_recovers_weighted_duration_average(self) -> None:
+    def test_recovers_weighted_stage_duration(self) -> None:
         # `AVG(duration_s)` cannot be reconstructed from per-day
         # rollup averages without double-averaging (averaging
         # averages across days does not preserve the row-weighted
@@ -254,7 +254,7 @@ class RollupReadCutoverTest(unittest.TestCase):
         # across days would silently produce wrong numbers.
         self.assertNotIn("AVG(duration_s)", sql)
 
-    def test_backend_efficiency_pins_event_filter_in_sql(self) -> None:
+    def test_backend_efficiency_pins_event_in_sql(self) -> None:
         # The previous `analytics_agent_runs` view filtered to
         # `event = 'agent_exit'` internally. The rollup has an
         # `event` column, so the reader pins the filter in the

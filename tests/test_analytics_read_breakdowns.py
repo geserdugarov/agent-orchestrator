@@ -28,7 +28,7 @@ class BackendDailyTokensTest(unittest.TestCase):
             [],
         )
 
-    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+    def test_other_event_filter_skips_query(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         rows = analytics_read.get_backend_daily_tokens(
@@ -46,7 +46,7 @@ class BackendDailyTokensTest(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
 
-    def test_reads_view_and_aggregates_per_day_per_backend(self) -> None:
+    def test_reads_daily_backend_totals_from_view(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.rows_for = {
@@ -113,7 +113,7 @@ class BackendEfficiencyTest(unittest.TestCase):
             [],
         )
 
-    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+    def test_other_event_filter_skips_query(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         rows = analytics_read.get_backend_efficiency(
@@ -167,7 +167,7 @@ class BackendEfficiencyTest(unittest.TestCase):
         self.assertIn("SUM(duration_s_sum)", sql)
         self.assertIn("NULLIF(SUM(duration_s_count), 0)", sql)
 
-    def test_legacy_7tuple_fixture_defaults_cache_to_zero(self) -> None:
+    def test_legacy_7tuple_defaults_cache_to_zero(self) -> None:
         # Older 7-tuple `(backend, runs, failed, avg_dur, cost, in,
         # out)` rows still round-trip with zero cache tokens so
         # unrelated tests keep working.
@@ -198,7 +198,7 @@ class SkillTriggerRatesTest(unittest.TestCase):
             [],
         )
 
-    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+    def test_other_event_filter_skips_query(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         rows = analytics_read.get_skill_trigger_rates(
@@ -306,7 +306,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
             [],
         )
 
-    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+    def test_other_event_filter_skips_query(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         rows = analytics_read.get_skill_trigger_matrix(
@@ -386,7 +386,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
             self.assertNotIn("analytics_daily_rollup", sql)
             self.assertNotIn("analytics_agent_runs", sql)
 
-    def test_rate_derives_from_counts_and_guards_zero_runs(self) -> None:
+    def test_rate_handles_counts_and_zero_runs(self) -> None:
         # `rate` is `skill_runs / runs` (the offered-but-quiet cell reads
         # `0.0`), and a zero-run cell -- never emitted by the SQL -- still
         # yields `0.0` rather than a ZeroDivisionError.
@@ -485,7 +485,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         self.assertIn("COALESCE(agent_role, 'unknown')", run_sql)
         self.assertIn("COALESCE(backend, 'unknown')", run_sql)
 
-    def test_window_and_repo_params_bound_on_both_queries(self) -> None:
+    def test_window_and_repo_bound_to_both_queries(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         analytics_read.get_skill_trigger_matrix(
@@ -502,7 +502,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
             self.assertIn(datetime(2026, 6, 1, tzinfo=timezone.utc), params)
             self.assertIn("owner/repo", params)
 
-    def test_issue_and_stage_filter_runs_only_not_catalog(self) -> None:
+    def test_issue_stage_filters_apply_only_to_runs(self) -> None:
         # The stage / issue filters narrow only the agent_exit runs;
         # pushing them onto the repo-level catalog records (issue == 0,
         # NULL stage) would drop every catalog row.
@@ -544,7 +544,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         self.assertEqual(by_cell[("develop", "developer", "claude")], 1)
         self.assertEqual(by_cell[("review", "developer", "claude")], 0)
 
-    def test_runs_counts_every_cohort_run_not_just_skill_runs(self) -> None:
+    def test_run_count_includes_runs_without_skills(self) -> None:
         # `runs` is the cohort total: a cohort with four runs, only one
         # of which fired the skill, reads runs=4 / skill_runs=1 so the low
         # trigger count is legible against the cohort size.
@@ -570,7 +570,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         self.assertEqual(by_skill["review"].runs, 4)
         self.assertEqual(by_skill["review"].skill_runs, 1)
 
-    def test_sorted_by_skill_runs_then_cohort_runs_desc(self) -> None:
+    def test_sorted_by_skill_then_cohort_run_count(self) -> None:
         # Acceptance order: Runs-with-skill DESC, then cohort Runs DESC,
         # then a stable repo/role/backend/skill tiebreak.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
@@ -637,7 +637,7 @@ class SkillTriggerMatrixTest(unittest.TestCase):
         )
         self.assertEqual(len(all_rows), 3)
 
-    def test_decomposer_and_question_cohorts_get_zero_rows(self) -> None:
+    def test_question_decompose_cohorts_are_empty(self) -> None:
         # decomposer / question runs emit `agent_exit` just like
         # developer / reviewer, so their cohorts must be zero-padded with
         # the repo's catalog skills even when they trigger nothing.
@@ -736,7 +736,7 @@ class CostCoverageTest(unittest.TestCase):
             [],
         )
 
-    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+    def test_other_event_filter_skips_query(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         rows = analytics_read.get_cost_coverage(
@@ -789,7 +789,7 @@ class CostCoverageTest(unittest.TestCase):
         ):
             self.assertIn(col, sql)
 
-    def test_legacy_two_tuple_rows_default_tokens_to_zero(self) -> None:
+    def test_legacy_2tuple_defaults_tokens_to_zero(self) -> None:
         # Older fixtures still emit 2-tuple `(cost_source, runs)`
         # rows; the reader defaults `total_tokens` to zero so
         # unrelated tests round-trip.
@@ -816,7 +816,7 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
             [],
         )
 
-    def test_event_filter_excluding_agent_exit_short_circuits(self) -> None:
+    def test_other_event_filter_skips_query(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         rows = analytics_read.get_review_round_breakdown(
@@ -834,7 +834,7 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(conn.executed, [])
 
-    def test_query_against_view_and_buckets_round_trip(self) -> None:
+    def test_view_query_buckets_rounds(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         # 12-tuple rows carry the role + cache split the new chart
@@ -913,7 +913,7 @@ class ReviewRoundBreakdownTest(unittest.TestCase):
         self.assertIn("reviewer_cache_cost_usd", sql)
         self.assertIn("reviewer_no_cache_cost_usd", sql)
 
-    def test_legacy_three_tuple_rows_default_cost_to_zero(self) -> None:
+    def test_legacy_3tuple_defaults_cost_to_zero(self) -> None:
         # Older fixtures still emit 3-tuple `(bucket, runs, failed)` rows
         # without the cost / role / cache rollups; the reader defaults
         # those values to zero so unrelated tests keep round-tripping.

@@ -17,7 +17,7 @@ class GitHardenedInjectsIdentityTest(unittest.TestCase):
     non-conflict failure rather than resolving.
     """
 
-    def test_env_includes_committer_and_author_identity(self) -> None:
+    def test_env_has_committer_and_author_identity(self) -> None:
         from unittest.mock import patch as mock_patch
 
         captured: dict[str, dict] = {}

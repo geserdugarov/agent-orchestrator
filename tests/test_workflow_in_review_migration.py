@@ -97,7 +97,7 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_legacy_first_tick_does_not_replay_history(self) -> None:
+    def test_first_tick_does_not_replay_history(self) -> None:
         gh, issue, pr = self._legacy_setup()
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", 600):
@@ -117,7 +117,7 @@ class LegacyInReviewWatermarkSeedTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(state.get("pr_last_review_comment_id"), 30)
         self.assertEqual(state.get("pr_last_review_summary_id"), 4000)
 
-    def test_legacy_first_tick_pings_hitl_for_mergeable_pr(self) -> None:
+    def test_first_tick_pings_for_mergeable_pr(self) -> None:
         # All gates passing: the migration must not park or otherwise
         # block the handler from posting the HITL ping -- it only treats
         # already-visible comments as consumed.
@@ -183,7 +183,7 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
         )
         return gh, issue, pr
 
-    def test_first_inline_review_after_migration_surfaces(self) -> None:
+    def test_first_inline_review_surfaces(self) -> None:
         gh, issue, pr = self._legacy_setup()
 
         # Tick 1: legacy migration runs, surfaces have nothing to seed past.
@@ -224,7 +224,7 @@ class LegacyMigrationPersistsEmptyWatermarksTest(
             gh.pinned_data(400).get("pending_fix_review_max_id"), 42,
         )
 
-    def test_first_review_summary_after_migration_surfaces(self) -> None:
+    def test_first_review_summary_surfaces(self) -> None:
         # Same shape on the review-summary surface. A COMMENTED summary
         # body must still surface through the fresh-feedback scan; without
         # the migration persisting 0, the body would be migrated past and
@@ -280,7 +280,7 @@ class ZeroWatermarkSurvivesFallbackTest(unittest.TestCase, _PatchedWorkflowMixin
     PR_NUMBER = 1100
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-600"
 
-    def test_zero_watermark_does_not_fall_back_to_last_action(self) -> None:
+    def test_zero_does_not_use_last_action(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # The implementing-time park comment (id 920) sits between a human

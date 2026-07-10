@@ -15,7 +15,7 @@ from tests.workflow_helpers import _PatchedWorkflowMixin, _TEST_SPEC, _agent
 
 
 class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_pickup_with_decompose_off_routes_to_implementing(self) -> None:
+    def test_decompose_off_routes_to_implementing(self) -> None:
         # Legacy path retained behind the DECOMPOSE kill switch: an
         # unlabeled issue still goes straight to implementing without a
         # decomposer round, so operators can disable decomposition without
@@ -42,7 +42,7 @@ class HandlePickupTest(unittest.TestCase, _PatchedWorkflowMixin):
         # _handle_implementing was actually entered (codex spawned).
         mocks["run_agent"].assert_called_once()
 
-    def test_pickup_skips_issue_from_non_allowed_author(self) -> None:
+    def test_nonallowed_author_is_skipped(self) -> None:
         # A populated ALLOWED_ISSUE_AUTHORS allowlist must drop unlabeled
         # issues from outside that list silently -- no comment, no label,
         # no pinned state. This is the abuse guard: a stranger filing

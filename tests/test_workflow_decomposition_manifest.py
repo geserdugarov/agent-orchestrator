@@ -150,7 +150,7 @@ class ParseManifestTest(unittest.TestCase):
         self.assertIsNone(manifest)
         self.assertIn("final block", error)
 
-    def test_trailing_whitespace_after_manifest_accepted(self) -> None:
+    def test_accepts_trailing_manifest_whitespace(self) -> None:
         # Pure whitespace (newlines/spaces) after the closing fence is a
         # benign formatting artifact and must NOT trip the "trailing
         # content" guard.
@@ -222,7 +222,7 @@ class ParseManifestTest(unittest.TestCase):
         self.assertIsNone(manifest)
         self.assertIn("umbrella", error)
 
-    def test_displayed_schema_example_is_valid_manifest(self) -> None:
+    def test_displayed_schema_is_valid(self) -> None:
         # A literal-minded decomposer that copies the schema verbatim
         # must produce a manifest that survives _parse_manifest. If the
         # displayed example uses union notation or any other
@@ -276,7 +276,7 @@ class BuildSingleDecisionCommentTest(unittest.TestCase):
             ":mag: decomposer says this fits one context: trivial",
         )
 
-    def test_missing_rationale_falls_back_to_placeholder(self) -> None:
+    def test_missing_rationale_uses_placeholder(self) -> None:
         # `_parse_manifest` does not validate single-branch fields, so a
         # non-string / absent rationale must not crash rendering.
         comment = workflow._build_single_decision_comment(

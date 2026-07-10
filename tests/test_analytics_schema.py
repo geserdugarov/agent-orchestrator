@@ -56,7 +56,7 @@ class SchemaIndexesTest(unittest.TestCase):
             r"WHERE event = 'stage_enter'",
         )
 
-    def test_composite_event_repo_stage_ts_index_present(self) -> None:
+    def test_has_composite_event_repo_stage_ts_index(self) -> None:
         # The column order matters: equality on event / repo / stage
         # then range on ts. A reorder is a behavior change.
         text = _normalize(_schema_text())
@@ -275,7 +275,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
             r"AS\s+duration_s_count",
         )
 
-    def test_view_failed_count_filters_to_non_zero_exit_code(self) -> None:
+    def test_failed_count_requires_nonzero_exit(self) -> None:
         body = self._view_body()
         # Non-zero exit_code is the failure signal; NULL exit_code
         # stays excluded so a `stage_enter` row never counts as a
@@ -286,7 +286,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
             r"THEN 1 ELSE 0 END\)\s+AS\s+failed_count",
         )
 
-    def test_view_timed_out_count_filters_to_agent_exit(self) -> None:
+    def test_timeout_count_uses_agent_exit(self) -> None:
         body = self._view_body()
         # The reliability "Timeouts" tile reads this aggregate; it must
         # be scoped to `event='agent_exit'` so a `stage_enter` row with
@@ -302,7 +302,7 @@ class AnalyticsDailyRollupViewTest(unittest.TestCase):
         body = self._view_body()
         self.assertRegex(body, r"COUNT\(\*\)\s+AS\s+event_count")
 
-    def test_unique_key_index_present_with_nulls_not_distinct(self) -> None:
+    def test_unique_index_treats_nulls_as_equal(self) -> None:
         # `REFRESH MATERIALIZED VIEW CONCURRENTLY` requires a unique
         # index. NULLS NOT DISTINCT (Postgres 15+) collapses NULL
         # stage / backend / cost_source values into one row -- the same

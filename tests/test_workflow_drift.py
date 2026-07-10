@@ -83,7 +83,7 @@ class ComputeUserContentHashTest(unittest.TestCase):
             workflow._compute_user_content_hash(issue_with_both, set()),
         )
 
-    def test_pinned_state_marker_comment_is_filtered_by_marker(self) -> None:
+    def test_state_marker_filtered_by_marker(self) -> None:
         pinned = FakeComment(
             id=300, body="<!--orchestrator-state {\"k\": 1}-->",
         )
@@ -96,7 +96,7 @@ class ComputeUserContentHashTest(unittest.TestCase):
             workflow._compute_user_content_hash(issue_with_pinned, set()),
         )
 
-    def test_bare_continue_excluded_but_guidance_counts(
+    def test_bare_continue_ignored_guidance_counts(
         self,
     ) -> None:
         # A bare `/orchestrator continue` is an operator command, not
@@ -177,7 +177,7 @@ class ContinueCommandActionTest(unittest.TestCase):
 
 
 class DetectUserContentChangeTest(unittest.TestCase):
-    def test_first_call_persists_durably_and_returns_none(self) -> None:
+    def test_first_call_persists_and_returns_none(self) -> None:
         # The first encounter has no baseline; we record the current value
         # AND write pinned state immediately so a parked/idle tick can't
         # silently absorb a later edit as the new baseline.
@@ -214,7 +214,7 @@ class DetectUserContentChangeTest(unittest.TestCase):
         # No extra write when the baseline already matches.
         self.assertEqual(gh.write_state_calls, before)
 
-    def test_body_change_returns_new_hash_without_auto_persist(
+    def test_body_change_returns_hash_without_persist(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -267,7 +267,7 @@ class DetectUserContentChangeTest(unittest.TestCase):
         self.assertEqual(state.get(KEY_USER_CONTENT_HASH), new_hash)
         self.assertEqual(gh.pinned_data(1).get(KEY_USER_CONTENT_HASH), new_hash)
 
-    def test_real_edit_alongside_bare_continue_still_drifts(self) -> None:
+    def test_real_edit_with_bare_continue_drifts(self) -> None:
         # The legacy-normalization path must not swallow a genuine edit: when
         # the body actually changed AND a bare continue is present, the legacy
         # hash (old algorithm over the NEW content) still differs from the
@@ -346,7 +346,7 @@ class UserContentChangePromptIncludesCommentsTest(unittest.TestCase):
     surface that comment to the dev. Quoting only title/body would leave
     the dev unaware of the acceptance criterion the human just posted."""
 
-    def test_recent_comments_are_quoted_in_resume_prompt(self) -> None:
+    def test_recent_comments_quoted_in_resume_prompt(self) -> None:
         issue = make_issue(1, title="t", body="b")
         issue.comments.append(FakeComment(
             id=500, body="new acceptance criterion: handle empty input",
@@ -369,7 +369,7 @@ class FirstTimeHashSeedingIsDurableTest(
     later edit after a parked/idle tick is not silently absorbed as the
     new baseline."""
 
-    def test_validating_awaiting_human_no_reply_persists_baseline(
+    def test_validating_no_reply_persists_baseline(
         self,
     ) -> None:
         # Legacy state (no `user_content_hash`) parked on awaiting_human
@@ -429,7 +429,7 @@ class NoCommitAckDoesNotParkTest(
     validating / in_review / resolving_conflict drift paths must treat
     that as an ack rather than parking awaiting_human."""
 
-    def test_validating_ack_without_commit_does_not_park(self) -> None:
+    def test_validating_ack_does_not_park(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(600, label=LABEL_VALIDATING, body=CLARIFIED_BODY)
         gh.add_issue(issue)
@@ -468,7 +468,7 @@ class NoCommitAckDoesNotParkTest(
             for _, body in gh.posted_comments
         ))
 
-    def test_in_review_ack_without_commit_bounces_to_validating(
+    def test_in_review_ack_routes_to_validating(
         self,
     ) -> None:
         # A no-commit "ack" reply from the dev on an in_review drift
@@ -532,7 +532,7 @@ class DriftMarksCommentsConsumedTest(
     the same human comment and replays it as fresh PR feedback,
     triggering a duplicate dev resume."""
 
-    def test_validating_drift_bumps_last_action_past_human_comment(
+    def test_validating_bumps_past_human_comment(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -635,7 +635,7 @@ class DriftMarksCommentsConsumedTest(
         # consumed feedback has been fed to the dev.
         self.assertEqual(state.get("pr_last_comment_id"), 0)
 
-    def test_implementing_bumps_last_action_past_comment(
+    def test_implementing_bumps_past_comment(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -675,7 +675,7 @@ class DriftMarksCommentsConsumedTest(
             int(state.get(KEY_LAST_ACTION_COMMENT_ID)), 7000,
         )
 
-    def test_resolving_conflict_drift_bumps_last_action(self) -> None:
+    def test_conflict_drift_bumps_last_action(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
             930, label=LABEL_RESOLVING_CONFLICT, body=NEW_BODY,
@@ -727,7 +727,7 @@ class OrchCommentMarkerSurvivesIdCapTest(unittest.TestCase):
     bot comment in the hash and trigger false drift each tick. The body
     marker (`_ORCH_COMMENT_MARKER`) must keep the hash stable."""
 
-    def test_excludes_orchestrator_comment_when_id_unknown(
+    def test_unknown_id_bot_comment_is_excluded(
         self,
     ) -> None:
         # Simulate an orchestrator comment whose id has been evicted
@@ -872,7 +872,7 @@ class DriftNonAckResponseParksTest(
     a clarification question -- must park awaiting human, not silently
     advance the workflow with a misleading "satisfies" comment."""
 
-    def test_validating_drift_clarification_question_parks(self) -> None:
+    def test_validating_clarification_parks(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(601, label=LABEL_VALIDATING, body=CLARIFIED_BODY)
         gh.add_issue(issue)
@@ -916,7 +916,7 @@ class DriftNonAckResponseParksTest(
             for _, body in gh.posted_comments
         ))
 
-    def test_in_review_drift_clarification_question_parks(self) -> None:
+    def test_in_review_clarification_parks(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(701, label=LABEL_IN_REVIEW, body=CLARIFIED_BODY)
         gh.add_issue(issue)
@@ -961,7 +961,7 @@ class DriftNonAckResponseParksTest(
             for _, body in gh.posted_comments
         ))
 
-    def test_implementing_drift_clarification_question_parks(
+    def test_implementing_clarification_parks(
         self,
     ) -> None:
         # The implementing-stage inline drift handler shares the same

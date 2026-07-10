@@ -43,7 +43,7 @@ class ConnReusePathTest(unittest.TestCase):
         # The reuse path never closes the caller's connection.
         self.assertEqual(conn.close_called, 0)
 
-    def test_get_filter_options_runs_one_query_on_passed_conn(self) -> None:
+    def test_filter_options_uses_passed_connection(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         analytics_read.get_filter_options(
@@ -95,7 +95,7 @@ class ConnReusePathTest(unittest.TestCase):
         self.assertIsNotNone(extent.max_ts)
         self.assertEqual(conn.close_called, 0)
 
-    def test_conn_runs_query_even_when_global_db_url_unset(self) -> None:
+    def test_passed_conn_works_without_global_url(self) -> None:
         # The `conn=` path is a complete escape hatch: a caller that
         # already holds a connection (e.g. opened with an explicit
         # `analytics_connection(db_url=...)`) must be able to run
@@ -165,7 +165,7 @@ class ConnReusePathTest(unittest.TestCase):
         self.assertEqual(len(ts_conn.executed), 1)
         self.assertEqual(ts_conn.close_called, 0)
 
-    def test_conn_none_preserves_legacy_open_close_path(self) -> None:
+    def test_none_uses_legacy_open_close_path(self) -> None:
         # Backwards-compat: callers that do not pass `conn=` still
         # see the existing one-connection-per-call shape so the
         # original tests (and any other consumers) keep working.

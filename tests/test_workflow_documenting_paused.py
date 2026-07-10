@@ -49,7 +49,7 @@ def _paused_view(number: int) -> object:
 class DocumentingLivePauseInitialPassTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
-    def test_pause_during_initial_docs_pass_blocks_push_and_advance(
+    def test_initial_pause_blocks_push_and_advance(
         self,
     ) -> None:
         # Fresh docs pass on an approved PR. `paused` applied during the pass
@@ -95,7 +95,7 @@ class DocumentingLivePauseInitialPassTest(
 class DocumentingLivePauseAwaitingHumanTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
-    def test_pause_during_followup_docs_pass_keeps_park_intact(self) -> None:
+    def test_followup_pause_keeps_park_intact(self) -> None:
         # Awaiting-human docs resume after a park: a human replied and the full
         # docs prompt is rerun. `paused` applied mid-resume must stop before the
         # push / advance / watermark write, leaving the park and the consumed-
@@ -207,7 +207,7 @@ class DocumentingResumeTrustFilterTest(
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(state.get("last_action_comment_id"), 5000)
 
-    def test_trusted_comment_resumes_and_advances_to_trusted_only(self) -> None:
+    def test_trusted_comment_advances_watermark(self) -> None:
         gh = FakeGitHubClient()
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
             issue = self._seed_parked_docs(gh, comments=[

@@ -178,7 +178,7 @@ class ResolvingConflictAwaitingHumanResumeTest(
         self.assertEqual(state.get("last_action_comment_id"), 1000)
         self.assertEqual(gh.label_history, [])
 
-    def test_resume_interrupted_does_not_consume_reply(
+    def test_interrupted_resume_keeps_reply(
         self,
     ) -> None:
         gh, issue, pr = self._seed(
@@ -223,7 +223,7 @@ class ResolvingConflictAwaitingHumanResumeTest(
         self.assertEqual(state.get("conflict_round"), 1)
         self.assertNotIn((200, "validating"), gh.label_history)
 
-    def test_resume_recovers_from_stale_claude_session(self) -> None:
+    def test_stale_claude_session_recovers(self) -> None:
         # Regression: a `resolving_conflict` issue parked awaiting human
         # whose pinned `dev_session_id` references a Claude transcript that
         # no longer exists. The first `--resume <sid>` call comes back with
@@ -338,7 +338,7 @@ class ResolvingConflictAwaitingHumanResumeTest(
         self.assertNotIn((200, "validating"), gh.label_history)
         self.assertTrue(state.get("awaiting_human"))
 
-    def test_silent_bare_continue_retries_without_literal(
+    def test_bare_continue_retries_without_literal(
         self,
     ) -> None:
         # `/orchestrator continue` on a session-failure rebase park is an

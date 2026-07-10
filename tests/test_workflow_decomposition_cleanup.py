@@ -28,7 +28,7 @@ class ReadyDriftClearsStaleManifestStateTest(
     `_handle_decomposing` tick's half-finished recovery would fire and
     flip back to `blocked` WITHOUT re-running the decomposer."""
 
-    def test_ready_drift_clears_children_and_orphans_them(self) -> None:
+    def test_drift_clears_and_orphans_children(self) -> None:
         gh = FakeGitHubClient()
         parent = make_issue(800, label="ready", body="updated parent body")
         gh.add_issue(parent)
@@ -70,7 +70,7 @@ class ReadyDriftClearsStaleManifestStateTest(
         self.assertIn("ORPHANED", notice)
 
 
-class DecomposingDriftBeforeHalfFinishedRecoveryTest(
+class DriftBeforeHalfFinishedRecoveryTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
     """Reviewer point 2: `_handle_decomposing` checks half-finished
@@ -80,7 +80,7 @@ class DecomposingDriftBeforeHalfFinishedRecoveryTest(
     manifest. The drift check must run FIRST so the manifest gets
     re-derived against the new body."""
 
-    def test_children_clear_manifest_and_rerun_decomposer(
+    def test_clears_manifest_and_reruns_decomposer(
         self,
     ) -> None:
         # Simulate the recovery shape: parent label is still

@@ -78,7 +78,7 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
         )
         return gh, issue, pr
 
-    def test_pre_handoff_human_pr_comment_is_processed_in_in_review(self) -> None:
+    def test_human_pr_comment_survives_handoff(self) -> None:
         gh, issue, pr = self._setup()
 
         # Step 1: validating approves. The orchestrator's approval comment
@@ -171,7 +171,7 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr, long_ago
 
-    def test_pre_pickup_chatter_does_not_replay_at_in_review(self) -> None:
+    def test_pre_pickup_chatter_not_replayed(self) -> None:
         gh, issue, pr, long_ago = self._setup()
 
         # Step 1: validating approves. Watermark must include id 850 so the
@@ -271,7 +271,7 @@ class ValidatingHandoffSeedsAllWatermarksTest(
         )
         return gh, issue, pr, long_ago
 
-    def test_pre_handoff_review_summary_surfaces_in_in_review(self) -> None:
+    def test_review_summary_survives_handoff(self) -> None:
         # A "Comment" review without `CHANGES_REQUESTED` is the dangerous
         # case: it doesn't trip `pr_has_changes_requested` so the HITL
         # ping would happily advertise the PR as ready if the in_review
@@ -318,7 +318,7 @@ class ValidatingHandoffSeedsAllWatermarksTest(
             4242,
         )
 
-    def test_pre_handoff_inline_review_comment_surfaces(self) -> None:
+    def test_inline_review_survives_handoff(self) -> None:
         # Same shape, inline-review surface. The orchestrator never posts
         # there either, so handoff has to seed pr_last_review_comment_id
         # explicitly.
@@ -369,7 +369,7 @@ class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
     PR_NUMBER = 800
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-300"
 
-    def test_inline_comment_with_bot_issue_id_survives_handoff(self) -> None:
+    def test_bot_issue_id_collision_survives_handoff(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         issue = make_issue(300, label="validating", comments=[
@@ -449,7 +449,7 @@ class HandoffWithoutPickupIdLegacyStateTest(
     PR_NUMBER = 1000
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-500"
 
-    def test_legacy_human_during_implementing_survives_handoff(self) -> None:
+    def test_legacy_human_comment_survives_handoff(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Comment id ordering models a real legacy lifecycle: pre-pickup
@@ -557,7 +557,7 @@ class HandoffWalkerHonorsOrchestratorMarkerTest(
     PR_NUMBER = 700
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-300"
 
-    def test_marker_only_orchestrator_comment_does_not_stop_walker(
+    def test_marker_only_comment_does_not_stop_walk(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -643,7 +643,7 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
     PR_NUMBER = 1500
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-900"
 
-    def test_consumed_reply_does_not_replay_after_handoff(self) -> None:
+    def test_consumed_reply_not_replayed(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Lifecycle: pickup (900) -> implementing dev asks question, parks
@@ -725,7 +725,7 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
         ]
         self.assertEqual(len(ping_comments), 1)
 
-    def test_resume_bumps_last_action_comment_id_to_consumed_max(self) -> None:
+    def test_resume_bumps_last_action_to_consumed_max(self) -> None:
         # Direct unit-level check on `_resume_developer_on_human_reply`:
         # after the resume runs, `last_action_comment_id` must reflect
         # the highest consumed id, not the prior park id.
@@ -770,7 +770,7 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
     PR_NUMBER = 1600
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-800"
 
-    def test_pr_conv_comment_below_consumed_through_is_preserved(self) -> None:
+    def test_pr_comment_below_consumed_max_is_kept(self) -> None:
         gh = FakeGitHubClient()
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         # Lifecycle: pickup (900) -> park asking question (910) -> human

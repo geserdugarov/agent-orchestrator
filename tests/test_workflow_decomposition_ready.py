@@ -20,7 +20,7 @@ from tests.workflow_helpers import (
 
 
 class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_handle_ready_routes_to_implementing_same_tick(self) -> None:
+    def test_routes_to_implementing_same_tick(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(20, label="ready")
         gh.add_issue(issue)
@@ -75,7 +75,7 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
             "picking this up" in body for _, body in new_comments
         ))
 
-    def test_handle_ready_marks_pre_existing_comments_consumed(self) -> None:
+    def test_marks_prior_comments_consumed(self) -> None:
         # A parent that came through `decomposing` -> `blocked` ->
         # all-children-done -> `ready` carries a `pickup_comment_id`
         # anchored on the original "decomposing" comment. Any human
@@ -120,7 +120,7 @@ class HandleReadyTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertGreaterEqual(int(last_action), 2050)
 
-    def test_handle_ready_does_not_lower_existing_last_action(self) -> None:
+    def test_keeps_existing_last_action(self) -> None:
         # If a prior decomposing park already advanced
         # `last_action_comment_id` past everything, _handle_ready must
         # not regress it. Latest comment id might be smaller than the

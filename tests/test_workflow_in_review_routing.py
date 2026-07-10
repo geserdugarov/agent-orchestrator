@@ -113,7 +113,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-30",
         )
 
-    def test_in_review_mergeable_final_docs_pings_human(self) -> None:
+    def test_mergeable_final_docs_ping_human(self) -> None:
         # PR mergeable: post a one-shot HITL ping so the human knows the
         # PR is ready, but stay open (no merge, no label flip, no
         # awaiting_human). The orchestrator is manual-merge-only -- it
@@ -161,7 +161,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNotNone(ping_id)
         self.assertIn(ping_id, state.get("orchestrator_comment_ids", []))
 
-    def test_in_review_mergeable_without_approval_does_not_ping(self) -> None:
+    def test_no_approval_does_not_ping(self) -> None:
         # The ping advertises the PR as ready for review/merge; firing it
         # on a mergeable PR with neither a current final-docs handoff nor
         # a formal GitHub approval would invite a manual merge over a
@@ -181,7 +181,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNone(state.get("ready_ping_sha"))
         self.assertFalse(state.get("awaiting_human"))
 
-    def test_in_review_mergeable_changes_requested_does_not_ping(self) -> None:
+    def test_changes_requested_does_not_ping(self) -> None:
         # A standing human CHANGES_REQUESTED on the current head vetoes
         # the ping; the orchestrator must not advertise the PR as ready
         # while a human review is asking for changes, even when the
@@ -256,7 +256,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(len(pings_total), 2)
         self.assertEqual(gh.pinned_data(30).get("ready_ping_sha"), "beefcafe")
 
-    def test_in_review_stale_final_docs_does_not_ping_new_head(self) -> None:
+    def test_stale_final_docs_do_not_ping_new_head(self) -> None:
         # The final-docs marker is a head-SHA approval signal. If another
         # commit lands after documenting, the old marker must not ping the
         # new head; the issue needs another validating/documenting pass.
@@ -279,7 +279,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.pinned_data(30).get("ready_ping_sha"), "cafe1234")
 
-    def test_in_review_ready_ping_does_not_swallow_concurrent_human(self) -> None:
+    def test_ready_ping_keeps_concurrent_human(self) -> None:
         # Race window: a human posts an issue comment AFTER the handler's
         # comment scan but BEFORE the ready-for-merge ping. The ping must
         # NOT bump `pr_last_comment_id` past the unseen human comment;
@@ -377,7 +377,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.posted_comments, [])
         self.assertFalse(gh.pinned_data(30).get("awaiting_human"))
 
-    def test_in_review_pr_comment_within_debounce_flips_to_fixing(self) -> None:
+    def test_inside_debounce_comment_enters_fixing(self) -> None:
         # Fresh PR feedback inside the debounce window must NOT silently
         # wait or spawn the dev: the handler records pending-fix metadata
         # and flips the label to `fixing` immediately so the fixing handler
@@ -417,7 +417,7 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # triggering comments to build its dev-resume prompt.
         self.assertEqual(state.get("pr_last_comment_id"), 1999)
 
-    def test_in_review_pr_comment_past_debounce_flips_to_fixing(self) -> None:
+    def test_past_debounce_comment_enters_fixing(self) -> None:
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         pr = self._open_pr(
             issue_comments=[
@@ -482,7 +482,7 @@ class HandleInReviewClosedIssueExternalMergeTest(
     `merged_at` -- otherwise the issue stays closed-but-`in_review` forever.
     """
 
-    def test_external_merge_on_closed_issue_finalizes_to_done(self) -> None:
+    def test_closed_issue_external_merge_finishes(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(40, label="in_review")
         issue.closed = True  # Resolves #N has already auto-closed it.
@@ -539,7 +539,7 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
-    def test_changes_requested_with_body_routes_to_fixing(self) -> None:
+    def test_change_request_body_enters_fixing(self) -> None:
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         review = FakePRReview(
             id=4242,
@@ -569,7 +569,7 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
         # body when it builds its dev-resume prompt.
         self.assertEqual(state.get("pr_last_review_summary_id"), 0)
 
-    def test_commented_review_with_body_routes_to_fixing(self) -> None:
+    def test_comment_review_body_enters_fixing(self) -> None:
         # A "Comment" review (state=COMMENTED) needs to surface as fresh
         # feedback even though it does not block via
         # pr_has_changes_requested -- without the route to `fixing` the
@@ -598,7 +598,7 @@ class InReviewPRReviewSummaryTest(unittest.TestCase, _PatchedWorkflowMixin):
             4243,
         )
 
-    def test_approved_review_body_does_not_trigger_resume(self) -> None:
+    def test_approved_body_does_not_resume(self) -> None:
         # APPROVED reviews are excluded from the summary surface even when
         # they carry an informational body. The human approved the PR --
         # their note is not a request for changes, so the handler must not

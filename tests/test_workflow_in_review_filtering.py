@@ -45,7 +45,7 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
     PR_NUMBER = 200
     BRANCH = "orchestrator/geserdugarov__agent-orchestrator/issue-100"
 
-    def test_same_account_human_pr_comment_routes_to_fixing(self) -> None:
+    def test_human_pr_comment_routes_to_fixing(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(100, label="in_review")
         gh.add_issue(issue)
@@ -101,7 +101,7 @@ class SameAccountHumanFeedbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(100).get("pending_fix_issue_max_id"), 3000,
         )
 
-    def test_same_account_human_issue_comment_at_handoff_preserved(self) -> None:
+    def test_handoff_keeps_human_issue_comment(self) -> None:
         # Validating-handoff variant: a human posts a review comment on the
         # issue thread (under the same account that owns the PAT) while
         # validating is still running. Without the id-based filter, the
@@ -190,7 +190,7 @@ class OrchestratorMarkerFeedbackFilterTest(
     must not route a marked bot comment to `fixing`.
     """
 
-    def test_marked_pr_comment_missing_id_does_not_route_to_fixing(self) -> None:
+    def test_marked_comment_without_id_is_filtered(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(120, label="in_review")
         gh.add_issue(issue)
@@ -244,7 +244,7 @@ class OrchestratorMarkerFeedbackFilterTest(
             for _, body in gh.posted_comments
         ))
 
-    def test_pr433_loop_legacy_state_with_marker_only_comments(self) -> None:
+    def test_legacy_marker_only_loop_is_filtered(self) -> None:
         # Regression test for #437 / PR #433 loop: an issue that reached
         # in_review with `pickup_comment_id=None` (a legacy state from an
         # issue picked up via operator relabel out of `question`) keeps
@@ -348,7 +348,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
     share an id must NOT be filtered out as self-authored.
     """
 
-    def test_inline_review_with_colliding_id_still_surfaces(self) -> None:
+    def test_inline_id_collision_still_surfaces(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(160, label="in_review")
         gh.add_issue(issue)
@@ -394,7 +394,7 @@ class CrossNamespaceFilterTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(160).get("pending_fix_review_max_id"), 4242,
         )
 
-    def test_review_summary_with_colliding_id_still_surfaces(self) -> None:
+    def test_summary_id_collision_still_surfaces(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(161, label="in_review")
         gh.add_issue(issue)
@@ -509,7 +509,7 @@ class InReviewAllowlistFeedbackFilterTest(
         )
         return gh, issue
 
-    def test_outsider_feedback_does_not_route_on_any_surface(self) -> None:
+    def test_outsider_feedback_never_routes(self) -> None:
         for surface, _ in self._SURFACES:
             with self.subTest(surface=surface):
                 gh, issue = self._seed(surface, self.OUTSIDER)
