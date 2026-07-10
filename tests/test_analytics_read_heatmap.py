@@ -58,7 +58,7 @@ class HourlyHeatmapTest(unittest.TestCase):
         ):
             self.assertIn(column, sql)
 
-    def test_legacy_three_tuple_rows_default_tokens_to_zero(self) -> None:
+    def test_legacy_3tuple_defaults_tokens_to_zero(self) -> None:
         # Older fixtures still emit 3-tuple `(weekday, hour, count)`
         # rows without the token column; the reader defaults the
         # token total to zero so unrelated tests round-trip.

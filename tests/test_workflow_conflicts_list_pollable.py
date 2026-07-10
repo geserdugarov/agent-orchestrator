@@ -7,14 +7,14 @@ import unittest
 from tests.fakes import FakeGitHubClient, make_issue
 
 
-class ListPollableIssuesIncludesResolvingConflictTest(unittest.TestCase):
+class ConflictIncludedInPollableIssuesTest(unittest.TestCase):
     """An external merge can land while the orchestrator is mid-resolution:
     `Resolves #N` closes the issue, but the orchestrator must still poll
     closed-but-`resolving_conflict` issues so `_handle_resolving_conflict`'s
     terminal `pr_status == "merged"` branch can finalize to `done`.
     """
 
-    def test_closed_resolving_conflict_issue_is_polled(self) -> None:
+    def test_closed_conflict_issue_is_polled(self) -> None:
         gh = FakeGitHubClient()
         # Close an issue still labeled `resolving_conflict` (mirrors
         # GitHub auto-closing via `Resolves #N` after a human merge).

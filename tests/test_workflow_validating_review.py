@@ -64,7 +64,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
             for _, body in gh.posted_pr_comments
         ))
 
-    def test_changes_requested_resumes_dev_increments_round(self) -> None:
+    def test_changes_requested_resume_and_bump_round(self) -> None:
         gh, issue = self._seeded()
         review = _agent(
             session_id="rev-sess",
@@ -112,7 +112,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((5, LABEL_DOCUMENTING), gh.label_history)
         self.assertNotIn((5, LABEL_IN_REVIEW), gh.label_history)
 
-    def test_unknown_verdict_parks_with_quoted_message(self) -> None:
+    def test_unknown_verdict_parks_with_message(self) -> None:
         gh, issue = self._seeded()
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
@@ -132,7 +132,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Label stays validating: no in_review transition.
         self.assertNotIn((5, LABEL_IN_REVIEW), gh.label_history)
 
-    def test_empty_review_park_surfaces_stderr_and_exit_code(self) -> None:
+    def test_empty_review_park_shows_stderr_exit(self) -> None:
         # Codex hit a Cloudflare interstitial: the agent exited with
         # nothing on stdout but the CF blob landed on stderr (#36). The
         # park comment must carry that tail so the operator can
@@ -182,7 +182,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         # The leading head of the noise must be dropped by the cap.
         self.assertNotIn("X" * 4096, last_comment)
 
-    def test_empty_review_park_with_no_stderr_omits_block(self) -> None:
+    def test_empty_review_without_stderr_omits_block(self) -> None:
         gh, issue = self._seeded()
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
@@ -211,7 +211,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("reviewer timed out", last_comment)
         self.assertNotIn((5, LABEL_IN_REVIEW), gh.label_history)
 
-    def test_reviewer_silent_crash_parks_reviewer_failed(self) -> None:
+    def test_silent_crash_parks_reviewer_failed(self) -> None:
         # The reviewer agent crashed (e.g. codex returned `Error: No such
         # file or directory (os error 2)`): empty last_message + non-zero
         # exit code. Tag the park as `reviewer_failed` so the next tick's
@@ -227,7 +227,7 @@ class HandleValidatingFreshReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(state.get("park_reason"), "reviewer_failed")
 
-    def test_reviewer_unknown_verdict_with_text_does_not_tag_failed(self) -> None:
+    def test_text_unknown_verdict_not_tagged_failed(self) -> None:
         # When the reviewer DID emit text but no VERDICT line, the park
         # is real adjudication and must NOT be silently retried -- a
         # human needs to read the message. Park reason stays cleared.
@@ -315,7 +315,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertIn((6, LABEL_FIXING), gh.label_history)
         self.assertNotIn((6, LABEL_VALIDATING), gh.label_history)
 
-    def test_dev_fix_no_new_commit_parks_round_unchanged(self) -> None:
+    def test_no_commit_fix_parks_without_round_bump(self) -> None:
         gh, issue = self._seeded()
         mocks = self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
@@ -387,7 +387,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertIn((6, LABEL_FIXING), gh.label_history)
         self.assertNotIn((6, LABEL_VALIDATING), gh.label_history)
 
-    def test_review_round_at_cap_parks_without_spawning_reviewer(self) -> None:
+    def test_round_cap_parks_without_reviewer(self) -> None:
         gh, issue = self._seeded(review_round=config.MAX_REVIEW_ROUNDS)
         mocks = self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
@@ -399,7 +399,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("review still has comments", last_comment)
 
-    def test_changes_requested_flips_to_fixing_before_dev_spawn(self) -> None:
+    def test_enters_fixing_before_dev_spawn(self) -> None:
         # The dev-fix subphase must run under the `fixing` label so the
         # active job is observably "fixing reviewer-requested changes"
         # rather than "validating". The label flip lands BEFORE the dev
@@ -437,7 +437,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertEqual(len(dev_spawns), 1)
         self.assertEqual(dev_spawns[0]["stage"], LABEL_FIXING)
 
-    def test_dev_fix_interrupted_skips_write_and_does_not_push(self) -> None:
+    def test_interrupted_fix_skips_write_and_push(self) -> None:
         # A shutdown-killed CHANGES_REQUESTED dev resume is ignored: the
         # handler does NOT persist the post-spawn state (so the per-session
         # resume budget `dev_resume_count` charged by `_resume_dev_with_text`
@@ -475,7 +475,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         # Interrupted is not a question / timeout / dirty park.
         self.assertFalse(state.get("awaiting_human"))
 
-    def test_changes_requested_park_records_reviewer_anchor(self) -> None:
+    def test_change_park_records_reviewer_anchor(self) -> None:
         # #742: on the validating -> fixing route the reviewer-feedback PR
         # comment id is anchored in `pending_fix_reviewer_comment_id` so a
         # session-failure park is retryable by `/orchestrator continue`.
@@ -504,7 +504,7 @@ class HandleValidatingFixLoopEdgeCasesTest(unittest.TestCase, _PatchedWorkflowMi
         self.assertIsNone(state.get("pending_fix_at"))
         self.assertIn((6, LABEL_FIXING), gh.label_history)
 
-    def test_changes_requested_pushed_fix_clears_reviewer_anchor(self) -> None:
+    def test_pushed_fix_clears_reviewer_anchor(self) -> None:
         # On a pushed inline fix this reviewer round is addressed, so the
         # anchor is cleared (a later session-failure park must not replay it)
         # and the round bumps back on `validating`.
@@ -570,7 +570,7 @@ class HandleValidatingAwaitingHumanResumeTest(unittest.TestCase, _PatchedWorkflo
         self.assertNotIn((7, LABEL_DOCUMENTING), gh.label_history)
         self.assertNotIn((7, LABEL_IN_REVIEW), gh.label_history)
 
-    def test_successful_dev_fix_resets_silent_park_streak(self) -> None:
+    def test_successful_fix_resets_silent_streak(self) -> None:
         # The validating / in_review fix paths exit on `_handle_dev_fix_result`
         # returning True without going through `_on_commits`. Without an
         # explicit reset on that branch, `silent_park_count` would still
@@ -645,7 +645,7 @@ class HandleValidatingContinueCommandTest(
         )
         return gh, issue
 
-    def test_silent_bare_continue_retries_without_literal(
+    def test_bare_continue_retries_without_literal(
         self,
     ) -> None:
         gh, issue = self._seed(7, park_reason="agent_silent")
@@ -727,7 +727,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         gh.seed_state(80, **defaults)
         return gh, issue
 
-    def test_command_resets_round_clears_park_and_reruns_reviewer(self) -> None:
+    def test_command_resets_round_park_and_reruns(self) -> None:
         # Granting 1 more round on a 3-cap means review_round becomes 2.
         # The reviewer-spawn block fires on the SAME tick (fall-through
         # parity with the reviewer_timeout / reviewer_failed branches) so
@@ -773,7 +773,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             for _, body in gh.posted_comments
         ))
 
-    def test_command_grants_full_reset_when_n_meets_or_exceeds_max(
+    def test_max_n_grants_full_reset(
         self,
     ) -> None:
         # `N >= MAX_REVIEW_ROUNDS` clamps review_round to 0 -- the full
@@ -792,7 +792,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
 
         self.assertEqual(gh.pinned_data(80).get("review_round"), 0)
 
-    def test_command_picks_latest_when_multiple_present(self) -> None:
+    def test_command_picks_latest(self) -> None:
         # Two commands in the same batch: the later one wins so a
         # corrected post supersedes a stale typo without needing the
         # operator to delete the first comment.
@@ -825,7 +825,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         )
         self.assertEqual(gh.pinned_data(80).get("last_action_comment_id"), 1101)
 
-    def test_command_with_zero_is_rejected_stays_parked(self) -> None:
+    def test_zero_command_rejected_and_parked(self) -> None:
         gh, issue = self._seeded(
             comment_body="/orchestrator add-review-rounds 0",
         )
@@ -851,7 +851,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         self.assertIn("ignored", last_comment)
         self.assertIn("positive integer", last_comment)
 
-    def test_plain_human_reply_stays_parked_no_dev_resume(self) -> None:
+    def test_plain_reply_stays_parked(self) -> None:
         # The original bug: on a `review_cap` park, a plain human reply
         # used to wake the dev session and the reviewer rebumped past
         # the cap on the next tick. The new behavior is to stay parked
@@ -922,7 +922,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
             state.get("review_round"), config.MAX_REVIEW_ROUNDS,
         )
 
-    def test_review_cap_park_message_advertises_command(self) -> None:
+    def test_cap_park_advertises_command(self) -> None:
         # When the orchestrator first parks on the cap, the park comment
         # itself surfaces the command so an operator who has never seen
         # the syntax can copy/paste it from the issue thread.
@@ -944,7 +944,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("/orchestrator add-review-rounds", last_comment)
 
-    def test_cap_park_persists_park_reason_for_next_tick(self) -> None:
+    def test_cap_park_persists_reason(self) -> None:
         # `_park_awaiting_human` always clears `park_reason` to None (its
         # `reason=` kwarg only feeds the audit event), so the cap branch
         # must re-set the durable field itself. Without this, the next
@@ -970,7 +970,7 @@ class HandleValidatingReviewCapAddRoundsCommandTest(
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(state.get("park_reason"), "review_cap")
 
-    def test_command_fires_after_real_cap_park_two_ticks(self) -> None:
+    def test_command_fires_after_real_cap_park(self) -> None:
         # End-to-end regression for the original bug: the FIRST tick must
         # park via the cap branch (not pre-seeded shortcut), persist
         # `park_reason="review_cap"`, and seed a `user_content_hash`. The
@@ -1070,7 +1070,7 @@ class ValidatingDevFixInterruptedHelperTest(unittest.TestCase):
         gh.seed_state(7, **state)
         return gh, gh.read_pinned_state(issue), issue
 
-    def test_result_returns_false_without_side_effects(
+    def test_false_without_side_effects(
         self,
     ) -> None:
         gh, state, issue = self._seeded()
@@ -1094,7 +1094,7 @@ class ValidatingDevFixInterruptedHelperTest(unittest.TestCase):
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.posted_pr_comments, [])
 
-    def test_user_content_change_result_returns_parked(
+    def test_content_change_returns_parked(
         self,
     ) -> None:
         gh, state, issue = self._seeded()
@@ -1126,7 +1126,7 @@ class ValidatingInterruptedResumeHandlerTest(
     consumption pre-staged before the spawn, so the next tick retries the
     resume rather than treating the input as already handled."""
 
-    def test_user_content_change_resume_does_not_persist(
+    def test_content_change_resume_not_persisted(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -1170,7 +1170,7 @@ class ValidatingInterruptedResumeHandlerTest(
         self.assertEqual(state.get("user_content_hash"), "stale-hash-forces-drift")
         self.assertEqual(state.get("last_action_comment_id"), 900)
 
-    def test_awaiting_human_interrupted_resume_does_not_persist(self) -> None:
+    def test_human_interrupted_resume_not_persisted(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(9, label=LABEL_VALIDATING)
         issue.comments.append(
@@ -1263,7 +1263,7 @@ class HandleValidatingResumeTrustFilterTest(
         )
         return issue
 
-    def test_outsider_add_review_rounds_command_ignored(self) -> None:
+    def test_outsider_add_rounds_ignored(self) -> None:
         gh = FakeGitHubClient()
         issue = self._seed_cap_park(
             gh, author="mallory",
@@ -1315,7 +1315,7 @@ class HandleValidatingResumeTrustFilterTest(
             "review-cap reset" in body for _, body in gh.posted_comments
         ))
 
-    def test_outsider_retry_nudge_does_not_respawn_reviewer(self) -> None:
+    def test_outsider_retry_does_not_respawn(self) -> None:
         gh = FakeGitHubClient()
         issue = self._seed_reviewer_timeout_park(gh, author="mallory")
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", self._ALLOWLIST):
@@ -1328,7 +1328,7 @@ class HandleValidatingResumeTrustFilterTest(
         # outsider's nudge waking the reviewer.
         mocks["run_agent"].assert_not_called()
 
-    def test_trusted_retry_nudge_respawns_reviewer_under_allowlist(
+    def test_trusted_retry_respawns_reviewer(
         self,
     ) -> None:
         gh = FakeGitHubClient()

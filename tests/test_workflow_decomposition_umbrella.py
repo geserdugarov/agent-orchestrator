@@ -62,7 +62,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         handler.assert_called_once_with(gh, _TEST_SPEC, issue)
 
-    def test_all_children_done_closes_umbrella_as_done(self) -> None:
+    def test_all_children_done_closes_as_done(self) -> None:
         gh, parent, children = self._seed_umbrella_with_children(
             parent_number=61, child_labels=["done", "done"],
         )
@@ -84,7 +84,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
             for n, body in gh.posted_comments if n == 61
         ))
 
-    def test_umbrella_close_comment_appends_usage_verdict(self) -> None:
+    def test_close_comment_appends_usage_verdict(self) -> None:
         # The decomposer runs accrue on the umbrella parent, so its close
         # comment carries the cumulative verdict appended to the existing
         # "all children resolved" line (one comment, not two).
@@ -111,7 +111,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
             body,
         )
 
-    def test_umbrella_close_comment_omits_verdict_without_counters(self) -> None:
+    def test_close_omits_verdict_without_counters(self) -> None:
         # An umbrella that never accrued a counted run closes with the bare
         # resolution line -- no zero receipt appended.
         gh, parent, children = self._seed_umbrella_with_children(
@@ -212,7 +212,7 @@ class HandleUmbrellaTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((65, "done"), gh.label_history)
         self.assertFalse(parent.closed)
 
-    def test_held_children_are_logged_with_pending_deps(self) -> None:
+    def test_held_children_log_pending_deps(self) -> None:
         # Visibility feature mirrored from `_handle_blocked`: a child still
         # `blocked` on an unfinished sibling is "held". `_handle_umbrella`
         # must surface it -- and the exact dependency gating it -- on the

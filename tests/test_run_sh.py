@@ -190,7 +190,7 @@ def _assert_warning(
         ("main", "0", True, None),
     ],
 )
-def test_self_update_launches_instead_of_crash_looping(
+def test_self_update_launches_without_crash_loop(
     tmp_path: Path,
     git_branch: str,
     git_pull_rc: str,
@@ -205,7 +205,7 @@ def test_self_update_launches_instead_of_crash_looping(
     _assert_warning(result, warn_substr)
 
 
-def test_clean_fast_forward_updates_on_self_modifying_restart(
+def test_self_restart_applies_clean_fast_forward(
     tmp_path: Path,
 ) -> None:
     scenario = _WrapperScenario.create(tmp_path, 0, 130, record_sleep=True)

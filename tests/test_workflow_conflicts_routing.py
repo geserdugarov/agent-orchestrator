@@ -16,7 +16,7 @@ class HandleResolvingConflictDispatchTest(unittest.TestCase):
     handler -- this is a label-rollout regression check that survives
     the placeholder being replaced by the real implementation."""
 
-    def test_dispatcher_routes_resolving_conflict_to_handler(self) -> None:
+    def test_dispatcher_routes_conflict_handler(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(42, label="resolving_conflict")
         gh.add_issue(issue)

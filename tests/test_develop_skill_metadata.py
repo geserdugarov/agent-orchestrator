@@ -74,7 +74,7 @@ class DevelopSkillTriggerAnchorTest(unittest.TestCase):
                 self.assertNotIn("open a pr", desc)
                 self.assertNotIn("push", desc)
 
-    def test_implementer_prompt_stays_aligned_with_anchor(self) -> None:
+    def test_implementer_prompt_matches_anchor(self) -> None:
         prompt = workflow_messages._build_implement_prompt(
             _TEST_SPEC, make_issue(1), "", [_TEST_SPEC],
         )

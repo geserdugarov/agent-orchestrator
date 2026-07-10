@@ -65,7 +65,7 @@ class HandleResolvingConflictHashDriftTest(
             for _, body in gh.posted_pr_comments
         ))
 
-    def test_drift_resume_interrupted_leaves_state_untouched(self) -> None:
+    def test_interrupted_resume_keeps_state(self) -> None:
         # The drift resume routes through the shared
         # `_post_user_content_change_result`, which has no interrupted check
         # of its own. The conflicts caller must short-circuit BEFORE it so a

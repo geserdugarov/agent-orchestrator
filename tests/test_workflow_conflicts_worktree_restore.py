@@ -56,7 +56,7 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
 
         return MagicMock(side_effect=fake_fetch), fetched
 
-    def test_missing_local_branch_restores_from_origin_branch(self) -> None:
+    def test_missing_branch_restores_from_origin(self) -> None:
         # The most common bad outcome: someone deletes the local branch.
         # Without our fix, `_ensure_worktree`'s fallback would create a
         # NEW branch from `origin/<base>`, discarding all the PR's
@@ -140,7 +140,7 @@ class EnsurePrWorktreeRestoresFromRemoteBranchTest(unittest.TestCase):
                 f"expected {_TEST_SPEC.target_root}",
             )
 
-    def test_branch_fetch_routed_through_authed_target_fetch(self) -> None:
+    def test_branch_fetch_uses_authed_target(self) -> None:
         # `git fetch <remote> <branch>` in target_root used to relyon git's
         # ambient credential helper; `_authed_target_fetch` replaces it
         # with an askpass-delivered per-spec token. The branch fetch and

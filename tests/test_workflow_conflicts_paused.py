@@ -39,7 +39,7 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
             for _, body in gh.posted_comments
         ))
 
-    def test_paused_during_fresh_resolution_blocks_push_and_relabel(
+    def test_fresh_pause_blocks_push_and_relabel(
         self,
     ) -> None:
         # The rebase conflicts, so the dev is spawned to resolve it. The
@@ -70,7 +70,7 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         self.assertEqual(data.get("conflict_round"), 0)
         self._assert_no_park_comment(gh)
 
-    def test_paused_during_awaiting_human_resume_keeps_park(self) -> None:
+    def test_resume_pause_keeps_park(self) -> None:
         # A parked issue resumes the dev on a fresh human reply; the operator
         # applies `paused` mid-run. The handler returns before
         # `_post_conflict_resolution_result`, so the park stays intact and the
@@ -114,7 +114,7 @@ class ResolvingConflictLivePauseTest(unittest.TestCase, _ResolvingConflictMixin)
         self.assertEqual(data.get("last_action_comment_id"), 1000)
         self.assertEqual(data.get("conflict_round"), 1)
 
-    def test_paused_during_drift_resume_blocks_relabel(self) -> None:
+    def test_drift_pause_blocks_relabel(self) -> None:
         # A body edit drives the drift resume (seeded hash mismatch); the
         # operator applies `paused` mid-run. The handler returns before
         # `_post_user_content_change_result` and the conflict-round bump, so

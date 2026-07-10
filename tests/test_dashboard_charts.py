@@ -61,7 +61,7 @@ class UsageOverTimeTest(unittest.TestCase):
     token bands with the cost line on a secondary axis.
     """
 
-    def test_stacks_input_output_cache_with_cost_overlay(self) -> None:
+    def test_stacks_tokens_with_cost_overlay(self) -> None:
         points = [
             TimeSeriesPoint(
                 day=date(2026, 5, 1), event=EVENT_AGENT_EXIT, count=2,
@@ -233,7 +233,7 @@ class CostByStageTest(unittest.TestCase):
             f"{EXPECTED_RGBA_MESSAGE}{fig.data[1].marker.color[0]}",
         )
 
-    def test_legacy_rows_without_cache_split_plot_full_total(self) -> None:
+    def test_legacy_rows_plot_full_token_total(self) -> None:
         # Fixtures predating the cache-split read model leave
         # `cache_cost_usd` / `no_cache_cost_usd` at the dataclass
         # default of 0.0; falling through would render an empty bar.
@@ -281,7 +281,7 @@ class CostByStageTest(unittest.TestCase):
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
 class CostByReviewRoundTest(unittest.TestCase):
 
-    def test_renders_review_round_labels_in_logical_order(self) -> None:
+    def test_round_labels_use_logical_order(self) -> None:
         rows = [
             ReviewRoundBucketRow(
                 bucket="0", runs=12, failed=0, total_cost_usd=40.0,
@@ -484,7 +484,7 @@ class HourWeekdayHeatmapTest(unittest.TestCase):
         self.assertEqual(z[0][9], 1_500)
         self.assertEqual(z[3][14], 12_000)
 
-    def test_empty_input_still_renders_grid_with_annotation(self) -> None:
+    def test_empty_input_renders_annotated_grid(self) -> None:
         fig = dashboard_charts.hour_weekday_heatmap([])
         z = [list(row) for row in fig.data[0].z]
         self.assertTrue(all(cell == 0 for row in z for cell in row))
@@ -549,7 +549,7 @@ class DonePerDayBarsTest(unittest.TestCase):
         # than being elided from the x-axis.
         self.assertEqual(tuple(bar.y), (2, 0, 0, 3, 0))
 
-    def test_window_with_no_rows_still_renders_zero_baseline(self) -> None:
+    def test_empty_window_renders_zero_baseline(self) -> None:
         # A window with no resolved issues at all renders an all-zero
         # baseline rather than the placeholder annotation, so the
         # operator can still see the calendar drawn out for the

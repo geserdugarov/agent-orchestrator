@@ -22,7 +22,7 @@ class BacklogLabelSkipsProcessingTest(unittest.TestCase):
     a human removes the label.
     """
 
-    def test_unlabeled_issue_with_backlog_skips_pickup(self) -> None:
+    def test_unlabeled_issue_skips_pickup(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(701)
         issue.labels.append(FakeLabel(BACKLOG_LABEL))
@@ -35,7 +35,7 @@ class BacklogLabelSkipsProcessingTest(unittest.TestCase):
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.label_history, [])
 
-    def test_in_flight_issue_with_backlog_skips_dispatch(self) -> None:
+    def test_in_flight_issue_skips_dispatch(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(702, label="implementing")
         issue.labels.append(FakeLabel(BACKLOG_LABEL))

@@ -135,7 +135,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         # closed"), this assertion would catch the regression.
         self.assertNotIn((40, "ready"), gh.label_history)
 
-    def test_closed_in_review_child_does_not_falsely_park_parent(
+    def test_closed_review_child_does_not_park_parent(
         self,
     ) -> None:
         # state=closed + label=in_review is the externally-merged
@@ -170,7 +170,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             for n, body in gh.posted_comments if n == 41
         ))
 
-    def test_manually_closed_child_with_no_label_parks_parent(self) -> None:
+    def test_manual_closed_unlabeled_child_parks(self) -> None:
         # Defensive corner: a child with no workflow label at all
         # (e.g. a label was manually stripped before the issue was
         # closed) is also invisible to the closed-in_review sweep.
@@ -219,7 +219,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(flipped, ["ready"])
         self.assertNotIn((33, "ready"), gh.label_history)
 
-    def test_held_children_are_logged_with_pending_deps(self) -> None:
+    def test_held_children_log_pending_deps(self) -> None:
         # Visibility feature: a child still `blocked` on an unfinished
         # sibling is "held". `_handle_blocked` must surface it -- and the
         # exact dependency gating it -- on the tick log so an operator can
@@ -306,7 +306,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.posted_comments, before_comments)
         self.assertEqual(gh.label_history, before_labels)
 
-    def test_no_dep_blocked_child_flipped_to_ready_by_walk(self) -> None:
+    def test_walk_readies_blocked_child_without_deps(self) -> None:
         # Activation-recovery path: a no-dep child got stuck as `blocked`
         # because the decomposer's same-tick activation step crashed
         # (network blip etc.). The parent's `_handle_blocked` walk must
@@ -333,7 +333,7 @@ class HandleBlockedTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(flipped, ["ready"])
         self.assertNotIn((36, "ready"), gh.label_history)
 
-    def test_blocked_clears_awaiting_human_after_all_done(self) -> None:
+    def test_all_done_clears_awaiting_human(self) -> None:
         # A prior tick parked the parent on `awaiting_human=True` because
         # one child was `rejected`. The operator fixed the rejection
         # off-band; eventually all children become `done`. The parent

@@ -47,7 +47,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
             if line.strip()
         ]
 
-    def test_handler_success_appends_stage_evaluation_record(self) -> None:
+    def test_success_appends_evaluation_record(self) -> None:
         # End-to-end: a labeled issue runs through the dispatcher with
         # the matching handler mocked, and the wrapper writes one
         # `stage_evaluation` line carrying the current label + ok result.
@@ -72,7 +72,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         self.assertIn("duration_s", rec)
         self.assertGreaterEqual(rec["duration_s"], 0)
 
-    def test_unlabeled_issue_records_stage_evaluation_with_no_stage(
+    def test_unlabeled_issue_records_no_stage(
         self,
     ) -> None:
         # The dispatcher routes a label=None issue to `_handle_pickup`;
@@ -99,7 +99,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         self.assertNotIn("stage", rec)
         self.assertEqual(rec["result"], "ok")
 
-    def test_handler_exception_records_error_result_and_propagates(
+    def test_error_is_recorded_and_propagated(
         self,
     ) -> None:
         # The handler raising must NOT suppress the exception: the
@@ -131,7 +131,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
         self.assertEqual(rec["result"], "error")
         self.assertIn("duration_s", rec)
 
-    def test_hard_skip_does_not_record_stage_evaluation(self) -> None:
+    def test_hard_skip_records_no_evaluation(self) -> None:
         # A hard-skip control label (`backlog` / `paused`) parks the issue
         # OUTSIDE the state machine before any handler runs; there is nothing
         # to time. The early return must short-circuit before the timing
@@ -151,7 +151,7 @@ class StageEvaluationAnalyticsTest(unittest.TestCase):
                     handler.assert_not_called()
                     self.assertEqual(self._records(path), [])
 
-    def test_disabled_sink_does_not_write_evaluation_record(self) -> None:
+    def test_disabled_sink_writes_no_evaluation(self) -> None:
         # The off knob is documented as a silent no-op for the analytics
         # sink. `_process_issue` must respect it so an operator who set
         # ANALYTICS_LOG_PATH=off does not see a phantom file appear.
@@ -185,7 +185,7 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
             if line.strip()
         ]
 
-    def test_label_transition_writes_analytics_stage_enter(self) -> None:
+    def test_label_transition_writes_stage_enter(self) -> None:
         with tempfile.TemporaryDirectory(prefix="analytics-stage-enter-") as td:
             path = Path(td) / "analytics.jsonl"
             with patch.object(analytics, "ANALYTICS_LOG_PATH", path):
@@ -206,7 +206,7 @@ class StageEnterAnalyticsRecordTest(unittest.TestCase):
             self.assertEqual(record["repo"], TEST_REPO_SLUG)
             datetime.fromisoformat(record["ts"])
 
-    def test_label_cleared_to_none_does_not_emit_record(self) -> None:
+    def test_label_clear_emits_no_record(self) -> None:
         # Mirrors the existing `_emit_stage_enter` no-op for None labels:
         # clearing a label is not a stage and must not produce a phantom
         # `stage_enter` analytics record.

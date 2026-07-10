@@ -43,7 +43,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
     resume tests in `tests/test_workflow_fixing.py`.
     """
 
-    def test_fixing_label_is_recognized_as_workflow_label(self) -> None:
+    def test_label_is_recognized(self) -> None:
         from orchestrator.github import WORKFLOW_LABELS
 
         self.assertIn("fixing", WORKFLOW_LABELS)
@@ -57,7 +57,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
         self.assertIn("fixing", names)
 
-    def test_label_sits_between_in_review_and_resolving_conflict(
+    def test_label_between_review_and_conflict(
         self,
     ) -> None:
         # Lifecycle order matters: `fixing` is the next stage after
@@ -103,7 +103,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         impl.assert_not_called()
         in_review.assert_not_called()
 
-    def test_fixing_without_pr_number_parks_awaiting_human(self) -> None:
+    def test_missing_pr_parks_awaiting_human(self) -> None:
         # A manual relabel directly to `fixing` without a recorded
         # `pr_number` cannot drive the dev-resume path (no PR to push
         # against). Park once, surfacing the misconfiguration to a
@@ -136,7 +136,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # the operator in control of the next move.
         self.assertEqual(gh.label_history, [])
 
-    def test_missing_pr_number_is_idempotent_when_parked(
+    def test_missing_pr_park_is_idempotent(
         self,
     ) -> None:
         # A second tick on an already-parked no-PR fixing issue must
@@ -152,7 +152,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.write_state_calls, 0)
 
-    def test_fixing_skips_closed_issue_without_pr_number(self) -> None:
+    def test_closed_issue_without_pr_is_skipped(self) -> None:
         # A closed-`fixing` issue with no recorded PR (manual relabel from
         # an early stage, no PR opened) cannot be finalized via the
         # PR-state arcs. The handler must NOT park (parking a closed issue
@@ -169,7 +169,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.write_state_calls, 0)
         self.assertEqual(gh.label_history, [])
 
-    def test_fixing_finalizes_closed_issue_on_external_merge(self) -> None:
+    def test_external_merge_finalizes_closed_issue(self) -> None:
         # The headline closed-sweep contract: a human merges the PR with
         # `Resolves #N` while the issue is labeled `fixing`. The issue
         # auto-closes; the closed-issue sweep yields it; the handler must
@@ -200,7 +200,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-705",
         )
 
-    def test_fixing_finalizes_closed_issue_on_closed_without_merge(
+    def test_closed_unmerged_pr_finalizes_issue(
         self,
     ) -> None:
         # Mirror branch: PR was closed without merging while the issue
@@ -230,7 +230,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-706",
         )
 
-    def test_closed_fixing_issue_surfaces_in_pollable_sweep(self) -> None:
+    def test_closed_issue_is_in_pollable_sweep(self) -> None:
         # The closed-issue sweep has to include `fixing` so the handler
         # can finalize an externally-merged PR to `done` even when
         # `Resolves #N` already closed the issue.
@@ -244,7 +244,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         numbers = {issue.number for issue in gh.list_pollable_issues()}
         self.assertEqual(numbers, {710, 711})
 
-    def test_auto_merge_does_not_fire_while_label_is_fixing(self) -> None:
+    def test_auto_merge_skips_fixing_label(self) -> None:
         # Headline merge-safeguard contract: an approved + mergeable PR
         # whose linked issue is labeled `fixing` MUST NOT produce any
         # `gh.merge_pr` call. The orchestrator is permanently manual-
@@ -350,7 +350,7 @@ class FixingConflictDetourTest(unittest.TestCase):
         self.assertEqual(data.get("pr_last_review_comment_id"), 0)
         self.assertEqual(data.get("pr_last_review_summary_id"), 0)
 
-    def test_fixing_clean_rebase_preserves_pending_feedback(self) -> None:
+    def test_clean_rebase_keeps_pending_feedback(self) -> None:
         # A clean refresh-time rebase now routes the `fixing` issue to
         # `validating` (no longer to `resolving_conflict`). Either way
         # the pending-fix bookmarks and in_review watermarks must
@@ -377,7 +377,7 @@ class FixingConflictDetourTest(unittest.TestCase):
         self.assertNotIn((7, "resolving_conflict"), self.gh.label_history)
         self._assert_pending_feedback_intact()
 
-    def test_fixing_conflicting_rebase_preserves_pending_feedback(self) -> None:
+    def test_conflict_rebase_keeps_pending_feedback(self) -> None:
         # A conflicting refresh-time rebase still routes to
         # `resolving_conflict` so the handler can drive the dev agent.
         # The pending-fix bookmarks and watermarks must survive that
@@ -582,7 +582,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         self.post.assert_not_called()
         self.recover.assert_not_called()
 
-    def test_in_review_route_transient_with_drift_stays_parked(self) -> None:
+    def test_review_transient_drift_stays_parked(self) -> None:
         # In_review-route transient parks (`pending_fix_at` set) are
         # deliberately NOT auto-recovered: the round and watermark
         # semantics differ from the validating route.
@@ -599,7 +599,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         self.post.assert_not_called()
         self.recover.assert_not_called()
 
-    def test_stuck_silent_park_with_drift_stays_parked(self) -> None:
+    def test_silent_park_with_drift_stays_parked(self) -> None:
         # `agent_silent` is not in `_VALIDATING_TRANSIENT_PARK_REASONS`
         # (the silent-crash counter is the recovery channel, not drift)
         # so even with `pending_fix_at` unset the issue must stay parked.

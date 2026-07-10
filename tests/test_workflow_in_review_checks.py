@@ -85,7 +85,7 @@ class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
         self.assertIn([resolving_label], labels_passed)
         self.assertIn([question_label], labels_passed)
 
-    def test_missing_label_skips_closed_sweep_without_raising(self) -> None:
+    def test_missing_label_skips_closed_sweep(self) -> None:
         # If `get_label` raises (under-scoped PAT, label not yet bootstrapped)
         # the generator must complete the open-issue sweep AND swallow the
         # closed-issue branch -- otherwise `tick()` aborts mid-loop.
@@ -122,7 +122,7 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
     naming the scope.
     """
 
-    def test_403_on_get_check_runs_logs_actionable_error(self) -> None:
+    def test_check_runs_403_logs_scope_hint(self) -> None:
         from unittest.mock import MagicMock
         from orchestrator.github import GitHubClient
         from github import GithubException
@@ -152,7 +152,7 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
         self.assertIn("Checks: read", joined)
         self.assertIn("check_state", joined)
 
-    def test_non_403_check_runs_failure_logs_warning_only(self) -> None:
+    def test_other_check_error_logs_warning(self) -> None:
         # 404, transient 5xx, etc. are logged at warning level and don't
         # need scope guidance. Avoid noisy ERROR for unrelated failures.
         from unittest.mock import MagicMock
@@ -183,7 +183,7 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
         self.assertEqual(error_records, [])
 
 
-class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):
+class PartialCheckReadFailsClosedTest(unittest.TestCase):
     """A read failure on one checks surface must NOT be masked by a
     'success' from the other surface. Otherwise a single green
     commit-status context plus failing or pending GitHub Actions check-runs
@@ -208,7 +208,7 @@ class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):
         pr.head.sha = "deadbeef"
         return client, pr
 
-    def test_combined_success_with_check_runs_403_returns_pending(self) -> None:
+    def test_success_plus_403_returns_pending(self) -> None:
         # The dangerous case: legacy commit-status says 'success' but the
         # PAT cannot read check-runs. Without the partial-read guard, a
         # caller would trust the head as green over failing/pending
@@ -230,7 +230,7 @@ class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):
             "the picture",
         )
 
-    def test_combined_success_with_check_runs_500_returns_pending(self) -> None:
+    def test_success_plus_500_returns_pending(self) -> None:
         # A transient 5xx on check-runs has the same downgrade rule -- the
         # next tick may succeed and resolve to a real verdict, but until
         # then we cannot report success.
@@ -246,7 +246,7 @@ class PrCombinedCheckStatePartialReadFailsClosedTest(unittest.TestCase):
             state = client.pr_combined_check_state(pr)
         self.assertEqual(state, "pending")
 
-    def test_no_combined_with_check_runs_403_returns_none(self) -> None:
+    def test_no_combined_plus_403_returns_none(self) -> None:
         # Edge case: combined-status returned no usable signal AND
         # check-runs raised. We have NO signal at all; preserve the
         # existing 'none' return so the workflow's failed_checks branch

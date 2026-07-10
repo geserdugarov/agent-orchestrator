@@ -180,7 +180,7 @@ class HandleQuestionFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         return gh, issue
 
-    def test_answer_posts_comment_and_parks_awaiting_human(self) -> None:
+    def test_answer_posts_and_parks_for_human(self) -> None:
         gh, issue = self._seeded()
         mocks = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
@@ -235,7 +235,7 @@ class HandleQuestionFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             call_kwargs.get("extra_args"), config.DECOMPOSE_AGENT_ARGS,
         )
 
-    def test_question_stage_does_not_count_against_retry_budget(self) -> None:
+    def test_stage_does_not_use_retry_budget(self) -> None:
         # Mirrors the implementing/decomposing retry-budget contract --
         # but the question stage explicitly does NOT consume that budget,
         # since the agent does no codegen and a wedged conversation does
@@ -394,7 +394,7 @@ class HandleQuestionAwaitingHumanResumeTest(
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.opened_prs, [])
 
-    def test_new_comment_resumes_locked_session_and_watermark(
+    def test_new_comment_resumes_and_bumps_watermark(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -436,7 +436,7 @@ class HandleQuestionAwaitingHumanResumeTest(
         self.assertEqual(pinned_data[KEY_PARK_REASON], PARK_QUESTION_ANSWER)
         self.assertIn("Y is defined in y.py.", gh.posted_comments[-1][1])
 
-    def test_multi_round_qa_advances_watermark_each_tick(self) -> None:
+    def test_multi_round_qa_advances_each_tick(self) -> None:
         # Three-round conversation: fresh spawn answers Q1, human asks
         # Q2, agent answers Q2, human asks Q3, agent answers Q3.
         # Each round the watermark must advance past the orchestrator's
@@ -493,7 +493,7 @@ class HandleQuestionClosedIssueTerminalTest(
     steady state.
     """
 
-    def test_closed_issue_skips_agent_and_finalizes_to_done(self) -> None:
+    def test_closed_skips_agent_and_finishes_done(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(50, label=LABEL_QUESTION)
         issue.closed = True
@@ -527,7 +527,7 @@ class HandleQuestionClosedIssueTerminalTest(
             branch=_issue_branch(issue.number),
         )
 
-    def test_closed_issue_with_unsafe_park_still_cleans_up(self) -> None:
+    def test_unsafe_park_closed_still_cleans(self) -> None:
         # When the operator closes an issue parked with an unsafe
         # park reason (commits / dirty / timeout left the worktree
         # intact for inspection), closing IS the operator's "I'm
@@ -556,7 +556,7 @@ class HandleQuestionClosedIssueTerminalTest(
             branch=_issue_branch(issue.number),
         )
 
-    def test_closed_issue_without_prior_state_finalizes_cleanly(self) -> None:
+    def test_closed_without_state_finishes_cleanly(self) -> None:
         # No pinned state at all -- e.g. the issue was labeled
         # `question` and immediately closed before the orchestrator
         # spawned anything. The terminal handler still finalizes
@@ -579,7 +579,7 @@ class HandleQuestionClosedIssueTerminalTest(
             branch=_issue_branch(issue.number),
         )
 
-    def test_closed_issue_with_counters_posts_tracked_usage_verdict(
+    def test_closed_with_counters_posts_usage_verdict(
         self,
     ) -> None:
         # A Q&A thread that ran the question agent accrued usage counters;
@@ -667,7 +667,7 @@ class HandleQuestionWorktreeCleanupTest(
             branch=_issue_branch(issue.number),
         )
 
-    def test_resume_no_new_comments_still_cleans_stale_worktree(
+    def test_no_comments_resume_cleans_stale_tree(
         self,
     ) -> None:
         # A no-reply tick must still tear down any worktree left by
@@ -696,7 +696,7 @@ class HandleQuestionWorktreeCleanupTest(
             branch=_issue_branch(issue.number),
         )
 
-    def test_timeout_park_keeps_worktree_for_inspection(self) -> None:
+    def test_timeout_park_keeps_worktree(self) -> None:
         gh, issue = self._seeded(103)
         mocks = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
@@ -707,7 +707,7 @@ class HandleQuestionWorktreeCleanupTest(
         self.assertEqual(pinned_data[KEY_PARK_REASON], PARK_QUESTION_TIMEOUT)
         self.assertIn("worktree is left intact", gh.posted_comments[-1][1])
 
-    def test_commits_park_keeps_worktree_for_inspection(self) -> None:
+    def test_commit_park_keeps_worktree(self) -> None:
         gh, issue = self._seeded(104)
         mocks = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
@@ -760,7 +760,7 @@ class HandleQuestionUnsafeParkStabilityTest(
         )
         return gh, issue
 
-    def test_no_reply_after_question_commits_preserves_worktree(
+    def test_no_reply_commit_park_keeps_tree(
         self,
     ) -> None:
         gh, issue = self._seeded_unsafe(300, PARK_QUESTION_COMMITS)
@@ -771,7 +771,7 @@ class HandleQuestionUnsafeParkStabilityTest(
         mocks[RUN_AGENT].assert_not_called()
         mocks[CLEANUP_QUESTION_WORKTREE].assert_not_called()
 
-    def test_no_reply_after_question_dirty_preserves_worktree(self) -> None:
+    def test_no_reply_dirty_park_keeps_tree(self) -> None:
         gh, issue = self._seeded_unsafe(301, PARK_QUESTION_DIRTY)
         mocks = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
@@ -780,7 +780,7 @@ class HandleQuestionUnsafeParkStabilityTest(
         mocks[RUN_AGENT].assert_not_called()
         mocks[CLEANUP_QUESTION_WORKTREE].assert_not_called()
 
-    def test_no_reply_after_question_timeout_preserves_worktree(
+    def test_no_reply_timeout_park_keeps_tree(
         self,
     ) -> None:
         gh, issue = self._seeded_unsafe(302, PARK_QUESTION_TIMEOUT)
@@ -791,7 +791,7 @@ class HandleQuestionUnsafeParkStabilityTest(
         mocks[RUN_AGENT].assert_not_called()
         mocks[CLEANUP_QUESTION_WORKTREE].assert_not_called()
 
-    def test_no_reply_after_safe_park_still_cleans_stale_worktree(
+    def test_no_reply_safe_park_cleans_stale_tree(
         self,
     ) -> None:
         # Counter-test: the preservation must only apply to UNSAFE
@@ -811,7 +811,7 @@ class HandleQuestionUnsafeParkStabilityTest(
             branch=_issue_branch(issue.number),
         )
 
-    def test_resume_after_unsafe_park_with_clean_answer_cleans_up(
+    def test_clean_answer_cleans_unsafe_park(
         self,
     ) -> None:
         # When the operator resets the worktree and replies, the
@@ -944,7 +944,7 @@ class QuestionRelabelToImplementingTest(
     human's reply as the prompt rather than a real implement prompt.
     """
 
-    def test_relabel_clears_question_park_and_runs_fresh_implement(
+    def test_relabel_clears_park_and_starts_fresh(
         self,
     ) -> None:
         gh = FakeGitHubClient()
@@ -988,7 +988,7 @@ class QuestionRelabelToImplementingTest(
         self.assertFalse(pinned_data.get(KEY_AWAITING_HUMAN))
         self.assertIsNone(pinned_data.get(KEY_PARK_REASON))
 
-    def test_relabel_with_question_committed_state_refuses_to_push(
+    def test_committed_state_relabel_refuses_push(
         self,
     ) -> None:
         # Regression: the operator relabels from `question` to
@@ -1037,7 +1037,7 @@ class QuestionRelabelToImplementingTest(
         self.assertIn(PARK_QUESTION_COMMITS, last)
         self.assertIn("reset the worktree", last.lower())
 
-    def test_missing_worktree_stale_branch_refuses_push(
+    def test_missing_tree_stale_branch_refuses_push(
         self,
     ) -> None:
         # Regression: the worktree directory is gone (a prior safe
@@ -1100,7 +1100,7 @@ class QuestionRelabelToImplementingTest(
         self.assertIn(_issue_branch(issue.number), last)
         self.assertIn("git branch -D", last)
 
-    def test_relabel_with_question_dirty_state_refuses_to_push(self) -> None:
+    def test_dirty_state_relabel_refuses_push(self) -> None:
         # Same as the commits case, but for `question_dirty`: the
         # question agent left uncommitted edits. Refusal must fire
         # regardless of which read-only-violation path tagged the park.
@@ -1135,7 +1135,7 @@ class QuestionRelabelToImplementingTest(
         pinned_data = gh.pinned_data(issue.number)
         self.assertEqual(pinned_data[KEY_PARK_REASON], PARK_QUESTION_UNSAFE_RELABEL)
 
-    def test_unsafe_relabel_tick_is_idempotent_until_worktree_reset(
+    def test_relabel_idempotent_until_tree_reset(
         self,
     ) -> None:
         # Once the unsafe-relabel re-park has fired, subsequent ticks
@@ -1178,7 +1178,7 @@ class QuestionRelabelToImplementingTest(
             self.assertTrue(pinned_data[KEY_AWAITING_HUMAN])
             self.assertEqual(pinned_data[KEY_PARK_REASON], PARK_QUESTION_UNSAFE_RELABEL)
 
-    def test_unsafe_relabel_recovers_after_worktree_reset(self) -> None:
+    def test_relabel_recovers_after_tree_reset(self) -> None:
         # After the operator resets the worktree (no commits, no dirty
         # files), the next tick goes through the safe-clear branch and
         # the dev agent runs fresh -- the unsafe-relabel park is not
@@ -1232,7 +1232,7 @@ class QuestionRelabelToImplementingTest(
         self.assertFalse(pinned_data.get(KEY_AWAITING_HUMAN))
         self.assertIsNone(pinned_data.get(KEY_PARK_REASON))
 
-    def test_relabel_with_no_new_comments_no_longer_no_ops(self) -> None:
+    def test_no_comment_relabel_runs_again(self) -> None:
         # Regression for the leak: prior to the fix, this scenario
         # would hit implementing's awaiting_human branch,
         # `_resume_developer_on_human_reply` would see no new comments
@@ -1269,7 +1269,7 @@ class HandleQuestionSessionPersistenceTest(
     wrong backend.
     """
 
-    def test_spec_persisted_even_when_run_returns_no_session_id(self) -> None:
+    def test_spec_persists_without_session_id(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(5, label=LABEL_QUESTION)
         gh.add_issue(issue)
@@ -1283,7 +1283,7 @@ class HandleQuestionSessionPersistenceTest(
         # the role identity is still durable.
         self.assertFalse(pinned_data.get(KEY_QUESTION_SESSION_ID))
 
-    def test_resume_without_session_id_uses_full_question_prompt(
+    def test_no_session_resume_uses_full_prompt(
         self,
     ) -> None:
         # Regression: when `question_session_id` is missing (a prior
@@ -1341,7 +1341,7 @@ class HandleQuestionSessionPersistenceTest(
         pinned_data = gh.pinned_data(issue.number)
         self.assertEqual(pinned_data[KEY_QUESTION_SESSION_ID], "q-sess-fresh")
 
-    def test_resume_persists_new_session_id_from_agent_result(self) -> None:
+    def test_resume_persists_new_session_id(self) -> None:
         # Regression: a prior question tick that yielded no session id
         # (CLI hiccup -- empty codex `-o` file, unparseable claude line)
         # leaves `question_session_id` unset. A later resume that DOES
@@ -1453,7 +1453,7 @@ class HandleQuestionRunUsageAccumulationTest(
             gh.pinned_data(issue.number)[KEY_ISSUE_AGENT_RUNS], 1,
         )
 
-    def test_no_new_comment_resume_leaves_counters_untouched(self) -> None:
+    def test_no_comment_resume_keeps_counters(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(612, label=LABEL_QUESTION)
         gh.add_issue(issue)
@@ -1478,7 +1478,7 @@ class HandleQuestionRunUsageAccumulationTest(
         self.assertNotIn(KEY_ISSUE_AGENT_RUNS, pinned_data)
         self.assertNotIn(KEY_ISSUE_TOTAL_TOKENS, pinned_data)
 
-    def test_interrupted_run_does_not_persist_counters(self) -> None:
+    def test_interrupted_run_keeps_counters_clear(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(613, label=LABEL_QUESTION)
         gh.add_issue(issue)
@@ -1500,7 +1500,7 @@ class HandleQuestionRunUsageAccumulationTest(
         self.assertNotEqual(pinned_data.get(KEY_PARK_REASON), PARK_QUESTION_SILENT)
         self.assertEqual(gh.posted_comments, [])
 
-    def test_interrupted_but_committed_run_parks_without_counters(self) -> None:
+    def test_committed_interrupt_parks_no_counters(self) -> None:
         # A killed question agent that ALSO left commits still hits the
         # read-only `question_commits` park (which writes pinned state and
         # keeps the worktree for inspection). Because that write path fires,
@@ -1614,7 +1614,7 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
                 worktrees._branch_has_unpushed_commits(spec, issue_number),
             )
 
-    def test_returns_true_when_branch_has_commits_ahead_of_base(
+    def test_true_when_branch_ahead_of_base(
         self,
     ) -> None:
         # `orchestrator/orch__realgit/issue-N` has at least one commit beyond
@@ -1647,7 +1647,7 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
                 worktrees._branch_has_unpushed_commits(spec, issue_number),
             )
 
-    def test_returns_false_when_base_remote_ref_missing(self) -> None:
+    def test_false_when_remote_base_missing(self) -> None:
         # If `refs/remotes/origin/main` has been pruned (a
         # mis-configured local clone, a fetch failure earlier in
         # the tick), `git rev-list` exits non-zero. The helper
@@ -1669,7 +1669,7 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
                 worktrees._branch_has_unpushed_commits(spec, issue_number),
             )
 
-    def test_detects_commits_on_legacy_orchestrator_issue_branch(
+    def test_detects_legacy_issue_branch_commits(
         self,
     ) -> None:
         # Regression: a pre-slug-namespacing `question_commits` park
@@ -1711,7 +1711,7 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
                 legacy,
             )
 
-    def test_prefers_namespaced_branch_when_both_exist(self) -> None:
+    def test_namespaced_branch_wins(self) -> None:
         # Both refs carry commits (a host-restart edge case where the
         # operator force-recreated the namespaced branch without
         # reaping the legacy one). The helper must report the
@@ -1760,7 +1760,7 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
         # and we can cleanly remove the whole directory.
         return _spec_for(target)
 
-    def test_removes_existing_worktree_and_local_branch(self) -> None:
+    def test_removes_worktree_and_local_branch(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cqw-both-") as td:
             issue_number = 800
             branch = _issue_branch(issue_number, slug=REAL_GIT_SLUG)
@@ -1816,7 +1816,7 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
                 # Should not raise.
                 worktrees._cleanup_question_worktree(spec, 801)
 
-    def test_deletes_branch_even_when_worktree_dir_missing(self) -> None:
+    def test_missing_tree_still_deletes_branch(self) -> None:
         # The reviewer's scenario: a prior tick's worktree directory
         # was removed (manual cleanup, or partial cleanup) but the
         # local branch survived. `_cleanup_question_worktree` must
@@ -1872,7 +1872,7 @@ class HandleQuestionResumeTrustFilterTest(
             park_reason=PARK_QUESTION_ANSWER,
         )
 
-    def test_outsider_reply_never_reaches_followup_prompt(self) -> None:
+    def test_outsider_reply_absent_from_prompt(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(70, label=LABEL_QUESTION)
         issue.comments.append(FakeComment(

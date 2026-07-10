@@ -28,7 +28,7 @@ class ThroughputBreakdownTest(unittest.TestCase):
             [],
         )
 
-    def test_event_filter_excluding_stage_enter_short_circuits(self) -> None:
+    def test_other_event_filter_skips_query(self) -> None:
         # If `stage_enter` is not in the events selection, this
         # widget has nothing to count -- it is by definition about
         # `stage_enter` rows.
@@ -96,7 +96,7 @@ class ThroughputBreakdownTest(unittest.TestCase):
         self.assertIn("done", params)
         self.assertIn("rejected", params)
 
-    def test_stage_filter_intersects_with_resolved_rejected_pair(self) -> None:
+    def test_stage_filter_intersects_terminal_pair(self) -> None:
         # User picked `done` only; SQL must narrow to `stage = 'done'`
         # (via stage IN ('done',)) inside the implicit event filter.
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})

@@ -44,7 +44,7 @@ class AnalyticsConnectionScopeTest(unittest.TestCase):
         with analytics_read.analytics_connection() as conn:
             self.assertIsNone(conn)
 
-    def test_reuses_connection_across_scopes_on_same_thread(self) -> None:
+    def test_reuses_conn_across_scopes_on_same_thread(self) -> None:
         analytics_read = self.analytics_read
         opens: list[str] = []
         conn_obj = _FakeConnection()
@@ -61,7 +61,7 @@ class AnalyticsConnectionScopeTest(unittest.TestCase):
         # Persistent connection: the CM must NOT close on normal exit.
         self.assertEqual(conn_obj.close_called, 0)
 
-    def test_close_thread_local_closes_cached_connection(self) -> None:
+    def test_close_thread_local_closes_cached_conn(self) -> None:
         analytics_read = self.analytics_read
         conn_obj = _FakeConnection()
         with analytics_read.analytics_connection(
@@ -74,7 +74,7 @@ class AnalyticsConnectionScopeTest(unittest.TestCase):
         analytics_read.close_thread_local_connection()
         self.assertEqual(conn_obj.close_called, 1)
 
-    def test_broken_connection_invalidates_thread_local(self) -> None:
+    def test_broken_conn_clears_thread_local(self) -> None:
         analytics_read = self.analytics_read
 
         # Stand-in for psycopg.OperationalError -- the class-name
@@ -121,7 +121,7 @@ class AnalyticsConnectionScopeTest(unittest.TestCase):
         with analytics_read.analytics_connection(connect=_factory) as c2:
             self.assertIs(c2, conn_obj)
 
-    def test_switching_db_url_replaces_cached_connection(self) -> None:
+    def test_db_url_change_replaces_cached_conn(self) -> None:
         # The thread-local must be keyed on the resolved URL: if a
         # later `with` block on the same thread asks for a different
         # `db_url=`, the stale socket has to close before a fresh

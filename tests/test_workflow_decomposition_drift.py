@@ -22,7 +22,7 @@ from tests.workflow_helpers import (
 class HandleReadyRoutesBackOnHashChangeTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
-    def test_body_drift_routes_ready_back_to_decomposing(self) -> None:
+    def test_body_drift_routes_ready_back(self) -> None:
         # `ready` is reached only after a `single` decomposition decision
         # (no children created), so re-decomposing is safe. The handler
         # must clear the locked decomposer session so the next tick spawns
@@ -91,10 +91,10 @@ class HandleReadyRoutesBackOnHashChangeTest(
         self.assertNotIn((51, "decomposing"), gh.label_history)
 
 
-class HandleDecomposingResetsSessionOnHashChangeTest(
+class DecomposingHashChangeResetsSessionTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
-    def test_hash_drift_drops_session_and_spawns_fresh_decomposer(
+    def test_drops_session_and_spawns_fresh(
         self,
     ) -> None:
         # An issue parked at `decomposing awaiting_human` whose body the
@@ -159,7 +159,7 @@ class HandleBlockedHashDriftTest(
     when the edited body now needs splitting. Both parent (children
     listed as orphans) and child (no orphans) cases route."""
 
-    def test_parent_with_children_routes_to_decomposing(self) -> None:
+    def test_parent_with_children_routes_back(self) -> None:
         gh = FakeGitHubClient()
         parent = make_issue(300, label="blocked", body="updated parent body")
         gh.add_issue(parent)
@@ -239,7 +239,7 @@ class HandleUmbrellaHashDriftTest(
     against the updated body; the previously-tracked children become
     orphans and are listed in the notice."""
 
-    def test_edited_umbrella_routes_to_decomposing_before_closing(
+    def test_edited_umbrella_routes_back_before_close(
         self,
     ) -> None:
         gh = FakeGitHubClient()

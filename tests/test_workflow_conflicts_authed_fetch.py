@@ -19,7 +19,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
     carries url-rewrite rules or http.* proxy/TLS transport config.
     """
 
-    def test_askpass_token_and_blocks_inherited_config(self) -> None:
+    def test_askpass_token_blocks_inherited_config(self) -> None:
         from unittest.mock import patch as mock_patch, MagicMock
 
         # First subprocess.run call is the rewrite-rule probe (returncode=1
@@ -74,7 +74,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
             f"expected x-access-token auth URL in argv, got {argv!r}",
         )
 
-    def test_refuses_when_worktree_has_url_rewrite_rule(self) -> None:
+    def test_url_rewrite_rule_is_refused(self) -> None:
         from unittest.mock import patch as mock_patch, MagicMock
 
         # Rewrite-rule probe returns a hit; the real fetch must NOT run.
@@ -131,7 +131,7 @@ class AuthedFetchHardeningTest(unittest.TestCase):
             f"expected http.proxy in refusal log, got {cm.output!r}",
         )
 
-    def test_no_token_returns_failure_without_subprocess(self) -> None:
+    def test_no_token_fails_without_subprocess(self) -> None:
         from unittest.mock import patch as mock_patch, MagicMock
 
         runs: list = []

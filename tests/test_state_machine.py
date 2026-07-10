@@ -102,7 +102,7 @@ class LabelWriteTypoGuardTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             gh.set_workflow_label(issue, "vaildating")
 
-    def test_set_workflow_label_accepts_enum_and_string(self) -> None:
+    def test_set_label_accepts_enum_and_string(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(1, label="implementing")
         gh.add_issue(issue)
@@ -263,7 +263,7 @@ class IsAllowedTransitionTest(unittest.TestCase):
                 state in sources, state,
             )
 
-    def test_rejected_allowed_only_from_its_exact_sources(self) -> None:
+    def test_rejected_only_from_exact_sources(self) -> None:
         sources = {
             WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
             WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW,
@@ -277,7 +277,7 @@ class IsAllowedTransitionTest(unittest.TestCase):
                 state in sources, state,
             )
 
-    def test_question_finalizes_to_done_but_never_rejected(self) -> None:
+    def test_question_can_finish_but_not_reject(self) -> None:
         # Maximal-exactness: `question` only finalizes to `done`; nothing
         # writes `question -> rejected`, so it must be illegal.
         self.assertTrue(
@@ -299,7 +299,7 @@ class IsAllowedTransitionTest(unittest.TestCase):
                 is_allowed_transition(state, WorkflowLabel.REJECTED), state,
             )
 
-    def test_resolving_conflict_only_from_detour_sources(self) -> None:
+    def test_conflict_only_from_detour_sources(self) -> None:
         self.assertTrue(
             is_allowed_transition(
                 WorkflowLabel.VALIDATING, WorkflowLabel.RESOLVING_CONFLICT,
@@ -391,7 +391,7 @@ class SetWorkflowLabelGuardWiringTest(unittest.TestCase):
             gh.set_workflow_label(issue, WorkflowLabel.DOCUMENTING)
         self.assertEqual(gh.workflow_label(issue), WorkflowLabel.DOCUMENTING)
 
-    def test_enforce_allows_validating_fix_loop_relabel(self) -> None:
+    def test_enforce_allows_validation_fix_loop(self) -> None:
         gh, issue = self._issue()
         with patch.object(config, "WORKFLOW_TRANSITION_GUARD", "enforce"):
             gh.set_workflow_label(issue, WorkflowLabel.FIXING)

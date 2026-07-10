@@ -36,7 +36,7 @@ def _usage(**overrides) -> UsageMetrics:
 class AccumulateIssueUsageHelperTest(unittest.TestCase):
     """The pure fold: token/cost math and the cost-source aggregate."""
 
-    def test_single_fold_sums_tokens_and_records_source(self) -> None:
+    def test_single_fold_sums_and_records_source(self) -> None:
         state = PinnedState()
         workflow._accumulate_issue_usage(
             state,
@@ -66,7 +66,7 @@ class AccumulateIssueUsageHelperTest(unittest.TestCase):
         )
         self.assertEqual(state.get("issue_total_tokens"), 140)
 
-    def test_multiple_runs_dedupe_sources_skip_none_cost(
+    def test_runs_dedupe_sources_and_none_cost(
         self,
     ) -> None:
         usage_state = PinnedState()
@@ -189,7 +189,7 @@ class DeveloperRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin
         self.assertNotIn("issue_total_cost_usd", state)
         self.assertEqual(state["issue_cost_sources"], ["no-usage"])
 
-    def test_interrupted_spawn_does_not_persist_counters(self) -> None:
+    def test_interrupted_spawn_keeps_counters_clear(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(31, label="implementing")
         gh.add_issue(issue)
@@ -298,7 +298,7 @@ class ReviewerRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin)
         self.assertEqual(state["issue_total_tokens"], 0)
         self.assertEqual(state["issue_cost_sources"], ["no-usage"])
 
-    def test_interrupted_reviewer_does_not_persist_counters(self) -> None:
+    def test_interrupted_review_keeps_counters_clear(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(33, label="validating")
         gh.add_issue(issue)

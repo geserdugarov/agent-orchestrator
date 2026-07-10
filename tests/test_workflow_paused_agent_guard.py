@@ -46,7 +46,7 @@ def _paused_view(number: int, label: str) -> object:
 
 
 class DecomposerLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_paused_during_run_blocks_children_and_relabel(self) -> None:
+    def test_run_pause_blocks_children_and_relabel(self) -> None:
         # A split manifest that WOULD create two children and relabel the parent
         # to `blocked` absent the guard, so empty child / label history proves
         # the guard short-circuited before the disposition. The operator applied
@@ -84,7 +84,7 @@ class DecomposerLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
 
 
 class ReviewerLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_paused_during_run_blocks_pr_feedback_and_dev_resume(self) -> None:
+    def test_run_pause_blocks_feedback_and_resume(self) -> None:
         # A CHANGES_REQUESTED verdict would post PR feedback, relabel to
         # `fixing`, and resume the dev (a SECOND agent run) absent the guard.
         # The guard stops right after the reviewer returns, so `run_agent` fires
@@ -124,7 +124,7 @@ class ReviewerLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
 
 
 class QuestionLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_paused_during_fresh_run_blocks_answer_park(self) -> None:
+    def test_fresh_pause_blocks_answer_park(self) -> None:
         # The fresh question spawn would post the answer + HITL park and persist
         # the session absent the guard. On a hit the handler posts nothing,
         # writes nothing, and reaps the read-only worktree as on any clean exit
@@ -154,7 +154,7 @@ class QuestionLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertFalse(state.get("awaiting_human"))
         mocks["_cleanup_question_worktree"].assert_called_once()
 
-    def test_paused_during_resume_freezes_watermark_advance(self) -> None:
+    def test_resume_pause_freezes_watermark(self) -> None:
         # Awaiting-human resume: `_resume_question_on_human_reply` advances
         # `last_action_comment_id` past the human's new comment and clears
         # `awaiting_human` in-memory BEFORE the spawn. A `paused` applied during

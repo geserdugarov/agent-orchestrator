@@ -131,7 +131,7 @@ class ParseRecordTest(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.steps[0].content, "")
 
-    def test_issue_coerced_and_bad_issue_defaults_zero(self) -> None:
+    def test_issue_coerced_bad_value_defaults_zero(self) -> None:
         self.assertEqual(tr.parse_record(_record(issue="7"), seq=0).issue, 7)
         self.assertEqual(
             tr.parse_record(_record(issue="bad"), seq=0).issue, 0
@@ -183,7 +183,7 @@ def _usage_record(**overrides):
 class UsageParsingTest(unittest.TestCase):
     """The reader exposes run- and per-turn usage, tolerantly parsed."""
 
-    def test_full_usage_record_parses_and_exposes_helpers(self) -> None:
+    def test_full_usage_parses_and_exposes_helpers(self) -> None:
         run = tr.parse_record(_usage_record(), seq=0)
         assert run is not None and run.run_usage is not None
         # Run summary round-trips.
@@ -347,7 +347,7 @@ class ReadTrajectoriesTest(unittest.TestCase):
         ])
         self.assertEqual([r.issue for r in runs], [2, 3, 1])
 
-    def test_equal_timestamp_breaks_on_file_order_newest_last(self) -> None:
+    def test_equal_time_uses_file_order_newest_last(self) -> None:
         # Same second-precision ts: the record appended later (higher
         # seq) sorts first so "most recent" stays intuitive.
         runs = self._read_from([
@@ -366,7 +366,7 @@ class ReadTrajectoriesTest(unittest.TestCase):
         with patch.object(analytics, "TRAJECTORY_LOG_PATH", None):
             self.assertEqual(tr.read_trajectories(), [])
 
-    def test_default_path_resolves_from_analytics_attr(self) -> None:
+    def test_default_path_uses_analytics_attr(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "traj.jsonl"
             _write_jsonl(path, [_record(issue=9)])
@@ -472,7 +472,7 @@ class FilterRunsTest(unittest.TestCase):
         self.assertEqual(len(tr.filter_runs(runs, backends=[])), 2)
         self.assertEqual(len(tr.filter_runs(runs, stages=None)), 2)
 
-    def test_query_spans_output_step_content_and_skill(self) -> None:
+    def test_query_spans_output_steps_and_skills(self) -> None:
         runs = self._runs()
         # Output text.
         self.assertEqual(
@@ -535,7 +535,7 @@ class FilterRunsTest(unittest.TestCase):
         kept = tr.filter_runs(runs, exclude_fixtures=True)
         self.assertEqual([r.issue for r in kept], [1])
 
-    def test_exclude_fixtures_combines_with_other_filters(self) -> None:
+    def test_fixture_exclusion_combines_with_filters(self) -> None:
         # An issue filter that selects a fixture still drops it.
         runs = [
             tr.parse_record(_record(issue=2, user_input="ignored"), seq=0),
@@ -579,7 +579,7 @@ class SummarizeTest(unittest.TestCase):
             (0, 0, 0, 0, 0, 0.0),
         )
 
-    def test_total_cost_sums_only_runs_that_recorded_one(self) -> None:
+    def test_total_cost_sums_only_priced_runs(self) -> None:
         # The KPI sums the authoritative run cost; a run with no run_usage
         # (pre-usage record) or an unpriced cost (None) contributes nothing
         # rather than a spurious 0.
@@ -649,7 +649,7 @@ class LabelTest(unittest.TestCase):
 class TimelineTest(unittest.TestCase):
     """`TrajectoryRun.timeline` normalizes old and new records alike."""
 
-    def test_old_steps_only_record_brackets_prompt_and_output(self) -> None:
+    def test_old_step_record_wraps_prompt_and_output(self) -> None:
         # A legacy record predates the text-turn timeline: its steps are
         # only tool_call / tool_result. The normalized timeline still
         # brackets them with the prompt and the final output, in order.
@@ -681,7 +681,7 @@ class TimelineTest(unittest.TestCase):
         self.assertEqual(run.timeline[0].name, "")
         self.assertEqual(run.timeline[0].tool_id, "")
 
-    def test_new_mixed_timeline_preserves_interleaved_turns(self) -> None:
+    def test_mixed_timeline_keeps_interleaved_turns(self) -> None:
         # A record written since the timeline feature interleaves
         # assistant / user text turns with the tool steps; the normalized
         # timeline keeps stream order and adds the prompt / output brackets.

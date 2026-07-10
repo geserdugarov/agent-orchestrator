@@ -109,7 +109,7 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("hit retry cap (3/day)", last_comment)
         self.assertIn("Window opened at", last_comment)
 
-    def test_successful_on_commits_clears_retry_counter(self) -> None:
+    def test_successful_commits_clear_counter(self) -> None:
         # Pre-seed near-cap state, then run a successful tick (commits + clean
         # tree + push succeeds). The PR-open path must clear the budget.
         gh, issue = self._seeded(
@@ -153,7 +153,7 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
         last_comment = gh.posted_comments[-1][1]
         self.assertNotIn("hit retry cap", last_comment)
 
-    def test_awaiting_human_resume_does_not_increment_counter(self) -> None:
+    def test_human_resume_keeps_counter(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(9, label=LABEL_IMPLEMENTING)
         issue.comments.append(
@@ -277,7 +277,7 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
             "dev-sess",
         )
 
-    def test_legacy_codex_session_id_resumes_with_codex(self) -> None:
+    def test_legacy_codex_session_resumes(self) -> None:
         # Pinned state predates the rollout: only `codex_session_id`. Resume
         # on human reply must stick with codex even when DEV_AGENT=claude.
         gh = FakeGitHubClient()
@@ -336,7 +336,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue
 
-    def test_below_threshold_keeps_existing_session_id(self) -> None:
+    def test_below_threshold_keeps_session(self) -> None:
         # One prior silent park is treated as a transient blip, not a
         # poisoned session: the resume still passes the original session
         # id and the streak counter stays put for the next park to bump.
@@ -361,7 +361,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(state.get(KEY_DEV_SESSION_ID), POISONED_SESSION)
         self.assertEqual(state.get(KEY_SILENT_PARK_COUNT), 1)
 
-    def test_at_threshold_drops_session_and_persists_fresh(self) -> None:
+    def test_threshold_drops_and_persists_session(self) -> None:
         # `_SILENT_PARKS_BEFORE_FRESH_SESSION` consecutive silent parks ==
         # session is poisoned. The resume must call `run_agent` with
         # `resume_session_id=None`, persist the new session id from the
@@ -394,7 +394,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         # immediately.
         self.assertEqual(state.get(KEY_SILENT_PARK_COUNT), 0)
 
-    def test_fresh_spawn_empty_session_id_still_clears_pinned(self) -> None:
+    def test_empty_fresh_session_clears_pinned(self) -> None:
         # If the fresh spawn comes back without a `session_id` (agent
         # backend hiccup, missing file, etc.), the poisoned id must STILL
         # be removed from pinned state. Otherwise `_read_dev_session` on
@@ -417,7 +417,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             "spawn returns no session_id",
         )
 
-    def test_fresh_spawn_clears_legacy_codex_session_id_too(self) -> None:
+    def test_fresh_spawn_clears_legacy_session(self) -> None:
         # An issue still on the legacy `codex_session_id` schema must
         # also have that field cleared on fresh-spawn -- otherwise the
         # next tick's `_read_dev_session` falls through the new keys
@@ -520,7 +520,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
             workflow._is_stale_session_failure(BACKEND_CODEX, agent_result)
         )
 
-    def test_claude_stale_session_retries_once_with_fresh_spawn(self) -> None:
+    def test_claude_stale_session_retries_fresh(self) -> None:
         # Two calls expected: the first one resumes the poisoned session and
         # comes back with the marker; the second is a fresh spawn (no resume
         # session id) in the same worktree, with the new session id
@@ -557,7 +557,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
         # re-drop the new session.
         self.assertEqual(state.get(KEY_SILENT_PARK_COUNT), 0)
 
-    def test_stale_session_retry_clears_pinned_if_retry_empty(self) -> None:
+    def test_empty_stale_retry_clears_pinned(self) -> None:
         # If the fresh-spawn retry returns no session id (CLI hiccup), the
         # poisoned id must still be cleared from pinned state -- otherwise
         # the next tick's `_read_dev_session` resurrects it.
@@ -582,7 +582,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
             "returns no session id",
         )
 
-    def test_stale_session_retry_does_not_loop_if_retry_stale(self) -> None:
+    def test_stale_retry_does_not_loop(self) -> None:
         # If the fresh spawn ALSO trips a stale-session marker something
         # deeper is broken (e.g. a misconfigured CLI). Surface that result
         # to the caller instead of looping infinitely.
@@ -662,7 +662,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
         )
         return gh, issue
 
-    def test_overflow_detector_matches_known_phrasings(self) -> None:
+    def test_detector_matches_known_phrasings(self) -> None:
         # The detector keys off a lowercase PREFIX of the last agent message
         # so the bare phrase, a token-count suffix, and mixed casing all trip
         # recovery.
@@ -691,7 +691,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             workflow._is_context_overflow_failure(BACKEND_CLAUDE, agent_result)
         )
 
-    def test_overflow_detector_ignores_phrase_midanswer(self) -> None:
+    def test_detector_ignores_midanswer_phrase(self) -> None:
         # An agent that merely MENTIONS the phrase inside a normal answer must
         # not be misclassified -- last_message is matched as a prefix only.
         agent_result = _agent(
@@ -712,13 +712,13 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             workflow._is_context_overflow_failure(BACKEND_CLAUDE, agent_result)
         )
 
-    def test_overflow_detector_only_triggers_for_claude(self) -> None:
+    def test_detector_only_triggers_for_claude(self) -> None:
         agent_result = _agent(session_id="", last_message=self.OVERFLOW_MSG)
         self.assertFalse(
             workflow._is_context_overflow_failure(BACKEND_CODEX, agent_result)
         )
 
-    def test_poisoned_predicate_covers_stale_and_overflow(self) -> None:
+    def test_poisoned_covers_stale_and_overflow(self) -> None:
         stale = _agent(
             session_id="", last_message="",
             stderr="No conversation found with session ID: x",
@@ -731,7 +731,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             workflow._is_poisoned_session_failure(BACKEND_CLAUDE, unrelated)
         )
 
-    def test_claude_overflow_retries_once_with_fresh_spawn(self) -> None:
+    def test_claude_overflow_retries_fresh(self) -> None:
         # First call resumes the poisoned (overflowed) session and returns the
         # marker; second is a fresh spawn (no resume id) whose new session id
         # is persisted on success.
@@ -760,7 +760,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
         )
         self.assertEqual(state.get(KEY_SILENT_PARK_COUNT), 0)
 
-    def test_overflow_retry_clears_pinned_if_retry_empty(self) -> None:
+    def test_empty_overflow_retry_clears_pinned(self) -> None:
         # If the fresh-spawn retry returns no session id, the poisoned id must
         # still be cleared so the next tick's `_read_dev_session` cannot
         # resurrect the overflowed session.
@@ -778,7 +778,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
 
         self.assertIsNone(state.get(KEY_DEV_SESSION_ID))
 
-    def test_overflow_retry_does_not_loop_if_spawn_overflows(self) -> None:
+    def test_repeated_overflow_does_not_loop(self) -> None:
         # A fresh spawn that ALSO overflows (issue body so large even a small
         # prompt exceeds the window) is bounded to a single retry; the still-
         # failing result is surfaced so the caller's `_on_question` parks it
@@ -853,7 +853,7 @@ class SessionLimitMessageClassifierTest(unittest.TestCase):
                     f"{last_message!r} should classify as a session limit",
                 )
 
-    def test_ignores_plain_question_and_midanswer_mention(self) -> None:
+    def test_ignores_question_and_midanswer_mention(self) -> None:
         for last_message in (
             "",
             "Should I prefer ruff or black for this?",
@@ -901,7 +901,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
         return state, agent_result
 
-    def test_resume_below_threshold_increments_and_keeps_session(self) -> None:
+    def test_below_threshold_bumps_and_keeps_session(self) -> None:
         gh, issue = self._seeded_issue(resume_count=3)
         calls: list[Optional[str]] = []
 
@@ -918,7 +918,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(state.get(KEY_DEV_SESSION_ID), LIVE_SESSION)
 
-    def test_resume_at_threshold_rotates_to_fresh_spawn(self) -> None:
+    def test_threshold_rotates_to_fresh_spawn(self) -> None:
         gh, issue = self._seeded_issue(resume_count=10)
         calls: list[Optional[str]] = []
 
@@ -954,7 +954,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(state.get(KEY_DEV_RESUME_COUNT), 100)
 
-    def test_rotation_fresh_spawn_prompt_is_regrounded(self) -> None:
+    def test_rotation_prompt_is_regrounded(self) -> None:
         # The rotated fresh spawn has no transcript, so its prompt must carry
         # the re-grounding preamble (issue body + branch pointer) AND the
         # stage followup appended after it.
@@ -989,7 +989,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(prompts, [FIX_PROMPT_FRAGMENT])
 
-    def test_overflow_recovery_fresh_spawn_is_regrounded(self) -> None:
+    def test_overflow_recovery_is_regrounded(self) -> None:
         # Ties the two features together: an overflowed ("Prompt is too long")
         # resume drops the session and the recovery fresh spawn -- like the
         # rotation spawn -- is re-grounded with the preamble.
@@ -1011,7 +1011,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
             "the overflow-recovery fresh spawn must be re-grounded",
         )
 
-    def test_preamble_builder_includes_requirements_and_branch(self) -> None:
+    def test_preamble_includes_requirements_branch(self) -> None:
         issue = make_issue(963, body="do the work", title="My Issue")
         text = workflow._build_fresh_respawn_preamble(
             _TEST_SPEC, issue, "@alice: please add tests", [_TEST_SPEC])
@@ -1020,7 +1020,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("git diff", text, "must point the fresh agent at the branch")
         self.assertIn("do NOT restart", text)
 
-    def test_entry_without_session_id_fresh_spawns_and_persists(self) -> None:
+    def test_no_session_entry_spawns_and_persists(self) -> None:
         # `dev_agent` is pinned but `dev_session_id` is absent -- e.g. an
         # earlier backend hiccup that committed work but surfaced no session
         # id. There is nothing to resume, so the spawn must open a NEW session

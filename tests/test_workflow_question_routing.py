@@ -23,7 +23,7 @@ class QuestionLabelRoutingTest(unittest.TestCase):
     bootstrapping and dispatcher routing.
     """
 
-    def test_question_label_is_recognized_as_workflow_label(self) -> None:
+    def test_label_is_recognized(self) -> None:
         from orchestrator.github import WORKFLOW_LABELS
 
         self.assertIn(LABEL_QUESTION, WORKFLOW_LABELS)

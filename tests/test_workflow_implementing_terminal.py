@@ -73,7 +73,7 @@ class HandleImplementingClosedIssueTest(
     after the external-merge finalize returns False.
     """
 
-    def test_closed_implementing_no_pr_flips_to_rejected(self) -> None:
+    def test_no_pr_flips_to_rejected(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(151, label="implementing")
         issue.closed = True
@@ -91,7 +91,7 @@ class HandleImplementingClosedIssueTest(
         # No PR → no branch cleanup (no remote ref to delete).
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
-    def test_closed_implementing_open_pr_skips_cleanup(self) -> None:
+    def test_open_pr_skips_cleanup(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(152, label="implementing")
         issue.closed = True
@@ -121,7 +121,7 @@ class HandleImplementingClosedIssueTest(
         # can salvage / reopen the PR.
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
-    def test_closed_implementing_closed_pr_runs_cleanup(self) -> None:
+    def test_closed_pr_runs_cleanup(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(153, label="implementing")
         issue.closed = True
@@ -156,7 +156,7 @@ class HandleImplementingClosedIssueTest(
         kinds = [event["event"] for event in gh.recorded_events]
         self.assertIn(EVENT_PR_CLOSED_WITHOUT_MERGE, kinds)
 
-    def test_closed_implementing_defers_when_pr_fetch_fails(self) -> None:
+    def test_pr_fetch_error_defers(self) -> None:
         # Both `_finalize_if_pr_merged` and `_finalize_if_issue_closed`
         # need a successful `gh.get_pr` call to act safely on a closed
         # issue with a pinned `pr_number`. If the PR fetch raises, the
@@ -193,7 +193,7 @@ class HandleImplementingClosedIssueTest(
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_terminal_branch"].assert_not_called()
 
-    def test_closed_implementing_defers_when_pr_merged(self) -> None:
+    def test_merged_pr_defers(self) -> None:
         # Models the race where `_finalize_if_pr_merged` had a fetch
         # failure (returned False) but the PR is actually merged. The
         # closed-issue helper then runs its own fetch successfully,
@@ -260,7 +260,7 @@ class FinalizeIfIssueClosedUsageVerdictTest(
     caller (the closed-issue sweep seeds no counters, so an integration
     test alone would stay green if the receipt call were removed)."""
 
-    def test_rejected_finalize_posts_tracked_usage_verdict(self) -> None:
+    def test_rejected_posts_usage_verdict(self) -> None:
         from orchestrator.github import PinnedState
 
         gh = FakeGitHubClient()
@@ -304,7 +304,7 @@ class FinalizeIfIssueClosedUsageVerdictTest(
             gh.pinned_data(156).get("orchestrator_comment_ids", []),
         )
 
-    def test_rejected_finalize_no_counters_posts_no_verdict(self) -> None:
+    def test_no_counters_posts_no_verdict(self) -> None:
         from orchestrator.github import PinnedState
 
         gh = FakeGitHubClient()

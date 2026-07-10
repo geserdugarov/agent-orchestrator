@@ -185,7 +185,7 @@ class PushBranchTest(unittest.TestCase):
             ls_call.args[0],
         )
 
-    def test_missing_per_spec_token_aborts_with_slug_in_log(self) -> None:
+    def test_missing_spec_token_logs_slug_and_aborts(self) -> None:
         # A multi-repo deployment that forgot to populate the per-slug
         # token file should refuse to push and log which repo is misconfigured
         # rather than the generic "GITHUB_TOKEN missing" the legacy code emitted.

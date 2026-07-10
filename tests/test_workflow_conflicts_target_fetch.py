@@ -23,7 +23,7 @@ class AuthedTargetFetchTest(unittest.TestCase):
     local-namespace ref selection follows `spec.remote_name`.
     """
 
-    def test_uses_per_spec_token_and_remote_namespace_ref(self) -> None:
+    def test_uses_spec_token_and_remote_ref(self) -> None:
         # Acceptance criterion: a `REPOS` row like
         # `geserdugarov/lance-private|...|cache-branch|private` should
         # resolve its token from `~/.config/geserdugarov/lance-private/token`
@@ -119,7 +119,7 @@ class AuthedTargetFetchTest(unittest.TestCase):
         self.assertIn("credential.helper=", argv)
         self.assertIn("core.fsmonitor=", argv)
 
-    def test_refuses_when_target_root_has_url_rewrite_rule(self) -> None:
+    def test_root_url_rewrite_rule_is_refused(self) -> None:
         # The agent has write access to linked worktrees, and a linked
         # worktree can rewrite the parent clone's local config via
         # `git config --local`. Local config still applies even with
@@ -158,7 +158,7 @@ class AuthedTargetFetchTest(unittest.TestCase):
         for arg in runs[0]:
             self.assertNotIn("super-secret-token", str(arg))
 
-    def test_refuses_on_real_local_ssl_verify_disabled(self) -> None:
+    def test_local_ssl_verify_disable_is_refused(self) -> None:
         # A linked worktree can disable TLS verification in the parent clone's
         # local config via `git config --local http.sslVerify false`; the
         # token-bearing target fetch must fail closed on it, not just on url
@@ -185,7 +185,7 @@ class AuthedTargetFetchTest(unittest.TestCase):
             f"expected sslVerify in refusal log, got {cm.output!r}",
         )
 
-    def test_missing_token_returns_failure_without_subprocess(self) -> None:
+    def test_missing_token_fails_without_subprocess(self) -> None:
         # When the per-spec token file is missing, fail loudly with the
         # slug in the log -- a multi-repo deployment that forgot to drop
         # `~/.config/<slug>/token` gets a debuggable error rather than

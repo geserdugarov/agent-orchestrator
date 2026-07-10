@@ -28,7 +28,7 @@ class ErrorHandlingTest(unittest.TestCase):
             analytics_read.get_summary(connect=_bad_connect)
         self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
 
-    def test_query_failure_wraps_and_closes_connection(self) -> None:
+    def test_query_failure_wraps_and_closes_conn(self) -> None:
         _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
         conn = _FakeConnection()
         conn.raise_on_execute = RuntimeError("syntax error at or near")
@@ -37,7 +37,7 @@ class ErrorHandlingTest(unittest.TestCase):
         # `finally` closed the descriptor even though execute raised.
         self.assertEqual(conn.close_called, 1)
 
-    def test_reused_conn_query_failure_wraps_without_closing(self) -> None:
+    def test_reused_conn_failure_wraps_without_close(self) -> None:
         # The `conn=` reuse path wraps a driver error the same way the
         # open-per-call path does, but must NOT close the caller-owned
         # connection -- its lifetime belongs to the `analytics_connection`

@@ -32,7 +32,7 @@ class ReadPinnedStateTrustsAuthorTest(unittest.TestCase):
     able to preempt the real pinned state with a forged marker comment
     (CWE-345)."""
 
-    def test_foreign_marker_before_real_state_is_ignored(self) -> None:
+    def test_foreign_marker_before_state_is_ignored(self) -> None:
         # An attacker posts (or edits an older comment to carry) the hidden
         # state marker before the orchestrator's real pinned comment. GitHub
         # keeps the original author on an edit, so "edited older comment" is
@@ -56,7 +56,7 @@ class ReadPinnedStateTrustsAuthorTest(unittest.TestCase):
         self.assertEqual(state.get("branch"), REAL_BRANCH)
         self.assertEqual(state.get("dev_agent"), "claude")
 
-    def test_malformed_foreign_marker_does_not_shadow_real_state(self) -> None:
+    def test_bad_foreign_marker_cannot_shadow_state(self) -> None:
         # A foreign marker with unparseable JSON would, under the old
         # first-marker-wins parser, early-return empty state and shadow the
         # real one. The author gate skips it before its body is parsed.
@@ -108,7 +108,7 @@ class ReadPinnedStateTrustsAuthorTest(unittest.TestCase):
         self.assertEqual(state.comment_id, 200)
         self.assertEqual(state.get("review_round"), 2)
 
-    def test_malformed_trusted_marker_keeps_comment_id(self) -> None:
+    def test_bad_trusted_marker_keeps_comment_id(self) -> None:
         # A corrupted orchestrator-authored comment still resolves to its id
         # (with empty data) so `write_pinned_state` re-targets and overwrites
         # it instead of leaking a duplicate pinned comment.
@@ -124,7 +124,7 @@ class ReadPinnedStateTrustsAuthorTest(unittest.TestCase):
         self.assertEqual(state.comment_id, 200)
         self.assertEqual(state.data, {})
 
-    def test_missing_login_degrades_to_marker_only_scan(self) -> None:
+    def test_missing_login_uses_marker_only_scan(self) -> None:
         # Clients built via `__new__` in tests have no `_bot_login`; the parser
         # must not raise and falls back to the marker-only scan there.
         client = GitHubClient.__new__(GitHubClient)
@@ -147,7 +147,7 @@ class ReadPinnedStateRequiresStateOnlyBodyTest(unittest.TestCase):
     substring must not be mistaken for state. Only a comment whose ENTIRE body
     is the marker (what `write_pinned_state` emits) is trusted."""
 
-    def test_bot_comment_embedding_marker_is_not_state(self) -> None:
+    def test_embedded_bot_marker_is_not_state(self) -> None:
         # Adversarial shape: forged marker at position 0, then the
         # orchestrator-comment marker that `_post_issue_comment` always
         # appends -- the trailing marker alone makes the body not state-only.
@@ -179,7 +179,7 @@ class ReadPinnedStateRequiresStateOnlyBodyTest(unittest.TestCase):
         self.assertIsNone(state.comment_id)
         self.assertEqual(state.data, {})
 
-    def test_embedded_marker_does_not_shadow_real_state(self) -> None:
+    def test_embedded_marker_cannot_shadow_state(self) -> None:
         forged = _marker({"branch": "orchestrator/evil"})
         ordinary = FakeComment(
             id=1,
@@ -202,7 +202,7 @@ class BotLoginResolutionTest(unittest.TestCase):
     into worker-thread clones so the parallel path issues no extra
     `GET /user` per worker."""
 
-    def test_init_resolves_login_and_worker_clone_reuses_it(self) -> None:
+    def test_worker_clone_reuses_resolved_login(self) -> None:
         with patch("orchestrator.github.Github") as GH, \
              patch("orchestrator.github.Auth"):
             gh_inst = GH.return_value

@@ -206,7 +206,7 @@ class ClaudeStreamJsonTest(unittest.TestCase):
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
-    def test_structured_cache_creation_splits_5m_and_1h(self) -> None:
+    def test_cache_creation_splits_5m_and_1h(self) -> None:
         # The structured form (``cache_creation.ephemeral_*_input_tokens``)
         # bills 5m and 1h cache writes at different rates; the parser must
         # keep them separate rather than collapse both onto the 5m bucket.
@@ -284,7 +284,7 @@ class ClaudeStreamJsonTest(unittest.TestCase):
         metrics = parse_claude_usage("")
         self.assertEqual(metrics, UsageMetrics(backend=CLAUDE))
 
-    def test_multiple_models_aggregate_when_all_priced(self) -> None:
+    def test_multiple_models_sum_when_all_priced(self) -> None:
         stdout = _jsonl(
             _assistant(id="msg_a", model=SONNET,
                        usage=_claude_usage(input=100, output=50)),
@@ -400,7 +400,7 @@ class CodexJsonTest(unittest.TestCase):
         expected = (100 * 1.25 + 0 + 50 * 10) / TOKENS_PER_MILLION
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
-    def test_cached_tokens_without_cached_rate_blocks_estimate(self) -> None:
+    def test_no_cached_rate_blocks_cost_estimate(self) -> None:
         # A model whose published price table has no cached rate cannot be
         # estimated when the run actually used cache reads -- billing those
         # at the input rate would overcharge. Defer to unknown-price.
@@ -476,7 +476,7 @@ class CodexJsonTest(unittest.TestCase):
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
-    def test_gpt_5_5_at_or_under_threshold_uses_flat_rate(self) -> None:
+    def test_gpt_5_5_threshold_uses_flat_rate(self) -> None:
         # The tier applies strictly when input > threshold; at or
         # under 272K the standard flat rates apply unchanged. This
         # is the boundary regression guard for the new long-context
@@ -499,7 +499,7 @@ class CodexJsonTest(unittest.TestCase):
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
-    def test_gpt_5_5_pro_long_context_stays_flat_priced(self) -> None:
+    def test_gpt_5_5_pro_long_context_stays_flat(self) -> None:
         # OpenAI's official gpt-5.5-pro docs list flat $30 / $180
         # with no >272K multiplier and no cached discount. The tier
         # the standard gpt-5.5 and gpt-5.4-pro entries carry must
@@ -550,7 +550,7 @@ class CodexJsonTest(unittest.TestCase):
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
-    def test_gpt_5_4_pro_long_context_uses_tiered_pricing(self) -> None:
+    def test_gpt_5_4_pro_long_context_uses_tiers(self) -> None:
         # gpt-5.4-pro mirrors gpt-5.5-pro: same threshold + multipliers.
         stdout = _jsonl(
             _turn_complete(
@@ -672,7 +672,7 @@ class CodexJsonTest(unittest.TestCase):
         self.assertEqual(metrics.cost_source, "unknown-price")
         self.assertIsNone(metrics.cost_usd)
 
-    def test_gpt_5_5_long_context_cached_tokens_also_tier_up(self) -> None:
+    def test_gpt_5_5_cached_tokens_also_tier_up(self) -> None:
         # Cached input tokens are still input billing -- the long-
         # context multiplier must apply to them too. Otherwise a
         # cache-heavy session over the threshold would silently
@@ -696,7 +696,7 @@ class CodexJsonTest(unittest.TestCase):
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
-    def test_truly_unknown_model_remains_unknown_price(self) -> None:
+    def test_unknown_model_keeps_unknown_price(self) -> None:
         # The unknown-price exposure contract: a SKU with no priced
         # family at all leaves cost_usd None and cost_source
         # `unknown-price` so the dashboard surfaces a pricing-table
@@ -1052,7 +1052,7 @@ class CodexSkillTriggerTest(unittest.TestCase):
         self.assertEqual(skills.triggered, ("develop", "review"))
         self.assertEqual(skills.trigger_counts, {"develop": 1, "review": 1})
 
-    def test_order_dedup_and_counts_across_separate_reads(self) -> None:
+    def test_order_dedup_counts_across_reads(self) -> None:
         # Distinct ``item.id``s are separate reads: a skill opened in two
         # separate commands counts twice, mirroring the claude path, while the
         # ``triggered`` tuple keeps it once in first-seen order.
@@ -1127,7 +1127,7 @@ class CodexSkillTriggerTest(unittest.TestCase):
         self.assertNotIn(leaked, repr(skills))
         self.assertNotIn("leaked", repr(skills))
 
-    def test_only_the_name_segment_is_captured_for_privacy(self) -> None:
+    def test_only_name_segment_is_captured(self) -> None:
         # The command around the SKILL.md read can carry issue / user content;
         # only the `<name>` path segment is ever extracted, never the rest.
         secret = "user secret: api_key=sk-deadbeef"
@@ -1194,7 +1194,7 @@ class ClaudeTrajectoryTest(unittest.TestCase):
     along verbatim -- this layer classifies, it does not redact.
     """
 
-    def test_extracts_tools_steps_skills_and_final_output(self) -> None:
+    def test_extracts_tools_skills_and_final_output(self) -> None:
         stdout = _jsonl(
             _system_init(tools=["Bash", "Read", "Skill"],
                          skills=[DEVELOP, REVIEW]),
@@ -1239,7 +1239,7 @@ class ClaudeTrajectoryTest(unittest.TestCase):
                            turn=1, content={"skill": DEVELOP}),
         )
 
-    def test_captures_assistant_and_user_text_turns_in_stream_order(
+    def test_captures_text_turns_in_stream_order(
         self,
     ) -> None:
         # Full timeline: an assistant text turn, then a tool call + its
@@ -1275,7 +1275,7 @@ class ClaudeTrajectoryTest(unittest.TestCase):
         self.assertEqual(first.tool_id, "")
         self.assertEqual(trajectory.final_output, "all set")
 
-    def test_empty_or_nonstring_text_blocks_are_skipped(self) -> None:
+    def test_skips_empty_or_nonstring_text_blocks(self) -> None:
         # An empty / missing / non-string text block does not create a
         # message step -- only non-empty string text turns are captured.
         stdout = _jsonl(
@@ -1346,7 +1346,7 @@ class ClaudeTurnUsageTest(unittest.TestCase):
     ``None``).
     """
 
-    def test_turn_indexes_span_multi_tool_turns_and_per_turn_model(
+    def test_indexes_span_tool_turns_and_models(
         self,
     ) -> None:
         # A single assistant message with a text block and two tool_use blocks
@@ -1415,7 +1415,7 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         assert turn1.cost_usd is not None
         self.assertAlmostEqual(turn1.cost_usd, expected1, places=12)
 
-    def test_structured_cache_creation_sums_into_cache_write(self) -> None:
+    def test_cache_creation_adds_to_cache_write(self) -> None:
         # The structured 5m/1h cache-creation form sums into a single per-turn
         # cache_write_tokens while both still price at their own rate.
         stdout = _jsonl(
@@ -1430,7 +1430,7 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         assert turn0.cost_usd is not None
         self.assertAlmostEqual(turn0.cost_usd, expected, places=12)
 
-    def test_partial_message_frames_are_one_turn_last_record_wins(self) -> None:
+    def test_partial_frames_use_last_record_per_turn(self) -> None:
         # Two frames sharing a message.id are one turn; the last usage record is
         # authoritative (claude streams partial usage on intermediate frames).
         # Both frames' steps carry the single turn 0.
@@ -1462,7 +1462,7 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         self.assertEqual(turn0.input_tokens, 100)
         self.assertEqual(turn0.output_tokens, 200)
 
-    def test_per_turn_cost_is_estimated_even_when_run_reports_cost(
+    def test_turn_cost_estimated_when_run_has_cost(
         self,
     ) -> None:
         # total_cost_usd is a run-level terminal figure; per-turn cost is always
@@ -1568,7 +1568,7 @@ class CodexTrajectoryTest(unittest.TestCase):
             ),
         )
 
-    def test_agent_messages_captured_as_assistant_turns_in_order(self) -> None:
+    def test_agent_messages_become_ordered_turns(self) -> None:
         # Each agent_message item becomes an assistant_message turn, kept in
         # stream order relative to the command steps; the last one is still the
         # final output.
@@ -1590,7 +1590,7 @@ class CodexTrajectoryTest(unittest.TestCase):
         )
         self.assertEqual(trajectory.final_output, "all done")
 
-    def test_agent_message_started_and_completed_collapse(self) -> None:
+    def test_started_completed_message_collapses(self) -> None:
         # A started + completed agent_message sharing an item.id is one turn
         # (last text wins), mirroring the command started/completed collapse.
         stdout = _jsonl(
@@ -1604,7 +1604,7 @@ class CodexTrajectoryTest(unittest.TestCase):
         )
         self.assertEqual(trajectory.final_output, "final text")
 
-    def test_empty_or_nonstring_agent_message_is_skipped(self) -> None:
+    def test_skips_empty_or_nonstring_message(self) -> None:
         # An empty / non-string agent_message text creates no turn.
         stdout = _jsonl(
             _agent_message("a1", ""),
@@ -1612,7 +1612,7 @@ class CodexTrajectoryTest(unittest.TestCase):
         )
         self.assertEqual(parse_codex_trajectory(stdout).steps, ())
 
-    def test_started_only_command_emits_call_without_result(self) -> None:
+    def test_started_command_emits_call_no_result(self) -> None:
         # A command that never completes (no aggregated_output) is a call with
         # no result step rather than a fabricated empty result.
         stdout = _jsonl(

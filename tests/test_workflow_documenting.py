@@ -150,7 +150,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks[PUSH_BRANCH].assert_called_once()
         self.assertIn((self.ISSUE, IN_REVIEW), gh.label_history)
 
-    def test_agent_lifecycle_events_carry_review_round(self) -> None:
+    def test_lifecycle_events_carry_review_round(self) -> None:
         # Documenting runs once per reviewer-approval handoff between
         # approval and `in_review`. The pinned `review_round` at the time
         # of approval (0 on the first approval, higher after fix loops)
@@ -213,7 +213,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
             for _, body in gh.posted_pr_comments
         ))
 
-    def test_no_commit_no_marker_parks_via_on_question(self) -> None:
+    def test_no_commit_or_marker_parks_as_question(self) -> None:
         gh, issue = self._seeded()
         mocks = self._run(
             lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
@@ -300,7 +300,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("uncommitted change", last_comment)
         self.assertIn(README, last_comment)
 
-    def test_no_change_with_dirty_files_parks_as_dirty(self) -> None:
+    def test_no_change_with_dirty_files_parks(self) -> None:
         # The agent edited files but did NOT commit, then emitted
         # `DOCS: NO_CHANGE`. Accepting that would advance to validating
         # while leaving uncommitted docs edits on disk -- the reviewer
@@ -329,7 +329,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("uncommitted change", last_comment)
         self.assertIn(README, last_comment)
 
-    def test_no_marker_with_dirty_files_parks_as_dirty(self) -> None:
+    def test_no_marker_with_dirty_files_parks(self) -> None:
         # Same shape as above but the agent ended with a question
         # instead of `DOCS: NO_CHANGE`. The dirty check must fire
         # before `_on_question`, otherwise an "agent needs your input"
@@ -359,7 +359,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # WRONG outcome here -- assert we did NOT take that path.
         self.assertNotIn("agent needs your input", last_comment)
 
-    def test_silent_run_with_dirty_files_parks_as_dirty(self) -> None:
+    def test_silent_run_with_dirty_files_parks(self) -> None:
         # Empty final message AND dirty edits. Without the dirty
         # check, the silent-crash path (`_on_question` with
         # `agent_silent` reason) would fire and the dirty files
@@ -383,7 +383,7 @@ class HandleDocumentingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("uncommitted change", last_comment)
 
-    def test_behind_remote_parks_diverged_branch_before_spawn(self) -> None:
+    def test_behind_remote_parks_before_spawn(self) -> None:
         # The local PR branch is behind `<remote>/<branch>` -- someone
         # force-pushed externally or a sibling-resolved-conflict
         # advanced the PR head. Pushing would clobber commits we
@@ -473,7 +473,7 @@ class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(self.ISSUE, **defaults)
         return gh, issue
 
-    def test_unpushed_recovered_commits_push_without_agent_spawn(self) -> None:
+    def test_recovered_commits_push_without_spawn(self) -> None:
         gh, issue = self._seeded()
         mocks = self._run(
             lambda: workflow._handle_documenting(gh, _TEST_SPEC, issue),
@@ -517,7 +517,7 @@ class HandleDocumentingRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(state.get(AWAITING_HUMAN))
         self.assertEqual(state.get(PARK_REASON), PARK_PUSH_FAILED)
 
-    def test_recovery_with_dirty_worktree_parks_without_push(self) -> None:
+    def test_dirty_recovery_parks_without_push(self) -> None:
         # A previous tick committed docs AND left some files
         # uncommitted, then crashed. The recovery branch must NOT push:
         # the push would publish an incomplete branch (the dirty files
@@ -555,7 +555,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
     advance via a stray no-change verdict without ever doing a real
     docs pass."""
 
-    def test_human_reply_resumes_dev_and_advances_on_commit(self) -> None:
+    def test_commit_reply_resumes_and_advances(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(401, label=DOCUMENTING)
         issue.comments.append(
@@ -653,7 +653,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         self.assertTrue(state.get(AWAITING_HUMAN))
         self.assertNotIn(DOCS_VERDICT, state)
 
-    def test_human_reply_no_change_with_unpushed_commit_pushes(self) -> None:
+    def test_no_change_reply_pushes_local_commit(self) -> None:
         # A previous tick committed docs and then parked (push_failed
         # / agent_timeout / dirty) -- the worktree carries an unpushed
         # docs commit (ahead == 1). The human's retry resumes the dev
@@ -709,7 +709,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
             for _, body in gh.posted_pr_comments
         ))
 
-    def test_human_reply_no_change_with_push_failure_parks(self) -> None:
+    def test_no_change_reply_parks_on_push_error(self) -> None:
         # Same shape as the previous test but the recovery push
         # itself fails. The issue must park with `push_failed` and
         # NOT advance -- the docs commit is still local-only.
@@ -776,7 +776,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         # Still parked; nothing changed.
         self.assertTrue(gh.pinned_data(402).get(AWAITING_HUMAN))
 
-    def test_human_reply_resume_uses_full_documentation_prompt(self) -> None:
+    def test_reply_uses_full_documentation_prompt(self) -> None:
         # Regression: a `fetch_failed` / `agent_timeout` /
         # `agent_silent` resume cannot use the generic
         # `_resume_developer_on_human_reply` followup (which
@@ -837,7 +837,7 @@ class HandleDocumentingAwaitingHumanResumeTest(
         state = gh.pinned_data(406)
         self.assertEqual(state.get(LAST_ACTION_COMMENT_ID), 6100)
 
-    def test_human_reply_no_change_persists_docs_checked_sha(self) -> None:
+    def test_no_change_reply_persists_docs_sha(self) -> None:
         # Regression: a NO_CHANGE outcome on a resume (no prior
         # fresh-spawn ran on this issue this lifecycle) must
         # still persist `docs_checked_sha` to the SHA the dev
@@ -918,7 +918,7 @@ class HandleDocumentingContinueCommandTest(
         )
         return gh, issue
 
-    def test_agent_silent_bare_continue_reruns_docs_without_drift(self) -> None:
+    def test_bare_continue_reruns_without_drift(self) -> None:
         # The #717 shape: parked `agent_silent` docs pass, human posts exactly
         # `/orchestrator continue`. The docs pass reruns (full documentation
         # prompt) with NO "issue body changed" / "routing back to validating"
@@ -985,7 +985,7 @@ class HandleDocumentingInterruptedTest(
     advance to `in_review`, post a HITL question, or set a docs verdict off
     the partial result."""
 
-    def test_final_docs_spawn_interrupted_leaves_state_untouched(self) -> None:
+    def test_interrupted_final_docs_keeps_state(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(202, label=DOCUMENTING)
         gh.add_issue(issue)
@@ -1100,7 +1100,7 @@ class HandleDocumentingParkedSilenceTest(
         gh.seed_state(self.ISSUE, **defaults)
         return gh, issue
 
-    def test_no_new_comments_short_circuits_before_fetch(
+    def test_no_comments_skip_fetch(
         self,
     ) -> None:
         gh, issue = self._seeded(park_reason=PARK_AGENT_QUESTION)
@@ -1121,7 +1121,7 @@ class HandleDocumentingParkedSilenceTest(
         self.assertEqual(gh.posted_pr_comments, [])
         self.assertEqual(gh.write_state_calls, 0)
 
-    def test_no_new_comments_does_not_repark_on_fetch_fail(
+    def test_fetch_error_does_not_repark(
         self,
     ) -> None:
         # If the fetch would have failed on this tick, the parked
@@ -1146,7 +1146,7 @@ class HandleDocumentingParkedSilenceTest(
             gh.pinned_data(self.ISSUE).get(PARK_REASON), PARK_AGENT_QUESTION,
         )
 
-    def test_no_new_comments_does_not_repark_on_diverged(
+    def test_divergence_does_not_repark(
         self,
     ) -> None:
         # Same shape for a behind-remote tick.
@@ -1196,7 +1196,7 @@ class HandleDocumentingDriftTest(
         gh.seed_state(self.ISSUE, **defaults)
         return gh, issue
 
-    def test_body_edit_relabels_to_validating_without_spawn(self) -> None:
+    def test_body_edit_routes_to_validating_no_spawn(self) -> None:
         # A body edit during the final-docs hop must reset
         # `review_round=0`, post the notice, and relabel to
         # `validating` so the reviewer re-evaluates on the next tick.
@@ -1237,7 +1237,7 @@ class HandleDocumentingDriftTest(
             "stale-hash-from-original-body",
         )
 
-    def test_body_edit_without_prior_park_relabels_to_validating(self) -> None:
+    def test_unparked_body_edit_routes_to_validating(self) -> None:
         # An in-flight tick (not parked) sees a body edit: same drift
         # invalidation as the parked case -- relabel to `validating`,
         # no docs spawn.
@@ -1268,7 +1268,7 @@ class HandleDocumentingDriftTest(
         self.assertNotIn((self.ISSUE, IN_REVIEW), gh.label_history)
         self.assertEqual(pinned_state.get(REVIEW_ROUND), 0)
 
-    def test_body_edit_recovered_commit_relabels_without_push(
+    def test_recovered_body_edit_routes_without_push(
         self,
     ) -> None:
         # A prior final-docs tick committed docs and parked before
@@ -1301,7 +1301,7 @@ class HandleDocumentingDriftTest(
         pinned_state = gh.pinned_data(self.ISSUE)
         self.assertEqual(pinned_state.get(REVIEW_ROUND), 0)
 
-    def test_body_edit_resets_unpushed_local_docs_commit(self) -> None:
+    def test_body_edit_resets_local_docs_commit(self) -> None:
         # Regression: drift mid-final-docs-hop must discard any
         # unpushed local docs commit before relabeling to `validating`.
         # Otherwise the recovered-commit shortcut on a future
@@ -1368,7 +1368,7 @@ class HandleDocumentingDriftTest(
         pinned_state = gh.pinned_data(self.ISSUE)
         self.assertEqual(pinned_state.get(REVIEW_ROUND), 0)
 
-    def test_body_edit_resets_dirty_worktree_with_no_local_commits(
+    def test_body_edit_resets_dirty_without_commit(
         self,
     ) -> None:
         # Regression: a prior docs run may have edited files without
@@ -1427,7 +1427,7 @@ class HandleDocumentingDriftTest(
         state = gh.pinned_data(self.ISSUE)
         self.assertEqual(state.get(REVIEW_ROUND), 0)
 
-    def test_body_edit_resets_when_remote_advanced_past_local(
+    def test_remote_advance_body_edit_resets_local(
         self,
     ) -> None:
         # Regression: if the remote PR head advanced past local HEAD
@@ -1540,7 +1540,7 @@ class HandleDocumentingDriftTest(
         # retry tick re-attempts the cleanup + relabel.
         self.assertTrue(state.get("docs_drift_unwind_pending"))
 
-    def test_body_edit_parks_on_ahead_behind_probe_failure(self) -> None:
+    def test_body_edit_parks_on_ahead_probe_error(self) -> None:
         # Regression: `_branch_ahead_behind` swallows git errors as
         # `(0, 0)` ("in sync"), which would let a stale local docs
         # commit silently survive into the next final-docs hop's
@@ -1645,7 +1645,7 @@ class HandleDocumentingDriftTest(
         # drift to trigger it.
         self.assertTrue(state.get("docs_drift_unwind_pending"))
 
-    def test_pending_unwind_retries_cleanup_after_operator_unpark(
+    def test_operator_unpark_retries_pending_cleanup(
         self,
     ) -> None:
         # Regression for the operator-unpark gap: a prior tick's
@@ -1716,7 +1716,7 @@ class HandleDocumentingDriftTest(
         state = gh.pinned_data(self.ISSUE)
         self.assertFalse(state.get("docs_drift_unwind_pending"))
 
-    def test_pending_unwind_silent_when_still_parked_no_input(
+    def test_parked_pending_unwind_is_silent(
         self,
     ) -> None:
         # The drift-unwind retry MUST NOT fire on every tick while
@@ -1785,7 +1785,7 @@ class HandleDocumentingDriftTest(
             state.get(PARK_REASON), PARK_RESET_FAILED,
         )
 
-    def test_body_edit_with_recovered_commit_parks_on_fetch_failure(
+    def test_recovered_body_edit_parks_on_fetch_error(
         self,
     ) -> None:
         # Regression: when the drift fetch fails AND the worktree
@@ -1881,7 +1881,7 @@ class HandleDocumentingClosedIssueTest(
     without-merge variant additionally runs branch cleanup.
     """
 
-    def test_closed_documenting_with_closed_pr_runs_cleanup(self) -> None:
+    def test_closed_pr_runs_cleanup(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(181, label=DOCUMENTING)
         issue.closed = True
@@ -1966,7 +1966,7 @@ class HandleDocumentingFinalDocsHandoffTest(
         state = gh.pinned_data(self.ISSUE)
         self.assertEqual(state.get(DOCS_VERDICT), VERDICT_NO_CHANGE)
 
-    def test_no_change_with_recovered_ahead_advances_to_in_review(
+    def test_recovered_ahead_routes_to_in_review(
         self,
     ) -> None:
         # A previous final-docs tick committed but parked before the
@@ -1998,7 +1998,7 @@ class HandleDocumentingFinalDocsHandoffTest(
         mocks[PUSH_BRANCH].assert_called_once()
         self.assertIn((self.ISSUE, IN_REVIEW), gh.label_history)
 
-    def test_drift_relabels_to_validating_without_spawn(
+    def test_drift_routes_to_validating_without_spawn(
         self,
     ) -> None:
         # A human body edit during the final-docs hop must reset

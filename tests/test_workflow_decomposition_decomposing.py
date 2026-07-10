@@ -115,7 +115,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             "fits in one context" in body for _, body in gh.posted_comments
         ))
 
-    def test_decompose_single_hands_off_collected_context(self) -> None:
+    def test_single_hands_off_collected_context(self) -> None:
         # A single decision must carry the decomposer's gathered context
         # (affected files + notes) into the issue thread so the implementer
         # inherits it via `_recent_comments_text` at spawn.
@@ -144,7 +144,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             "Bump the default and cover it in fakes.", context_comment
         )
 
-    def test_decompose_decision_split_creates_children(self) -> None:
+    def test_split_decision_creates_children(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(12, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
@@ -188,7 +188,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         for child in gh.created_child_issues:
             self.assertIn(f"#{child.number}", last_comment)
 
-    def test_decompose_split_umbrella_marks_parent_umbrella(self) -> None:
+    def test_umbrella_split_marks_parent(self) -> None:
         # `umbrella: true` on a split decision means the parent has no
         # implementation work of its own; instead of `blocked` (which
         # would re-enter implementation after children resolve), it gets
@@ -231,7 +231,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertIn(LABEL_UMBRELLA, last_comment)
 
-    def test_decompose_split_non_umbrella_default_marks_blocked(
+    def test_non_umbrella_split_defaults_blocked(
         self,
     ) -> None:
         # Default for the umbrella flag is False -- a split manifest
@@ -261,7 +261,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # prior aborted decomposition cannot survive into recovery.
         self.assertEqual(gh.pinned_data(51).get(KEY_UMBRELLA), False)
 
-    def test_decompose_split_with_deps_persists_dep_graph(self) -> None:
+    def test_split_with_deps_persists_graph(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(13, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
@@ -295,7 +295,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 gh.pinned_data(child.number).get(KEY_PARENT_NUMBER), 13,
             )
 
-    def test_decompose_parks_if_decomposer_left_commits(self) -> None:
+    def test_commits_left_by_decomposer_park(self) -> None:
         # The decomposer is supposed to be read-only. If it commits in the
         # parent's worktree, the implementer recovery path in
         # `_handle_implementing` would later see `_has_new_commits` -> True
@@ -319,7 +319,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         last_comment = gh.posted_comments[-1][1]
         self.assertIn(READ_ONLY_FRAGMENT, last_comment)
 
-    def test_decompose_parks_if_decomposer_left_dirty_files(self) -> None:
+    def test_dirty_files_left_by_decomposer_park(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(41, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
@@ -540,7 +540,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             last_comment,
         )
 
-    def test_decompose_off_falls_back_to_legacy_pickup(self) -> None:
+    def test_off_falls_back_to_legacy_pickup(self) -> None:
         # End-to-end: with DECOMPOSE=off, the unlabeled issue must skip
         # the decomposer entirely and route straight to implementing
         # exactly as the bootstrap-milestone path did. No `decomposing`
@@ -568,7 +568,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn(KEY_DECOMPOSER_AGENT, state)
         self.assertNotIn(KEY_DECOMPOSER_SESSION_ID, state)
 
-    def test_decompose_off_routes_decomposing_label_to_implementing(
+    def test_off_routes_label_to_implementing(
         self,
     ) -> None:
         # The DECOMPOSE kill switch must apply to issues that were
@@ -628,7 +628,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         ))
         self.assertEqual(gh.created_child_issues, [])
 
-    def test_decompose_off_ratchets_past_stage_comments(
+    def test_off_ratchets_past_stage_comments(
         self,
     ) -> None:
         # When DECOMPOSE flips off mid-flight, decomposing-era human
@@ -680,7 +680,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsInstance(last_action, int)
         self.assertGreaterEqual(last_action, 960)
 
-    def test_decompose_off_does_not_lower_last_action_comment_id(self) -> None:
+    def test_off_keeps_last_action_monotonic(self) -> None:
         # The ratchet is one-way. If `last_action_comment_id` is
         # already past the latest visible comment (e.g. a prior tick
         # consumed everything and a later high-id comment hasn't been
@@ -714,7 +714,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(22).get(KEY_LAST_ACTION_COMMENT_ID), 10000,
         )
 
-    def test_decompose_off_still_finalizes_half_finished_split(self) -> None:
+    def test_off_finishes_half_complete_split(self) -> None:
         # If a SIGKILL crashed a split between the parent's last
         # incremental `children` write and the parent label flip,
         # turning the kill switch on must NOT abandon the orphan
@@ -751,7 +751,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn(LABEL_IMPLEMENTING, labels)
         self.assertEqual(gh.created_child_issues, [])
 
-    def test_decompose_persists_children_incrementally(self) -> None:
+    def test_persists_children_incrementally(self) -> None:
         # Each successful child creation must flush the parent's
         # `children` list before the next iteration starts. Without this,
         # a process kill (no exception) between iterations leaves the
@@ -835,7 +835,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         state = gh.pinned_data(50)
         self.assertEqual(state.get(KEY_CHILDREN), [101, 102])
 
-    def test_half_finished_recovery_with_awaiting_human_holds(self) -> None:
+    def test_half_complete_awaiting_human_holds(self) -> None:
         # If the prior tick parked awaiting_human after partial child
         # creation, the recovery must NOT silently flip the parent to
         # `blocked`; the human's intervention is still required.
@@ -895,7 +895,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("crashed mid-way", last_comment)
         self.assertIn("1 of 3", last_comment)
 
-    def test_orphan_child_recovery_parks_when_no_children_recorded(
+    def test_orphan_recovery_parks_without_children(
         self,
     ) -> None:
         # SIGKILL between `create_child_issue` returning and the parent's
@@ -930,7 +930,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("crashed mid-way", last_comment)
         self.assertIn("0 of 2", last_comment)
 
-    def test_recovery_seeds_missing_parent_number_on_orphan_child(self) -> None:
+    def test_orphan_recovery_seeds_parent_number(self) -> None:
         # SIGKILL between the parent's child-record write and the child's
         # pinned-state seed for the LAST child satisfies
         # `len(children) == expected_children_count` but leaves that child
@@ -983,7 +983,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         healthy_state = gh.pinned_data(601)
         self.assertEqual(healthy_state.get(KEY_PARENT_NUMBER), 60)
 
-    def test_decompose_split_persists_expected_count_first(self) -> None:
+    def test_split_persists_expected_count_first(self) -> None:
         # `expected_children_count` MUST be on the parent before any
         # child is created on GitHub. Otherwise a SIGKILL after the
         # first child creation leaves `children=[#x]` without an
@@ -1013,7 +1013,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(seen_expected[0], 2)
         self.assertEqual(gh.pinned_data(82).get("expected_children_count"), 2)
 
-    def test_parent_records_child_before_seeding_child_state(self) -> None:
+    def test_parent_records_child_before_child_state(self) -> None:
         # Order matters: parent state records the new child BEFORE the
         # child's pinned state is seeded. Otherwise a SIGKILL between
         # `create_child_issue` returning and the parent write leaves
@@ -1058,7 +1058,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             "pinned state is seeded",
         )
 
-    def test_decompose_uses_separate_worktree_from_implementer(self) -> None:
+    def test_uses_separate_implementer_worktree(self) -> None:
         # The decomposer must NOT taint the implementer's per-issue branch.
         # If it shared `_ensure_worktree`, a `split` decision would leave
         # the local `orchestrator/geserdugarov__agent-orchestrator/issue-<n>` branch anchored at the
@@ -1101,7 +1101,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(gh.pinned_data(71).get(KEY_AWAITING_HUMAN))
         mocks[CLEANUP_DECOMPOSE_WORKTREE].assert_not_called()
 
-    def test_decompose_skips_cleanup_while_awaiting_human(self) -> None:
+    def test_awaiting_human_skips_cleanup(self) -> None:
         # On the tick AFTER a dirty/commits park, awaiting_human is True
         # and no human reply has arrived yet. The handler must not clean
         # up the decomposer worktree -- the HITL message asks the operator
@@ -1205,7 +1205,7 @@ class DecomposerRunUsageAccumulationTest(
         # Exactly one real resume exit folded.
         self.assertEqual(gh.pinned_data(621)[KEY_ISSUE_AGENT_RUNS], 1)
 
-    def test_no_new_comment_resume_leaves_counters_untouched(self) -> None:
+    def test_no_comment_resume_keeps_counters(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(622, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
@@ -1230,7 +1230,7 @@ class DecomposerRunUsageAccumulationTest(
         self.assertNotIn(KEY_ISSUE_AGENT_RUNS, state)
         self.assertNotIn(KEY_ISSUE_TOTAL_TOKENS, state)
 
-    def test_interrupted_run_does_not_persist_counters(self) -> None:
+    def test_interrupted_run_keeps_counters_clear(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(623, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
@@ -1257,7 +1257,7 @@ class DecomposerRunUsageAccumulationTest(
         self.assertNotIn(KEY_ISSUE_TOTAL_TOKENS, state)
         self.assertFalse(state.get(KEY_AWAITING_HUMAN))
 
-    def test_dirty_interruption_parks_without_counters(
+    def test_dirty_interrupt_parks_without_counters(
         self,
     ) -> None:
         # An interrupted decomposer that nonetheless left changes in the

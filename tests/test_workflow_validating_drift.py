@@ -55,7 +55,7 @@ class ValidatingTransientParkRecoveryTest(
         gh.seed_state(170, **seed)
         return gh, issue
 
-    def test_push_failed_park_recovers_when_push_succeeds(self) -> None:
+    def test_push_failure_recovers_on_success(self) -> None:
         gh, issue = self._parked_issue(park_reason="push_failed")
 
         # Force the worktree-existence check to pass; "/tmp" always exists
@@ -87,7 +87,7 @@ class ValidatingTransientParkRecoveryTest(
         self.assertNotIn((170, "documenting"), gh.label_history)
         self.assertNotIn((170, "in_review"), gh.label_history)
 
-    def test_push_failed_park_stays_parked_when_push_still_fails(self) -> None:
+    def test_repeat_push_failure_stays_parked(self) -> None:
         # Recovery must not re-post the park message when the push still
         # fails -- otherwise every poll would spam the issue.
         gh, issue = self._parked_issue(park_reason="push_failed")
@@ -110,7 +110,7 @@ class ValidatingTransientParkRecoveryTest(
         # review_round NOT bumped while still stuck.
         self.assertEqual(state.get("review_round"), 1)
 
-    def test_push_failed_park_stays_parked_when_worktree_is_gone(self) -> None:
+    def test_missing_worktree_stays_parked(self) -> None:
         # If the worktree was reaped between the original park and the
         # recovery tick, the dev's local commits are gone and there is
         # nothing to push. Stay parked so a human can intervene.
@@ -131,7 +131,7 @@ class ValidatingTransientParkRecoveryTest(
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(state.get("park_reason"), "push_failed")
 
-    def test_non_transient_park_stays_parked_no_new_comments(self) -> None:
+    def test_nontransient_no_comments_stays_parked(self) -> None:
         # A park whose reason is not in the validating transient set (e.g.
         # a question or dirty-tree park) must NOT auto-recover. The
         # _resume_developer_on_human_reply path (no new comments) returns
@@ -205,7 +205,7 @@ class ValidatingTransientParkRecoveryTest(
         # round must stay flat (mirrors the reviewer_timeout branch).
         self.assertEqual(state.get("review_round"), 1)
 
-    def test_reviewer_failed_park_new_comment_routes_to_reviewer(self) -> None:
+    def test_error_comment_reruns_reviewer(self) -> None:
         # A human "Retry" / "Continue" nudge after a reviewer-side park
         # must wake the REVIEWER, not the dev. Pre-fix this branch fed
         # the comment to `_resume_developer_on_human_reply`, which woke
@@ -243,7 +243,7 @@ class ValidatingTransientParkRecoveryTest(
         self.assertIsNone(state.get("park_reason"))
         self.assertEqual(state.get("last_action_comment_id"), 10_500)
 
-    def test_reviewer_timeout_park_new_comment_routes_to_reviewer(self) -> None:
+    def test_timeout_comment_reruns_reviewer(self) -> None:
         # Same routing rule for the reviewer_timeout park reason: a
         # human nudge must reach the reviewer, not the dev session.
         gh, issue = self._parked_issue(park_reason="reviewer_timeout")
@@ -273,7 +273,7 @@ class ValidatingTransientParkRecoveryTest(
         self.assertFalse(state.get("awaiting_human"))
         self.assertIsNone(state.get("park_reason"))
 
-    def test_agent_timeout_park_new_comment_routes_to_dev(self) -> None:
+    def test_dev_timeout_comment_routes_to_dev(self) -> None:
         # Regression: dev-side park reasons (agent_timeout) must keep
         # routing to the dev session on a human comment. Only
         # reviewer-side reasons get the new fall-through.
@@ -305,7 +305,7 @@ class ValidatingTransientParkRecoveryTest(
         followup = call.args[1]
         self.assertIn("please rebase first", followup)
 
-    def test_agent_timeout_clean_tree_no_commits_recovers_silently(self) -> None:
+    def test_clean_timeout_recovers_silently(self) -> None:
         # Common timeout shape: the dev burned the budget without
         # producing a new commit. Recovery clears flags and does not
         # bump the round (no fix landed); next tick re-runs the reviewer.
@@ -335,7 +335,7 @@ class ValidatingTransientParkRecoveryTest(
         # Watermark cleared so a future timeout cycle starts fresh.
         self.assertIsNone(state.get("pre_dev_fix_sha"))
 
-    def test_agent_timeout_existing_pr_commits_no_new_commit(self) -> None:
+    def test_timeout_with_only_pr_commits_recovers(self) -> None:
         # Regression: a normal PR worktree is always ahead of
         # `origin/<base>` after the first fix lands. `_has_new_commits()`
         # would say "yes" even when this run produced nothing, so naive
@@ -370,7 +370,7 @@ class ValidatingTransientParkRecoveryTest(
         # MUST NOT bump: nothing landed.
         self.assertEqual(state.get("review_round"), 1)
 
-    def test_agent_timeout_unpushed_commits_pushes_and_bumps(self) -> None:
+    def test_timeout_pushes_commits_and_bumps(self) -> None:
         # The dev committed the fix locally but the timeout killed it
         # before the push. Recovery must finish that push -- otherwise
         # the next tick's reviewer would inspect a SHA that is not on
@@ -403,7 +403,7 @@ class ValidatingTransientParkRecoveryTest(
         # re-evaluates the recovered head on the next tick.
         self.assertNotIn((170, "documenting"), gh.label_history)
 
-    def test_agent_timeout_unpushed_commits_push_fails_stays_parked(
+    def test_timeout_push_error_stays_parked(
         self,
     ) -> None:
         gh, issue = self._parked_issue(
@@ -429,7 +429,7 @@ class ValidatingTransientParkRecoveryTest(
         self.assertEqual(state.get("review_round"), 1)
         self.assertEqual(state.get("pre_dev_fix_sha"), "cafe1234")
 
-    def test_agent_timeout_dirty_worktree_stays_parked(self) -> None:
+    def test_dirty_timeout_stays_parked(self) -> None:
         # The dev edited files without committing before timing out.
         # Recovery refuses to silently push (would publish an incomplete
         # branch) or to clear flags (the next reviewer would inspect
@@ -458,7 +458,7 @@ class ValidatingTransientParkRecoveryTest(
         self.assertEqual(state.get("park_reason"), "agent_timeout")
         self.assertEqual(state.get("review_round"), 1)
 
-    def test_agent_timeout_without_watermark_stays_parked(self) -> None:
+    def test_timeout_without_watermark_stays_parked(self) -> None:
         # Defensive: if the timeout park ran in foreign code that did
         # not persist `pre_dev_fix_sha`, recovery cannot tell whether a
         # commit was produced. Refuse to act -- a force-push of a stale
@@ -480,7 +480,7 @@ class ValidatingTransientParkRecoveryTest(
         self.assertTrue(state.get("awaiting_human"))
         self.assertEqual(state.get("park_reason"), "agent_timeout")
 
-    def test_transient_park_new_comment_takes_resume_path(self) -> None:
+    def test_transient_comment_takes_resume_path(self) -> None:
         # A transient park is preempted by a fresh human comment: the
         # comment-driven resume path wins, the dev is spawned with the
         # human's feedback, and the recovery branch does not silently
@@ -514,7 +514,7 @@ class ValidatingTransientParkRecoveryTest(
 class HandleValidatingResumeOnHashChangeTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
-    def test_body_drift_resumes_dev_and_stays_on_validating(self) -> None:
+    def test_body_drift_resumes_and_stays_validating(self) -> None:
         # While validating (PR is open), a human edit must not discard the
         # dev's already-pushed work. Notify and resume; on a successful
         # pushed fix, stay on `validating` so the reviewer re-evaluates
@@ -571,7 +571,7 @@ class ValidatingDriftDefersToReviewerRecoveryTest(
     the drift handler must defer to the awaiting-human branch in this
     case so the reviewer re-runs naturally."""
 
-    def test_reviewer_timeout_drift_respawns_reviewer_not_dev(
+    def test_timeout_drift_respawns_reviewer(
         self,
     ) -> None:
         gh = FakeGitHubClient()

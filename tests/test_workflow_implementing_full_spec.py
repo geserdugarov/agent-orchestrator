@@ -79,7 +79,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- dev role --------------------------------------------------------
 
-    def test_fresh_dev_spawn_stores_full_spec_with_args(self) -> None:
+    def test_fresh_spawn_stores_spec_with_args(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(67001, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
@@ -106,7 +106,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data["dev_agent"], self._CODEX_SPEC)
         self.assertEqual(data["dev_session_id"], "sess-67001")
 
-    def test_dev_resume_uses_stored_spec_after_env_flip(self) -> None:
+    def test_resume_uses_spec_after_env_flip(self) -> None:
         # Pinned state recorded codex+args. Even after a config flip to
         # plain claude, the resume MUST keep the recorded backend AND
         # the recorded args -- the new backend's CLI would reject codex
@@ -151,7 +151,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Args came from the stored spec, NOT the current config.
         self.assertEqual(dev_call.kwargs.get("extra_args"), self._CODEX_ARGS)
 
-    def test_legacy_bare_backend_pinned_value_still_works(self) -> None:
+    def test_legacy_bare_backend_still_works(self) -> None:
         # An issue pinned with the pre-#67 bare-backend value (`"codex"`)
         # must still resume on codex with no args -- that is what those
         # deployments had at the time the session was spawned.
@@ -190,7 +190,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # No proactive migration -- a resume does NOT rewrite `dev_agent`.
         self.assertEqual(gh.pinned_data(67003).get("dev_agent"), "codex")
 
-    def test_legacy_codex_session_id_resumes_with_codex_no_args(self) -> None:
+    def test_legacy_codex_session_resumes_no_args(self) -> None:
         # The pre-rollout schema only had `codex_session_id`. Resume MUST
         # use codex regardless of any current config flip, and MUST pass
         # no args (the spec at the time was bare codex).
@@ -225,7 +225,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(call.kwargs.get("resume_session_id"), "sess-legacy-67004")
         self.assertEqual(call.kwargs.get("extra_args"), ())
 
-    def test_poisoned_session_drop_preserves_full_spec(self) -> None:
+    def test_poisoned_drop_keeps_full_spec(self) -> None:
         # After hitting the silent-park threshold, the resume drops the
         # poisoned session id and starts a fresh spawn. The stored
         # full spec MUST be preserved so the fresh spawn uses the same
@@ -262,7 +262,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(state.get("dev_agent"), self._CODEX_SPEC)
         self.assertEqual(state.get("dev_session_id"), "fresh-67005")
 
-    def test_poisoned_legacy_session_pins_codex_before_clearing(self) -> None:
+    def test_poisoned_legacy_session_pins_codex(self) -> None:
         # Legacy schema (only `codex_session_id`): a poisoned-session drop
         # must pin `dev_agent="codex"` before clearing the legacy field,
         # so a subsequent env flip to claude cannot retroactively switch
@@ -337,7 +337,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data["review_agent"], self._CODEX_SPEC)
         self.assertEqual(data["last_review_session_id"], "rev-67010")
 
-    def test_reviewer_pr_comments_use_configured_backend(self) -> None:
+    def test_reviewer_comments_use_config_backend(self) -> None:
         # Issue #67: reviewer trace/comments must not hardcode `codex` --
         # when the operator configures claude as the reviewer, the PR
         # comments must say so. We test both approval and CHANGES_REQUESTED
@@ -372,7 +372,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("claude review approved", approval_comments[0])
         self.assertNotIn("codex review approved", approval_comments[0])
 
-    def test_changes_requested_pr_comment_uses_configured_backend(self) -> None:
+    def test_change_request_uses_config_backend(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(67012, label=LABEL_VALIDATING)
         gh.add_issue(issue)
@@ -407,7 +407,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("claude review (round", review_bodies[0])
         self.assertNotIn("codex review (round", review_bodies[0])
 
-    def test_review_prompt_describes_dev_backend_not_codex(self) -> None:
+    def test_review_prompt_names_dev_backend(self) -> None:
         # The reviewer prompt's intro line described the implementer as
         # "a separate codex session" before the fix, which is wrong when
         # claude is the dev backend. Build the prompt directly and
@@ -453,7 +453,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(data["decomposer_agent"], self._CODEX_SPEC)
         self.assertEqual(data["decomposer_session_id"], "dec-67020")
 
-    def test_decomposer_resume_uses_stored_spec_after_env_flip(self) -> None:
+    def test_decomposer_resume_uses_stored_spec(self) -> None:
         # Pinned with the full codex spec. After DECOMPOSE_AGENT flips to
         # claude, the awaiting-human resume must still resume on codex
         # with the codex args, not retarget the next call to claude.
@@ -498,7 +498,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             gh.pinned_data(67021).get("decomposer_agent"), self._CODEX_SPEC,
         )
 
-    def test_legacy_bare_decomposer_backend_still_works(self) -> None:
+    def test_legacy_bare_decomposer_still_works(self) -> None:
         # `decomposer_agent="codex"` (no args) is the legacy pinned form;
         # it must continue to round-trip cleanly to `("codex", "codex", ())`.
         spec, backend, args, sid = workflow._read_decomposer_session(
@@ -543,7 +543,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(args, ())
         self.assertEqual(sid, "legacy-sid")
 
-    def test_read_dev_session_unseeded_falls_back_to_config(self) -> None:
+    def test_unseeded_dev_session_uses_config(self) -> None:
         self._enter(self._patch_dev_config(
             self._CLAUDE_SPEC, "claude", self._CLAUDE_ARGS,
         ))
@@ -555,7 +555,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- no-session-id regression (reviewer-flagged) ----------------------
 
-    def test_dev_spec_pinned_when_spawn_returns_no_session_id(self) -> None:
+    def test_dev_spec_pinned_without_session_id(self) -> None:
         # A fresh dev spawn that produces commits but no session id (a
         # codex `-o` file the agent left empty, an unparseable claude
         # JSONL line, etc.) MUST still pin `dev_agent` to the full
@@ -588,7 +588,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         # session_id was empty, so the legacy field stays absent.
         self.assertNotIn("dev_session_id", data)
 
-    def test_dev_no_session_then_flip_resumes_recorded_spec(self) -> None:
+    def test_dev_env_flip_resumes_recorded_spec(self) -> None:
         # Reviewer-requested scenario: spawn returns no session id but
         # commits/parks land. Operator then flips `DEV_AGENT` between
         # ticks. The next resume MUST stick with the spec that was
@@ -653,7 +653,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             "stored codex args must survive across the config flip",
         )
 
-    def test_decomposer_spec_pinned_without_session_id(self) -> None:
+    def test_decomposer_spec_pinned_no_session(self) -> None:
         # Same reviewer concern, decomposer side: a fresh decomposer
         # that emits a manifest without surfacing a session id (or
         # parks awaiting human after a question) must still pin
@@ -683,7 +683,7 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(data.get("awaiting_human"))
         self.assertNotIn("decomposer_session_id", data)
 
-    def test_decomposer_no_session_then_flip_resumes_recorded_spec(self) -> None:
+    def test_decomposer_env_flip_resumes_spec(self) -> None:
         # Same config-flip scenario, decomposer side: the awaiting-
         # human resume must stick with the recorded spec.
         gh = FakeGitHubClient()

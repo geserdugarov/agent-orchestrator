@@ -22,7 +22,7 @@ from tests.workflow_helpers import (
 )
 
 
-class HandleResolvingConflictUsesAuthedFetchTest(
+class AuthedFetchRoutingTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
     """The conflict-resolution fetch must run inside the agent-writable
@@ -33,7 +33,7 @@ class HandleResolvingConflictUsesAuthedFetchTest(
     rewrite / credential helper / hooksPath cannot exfiltrate the token.
     """
 
-    def test_fetch_call_targets_authed_fetch_with_explicit_refspec(self) -> None:
+    def test_fetch_uses_explicit_refspec(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(450, label="resolving_conflict")
         gh.add_issue(issue)
@@ -106,7 +106,7 @@ class ResolvingConflictCleanRebaseTest(
     PR-state terminal short-circuits.
     """
 
-    def test_clean_rebase_pushes_and_flips_to_validating(self) -> None:
+    def test_pushes_and_routes_to_validating(self) -> None:
         # A clean base rebase that actually moved HEAD pushes the
         # rebased branch and hands straight back to `validating`. Docs
         # do not run here -- the single docs pass runs after reviewer
@@ -135,7 +135,7 @@ class ResolvingConflictCleanRebaseTest(
         self.assertEqual(state.get("conflict_round"), 1)
         self.assertIn("last_conflict_resolved_at", state)
 
-    def test_clean_rebase_up_to_date_skips_push_and_ticks_round(
+    def test_up_to_date_skips_push_and_bumps_round(
         self,
     ) -> None:
         # When the base hasn't moved (e.g. unmergeability is purely due to
@@ -241,7 +241,7 @@ class ResolvingConflictCleanRebaseTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-200",
         )
 
-    def test_manually_closed_open_pr_marks_rejected_without_cleanup(
+    def test_manual_close_rejects_without_cleanup(
         self,
     ) -> None:
         # Mirror the in_review counterpart: closing the issue while the

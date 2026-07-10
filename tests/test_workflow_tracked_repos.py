@@ -58,7 +58,7 @@ class BuildTrackedReposContextTest(unittest.TestCase):
         other = _spec("owner/ray", "/srv/ray")
         self.assertEqual(self._build(cur, [cur, other], expose=False), "")
 
-    def test_lists_other_repos_with_slug_root_and_base(self) -> None:
+    def test_lists_repo_slug_root_and_base(self) -> None:
         cur = _spec("owner/lance", "/srv/lance")
         ray = _spec("owner/ray", "/srv/repos/ray", base="main")
         arrow = _spec("owner/arrow", "/srv/repos/arrow", base="master")

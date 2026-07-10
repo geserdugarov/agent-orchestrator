@@ -132,7 +132,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
     def _parks(gh) -> list[dict]:
         return [event for event in gh.recorded_events if event[KEY_EVENT] == EVENT_PARK_AWAITING_HUMAN]
 
-    def test_agent_question_park_carries_reason_and_stage(self) -> None:
+    def test_question_park_has_reason_and_stage(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(6, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
@@ -184,7 +184,7 @@ class ParkAwaitingHumanEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixi
         self.assertEqual(parks[0][KEY_STAGE], LABEL_VALIDATING)
         self.assertEqual(parks[0][KEY_REASON], "reviewer_timeout")
 
-    def test_shared_helper_park_carries_reason_for_review_cap(self) -> None:
+    def test_review_cap_park_has_reason(self) -> None:
         # `_handle_validating`'s review-cap exhaustion calls
         # `_park_awaiting_human(reason="review_cap")` directly -- a pure
         # shared-helper park path (no transient `state.set("park_reason",
@@ -344,7 +344,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         self.assertEqual(self._events_of(gh, EVENT_PR_OPENED), [])
 
-    def test_in_review_mergeable_does_not_emit_merge_events(self) -> None:
+    def test_mergeable_review_emits_no_merge_event(self) -> None:
         # The orchestrator is manual-merge-only: a mergeable PR in_review
         # never produces a `merge_attempt` or orchestrator-initiated
         # `pr_merged` event. The HITL ping is observable instead.
@@ -361,7 +361,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # And no orchestrator-driven label flip to `done`.
         self.assertNotIn((50, LABEL_DONE), gh.label_history)
 
-    def test_pr_merged_event_on_external_merge_terminal(self) -> None:
+    def test_external_merge_emits_pr_merged(self) -> None:
         # A human (or another bot) merged the PR while we were in_review.
         # The terminal handler stamps `merged_at` and emits `pr_merged`
         # with `merge_method=external`.
@@ -399,7 +399,7 @@ class PrLifecycleEventEmissionTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(closed[0][KEY_STAGE], LABEL_IN_REVIEW)
         self.assertEqual(closed[0][KEY_PR_NUMBER], self.PR_NUMBER)
 
-    def test_in_review_unmergeable_does_not_emit_conflict_round(self) -> None:
+    def test_unmergeable_review_emits_no_round(self) -> None:
         # The orchestrator no longer routes from in_review to
         # `resolving_conflict` on an unmergeable gate. An unmergeable PR
         # parks awaiting human, so no `conflict_round` event is emitted

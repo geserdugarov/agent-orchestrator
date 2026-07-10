@@ -23,14 +23,14 @@ class HitlHandleConfigTest(unittest.TestCase):
 
             return config
 
-    def test_formats_comma_separated_handles_as_mentions(self) -> None:
+    def test_formats_comma_handles_as_mentions(self) -> None:
         config = self._load_config("alice,bob")
 
         self.assertEqual(config.HITL_HANDLES, ("alice", "bob"))
         self.assertEqual(config.HITL_HANDLE, "alice,bob")
         self.assertEqual(config.HITL_MENTIONS, "@alice @bob")
 
-    def test_strips_whitespace_at_signs_and_duplicates(self) -> None:
+    def test_strips_spaces_at_signs_and_duplicates(self) -> None:
         config = self._load_config(" @alice, bob, ,alice,@carol ")
 
         self.assertEqual(config.HITL_HANDLES, ("alice", "bob", "carol"))
@@ -138,7 +138,7 @@ class AgentBackendConfigTest(unittest.TestCase):
             self._load_config({"DECOMPOSE_AGENT": "gemini"})
         self.assertIn("DECOMPOSE_AGENT", str(cm.exception))
 
-    def test_decompose_agent_validated_even_when_decompose_off(self) -> None:
+    def test_decomposer_validated_when_feature_off(self) -> None:
         # Toggling DECOMPOSE back on later must not surface a fresh
         # "that env var was always invalid" failure.
         with self.assertRaises(SystemExit) as cm:
@@ -331,7 +331,7 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
                 )
                 return config
 
-    def test_strip_dotenv_quotes_keeps_inner_quote_pairs(self) -> None:
+    def test_keeps_inner_quote_pairs(self) -> None:
         from orchestrator.config import _strip_dotenv_quotes
 
         # Inner double-quote pair stays intact; the trailing `'` is the
@@ -340,7 +340,7 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
         raw = "codex -m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"'"
         self.assertEqual(_strip_dotenv_quotes(raw), raw)
 
-    def test_strip_dotenv_quotes_unwraps_matched_outer_pair(self) -> None:
+    def test_unwraps_matched_outer_pair(self) -> None:
         from orchestrator.config import _strip_dotenv_quotes
 
         # Operator-written `KEY="value with spaces"` -- a single matched
@@ -355,7 +355,7 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
             "single quoted",
         )
 
-    def test_strip_dotenv_quotes_leaves_mismatched_pair_alone(self) -> None:
+    def test_keeps_mismatched_outer_pair(self) -> None:
         from orchestrator.config import _strip_dotenv_quotes
 
         # A `"...'` mismatch is more likely a typo than a quoting
@@ -363,7 +363,7 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
         # downstream parser instead of silently corrupting the value.
         self.assertEqual(_strip_dotenv_quotes("\"mismatched'"), "\"mismatched'")
 
-    def test_quoted_codex_spec_round_trips_through_dotenv(self) -> None:
+    def test_quoted_codex_spec_round_trips(self) -> None:
         # The exact spec shape advertised in .env.example.advanced and
         # the issue body must parse cleanly when supplied through .env,
         # not just when injected directly into os.environ.
@@ -377,7 +377,7 @@ class DotenvQuoteStrippingTest(unittest.TestCase):
             ("-m", "gpt-5.5", "-c", 'model_reasoning_effort="xhigh"'),
         )
 
-    def test_outer_double_quoted_dotenv_value_still_unwraps(self) -> None:
+    def test_outer_double_quoted_value_unwraps(self) -> None:
         # Backward-compat for operators who wrap their values in outer
         # double quotes (a common dotenv convention).
         body = 'REVIEW_AGENT="claude --model claude-opus-4-7"\n'
@@ -555,7 +555,7 @@ class AllowedIssueAuthorsConfigTest(unittest.TestCase):
         config = self._load_config({"ALLOWED_ISSUE_AUTHORS": "alice,bob"})
         self.assertEqual(config.ALLOWED_ISSUE_AUTHORS, ("alice", "bob"))
 
-    def test_strips_whitespace_at_signs_and_duplicates(self) -> None:
+    def test_strips_spaces_at_signs_and_duplicates(self) -> None:
         config = self._load_config(
             {"ALLOWED_ISSUE_AUTHORS": " @alice, bob, ,alice,@carol "}
         )
@@ -608,7 +608,7 @@ class MultiRepoConfigTest(unittest.TestCase):
 
             return config
 
-    def test_legacy_single_repo_fallback_when_repos_unset(self) -> None:
+    def test_legacy_single_repo_fallback(self) -> None:
         config = self._load_config({
             "REPO": "owner/legacy",
             "TARGET_REPO_ROOT": "/tmp",
@@ -636,7 +636,7 @@ class MultiRepoConfigTest(unittest.TestCase):
         specs = config.default_repo_specs()
         self.assertEqual(specs[0].remote_name, "private")
 
-    def test_multi_entry_parsing_newline_and_semicolon(self) -> None:
+    def test_entries_accept_newline_and_semicolon(self) -> None:
         # Mix newlines, ';', blank lines, and a comment to verify the parser
         # accepts both separators and ignores noise.
         with tempfile.TemporaryDirectory() as td:
@@ -740,7 +740,7 @@ class MultiRepoConfigTest(unittest.TestCase):
             self._load_config({"REPOS": "no-slash|/tmp|main"})
         self.assertIn("owner/name", str(cm.exception))
 
-    def test_slug_with_empty_component_aborts_at_import(self) -> None:
+    def test_empty_slug_component_aborts_import(self) -> None:
         # `owner//repo` and `/repo` and `owner/` are all malformed even
         # though they contain `/`; require exactly two non-empty components.
         for bad_slug in ("owner//repo", "/repo", "owner/", "//"):
@@ -749,7 +749,7 @@ class MultiRepoConfigTest(unittest.TestCase):
                     self._load_config({"REPOS": f"{bad_slug}|/tmp|main"})
                 self.assertIn("owner/name", str(cm.exception))
 
-    def test_slug_with_extra_path_segment_aborts_at_import(self) -> None:
+    def test_extra_slug_segment_aborts_import(self) -> None:
         # `owner/repo/extra` looks plausible but PyGithub treats the slug
         # as the full repo identifier, so any extra `/` would resolve to
         # a wrong (or nonexistent) repo at runtime. Reject at import.
@@ -775,7 +775,7 @@ class MultiRepoConfigTest(unittest.TestCase):
             self._load_config({"REPOS": "# just a comment\n  \n"})
         self.assertIn("no valid entries", str(cm.exception))
 
-    def test_missing_target_root_warns_but_does_not_abort(self) -> None:
+    def test_missing_target_warns_but_loads(self) -> None:
         # Captures the stderr warning to confirm "warn loudly" semantics.
         import io
         from contextlib import redirect_stderr
@@ -824,7 +824,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
         self.assertEqual(config.MAX_PARALLEL_ISSUES_PER_REPO, 2)
         self.assertEqual(config.MAX_PARALLEL_ISSUES_GLOBAL, 10)
 
-    def test_legacy_single_repo_inherits_default_per_repo_limit(self) -> None:
+    def test_legacy_repo_gets_default_limit(self) -> None:
         # When REPOS is unset, the legacy single-repo RepoSpec must adopt
         # whatever MAX_PARALLEL_ISSUES_PER_REPO is set to (default 1).
         config = self._load_config()
@@ -899,7 +899,7 @@ class ParallelLimitsConfigTest(unittest.TestCase):
                 ],
             )
 
-    def test_non_numeric_per_repo_env_aborts_at_import(self) -> None:
+    def test_non_numeric_repo_limit_aborts_import(self) -> None:
         with self.assertRaises(SystemExit) as cm:
             self._load_config({"MAX_PARALLEL_ISSUES_PER_REPO": "lots"})
         msg = str(cm.exception)

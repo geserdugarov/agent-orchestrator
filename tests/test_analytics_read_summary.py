@@ -314,7 +314,7 @@ class KpiPrevTest(unittest.TestCase):
         sql, _ = conn.executed[0]
         self.assertIn("FALSE", sql)
 
-    def test_does_not_emit_breakdown_or_distinct_counts(self) -> None:
+    def test_skips_breakdown_and_distinct_counts(self) -> None:
         # The trimmed shape is the whole point: the SQL must NOT
         # carry the `GROUP BY` follow-ups or the
         # `COUNT(DISTINCT ...)`s that `get_summary` emits, otherwise
@@ -428,7 +428,7 @@ class TimeSeriesAggregatesTest(unittest.TestCase):
         self.assertIn("SUM(total_cache_read_tokens)", sql)
         self.assertIn("SUM(total_cache_write_tokens)", sql)
 
-    def test_legacy_six_tuple_rows_default_cache_to_zero(self) -> None:
+    def test_legacy_6tuple_defaults_cache_to_zero(self) -> None:
         # Older fixtures still emit 6-tuple `(day, event, count,
         # cost, in, out)` rows; the reader defaults the cache fields
         # to zero so unrelated tests round-trip.

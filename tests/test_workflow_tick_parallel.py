@@ -113,7 +113,7 @@ class TickInvokesBaseRefreshTest(unittest.TestCase):
         refresh.assert_called_once_with(gh, _TEST_SPEC, scheduler=None)
         process.assert_called_once()
 
-    def test_refresh_exception_does_not_block_issue_processing(self) -> None:
+    def test_refresh_error_does_not_block_issues(self) -> None:
         from unittest.mock import MagicMock
         gh = FakeGitHubClient()
         gh.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
@@ -443,7 +443,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
                 "ready issues must fan out to worker threads, not the caller",
             )
 
-    def test_label_read_failure_does_not_abort_other_issues(self) -> None:
+    def test_label_error_does_not_abort_others(self) -> None:
         # Per-issue exception isolation must extend to the partition's
         # label read. The reviewer's reproducer: if `gh.workflow_label`
         # raises on one issue while classifying for parallel fanout, the
@@ -480,7 +480,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # after the bad label read on #2.
         self.assertEqual(sorted(processed), [1, 2, 3])
 
-    def test_family_bucket_occupies_one_slot_under_tight_limit(self) -> None:
+    def test_family_bucket_uses_one_slot(self) -> None:
         # Reviewer's exact reproducer: with `parallel_limit=2`, two
         # family-aware issues, and one fanout issue, an earlier draft
         # that submitted per-family-issue futures plus a shared lock
@@ -590,7 +590,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         idx_99 = observed_order.index(99)
         self.assertLess(idx_99, idx_2, observed_order)
 
-    def test_slow_family_handler_does_not_block_fanout_workers(self) -> None:
+    def test_slow_family_does_not_block_fanout(self) -> None:
         # Reviewer's reproducer: a single long decomposing / unlabeled-
         # pickup agent run must NOT block the other workers in the same
         # tick. With the family lock holding the family bucket on one
@@ -661,7 +661,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # the caller thread).
         self.assertEqual(sorted(fanout_done), [10, 11, 12])
 
-    def test_decomposing_and_blocked_do_not_race_child_state(
+    def test_family_stages_do_not_race_child_state(
         self,
     ) -> None:
         # Regression for the reproducer the reviewer flagged: a parent
@@ -747,7 +747,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             workflow.tick(gh, self._spec(parallel_limit=4))
         process.assert_not_called()
 
-    def test_global_semaphore_clamps_concurrent_in_flight(self) -> None:
+    def test_global_semaphore_clamps_concurrency(self) -> None:
         # The `global_semaphore` parameter is the host-wide ceiling threaded
         # in by `main._run_tick`. It must clamp concurrent `_process_issue`
         # calls regardless of how high `spec.parallel_limit` was
@@ -801,7 +801,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # parallel, the semaphore cap of 2 must hold.
         self.assertEqual(max_in_flight, 2)
 
-    def test_global_semaphore_size_one_serializes_processing(self) -> None:
+    def test_global_limit_one_serializes_processing(self) -> None:
         # With a size-1 semaphore the `_process_issue` calls must run one
         # at a time regardless of `parallel_limit`. This is the workflow-
         # level guarantee that backs `MAX_PARALLEL_ISSUES_GLOBAL=1`: even
@@ -834,7 +834,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
 
         self.assertEqual(max_in_flight, 1)
 
-    def test_parallel_path_uses_per_worker_clients_and_refetches(
+    def test_workers_use_own_clients_and_refetch(
         self,
     ) -> None:
         # PyGithub's `Requester` is not documented thread-safe; sharing a
@@ -880,7 +880,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             workflow.tick(gh, self._spec(parallel_limit=1))
         clone.assert_not_called()
 
-    def test_limit_one_streams_and_processes_pre_failure_issues(self) -> None:
+    def test_limit_one_processes_issues_before_error(self) -> None:
         # Legacy invariant: with parallel_limit=1, the loop iterates the
         # generator directly so any issue yielded BEFORE an enumeration
         # failure (PyGithub pagination error, closed-issue sweep raise) is

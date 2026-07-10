@@ -75,7 +75,7 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
         self.assertEqual(gh.pulls[5].labels, [])
         self.assertEqual(gh.posted_pr_comments, [])
 
-    def test_idempotent_does_not_re_ping_already_labeled_prs(self) -> None:
+    def test_labeled_prs_are_not_pinged_again(self) -> None:
         gh = FakeGitHubClient()
         gh.add_pr(
             _pr(3, author="outsider", labels=(COMMUNITY_CONTRIBUTION_LABEL,))
@@ -119,7 +119,7 @@ class SweepCommunityContributionPRsTest(unittest.TestCase):
             sorted(number for number, _ in gh.posted_pr_comments), [1, 2]
         )
 
-    def test_comment_failure_leaves_pr_unlabeled_for_retry(self) -> None:
+    def test_comment_error_leaves_pr_for_retry(self) -> None:
         # Regression: the label is the dedup marker that suppresses
         # re-pinging on later ticks. If `pr_comment` raises, the label
         # must NOT be written -- otherwise the PR is silently skipped on

@@ -79,7 +79,7 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return issue
 
-    def test_resume_blocks_publish_relabel_and_watermark(
+    def test_resume_pause_blocks_publish_and_relabel(
         self,
     ) -> None:
         # The handler's `issue` snapshot carries no `paused`; the operator
@@ -118,7 +118,7 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertFalse(data.get("awaiting_human"))
         self.assertEqual(data.get("dev_session_id"), DEV_SESSION)
 
-    def test_paused_then_removed_republishes_via_resume(self) -> None:
+    def test_unpause_republishes_via_resume(self) -> None:
         # End-to-end: tick 1 is frozen by a live pause and leaves the feedback
         # unconsumed; tick 2, after the operator removes `paused`, re-discovers
         # the same feedback, resumes the dev, pushes the fix, and flips to

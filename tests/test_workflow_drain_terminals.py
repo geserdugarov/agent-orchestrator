@@ -212,7 +212,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(event["review_round"], 3)
         self.assertEqual(event["conflict_round"], 2)
 
-    def test_open_pr_closed_issue_rejects_without_cleanup(
+    def test_open_pr_closed_issue_rejects_no_cleanup(
         self,
     ) -> None:
         # Open PR + manually closed issue is a human stop signal: flip
@@ -262,7 +262,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
             [],
         )
 
-    def test_resolving_conflict_preserves_zero_conflict_round(
+    def test_conflict_route_keeps_zero_round(
         self,
     ) -> None:
         # Legacy / manually-relabelled `resolving_conflict` states may
@@ -339,7 +339,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("conflict_round", closed_event)
         self.assertEqual(closed_event["conflict_round"], 0)
 
-    def test_in_review_terminal_omits_missing_conflict_round(self) -> None:
+    def test_review_terminal_omits_missing_round(self) -> None:
         # The other two stages have always passed the raw
         # `state.get("conflict_round")` through, so a missing counter
         # naturally drops out via `build_event_record`. Pin that contract
@@ -411,7 +411,7 @@ class DrainReviewPrTerminalsTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(len(merged_events), 1)
         self.assertEqual(merged_events[0]["stage"], LABEL_FIXING)
 
-    def test_each_terminal_arc_posts_tracked_usage_verdict(self) -> None:
+    def test_each_terminal_posts_usage_verdict(self) -> None:
         # All three terminal arcs -- merged -> done, closed -> rejected, and
         # the open-PR + manually-closed-issue -> rejected path -- surface the
         # cumulative usage verdict as a tracked comment posted BEFORE the

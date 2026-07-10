@@ -27,7 +27,7 @@ from tests.workflow_helpers import (
 class HandleInReviewResumeOnHashChangeTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
-    def test_body_drift_pushed_bounces_directly_to_validating(
+    def test_pushed_drift_routes_to_validating(
         self,
     ) -> None:
         # The in_review handler must mirror the comment-driven dev resume:
@@ -83,7 +83,7 @@ class HandleInReviewResumeOnHashChangeTest(
         # review_round reset because this is a new diff.
         self.assertEqual(state.get("review_round"), 0)
 
-    def test_body_drift_ack_bounces_directly_to_validating(self) -> None:
+    def test_ack_drift_routes_to_validating(self) -> None:
         # A drift ACK reply (no commit, explicit `ACK:` marker) is an
         # acknowledgement that the existing work already satisfies the
         # edit. The issue bounces DIRECTLY back to `validating` (same
@@ -219,7 +219,7 @@ class HandleInReviewResumeOnHashChangeTest(
         self.assertEqual(state.get("user_content_hash"), "stale-hash")
         self.assertFalse(state.get("awaiting_human"))
 
-    def test_body_drift_no_commit_publishes_stranded_fix(self) -> None:
+    def test_no_commit_drift_publishes_stranded_fix(self) -> None:
         # A no-commit drift resume that finds a committed-but-unpublished
         # fix stranded on the branch (e.g. left by a PRIOR interrupted drift
         # resume that committed before being killed) must PUBLISH it through
@@ -269,7 +269,7 @@ class HandleInReviewResumeOnHashChangeTest(
         ))
 
 
-class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
+class FreshFeedbackBothSurfacesTest(
     unittest.TestCase, _PatchedWorkflowMixin,
 ):
     """Issue-thread and PR-conversation comments share the IssueComment id
@@ -282,7 +282,7 @@ class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
     fixing route preserves both comments for the (future real) fix
     handler."""
 
-    def test_concurrent_issue_and_pr_conv_both_bookmarked(self) -> None:
+    def test_issue_and_pr_feedback_both_bookmarked(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(
             1300, label="in_review", body="updated body",
@@ -332,7 +332,7 @@ class InReviewFreshFeedbackRouteCoversBothSurfacesTest(
         # comments.
         self.assertEqual(state.get("pr_last_comment_id"), 100)
 
-    def test_pr_conv_comment_above_issue_max_also_bookmarked(
+    def test_pr_comment_above_issue_max_bookmarked(
         self,
     ) -> None:
         # Symmetric guard: a PR-conversation comment whose id is HIGHER
@@ -385,7 +385,7 @@ class InReviewDriftPromptTrustFilterTest(
 
     _MALICIOUS_URL = "https://example.invalid/malicious-patch.zip"
 
-    def test_untrusted_pr_conv_absent_from_drift_prompt(self) -> None:
+    def test_untrusted_pr_comment_absent_from_prompt(self) -> None:
         gh = FakeGitHubClient()
         # Body edit relative to the stale hash -> the drift path fires.
         issue = make_issue(85, label="in_review", body="new acceptance")

@@ -77,7 +77,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.seed_state(ISSUE, **defaults)
         return gh, issue
 
-    def test_default_empty_verify_is_a_noop_on_approval(self) -> None:
+    def test_empty_default_is_noop_on_approval(self) -> None:
         # With no `VERIFY_COMMANDS` configured, the gate short-circuits
         # to ok inside the runner; the helper is still called once (so a
         # future config flip toggles the gate without code changes), but
@@ -101,7 +101,7 @@ class HandleValidatingVerifyGateTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertFalse(state.get("awaiting_human"))
         self.assertIsNone(state.get("park_reason"))
 
-    def test_config_parses_semicolon_and_newline_commands(self) -> None:
+    def test_config_parses_two_command_separators(self) -> None:
         # `_parse_verify_commands` accepts both `;` and `\n` separators so
         # the value fits on one line in a `.env` file. Blank lines and
         # `#`-commented lines are skipped.
@@ -371,7 +371,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         )
         self.assertEqual(run.status, VERIFY_OK)
 
-    def test_non_zero_exit_names_first_failing_command(self) -> None:
+    def test_nonzero_names_first_failed_command(self) -> None:
         run = workflow._run_verify_commands(
             self.tmp,
             ("true", "sh -c 'echo boom 1>&2; exit 3'", "true"),
@@ -382,7 +382,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         self.assertEqual(run.exit_code, 3)
         self.assertIn("boom", run.output)
 
-    def test_timeout_returns_timeout_with_partial_output(self) -> None:
+    def test_timeout_keeps_partial_output(self) -> None:
         # `sleep 5` against a 1s timeout fires `TimeoutExpired`.
         run = workflow._run_verify_commands(
             self.tmp, ("sleep 5",), timeout=1,
@@ -442,7 +442,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         self.assertIn("TAIL", run.output)
         self.assertLessEqual(len(run.output), 4096)
 
-    def test_truncation_boundary_secret_fully_redacted(self) -> None:
+    def test_boundary_secret_fully_redacted(self) -> None:
         # Regression: `_redact_secrets` does `str.replace(value, "***")`
         # on the full value, so a secret whose bytes straddle the
         # truncation cut would no longer match a post-truncation replace
@@ -486,7 +486,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         # actually saw and replaced the secret).
         self.assertIn("***", run.output)
 
-    def test_github_token_stripped_from_verify_environment(self) -> None:
+    def test_github_token_stripped_from_env(self) -> None:
         # Regression: verify commands run in the per-issue worktree
         # against code the implementer agent just produced. If the
         # runner inherited the orchestrator's process env, a prompt-
@@ -518,7 +518,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         # exposed to the verify command.)
         self.assertNotIn("ghp_ORCHESTRATOR_PAT_SHOULD_NOT_LEAK", run.output)
 
-    def test_strips_write_credential_locators_from_env(self) -> None:
+    def test_strips_write_locators_from_env(self) -> None:
         # Issue #213 review: SSH-agent socket, askpass binaries, and
         # `GIT_SSH_COMMAND` are write-credential pointers, not secret-
         # shaped values. Leaving them in the verify shell lets a
@@ -643,7 +643,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         self.assertNotIn("sk-ant-SHOULD_NOT_LEAK_TO_VERIFY", run.output)
         self.assertNotIn("sk-oai-SHOULD_NOT_LEAK_TO_VERIFY", run.output)
 
-    def test_command_that_commits_is_caught_as_head_changed(self) -> None:
+    def test_commit_command_reports_head_change(self) -> None:
         # Regression: a verify command that runs `git commit` leaves
         # `git status --porcelain` clean and exits 0, so the previous
         # dirty+exit-code-only gate accepted it as "ok". The squash-on-
@@ -672,7 +672,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         # And the worktree was clean on detection (not the dirty branch).
         self.assertEqual(run.dirty_files, ())
 
-    def test_dirty_attribution_keeps_command_and_output(self) -> None:
+    def test_dirty_result_keeps_command_output(self) -> None:
         # Regression: previously the dirty check ran once at the end of
         # the loop, so a dirty failure always blamed `commands[-1]` and
         # discarded every command's captured output. The fix checks
@@ -696,7 +696,7 @@ class RunVerifyCommandsTest(unittest.TestCase):
         # operator can triage what the command actually did.
         self.assertIn("BUILD_LOG_LINE", run.output)
 
-    def test_running_command_registered_for_shutdown_sweep(self) -> None:
+    def test_running_command_registered_for_shutdown(self) -> None:
         # The shutdown sweep (`agents.terminate_all_running`) only reaches
         # process groups registered in `agents._running_procs`. A verify
         # command must be registered for the lifetime of its run -- otherwise
@@ -737,13 +737,13 @@ class DrainVerifyOutputTest(unittest.TestCase):
     empty output. Popen is faked so the wedged path is deterministic.
     """
 
-    def test_first_drain_returns_output_without_extra_kill(self) -> None:
+    def test_first_drain_returns_without_extra_kill(self) -> None:
         proc = MagicMock()
         proc.communicate.return_value = ("out", "err")
         self.assertEqual(verify._drain_verify_output(proc), ("out", "err"))
         proc.kill.assert_not_called()
 
-    def test_wedged_first_drain_kills_then_returns_second_drain(self) -> None:
+    def test_wedged_drain_kills_then_returns_output(self) -> None:
         proc = MagicMock()
         proc.communicate.side_effect = [
             subprocess.TimeoutExpired(cmd="verify", timeout=5),
@@ -791,7 +791,7 @@ class WorktreeDirtyFilesHardeningTest(unittest.TestCase):
         self._git("add", ".", cwd=self.work)
         self._git("commit", "-q", "-m", "seed", cwd=self.work)
 
-    def test_planted_fsmonitor_not_executed_but_dirty_still_reported(self) -> None:
+    def test_blocks_planted_fsmonitor_reports_dirty(self) -> None:
         # Hook + marker live outside the worktree so they are not themselves
         # untracked files. The `/`+NUL response is fsmonitor v1 for "assume
         # everything changed" -- a scan hint only, so a clean tree reads clean.

@@ -53,7 +53,7 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # under the existing guard, which is fine.
         self.assertIsInstance(worktrees._TARGET_ROOT_LOCKS_LOCK, type(threading.Lock()))
 
-    def test_target_root_lock_serializes_concurrent_callers(self) -> None:
+    def test_root_lock_serializes_callers(self) -> None:
         # Drive `_ensure_worktree` against the SAME `spec.target_root`
         # from multiple threads with a `_git` patch that records every
         # subprocess invocation's concurrency. With the lock in place,
@@ -147,7 +147,7 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         # And we actually drove the workers (sanity check).
         self.assertGreaterEqual(len(order), 4)
 
-    def test_authed_fetch_is_serialized_per_target_root(self) -> None:
+    def test_fetch_serialized_per_root(self) -> None:
         # `_authed_fetch` updates `refs/remotes/<remote>/<branch>` in the
         # parent clone's git directory (worktrees share the parent's
         # `.git/refs` namespace). Two concurrent `_authed_fetch` calls
@@ -392,7 +392,7 @@ class EnsureWorktreeRealGitConcurrencyTest(unittest.TestCase):
         self._fetch_patch.start()
         self.addCleanup(self._fetch_patch.stop)
 
-    def test_concurrent_ensure_worktree_against_same_target_root(self) -> None:
+    def test_same_root_ensure_worktree_serialized(self) -> None:
         # Six concurrent workers, each requesting their own per-issue
         # worktree. With the lock in place all six must succeed; without
         # the lock at least one would intermittently surface

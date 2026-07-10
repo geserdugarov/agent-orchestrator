@@ -39,7 +39,7 @@ def _paused_view(number: int) -> object:
 
 
 class ImplementingLivePauseFreshSpawnTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_run_blocks_pr_and_relabel_from_fresh_issue(
+    def test_fresh_pause_blocks_pr_and_relabel(
         self,
     ) -> None:
         # The handler's `issue` snapshot carries no `paused`; the operator
@@ -82,7 +82,7 @@ class ImplementingLivePauseFreshSpawnTest(unittest.TestCase, _PatchedWorkflowMix
 
 
 class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_poisoned_retry_is_skipped_without_refetch(
+    def test_pause_skips_poisoned_retry_refetch(
         self,
     ) -> None:
         # Awaiting-human resume whose first result is a poisoned Claude session
@@ -145,7 +145,7 @@ class ImplementingLivePauseResumeTest(unittest.TestCase, _PatchedWorkflowMixin):
 
 
 class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def test_paused_then_removed_republishes_via_recovered_worktree(self) -> None:
+    def test_unpause_republishes_recovered_worktree(self) -> None:
         # End-to-end: tick 1 commits under a live pause and is held; tick 2,
         # after the operator removes `paused`, publishes the stranded commit
         # through the recovered-worktree path and relabels to `validating`.
@@ -191,7 +191,7 @@ class ImplementingLivePauseRecoveryTest(unittest.TestCase, _PatchedWorkflowMixin
 class ImplementingLivePauseRetryWindowTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
-    def test_pause_during_poisoned_retry_stops_before_persistence(self) -> None:
+    def test_retry_pause_stops_before_persistence(self) -> None:
         # The first resume trips a poisoned Claude session marker, so the helper
         # drops the session and retries once as a fresh spawn. An operator
         # applies `paused` DURING that retry -- the pre-retry fetch was still
