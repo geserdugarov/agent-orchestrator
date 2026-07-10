@@ -53,8 +53,8 @@ from typing import Optional, Sequence
 
 import plotly.graph_objects as go
 
-from . import dashboard_theme as theme
-from .analytics.read import (
+from orchestrator import dashboard_theme as theme
+from orchestrator.analytics.read import (
     BackendEfficiencyRow,
     HourlyHeatmapPoint,
     RepoBreakdownRow,

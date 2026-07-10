@@ -75,12 +75,12 @@ from __future__ import annotations
 
 from github.Issue import Issue
 
-from .. import config
-from ..agents import AgentResult
-from ..comment_trust import filter_trusted
-from ..config import RepoSpec
-from ..state_machine import WorkflowLabel
-from ..github import GitHubClient, PinnedState
+from orchestrator import config
+from orchestrator.agents import AgentResult
+from orchestrator.comment_trust import filter_trusted
+from orchestrator.config import RepoSpec
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import GitHubClient, PinnedState
 
 
 def _ratchet_in_review_watermark_for_final_docs(
@@ -115,7 +115,7 @@ def _ratchet_in_review_watermark_for_final_docs(
     will route to `fixing` and the rescan there is debounced and
     correct on its own.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     pr_number = state.get("pr_number")
     if pr_number is None:
@@ -184,7 +184,7 @@ def _finalize_documenting_terminal(
     Returns True when the issue was routed to a terminal state and the
     caller must return.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if _wf._finalize_if_pr_merged(gh, spec, issue, state):
         return True
@@ -205,7 +205,7 @@ def _park_documenting_without_pr(
     by `awaiting_human` mirrors `_handle_in_review`'s missing-pr-number
     guard.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if state.get("awaiting_human"):
         return
@@ -243,7 +243,7 @@ def _reset_documenting_drift_worktree(
     step failed and the issue was parked -- a stale local commit silently
     riding into the next approval is worse than parking.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     fetch_branch = _wf._authed_fetch(
         spec,
@@ -401,7 +401,7 @@ def _reconcile_documenting_drift(
     fast-path, a reconcile park, or the relabel to `validating`); False
     when there is no drift and the normal docs flow should continue.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     fresh_drift = new_hash is not None
@@ -484,7 +484,7 @@ def _documenting_parked_no_input(
     Returns True when the issue is parked with nothing to act on (the
     caller must return), False to proceed with the normal docs flow.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if not state.get("awaiting_human"):
         return False
@@ -520,7 +520,7 @@ def _prepare_documenting_worktree(
     or None when a fetch failure or diverged worktree parked the issue
     (the caller must return).
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     fetch_branch = _wf._authed_fetch(
         spec,
@@ -581,7 +581,7 @@ def _run_documenting_dev(
     awaiting-human resume finds no new comments and the tick should end
     without disposition.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if state.get("awaiting_human"):
         # Rerun the FULL documentation prompt on every awaiting-human
@@ -708,7 +708,7 @@ def _push_docs_and_advance(
     `docs_verdict=updated`), post `notice` on the PR, and route to
     `in_review`. Writes pinned state; the caller returns unconditionally.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if not _wf._push_branch(spec, wt, branch):
         _wf._park_awaiting_human(
@@ -747,7 +747,7 @@ def _route_documenting_no_change(
     no-change verdict against the evaluated head and advance. Writes
     pinned state; the caller returns unconditionally.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if ahead > 0:
         # A previous tick committed docs but parked before the push landed
@@ -808,7 +808,7 @@ def _dispose_documenting_outcome(
     Writes pinned state on every terminal branch; the caller returns
     unconditionally.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if result.timed_out:
         _wf._park_awaiting_human(
@@ -897,7 +897,7 @@ def _refuse_parked_continue_command(
     refresh loop owns the nudge), no new comment, no bare continue, a retryable
     park, or a command posted alongside genuine guidance.
     """
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     if not state.get("awaiting_human"):
         return False
@@ -917,7 +917,7 @@ def _refuse_parked_continue_command(
 
 
 def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
-    from .. import workflow as _wf
+    from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")

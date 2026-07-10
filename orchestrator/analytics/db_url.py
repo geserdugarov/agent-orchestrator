@@ -19,7 +19,7 @@ def _resolve_db_url(db_url: Optional[str]) -> Optional[str]:
     # that pops + reloads the package to land a patched env sees the
     # fresh value without having to also pop this module.
     if db_url is None:
-        from .. import analytics as _analytics
+        from orchestrator import analytics as _analytics
 
         return _analytics.ANALYTICS_DB_URL
     return db_url

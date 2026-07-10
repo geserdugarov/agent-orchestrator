@@ -57,8 +57,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from . import config
-from .config import RepoSpec
+from orchestrator import config
+from orchestrator.config import RepoSpec
 
 log = logging.getLogger(__name__)
 

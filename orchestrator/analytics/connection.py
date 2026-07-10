@@ -18,7 +18,7 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, Optional
 
-from .db_url import _resolve_db_url
+from orchestrator.analytics.db_url import _resolve_db_url
 
 log = logging.getLogger(__name__)
 

@@ -100,8 +100,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .. import config, usage
-from ..agents import AgentResult
+from orchestrator import config, usage
+from orchestrator.agents import AgentResult
 
 # Serializes filesystem ops on `ANALYTICS_LOG_PATH` so a concurrent
 # `prune_old_records` (read + rewrite via `os.replace`) cannot drop an
@@ -523,7 +523,7 @@ def record_agent_exit(
     codex_tools: Optional[list[str]] = None
     if backend == "codex":
         try:
-            from .. import skill_catalog
+            from orchestrator import skill_catalog
             if cwd is not None and (
                 TRACK_SKILL_TRIGGERS or TRAJECTORY_LOG_PATH is not None
             ):
@@ -851,7 +851,7 @@ def _maybe_record_trajectory(
     if TRAJECTORY_LOG_PATH is None:
         return
     try:
-        from ..workflow_messages import _redact_secrets
+        from orchestrator.workflow_messages import _redact_secrets
         trajectory = usage.parse_agent_trajectory(backend, result.stdout)
         if backend == "codex":
             changes: dict[str, Any] = {}

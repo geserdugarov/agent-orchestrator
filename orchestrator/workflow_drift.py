@@ -34,10 +34,10 @@ from typing import Optional
 
 from github.Issue import Issue
 
-from .comment_trust import is_trusted_author
-from .state_machine import WorkflowLabel
-from .github import PINNED_STATE_MARKER, GitHubClient, PinnedState
-from .workflow_messages import (
+from orchestrator.comment_trust import is_trusted_author
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import PINNED_STATE_MARKER, GitHubClient, PinnedState
+from orchestrator.workflow_messages import (
     _COMMIT_STYLE_NOTE,
     _FOREGROUND_ONLY_NOTE,
     _ORCH_COMMENT_MARKER,

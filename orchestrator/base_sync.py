@@ -49,28 +49,28 @@ from typing import Optional, Tuple
 
 from github.Issue import Issue
 
-from . import config
-from .comment_trust import filter_trusted
-from .config import RepoSpec
-from .branch_publication import _branch_ahead_behind
-from .git_plumbing import (
+from orchestrator import config
+from orchestrator.comment_trust import filter_trusted
+from orchestrator.config import RepoSpec
+from orchestrator.branch_publication import _branch_ahead_behind
+from orchestrator.git_plumbing import (
     _authed_fetch,
     _authed_target_fetch,
     _git,
     _git_hardened,
     _push_branch,
 )
-from .state_machine import WorkflowLabel
-from .github import (
+from orchestrator.state_machine import WorkflowLabel
+from orchestrator.github import (
     GitHubClient,
     PinnedState,
     hard_skip_control_label,
     issue_has_label,
 )
-from .scheduler import IssueScheduler
-from .verify import _head_sha, _worktree_dirty_files
-from .workflow_messages import _post_pr_comment
-from .worktree_lifecycle import _repo_worktrees_root, _resolve_branch_name
+from orchestrator.scheduler import IssueScheduler
+from orchestrator.verify import _head_sha, _worktree_dirty_files
+from orchestrator.workflow_messages import _post_pr_comment
+from orchestrator.worktree_lifecycle import _repo_worktrees_root, _resolve_branch_name
 
 log = logging.getLogger(__name__)
 
@@ -317,7 +317,7 @@ def _park_auto_rebase_failure(
     # Lazy import: `workflow` imports `base_sync` at module load time,
     # so a top-level `from . import workflow` would be a circular
     # import. Stage modules use the same late-bind pattern.
-    from . import workflow as _wf
+    from orchestrator import workflow as _wf
     assert reason in _AUTO_REBASE_PARK_REASONS, (
         f"_park_auto_rebase_failure called with reason={reason!r}, "
         f"which is not in _AUTO_REBASE_PARK_REASONS"

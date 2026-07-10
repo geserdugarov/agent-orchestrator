@@ -21,9 +21,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
-from . import agents, analytics, config, workflow
-from .github import GitHubClient
-from .scheduler import IssueScheduler
+from orchestrator import agents, analytics, config, workflow
+from orchestrator.github import GitHubClient
+from orchestrator.scheduler import IssueScheduler
 
 log = logging.getLogger("orchestrator")
 
