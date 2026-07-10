@@ -30,7 +30,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tests import bootstrap as bootstrap
+from tests import bootstrap  # noqa: F401 -- normalize settings before orchestrator imports
 from orchestrator import analytics
 
 
