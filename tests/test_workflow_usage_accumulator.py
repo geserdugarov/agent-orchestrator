@@ -19,6 +19,7 @@ from orchestrator.usage import UsageMetrics
 
 from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import (
+    REVIEW_APPROVED_MESSAGE,
     _FAKE_WT,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
@@ -288,7 +289,7 @@ class ReviewerRunUsageAccumulationTest(unittest.TestCase, _PatchedWorkflowMixin)
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
                     session_id="rev-sess",
-                    last_message="LGTM\n\nVERDICT: APPROVED",
+                    last_message=REVIEW_APPROVED_MESSAGE,
                 ),
             )
 

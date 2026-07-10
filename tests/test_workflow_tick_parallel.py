@@ -11,7 +11,20 @@ from unittest.mock import patch
 from orchestrator import config, workflow
 
 from tests.fakes import FakeGitHubClient, make_issue
-from tests.workflow_helpers import _TEST_SPEC
+from tests.workflow_helpers import (
+    KEY_AWAITING_HUMAN,
+    KEY_PARENT_NUMBER,
+    KEY_PARK_REASON,
+    LABEL_BLOCKED,
+    LABEL_DECOMPOSING,
+    LABEL_IMPLEMENTING,
+    LABEL_READY,
+    LABEL_UMBRELLA,
+    _TEST_SPEC,
+)
+
+PROCESS_ISSUE = "_process_issue"
+REFRESH_BASE = "_refresh_base_and_worktrees"
 
 
 _WORKER_ISSUE_NUMBERS = (1, 2, 3)
@@ -48,7 +61,7 @@ class _WorkerClientScenario:
     @staticmethod
     def _seed_issues(client: FakeGitHubClient) -> None:
         for number in _WORKER_ISSUE_NUMBERS:
-            client.add_issue(make_issue(number, label="implementing"))
+            client.add_issue(make_issue(number, label=LABEL_IMPLEMENTING))
 
     def clone_client(self) -> FakeGitHubClient:
         twin = _TrackingGitHubClient(self.get_issue_calls, self._calls_lock)
@@ -91,11 +104,11 @@ class TickInvokesBaseRefreshTest(unittest.TestCase):
     def test_refresh_called_once_before_issues(self) -> None:
         from unittest.mock import MagicMock
         gh = FakeGitHubClient()
-        gh.add_issue(make_issue(1, label="implementing"))
+        gh.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
         refresh = MagicMock()
         process = MagicMock()
-        with patch.object(workflow, "_refresh_base_and_worktrees", refresh), \
-             patch.object(workflow, "_process_issue", process):
+        with patch.object(workflow, REFRESH_BASE, refresh), \
+             patch.object(workflow, PROCESS_ISSUE, process):
             workflow.tick(gh, _TEST_SPEC)
         refresh.assert_called_once_with(gh, _TEST_SPEC, scheduler=None)
         process.assert_called_once()
@@ -103,11 +116,11 @@ class TickInvokesBaseRefreshTest(unittest.TestCase):
     def test_refresh_exception_does_not_block_issue_processing(self) -> None:
         from unittest.mock import MagicMock
         gh = FakeGitHubClient()
-        gh.add_issue(make_issue(1, label="implementing"))
+        gh.add_issue(make_issue(1, label=LABEL_IMPLEMENTING))
         refresh = MagicMock(side_effect=RuntimeError("fetch boom"))
         process = MagicMock()
-        with patch.object(workflow, "_refresh_base_and_worktrees", refresh), \
-             patch.object(workflow, "_process_issue", process):
+        with patch.object(workflow, REFRESH_BASE, refresh), \
+             patch.object(workflow, PROCESS_ISSUE, process):
             workflow.tick(gh, _TEST_SPEC)
         process.assert_called_once()
 
@@ -136,7 +149,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         import threading
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
         caller_thread = threading.get_ident()
         in_flight = 0
         max_in_flight = 0
@@ -155,8 +168,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             with lock:
                 in_flight -= 1
 
-        with patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+        with patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             workflow.tick(gh, self._spec(parallel_limit=1))
 
         self.assertEqual(max_in_flight, 1)
@@ -170,7 +183,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         import threading
         gh = FakeGitHubClient()
         for n in (1, 2, 3, 4):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
         in_flight = 0
         max_in_flight = 0
         # Each enter() ticks the counter and waits up to a bounded timeout
@@ -207,8 +220,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         releaser = threading.Thread(target=release_when_two_admitted)
         releaser.start()
         try:
-            with patch.object(workflow, "_refresh_base_and_worktrees"), \
-                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+            with patch.object(workflow, REFRESH_BASE), \
+                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
                 workflow.tick(gh, self._spec(parallel_limit=2))
         finally:
             release.set()
@@ -225,7 +238,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         import threading
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
         barrier = threading.Barrier(3)
         passed: list[int] = []
         lock = threading.Lock()
@@ -235,8 +248,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             with lock:
                 passed.append(issue.number)
 
-        with patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+        with patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             workflow.tick(gh, self._spec(parallel_limit=3))
 
         self.assertEqual(sorted(passed), [1, 2, 3])
@@ -248,7 +261,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         import threading
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
         processed: list[int] = []
         lock = threading.Lock()
 
@@ -258,8 +271,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             with lock:
                 processed.append(issue.number)
 
-        with patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+        with patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             workflow.tick(gh, self._spec(parallel_limit=3))
 
         self.assertEqual(sorted(processed), [1, 3])
@@ -274,7 +287,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
 
         gh = FakeGitHubClient()
         for n in (1, 2):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
         refresh_seen_by_worker: list[int] = []
         refresh = MagicMock()
         lock = threading.Lock()
@@ -283,8 +296,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             with lock:
                 refresh_seen_by_worker.append(refresh.call_count)
 
-        with patch.object(workflow, "_refresh_base_and_worktrees", refresh), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+        with patch.object(workflow, REFRESH_BASE, refresh), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             workflow.tick(gh, self._spec(parallel_limit=2))
 
         refresh.assert_called_once_with(
@@ -314,15 +327,15 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # contract down.
         import threading
         gh = FakeGitHubClient()
-        gh.add_issue(make_issue(1, label="decomposing"))
-        gh.add_issue(make_issue(2, label="blocked"))
-        gh.add_issue(make_issue(4, label="umbrella"))
+        gh.add_issue(make_issue(1, label=LABEL_DECOMPOSING))
+        gh.add_issue(make_issue(2, label=LABEL_BLOCKED))
+        gh.add_issue(make_issue(4, label=LABEL_UMBRELLA))
         # An unlabeled issue routes through `_handle_pickup` -> decomposer
         # and is therefore family-aware too.
         gh.add_issue(make_issue(5, label=None))
         # A non-family-aware label that MUST fan out to a worker thread
         # AND must be allowed to overlap with the family-aware bucket.
-        gh.add_issue(make_issue(99, label="implementing"))
+        gh.add_issue(make_issue(99, label=LABEL_IMPLEMENTING))
 
         family_in_flight = 0
         family_max_in_flight = 0
@@ -372,8 +385,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # preventing family-aware handlers from overlapping with each
         # other, and the fanout worker is free to run alongside whichever
         # family handler currently holds the lock.
-        with patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+        with patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             workflow.tick(gh, self._spec(parallel_limit=5))
 
         # Four family-aware issues observed; the family lock kept them
@@ -403,7 +416,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         import threading
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label="ready"))
+            gh.add_issue(make_issue(n, label=LABEL_READY))
 
         caller_thread = threading.get_ident()
         barrier = threading.Barrier(3, timeout=5.0)
@@ -418,8 +431,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             with lock:
                 passed.append((issue.number, threading.get_ident()))
 
-        with patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+        with patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             workflow.tick(gh, self._spec(parallel_limit=3))
 
         self.assertEqual(sorted(n for n, _ in passed), [1, 2, 3])
@@ -441,7 +454,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # per-issue try/except picks up any sustained failure.
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
 
         original_workflow_label = FakeGitHubClient.workflow_label
         # Raise for issue #2 only; #1 and #3 return their real labels.
@@ -459,8 +472,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             processed.append(issue.number)
 
         with patch.object(FakeGitHubClient, "workflow_label", flaky_workflow_label), \
-             patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+             patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             workflow.tick(gh, self._spec(parallel_limit=3))
 
         # All three issues were attempted -- the partition did not abort
@@ -488,11 +501,11 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # Two family-aware issues. The first is slow; the second
         # must wait for the first because the family bucket runs them
         # sequentially in one drain task.
-        gh.add_issue(make_issue(1, label="decomposing"))
-        gh.add_issue(make_issue(2, label="blocked"))
+        gh.add_issue(make_issue(1, label=LABEL_DECOMPOSING))
+        gh.add_issue(make_issue(2, label=LABEL_BLOCKED))
         # One fanout issue that MUST advance while the slow family
         # handler is still inside `_process_issue`.
-        gh.add_issue(make_issue(99, label="implementing"))
+        gh.add_issue(make_issue(99, label=LABEL_IMPLEMENTING))
 
         slow_family_holding = threading.Event()
         slow_family_release = threading.Event()
@@ -555,8 +568,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             # The second family issue stays inside the drain task (not
             # a separate executor slot), so the fanout's slot is free
             # while issue #1 is held.
-            with patch.object(workflow, "_refresh_base_and_worktrees"), \
-                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+            with patch.object(workflow, REFRESH_BASE), \
+                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
                 workflow.tick(gh, self._spec(parallel_limit=2))
         finally:
             slow_family_release.set()
@@ -589,11 +602,11 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # One slow family-aware issue. The handler holds inside
         # `_process_issue` until released by the test; without the
         # overlap fix this would freeze every other worker.
-        gh.add_issue(make_issue(1, label="decomposing"))
+        gh.add_issue(make_issue(1, label=LABEL_DECOMPOSING))
         # Several fanout issues that MUST advance while the family
         # handler is still running.
         for n in (10, 11, 12):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
 
         family_holding = threading.Event()
         family_release = threading.Event()
@@ -634,8 +647,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         releaser_thread = threading.Thread(target=releaser)
         releaser_thread.start()
         try:
-            with patch.object(workflow, "_refresh_base_and_worktrees"), \
-                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+            with patch.object(workflow, REFRESH_BASE), \
+                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
                 workflow.tick(gh, self._spec(parallel_limit=4))
         finally:
             family_release.set()
@@ -667,8 +680,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # child's state. Child #20 is labeled `blocked` with empty pinned
         # state, so its `_handle_blocked` would normally park
         # `blocked_no_children` and clobber the parent's seed.
-        gh.add_issue(make_issue(10, label="decomposing"))
-        gh.add_issue(make_issue(20, label="blocked"))
+        gh.add_issue(make_issue(10, label=LABEL_DECOMPOSING))
+        gh.add_issue(make_issue(20, label=LABEL_BLOCKED))
         gh.seed_state(
             10,
             expected_children_count=1,
@@ -691,27 +704,27 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
                 for child_number in state.get("children") or []:
                     child = client.get_issue(int(child_number))
                     child_state = client.read_pinned_state(child)
-                    if not child_state.get("parent_number"):
-                        child_state.set("parent_number", issue.number)
-                        child_state.set("awaiting_human", False)
-                        child_state.set("park_reason", None)
+                    if not child_state.get(KEY_PARENT_NUMBER):
+                        child_state.set(KEY_PARENT_NUMBER, issue.number)
+                        child_state.set(KEY_AWAITING_HUMAN, False)
+                        child_state.set(KEY_PARK_REASON, None)
                         client.write_pinned_state(child, child_state)
-                client.set_workflow_label(issue, "blocked")
+                client.set_workflow_label(issue, LABEL_BLOCKED)
                 client.write_pinned_state(issue, state)
                 return
             if issue.number == 20:
                 child_state = client.read_pinned_state(issue)
-                if child_state.get("parent_number"):
+                if child_state.get(KEY_PARENT_NUMBER):
                     return
-                if child_state.get("awaiting_human"):
+                if child_state.get(KEY_AWAITING_HUMAN):
                     return
-                child_state.set("awaiting_human", True)
-                child_state.set("park_reason", "blocked_no_children")
+                child_state.set(KEY_AWAITING_HUMAN, True)
+                child_state.set(KEY_PARK_REASON, "blocked_no_children")
                 client.write_pinned_state(issue, child_state)
                 return
 
-        with patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+        with patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             workflow.tick(gh, self._spec(parallel_limit=4))
 
         # Child's final state retains the parent's seed and is not parked.
@@ -720,17 +733,17 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # the parent's repair either runs first (child sees parent_number
         # set and returns early) or last (parent's write is final).
         child_state = gh.pinned_data(20)
-        self.assertEqual(child_state.get("parent_number"), 10)
-        self.assertFalse(child_state.get("awaiting_human"))
-        self.assertIsNone(child_state.get("park_reason"))
+        self.assertEqual(child_state.get(KEY_PARENT_NUMBER), 10)
+        self.assertFalse(child_state.get(KEY_AWAITING_HUMAN))
+        self.assertIsNone(child_state.get(KEY_PARK_REASON))
 
     def test_no_eligible_issues_is_a_noop(self) -> None:
         # An empty pollable list must not spin up worker threads or raise.
         gh = FakeGitHubClient()
         from unittest.mock import MagicMock
         process = MagicMock()
-        with patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", process):
+        with patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, process):
             workflow.tick(gh, self._spec(parallel_limit=4))
         process.assert_not_called()
 
@@ -744,7 +757,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         import threading
         gh = FakeGitHubClient()
         for n in (1, 2, 3, 4):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
         in_flight = 0
         max_in_flight = 0
         lock = threading.Lock()
@@ -773,8 +786,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         releaser = threading.Thread(target=release_when_two_admitted)
         releaser.start()
         try:
-            with patch.object(workflow, "_refresh_base_and_worktrees"), \
-                 patch.object(workflow, "_process_issue", side_effect=fake_process):
+            with patch.object(workflow, REFRESH_BASE), \
+                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
                 workflow.tick(
                     gh,
                     self._spec(parallel_limit=4),
@@ -797,7 +810,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         import threading
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
         in_flight = 0
         max_in_flight = 0
         lock = threading.Lock()
@@ -811,8 +824,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             with lock:
                 in_flight -= 1
 
-        with patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+        with patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             workflow.tick(
                 gh,
                 self._spec(parallel_limit=5),
@@ -838,10 +851,10 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             "_for_worker_thread",
             side_effect=scenario.clone_client,
         ), \
-             patch.object(workflow, "_refresh_base_and_worktrees"), \
+             patch.object(workflow, REFRESH_BASE), \
              patch.object(
                  workflow,
-                 "_process_issue",
+                 PROCESS_ISSUE,
                  side_effect=scenario.process_issue,
              ):
             workflow.tick(scenario.parent, self._spec(parallel_limit=3))
@@ -857,13 +870,13 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         from unittest.mock import MagicMock
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
         clone = MagicMock(side_effect=lambda: self.fail(
             "_for_worker_thread must not be called on the sequential path"
         ))
         with patch.object(gh, "_for_worker_thread", clone), \
-             patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue"):
+             patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE):
             workflow.tick(gh, self._spec(parallel_limit=1))
         clone.assert_not_called()
 
@@ -876,7 +889,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # mid-iteration to pin the streaming contract down.
         gh = FakeGitHubClient()
         for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label="implementing"))
+            gh.add_issue(make_issue(n, label=LABEL_IMPLEMENTING))
 
         def flaky_list_pollable_issues():
             yield gh.get_issue(1)
@@ -889,8 +902,8 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
             processed.append(issue.number)
 
         with patch.object(gh, "list_pollable_issues", flaky_list_pollable_issues), \
-             patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
+             patch.object(workflow, REFRESH_BASE), \
+             patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
             # The enumeration failure is not caught inside `tick` (it lives
             # at the per-repo boundary in `main._run_tick`), but the issues
             # yielded BEFORE the raise must still have been processed.

@@ -21,7 +21,13 @@ from unittest.mock import patch
 from orchestrator import config, workflow
 
 from tests.fakes import FakeComment, FakeGitHubClient, FakeUser, make_issue
-from tests.workflow_helpers import _FAKE_WT, _PatchedWorkflowMixin, _TEST_SPEC, _agent
+from tests.workflow_helpers import (
+    REVIEW_APPROVED_MESSAGE,
+    _FAKE_WT,
+    _PatchedWorkflowMixin,
+    _TEST_SPEC,
+    _agent,
+)
 
 # Distinctive lead-in of `_build_tracked_repos_context`; its presence (and
 # count) in a spawned prompt is the signal that the block was threaded.
@@ -313,7 +319,7 @@ class ReviewerSpawnTrackedReposTest(
         # captured prompt is unambiguously the review prompt.
         mocks = self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         return _prompt_of(mocks["run_agent"])
 

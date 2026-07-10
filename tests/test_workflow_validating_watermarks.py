@@ -19,6 +19,7 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    REVIEW_APPROVED_MESSAGE,
     _FAKE_WT,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
@@ -85,7 +86,7 @@ class ValidatingHandoffPreservesHumanFeedbackTest(
         # the first human comment instead of swallowing it.
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         # Validating's approval flips through `documenting` first (the
         # final-docs hop); the watermark must already be seeded past the
@@ -177,7 +178,7 @@ class PrePickupChatterHandoffTest(unittest.TestCase, _PatchedWorkflowMixin):
         # pre-pickup human comment is treated as consumed.
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=("cafe1234",),
         )
         watermark = gh.pinned_data(20).get("pr_last_comment_id")
@@ -290,7 +291,7 @@ class ValidatingHandoffSeedsAllWatermarksTest(
         # accidentally advance past the human review.
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         state = gh.pinned_data(200)
         self.assertIn("pr_last_review_summary_id", state)
@@ -333,7 +334,7 @@ class ValidatingHandoffSeedsAllWatermarksTest(
 
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         state = gh.pinned_data(200)
         self.assertIn("pr_last_review_comment_id", state)
@@ -405,7 +406,7 @@ class HandoffInlineIdCollisionTest(unittest.TestCase, _PatchedWorkflowMixin):
         # pr_last_review_comment_id past 4242.
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         state = gh.pinned_data(300)
         self.assertLess(
@@ -499,7 +500,7 @@ class HandoffWithoutPickupIdLegacyStateTest(
         # watermark past 950.
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
         watermark = gh.pinned_data(500).get("pr_last_comment_id")
         self.assertIsNotNone(watermark)
@@ -614,7 +615,7 @@ class HandoffWalkerHonorsOrchestratorMarkerTest(
 
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
         )
 
         # Watermark must advance past the marker-only id 902 -- ideally
@@ -691,7 +692,7 @@ class HandoffSkipsConsumedRepliesTest(unittest.TestCase, _PatchedWorkflowMixin):
         # comment 920 (already consumed) instead of stopping at it.
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=("cafe1234",),
         )
         watermark = gh.pinned_data(900).get("pr_last_comment_id")
@@ -827,7 +828,7 @@ class HandoffConsumedThroughIssueThreadOnlyTest(
         # through `documenting` first (the final-docs hop).
         self._run(
             lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+            run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
             head_shas=("cafe1234",),
         )
         self.assertIn((800, "documenting"), gh.label_history)

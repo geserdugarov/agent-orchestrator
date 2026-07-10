@@ -18,6 +18,7 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    EVENT_PR_CLOSED_WITHOUT_MERGE,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
@@ -153,7 +154,7 @@ class HandleImplementingClosedIssueTest(
         # `pr_closed_without_merge` event emitted only when the PR
         # itself is closed (mirrors in_review / fixing semantics).
         kinds = [event["event"] for event in gh.recorded_events]
-        self.assertIn("pr_closed_without_merge", kinds)
+        self.assertIn(EVENT_PR_CLOSED_WITHOUT_MERGE, kinds)
 
     def test_closed_implementing_defers_when_pr_fetch_fails(self) -> None:
         # Both `_finalize_if_pr_merged` and `_finalize_if_issue_closed`

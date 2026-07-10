@@ -16,6 +16,7 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    REVIEW_APPROVED_MESSAGE,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
@@ -155,7 +156,7 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
             self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 squash_result=(True, self.SQUASHED_SHA, 2, None),
             )
@@ -186,7 +187,7 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         with patch.object(config, "VERIFY_COMMANDS", ("pytest -q",)):
             self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 verify_result=VerifyResult(
                     status="failed", command="pytest -q",
@@ -210,7 +211,7 @@ class ValidatingApprovalRoutesThroughDocumentingTest(
         with patch.object(config, "SQUASH_ON_APPROVAL", True):
             self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
-                run_agent=_agent(last_message="LGTM\n\nVERDICT: APPROVED"),
+                run_agent=_agent(last_message=REVIEW_APPROVED_MESSAGE),
                 head_shas=(self.REVIEWED_SHA,),
                 squash_result=(False, None, 0, "force-with-lease rejected"),
             )

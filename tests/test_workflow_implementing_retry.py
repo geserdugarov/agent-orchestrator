@@ -18,12 +18,40 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    BACKEND_CLAUDE,
+    BACKEND_CODEX,
+    LABEL_DOCUMENTING,
+    LABEL_IMPLEMENTING,
+    LABEL_RESOLVING_CONFLICT,
+    LABEL_VALIDATING,
+    REVIEW_APPROVED_MESSAGE,
     _FAKE_WT,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
     _iso_hours_ago,
 )
+
+KEY_CODEX_SESSION_ID = "codex_session_id"
+KEY_DEV_AGENT = "dev_agent"
+KEY_DEV_RESUME_COUNT = "dev_resume_count"
+KEY_DEV_SESSION_ID = "dev_session_id"
+KEY_RETRY_COUNT = "retry_count"
+KEY_SILENT_PARK_COUNT = "silent_park_count"
+
+ENSURE_WORKTREE = "_ensure_worktree"
+RUN_AGENT = "run_agent"
+RESUME_SESSION_ID = "resume_session_id"
+
+POISONED_SESSION = "poisoned-sess"
+FRESH_SESSION = "fresh-sess"
+LIVE_SESSION = "live-sess"
+LEGACY_SESSION = "sess-legacy"
+
+IMPLEMENT_PROMPT_FRAGMENT = "implement the thing"
+FIX_PROMPT_FRAGMENT = "fix it"
+RESUME_PROMPT_FRAGMENT = "resuming work on GitHub issue"
+PROMPT_TOO_LONG_MESSAGE = "Prompt is too long"
 
 
 class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -35,7 +63,7 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def _seeded(self, **state):
         gh = FakeGitHubClient()
-        issue = make_issue(8, label="implementing")
+        issue = make_issue(8, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         if state:
             gh.seed_state(8, **state)
@@ -65,7 +93,7 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
                 pinned_data = gh._pinned[8].data
                 pinned_data["awaiting_human"] = False
 
-            self.assertEqual(gh.pinned_data(8).get("retry_count"), 3)
+            self.assertEqual(gh.pinned_data(8).get(KEY_RETRY_COUNT), 3)
             self.assertIsNotNone(gh.pinned_data(8).get("retry_window_start"))
 
             # Fourth tick: must park before codex spawns.
@@ -75,7 +103,7 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
                 has_new_commits=False,
             )
 
-        mocks["run_agent"].assert_not_called()
+        mocks[RUN_AGENT].assert_not_called()
         self.assertTrue(gh.pinned_data(8).get("awaiting_human"))
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("hit retry cap (3/day)", last_comment)
@@ -98,7 +126,7 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         pinned_data = gh.pinned_data(8)
-        self.assertEqual(pinned_data.get("retry_count"), 0)
+        self.assertEqual(pinned_data.get(KEY_RETRY_COUNT), 0)
         # window_start cleared back to falsy.
         self.assertFalse(pinned_data.get("retry_window_start"))
         self.assertEqual(len(gh.opened_prs), 1)
@@ -117,17 +145,17 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
             has_new_commits=False,
         )
 
-        mocks["run_agent"].assert_called_once()
+        mocks[RUN_AGENT].assert_called_once()
         pinned_data = gh.pinned_data(8)
         # Reset to 0 by the window-expired branch, then incremented to 1.
-        self.assertEqual(pinned_data.get("retry_count"), 1)
+        self.assertEqual(pinned_data.get(KEY_RETRY_COUNT), 1)
         # Park message must NOT be the cap message.
         last_comment = gh.posted_comments[-1][1]
         self.assertNotIn("hit retry cap", last_comment)
 
     def test_awaiting_human_resume_does_not_increment_counter(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(9, label="implementing")
+        issue = make_issue(9, label=LABEL_IMPLEMENTING)
         issue.comments.append(
             FakeComment(id=1100, body="please use sqlite", user=FakeUser("alice"))
         )
@@ -150,11 +178,11 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         # Resume happened (codex was called once with the followup comment).
-        mocks["run_agent"].assert_called_once()
+        mocks[RUN_AGENT].assert_called_once()
         # retry_count NOT incremented by the resume itself. The successful
         # _on_commits then clears it to 0.
         pinned_data = gh.pinned_data(9)
-        self.assertEqual(pinned_data.get("retry_count"), 0)
+        self.assertEqual(pinned_data.get(KEY_RETRY_COUNT), 0)
 
 
 class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -165,10 +193,10 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def test_fresh_spawn_uses_dev_agent_config(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(20, label="implementing")
+        issue = make_issue(20, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
 
-        with patch.object(config, "DEV_AGENT", "claude"):
+        with patch.object(config, "DEV_AGENT", BACKEND_CLAUDE):
             mocks = self._run(
                 lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
                 run_agent=_agent(session_id="sess-fresh", last_message="done"),
@@ -177,50 +205,50 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
                 push_branch=True,
             )
 
-        self.assertEqual(mocks["run_agent"].call_args.args[0], "claude")
+        self.assertEqual(mocks[RUN_AGENT].call_args.args[0], BACKEND_CLAUDE)
         pinned_data = gh.pinned_data(20)
-        self.assertEqual(pinned_data["dev_agent"], "claude")
-        self.assertEqual(pinned_data["dev_session_id"], "sess-fresh")
-        self.assertNotIn("codex_session_id", pinned_data)
+        self.assertEqual(pinned_data[KEY_DEV_AGENT], BACKEND_CLAUDE)
+        self.assertEqual(pinned_data[KEY_DEV_SESSION_ID], "sess-fresh")
+        self.assertNotIn(KEY_CODEX_SESSION_ID, pinned_data)
 
     def test_reviewer_spawn_uses_review_agent_config(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(21, label="validating")
+        issue = make_issue(21, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(
             21,
             pr_number=21,
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-21",
-            dev_agent="claude",
+            dev_agent=BACKEND_CLAUDE,
             dev_session_id="dev-sess",
             review_round=0,
         )
 
-        with patch.object(config, "REVIEW_AGENT", "codex"):
+        with patch.object(config, "REVIEW_AGENT", BACKEND_CODEX):
             mocks = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
                 run_agent=_agent(
                     session_id="rev-sess",
-                    last_message="LGTM\n\nVERDICT: APPROVED",
+                    last_message=REVIEW_APPROVED_MESSAGE,
                 ),
             )
 
-        self.assertEqual(mocks["run_agent"].call_args.args[0], "codex")
+        self.assertEqual(mocks[RUN_AGENT].call_args.args[0], BACKEND_CODEX)
         pinned_data = gh.pinned_data(21)
-        self.assertEqual(pinned_data["review_agent"], "codex")
+        self.assertEqual(pinned_data["review_agent"], BACKEND_CODEX)
         self.assertEqual(pinned_data["last_review_session_id"], "rev-sess")
 
     def test_dev_fix_uses_recorded_backend_not_config(self) -> None:
         # Issue locked to codex via pinned state; even if config flips to
         # claude, the validating dev-fix call must stay on codex.
         gh = FakeGitHubClient()
-        issue = make_issue(22, label="validating")
+        issue = make_issue(22, label=LABEL_VALIDATING)
         gh.add_issue(issue)
         gh.seed_state(
             22,
             pr_number=22,
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-22",
-            dev_agent="codex",
+            dev_agent=BACKEND_CODEX,
             dev_session_id="dev-sess",
             review_round=0,
         )
@@ -230,8 +258,8 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         dev_fix = _agent(session_id="dev-sess", last_message="fixed")
 
-        with patch.object(config, "DEV_AGENT", "claude"), \
-             patch.object(config, "REVIEW_AGENT", "claude"):
+        with patch.object(config, "DEV_AGENT", BACKEND_CLAUDE), \
+             patch.object(config, "REVIEW_AGENT", BACKEND_CLAUDE):
             mocks = self._run(
                 lambda: workflow._handle_validating(gh, _TEST_SPEC, issue),
                 run_agent=[review, dev_fix],
@@ -241,11 +269,11 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         # Reviewer takes config; dev-fix takes pinned state.
-        self.assertEqual(mocks["run_agent"].call_count, 2)
-        self.assertEqual(mocks["run_agent"].call_args_list[0].args[0], "claude")
-        self.assertEqual(mocks["run_agent"].call_args_list[1].args[0], "codex")
+        self.assertEqual(mocks[RUN_AGENT].call_count, 2)
+        self.assertEqual(mocks[RUN_AGENT].call_args_list[0].args[0], BACKEND_CLAUDE)
+        self.assertEqual(mocks[RUN_AGENT].call_args_list[1].args[0], BACKEND_CODEX)
         self.assertEqual(
-            mocks["run_agent"].call_args_list[1].kwargs.get("resume_session_id"),
+            mocks[RUN_AGENT].call_args_list[1].kwargs.get(RESUME_SESSION_ID),
             "dev-sess",
         )
 
@@ -253,7 +281,7 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Pinned state predates the rollout: only `codex_session_id`. Resume
         # on human reply must stick with codex even when DEV_AGENT=claude.
         gh = FakeGitHubClient()
-        issue = make_issue(23, label="implementing")
+        issue = make_issue(23, label=LABEL_IMPLEMENTING)
         issue.comments.append(
             FakeComment(id=1100, body="use sqlite", user=FakeUser("alice"))
         )
@@ -262,30 +290,30 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
             23,
             awaiting_human=True,
             last_action_comment_id=900,
-            codex_session_id="sess-legacy",
+            codex_session_id=LEGACY_SESSION,
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-23",
         )
 
-        with patch.object(config, "DEV_AGENT", "claude"):
+        with patch.object(config, "DEV_AGENT", BACKEND_CLAUDE):
             mocks = self._run(
                 lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
-                run_agent=_agent(session_id="sess-legacy", last_message="ok"),
+                run_agent=_agent(session_id=LEGACY_SESSION, last_message="ok"),
                 has_new_commits=[True],
                 dirty_files=(),
                 push_branch=True,
             )
 
-        self.assertEqual(mocks["run_agent"].call_args.args[0], "codex")
+        self.assertEqual(mocks[RUN_AGENT].call_args.args[0], BACKEND_CODEX)
         self.assertEqual(
-            mocks["run_agent"].call_args.kwargs.get("resume_session_id"),
-            "sess-legacy",
+            mocks[RUN_AGENT].call_args.kwargs.get(RESUME_SESSION_ID),
+            LEGACY_SESSION,
         )
         # No proactive migration: legacy key stays put, no new keys written
         # by a resume (only fresh spawns write `dev_agent`/`dev_session_id`).
         pinned_data = gh.pinned_data(23)
-        self.assertEqual(pinned_data.get("codex_session_id"), "sess-legacy")
-        self.assertNotIn("dev_agent", pinned_data)
-        self.assertNotIn("dev_session_id", pinned_data)
+        self.assertEqual(pinned_data.get(KEY_CODEX_SESSION_ID), LEGACY_SESSION)
+        self.assertNotIn(KEY_DEV_AGENT, pinned_data)
+        self.assertNotIn(KEY_DEV_SESSION_ID, pinned_data)
 
 
 class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -298,12 +326,12 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def _seeded_issue(self, *, silent_park_count: int):
         gh = FakeGitHubClient()
-        issue = make_issue(950, label="implementing")
+        issue = make_issue(950, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(
             950,
-            dev_agent="claude",
-            dev_session_id="poisoned-sess",
+            dev_agent=BACKEND_CLAUDE,
+            dev_session_id=POISONED_SESSION,
             silent_park_count=silent_park_count,
         )
         return gh, issue
@@ -318,20 +346,20 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         captured: dict = {}
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
-            captured["resume_session_id"] = resume_session_id
+            captured[RESUME_SESSION_ID] = resume_session_id
             return _agent(session_id="ignored", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         self.assertEqual(
-            captured["resume_session_id"], "poisoned-sess",
+            captured[RESUME_SESSION_ID], POISONED_SESSION,
             "below threshold the original session id must still be resumed",
         )
         # Session id and streak are not touched on the below-threshold path.
-        self.assertEqual(state.get("dev_session_id"), "poisoned-sess")
-        self.assertEqual(state.get("silent_park_count"), 1)
+        self.assertEqual(state.get(KEY_DEV_SESSION_ID), POISONED_SESSION)
+        self.assertEqual(state.get(KEY_SILENT_PARK_COUNT), 1)
 
     def test_at_threshold_drops_session_and_persists_fresh(self) -> None:
         # `_SILENT_PARKS_BEFORE_FRESH_SESSION` consecutive silent parks ==
@@ -347,24 +375,24 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             captured["agent"] = agent
-            captured["resume_session_id"] = resume_session_id
-            return _agent(session_id="fresh-sess", last_message="ok")
+            captured[RESUME_SESSION_ID] = resume_session_id
+            return _agent(session_id=FRESH_SESSION, last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         self.assertIsNone(
-            captured["resume_session_id"],
+            captured[RESUME_SESSION_ID],
             "fresh spawn must drop the poisoned dev_session_id",
         )
-        self.assertEqual(captured["agent"], "claude")
+        self.assertEqual(captured["agent"], BACKEND_CLAUDE)
         # New session id must be persisted so the next resume picks it up
         # instead of looking up an empty `dev_session_id` and re-spawning.
-        self.assertEqual(state.get("dev_session_id"), "fresh-sess")
+        self.assertEqual(state.get(KEY_DEV_SESSION_ID), FRESH_SESSION)
         # Streak resets so a future blip doesn't drop the new session
         # immediately.
-        self.assertEqual(state.get("silent_park_count"), 0)
+        self.assertEqual(state.get(KEY_SILENT_PARK_COUNT), 0)
 
     def test_fresh_spawn_empty_session_id_still_clears_pinned(self) -> None:
         # If the fresh spawn comes back without a `session_id` (agent
@@ -376,15 +404,15 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded_issue(silent_park_count=threshold)
         state = gh.read_pinned_state(issue)
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(
-                 workflow, "run_agent",
+                 workflow, RUN_AGENT,
                  lambda *args, **kwargs: _agent(session_id="", last_message=""),
              ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         self.assertIsNone(
-            state.get("dev_session_id"),
+            state.get(KEY_DEV_SESSION_ID),
             "poisoned session id must be cleared even when the fresh "
             "spawn returns no session_id",
         )
@@ -397,7 +425,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         # legacy id.
         threshold = workflow._SILENT_PARKS_BEFORE_FRESH_SESSION
         gh = FakeGitHubClient()
-        issue = make_issue(951, label="implementing")
+        issue = make_issue(951, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(
             951,
@@ -411,23 +439,23 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             captured["agent"] = agent
-            captured["resume_session_id"] = resume_session_id
+            captured[RESUME_SESSION_ID] = resume_session_id
             return _agent(session_id="fresh-legacy", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         # Backend stays locked to codex (legacy).
-        self.assertEqual(captured["agent"], "codex")
+        self.assertEqual(captured["agent"], BACKEND_CODEX)
         # Resume happened with no session id -- the poisoned legacy id
         # was dropped.
-        self.assertIsNone(captured["resume_session_id"])
+        self.assertIsNone(captured[RESUME_SESSION_ID])
         # Pinned state migrated to the new keys with the fresh session
         # id, and the legacy field is cleared.
-        self.assertEqual(state.get("dev_agent"), "codex")
-        self.assertEqual(state.get("dev_session_id"), "fresh-legacy")
-        self.assertIsNone(state.get("codex_session_id"))
+        self.assertEqual(state.get(KEY_DEV_AGENT), BACKEND_CODEX)
+        self.assertEqual(state.get(KEY_DEV_SESSION_ID), "fresh-legacy")
+        self.assertIsNone(state.get(KEY_CODEX_SESSION_ID))
 
 
 class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -442,14 +470,14 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     STALE_STDERR = "Error: No conversation found with session ID: poisoned-sess\n"
 
-    def _seeded_issue(self, *, dev_agent: str = "claude"):
+    def _seeded_issue(self, *, dev_agent: str = BACKEND_CLAUDE):
         gh = FakeGitHubClient()
-        issue = make_issue(960, label="resolving_conflict")
+        issue = make_issue(960, label=LABEL_RESOLVING_CONFLICT)
         gh.add_issue(issue)
         gh.seed_state(
             960,
             dev_agent=dev_agent,
-            dev_session_id="poisoned-sess",
+            dev_session_id=POISONED_SESSION,
             silent_park_count=0,
         )
         return gh, issue
@@ -468,7 +496,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
             with self.subTest(stderr=stderr):
                 agent_result = _agent(session_id="", last_message="", stderr=stderr)
                 self.assertTrue(
-                    workflow._is_stale_session_failure("claude", agent_result),
+                    workflow._is_stale_session_failure(BACKEND_CLAUDE, agent_result),
                     f"{stderr!r} should be classified stale-session",
                 )
 
@@ -478,7 +506,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
             stderr="Error: rate limited, please retry shortly",
         )
         self.assertFalse(
-            workflow._is_stale_session_failure("claude", agent_result)
+            workflow._is_stale_session_failure(BACKEND_CLAUDE, agent_result)
         )
 
     def test_marker_detector_only_triggers_for_claude(self) -> None:
@@ -489,7 +517,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
             stderr="No conversation found with session ID: xyz",
         )
         self.assertFalse(
-            workflow._is_stale_session_failure("codex", agent_result)
+            workflow._is_stale_session_failure(BACKEND_CODEX, agent_result)
         )
 
     def test_claude_stale_session_retries_once_with_fresh_spawn(self) -> None:
@@ -504,30 +532,30 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             calls.append(resume_session_id)
-            if resume_session_id == "poisoned-sess":
+            if resume_session_id == POISONED_SESSION:
                 return _agent(
                     session_id="", last_message="",
                     stderr=self.STALE_STDERR,
                 )
-            return _agent(session_id="fresh-sess", last_message="ok")
+            return _agent(session_id=FRESH_SESSION, last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         self.assertEqual(
-            calls, ["poisoned-sess", None],
+            calls, [POISONED_SESSION, None],
             "expected one resume with the poisoned id then one fresh spawn",
         )
         self.assertEqual(
-            state.get("dev_session_id"), "fresh-sess",
+            state.get(KEY_DEV_SESSION_ID), FRESH_SESSION,
             "fresh spawn's session id must be persisted",
         )
-        self.assertEqual(state.get("dev_agent"), "claude")
-        self.assertIsNone(state.get("codex_session_id"))
+        self.assertEqual(state.get(KEY_DEV_AGENT), BACKEND_CLAUDE)
+        self.assertIsNone(state.get(KEY_CODEX_SESSION_ID))
         # Silent-park streak resets so a future blip does not immediately
         # re-drop the new session.
-        self.assertEqual(state.get("silent_park_count"), 0)
+        self.assertEqual(state.get(KEY_SILENT_PARK_COUNT), 0)
 
     def test_stale_session_retry_clears_pinned_if_retry_empty(self) -> None:
         # If the fresh-spawn retry returns no session id (CLI hiccup), the
@@ -537,19 +565,19 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
         state = gh.read_pinned_state(issue)
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
-            if resume_session_id == "poisoned-sess":
+            if resume_session_id == POISONED_SESSION:
                 return _agent(
                     session_id="", last_message="",
                     stderr=self.STALE_STDERR,
                 )
             return _agent(session_id="", last_message="")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         self.assertIsNone(
-            state.get("dev_session_id"),
+            state.get(KEY_DEV_SESSION_ID),
             "poisoned session id must be cleared even when the retry "
             "returns no session id",
         )
@@ -569,14 +597,14 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 session_id="", last_message="", stderr=self.STALE_STDERR,
             )
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             _, agent_result, _ = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "go",
             )
 
         self.assertEqual(
-            calls, ["poisoned-sess", None],
+            calls, [POISONED_SESSION, None],
             "retry must be bounded to a single fresh spawn",
         )
         # Result reflects the still-failing retry; caller's downstream
@@ -587,7 +615,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Codex falls back to the silent-park-count path. A first resume
         # whose stderr happens to contain the marker must NOT retry
         # immediately for the codex backend.
-        gh, issue = self._seeded_issue(dev_agent="codex")
+        gh, issue = self._seeded_issue(dev_agent=BACKEND_CODEX)
         state = gh.read_pinned_state(issue)
 
         calls: list[Optional[str]] = []
@@ -598,17 +626,17 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 session_id="", last_message="", stderr=self.STALE_STDERR,
             )
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         self.assertEqual(
-            calls, ["poisoned-sess"],
+            calls, [POISONED_SESSION],
             "codex backend must NOT trigger the claude-only immediate retry",
         )
         # Poisoned id remains; the existing silent-park-count path is what
         # will eventually drop it.
-        self.assertEqual(state.get("dev_session_id"), "poisoned-sess")
+        self.assertEqual(state.get(KEY_DEV_SESSION_ID), POISONED_SESSION)
 
 
 class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -620,16 +648,16 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
     spawn in the same worktree, exactly like the stale-session path.
     """
 
-    OVERFLOW_MSG = "Prompt is too long"
+    OVERFLOW_MSG = PROMPT_TOO_LONG_MESSAGE
 
-    def _seeded_issue(self, *, dev_agent: str = "claude"):
+    def _seeded_issue(self, *, dev_agent: str = BACKEND_CLAUDE):
         gh = FakeGitHubClient()
-        issue = make_issue(961, label="implementing")
+        issue = make_issue(961, label=LABEL_IMPLEMENTING)
         gh.add_issue(issue)
         gh.seed_state(
             961,
             dev_agent=dev_agent,
-            dev_session_id="poisoned-sess",
+            dev_session_id=POISONED_SESSION,
             silent_park_count=0,
         )
         return gh, issue
@@ -639,7 +667,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
         # so the bare phrase, a token-count suffix, and mixed casing all trip
         # recovery.
         for last_message in (
-            "Prompt is too long",
+            PROMPT_TOO_LONG_MESSAGE,
             "prompt is too long: 215000 tokens > 200000 maximum",
             "PROMPT IS TOO LONG",
             "Input is too long",
@@ -648,7 +676,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             with self.subTest(last_message=last_message):
                 agent_result = _agent(session_id="", last_message=last_message)
                 self.assertTrue(
-                    workflow._is_context_overflow_failure("claude", agent_result),
+                    workflow._is_context_overflow_failure(BACKEND_CLAUDE, agent_result),
                     f"{last_message!r} should be classified context overflow",
                 )
 
@@ -660,7 +688,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             stderr="API Error: prompt is too long: 210000 tokens > 200000",
         )
         self.assertTrue(
-            workflow._is_context_overflow_failure("claude", agent_result)
+            workflow._is_context_overflow_failure(BACKEND_CLAUDE, agent_result)
         )
 
     def test_overflow_detector_ignores_phrase_midanswer(self) -> None:
@@ -672,7 +700,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             "to handle in one pass; see the sub-issues.",
         )
         self.assertFalse(
-            workflow._is_context_overflow_failure("claude", agent_result)
+            workflow._is_context_overflow_failure(BACKEND_CLAUDE, agent_result)
         )
 
     def test_overflow_detector_ignores_unrelated(self) -> None:
@@ -681,13 +709,13 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             stderr="Error: rate limited, please retry shortly",
         )
         self.assertFalse(
-            workflow._is_context_overflow_failure("claude", agent_result)
+            workflow._is_context_overflow_failure(BACKEND_CLAUDE, agent_result)
         )
 
     def test_overflow_detector_only_triggers_for_claude(self) -> None:
         agent_result = _agent(session_id="", last_message=self.OVERFLOW_MSG)
         self.assertFalse(
-            workflow._is_context_overflow_failure("codex", agent_result)
+            workflow._is_context_overflow_failure(BACKEND_CODEX, agent_result)
         )
 
     def test_poisoned_predicate_covers_stale_and_overflow(self) -> None:
@@ -697,10 +725,10 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
         )
         overflow = _agent(session_id="", last_message=self.OVERFLOW_MSG)
         unrelated = _agent(session_id="sess-1", last_message="a question?")
-        self.assertTrue(workflow._is_poisoned_session_failure("claude", stale))
-        self.assertTrue(workflow._is_poisoned_session_failure("claude", overflow))
+        self.assertTrue(workflow._is_poisoned_session_failure(BACKEND_CLAUDE, stale))
+        self.assertTrue(workflow._is_poisoned_session_failure(BACKEND_CLAUDE, overflow))
         self.assertFalse(
-            workflow._is_poisoned_session_failure("claude", unrelated)
+            workflow._is_poisoned_session_failure(BACKEND_CLAUDE, unrelated)
         )
 
     def test_claude_overflow_retries_once_with_fresh_spawn(self) -> None:
@@ -714,23 +742,23 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             calls.append(resume_session_id)
-            if resume_session_id == "poisoned-sess":
+            if resume_session_id == POISONED_SESSION:
                 return _agent(session_id="", last_message=self.OVERFLOW_MSG)
-            return _agent(session_id="fresh-sess", last_message="ok")
+            return _agent(session_id=FRESH_SESSION, last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         self.assertEqual(
-            calls, ["poisoned-sess", None],
+            calls, [POISONED_SESSION, None],
             "expected one resume with the poisoned id then one fresh spawn",
         )
         self.assertEqual(
-            state.get("dev_session_id"), "fresh-sess",
+            state.get(KEY_DEV_SESSION_ID), FRESH_SESSION,
             "fresh spawn's session id must be persisted",
         )
-        self.assertEqual(state.get("silent_park_count"), 0)
+        self.assertEqual(state.get(KEY_SILENT_PARK_COUNT), 0)
 
     def test_overflow_retry_clears_pinned_if_retry_empty(self) -> None:
         # If the fresh-spawn retry returns no session id, the poisoned id must
@@ -740,15 +768,15 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
         state = gh.read_pinned_state(issue)
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
-            if resume_session_id == "poisoned-sess":
+            if resume_session_id == POISONED_SESSION:
                 return _agent(session_id="", last_message=self.OVERFLOW_MSG)
             return _agent(session_id="", last_message="")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
-        self.assertIsNone(state.get("dev_session_id"))
+        self.assertIsNone(state.get(KEY_DEV_SESSION_ID))
 
     def test_overflow_retry_does_not_loop_if_spawn_overflows(self) -> None:
         # A fresh spawn that ALSO overflows (issue body so large even a small
@@ -764,14 +792,14 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             calls.append(resume_session_id)
             return _agent(session_id="", last_message=self.OVERFLOW_MSG)
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             _, agent_result, _ = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "go",
             )
 
         self.assertEqual(
-            calls, ["poisoned-sess", None],
+            calls, [POISONED_SESSION, None],
             "retry must be bounded to a single fresh spawn",
         )
         self.assertEqual(agent_result.last_message, self.OVERFLOW_MSG)
@@ -779,7 +807,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
     def test_codex_overflow_no_immediate_retry(self) -> None:
         # Codex has no analogous stable marker; a codex resume whose message
         # happens to share the text must not trip the claude-only retry.
-        gh, issue = self._seeded_issue(dev_agent="codex")
+        gh, issue = self._seeded_issue(dev_agent=BACKEND_CODEX)
         state = gh.read_pinned_state(issue)
 
         calls: list[Optional[str]] = []
@@ -788,15 +816,15 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             calls.append(resume_session_id)
             return _agent(session_id="", last_message=self.OVERFLOW_MSG)
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+        with patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         self.assertEqual(
-            calls, ["poisoned-sess"],
+            calls, [POISONED_SESSION],
             "codex backend must NOT trigger the claude-only immediate retry",
         )
-        self.assertEqual(state.get("dev_session_id"), "poisoned-sess")
+        self.assertEqual(state.get(KEY_DEV_SESSION_ID), POISONED_SESSION)
 
 
 class SessionLimitMessageClassifierTest(unittest.TestCase):
@@ -849,10 +877,10 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
     resets it and is re-grounded with the issue requirements + branch pointer.
     """
 
-    def _seeded_issue(self, *, resume_count: int = 0, dev_agent: str = "claude",
-                      sid: str = "live-sess"):
+    def _seeded_issue(self, *, resume_count: int = 0, dev_agent: str = BACKEND_CLAUDE,
+                      sid: str = LIVE_SESSION):
         gh = FakeGitHubClient()
-        issue = make_issue(962, label="in_review", body="implement the thing")
+        issue = make_issue(962, label="in_review", body=IMPLEMENT_PROMPT_FRAGMENT)
         gh.add_issue(issue)
         gh.seed_state(
             962,
@@ -866,10 +894,10 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
     def _run_resume(self, gh, issue, *, fake_run, threshold):
         state = gh.read_pinned_state(issue)
         with patch.object(config, "DEV_SESSION_MAX_RESUMES", threshold), \
-             patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+             patch.object(workflow, ENSURE_WORKTREE, lambda spec, issue_number, **_: _FAKE_WT), \
+             patch.object(workflow, RUN_AGENT, fake_run):
             wt, agent_result, _ = workflow._resume_dev_with_text(
-                gh, _TEST_SPEC, issue, state, "fix it",
+                gh, _TEST_SPEC, issue, state, FIX_PROMPT_FRAGMENT,
             )
         return state, agent_result
 
@@ -879,16 +907,16 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             calls.append(resume_session_id)
-            return _agent(session_id="live-sess", last_message="done")
+            return _agent(session_id=LIVE_SESSION, last_message="done")
 
         state, _ = self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
 
-        self.assertEqual(calls, ["live-sess"], "below budget must resume in place")
+        self.assertEqual(calls, [LIVE_SESSION], "below budget must resume in place")
         self.assertEqual(
-            state.get("dev_resume_count"), 4,
+            state.get(KEY_DEV_RESUME_COUNT), 4,
             "each resume charges one against the per-session budget",
         )
-        self.assertEqual(state.get("dev_session_id"), "live-sess")
+        self.assertEqual(state.get(KEY_DEV_SESSION_ID), LIVE_SESSION)
 
     def test_resume_at_threshold_rotates_to_fresh_spawn(self) -> None:
         gh, issue = self._seeded_issue(resume_count=10)
@@ -896,7 +924,7 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             calls.append(resume_session_id)
-            return _agent(session_id="fresh-sess", last_message="ok")
+            return _agent(session_id=FRESH_SESSION, last_message="ok")
 
         state, _ = self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
 
@@ -904,9 +932,9 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
             calls, [None],
             "budget reached must fresh-spawn (no resume id), not resume",
         )
-        self.assertEqual(state.get("dev_session_id"), "fresh-sess")
+        self.assertEqual(state.get(KEY_DEV_SESSION_ID), FRESH_SESSION)
         self.assertEqual(
-            state.get("dev_resume_count"), 0,
+            state.get(KEY_DEV_RESUME_COUNT), 0,
             "rotation resets the budget for the new session",
         )
 
@@ -916,15 +944,15 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             calls.append(resume_session_id)
-            return _agent(session_id="live-sess", last_message="done")
+            return _agent(session_id=LIVE_SESSION, last_message="done")
 
         state, _ = self._run_resume(gh, issue, fake_run=fake_run, threshold=0)
 
         self.assertEqual(
-            calls, ["live-sess"],
+            calls, [LIVE_SESSION],
             "0 = unbounded: must keep resuming regardless of count",
         )
-        self.assertEqual(state.get("dev_resume_count"), 100)
+        self.assertEqual(state.get(KEY_DEV_RESUME_COUNT), 100)
 
     def test_rotation_fresh_spawn_prompt_is_regrounded(self) -> None:
         # The rotated fresh spawn has no transcript, so its prompt must carry
@@ -935,15 +963,15 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             prompts.append(prompt)
-            return _agent(session_id="fresh-sess", last_message="ok")
+            return _agent(session_id=FRESH_SESSION, last_message="ok")
 
         self._run_resume(gh, issue, fake_run=fake_run, threshold=5)
 
         self.assertEqual(len(prompts), 1)
-        self.assertIn("resuming work on GitHub issue", prompts[0])
-        self.assertIn("implement the thing", prompts[0], "issue body re-grounds")
+        self.assertIn(RESUME_PROMPT_FRAGMENT, prompts[0])
+        self.assertIn(IMPLEMENT_PROMPT_FRAGMENT, prompts[0], "issue body re-grounds")
         self.assertTrue(
-            prompts[0].rstrip().endswith("fix it"),
+            prompts[0].rstrip().endswith(FIX_PROMPT_FRAGMENT),
             "stage followup must be appended after the preamble",
         )
 
@@ -955,31 +983,31 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             prompts.append(prompt)
-            return _agent(session_id="live-sess", last_message="done")
+            return _agent(session_id=LIVE_SESSION, last_message="done")
 
         self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
 
-        self.assertEqual(prompts, ["fix it"])
+        self.assertEqual(prompts, [FIX_PROMPT_FRAGMENT])
 
     def test_overflow_recovery_fresh_spawn_is_regrounded(self) -> None:
         # Ties the two features together: an overflowed ("Prompt is too long")
         # resume drops the session and the recovery fresh spawn -- like the
         # rotation spawn -- is re-grounded with the preamble.
-        gh, issue = self._seeded_issue(resume_count=0, sid="poisoned-sess")
+        gh, issue = self._seeded_issue(resume_count=0, sid=POISONED_SESSION)
         seen: list[tuple[Optional[str], str]] = []
 
         def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
             seen.append((resume_session_id, prompt))
-            if resume_session_id == "poisoned-sess":
-                return _agent(session_id="", last_message="Prompt is too long")
-            return _agent(session_id="fresh-sess", last_message="ok")
+            if resume_session_id == POISONED_SESSION:
+                return _agent(session_id="", last_message=PROMPT_TOO_LONG_MESSAGE)
+            return _agent(session_id=FRESH_SESSION, last_message="ok")
 
         self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
 
-        self.assertEqual([sid for sid, _ in seen], ["poisoned-sess", None])
-        self.assertEqual(seen[0][1], "fix it", "the initial resume sends the bare followup")
+        self.assertEqual([sid for sid, _ in seen], [POISONED_SESSION, None])
+        self.assertEqual(seen[0][1], FIX_PROMPT_FRAGMENT, "the initial resume sends the bare followup")
         self.assertIn(
-            "resuming work on GitHub issue", seen[1][1],
+            RESUME_PROMPT_FRAGMENT, seen[1][1],
             "the overflow-recovery fresh spawn must be re-grounded",
         )
 
@@ -1000,11 +1028,11 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
         # stale resume count -- otherwise later resumes find no live session
         # and fresh-spawn from scratch every tick.
         gh = FakeGitHubClient()
-        issue = make_issue(964, label="documenting", body="implement the thing")
+        issue = make_issue(964, label=LABEL_DOCUMENTING, body=IMPLEMENT_PROMPT_FRAGMENT)
         gh.add_issue(issue)
         gh.seed_state(
             964,
-            dev_agent="claude",
+            dev_agent=BACKEND_CLAUDE,
             silent_park_count=0,
             dev_resume_count=7,
         )
@@ -1021,15 +1049,15 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
             "no live session -> fresh spawn with no resume id",
         )
         self.assertIn(
-            "resuming work on GitHub issue", seen[0][1],
+            RESUME_PROMPT_FRAGMENT, seen[0][1],
             "the fresh spawn must be re-grounded",
         )
         self.assertEqual(
-            state.get("dev_session_id"), "hiccup-recovered",
+            state.get(KEY_DEV_SESSION_ID), "hiccup-recovered",
             "the returned session id must be persisted, not dropped",
         )
         self.assertEqual(
-            state.get("dev_resume_count"), 0,
+            state.get(KEY_DEV_RESUME_COUNT), 0,
             "the new session starts its resume budget from zero",
         )
 
@@ -1038,11 +1066,11 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
         # session stays unpinned so the next tick fresh-spawns again rather
         # than resuming a phantom id, and the resume budget is not charged.
         gh = FakeGitHubClient()
-        issue = make_issue(965, label="documenting", body="implement the thing")
+        issue = make_issue(965, label=LABEL_DOCUMENTING, body=IMPLEMENT_PROMPT_FRAGMENT)
         gh.add_issue(issue)
         gh.seed_state(
             965,
-            dev_agent="claude",
+            dev_agent=BACKEND_CLAUDE,
             silent_park_count=0,
             dev_resume_count=2,
         )
@@ -1055,8 +1083,8 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
         state, _ = self._run_resume(gh, issue, fake_run=fake_run, threshold=10)
 
         self.assertEqual(calls, [None], "still a fresh spawn, no resume id")
-        self.assertIsNone(state.get("dev_session_id"))
+        self.assertIsNone(state.get(KEY_DEV_SESSION_ID))
         self.assertEqual(
-            state.get("dev_resume_count"), 2,
+            state.get(KEY_DEV_RESUME_COUNT), 2,
             "a no-session fresh spawn must not charge the resume budget",
         )

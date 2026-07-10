@@ -13,7 +13,7 @@ from unittest.mock import patch
 from orchestrator import workflow
 
 from tests.fakes import FakeGitHubClient, make_issue
-from tests.workflow_helpers import _TEST_SPEC
+from tests.workflow_helpers import LABEL_QUESTION, _TEST_SPEC
 
 
 class QuestionLabelRoutingTest(unittest.TestCase):
@@ -26,7 +26,7 @@ class QuestionLabelRoutingTest(unittest.TestCase):
     def test_question_label_is_recognized_as_workflow_label(self) -> None:
         from orchestrator.github import WORKFLOW_LABELS
 
-        self.assertIn("question", WORKFLOW_LABELS)
+        self.assertIn(LABEL_QUESTION, WORKFLOW_LABELS)
 
     def test_question_label_is_in_bootstrap_specs(self) -> None:
         # Label bootstrap iterates WORKFLOW_LABEL_SPECS; if the spec entry
@@ -35,18 +35,18 @@ class QuestionLabelRoutingTest(unittest.TestCase):
         from orchestrator.github import WORKFLOW_LABEL_SPECS
 
         names = [name for name, _, _ in WORKFLOW_LABEL_SPECS]
-        self.assertIn("question", names)
+        self.assertIn(LABEL_QUESTION, names)
 
     def test_question_label_is_not_family_aware(self) -> None:
         # Open `question` issues touch only their own pinned state, so the
         # label must stay out of `_FAMILY_AWARE_LABELS` -- otherwise the
         # parallel tick path would route it through the single-threaded
         # family bucket and defeat fan-out concurrency.
-        self.assertNotIn("question", workflow._FAMILY_AWARE_LABELS)
+        self.assertNotIn(LABEL_QUESTION, workflow._FAMILY_AWARE_LABELS)
 
     def test_dispatcher_routes_question_to_handler(self) -> None:
         gh = FakeGitHubClient()
-        issue = make_issue(801, label="question")
+        issue = make_issue(801, label=LABEL_QUESTION)
         gh.add_issue(issue)
 
         with patch.object(workflow, "_handle_question") as handler, \

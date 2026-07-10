@@ -17,6 +17,7 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    EVENT_PR_MERGED,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
@@ -147,10 +148,10 @@ class FinalizeIfPrMergedTest(unittest.TestCase, _PatchedWorkflowMixin):
         # An `external`-merge audit event is emitted with the
         # entry-stage label.
         kinds = [event["event"] for event in gh.recorded_events]
-        self.assertIn("pr_merged", kinds)
+        self.assertIn(EVENT_PR_MERGED, kinds)
         merged_event = next(
             event for event in gh.recorded_events
-            if event["event"] == "pr_merged"
+            if event["event"] == EVENT_PR_MERGED
         )
         self.assertEqual(merged_event.get("merge_method"), "external")
         self.assertEqual(merged_event.get("stage"), "implementing")

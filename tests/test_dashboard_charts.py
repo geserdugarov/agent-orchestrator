@@ -40,6 +40,19 @@ except ModuleNotFoundError:
 
 _SKIP_REASON = "plotly not installed -- run `uv sync --group dashboard`"
 
+EVENT_AGENT_EXIT = "agent_exit"
+STAGE_IMPLEMENTING = "implementing"
+STAGE_VALIDATING = "validating"
+ROLE_DEVELOPER = "developer"
+ROLE_REVIEWER = "reviewer"
+BACKEND_CLAUDE = "claude"
+BACKEND_CODEX = "codex"
+TRACE_CACHE = "Cache"
+TRACE_COST = "Cost"
+RGBA_PREFIX = "rgba("
+EXPECTED_RGBA_MESSAGE = "expected rgba() cache shade, got "
+TWO_RUNS_LABEL = "2 runs"
+
 
 @unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
 class UsageOverTimeTest(unittest.TestCase):
@@ -51,12 +64,12 @@ class UsageOverTimeTest(unittest.TestCase):
     def test_stacks_input_output_cache_with_cost_overlay(self) -> None:
         points = [
             TimeSeriesPoint(
-                day=date(2026, 5, 1), event="agent_exit", count=2,
+                day=date(2026, 5, 1), event=EVENT_AGENT_EXIT, count=2,
                 cost_usd=1.20, input_tokens=1000, output_tokens=500,
                 cache_read_tokens=400, cache_write_tokens=200,
             ),
             TimeSeriesPoint(
-                day=date(2026, 5, 2), event="agent_exit", count=3,
+                day=date(2026, 5, 2), event=EVENT_AGENT_EXIT, count=3,
                 cost_usd=2.40, input_tokens=2000, output_tokens=800,
                 cache_read_tokens=900, cache_write_tokens=600,
             ),
@@ -68,23 +81,23 @@ class UsageOverTimeTest(unittest.TestCase):
         names = [trace.name for trace in fig.data]
         self.assertIn("Input", names)
         self.assertIn("Output", names)
-        self.assertIn("Cache", names)
-        self.assertIn("Cost", names)
-        cache_trace = next(trace for trace in fig.data if trace.name == "Cache")
+        self.assertIn(TRACE_CACHE, names)
+        self.assertIn(TRACE_COST, names)
+        cache_trace = next(trace for trace in fig.data if trace.name == TRACE_CACHE)
         self.assertEqual(tuple(cache_trace.y), (600, 1500))
-        cost_trace = next(trace for trace in fig.data if trace.name == "Cost")
+        cost_trace = next(trace for trace in fig.data if trace.name == TRACE_COST)
         # Cost rides the secondary axis so it can use $ ticks.
         self.assertEqual(cost_trace.yaxis, "y2")
 
     def test_backend_mode_stacks_per_backend(self) -> None:
         points = [
             TimeSeriesPoint(
-                day=date(2026, 5, 1), event="agent_exit", count=2,
+                day=date(2026, 5, 1), event=EVENT_AGENT_EXIT, count=2,
                 cost_usd=0.50, input_tokens=500, output_tokens=200,
             ),
         ]
         backend_by_day = {
-            date(2026, 5, 1): {"claude": 1200, "codex": 600},
+            date(2026, 5, 1): {BACKEND_CLAUDE: 1200, BACKEND_CODEX: 600},
         }
         fig = dashboard_charts.usage_over_time(
             points,
@@ -93,9 +106,9 @@ class UsageOverTimeTest(unittest.TestCase):
         )
         names = {trace.name for trace in fig.data}
         # Backend bands plus the cost overlay.
-        self.assertIn("claude", names)
-        self.assertIn("codex", names)
-        self.assertIn("Cost", names)
+        self.assertIn(BACKEND_CLAUDE, names)
+        self.assertIn(BACKEND_CODEX, names)
+        self.assertIn(TRACE_COST, names)
 
     def test_empty_renders_placeholder(self) -> None:
         fig = dashboard_charts.usage_over_time([])
@@ -113,7 +126,7 @@ class CostHorizontalBarsTest(unittest.TestCase):
     def test_sorts_by_cost_descending(self) -> None:
         items = [
             ("alpha", "1 run", 5.0, "#111"),
-            ("beta", "2 runs", 15.0, "#222"),
+            ("beta", TWO_RUNS_LABEL, 15.0, "#222"),
             ("gamma", "3 runs", 10.0, "#333"),
         ]
         fig = dashboard_charts.cost_horizontal_bars(items)
@@ -150,7 +163,7 @@ class CostByStageTest(unittest.TestCase):
         # so the stacked segments add back to the per-stage total.
         rows = [
             StageBreakdown(
-                stage="implementing",
+                stage=STAGE_IMPLEMENTING,
                 count=20,
                 total_cost_usd=12.0,
                 runs=8,
@@ -158,7 +171,7 @@ class CostByStageTest(unittest.TestCase):
                 no_cache_cost_usd=3.0,
             ),
             StageBreakdown(
-                stage="validating",
+                stage=STAGE_VALIDATING,
                 count=5,
                 total_cost_usd=4.0,
                 runs=3,
@@ -171,11 +184,11 @@ class CostByStageTest(unittest.TestCase):
         # (one per stage). No-cache is added first so cache stacks
         # outward; the chart stacks under `barmode="stack"`.
         self.assertEqual(len(fig.data), 2)
-        self.assertEqual([trace.name for trace in fig.data], ["No cache", "Cache"])
+        self.assertEqual([trace.name for trace in fig.data], ["No cache", TRACE_CACHE])
         self.assertEqual(fig.layout.barmode, "stack")
         for trace in fig.data:
             self.assertEqual(len(trace.y), 2)
-        for stage in ("implementing", "validating"):
+        for stage in (STAGE_IMPLEMENTING, STAGE_VALIDATING):
             self.assertTrue(
                 any(stage in lbl for lbl in fig.data[0].y),
                 f"stage {stage!r} missing from y labels",
@@ -200,7 +213,7 @@ class CostByStageTest(unittest.TestCase):
         # color rather than a separate palette.
         rows = [
             StageBreakdown(
-                stage="implementing",
+                stage=STAGE_IMPLEMENTING,
                 count=10,
                 total_cost_usd=10.0,
                 runs=4,
@@ -210,14 +223,14 @@ class CostByStageTest(unittest.TestCase):
         ]
         fig = dashboard_charts.cost_by_stage(rows)
         stage_color = theme.color_for(
-            "implementing", explicit=theme.STAGE_COLORS,
+            STAGE_IMPLEMENTING, explicit=theme.STAGE_COLORS,
         )
         # No-cache uses the canonical stage color verbatim.
         self.assertEqual(fig.data[0].marker.color[0], stage_color)
         # Cache uses an rgba() shade of the same color.
         self.assertTrue(
-            fig.data[1].marker.color[0].startswith("rgba("),
-            f"expected rgba() cache shade, got {fig.data[1].marker.color[0]}",
+            fig.data[1].marker.color[0].startswith(RGBA_PREFIX),
+            f"{EXPECTED_RGBA_MESSAGE}{fig.data[1].marker.color[0]}",
         )
 
     def test_legacy_rows_without_cache_split_plot_full_total(self) -> None:
@@ -228,7 +241,7 @@ class CostByStageTest(unittest.TestCase):
         # so the bar length still reads correctly.
         rows = [
             StageBreakdown(
-                stage="implementing",
+                stage=STAGE_IMPLEMENTING,
                 count=10,
                 total_cost_usd=7.5,
                 runs=3,
@@ -246,7 +259,7 @@ class CostByStageTest(unittest.TestCase):
         # "8 runs", not "20 events".
         rows = [
             StageBreakdown(
-                stage="implementing",
+                stage=STAGE_IMPLEMENTING,
                 count=20,
                 total_cost_usd=12.0,
                 runs=8,
@@ -327,10 +340,10 @@ class CostByReviewRoundTest(unittest.TestCase):
         # side), while same-role traces share an offsetgroup so they
         # stack at the same y bucket under `barmode="relative"`.
         self.assertEqual(fig.layout.barmode, "relative")
-        self.assertEqual(fig.data[0].offsetgroup, "reviewer")
-        self.assertEqual(fig.data[1].offsetgroup, "reviewer")
-        self.assertEqual(fig.data[2].offsetgroup, "developer")
-        self.assertEqual(fig.data[3].offsetgroup, "developer")
+        self.assertEqual(fig.data[0].offsetgroup, ROLE_REVIEWER)
+        self.assertEqual(fig.data[1].offsetgroup, ROLE_REVIEWER)
+        self.assertEqual(fig.data[2].offsetgroup, ROLE_DEVELOPER)
+        self.assertEqual(fig.data[3].offsetgroup, ROLE_DEVELOPER)
         self.assertEqual(fig.layout.legend.traceorder, "reversed")
         for trace in fig.data:
             self.assertEqual(len(trace.y), 4)
@@ -392,19 +405,19 @@ class CostByReviewRoundTest(unittest.TestCase):
         from orchestrator import dashboard_theme as theme
         # Reviewer no-cache uses the canonical role color verbatim.
         self.assertEqual(
-            fig.data[0].marker.color, theme.AGENT_ROLE_COLORS["reviewer"],
+            fig.data[0].marker.color, theme.AGENT_ROLE_COLORS[ROLE_REVIEWER],
         )
         # Reviewer cache uses an rgba() shade of the same color.
         self.assertTrue(
-            fig.data[1].marker.color.startswith("rgba("),
-            f"expected rgba() cache shade, got {fig.data[1].marker.color}",
+            fig.data[1].marker.color.startswith(RGBA_PREFIX),
+            f"{EXPECTED_RGBA_MESSAGE}{fig.data[1].marker.color}",
         )
         self.assertEqual(
-            fig.data[2].marker.color, theme.AGENT_ROLE_COLORS["developer"],
+            fig.data[2].marker.color, theme.AGENT_ROLE_COLORS[ROLE_DEVELOPER],
         )
         self.assertTrue(
-            fig.data[3].marker.color.startswith("rgba("),
-            f"expected rgba() cache shade, got {fig.data[3].marker.color}",
+            fig.data[3].marker.color.startswith(RGBA_PREFIX),
+            f"{EXPECTED_RGBA_MESSAGE}{fig.data[3].marker.color}",
         )
 
     def test_empty_renders_placeholder(self) -> None:
@@ -438,7 +451,7 @@ class CostByRepoTest(unittest.TestCase):
         # standalone mock's per-run aggregation; counting every event
         # would overstate per-repo activity against the per-run cost.
         self.assertIn("4 runs", joined)
-        self.assertIn("2 runs", joined)
+        self.assertIn(TWO_RUNS_LABEL, joined)
         self.assertNotIn("events", joined)
 
     def test_empty_renders_placeholder(self) -> None:
@@ -574,7 +587,7 @@ class ChartHeightsTest(unittest.TestCase):
     def test_hero_chart_height_matches_mock(self) -> None:
         points = [
             TimeSeriesPoint(
-                day=date(2026, 5, 1), event="agent_exit", count=1,
+                day=date(2026, 5, 1), event=EVENT_AGENT_EXIT, count=1,
                 cost_usd=1.0, input_tokens=10, output_tokens=10,
             ),
         ]
@@ -585,7 +598,7 @@ class ChartHeightsTest(unittest.TestCase):
         # Three bars: ~40px per row + 80 = 200.
         items = [
             ("alpha", "1 run", 1.0, "#111"),
-            ("beta", "2 runs", 2.0, "#222"),
+            ("beta", TWO_RUNS_LABEL, 2.0, "#222"),
             ("gamma", "3 runs", 3.0, "#333"),
         ]
         fig = dashboard_charts.cost_horizontal_bars(items)
