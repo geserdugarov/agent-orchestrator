@@ -64,10 +64,10 @@ def _head_sha(worktree: Path) -> str:
     which is already true throughout validating, so we need an absolute SHA
     snapshot instead.
     """
-    r = _git("rev-parse", "HEAD", cwd=worktree)
-    if r.returncode != 0:
+    head_result = _git("rev-parse", "HEAD", cwd=worktree)
+    if head_result.returncode != 0:
         return ""
-    return (r.stdout or "").strip()
+    return (head_result.stdout or "").strip()
 
 
 def _worktree_dirty_files(worktree: Path) -> list[str]:
@@ -89,11 +89,11 @@ def _worktree_dirty_files(worktree: Path) -> list[str]:
     `core.excludesFile` from the untracked filter; the repo's own tracked
     `.gitignore` still applies, which is the intended trust boundary.
     """
-    r = _git_hardened("status", "--porcelain", cwd=worktree)
-    if r.returncode != 0:
+    status_result = _git_hardened("status", "--porcelain", cwd=worktree)
+    if status_result.returncode != 0:
         return []
     paths: list[str] = []
-    for line in (r.stdout or "").splitlines():
+    for line in (status_result.stdout or "").splitlines():
         if len(line) < 4:
             continue
         # porcelain v1: "XY <path>" with optional " -> dest" for renames.

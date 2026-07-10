@@ -162,7 +162,7 @@ def _iter_new_non_pr_issues(
             yield issue
 
 
-def _write_event_record(record: dict) -> None:
+def _write_event_record(event_record: dict) -> None:
     """Append one JSONL line to `config.EVENT_LOG_PATH` if configured.
 
     Shared by the real client and the test fake so a temp-file-backed
@@ -176,9 +176,9 @@ def _write_event_record(record: dict) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, sort_keys=True) + "\n")
-    except OSError as e:
-        log.warning("could not write event log %s: %s", path, e)
+            fh.write(json.dumps(event_record, sort_keys=True) + "\n")
+    except OSError as error:
+        log.warning("could not write event log %s: %s", path, error)
 
 
 def build_event_record(
@@ -202,9 +202,9 @@ def build_event_record(
     }
     if stage is not None:
         rec["stage"] = stage
-    for k, v in extras.items():
-        if v is not None:
-            rec[k] = v
+    for field_name, field_value in extras.items():
+        if field_value is not None:
+            rec[field_name] = field_value
     return rec
 
 
@@ -216,8 +216,8 @@ class PinnedState:
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
 
-    def set(self, key: str, value: Any) -> None:
-        self.data[key] = value
+    def set(self, key: str, state_value: Any) -> None:
+        self.data[key] = state_value
 
 
 class GitHubClient:
@@ -343,12 +343,12 @@ class GitHubClient:
             return cached
         try:
             label_obj = self.repo.get_label(name)
-        except GithubException as e:
+        except GithubException as error:
             log.warning(
                 "could not look up %r label for closed-issue sweep "
                 "(HTTP %s); skipping. Externally-merged %s issues will "
                 "not finalize to `done` until the label exists.",
-                name, e.status, name,
+                name, error.status, name,
             )
             return None
         self._label_cache[name] = label_obj
@@ -463,7 +463,11 @@ class GitHubClient:
             guard_transition(
                 self.workflow_label(issue), new, config.WORKFLOW_TRANSITION_GUARD,
             )
-        keep = [l.name for l in issue.labels if l.name not in WORKFLOW_LABELS]
+        keep = [
+            issue_label.name
+            for issue_label in issue.labels
+            if issue_label.name not in WORKFLOW_LABELS
+        ]
         if new is not None:
             keep.append(new)
         issue.set_labels(*keep)
@@ -576,21 +580,26 @@ class GitHubClient:
         # there the author axis degrades open, but the state-only body axis
         # still holds.
         trusted_login = getattr(self, "_bot_login", None)
-        for c in issue.get_comments():
-            body = c.body or ""
+        for issue_comment in issue.get_comments():
+            body = issue_comment.body or ""
             if PINNED_STATE_MARKER not in body:
                 continue
             if trusted_login is not None:
-                author = getattr(getattr(c, "user", None), "login", None)
+                author = getattr(
+                    getattr(issue_comment, "user", None), "login", None,
+                )
                 if author != trusted_login:
                     continue
-            m = PINNED_STATE_BODY_RE.match(body)
-            if m:
+            state_match = PINNED_STATE_BODY_RE.match(body)
+            if state_match:
                 try:
-                    return PinnedState(comment_id=c.id, data=json.loads(m.group(1)))
+                    return PinnedState(
+                        comment_id=issue_comment.id,
+                        data=json.loads(state_match.group(1)),
+                    )
                 except json.JSONDecodeError:
                     log.warning("issue=#%s pinned state JSON unparseable", issue.number)
-                    return PinnedState(comment_id=c.id, data={})
+                    return PinnedState(comment_id=issue_comment.id, data={})
         return PinnedState()
 
     def write_pinned_state(self, issue: Issue, state: PinnedState) -> PinnedState:
@@ -601,9 +610,9 @@ class GitHubClient:
             created = issue.create_comment(body)
             state.comment_id = created.id
             return state
-        for c in issue.get_comments():
-            if c.id == state.comment_id:
-                c.edit(body)
+        for issue_comment in issue.get_comments():
+            if issue_comment.id == state.comment_id:
+                issue_comment.edit(body)
                 return state
         # Pinned comment was deleted out from under us; recreate.
         created = issue.create_comment(body)
@@ -613,19 +622,19 @@ class GitHubClient:
     def comments_after(
         self, issue: Issue, after_id: Optional[int]
     ) -> list[IssueComment]:
-        result: list[IssueComment] = []
-        for c in issue.get_comments():
-            if PINNED_STATE_MARKER in (c.body or ""):
+        issue_comments: list[IssueComment] = []
+        for issue_comment in issue.get_comments():
+            if PINNED_STATE_MARKER in (issue_comment.body or ""):
                 continue
-            if after_id is None or c.id > after_id:
-                result.append(c)
-        return result
+            if after_id is None or issue_comment.id > after_id:
+                issue_comments.append(issue_comment)
+        return issue_comments
 
     def latest_comment_id(self, issue: Issue) -> Optional[int]:
         latest: Optional[int] = None
-        for c in issue.get_comments():
-            if latest is None or c.id > latest:
-                latest = c.id
+        for issue_comment in issue.get_comments():
+            if latest is None or issue_comment.id > latest:
+                latest = issue_comment.id
         return latest
 
     def open_pr(
@@ -725,10 +734,10 @@ class GitHubClient:
                 # when there are statuses but none have completed yet.
                 if combined.total_count or cs != "pending":
                     states.append("failure" if cs == "error" else cs)
-        except GithubException as e:
+        except GithubException as error:
             log.warning(
                 "could not read combined status for %s (HTTP %s); ignoring",
-                head_sha, e.status,
+                head_sha, error.status,
             )
             read_failed = True
 
@@ -736,29 +745,30 @@ class GitHubClient:
             check_runs = list(self.repo.get_commit(head_sha).get_check_runs())
             if check_runs:
                 conclusions = [cr.conclusion for cr in check_runs]
-                if any(c is None for c in conclusions):
+                if any(conclusion is None for conclusion in conclusions):
                     states.append("pending")
                 elif any(
-                    c in ("failure", "timed_out", "action_required", "cancelled")
-                    for c in conclusions
+                    conclusion
+                    in ("failure", "timed_out", "action_required", "cancelled")
+                    for conclusion in conclusions
                 ):
                     states.append("failure")
                 elif all(
-                    c in ("success", "neutral", "skipped")
-                    for c in conclusions
+                    conclusion in ("success", "neutral", "skipped")
+                    for conclusion in conclusions
                 ):
                     states.append("success")
                 else:
                     # Unknown conclusion shape -- fail safe.
                     states.append("failure")
-        except GithubException as e:
+        except GithubException as error:
             # 403 here almost always means the fine-grained PAT is missing
             # 'Checks: read'. For Actions-only PRs (no commit statuses,
             # only check-runs), swallowing this silently leaves
             # `pr_combined_check_state` at 'none' despite the PR actually
             # being green; surface the remediation prominently so an
             # operator can fix the scope.
-            if e.status == 403:
+            if error.status == 403:
                 log.error(
                     "could not read check-runs for %s (HTTP 403). The "
                     "orchestrator PAT needs 'Checks: read' to evaluate "
@@ -770,7 +780,7 @@ class GitHubClient:
             else:
                 log.warning(
                     "could not read check-runs for %s (HTTP %s); ignoring",
-                    head_sha, e.status,
+                    head_sha, error.status,
                 )
             read_failed = True
 
@@ -817,7 +827,10 @@ class GitHubClient:
             prev = latest_per_user.get(login)
             if prev is None or sub_id > prev[0]:
                 latest_per_user[login] = (sub_id, state)
-        return [s for _, s in latest_per_user.values()]
+        return [
+            review_state
+            for _, review_state in latest_per_user.values()
+        ]
 
     @classmethod
     def pr_has_changes_requested(
@@ -828,8 +841,10 @@ class GitHubClient:
         the in_review ready-for-merge ping.
         """
         return any(
-            s == "CHANGES_REQUESTED"
-            for s in cls._latest_review_states_for_head(pr, head_sha=head_sha)
+            review_state == "CHANGES_REQUESTED"
+            for review_state in cls._latest_review_states_for_head(
+                pr, head_sha=head_sha,
+            )
         )
 
     @classmethod
@@ -840,9 +855,9 @@ class GitHubClient:
         states = cls._latest_review_states_for_head(pr, head_sha=head_sha)
         if not states:
             return False
-        if any(s == "CHANGES_REQUESTED" for s in states):
+        if any(review_state == "CHANGES_REQUESTED" for review_state in states):
             return False
-        return any(s == "APPROVED" for s in states)
+        return any(review_state == "APPROVED" for review_state in states)
 
     def delete_remote_branch(self, branch: str) -> bool:
         """Delete the remote `<branch>` ref from the repo.
@@ -856,12 +871,12 @@ class GitHubClient:
         try:
             self.repo.get_git_ref(f"heads/{branch}").delete()
             return True
-        except GithubException as e:
-            if e.status == 404:
+        except GithubException as error:
+            if error.status == 404:
                 return True
             log.warning(
                 "could not delete remote branch %r (HTTP %s): %s",
-                branch, e.status, e.data,
+                branch, error.status, error.data,
             )
             return False
 
@@ -876,10 +891,10 @@ class GitHubClient:
         try:
             pr.merge(sha=sha, merge_method=method)
             return True
-        except GithubException as e:
+        except GithubException as error:
             log.warning(
                 "merge failed for PR #%s (HTTP %s): %s",
-                pr.number, e.status, e.data,
+                pr.number, error.status, error.data,
             )
             return False
 
@@ -893,12 +908,12 @@ class GitHubClient:
         `pr_inline_comments_after`.
         """
         out: list[IssueComment] = []
-        for c in pr.get_issue_comments():
-            if PINNED_STATE_MARKER in (c.body or ""):
+        for pr_comment in pr.get_issue_comments():
+            if PINNED_STATE_MARKER in (pr_comment.body or ""):
                 continue
-            if after_id is None or c.id > after_id:
-                out.append(c)
-        out.sort(key=lambda c: c.id)
+            if after_id is None or pr_comment.id > after_id:
+                out.append(pr_comment)
+        out.sort(key=lambda comment: comment.id)
         return out
 
     def pr_inline_comments_after(
@@ -911,12 +926,12 @@ class GitHubClient:
         a separate watermark from the issue-comment side.
         """
         out: list = []
-        for c in pr.get_review_comments():
-            if PINNED_STATE_MARKER in (c.body or ""):
+        for review_comment in pr.get_review_comments():
+            if PINNED_STATE_MARKER in (review_comment.body or ""):
                 continue
-            if after_id is None or c.id > after_id:
-                out.append(c)
-        out.sort(key=lambda c: c.id)
+            if after_id is None or review_comment.id > after_id:
+                out.append(review_comment)
+        out.sort(key=lambda comment: comment.id)
         return out
 
     def pr_reviews_after(
@@ -948,7 +963,7 @@ class GitHubClient:
                 continue
             if after_id is None or review.id > after_id:
                 out.append(review)
-        out.sort(key=lambda r: r.id)
+        out.sort(key=lambda review: review.id)
         return out
 
     def ensure_workflow_labels(self) -> None:
@@ -959,12 +974,14 @@ class GitHubClient:
         can fix the PAT scopes without restarting.
         """
         try:
-            existing = {l.name for l in self.repo.get_labels()}
-        except GithubException as e:
+            existing = {
+                repo_label.name for repo_label in self.repo.get_labels()
+            }
+        except GithubException as error:
             log.warning(
                 "could not list labels (HTTP %s); skipping label bootstrap. "
                 "Grant the PAT 'Issues: Read and write' to enable.",
-                e.status,
+                error.status,
             )
             return
         for name, color, description in (
@@ -975,12 +992,12 @@ class GitHubClient:
             try:
                 self.repo.create_label(name=name, color=color, description=description)
                 log.info("created label %r", name)
-            except GithubException as e:
+            except GithubException as error:
                 log.error(
                     "could not create label %r (HTTP %s). "
                     "Fine-grained PAT needs 'Issues: Read and write'. "
                     "Skipping remaining label bootstrap; orchestrator will keep "
                     "running and may retry on the next restart.",
-                    name, e.status,
+                    name, error.status,
                 )
                 return

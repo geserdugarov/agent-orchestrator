@@ -97,21 +97,24 @@ def _compute_user_content_hash(
     expected to list the reviewer login they post under.
     """
     parts = [issue.title or "", issue.body or ""]
-    for c in issue.get_comments():
-        body = c.body or ""
+    for issue_comment in issue.get_comments():
+        body = issue_comment.body or ""
         if PINNED_STATE_MARKER in body:
             continue
         if _ORCH_COMMENT_MARKER in body:
             continue
-        cid = getattr(c, "id", None)
+        cid = getattr(issue_comment, "id", None)
         if cid is not None and int(cid) in orchestrator_ids:
             continue
-        user = getattr(c, "user", None)
+        user = getattr(issue_comment, "user", None)
         if user is not None and getattr(user, "type", None) == "Bot":
             continue
         if not is_trusted_author(user):
             continue
-        if not include_bare_continue and _is_bare_orchestrator_continue(c):
+        if (
+            not include_bare_continue
+            and _is_bare_orchestrator_continue(issue_comment)
+        ):
             continue
         parts.append(body)
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
@@ -253,7 +256,9 @@ def _route_drift_to_decomposing(
     Caller writes pinned state (`gh.write_pinned_state`) after returning.
     """
     if orphan_children:
-        orphan_list = ", ".join(f"#{n}" for n in orphan_children)
+        orphan_list = ", ".join(
+            f"#{child_number}" for child_number in orphan_children
+        )
         notice = (
             ":pencil2: issue content changed; re-running decomposer "
             "against the updated body. The previously-tracked children "

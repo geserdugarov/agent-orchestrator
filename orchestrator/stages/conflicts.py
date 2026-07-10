@@ -121,14 +121,14 @@ def _already_rebased_onto_base(spec: RepoSpec, wt: Path) -> bool:
     )
     if fetch.returncode != 0:
         return False
-    r = _wf._git_hardened(
+    base_distance_result = _wf._git_hardened(
         "rev-list", "--count",
         f"HEAD..{spec.remote_name}/{spec.base_branch}", cwd=wt,
     )
-    if r.returncode != 0:
+    if base_distance_result.returncode != 0:
         return False
     try:
-        return int((r.stdout or "0").strip() or "0") == 0
+        return int((base_distance_result.stdout or "0").strip() or "0") == 0
     except ValueError:
         return False
 
@@ -410,7 +410,7 @@ def _resume_on_user_content_change(
     followup = _wf._build_user_content_change_prompt(
         issue, _wf._recent_comments_text(issue),
     )
-    wt, result, paused = _wf._resume_dev_with_text(
+    wt, conflict_result, paused = _wf._resume_dev_with_text(
         gh, spec, issue, state, followup, pause_guard=True,
     )
     state.set("last_agent_action_at", _wf._now_iso())
@@ -422,7 +422,7 @@ def _resume_on_user_content_change(
     # no interrupted check of its own and would otherwise parse
     # `last_message` / route through `_on_question` before the caller
     # persists those changes below.
-    if _wf._ignore_if_interrupted(issue, result):
+    if _wf._ignore_if_interrupted(issue, conflict_result):
         return
     # Live pause applied mid-run: an operator added `paused` (or `backlog`)
     # while this drift resume was in flight. Same short-circuit as the
@@ -433,7 +433,7 @@ def _resume_on_user_content_change(
     if paused:
         return
     outcome = _wf._post_user_content_change_result(
-        gh, spec, issue, state, wt, result, before_sha,
+        gh, spec, issue, state, wt, conflict_result, before_sha,
     )
     if outcome == "pushed":
         conflict_round = int(state.get("conflict_round") or 0)
@@ -494,14 +494,16 @@ def _resume_awaiting_human(
         _wf._refuse_parked_continue(gh, issue, state)
         gh.write_pinned_state(issue, state)
         return
-    consumed_max = max(c.id for c in new_comments)
+    consumed_max = max(comment.id for comment in new_comments)
     state.set("last_action_comment_id", consumed_max)
     if continue_action == "retry":
         followup = f"{_wf._CONTINUE_RETRY_PROMPT}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
     else:
         followup = "\n\n".join(
-            f"@{c.user.login if c.user else 'user'}: {c.body}"
-            for c in new_comments if c.body
+            f"@{comment.user.login if comment.user else 'user'}: "
+            f"{comment.body}"
+            for comment in new_comments
+            if comment.body
         )
         followup = f"{followup}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
     wt = _wf._worktree_path(spec, issue.number)
@@ -511,7 +513,7 @@ def _resume_awaiting_human(
             branch=_wf._resolve_branch_name(state, spec, issue.number),
         )
     before_sha = _wf._head_sha(wt)
-    wt, result, paused = _wf._resume_dev_with_text(
+    wt, conflict_result, paused = _wf._resume_dev_with_text(
         gh, spec, issue, state, followup, pause_guard=True,
     )
     state.set("last_agent_action_at", _wf._now_iso())
@@ -525,7 +527,14 @@ def _resume_awaiting_human(
     # ahead of the remote PR head, so `before_sha` is not necessarily
     # the remote SHA. Let `_push_branch` lease against live ls-remote.
     _post_conflict_resolution_result(
-        gh, spec, issue, state, wt, result, before_sha, conflict_round,
+        gh,
+        spec,
+        issue,
+        state,
+        wt,
+        conflict_result,
+        before_sha,
+        conflict_round,
     )
 
 
@@ -848,7 +857,7 @@ def _resolve_conflicts_with_agent(
     fix_prompt = _wf._build_conflict_resolution_prompt(
         f"{spec.remote_name}/{spec.base_branch}", conflicted_files,
     )
-    wt, result, paused = _wf._resume_dev_with_text(
+    wt, conflict_result, paused = _wf._resume_dev_with_text(
         gh, spec, issue, state, fix_prompt, pause_guard=True,
     )
     state.set("last_agent_action_at", _wf._now_iso())
@@ -859,7 +868,7 @@ def _resolve_conflicts_with_agent(
     if paused:
         return
     _post_conflict_resolution_result(
-        gh, spec, issue, state, wt, result, before_sha, conflict_round,
+        gh, spec, issue, state, wt, conflict_result, before_sha, conflict_round,
         force_with_lease=before_sha or None,
     )
 
@@ -870,7 +879,7 @@ def _post_conflict_resolution_result(
     issue: Issue,
     state: PinnedState,
     wt: Path,
-    result: AgentResult,
+    conflict_result: AgentResult,
     before_sha: str,
     conflict_round: int,
     *,
@@ -895,20 +904,22 @@ def _post_conflict_resolution_result(
 
     # Interrupt / timeout / still-mid-rebase dispositions park (or, for the
     # shutdown-sweep interrupt, silently drop) and signal the caller to stop.
-    if _park_stalled_conflict_result(gh, issue, state, wt, result):
+    if _park_stalled_conflict_result(
+        gh, issue, state, wt, conflict_result,
+    ):
         return
 
     after_sha = _wf._head_sha(wt)
     if not after_sha or after_sha == before_sha:
         # Agent did not finish the rebase. Treat as a question /
         # silence park, mirroring the implementing handler.
-        _wf._on_question(gh, issue, state, result)
+        _wf._on_question(gh, issue, state, conflict_result)
         gh.write_pinned_state(issue, state)
         return
 
     dirty = _wf._worktree_dirty_files(wt)
     if dirty:
-        _wf._on_dirty_worktree(gh, issue, state, result, dirty)
+        _wf._on_dirty_worktree(gh, issue, state, conflict_result, dirty)
         gh.write_pinned_state(issue, state)
         return
 
@@ -923,7 +934,7 @@ def _park_stalled_conflict_result(
     issue: Issue,
     state: PinnedState,
     wt: Path,
-    result: AgentResult,
+    conflict_result: AgentResult,
 ) -> bool:
     """Park (or silently drop) a conflict-resolution run that never landed
     a usable commit. Returns True when the tick is fully handled.
@@ -942,10 +953,10 @@ def _park_stalled_conflict_result(
     # session mutations are discarded and the next process re-runs the
     # rebase from durable state. Must precede the timeout/unfinished-rebase/
     # question/dirty/push branches below.
-    if _wf._ignore_if_interrupted(issue, result):
+    if _wf._ignore_if_interrupted(issue, conflict_result):
         return True
 
-    if result.timed_out:
+    if conflict_result.timed_out:
         _wf._park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} dev agent timed out resolving rebase "
@@ -957,7 +968,7 @@ def _park_stalled_conflict_result(
         return True
 
     if _wf._rebase_in_progress(wt):
-        raw = result.last_message.strip()
+        raw = conflict_result.last_message.strip()
         quoted = ""
         if raw:
             quoted = "\n\nAgent output:\n\n> " + raw.replace("\n", "\n> ")

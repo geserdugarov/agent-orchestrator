@@ -100,7 +100,7 @@ def _bump_in_review_watermarks(
     if isinstance(latest, int):
         candidates.append(latest)
     if issue_space_new:
-        candidates.extend(c.id for c in issue_space_new)
+        candidates.extend(comment.id for comment in issue_space_new)
     if candidates:
         state.set("pr_last_comment_id", max(candidates))
 
@@ -109,7 +109,7 @@ def _bump_in_review_watermarks(
     if isinstance(cur_review_wm, int):
         review_candidates.append(cur_review_wm)
     if review_space_new:
-        review_candidates.extend(c.id for c in review_space_new)
+        review_candidates.extend(comment.id for comment in review_space_new)
     if review_candidates:
         state.set("pr_last_review_comment_id", max(review_candidates))
 
@@ -118,7 +118,7 @@ def _bump_in_review_watermarks(
     if isinstance(cur_summary_wm, int):
         summary_candidates.append(cur_summary_wm)
     if review_summary_new:
-        summary_candidates.extend(r.id for r in review_summary_new)
+        summary_candidates.extend(review.id for review in review_summary_new)
     if summary_candidates:
         state.set("pr_last_review_summary_id", max(summary_candidates))
 
@@ -136,8 +136,13 @@ def _seed_missing_watermark(state: PinnedState, key: str, fetch) -> bool:
     """
     if state.get(key) is not None:
         return False
-    items = list(fetch())
-    state.set(key, max(c.id for c in items) if items else 0)
+    surface_comments = list(fetch())
+    state.set(
+        key,
+        max(comment.id for comment in surface_comments)
+        if surface_comments
+        else 0,
+    )
     return True
 
 
@@ -179,7 +184,7 @@ def _seed_legacy_in_review_watermarks(
             candidates.append(issue_latest)
         pr_conv = list(gh.pr_conversation_comments_after(pr, None))
         if pr_conv:
-            candidates.append(max(c.id for c in pr_conv))
+            candidates.append(max(comment.id for comment in pr_conv))
         state.set("pr_last_comment_id", max(candidates) if candidates else 0)
         seeded = True
 
@@ -222,9 +227,10 @@ def _drop_orchestrator_comments(comments, orchestrator_ids) -> list:
     from orchestrator import workflow as _wf
 
     return [
-        c for c in comments
-        if c.id not in orchestrator_ids
-        and _wf._ORCH_COMMENT_MARKER not in (c.body or "")
+        comment
+        for comment in comments
+        if comment.id not in orchestrator_ids
+        and _wf._ORCH_COMMENT_MARKER not in (comment.body or "")
     ]
 
 
@@ -276,11 +282,15 @@ def _scan_fresh_pr_feedback(
     # (above) is preserved; this is the login gate layered on top of it. An
     # empty allowlist trusts everyone, so the default deployment is unchanged.
     issue_space_new = filter_trusted(sorted(
-        list(new_issue_side) + list(new_pr_conv), key=lambda c: c.id
+        list(new_issue_side) + list(new_pr_conv),
+        key=lambda comment: comment.id,
     ))
-    review_space_new = filter_trusted(sorted(new_pr_inline, key=lambda c: c.id))
+    review_space_new = filter_trusted(sorted(
+        new_pr_inline,
+        key=lambda comment: comment.id,
+    ))
     review_summary_new = filter_trusted(
-        sorted(new_pr_reviews, key=lambda r: r.id)
+        sorted(new_pr_reviews, key=lambda review: review.id)
     )
     return issue_space_new, review_space_new, review_summary_new
 
@@ -355,27 +365,29 @@ def _route_feedback_to_fixing(
     if issue_space_new:
         state.set(
             "pending_fix_issue_max_id",
-            max(c.id for c in issue_space_new),
+            max(comment.id for comment in issue_space_new),
         )
         state.set(
-            "pending_fix_issue_ids", [c.id for c in issue_space_new],
+            "pending_fix_issue_ids",
+            [comment.id for comment in issue_space_new],
         )
     if review_space_new:
         state.set(
             "pending_fix_review_max_id",
-            max(c.id for c in review_space_new),
+            max(comment.id for comment in review_space_new),
         )
         state.set(
-            "pending_fix_review_ids", [c.id for c in review_space_new],
+            "pending_fix_review_ids",
+            [comment.id for comment in review_space_new],
         )
     if review_summary_new:
         state.set(
             "pending_fix_review_summary_max_id",
-            max(r.id for r in review_summary_new),
+            max(review.id for review in review_summary_new),
         )
         state.set(
             "pending_fix_review_summary_ids",
-            [r.id for r in review_summary_new],
+            [review.id for review in review_summary_new],
         )
     # Update `user_content_hash` so the user-content drift detection does NOT
     # fire on the next tick for the same comment changes we just consumed via
@@ -413,9 +425,9 @@ def _build_drift_resume_prompt(issue: Issue, unread_pr_conv: list) -> str:
     comments_text = _wf._recent_comments_text(issue)
     if unread_pr_conv:
         pr_block = "\n\n".join(
-            f"@{c.user.login if c.user else 'user'} (PR comment): "
-            f"{c.body or ''}"
-            for c in unread_pr_conv
+            f"@{comment.user.login if comment.user else 'user'} (PR comment): "
+            f"{comment.body or ''}"
+            for comment in unread_pr_conv
         )
         prefix = f"{comments_text}\n\n" if comments_text else ""
         comments_text = (

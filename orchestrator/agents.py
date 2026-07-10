@@ -322,16 +322,19 @@ def _filter_agent_env(
       would leak the secret to GitHub on the first failure.
     """
     filtered: dict[str, str] = {}
-    for k, v in env.items():
-        if k in _FORBIDDEN_AGENT_ENV:
+    for env_key, env_value in env.items():
+        if env_key in _FORBIDDEN_AGENT_ENV:
             continue
-        if k in _AGENT_WRITE_CREDENTIAL_LOCATORS:
+        if env_key in _AGENT_WRITE_CREDENTIAL_LOCATORS:
             continue
-        if _is_secret_shaped(k):
-            if allow_provider_auth and k in _AGENT_PROVIDER_AUTH_ALLOWLIST:
-                filtered[k] = v
+        if _is_secret_shaped(env_key):
+            if (
+                allow_provider_auth
+                and env_key in _AGENT_PROVIDER_AUTH_ALLOWLIST
+            ):
+                filtered[env_key] = env_value
             continue
-        filtered[k] = v
+        filtered[env_key] = env_value
     return filtered
 
 
@@ -371,23 +374,23 @@ class AgentResult:
 CodexResult = AgentResult
 
 
-def _walk_for_uuid(obj: Any) -> Optional[str]:
-    if isinstance(obj, str):
-        return obj if _UUID_RE.match(obj) else None
-    if isinstance(obj, dict):
+def _walk_for_uuid(payload_node: Any) -> Optional[str]:
+    if isinstance(payload_node, str):
+        return payload_node if _UUID_RE.match(payload_node) else None
+    if isinstance(payload_node, dict):
         for key in _PRIORITY_KEYS:
-            if key in obj:
-                found = _walk_for_uuid(obj[key])
+            if key in payload_node:
+                found = _walk_for_uuid(payload_node[key])
                 if found:
                     return found
-        for value in obj.values():
-            found = _walk_for_uuid(value)
+        for child_node in payload_node.values():
+            found = _walk_for_uuid(child_node)
             if found:
                 return found
         return None
-    if isinstance(obj, list):
-        for item in obj:
-            found = _walk_for_uuid(item)
+    if isinstance(payload_node, list):
+        for child_node in payload_node:
+            found = _walk_for_uuid(child_node)
             if found:
                 return found
     return None
@@ -399,10 +402,10 @@ def parse_session_id(jsonl_output: str) -> Optional[str]:
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            event_payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        sid = _walk_for_uuid(obj)
+        sid = _walk_for_uuid(event_payload)
         if sid:
             return sid
     return None
@@ -604,30 +607,34 @@ def _claude_last_message(
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            event_payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(obj, dict):
+        if not isinstance(event_payload, dict):
             continue
-        ev_type = obj.get("type")
-        if ev_type == "result":
-            res = obj.get("result")
-            if isinstance(res, str):
-                last_result = res
-        elif ev_type in ("assistant", "message"):
-            msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
-            content = msg.get("content")
-            if isinstance(content, list):
+        event_type = event_payload.get("type")
+        if event_type == "result":
+            result_text = event_payload.get("result")
+            if isinstance(result_text, str):
+                last_result = result_text
+        elif event_type in ("assistant", "message"):
+            message_payload = (
+                event_payload.get("message")
+                if isinstance(event_payload.get("message"), dict)
+                else event_payload
+            )
+            message_content = message_payload.get("content")
+            if isinstance(message_content, list):
                 texts: list[str] = []
-                for block in content:
+                for block in message_content:
                     if isinstance(block, dict) and block.get("type") == "text":
                         text = block.get("text")
                         if isinstance(text, str):
                             texts.append(text)
                 if texts:
                     last_assistant_text = "".join(texts)
-            elif isinstance(content, str):
-                last_assistant_text = content
+            elif isinstance(message_content, str):
+                last_assistant_text = message_content
     if last_result is not None:
         return last_result
     if allow_assistant_fallback:

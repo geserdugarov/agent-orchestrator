@@ -113,7 +113,7 @@ _CLAUDE_SESSION_LIMIT_MESSAGE_MARKERS: Tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class _PreparedDevRun:
-    result: AgentResult
+    agent_result: AgentResult
     before_sha: Optional[str]
     paused: bool
 
@@ -166,8 +166,8 @@ def _read_dev_session(
     )
 
 
-def _is_stale_session_failure(backend: str, result: AgentResult) -> bool:
-    """True iff `result` is a deterministic stale-session resume failure.
+def _is_stale_session_failure(backend: str, agent_result: AgentResult) -> bool:
+    """True iff `agent_result` is a deterministic stale-session resume failure.
 
     Only claude is matched today: codex's resume CLI does not expose a
     comparable stable stderr marker, so codex still relies on the silent-
@@ -175,14 +175,14 @@ def _is_stale_session_failure(backend: str, result: AgentResult) -> bool:
     """
     if backend != "claude":
         return False
-    stderr = (result.stderr or "").lower()
+    stderr = (agent_result.stderr or "").lower()
     if not stderr:
         return False
     return any(marker in stderr for marker in _CLAUDE_STALE_SESSION_STDERR_MARKERS)
 
 
-def _is_context_overflow_failure(backend: str, result: AgentResult) -> bool:
-    """True iff `result` is a Claude context-window-overflow resume failure.
+def _is_context_overflow_failure(backend: str, agent_result: AgentResult) -> bool:
+    """True iff `agent_result` is a Claude context-window-overflow resume failure.
 
     Only claude is matched today: codex's resume CLI does not expose a
     comparable stable marker. The marker is checked as a PREFIX of the
@@ -193,15 +193,15 @@ def _is_context_overflow_failure(backend: str, result: AgentResult) -> bool:
     """
     if backend != "claude":
         return False
-    msg = (result.last_message or "").strip().lower()
+    msg = (agent_result.last_message or "").strip().lower()
     if any(msg.startswith(marker) for marker in _CLAUDE_CONTEXT_OVERFLOW_MARKERS):
         return True
-    stderr = (result.stderr or "").lower()
+    stderr = (agent_result.stderr or "").lower()
     return any(marker in stderr for marker in _CLAUDE_CONTEXT_OVERFLOW_MARKERS)
 
 
-def _is_session_limit_message(result: AgentResult) -> bool:
-    """True iff `result.last_message` is a Claude session/usage-quota notice.
+def _is_session_limit_message(agent_result: AgentResult) -> bool:
+    """True iff `agent_result.last_message` is a Claude session/usage-quota notice.
 
     A non-empty quota notice ("You've hit your session limit ...") is not a
     real agent question: the session is healthy and the only recovery is to
@@ -211,21 +211,21 @@ def _is_session_limit_message(result: AgentResult) -> bool:
     distinctive enough that a non-Claude backend echoing them would still be a
     quota stop, and `_on_question` (the sole caller) has no backend in hand.
     """
-    msg = (result.last_message or "").strip().lower().replace("’", "'")
+    msg = (agent_result.last_message or "").strip().lower().replace("’", "'")
     return any(
         msg.startswith(marker) for marker in _CLAUDE_SESSION_LIMIT_MESSAGE_MARKERS
     )
 
 
-def _is_poisoned_session_failure(backend: str, result: AgentResult) -> bool:
+def _is_poisoned_session_failure(backend: str, agent_result: AgentResult) -> bool:
     """True iff resuming this session is futile and a fresh spawn is the only
     recovery: the session was GC'd (stale) or its transcript overflowed the
     model context window. Both clear the pinned session id and retry once as
     a fresh spawn in `_resume_dev_with_text`.
     """
     return (
-        _is_stale_session_failure(backend, result)
-        or _is_context_overflow_failure(backend, result)
+        _is_stale_session_failure(backend, agent_result)
+        or _is_context_overflow_failure(backend, agent_result)
     )
 
 
@@ -404,7 +404,7 @@ def _build_dev_spawn_prompt(
 
 def _persist_dev_session_after_run(
     state: PinnedState,
-    result: AgentResult,
+    agent_result: AgentResult,
     *,
     fresh_spawn: bool,
     resume_count: int,
@@ -420,8 +420,8 @@ def _persist_dev_session_after_run(
     budget so the next tick can rotate once the transcript has grown enough.
     """
     if fresh_spawn:
-        if result.session_id:
-            state.set("dev_session_id", result.session_id)
+        if agent_result.session_id:
+            state.set("dev_session_id", agent_result.session_id)
             state.set("dev_resume_count", 0)
     else:
         state.set("dev_resume_count", resume_count + 1)
@@ -474,7 +474,7 @@ def _resume_dev_with_text(
     (`agent_silent` for two ticks, or `awaiting_human` forever) before
     recovering.
 
-    Returns `(worktree, result, paused)`. `paused` is the live-pause decision
+    Returns `(worktree, agent_result, paused)`. `paused` is the live-pause decision
     -- True only when `pause_guard` is set AND a hard-skip control label
     (`paused` / `backlog`) was applied to a freshly fetched issue while an agent
     run was in flight. `pause_guard` is opt-in (default False): every
@@ -505,7 +505,7 @@ def _resume_dev_with_text(
     # in_review / resolving_conflict resumes (or implementing awaiting-human
     # resumes) are tagged with the handler that triggered the resume.
     resume_stage = gh.workflow_label(issue) or "implementing"
-    result = _wf._run_agent_tracked(
+    agent_result = _wf._run_agent_tracked(
         gh, issue.number,
         agent_role="developer",
         stage=resume_stage,
@@ -522,7 +522,7 @@ def _resume_dev_with_text(
         review_round=state.get("review_round", 0),
         retry_count=state.get("retry_count"),
     )
-    _wf._accumulate_issue_usage(state, result.usage)
+    _wf._accumulate_issue_usage(state, agent_result.usage)
 
     # Live pause (opt-in via `pause_guard`): an operator applied `paused` (or
     # `backlog`) while this resume/spawn was in flight. Stop BEFORE the
@@ -533,7 +533,7 @@ def _resume_dev_with_text(
     # before the run -- and propagate the result rather than have the caller
     # re-fetch, so both act on the same observation.
     if pause_guard and _wf._paused_during_agent_run(gh, issue):
-        return wt, result, True
+        return wt, agent_result, True
 
     # Deterministic poisoned-session recovery: if we resumed with a session
     # id and Claude reported either a stale session ("no conversation found")
@@ -549,7 +549,7 @@ def _resume_dev_with_text(
     if (
         dev_sid is not None
         and not fresh_spawn
-        and _is_poisoned_session_failure(dev_backend, result)
+        and _is_poisoned_session_failure(dev_backend, agent_result)
     ):
         _wf.log.info(
             "issue=#%d dropping poisoned dev session %r after poisoned-session "
@@ -558,7 +558,7 @@ def _resume_dev_with_text(
         )
         _drop_poisoned_dev_session(state)
         fresh_spawn = True
-        result = _wf._run_agent_tracked(
+        agent_result = _wf._run_agent_tracked(
             gh, issue.number,
             agent_role="developer",
             stage=resume_stage,
@@ -578,7 +578,7 @@ def _resume_dev_with_text(
         # The poisoned resume above already burned a real agent exit and was
         # folded once; this fresh-spawn retry is a second real exit, so it is
         # counted too -- both consumed tokens on this issue.
-        _wf._accumulate_issue_usage(state, result.usage)
+        _wf._accumulate_issue_usage(state, agent_result.usage)
 
         # The fresh retry is a SECOND run with its own live-pause window: an
         # operator may have applied `paused` while it was in flight even though
@@ -586,12 +586,12 @@ def _resume_dev_with_text(
         # persistence / disposition below, so the retry's result is not
         # published while the issue is frozen.
         if pause_guard and _wf._paused_during_agent_run(gh, issue):
-            return wt, result, True
+            return wt, agent_result, True
 
     _persist_dev_session_after_run(
-        state, result, fresh_spawn=fresh_spawn, resume_count=resume_count,
+        state, agent_result, fresh_spawn=fresh_spawn, resume_count=resume_count,
     )
-    return wt, result, False
+    return wt, agent_result, False
 
 
 def _resume_developer_on_human_reply(
@@ -632,13 +632,14 @@ def _resume_developer_on_human_reply(
     new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
     if not new_comments:
         return None
-    consumed_max = max(c.id for c in new_comments)
+    consumed_max = max(comment.id for comment in new_comments)
     state.set("last_action_comment_id", consumed_max)
     from orchestrator import workflow as _wf
 
     followup = "\n\n".join(
-        f"@{c.user.login if c.user else 'user'}: {c.body}"
-        for c in new_comments if c.body
+        f"@{comment.user.login if comment.user else 'user'}: {comment.body}"
+        for comment in new_comments
+        if comment.body
     )
     followup = f"{followup}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
     return _resume_dev_with_text(
@@ -651,7 +652,7 @@ def _publish_committed_work(
     spec: RepoSpec,
     issue: Issue,
     state: PinnedState,
-    result: AgentResult,
+    agent_result: AgentResult,
     wt: Path,
 ) -> None:
     """Publish a worktree that carries a new commit.
@@ -666,9 +667,9 @@ def _publish_committed_work(
 
     dirty = _wf._worktree_dirty_files(wt)
     if dirty:
-        _on_dirty_worktree(gh, issue, state, result, dirty)
+        _on_dirty_worktree(gh, issue, state, agent_result, dirty)
     else:
-        _on_commits(gh, spec, issue, state, result)
+        _on_commits(gh, spec, issue, state, agent_result)
 
 
 def _park_agent_timeout(
@@ -746,7 +747,7 @@ def _try_recover_implementing_timeout_park(
     state.set("park_reason", None)
     state.set("pre_implement_sha", None)
     _, _, _, dev_sid = _read_dev_session(state)
-    result = AgentResult(
+    agent_result = AgentResult(
         session_id=dev_sid,
         last_message=(
             "(orchestrator recovery: publishing commit produced around the "
@@ -757,7 +758,7 @@ def _try_recover_implementing_timeout_park(
         stdout="",
         stderr="",
     )
-    _on_commits(gh, spec, issue, state, result)
+    _on_commits(gh, spec, issue, state, agent_result)
     return "pushed"
 
 
@@ -875,7 +876,7 @@ def _retry_parked_dev_session(
 ) -> None:
     """Resume the locked dev session as an intentional `/orchestrator continue`
     retry of a session-failure park (`agent_silent` / `agent_timeout`), then
-    dispose the result exactly like the awaiting-human resume path.
+    dispose the outcome exactly like the awaiting-human resume path.
 
     Unlike the generic human-reply resume this does NOT feed the bare command
     text to the dev (`_wf._CONTINUE_RETRY_PROMPT` instead): the poisoned session
@@ -889,7 +890,10 @@ def _retry_parked_dev_session(
     """
     from orchestrator import workflow as _wf
 
-    state.set("last_action_comment_id", max(c.id for c in new_comments))
+    state.set(
+        "last_action_comment_id",
+        max(comment.id for comment in new_comments),
+    )
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _wf._ensure_worktree(
@@ -898,7 +902,7 @@ def _retry_parked_dev_session(
         )
     before_sha = _wf._head_sha(wt)
     followup = f"{_wf._CONTINUE_RETRY_PROMPT}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
-    wt, result, paused = _resume_dev_with_text(
+    wt, agent_result, paused = _resume_dev_with_text(
         gh, spec, issue, state, followup, pause_guard=True,
     )
     state.set("last_agent_action_at", _wf._now_iso())
@@ -906,11 +910,11 @@ def _retry_parked_dev_session(
     # A shutdown-killed or live-paused resume leaves durable state untouched so
     # the next process re-detects and re-runs the retry (mirrors the drift and
     # fresh-spawn dispositions).
-    if _wf._ignore_if_interrupted(issue, result):
+    if _wf._ignore_if_interrupted(issue, agent_result):
         return
     if paused:
         return
-    _dispose_agent_result(gh, spec, issue, state, result, before_sha)
+    _dispose_agent_result(gh, spec, issue, state, agent_result, before_sha)
 
 
 def _handle_parked_continue_command(
@@ -972,7 +976,7 @@ def _handle_user_content_drift(
     Persists the new content hash, then:
       * With a recorded dev session -> notify the human, mark the current
         conversation consumed, resume the locked session with the updated
-        requirements, and dispose the result (publish a fresh commit, park a
+        requirements, and dispose the outcome (publish a fresh commit, park a
         commit-less timeout, ACK an explicit "existing work satisfies" reply,
         or park the question). Always returns True -- the caller must return.
       * Without a dev session but with recovered unpushed commits from a prior
@@ -1027,7 +1031,7 @@ def _handle_user_content_drift(
         followup = _wf._build_user_content_change_prompt(
             issue, _wf._recent_comments_text(issue),
         )
-        wt, result, paused = _resume_dev_with_text(
+        wt, agent_result, paused = _resume_dev_with_text(
             gh, spec, issue, state, followup, pause_guard=True,
         )
         state.set("last_agent_action_at", _wf._now_iso())
@@ -1038,7 +1042,7 @@ def _handle_user_content_drift(
         # and return WITHOUT writing pinned state, so the drift (and its
         # consumed-comment / user_content_hash bookkeeping) is left unrecorded
         # and the next process re-detects and re-runs it.
-        if _wf._ignore_if_interrupted(issue, result):
+        if _wf._ignore_if_interrupted(issue, agent_result):
             return True
         # Live pause applied during the drift resume: honor the decision the
         # helper already made (propagated, not re-fetched), then stop before
@@ -1048,8 +1052,8 @@ def _handle_user_content_drift(
         if this_resume_committed:
             # A commit landed on THIS resume -- publish it even if the agent
             # then timed out, rather than stranding it behind awaiting_human.
-            _publish_committed_work(gh, spec, issue, state, result, wt)
-        elif result.timed_out:
+            _publish_committed_work(gh, spec, issue, state, agent_result, wt)
+        elif agent_result.timed_out:
             # Timed out with no new commit -- park so the next-tick recovery
             # can publish a commit a lingering descendant finishes afterward.
             _park_agent_timeout(gh, issue, state, before_sha)
@@ -1065,7 +1069,7 @@ def _handle_user_content_drift(
             # Recovered pre-existing commits are deliberately NOT pushed here
             # either: the dev must explicitly commit again (or ACK) for the
             # body change to count as handled.
-            ack_reason = _wf._drift_ack_reason(result.last_message or "")
+            ack_reason = _wf._drift_ack_reason(agent_result.last_message or "")
             if ack_reason:
                 quoted = "> " + ack_reason.replace("\n", "\n> ")
                 _wf._post_issue_comment(
@@ -1075,7 +1079,7 @@ def _handle_user_content_drift(
                 )
                 state.set("silent_park_count", 0)
             else:
-                _on_question(gh, issue, state, result)
+                _on_question(gh, issue, state, agent_result)
         gh.write_pinned_state(issue, state)
         return True
     # No dev session yet. If the worktree carries recovered unpushed commits
@@ -1185,8 +1189,8 @@ def _prepare_dev_run(
         )
         if resumed is None:
             return None
-        _, result, paused = resumed
-        return _PreparedDevRun(result, before_sha, paused)
+        _, agent_result, paused = resumed
+        return _PreparedDevRun(agent_result, before_sha, paused)
 
     wt = _wf._ensure_worktree(
         spec, issue.number,
@@ -1205,7 +1209,7 @@ def _prepare_dev_run(
             issue.number,
         )
         _, _, _, dev_sid = _read_dev_session(state)
-        result = AgentResult(
+        agent_result = AgentResult(
             session_id=dev_sid,
             last_message="(orchestrator restart: pushing previously committed work)",
             exit_code=0,
@@ -1235,7 +1239,7 @@ def _prepare_dev_run(
             spec, issue, _wf._recent_comments_text(issue),
             config.default_repo_specs(),
         )
-        result = _wf._run_agent_tracked(
+        agent_result = _wf._run_agent_tracked(
             gh, issue.number,
             agent_role="developer",
             stage="implementing",
@@ -1247,9 +1251,9 @@ def _prepare_dev_run(
             review_round=state.get("review_round", 0),
             retry_count=state.get("retry_count"),
         )
-        _wf._accumulate_issue_usage(state, result.usage)
-        if result.session_id:
-            state.set("dev_session_id", result.session_id)
+        _wf._accumulate_issue_usage(state, agent_result.usage)
+        if agent_result.session_id:
+            state.set("dev_session_id", agent_result.session_id)
             # Fresh session -> its resume budget starts from zero, even when a
             # prior (retried) session left a non-zero count.
             state.set("dev_resume_count", 0)
@@ -1258,7 +1262,7 @@ def _prepare_dev_run(
         # decision without a second read.
         paused = _wf._paused_during_agent_run(gh, issue)
     state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
-    return _PreparedDevRun(result, before_sha, paused)
+    return _PreparedDevRun(agent_result, before_sha, paused)
 
 
 def _dispose_agent_result(
@@ -1266,7 +1270,7 @@ def _dispose_agent_result(
     spec: RepoSpec,
     issue: Issue,
     state: PinnedState,
-    result: AgentResult,
+    agent_result: AgentResult,
     before_sha: Optional[str],
 ) -> None:
     """Dispose a completed implementing run and write pinned state.
@@ -1280,7 +1284,7 @@ def _dispose_agent_result(
     """
     from orchestrator import workflow as _wf
 
-    if result.timed_out:
+    if agent_result.timed_out:
         # The implementer can commit clean work and then get killed by the
         # timeout (or a descendant finishes the commit during cleanup). Don't
         # strand that commit behind `awaiting_human`: publish it if HEAD
@@ -1289,7 +1293,7 @@ def _dispose_agent_result(
         wt = _wf._worktree_path(spec, issue.number)
         after_sha = _wf._head_sha(wt)
         if after_sha and after_sha != before_sha:
-            _publish_committed_work(gh, spec, issue, state, result, wt)
+            _publish_committed_work(gh, spec, issue, state, agent_result, wt)
         else:
             _park_agent_timeout(gh, issue, state, before_sha)
         gh.write_pinned_state(issue, state)
@@ -1297,9 +1301,9 @@ def _dispose_agent_result(
 
     wt = _wf._worktree_path(spec, issue.number)
     if _wf._has_new_commits(spec, wt):
-        _publish_committed_work(gh, spec, issue, state, result, wt)
+        _publish_committed_work(gh, spec, issue, state, agent_result, wt)
     else:
-        _on_question(gh, issue, state, result)
+        _on_question(gh, issue, state, agent_result)
     gh.write_pinned_state(issue, state)
 
 
@@ -1355,11 +1359,11 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
     state.set("last_agent_action_at", _wf._now_iso())
 
     # Shutdown-sweep interruption: a run the orchestrator killed mid-flight
-    # has no trustworthy result, so ignore it and return WITHOUT writing
+    # has no trustworthy outcome, so ignore it and return WITHOUT writing
     # pinned state (the in-memory `awaiting_human=False` / watermark / session
     # mutations in `_prepare_dev_run` are discarded) so the next process
     # retries from durable state. Must precede the disposition below.
-    if _wf._ignore_if_interrupted(issue, prepared.result):
+    if _wf._ignore_if_interrupted(issue, prepared.agent_result):
         return
 
     # Live pause applied while the agent ran: honor the single decision made in
@@ -1373,7 +1377,7 @@ def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None
         return
 
     _dispose_agent_result(
-        gh, spec, issue, state, prepared.result, prepared.before_sha,
+        gh, spec, issue, state, prepared.agent_result, prepared.before_sha,
     )
 
 
@@ -1436,7 +1440,7 @@ def _derive_pr_title(spec: RepoSpec, issue: Issue, wt: Path) -> str:
     )
 
 
-def _build_pr_body(state: PinnedState, issue: Issue, result: AgentResult) -> str:
+def _build_pr_body(state: PinnedState, issue: Issue, agent_result: AgentResult) -> str:
     """PR body: the `Resolves #N` line, the generating session's identity, and
     the (capped) final agent message when the run produced one."""
     _, dev_backend, _, dev_sid = _read_dev_session(state)
@@ -1445,10 +1449,10 @@ def _build_pr_body(state: PinnedState, issue: Issue, result: AgentResult) -> str
         "",
         f"Generated by orchestrator ({dev_backend} session `{dev_sid or '?'}`).",
     ]
-    if result.last_message.strip():
+    if agent_result.last_message.strip():
         body_parts += [
             "", "---", "_Last agent message:_", "",
-            _format_pr_agent_message(result.last_message),
+            _format_pr_agent_message(agent_result.last_message),
         ]
     return "\n".join(body_parts)
 
@@ -1458,7 +1462,7 @@ def _reuse_or_open_pr(
     spec: RepoSpec,
     issue: Issue,
     state: PinnedState,
-    result: AgentResult,
+    agent_result: AgentResult,
     wt: Path,
     branch: str,
 ):
@@ -1481,7 +1485,7 @@ def _reuse_or_open_pr(
     pr = gh.open_pr(
         branch=branch, base=spec.base_branch,
         title=_derive_pr_title(spec, issue, wt),
-        body=_build_pr_body(state, issue, result),
+        body=_build_pr_body(state, issue, agent_result),
     )
     _wf._post_issue_comment(gh, issue, state, f":sparkles: PR opened: #{pr.number}")
     gh.emit_event(
@@ -1541,7 +1545,7 @@ def _on_commits(
     spec: RepoSpec,
     issue: Issue,
     state: PinnedState,
-    result: AgentResult,
+    agent_result: AgentResult,
 ) -> None:
     from orchestrator import workflow as _wf
 
@@ -1558,7 +1562,7 @@ def _on_commits(
         )
         # _handle_implementing writes pinned state after we return.
         return
-    pr = _reuse_or_open_pr(gh, spec, issue, state, result, wt, branch)
+    pr = _reuse_or_open_pr(gh, spec, issue, state, agent_result, wt, branch)
     _advance_to_validating(gh, issue, state, pr, branch)
 
 
@@ -1617,7 +1621,7 @@ def _park_real_question(
 
 
 def _park_silent_failure(
-    gh: GitHubClient, issue: Issue, state: PinnedState, result: AgentResult
+    gh: GitHubClient, issue: Issue, state: PinnedState, agent_result: AgentResult
 ) -> str:
     """Park a run that produced no commit AND no message as a silent failure.
 
@@ -1630,7 +1634,7 @@ def _park_silent_failure(
     """
     from orchestrator import workflow as _wf
 
-    diag = _wf._format_stderr_diagnostics(result, "Agent")
+    diag = _wf._format_stderr_diagnostics(agent_result, "Agent")
     _wf._post_issue_comment(
         gh, issue, state,
         f"{config.HITL_MENTIONS} agent produced no output (likely a "
@@ -1639,8 +1643,8 @@ def _park_silent_failure(
     _wf.log.warning(
         "issue=#%s agent produced no output; exit_code=%d "
         "timed_out=%s stderr_tail=%r",
-        issue.number, result.exit_code, result.timed_out,
-        _wf._stderr_log_tail(result),
+        issue.number, agent_result.exit_code, agent_result.timed_out,
+        _wf._stderr_log_tail(agent_result),
     )
     state.set("awaiting_human", True)
     state.set("park_reason", "agent_silent")
@@ -1649,15 +1653,15 @@ def _park_silent_failure(
 
 
 def _on_question(
-    gh: GitHubClient, issue: Issue, state: PinnedState, result: AgentResult
+    gh: GitHubClient, issue: Issue, state: PinnedState, agent_result: AgentResult
 ) -> None:
-    raw = result.last_message.strip()
-    if raw and _is_session_limit_message(result):
+    raw = agent_result.last_message.strip()
+    if raw and _is_session_limit_message(agent_result):
         park_reason = _park_session_limit(gh, issue, state, raw)
     elif raw:
         park_reason = _park_real_question(gh, issue, state, raw)
     else:
-        park_reason = _park_silent_failure(gh, issue, state, result)
+        park_reason = _park_silent_failure(gh, issue, state, agent_result)
     latest = gh.latest_comment_id(issue)
     if latest is not None:
         state.set("last_action_comment_id", latest)
@@ -1673,7 +1677,7 @@ def _on_dirty_worktree(
     gh: GitHubClient,
     issue: Issue,
     state: PinnedState,
-    result: AgentResult,
+    agent_result: AgentResult,
     dirty: list[str],
 ) -> None:
     """Park instead of pushing when the agent left uncommitted changes.
@@ -1686,10 +1690,10 @@ def _on_dirty_worktree(
     from orchestrator import workflow as _wf
 
     shown = dirty[:10]
-    files_md = "\n".join(f"- `{p}`" for p in shown)
+    files_md = "\n".join(f"- `{file_path}`" for file_path in shown)
     if len(dirty) > len(shown):
         files_md += f"\n- … ({len(dirty) - len(shown)} more)"
-    last_msg = result.last_message.strip()
+    last_msg = agent_result.last_message.strip()
     tail = ""
     if last_msg:
         quoted = "> " + last_msg.replace("\n", "\n> ")

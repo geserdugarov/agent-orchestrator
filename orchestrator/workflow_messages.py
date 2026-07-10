@@ -123,12 +123,13 @@ def _build_tracked_repos_context(
     """
     if not config.EXPOSE_TRACKED_REPOS or len(specs) <= 1:
         return ""
-    others = [s for s in specs if s.slug != current.slug]
+    others = [repo_spec for repo_spec in specs if repo_spec.slug != current.slug]
     if not others:
         return ""
     lines = [
-        f"- {s.slug} — source at {s.target_root} (base `{s.base_branch}`)"
-        for s in others[:_TRACKED_REPOS_CAP]
+        f"- {repo_spec.slug} — source at {repo_spec.target_root} "
+        f"(base `{repo_spec.base_branch}`)"
+        for repo_spec in others[:_TRACKED_REPOS_CAP]
     ]
     overflow = len(others) - _TRACKED_REPOS_CAP
     if overflow > 0:
@@ -153,7 +154,7 @@ def _orchestrator_ids(state: PinnedState) -> set[int]:
     human merge over them).
     """
     raw = state.get("orchestrator_comment_ids") or []
-    return {int(x) for x in raw}
+    return {int(comment_id) for comment_id in raw}
 
 
 def _track_orchestrator_comment(state: PinnedState, comment_id: int) -> None:
@@ -190,11 +191,11 @@ def _post_issue_comment(
     hash can identify bot comments by marker (id-cap-resistant) in
     addition to by id (works for tracked-and-not-yet-evicted comments).
     """
-    c = gh.comment(issue, _with_orch_marker(body))
-    cid = getattr(c, "id", None)
+    issue_comment = gh.comment(issue, _with_orch_marker(body))
+    cid = getattr(issue_comment, "id", None)
     if cid is not None:
         _track_orchestrator_comment(state, int(cid))
-    return c
+    return issue_comment
 
 
 def _post_pr_comment(
@@ -214,11 +215,11 @@ def _post_pr_comment(
     surfaces keeps the filter rules uniform and avoids accidental
     inconsistency when a future tweak does start reading PR comments.
     """
-    c = gh.pr_comment(pr_number, _with_orch_marker(body))
-    cid = getattr(c, "id", None)
+    pr_comment = gh.pr_comment(pr_number, _with_orch_marker(body))
+    cid = getattr(pr_comment, "id", None)
     if cid is not None:
         _track_orchestrator_comment(state, int(cid))
-    return c
+    return pr_comment
 
 
 # Cap the stderr tail surfaced in park comments. A multi-MB Cloudflare
@@ -275,14 +276,14 @@ def _redact_secrets(text: str) -> str:
     if not text:
         return text
     redacted = text
-    for key, value in os.environ.items():
-        if not value or len(value) < _REDACT_MIN_VALUE_LEN:
+    for key, env_value in os.environ.items():
+        if not env_value or len(env_value) < _REDACT_MIN_VALUE_LEN:
             continue
         upper = key.upper()
         if upper in _SECRET_KEY_NAMES or any(
             upper.endswith(suffix) for suffix in _SECRET_KEY_SUFFIXES
         ):
-            redacted = redacted.replace(value, "***")
+            redacted = redacted.replace(env_value, "***")
     # GITHUB_TOKEN may have been resolved from ORCHESTRATOR_TOKEN_FILE (or
     # the default ~/.config/<repo>/token path) rather than the process env,
     # in which case the env loop above never sees it. Without this explicit
@@ -294,7 +295,9 @@ def _redact_secrets(text: str) -> str:
     return redacted
 
 
-def _format_stderr_diagnostics(result: AgentResult, label: str = "Agent") -> str:
+def _format_stderr_diagnostics(
+    agent_result: AgentResult, label: str = "Agent",
+) -> str:
     """Render a stderr/exit-code diagnostic block to append to a park comment.
 
     Returns "" when the agent produced no stderr -- callers can concatenate
@@ -308,7 +311,7 @@ def _format_stderr_diagnostics(result: AgentResult, label: str = "Agent") -> str
     stripped first, so `str.replace` would no longer find the env value
     verbatim and the secret would leak.
     """
-    tail = _redact_secrets(result.stderr or "").rstrip()
+    tail = _redact_secrets(agent_result.stderr or "").rstrip()
     if not tail:
         return ""
     if len(tail) > _STDERR_TAIL_BUDGET:
@@ -316,11 +319,11 @@ def _format_stderr_diagnostics(result: AgentResult, label: str = "Agent") -> str
     quoted = "> " + tail.replace("\n", "\n> ")
     return (
         f"\n\n_{label} stderr (last 1KB):_\n\n{quoted}\n\n"
-        f"_{label} exit code:_ {result.exit_code}"
+        f"_{label} exit code:_ {agent_result.exit_code}"
     )
 
 
-def _stderr_log_tail(result: AgentResult, max_chars: int = 400) -> str:
+def _stderr_log_tail(agent_result: AgentResult, max_chars: int = 400) -> str:
     """Short stderr tail for log lines -- tighter than the park-comment cap
     so a single WARNING fits on one screen.
 
@@ -328,7 +331,7 @@ def _stderr_log_tail(result: AgentResult, max_chars: int = 400) -> str:
     a multi-line secret value ending in `\\n` would not match `str.replace`
     if `rstrip` ate the trailing newline first.
     """
-    tail = _redact_secrets(result.stderr or "").rstrip()
+    tail = _redact_secrets(agent_result.stderr or "").rstrip()
     if len(tail) > max_chars:
         tail = tail[-max_chars:]
     return tail
@@ -476,7 +479,9 @@ def _parse_orchestrator_continue(comments: list) -> list:
     """Return the comments whose body contains an exact-line
     `/orchestrator continue` operator command."""
     return [
-        c for c in comments if _ORCHESTRATOR_CONTINUE_RE.search(c.body or "")
+        comment
+        for comment in comments
+        if _ORCHESTRATOR_CONTINUE_RE.search(comment.body or "")
     ]
 
 
@@ -514,7 +519,9 @@ def _continue_command_action(new_comments: list, park_reason) -> str:
     """
     if not _parse_orchestrator_continue(new_comments):
         return "passthrough"
-    if not all(_is_bare_orchestrator_continue(c) for c in new_comments):
+    if not all(
+        _is_bare_orchestrator_continue(comment) for comment in new_comments
+    ):
         return "passthrough"
     if park_reason in _CONTINUE_PARK_REASONS:
         return "retry"
@@ -619,24 +626,24 @@ def _parse_manifest(
             f"expected exactly one orchestrator-manifest block, "
             f"found {len(matches)}"
         )
-    m = matches[0]
-    if last_message[m.end():].strip():
+    manifest_match = matches[0]
+    if last_message[manifest_match.end():].strip():
         return None, (
             "orchestrator-manifest must be the final block; "
             "found content after the closing fence"
         )
     try:
-        data = json.loads(m.group(1))
-    except json.JSONDecodeError as e:
-        return None, f"invalid JSON: {e.msg}"
-    if not isinstance(data, dict):
+        manifest = json.loads(manifest_match.group(1))
+    except json.JSONDecodeError as error:
+        return None, f"invalid JSON: {error.msg}"
+    if not isinstance(manifest, dict):
         return None, "manifest is not a JSON object"
-    decision = data.get("decision")
+    decision = manifest.get("decision")
     if decision not in ("single", "split"):
         return None, "decision must be 'single' or 'split'"
     if decision == "single":
-        return data, None
-    children = data.get("children")
+        return manifest, None
+    children = manifest.get("children")
     if not isinstance(children, list) or not children:
         return None, "split decision requires non-empty children list"
     if len(children) > _MAX_CHILDREN:
@@ -649,7 +656,7 @@ def _parse_manifest(
     # so a typo like `"umbrella": "yes"` surfaces via the standard
     # invalid-manifest HITL loop instead of silently being treated as
     # truthy.
-    umbrella = data.get("umbrella")
+    umbrella = manifest.get("umbrella")
     if umbrella is not None and not isinstance(umbrella, bool):
         return None, "umbrella must be a boolean"
     for idx, child in enumerate(children):
@@ -680,21 +687,25 @@ def _parse_manifest(
             deps = []
         elif not isinstance(deps, list):
             return None, f"child {idx} depends_on must be a list"
-        for d in deps:
+        for dependency_index in deps:
             if (
-                not isinstance(d, int)
-                or isinstance(d, bool)
-                or d < 0
-                or d >= len(children)
-                or d == idx
+                not isinstance(dependency_index, int)
+                or isinstance(dependency_index, bool)
+                or dependency_index < 0
+                or dependency_index >= len(children)
+                or dependency_index == idx
             ):
-                return None, f"child {idx} has invalid dependency {d!r}"
+                return None, (
+                    f"child {idx} has invalid dependency {dependency_index!r}"
+                )
     if _has_dep_cycle(children):
         return None, "dependency graph has a cycle"
-    return data, None
+    return manifest, None
 
 
-def _dep_cycle_visit(u: int, children: list[dict], color: list[int]) -> bool:
+def _dep_cycle_visit(
+    child_index: int, children: list[dict], color: list[int],
+) -> bool:
     """DFS one node of the children dep graph; True on a back-edge to a node
     still on the stack.
 
@@ -702,13 +713,15 @@ def _dep_cycle_visit(u: int, children: list[dict], color: list[int]) -> bool:
     shared across the whole walk, so a node finished on one root is never
     re-descended from another.
     """
-    color[u] = 1
-    for v in (children[u].get("depends_on") or []):
-        if color[v] == 1:
+    color[child_index] = 1
+    for dependency_index in (children[child_index].get("depends_on") or []):
+        if color[dependency_index] == 1:
             return True
-        if color[v] == 0 and _dep_cycle_visit(v, children, color):
+        if color[dependency_index] == 0 and _dep_cycle_visit(
+            dependency_index, children, color,
+        ):
             return True
-    color[u] = 2
+    color[child_index] = 2
     return False
 
 
@@ -716,8 +729,9 @@ def _has_dep_cycle(children: list[dict]) -> bool:
     """DFS for back-edges in the children dep graph (white/gray/black)."""
     color = [0] * len(children)  # 0=unvisited, 1=on-stack, 2=finished
     return any(
-        color[u] == 0 and _dep_cycle_visit(u, children, color)
-        for u in range(len(children))
+        color[child_index] == 0
+        and _dep_cycle_visit(child_index, children, color)
+        for child_index in range(len(children))
     )
 
 
@@ -733,13 +747,13 @@ def _recent_comments_text(issue: Issue, max_chars: int = 4000) -> str:
     default single-user deployment sees the full thread unchanged.
     """
     chunks: list[str] = []
-    for c in issue.get_comments():
-        body = c.body or ""
+    for issue_comment in issue.get_comments():
+        body = issue_comment.body or ""
         if "<!--orchestrator-state" in body:
             continue
-        if not is_trusted_author(getattr(c, "user", None)):
+        if not is_trusted_author(getattr(issue_comment, "user", None)):
             continue
-        login = c.user.login if c.user else "user"
+        login = issue_comment.user.login if issue_comment.user else "user"
         chunks.append(f"@{login}: {body}")
     text = "\n\n".join(chunks)
     return text[-max_chars:] if len(text) > max_chars else text
@@ -1003,11 +1017,15 @@ def _build_single_decision_comment(manifest: dict) -> str:
 
     raw_files = manifest.get("affected_files")
     files = (
-        [f.strip() for f in raw_files if isinstance(f, str) and f.strip()]
+        [
+            file_path.strip()
+            for file_path in raw_files
+            if isinstance(file_path, str) and file_path.strip()
+        ]
         if isinstance(raw_files, list) else []
     )
     if files:
-        rendered = "\n".join(f"- `{f}`" for f in files)
+        rendered = "\n".join(f"- `{file_path}`" for file_path in files)
         lines.append(f"**Affected files:**\n{rendered}")
 
     raw_notes = manifest.get("notes")
@@ -1022,7 +1040,7 @@ def _build_conflict_resolution_prompt(
     base_ref: str, files: list[str]
 ) -> str:
     shown = files[:20]
-    files_md = "\n".join(f"- `{p}`" for p in shown)
+    files_md = "\n".join(f"- `{file_path}`" for file_path in shown)
     if len(files) > len(shown):
         files_md += f"\n- ... ({len(files) - len(shown)} more)"
     return (
@@ -1098,8 +1116,9 @@ def _build_question_followup_prompt(comments: list) -> str:
     deciding to "just implement the fix".
     """
     body = "\n\n".join(
-        f"@{c.user.login if c.user else 'user'}: {c.body or ''}"
-        for c in comments
+        f"@{comment.user.login if comment.user else 'user'}: "
+        f"{comment.body or ''}"
+        for comment in comments
     )
     quoted = "> " + body.replace("\n", "\n> ")
     return (
@@ -1121,8 +1140,9 @@ def _build_pr_comment_followup(comments: list) -> str:
     "rename foo to bar" reads as freeform chatter without context.
     """
     body = "\n\n".join(
-        f"@{c.user.login if c.user else 'user'}: {c.body or ''}"
-        for c in comments
+        f"@{comment.user.login if comment.user else 'user'}: "
+        f"{comment.body or ''}"
+        for comment in comments
     )
     quoted = "> " + body.replace("\n", "\n> ")
     return (

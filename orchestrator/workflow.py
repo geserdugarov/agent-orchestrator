@@ -567,7 +567,7 @@ def _run_agent_tracked(
         run_agent_kwargs["resume_session_id"] = resume_session_id
     if timeout is not None:
         run_agent_kwargs["timeout"] = timeout
-    result = run_agent(backend, prompt, cwd, **run_agent_kwargs)
+    agent_result = run_agent(backend, prompt, cwd, **run_agent_kwargs)
     duration_s = round(time.monotonic() - start, 3)
     gh.emit_event(
         "agent_exit",
@@ -575,10 +575,10 @@ def _run_agent_tracked(
         stage=stage,
         agent=backend,
         agent_role=agent_role,
-        session_id=result.session_id,
+        session_id=agent_result.session_id,
         duration_s=duration_s,
-        exit_code=result.exit_code,
-        timed_out=result.timed_out,
+        exit_code=agent_result.exit_code,
+        timed_out=agent_result.timed_out,
         review_round=review_round,
         retry_count=retry_count,
     )
@@ -590,7 +590,7 @@ def _run_agent_tracked(
         backend=backend,
         agent_spec=agent_spec,
         resume_session_id=resume_session_id,
-        result=result,
+        result=agent_result,
         duration_s=duration_s,
         review_round=review_round,
         retry_count=retry_count,
@@ -621,7 +621,7 @@ def _run_agent_tracked(
             "issue=#%d: skill_triggered audit emission failed; continuing",
             issue_number,
         )
-    return result
+    return agent_result
 
 
 def _configured_model(
@@ -644,13 +644,13 @@ def _configured_model(
     """
     flag = "-m" if backend == "codex" else "--model"
     eq_prefix = flag + "="
-    for i, tok in enumerate(extra_args):
-        if tok == flag and i + 1 < len(extra_args):
-            value = extra_args[i + 1].strip()
-            return value or None
-        if tok.startswith(eq_prefix):
-            value = tok[len(eq_prefix):].strip()
-            return value or None
+    for arg_index, arg in enumerate(extra_args):
+        if arg == flag and arg_index + 1 < len(extra_args):
+            model_name = extra_args[arg_index + 1].strip()
+            return model_name or None
+        if arg.startswith(eq_prefix):
+            model_name = arg[len(eq_prefix):].strip()
+            return model_name or None
     return None
 
 
@@ -789,7 +789,7 @@ def _sweep_community_contribution_prs(
     allowed = config.ALLOWED_ISSUE_AUTHORS
     if not allowed:
         return
-    allowed_lower = {h.lower() for h in allowed}
+    allowed_lower = {github_handle.lower() for github_handle in allowed}
     try:
         prs = list(gh.iter_open_prs())
     except Exception:
@@ -1079,10 +1079,16 @@ def _run_parallel_tick(
                     semaphore_cm=semaphore_cm,
                 )
             ] = family_sentinel
-        for n in fanout_numbers:
+        for issue_number in fanout_numbers:
             futures[
-                ex.submit(_refetch_and_process, gh, spec, n, semaphore_cm=semaphore_cm)
-            ] = n
+                ex.submit(
+                    _refetch_and_process,
+                    gh,
+                    spec,
+                    issue_number,
+                    semaphore_cm=semaphore_cm,
+                )
+            ] = issue_number
         # `as_completed` so a slow issue does not delay logging the failures
         # of faster ones. Each `fut.result()` is wrapped individually so one
         # raising issue cannot abort the remaining futures' result drain.
@@ -1239,21 +1245,21 @@ def _drain_scheduler_family_bucket(
     mints a fresh ``GitHubClient`` via ``gh._for_worker_thread()`` and
     refetches the Issue against it (PyGithub is not documented thread-safe).
     """
-    for n in family_numbers:
+    for issue_number in family_numbers:
         try:
-            with scheduler.track_active(spec.slug, n) as claimed:
+            with scheduler.track_active(spec.slug, issue_number) as claimed:
                 if not claimed:
                     log.info(
                         "repo=%s issue=#%s already in flight; "
                         "family bucket skipping this iteration",
-                        spec.slug, n,
+                        spec.slug, issue_number,
                     )
                     continue
-                _refetch_and_process(gh, spec, n)
+                _refetch_and_process(gh, spec, issue_number)
         except Exception:
             log.exception(
                 "repo=%s issue=#%s processing failed",
-                spec.slug, n,
+                spec.slug, issue_number,
             )
 
 
@@ -1304,11 +1310,11 @@ def _submit_scheduler_fanout_issues(
     partition: _PollablePartition,
     per_repo_cap: int,
 ) -> None:
-    for n in partition.fanout_numbers:
+    for issue_number in partition.fanout_numbers:
         scheduler.submit(
             spec.slug,
-            n,
-            functools.partial(_refetch_and_process, gh, spec, n),
+            issue_number,
+            functools.partial(_refetch_and_process, gh, spec, issue_number),
             family=False,
             # A closed issue's handler is a cheap terminal finalization with
             # no agent spawn -- exempt it from the per-repo / global caps so
@@ -1316,7 +1322,7 @@ def _submit_scheduler_fanout_issues(
             # instead of being starved behind active agent work under
             # `parallel_limit=1` (mirrors the `_CAP_EXEMPT_FAMILY_LABELS`
             # exemption for `blocked` / `umbrella`).
-            cap_exempt=(n in partition.fanout_closed),
+            cap_exempt=(issue_number in partition.fanout_closed),
             per_repo_cap=per_repo_cap,
         )
 
@@ -1476,7 +1482,7 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     label = gh.workflow_label(issue)
     log.info("repo=%s issue=#%s label=%r", spec.slug, issue.number, label)
     # Time the handler dispatch and append a single `stage_evaluation`
-    # analytics record on exit. `result` flips to "error" inside the
+    # analytics record on exit. `evaluation_result` flips to "error" inside the
     # except clause so an unhandled exception still produces a timing
     # record before propagating -- the tick loop's per-issue try/except
     # already logs and isolates the failure, so re-raising here keeps
@@ -1484,11 +1490,11 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # itself is internally hardened against OSError; an analytics
     # misconfiguration cannot stop the per-issue tick from advancing.
     start = time.monotonic()
-    result = "ok"
+    evaluation_result = "ok"
     try:
         _route_issue_to_handler(gh, spec, issue, label)
     except Exception:
-        result = "error"
+        evaluation_result = "error"
         raise
     finally:
         duration_s = round(time.monotonic() - start, 3)
@@ -1497,7 +1503,7 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             issue=issue.number,
             stage=label,
             duration_s=duration_s,
-            result=result,
+            result=evaluation_result,
         )
 
 
@@ -1510,7 +1516,10 @@ def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         author = getattr(getattr(issue, "user", None), "login", None) or ""
         # GitHub logins are case-insensitive (Alice and alice resolve to the
         # same account), so normalize both sides before comparing.
-        allowed = {h.lower() for h in config.ALLOWED_ISSUE_AUTHORS}
+        allowed = {
+            github_handle.lower()
+            for github_handle in config.ALLOWED_ISSUE_AUTHORS
+        }
         if author.lower() not in allowed:
             log.info(
                 "repo=%s issue=#%s author=%r not in ALLOWED_ISSUE_AUTHORS; skipping pickup",
@@ -1570,8 +1579,8 @@ def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     _handle_implementing(gh, spec, issue)
 
 
-def _ignore_if_interrupted(issue: Issue, result: AgentResult) -> bool:
-    """True when `result` came from an agent run the shutdown sweep killed
+def _ignore_if_interrupted(issue: Issue, agent_result: AgentResult) -> bool:
+    """True when `agent_result` came from a run the shutdown sweep killed
     mid-flight (SIGTERM/SIGKILL -- `AgentResult.interrupted`).
 
     Such a run carries no trustworthy outcome: `last_message` is empty or a
@@ -1589,7 +1598,7 @@ def _ignore_if_interrupted(issue: Issue, result: AgentResult) -> bool:
     Logs once at INFO so the interruption is visible without being mistaken
     for a real silence/timeout park.
     """
-    if not result.interrupted:
+    if not agent_result.interrupted:
         return False
     log.info(
         "issue=#%d agent run interrupted by shutdown sweep; leaving durable "

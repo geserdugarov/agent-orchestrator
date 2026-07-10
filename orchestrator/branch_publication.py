@@ -117,14 +117,14 @@ def _branch_ahead_behind(
     silently re-route the workflow; the caller's subsequent steps
     (the rebase attempt, the push) surface the underlying problem.
     """
-    r = _git_hardened(
+    comparison_result = _git_hardened(
         "rev-list", "--left-right", "--count",
         f"refs/remotes/{spec.remote_name}/{branch}...HEAD",
         cwd=worktree,
     )
-    if r.returncode != 0:
+    if comparison_result.returncode != 0:
         return (0, 0)
-    parts = (r.stdout or "").strip().split()
+    parts = (comparison_result.stdout or "").strip().split()
     if len(parts) != 2:
         return (0, 0)
     try:
@@ -144,14 +144,14 @@ def _first_commit_subject(spec: RepoSpec, worktree: Path) -> str:
     with mixed default branches (e.g. one repo on `main`, another on
     `master`) compares against the right remote.
     """
-    r = _git(
+    log_result = _git(
         "log", "--reverse", "--format=%s",
         f"{spec.remote_name}/{spec.base_branch}..HEAD",
         cwd=worktree,
     )
-    if r.returncode != 0:
+    if log_result.returncode != 0:
         return ""
-    lines = (r.stdout or "").splitlines()
+    lines = (log_result.stdout or "").splitlines()
     return lines[0].strip() if lines else ""
 
 
@@ -171,8 +171,8 @@ def _is_prefixed_subject(subject: str) -> bool:
 
 def _subject_prefix(subject: str) -> Optional[str]:
     """Bare prefix token of a `<token>[(scope)][!]: ...` subject, or None."""
-    m = _PREFIX_TOKEN_RE.match(subject or "")
-    return m.group(1) if m else None
+    prefix_match = _PREFIX_TOKEN_RE.match(subject or "")
+    return prefix_match.group(1) if prefix_match else None
 
 
 def _recent_base_subjects(
@@ -186,14 +186,18 @@ def _recent_base_subjects(
     are excluded so their `Merge pull request #...` subjects don't drown
     out the real prefix style.
     """
-    r = _git(
+    log_result = _git(
         "log", "--no-merges", f"--max-count={limit}", "--format=%s",
         f"{spec.remote_name}/{spec.base_branch}",
         cwd=worktree,
     )
-    if r.returncode != 0:
+    if log_result.returncode != 0:
         return []
-    return [line.strip() for line in (r.stdout or "").splitlines() if line.strip()]
+    return [
+        line.strip()
+        for line in (log_result.stdout or "").splitlines()
+        if line.strip()
+    ]
 
 
 def _infer_subject_prefix(
@@ -220,7 +224,10 @@ def _infer_subject_prefix(
         dominant = counts.most_common(1)[0][0]
         if dominant not in _CONVENTIONAL_TYPES:
             return dominant
-    label_names = {(getattr(l, "name", "") or "").lower() for l in (issue.labels or [])}
+    label_names = {
+        (getattr(issue_label, "name", "") or "").lower()
+        for issue_label in (issue.labels or [])
+    }
     if {"bug", "fix"} & label_names:
         return "fix"
     return "feat"

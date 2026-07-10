@@ -55,7 +55,7 @@ from orchestrator.github import GitHubClient, PinnedState
 
 @dataclass(frozen=True)
 class _DecomposerRunPlan:
-    result: Optional[AgentResult]
+    agent_result: Optional[AgentResult]
     keep_worktree: bool = False
 
 
@@ -116,11 +116,12 @@ def _resume_decomposer_on_human_reply(
     new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
     if not new_comments:
         return None
-    consumed_max = max(c.id for c in new_comments)
+    consumed_max = max(comment.id for comment in new_comments)
     state.set("last_action_comment_id", consumed_max)
     followup = "\n\n".join(
-        f"@{c.user.login if c.user else 'user'}: {c.body}"
-        for c in new_comments if c.body
+        f"@{comment.user.login if comment.user else 'user'}: {comment.body}"
+        for comment in new_comments
+        if comment.body
     )
     wt = _wf._decompose_worktree_path(spec, issue.number)
     if not wt.exists():
@@ -128,7 +129,7 @@ def _resume_decomposer_on_human_reply(
     decomposer_spec, decomposer_backend, decomposer_args, decomposer_sid = (
         _read_decomposer_session(state)
     )
-    result = _wf._run_agent_tracked(
+    decomposer_result = _wf._run_agent_tracked(
         gh, issue.number,
         agent_role="decomposer",
         stage="decomposing",
@@ -141,7 +142,7 @@ def _resume_decomposer_on_human_reply(
         retry_count=state.get("retry_count"),
     )
     state.set("awaiting_human", False)
-    return result
+    return decomposer_result
 
 
 def _reset_decomposing_on_drift(
@@ -174,7 +175,9 @@ def _reset_decomposing_on_drift(
         return
     orphans = list(state.get("children") or [])
     if orphans:
-        orphan_list = ", ".join(f"#{n}" for n in orphans)
+        orphan_list = ", ".join(
+            f"#{child_number}" for child_number in orphans
+        )
         notice = (
             ":pencil2: issue content changed; re-running "
             "decomposer against the updated body. The "
@@ -397,7 +400,7 @@ def _spawn_fresh_decomposer(
         spec, issue, _wf._recent_comments_text(issue),
         config.default_repo_specs(),
     )
-    result = _wf._run_agent_tracked(
+    decomposer_result = _wf._run_agent_tracked(
         gh, issue.number,
         agent_role="decomposer",
         stage="decomposing",
@@ -408,14 +411,14 @@ def _spawn_fresh_decomposer(
         extra_args=decomposer_args,
         retry_count=state.get("retry_count"),
     )
-    if result.session_id:
-        state.set("decomposer_session_id", result.session_id)
-    return result
+    if decomposer_result.session_id:
+        state.set("decomposer_session_id", decomposer_result.session_id)
+    return decomposer_result
 
 
 def _park_unparsed_manifest(
     gh: GitHubClient, issue: Issue, state: PinnedState,
-    result: AgentResult, error: Optional[str],
+    decomposer_result: AgentResult, error: Optional[str],
 ) -> None:
     """Park awaiting human when the decomposer produced no usable manifest.
 
@@ -425,7 +428,7 @@ def _park_unparsed_manifest(
     """
     from orchestrator import workflow as _wf
 
-    last_msg = result.last_message or ""
+    last_msg = decomposer_result.last_message or ""
     if error is not None:
         quoted = "> " + last_msg.strip().replace("\n", "\n> ")
         _wf._park_awaiting_human(
@@ -444,7 +447,9 @@ def _park_unparsed_manifest(
         # the operator wading through subprocess noise.
         diag = (
             "" if stripped
-            else _wf._format_stderr_diagnostics(result, "Decomposer")
+            else _wf._format_stderr_diagnostics(
+                decomposer_result, "Decomposer",
+            )
         )
         _wf._park_awaiting_human(
             gh, issue, state,
@@ -456,8 +461,10 @@ def _park_unparsed_manifest(
             _wf.log.warning(
                 "issue=#%s decomposer produced no final message; "
                 "exit_code=%d timed_out=%s stderr_tail=%r",
-                issue.number, result.exit_code, result.timed_out,
-                _wf._stderr_log_tail(result),
+                issue.number,
+                decomposer_result.exit_code,
+                decomposer_result.timed_out,
+                _wf._stderr_log_tail(decomposer_result),
             )
     gh.write_pinned_state(issue, state)
 
@@ -553,7 +560,10 @@ def _create_child_issues(
         created.append((new_issue.number, child))
         if depends_on:
             dep_graph[str(idx)] = depends_on
-        state.set("children", [n for n, _ in created])
+        state.set(
+            "children",
+            [child_number for child_number, _ in created],
+        )
         if dep_graph:
             state.set("dep_graph", dep_graph)
         state.set("decomposed_at", _wf._now_iso())
@@ -608,7 +618,8 @@ def _finalize_split(
     from orchestrator import workflow as _wf
 
     summary = "\n".join(
-        f"- #{n}: {child['title']}" for n, child in created
+        f"- #{child_number}: {child['title']}"
+        for child_number, child in created
     )
     if is_umbrella:
         summary_intro = (
@@ -647,7 +658,10 @@ def _finalize_split(
 
 
 def _settle_decomposer_run(
-    gh: GitHubClient, issue: Issue, state: PinnedState, result: AgentResult,
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    decomposer_result: AgentResult,
 ) -> bool:
     """Fold this run's usage and park on a live pause or timeout.
 
@@ -683,10 +697,10 @@ def _settle_decomposer_run(
     # persist a counter the interrupted contract says must not accrue. The
     # clean-interrupted case is additionally short-circuited by the
     # `_ignore_if_interrupted` guard in `_handle_decomposing`.
-    if not result.interrupted:
-        _wf._accumulate_issue_usage(state, result.usage)
+    if not decomposer_result.interrupted:
+        _wf._accumulate_issue_usage(state, decomposer_result.usage)
 
-    if result.timed_out:
+    if decomposer_result.timed_out:
         _wf._park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} decomposer timed out after "
@@ -699,7 +713,10 @@ def _settle_decomposer_run(
 
 
 def _dispatch_decomposer_manifest(
-    gh: GitHubClient, issue: Issue, state: PinnedState, result: AgentResult,
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    decomposer_result: AgentResult,
 ) -> None:
     """Parse the decomposer's final message and route on the outcome.
 
@@ -709,11 +726,13 @@ def _dispatch_decomposer_manifest(
     """
     from orchestrator import workflow as _wf
 
-    last_msg = result.last_message or ""
+    last_msg = decomposer_result.last_message or ""
     parsed, error = _wf._parse_manifest(last_msg)
 
     if parsed is None:
-        _park_unparsed_manifest(gh, issue, state, result, error)
+        _park_unparsed_manifest(
+            gh, issue, state, decomposer_result, error,
+        )
         return
 
     if parsed["decision"] == "single":
@@ -750,18 +769,23 @@ def _prepare_decomposer_run(
         return None
 
     if state.get("awaiting_human"):
-        result = _resume_decomposer_on_human_reply(gh, spec, issue, state)
-        if result is None:
+        decomposer_result = _resume_decomposer_on_human_reply(
+            gh, spec, issue, state,
+        )
+        if decomposer_result is None:
             # Keep the worktree intact: if a prior tick parked on dirty/commits,
             # the HITL message asks the operator to inspect and reset it before
             # resuming, and cleanup here would silently delete that state.
-            return _DecomposerRunPlan(result=None, keep_worktree=True)
-        return _DecomposerRunPlan(result=result)
+            return _DecomposerRunPlan(
+                agent_result=None,
+                keep_worktree=True,
+            )
+        return _DecomposerRunPlan(agent_result=decomposer_result)
 
-    result = _spawn_fresh_decomposer(gh, spec, issue, state)
-    if result is None:
+    decomposer_result = _spawn_fresh_decomposer(gh, spec, issue, state)
+    if decomposer_result is None:
         return None
-    return _DecomposerRunPlan(result=result)
+    return _DecomposerRunPlan(agent_result=decomposer_result)
 
 
 def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
@@ -781,11 +805,11 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         if run_plan is None:
             return
         keep_worktree = run_plan.keep_worktree
-        if run_plan.result is None:
+        if run_plan.agent_result is None:
             return
-        result = run_plan.result
+        decomposer_result = run_plan.agent_result
 
-        if _settle_decomposer_run(gh, issue, state, result):
+        if _settle_decomposer_run(gh, issue, state, decomposer_result):
             return
 
         # The decomposer is supposed to be read-only. If it committed or
@@ -818,10 +842,10 @@ def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # still left changes parks for inspection (preserving the read-only
         # semantics), and BEFORE the manifest parse so no partial
         # `last_message` is read.
-        if _wf._ignore_if_interrupted(issue, result):
+        if _wf._ignore_if_interrupted(issue, decomposer_result):
             return
 
-        _dispatch_decomposer_manifest(gh, issue, state, result)
+        _dispatch_decomposer_manifest(gh, issue, state, decomposer_result)
     finally:
         if not keep_worktree:
             _wf._cleanup_decompose_worktree(spec, issue.number)
@@ -899,7 +923,11 @@ def _park_rejected_children(
     """
     from orchestrator import workflow as _wf
 
-    rejected = [n for n, lbl in child_labels.items() if lbl == "rejected"]
+    rejected = [
+        child_number
+        for child_number, child_label in child_labels.items()
+        if child_label == "rejected"
+    ]
     if not rejected:
         return False
     if state.get("awaiting_human"):
@@ -907,7 +935,7 @@ def _park_rejected_children(
     _wf._park_awaiting_human(
         gh, issue, state,
         f"{config.HITL_MENTIONS} child issue(s) rejected: "
-        f"{', '.join(f'#{n}' for n in rejected)}; "
+        f"{', '.join(f'#{child_number}' for child_number in rejected)}; "
         "decide whether to re-decompose or close.",
         reason="child_rejected",
     )
@@ -942,19 +970,21 @@ def _park_manually_closed_children(
     from orchestrator import workflow as _wf
 
     manually_closed = [
-        n for n, ci in child_issues.items()
-        if getattr(ci, "state", "open") == "closed"
-        and child_labels.get(n) not in ("done", "rejected", "in_review")
+        child_number
+        for child_number, child_issue in child_issues.items()
+        if getattr(child_issue, "state", "open") == "closed"
+        and child_labels.get(child_number)
+        not in ("done", "rejected", "in_review")
     ]
     if manually_closed:
         still_closed: list[int] = []
-        for n in manually_closed:
-            child_issue = child_issues[n]
+        for child_number in manually_closed:
+            child_issue = child_issues[child_number]
             child_state = gh.read_pinned_state(child_issue)
             if _wf._finalize_if_pr_merged(gh, spec, child_issue, child_state):
-                child_labels[n] = "done"
+                child_labels[child_number] = "done"
                 continue
-            still_closed.append(n)
+            still_closed.append(child_number)
         manually_closed = still_closed
     if not manually_closed:
         return False
@@ -964,7 +994,7 @@ def _park_manually_closed_children(
         gh, issue, state,
         f"{config.HITL_MENTIONS} child issue(s) closed without reaching "
         f"`done` or `rejected`: "
-        f"{', '.join(f'#{n}' for n in manually_closed)}; "
+        f"{', '.join(f'#{child_number}' for child_number in manually_closed)}; "
         "decide whether to re-decompose or close.",
         reason="child_manually_closed",
     )
@@ -995,7 +1025,9 @@ def _activate_ready_children(
             continue
         deps = dep_graph.get(str(idx), [])
         dep_numbers = [
-            int(children[int(d)]) for d in deps if int(d) < len(children)
+            int(children[int(dependency_index)])
+            for dependency_index in deps
+            if int(dependency_index) < len(children)
         ]
         pending = [dn for dn in dep_numbers if child_labels.get(dn) != "done"]
         if not pending:
@@ -1027,7 +1059,8 @@ def _log_held_children(
         return
     done_count = sum(1 for lbl in child_labels.values() if lbl == "done")
     summary = "; ".join(
-        f"#{cn} waits on {', '.join(f'#{d}' for d in pending)}"
+        f"#{cn} waits on "
+        f"{', '.join(f'#{dependency_number}' for dependency_number in pending)}"
         for cn, pending in held
     )
     _wf.log.info(
