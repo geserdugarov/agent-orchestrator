@@ -95,6 +95,13 @@ COMMAND_COMMENT_ID = 9000
 INITIAL_PR_COMMENT_WATERMARK = 1999
 PENDING_FIX_AT_TS = "2026-05-24T00:00:00+00:00"
 EARLIER_PENDING_FIX_AT_TS = "2026-05-23T00:00:00+00:00"
+INLINE_FEEDBACK_ID = 3000
+REVIEW_SUMMARY_FEEDBACK_ID = 4000
+
+# Watermarks that deliberately sit beyond every preserved feedback item.
+ADVANCED_PR_COMMENT_WATERMARK = 8000
+ADVANCED_REVIEW_COMMENT_WATERMARK = 50
+ADVANCED_REVIEW_SUMMARY_WATERMARK = 10
 
 # --- Preserved feedback batch ids used by reconstruction / continue tests --
 BATCH_ISSUE_ID = 2050
@@ -111,6 +118,7 @@ BATCH_INLINE_NOISE_ID = 99
 BATCH_SUMMARY_NOISE_ID = 12
 UNTRUSTED_ISSUE_ID = 2060
 ORCHESTRATOR_PARK_COMMENT_ID = 2050
+ALLOWLIST_FEEDBACK_ID = 3000
 
 # --- Recurring comment authors ------------------------------------------
 ALICE = "alice"
@@ -627,11 +635,12 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             user=FakeUser(ALICE), created_at=long_ago,
         )
         inline_comment = FakeComment(
-            id=3000, body="add a test for this branch",
+            id=INLINE_FEEDBACK_ID, body="add a test for this branch",
             user=FakeUser(BOB), created_at=long_ago,
         )
         summary_review = FakePRReview(
-            id=4000, body="please update the doc string",
+            id=REVIEW_SUMMARY_FEEDBACK_ID,
+            body="please update the doc string",
             state="CHANGES_REQUESTED",
             user=FakeUser(CAROL), submitted_at=long_ago,
         )
@@ -642,10 +651,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(
             pr=pr, issue_comments=[issue_comment],
             extra_state={
-                PR_LAST_REVIEW_COMMENT_ID: 2999,
-                PR_LAST_REVIEW_SUMMARY_ID: 3999,
-                PENDING_FIX_REVIEW_MAX_ID: 3000,
-                PENDING_FIX_REVIEW_SUMMARY_MAX_ID: 4000,
+                PR_LAST_REVIEW_COMMENT_ID: INLINE_FEEDBACK_ID - 1,
+                PR_LAST_REVIEW_SUMMARY_ID: REVIEW_SUMMARY_FEEDBACK_ID - 1,
+                PENDING_FIX_REVIEW_MAX_ID: INLINE_FEEDBACK_ID,
+                PENDING_FIX_REVIEW_SUMMARY_MAX_ID: REVIEW_SUMMARY_FEEDBACK_ID,
             },
         )
 
@@ -664,8 +673,12 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
         data = gh.pinned_data(ISSUE)
         self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
-        self.assertEqual(data.get(PR_LAST_REVIEW_COMMENT_ID), 3000)
-        self.assertEqual(data.get(PR_LAST_REVIEW_SUMMARY_ID), 4000)
+        self.assertEqual(
+            data.get(PR_LAST_REVIEW_COMMENT_ID), INLINE_FEEDBACK_ID,
+        )
+        self.assertEqual(
+            data.get(PR_LAST_REVIEW_SUMMARY_ID), REVIEW_SUMMARY_FEEDBACK_ID,
+        )
         # Prompt also quoted every surface.
         prompt = mocks[RUN_AGENT].call_args.args[1]
         self.assertIn("rename foo", prompt)
@@ -2098,9 +2111,9 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         # dev resume consumed it: a rescan from these would find nothing.
         gh.seed_state(
             ISSUE,
-            pr_last_comment_id=8000,
-            pr_last_review_comment_id=50,
-            pr_last_review_summary_id=10,
+            pr_last_comment_id=ADVANCED_PR_COMMENT_WATERMARK,
+            pr_last_review_comment_id=ADVANCED_REVIEW_COMMENT_WATERMARK,
+            pr_last_review_summary_id=ADVANCED_REVIEW_SUMMARY_WATERMARK,
             pending_fix_issue_ids=BATCH_ISSUE_IDS,
             pending_fix_issue_max_id=BATCH_PR_CONVERSATION_ID,
             pending_fix_review_ids=BATCH_INLINE_IDS,
@@ -2139,9 +2152,9 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         # for.
         gh.seed_state(
             ISSUE,
-            pr_last_comment_id=8000,
-            pr_last_review_comment_id=50,
-            pr_last_review_summary_id=10,
+            pr_last_comment_id=ADVANCED_PR_COMMENT_WATERMARK,
+            pr_last_review_comment_id=ADVANCED_REVIEW_COMMENT_WATERMARK,
+            pr_last_review_summary_id=ADVANCED_REVIEW_SUMMARY_WATERMARK,
             pending_fix_issue_max_id=BATCH_PR_CONVERSATION_ID,
             pending_fix_review_max_id=BATCH_INLINE_SECOND_ID,
             pending_fix_review_summary_max_id=BATCH_SUMMARY_ID,
@@ -2163,7 +2176,9 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
 
     def test_no_metadata_reconstructs_empty_batch(self) -> None:
         gh, issue, pr = self._pr_with_feedback()
-        gh.seed_state(ISSUE, pr_last_comment_id=8000)
+        gh.seed_state(
+            ISSUE, pr_last_comment_id=ADVANCED_PR_COMMENT_WATERMARK,
+        )
         state = gh.read_pinned_state(issue)
 
         self.assertEqual(_reconstruct_pending_fix_batch(gh, issue, pr, state), [])
@@ -2195,7 +2210,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh.add_pr(pr)
         gh.seed_state(
             ISSUE,
-            pr_last_comment_id=8000,
+            pr_last_comment_id=ADVANCED_PR_COMMENT_WATERMARK,
             pending_fix_issue_ids=[BATCH_ISSUE_ID, UNTRUSTED_ISSUE_ID],
             pending_fix_issue_max_id=UNTRUSTED_ISSUE_ID,
         )
@@ -2244,7 +2259,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh, issue, pr = self._pr_with_reviewer_anchor()
         gh.seed_state(
             ISSUE,
-            pr_last_comment_id=8000,
+            pr_last_comment_id=ADVANCED_PR_COMMENT_WATERMARK,
             pending_fix_reviewer_comment_id=BATCH_PR_CONVERSATION_ID,
         )
         state = gh.read_pinned_state(issue)
@@ -2262,7 +2277,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh, issue, pr = self._pr_with_reviewer_anchor()
         gh.seed_state(
             ISSUE,
-            pr_last_comment_id=8000,
+            pr_last_comment_id=ADVANCED_PR_COMMENT_WATERMARK,
             pending_fix_reviewer_comment_id=BATCH_PR_CONVERSATION_ID,
         )
         state = gh.read_pinned_state(issue)
@@ -2279,7 +2294,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh, issue, pr = self._pr_with_reviewer_anchor()
         gh.seed_state(
             ISSUE,
-            pr_last_comment_id=8000,
+            pr_last_comment_id=ADVANCED_PR_COMMENT_WATERMARK,
             pending_fix_at=PENDING_FIX_AT_TS,
             pending_fix_reviewer_comment_id=BATCH_PR_CONVERSATION_ID,
         )
@@ -2294,7 +2309,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh, issue, pr = self._pr_with_reviewer_anchor()
         gh.seed_state(
             ISSUE,
-            pr_last_comment_id=8000,
+            pr_last_comment_id=ADVANCED_PR_COMMENT_WATERMARK,
             pending_fix_reviewer_comment_id=999999,
         )
         state = gh.read_pinned_state(issue)
@@ -2432,9 +2447,9 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
             PARK_REASON: park_reason,
             "silent_park_count": silent_park_count,
             # Watermarks advanced PAST the batch.
-            PR_LAST_COMMENT_ID: 8000,
-            PR_LAST_REVIEW_COMMENT_ID: 50,
-            PR_LAST_REVIEW_SUMMARY_ID: 10,
+            PR_LAST_COMMENT_ID: ADVANCED_PR_COMMENT_WATERMARK,
+            PR_LAST_REVIEW_COMMENT_ID: ADVANCED_REVIEW_COMMENT_WATERMARK,
+            PR_LAST_REVIEW_SUMMARY_ID: ADVANCED_REVIEW_SUMMARY_WATERMARK,
         }
         if pending_fix_at is not None:
             state[PENDING_FIX_AT] = pending_fix_at
@@ -2643,9 +2658,9 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 AWAITING_HUMAN: True,
                 PARK_REASON: park_reason,
                 "silent_park_count": 2,
-                PR_LAST_COMMENT_ID: 8000,
-                PR_LAST_REVIEW_COMMENT_ID: 50,
-                PR_LAST_REVIEW_SUMMARY_ID: 10,
+                PR_LAST_COMMENT_ID: ADVANCED_PR_COMMENT_WATERMARK,
+                PR_LAST_REVIEW_COMMENT_ID: ADVANCED_REVIEW_COMMENT_WATERMARK,
+                PR_LAST_REVIEW_SUMMARY_ID: ADVANCED_REVIEW_SUMMARY_WATERMARK,
                 PENDING_FIX_REVIEWER_COMMENT_ID: reviewer_id,
                 # No `pending_fix_at`, no `pending_fix_*_ids` -> validating route.
             },
@@ -2787,11 +2802,16 @@ class FixingAllowlistFeedbackFilterTest(
         old = datetime.now(timezone.utc) - timedelta(hours=1)
         if surface == "review_summary":
             return FakePRReview(
-                id=3000, body=body, state="CHANGES_REQUESTED",
+                id=ALLOWLIST_FEEDBACK_ID,
+                body=body,
+                state="CHANGES_REQUESTED",
                 user=FakeUser(login), submitted_at=old,
             )
         return FakeComment(
-            id=3000, body=body, user=FakeUser(login), created_at=old,
+            id=ALLOWLIST_FEEDBACK_ID,
+            body=body,
+            user=FakeUser(login),
+            created_at=old,
         )
 
     def _seed(self, surface: str, body: str, login: str):

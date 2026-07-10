@@ -21,6 +21,16 @@ OLD_RECORD_AGE_DAYS = 100
 VERY_OLD_RECORD_AGE_DAYS = 200
 ANCIENT_RECORD_AGE_DAYS = 1000
 
+AGENT_EXIT_ISSUE_NUMBER = 7
+SKILL_STREAM_INPUT_TOKENS = 1_000
+SKILL_STREAM_OUTPUT_TOKENS = 500
+CLAUDE_TRAJECTORY_INPUT_TOKENS = 100
+CLAUDE_TRAJECTORY_OUTPUT_TOKENS = 50
+CODEX_TRAJECTORY_INPUT_TOKENS = 200
+CODEX_TRAJECTORY_OUTPUT_TOKENS = 80
+TRAJECTORY_REVIEW_ROUND = 2
+TRAJECTORY_RETRY_COUNT = 1
+
 
 def _ts_days_ago(days: int, *, now: datetime = PRUNE_NOW) -> str:
     return (now - timedelta(days=days)).isoformat(timespec="seconds")
@@ -64,8 +74,8 @@ def _claude_stdout_with_skills(
     skills: tuple[str, ...],
     offered: tuple[str, ...] = (),
     args_marker: str = "skill-args-must-never-be-stored",
-    input_tokens: int = 1000,
-    output_tokens: int = 500,
+    input_tokens: int = SKILL_STREAM_INPUT_TOKENS,
+    output_tokens: int = SKILL_STREAM_OUTPUT_TOKENS,
 ) -> str:
     """A claude stream-json stdout that both reports usage AND triggers
     `Skill` tool_use blocks.
@@ -680,7 +690,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
                 patch.object(analytics, "TRACK_SKILL_TRIGGERS", track):
             analytics.record_agent_exit(
                 repo="owner/repo",
-                issue=7,
+                issue=AGENT_EXIT_ISSUE_NUMBER,
                 stage="implementing",
                 agent_role="developer",
                 backend=backend,
@@ -713,7 +723,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         rec = records[0]
         self.assertEqual(rec["event"], "agent_exit")
-        self.assertEqual(rec["input_tokens"], 1000)
+        self.assertEqual(rec["input_tokens"], SKILL_STREAM_INPUT_TOKENS)
         for key in (
             "skills_triggered", "skills_triggered_count", "skills_available",
         ):
@@ -737,7 +747,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         self.assertEqual(rec["skills_triggered"], ["develop", "review"])
         self.assertEqual(rec["skills_triggered_count"], 3)
         self.assertNotIn("skills_available", rec)
-        self.assertEqual(rec["input_tokens"], 1000)
+        self.assertEqual(rec["input_tokens"], SKILL_STREAM_INPUT_TOKENS)
 
     def test_switch_on_no_triggers_matches_off_shape(self) -> None:
         # Switch on but the stream triggered nothing: all three skill keys
@@ -836,8 +846,8 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         rec = records[0]
         # Baseline usage fields survived the skill-parse failure...
         self.assertEqual(rec["event"], "agent_exit")
-        self.assertEqual(rec["input_tokens"], 1000)
-        self.assertEqual(rec["output_tokens"], 500)
+        self.assertEqual(rec["input_tokens"], SKILL_STREAM_INPUT_TOKENS)
+        self.assertEqual(rec["output_tokens"], SKILL_STREAM_OUTPUT_TOKENS)
         # ...and the skill fields were left off.
         for key in (
             "skills_triggered", "skills_triggered_count", "skills_available",
@@ -864,7 +874,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
                 )
             return analytics.record_agent_exit(
                 repo="owner/repo",
-                issue=7,
+                issue=AGENT_EXIT_ISSUE_NUMBER,
                 stage="implementing",
                 agent_role="developer",
                 backend="claude",
@@ -1282,8 +1292,8 @@ def _claude_trajectory_stdout(
     tool_result: object = "tool result text",
     final_output: str | None = "final answer",
     offered_tools: tuple[str, ...] = ("Read", "Bash"),
-    input_tokens: int = 100,
-    output_tokens: int = 50,
+    input_tokens: int = CLAUDE_TRAJECTORY_INPUT_TOKENS,
+    output_tokens: int = CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
 ) -> str:
     """A claude stream-json stdout with offered tools, one tool_use /
     tool_result step, a usage block, and a terminal `result` answer -- the
@@ -1357,8 +1367,8 @@ def _codex_trajectory_stdout(
     command: str = "ls -la",
     output: str = "command output",
     final: str | None = "codex done",
-    input_tokens: int = 200,
-    output_tokens: int = 80,
+    input_tokens: int = CODEX_TRAJECTORY_INPUT_TOKENS,
+    output_tokens: int = CODEX_TRAJECTORY_OUTPUT_TOKENS,
 ) -> str:
     """A codex --json stdout with one command_execution call + result and a
     final agent_message -- the surface `parse_codex_trajectory` reads."""
@@ -1387,6 +1397,12 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
     head/tail + total-size truncation caps, and never lets a trajectory
     failure drop the baseline `agent_exit` usage record."""
 
+    TRUNCATION_EDGE_CHARS = 5
+    LONG_TEXT_CHARS = 100
+    BUDGET_TOOL_PAIR_COUNT = 5
+    MANY_TURNS_COUNT = 5_000
+    METADATA_ONLY_STEP_COUNT = 10_000
+
     def _emit(
         self,
         analytics,
@@ -1403,7 +1419,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 patch.object(analytics, "TRACK_SKILL_TRIGGERS", track):
             return analytics.record_agent_exit(
                 repo="owner/repo",
-                issue=7,
+                issue=AGENT_EXIT_ISSUE_NUMBER,
                 stage="implementing",
                 agent_role="developer",
                 backend=backend,
@@ -1418,8 +1434,8 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                     stderr="",
                 ),
                 duration_s=0.0,
-                review_round=2,
-                retry_count=1,
+                review_round=TRAJECTORY_REVIEW_ROUND,
+                retry_count=TRAJECTORY_RETRY_COUNT,
                 prompt=prompt,
             )
 
@@ -1472,7 +1488,9 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             base = _read_records(a_path)
             self.assertEqual(len(base), 1)
             self.assertEqual(base[0]["event"], "agent_exit")
-            self.assertEqual(base[0]["input_tokens"], 100)
+            self.assertEqual(
+                base[0]["input_tokens"], CLAUDE_TRAJECTORY_INPUT_TOKENS,
+            )
             self.assertNotIn("user_input", base[0])
             self.assertNotIn("run_usage", base[0])
             # One trajectory record carrying the full surface.
@@ -1481,13 +1499,13 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             rec = traj[0]
             self.assertEqual(rec["event"], "agent_trajectory")
             self.assertEqual(rec["repo"], "owner/repo")
-            self.assertEqual(rec["issue"], 7)
+            self.assertEqual(rec["issue"], AGENT_EXIT_ISSUE_NUMBER)
             self.assertEqual(rec["stage"], "implementing")
             self.assertEqual(rec["agent_role"], "developer")
             self.assertEqual(rec["backend"], "claude")
             self.assertEqual(rec["session_id"], "sess-traj")
-            self.assertEqual(rec["review_round"], 2)
-            self.assertEqual(rec["retry_count"], 1)
+            self.assertEqual(rec["review_round"], TRAJECTORY_REVIEW_ROUND)
+            self.assertEqual(rec["retry_count"], TRAJECTORY_RETRY_COUNT)
             self.assertEqual(rec["user_input"], "implement X")
             self.assertEqual(rec["tools"], ["Read", "Bash"])
             self.assertEqual(rec["output"], "implemented")
@@ -1502,8 +1520,12 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             # viewer reads without re-parsing.
             run_usage = rec["run_usage"]
             self.assertNotIn("backend", run_usage)
-            self.assertEqual(run_usage["input_tokens"], 100)
-            self.assertEqual(run_usage["output_tokens"], 50)
+            self.assertEqual(
+                run_usage["input_tokens"], CLAUDE_TRAJECTORY_INPUT_TOKENS,
+            )
+            self.assertEqual(
+                run_usage["output_tokens"], CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
+            )
             self.assertEqual(run_usage["models"], ["claude-sonnet-4-6"])
             self.assertEqual(run_usage["turns"], 1)  # run-level turn count
             self.assertEqual(run_usage["cost_source"], "estimated")
@@ -1513,8 +1535,12 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             turn = rec["turns"][0]
             self.assertEqual(turn["turn"], 0)
             self.assertEqual(turn["model"], "claude-sonnet-4-6")
-            self.assertEqual(turn["input_tokens"], 100)
-            self.assertEqual(turn["output_tokens"], 50)
+            self.assertEqual(
+                turn["input_tokens"], CLAUDE_TRAJECTORY_INPUT_TOKENS,
+            )
+            self.assertEqual(
+                turn["output_tokens"], CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
+            )
             self.assertEqual(turn["cost_source"], "estimated")
             # The billed tool_call carries its turn index; the tool_result is
             # a turn *input*, not billed output, so it omits `turn`.
@@ -1564,8 +1590,12 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             # run-level totals, present even though per-turn detail is not.
             run_usage = rec["run_usage"]
             self.assertNotIn("backend", run_usage)
-            self.assertEqual(run_usage["input_tokens"], 200)
-            self.assertEqual(run_usage["output_tokens"], 80)
+            self.assertEqual(
+                run_usage["input_tokens"], CODEX_TRAJECTORY_INPUT_TOKENS,
+            )
+            self.assertEqual(
+                run_usage["output_tokens"], CODEX_TRAJECTORY_OUTPUT_TOKENS,
+            )
             # No priced model in the stream -> unknown-price, no cost.
             self.assertEqual(run_usage["cost_source"], "unknown-price")
             self.assertIsNone(run_usage["cost_usd"])
@@ -1583,13 +1613,21 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
         secret = "sk-ant-TEXTLEAK-0123456789"
         with tempfile.TemporaryDirectory() as td, \
                 patch.dict(os.environ, {"ANTHROPIC_API_KEY": secret}), \
-                patch.object(analytics, "_TRAJECTORY_FIELD_HEAD", 5), \
-                patch.object(analytics, "_TRAJECTORY_FIELD_TAIL", 5):
+                patch.object(
+                    analytics,
+                    "_TRAJECTORY_FIELD_HEAD",
+                    self.TRUNCATION_EDGE_CHARS,
+                ), \
+                patch.object(
+                    analytics,
+                    "_TRAJECTORY_FIELD_TAIL",
+                    self.TRUNCATION_EDGE_CHARS,
+                ):
             t_path = Path(td) / "trajectory.jsonl"
             frames = [
                 {"type": "system", "subtype": "init", "tools": ["Bash"]},
                 {"type": "assistant", "message": {"id": "m1", "content": [
-                    {"type": "text", "text": "B" * 100},
+                    {"type": "text", "text": "B" * self.LONG_TEXT_CHARS},
                     {"type": "tool_use", "name": "Bash", "id": "tu1",
                      "input": {"command": "ls"}}]}},
                 {"type": "user", "message": {"content": [
@@ -1614,7 +1652,9 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             )
             assistant_step = rec["steps"][0]
             # Long assistant text head/tail truncated; no tool metadata.
-            self.assertLess(len(assistant_step["content"]), 100)
+            self.assertLess(
+                len(assistant_step["content"]), self.LONG_TEXT_CHARS,
+            )
             self.assertIn("chars elided", assistant_step["content"])
             self.assertIsNone(assistant_step["name"])
             self.assertIsNone(assistant_step["tool_id"])
@@ -1694,13 +1734,22 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
         # step. Shrink the caps so the test stays small.
         _, analytics = _reload()
         with tempfile.TemporaryDirectory() as td, \
-                patch.object(analytics, "_TRAJECTORY_FIELD_HEAD", 5), \
-                patch.object(analytics, "_TRAJECTORY_FIELD_TAIL", 5):
+                patch.object(
+                    analytics,
+                    "_TRAJECTORY_FIELD_HEAD",
+                    self.TRUNCATION_EDGE_CHARS,
+                ), \
+                patch.object(
+                    analytics,
+                    "_TRAJECTORY_FIELD_TAIL",
+                    self.TRUNCATION_EDGE_CHARS,
+                ):
             t_path = Path(td) / "trajectory.jsonl"
             self._emit(
                 analytics,
                 stdout=_claude_trajectory_stdout(
-                    tool_result="A" * 100, final_output="done",
+                    tool_result="A" * self.LONG_TEXT_CHARS,
+                    final_output="done",
                 ),
                 prompt="p",
                 traj_path=t_path,
@@ -1711,9 +1760,10 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 step for step in rec["steps"] if step["kind"] == "tool_result"
             )
             content = result_step["content"]
-            self.assertLess(len(content), 100)
-            self.assertTrue(content.startswith("AAAAA"))
-            self.assertTrue(content.endswith("AAAAA"))
+            self.assertLess(len(content), self.LONG_TEXT_CHARS)
+            edge = "A" * self.TRUNCATION_EDGE_CHARS
+            self.assertTrue(content.startswith(edge))
+            self.assertTrue(content.endswith(edge))
             self.assertIn("chars elided", content)
 
     def test_total_record_budget_drops_excess_steps(self) -> None:
@@ -1727,7 +1777,8 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             self._emit(
                 analytics,
                 stdout=_claude_multistep_stdout(
-                    n_steps=5, content="0123456789" * 20,
+                    n_steps=self.BUDGET_TOOL_PAIR_COUNT,
+                    content="0123456789" * 20,
                 ),
                 traj_path=t_path,
                 analytics_path=Path(td) / "a.jsonl",
@@ -1737,12 +1788,16 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             # 5 pairs => 10 steps emitted; the budget dropped the tail but
             # kept a prefix.
             self.assertGreater(len(rec["steps"]), 0)
-            self.assertLess(len(rec["steps"]), 10)
+            self.assertLess(
+                len(rec["steps"]), self.BUDGET_TOOL_PAIR_COUNT * 2,
+            )
             # The 5 small per-turn entries fit under the budget (they are drawn
             # down before the steps), so all are kept while the step tail is
             # dropped; a turns array that itself overflows is truncated too
             # (see test_turns_array_respects_total_budget).
-            self.assertEqual(len(rec["turns"]), 5)
+            self.assertEqual(
+                len(rec["turns"]), self.BUDGET_TOOL_PAIR_COUNT,
+            )
             self.assertIn("run_usage", rec)
 
     def test_turns_array_respects_total_budget(self) -> None:
@@ -1761,7 +1816,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                     input_tokens=1,
                     output_tokens=1,
                 )
-                for i in range(5_000)
+                for i in range(self.MANY_TURNS_COUNT)
             ),
         )
         with tempfile.TemporaryDirectory() as td:
@@ -1779,7 +1834,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             raw = t_path.read_text(encoding="utf-8")
             rec = json.loads(raw)
             self.assertTrue(rec["truncated"])
-            self.assertLess(len(rec["turns"]), 5_000)
+            self.assertLess(len(rec["turns"]), self.MANY_TURNS_COUNT)
             # The on-disk line is bounded near the budget, not the ~914 KB an
             # uncapped turns array produced.
             self.assertLess(len(raw), analytics._TRAJECTORY_RECORD_BUDGET * 2)
@@ -1800,7 +1855,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                     tool_id=f"id{i}",
                     content=None,
                 )
-                for i in range(10_000)
+                for i in range(self.METADATA_ONLY_STEP_COUNT)
             ),
         )
         with tempfile.TemporaryDirectory() as td:
@@ -1818,7 +1873,9 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             raw = t_path.read_text(encoding="utf-8")
             rec = json.loads(raw)
             self.assertTrue(rec["truncated"])
-            self.assertLess(len(rec["steps"]), 10_000)
+            self.assertLess(
+                len(rec["steps"]), self.METADATA_ONLY_STEP_COUNT,
+            )
             # The on-disk line is bounded near the budget, not the ~749 KB an
             # uncapped run produced -- one step of overshoot plus the envelope.
             self.assertLess(len(raw), analytics._TRAJECTORY_RECORD_BUDGET * 2)
@@ -1850,7 +1907,9 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
             base = _read_records(a_path)
             self.assertEqual(len(base), 1)
             self.assertEqual(base[0]["event"], "agent_exit")
-            self.assertEqual(base[0]["input_tokens"], 1000)
+            self.assertEqual(
+                base[0]["input_tokens"], SKILL_STREAM_INPUT_TOKENS,
+            )
             # ...and the broken trajectory wrote nothing.
             self.assertFalse(t_path.exists())
 
@@ -1918,7 +1977,7 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
                 patch.object(analytics, "TRACK_SKILL_TRIGGERS", track):
             analytics.record_agent_exit(
                 repo="owner/repo",
-                issue=7,
+                issue=AGENT_EXIT_ISSUE_NUMBER,
                 stage="validating",
                 agent_role="reviewer",
                 backend=backend,
@@ -2004,7 +2063,9 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
                     patch.object(analytics, "TRAJECTORY_LOG_PATH", None), \
                     patch.object(analytics, "TRACK_SKILL_TRIGGERS", True):
                 analytics.record_agent_exit(
-                    repo="owner/repo", issue=7, stage="implementing",
+                    repo="owner/repo",
+                    issue=AGENT_EXIT_ISSUE_NUMBER,
+                    stage="implementing",
                     agent_role="developer", backend="claude",
                     agent_spec="claude", resume_session_id=None,
                     result=analytics.AgentResult(

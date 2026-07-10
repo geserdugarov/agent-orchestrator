@@ -26,6 +26,8 @@ DIRTY_DISPLAY_LIMIT = 10
 DIRTY_OVERFLOW_COUNT = DIRTY_FILE_COUNT - DIRTY_DISPLAY_LIMIT
 TRUSTED_REPLY_ID = QUESTION_REPLY_ID
 OUTSIDER_REPLY_ID = TRUSTED_REPLY_ID + 1
+MULTI_ROUND_REPLY_ID_STEP = 100
+UNSAFE_PARK_WATERMARK = 88_888
 
 
 def _issue_branch(
@@ -79,7 +81,7 @@ class HandleQuestionFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("> X lives in src/x.py:42.", body)
 
         # Pinned state records the agent spec, session id, and park reason.
-        data = gh.pinned_data(1)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["question_agent"], config.DECOMPOSE_AGENT_SPEC)
         self.assertEqual(data["question_session_id"], "q-sess-1")
         self.assertTrue(data["awaiting_human"])
@@ -88,8 +90,8 @@ class HandleQuestionFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # The agent ran in the per-issue worktree, not the decomposer one.
         mocks["_ensure_worktree"].assert_called_once_with(
-            _TEST_SPEC, 1,
-            branch=_issue_branch(1),
+            _TEST_SPEC, issue.number,
+            branch=_issue_branch(issue.number),
         )
         mocks["_ensure_decompose_worktree"].assert_not_called()
 
@@ -150,7 +152,7 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(timed_out=True, last_message=""),
         )
         self._assert_no_pr_no_push_no_relabel(gh, mocks)
-        data = gh.pinned_data(2)
+        data = gh.pinned_data(issue.number)
         self.assertTrue(data["awaiting_human"])
         self.assertEqual(data["park_reason"], "question_timeout")
         self.assertIn(config.HITL_MENTIONS, gh.posted_comments[-1][1])
@@ -168,7 +170,7 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
             ),
         )
         self._assert_no_pr_no_push_no_relabel(gh, mocks)
-        data = gh.pinned_data(2)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["park_reason"], "question_silent")
         # Silent-path park surfaces stderr diagnostics for the operator.
         self.assertIn("something broke", gh.posted_comments[-1][1])
@@ -184,7 +186,7 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
             has_new_commits=True,
         )
         self._assert_no_pr_no_push_no_relabel(gh, mocks)
-        data = gh.pinned_data(2)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["park_reason"], "question_commits")
         self.assertIn("read-only", gh.posted_comments[-1][1])
 
@@ -198,7 +200,7 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
             dirty_files=dirty,
         )
         self._assert_no_pr_no_push_no_relabel(gh, mocks)
-        data = gh.pinned_data(2)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["park_reason"], "question_dirty")
         comment = gh.posted_comments[-1][1]
         self.assertIn("file_0.py", comment)
@@ -221,7 +223,7 @@ class HandleQuestionAwaitingHumanResumeTest(
         issue = make_issue(3, label="question")
         gh.add_issue(issue)
         gh.seed_state(
-            3,
+            issue.number,
             awaiting_human=True,
             last_action_comment_id=9999,
             question_agent="claude",
@@ -249,7 +251,7 @@ class HandleQuestionAwaitingHumanResumeTest(
         )
         gh.add_issue(issue)
         gh.seed_state(
-            4,
+            issue.number,
             awaiting_human=True,
             last_action_comment_id=QUESTION_REPLY_WATERMARK,
             question_agent="claude",
@@ -272,7 +274,7 @@ class HandleQuestionAwaitingHumanResumeTest(
         self.assertIn("please clarify Y", spawn_args[1])
         # Watermark advanced past the consumed comment so the next tick
         # without a new reply is a no-op.
-        data = gh.pinned_data(4)
+        data = gh.pinned_data(issue.number)
         self.assertGreaterEqual(data["last_action_comment_id"], QUESTION_REPLY_ID)
         # The follow-up answer was posted and the issue re-parks awaiting
         # human (so the human can either answer again or close / relabel).
@@ -300,7 +302,7 @@ class HandleQuestionAwaitingHumanResumeTest(
             ),
             has_new_commits=False,
         )
-        data = gh.pinned_data(40)
+        data = gh.pinned_data(issue.number)
         self.assertTrue(data["awaiting_human"])
         self.assertEqual(data["park_reason"], "question_answer")
         wm_after_r1 = data["last_action_comment_id"]
@@ -328,7 +330,10 @@ class HandleQuestionAwaitingHumanResumeTest(
 
         # Round 2: human replies.
         issue.comments.append(
-            FakeComment(id=wm_after_r1 + 100, body="follow-up Q2"),
+            FakeComment(
+                id=wm_after_r1 + MULTI_ROUND_REPLY_ID_STEP,
+                body="follow-up Q2",
+            ),
         )
         mocks_r2 = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
@@ -347,7 +352,7 @@ class HandleQuestionAwaitingHumanResumeTest(
         prompt_r2 = mocks_r2["run_agent"].call_args.args[1]
         self.assertIn("follow-up Q2", prompt_r2)
         self.assertNotIn("round-1 answer", prompt_r2)
-        data = gh.pinned_data(40)
+        data = gh.pinned_data(issue.number)
         self.assertTrue(data["awaiting_human"])
         self.assertEqual(data["park_reason"], "question_answer")
         wm_after_r2 = data["last_action_comment_id"]
@@ -355,7 +360,10 @@ class HandleQuestionAwaitingHumanResumeTest(
 
         # Round 3: another human reply.
         issue.comments.append(
-            FakeComment(id=wm_after_r2 + 100, body="follow-up Q3"),
+            FakeComment(
+                id=wm_after_r2 + MULTI_ROUND_REPLY_ID_STEP,
+                body="follow-up Q3",
+            ),
         )
         mocks_r3 = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
@@ -374,7 +382,7 @@ class HandleQuestionAwaitingHumanResumeTest(
         # The prior bot answers did not leak into the resume prompt.
         self.assertNotIn("round-1 answer", prompt_r3)
         self.assertNotIn("round-2 answer", prompt_r3)
-        data = gh.pinned_data(40)
+        data = gh.pinned_data(issue.number)
         wm_after_r3 = data["last_action_comment_id"]
         self.assertGreater(wm_after_r3, wm_after_r2)
 
@@ -417,7 +425,7 @@ class HandleQuestionClosedIssueTerminalTest(
         # Mid-conversation state from a prior tick; the close is the
         # terminal signal regardless of where the conversation was.
         gh.seed_state(
-            50,
+            issue.number,
             awaiting_human=True,
             last_action_comment_id=70000,
             question_agent=config.DECOMPOSE_AGENT_SPEC,
@@ -433,14 +441,14 @@ class HandleQuestionClosedIssueTerminalTest(
         self.assertEqual(gh.posted_comments, [])
         self.assertEqual(gh.opened_prs, [])
         # Workflow label flipped to `done`.
-        self.assertEqual(gh.label_history, [(50, "done")])
+        self.assertEqual(gh.label_history, [(issue.number, "done")])
         # Terminal stamp in pinned state.
-        data = gh.pinned_data(50)
+        data = gh.pinned_data(issue.number)
         self.assertIn("question_closed_at", data)
         # Cleanup ran.
         mocks["_cleanup_question_worktree"].assert_called_once_with(
-            _TEST_SPEC, 50,
-            branch=_issue_branch(50),
+            _TEST_SPEC, issue.number,
+            branch=_issue_branch(issue.number),
         )
 
     def test_closed_issue_with_unsafe_park_still_cleans_up(self) -> None:
@@ -454,7 +462,7 @@ class HandleQuestionClosedIssueTerminalTest(
         issue.closed = True
         gh.add_issue(issue)
         gh.seed_state(
-            51,
+            issue.number,
             awaiting_human=True,
             park_reason="question_commits",
             question_agent=config.DECOMPOSE_AGENT_SPEC,
@@ -466,10 +474,10 @@ class HandleQuestionClosedIssueTerminalTest(
             run_agent=_agent(last_message="should not run"),
         )
         mocks["run_agent"].assert_not_called()
-        self.assertEqual(gh.label_history, [(51, "done")])
+        self.assertEqual(gh.label_history, [(issue.number, "done")])
         mocks["_cleanup_question_worktree"].assert_called_once_with(
-            _TEST_SPEC, 51,
-            branch=_issue_branch(51),
+            _TEST_SPEC, issue.number,
+            branch=_issue_branch(issue.number),
         )
 
     def test_closed_issue_without_prior_state_finalizes_cleanly(self) -> None:
@@ -487,12 +495,12 @@ class HandleQuestionClosedIssueTerminalTest(
             run_agent=_agent(last_message="should not run"),
         )
         mocks["run_agent"].assert_not_called()
-        self.assertEqual(gh.label_history, [(52, "done")])
-        data = gh.pinned_data(52)
+        self.assertEqual(gh.label_history, [(issue.number, "done")])
+        data = gh.pinned_data(issue.number)
         self.assertIn("question_closed_at", data)
         mocks["_cleanup_question_worktree"].assert_called_once_with(
-            _TEST_SPEC, 52,
-            branch=_issue_branch(52),
+            _TEST_SPEC, issue.number,
+            branch=_issue_branch(issue.number),
         )
 
     def test_closed_issue_with_counters_posts_tracked_usage_verdict(
@@ -506,7 +514,7 @@ class HandleQuestionClosedIssueTerminalTest(
         issue.closed = True
         gh.add_issue(issue)
         gh.seed_state(
-            53,
+            issue.number,
             question_agent=config.DECOMPOSE_AGENT_SPEC,
             question_session_id=QUESTION_SESSION,
             issue_agent_runs=4, issue_total_tokens=8800,
@@ -517,10 +525,10 @@ class HandleQuestionClosedIssueTerminalTest(
             run_agent=_agent(last_message="should not run"),
         )
         mocks["run_agent"].assert_not_called()
-        self.assertEqual(gh.label_history, [(53, "done")])
+        self.assertEqual(gh.label_history, [(issue.number, "done")])
         receipts = [
             body for n, body in gh.posted_comments
-            if n == 53 and body.startswith(":receipt:")
+            if n == issue.number and body.startswith(":receipt:")
         ]
         self.assertEqual(len(receipts), 1)
         self.assertIn(
@@ -532,7 +540,7 @@ class HandleQuestionClosedIssueTerminalTest(
         )
         self.assertIn(
             receipt_comment.id,
-            gh.pinned_data(53).get("orchestrator_comment_ids", []),
+            gh.pinned_data(issue.number).get("orchestrator_comment_ids", []),
         )
 
 
@@ -559,15 +567,15 @@ class HandleQuestionWorktreeCleanupTest(
         return gh, issue
 
     def test_answer_path_cleans_up_worktree(self) -> None:
-        gh, issue = self._seeded(100)
+        gh, issue = self._seeded()
         mocks = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
             run_agent=_agent(last_message="here is the answer"),
             has_new_commits=False,
         )
         mocks["_cleanup_question_worktree"].assert_called_once_with(
-            _TEST_SPEC, 100,
-            branch=_issue_branch(100),
+            _TEST_SPEC, issue.number,
+            branch=_issue_branch(issue.number),
         )
 
     def test_silent_path_cleans_up_worktree(self) -> None:
@@ -578,8 +586,8 @@ class HandleQuestionWorktreeCleanupTest(
             has_new_commits=False,
         )
         mocks["_cleanup_question_worktree"].assert_called_once_with(
-            _TEST_SPEC, 101,
-            branch=_issue_branch(101),
+            _TEST_SPEC, issue.number,
+            branch=_issue_branch(issue.number),
         )
 
     def test_resume_no_new_comments_still_cleans_stale_worktree(
@@ -594,7 +602,7 @@ class HandleQuestionWorktreeCleanupTest(
         issue = make_issue(102, label="question")
         gh.add_issue(issue)
         gh.seed_state(
-            102,
+            issue.number,
             awaiting_human=True,
             last_action_comment_id=99999,
             question_agent="claude",
@@ -607,8 +615,8 @@ class HandleQuestionWorktreeCleanupTest(
         )
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_question_worktree"].assert_called_once_with(
-            _TEST_SPEC, 102,
-            branch=_issue_branch(102),
+            _TEST_SPEC, issue.number,
+            branch=_issue_branch(issue.number),
         )
 
     def test_timeout_park_keeps_worktree_for_inspection(self) -> None:
@@ -618,7 +626,7 @@ class HandleQuestionWorktreeCleanupTest(
             run_agent=_agent(timed_out=True, last_message=""),
         )
         mocks["_cleanup_question_worktree"].assert_not_called()
-        data = gh.pinned_data(103)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["park_reason"], "question_timeout")
         self.assertIn("worktree is left intact", gh.posted_comments[-1][1])
 
@@ -630,7 +638,7 @@ class HandleQuestionWorktreeCleanupTest(
             has_new_commits=True,
         )
         mocks["_cleanup_question_worktree"].assert_not_called()
-        data = gh.pinned_data(104)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["park_reason"], "question_commits")
 
     def test_dirty_park_keeps_worktree_for_inspection(self) -> None:
@@ -642,7 +650,7 @@ class HandleQuestionWorktreeCleanupTest(
             dirty_files=["src/x.py"],
         )
         mocks["_cleanup_question_worktree"].assert_not_called()
-        data = gh.pinned_data(105)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["park_reason"], "question_dirty")
 
 
@@ -671,7 +679,7 @@ class HandleQuestionUnsafeParkStabilityTest(
             park_reason=park_reason,
             question_agent=config.DECOMPOSE_AGENT_SPEC,
             question_session_id=QUESTION_SESSION,
-            last_action_comment_id=88888,
+            last_action_comment_id=UNSAFE_PARK_WATERMARK,
         )
         return gh, issue
 
@@ -722,8 +730,8 @@ class HandleQuestionUnsafeParkStabilityTest(
         )
         mocks["run_agent"].assert_not_called()
         mocks["_cleanup_question_worktree"].assert_called_once_with(
-            _TEST_SPEC, 303,
-            branch=_issue_branch(303),
+            _TEST_SPEC, issue.number,
+            branch=_issue_branch(issue.number),
         )
 
     def test_resume_after_unsafe_park_with_clean_answer_cleans_up(
@@ -742,12 +750,12 @@ class HandleQuestionUnsafeParkStabilityTest(
         )
         gh.add_issue(issue)
         gh.seed_state(
-            304,
+            issue.number,
             awaiting_human=True,
             park_reason="question_commits",
             question_agent=config.DECOMPOSE_AGENT_SPEC,
             question_session_id=QUESTION_SESSION,
-            last_action_comment_id=88888,
+            last_action_comment_id=UNSAFE_PARK_WATERMARK,
         )
         mocks = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
@@ -760,12 +768,12 @@ class HandleQuestionUnsafeParkStabilityTest(
         )
         # Agent ran (human replied) and produced a clean answer.
         mocks["run_agent"].assert_called_once()
-        data = gh.pinned_data(304)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["park_reason"], "question_answer")
         # Worktree is now safe to reap.
         mocks["_cleanup_question_worktree"].assert_called_once_with(
-            _TEST_SPEC, 304,
-            branch=_issue_branch(304),
+            _TEST_SPEC, issue.number,
+            branch=_issue_branch(issue.number),
         )
 
     def test_repark_preserves_worktree(
@@ -782,12 +790,12 @@ class HandleQuestionUnsafeParkStabilityTest(
         )
         gh.add_issue(issue)
         gh.seed_state(
-            305,
+            issue.number,
             awaiting_human=True,
             park_reason="question_commits",
             question_agent=config.DECOMPOSE_AGENT_SPEC,
             question_session_id=QUESTION_SESSION,
-            last_action_comment_id=88888,
+            last_action_comment_id=UNSAFE_PARK_WATERMARK,
         )
         mocks = self._run(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
@@ -798,7 +806,7 @@ class HandleQuestionUnsafeParkStabilityTest(
             has_new_commits=True,
         )
         mocks["run_agent"].assert_called_once()
-        pinned_state = gh.pinned_data(305)
+        pinned_state = gh.pinned_data(issue.number)
         self.assertEqual(pinned_state["park_reason"], "question_commits")
         mocks["_cleanup_question_worktree"].assert_not_called()
 
@@ -832,7 +840,10 @@ class QuestionLabelBaseRefreshSkipTest(unittest.TestCase):
                  return_value=(True, []),
              ) as merge_mock:
             base_sync._sync_worktree_with_base(
-                gh, _TEST_SPEC, Path("/tmp/q-issue-200"), 200,
+                gh,
+                _TEST_SPEC,
+                Path(f"/tmp/q-issue-{issue.number}"),
+                issue.number,
             )
 
         # Neither the rev-list (used to decide whether to merge) nor
@@ -866,7 +877,7 @@ class QuestionRelabelToImplementingTest(
         issue = make_issue(80, label="implementing")
         gh.add_issue(issue)
         gh.seed_state(
-            80,
+            issue.number,
             awaiting_human=True,
             park_reason="question_answer",
             question_agent=config.DECOMPOSE_AGENT_SPEC,
@@ -894,9 +905,9 @@ class QuestionRelabelToImplementingTest(
         self.assertIn("You are the implementer", prompt)
 
         self.assertEqual(len(gh.opened_prs), 1)
-        self.assertIn((80, "validating"), gh.label_history)
+        self.assertIn((issue.number, "validating"), gh.label_history)
 
-        data = gh.pinned_data(80)
+        data = gh.pinned_data(issue.number)
         self.assertFalse(data.get("awaiting_human"))
         self.assertIsNone(data.get("park_reason"))
 
@@ -918,7 +929,7 @@ class QuestionRelabelToImplementingTest(
             issue = make_issue(82, label="implementing")
             gh.add_issue(issue)
             gh.seed_state(
-                82,
+                issue.number,
                 awaiting_human=True,
                 park_reason="question_commits",
                 last_action_comment_id=60000,
@@ -929,7 +940,7 @@ class QuestionRelabelToImplementingTest(
                     workflow, "_worktree_path", return_value=wt_path,
                 ), patch.object(
                     workflow, "_branch_has_unpushed_commits",
-                    return_value=_issue_branch(82),
+                    return_value=_issue_branch(issue.number),
                 ):
                     workflow._handle_implementing(gh, _TEST_SPEC, issue)
 
@@ -942,7 +953,7 @@ class QuestionRelabelToImplementingTest(
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.opened_prs, [])
-        data = gh.pinned_data(82)
+        data = gh.pinned_data(issue.number)
         self.assertTrue(data["awaiting_human"])
         self.assertEqual(data["park_reason"], "question_unsafe_relabel")
         last = gh.posted_comments[-1][1]
@@ -968,7 +979,7 @@ class QuestionRelabelToImplementingTest(
         issue = make_issue(86, label="implementing")
         gh.add_issue(issue)
         gh.seed_state(
-            86,
+            issue.number,
             awaiting_human=True,
             park_reason="question_commits",
             last_action_comment_id=65000,
@@ -985,7 +996,7 @@ class QuestionRelabelToImplementingTest(
                 workflow, "_worktree_path", return_value=missing,
             ), patch.object(
                 workflow, "_branch_has_unpushed_commits",
-                return_value=_issue_branch(86),
+                return_value=_issue_branch(issue.number),
             ):
                 workflow._handle_implementing(gh, _TEST_SPEC, issue)
 
@@ -1002,14 +1013,14 @@ class QuestionRelabelToImplementingTest(
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.opened_prs, [])
         # State carries the unsafe-relabel park reason.
-        pinned_state = gh.pinned_data(86)
+        pinned_state = gh.pinned_data(issue.number)
         self.assertTrue(pinned_state["awaiting_human"])
         self.assertEqual(pinned_state["park_reason"], "question_unsafe_relabel")
         # Message tells the operator about the branch and how to
         # reset it.
         last = gh.posted_comments[-1][1]
         self.assertIn("question_commits", last)
-        self.assertIn(_issue_branch(86), last)
+        self.assertIn(_issue_branch(issue.number), last)
         self.assertIn("git branch -D", last)
 
     def test_relabel_with_question_dirty_state_refuses_to_push(self) -> None:
@@ -1023,7 +1034,7 @@ class QuestionRelabelToImplementingTest(
             issue = make_issue(83, label="implementing")
             gh.add_issue(issue)
             gh.seed_state(
-                83,
+                issue.number,
                 awaiting_human=True,
                 park_reason="question_dirty",
                 last_action_comment_id=70000,
@@ -1044,7 +1055,7 @@ class QuestionRelabelToImplementingTest(
 
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(83)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["park_reason"], "question_unsafe_relabel")
 
     def test_unsafe_relabel_tick_is_idempotent_until_worktree_reset(
@@ -1063,7 +1074,7 @@ class QuestionRelabelToImplementingTest(
             issue = make_issue(84, label="implementing")
             gh.add_issue(issue)
             gh.seed_state(
-                84,
+                issue.number,
                 awaiting_human=True,
                 park_reason="question_unsafe_relabel",
                 last_action_comment_id=80000,
@@ -1074,7 +1085,7 @@ class QuestionRelabelToImplementingTest(
                     workflow, "_worktree_path", return_value=wt_path,
                 ), patch.object(
                     workflow, "_branch_has_unpushed_commits",
-                    return_value=_issue_branch(84),
+                    return_value=_issue_branch(issue.number),
                 ):
                     workflow._handle_implementing(gh, _TEST_SPEC, issue)
 
@@ -1086,7 +1097,7 @@ class QuestionRelabelToImplementingTest(
 
             self.assertEqual(gh.posted_comments, [])
             mocks["run_agent"].assert_not_called()
-            data = gh.pinned_data(84)
+            data = gh.pinned_data(issue.number)
             self.assertTrue(data["awaiting_human"])
             self.assertEqual(data["park_reason"], "question_unsafe_relabel")
 
@@ -1102,7 +1113,7 @@ class QuestionRelabelToImplementingTest(
             issue = make_issue(85, label="implementing")
             gh.add_issue(issue)
             gh.seed_state(
-                85,
+                issue.number,
                 awaiting_human=True,
                 park_reason="question_unsafe_relabel",
                 last_action_comment_id=90000,
@@ -1139,8 +1150,8 @@ class QuestionRelabelToImplementingTest(
         # The relabel exercises the implementing fresh-spawn path,
         # which now hands off straight to `validating` (no pre-review
         # docs hop).
-        self.assertIn((85, "validating"), gh.label_history)
-        data = gh.pinned_data(85)
+        self.assertIn((issue.number, "validating"), gh.label_history)
+        data = gh.pinned_data(issue.number)
         self.assertFalse(data.get("awaiting_human"))
         self.assertIsNone(data.get("park_reason"))
 
@@ -1158,7 +1169,7 @@ class QuestionRelabelToImplementingTest(
         # the operator's only signal was the relabel itself.
         gh.add_issue(issue)
         gh.seed_state(
-            81,
+            issue.number,
             awaiting_human=True,
             park_reason="question_silent",
             last_action_comment_id=50000,
@@ -1189,7 +1200,7 @@ class HandleQuestionSessionPersistenceTest(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
             run_agent=_agent(session_id="", last_message="best-effort answer"),
         )
-        data = gh.pinned_data(5)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["question_agent"], config.DECOMPOSE_AGENT_SPEC)
         # No session id was returned -- the field is absent / falsy, but
         # the role identity is still durable.
@@ -1219,7 +1230,7 @@ class HandleQuestionSessionPersistenceTest(
         )
         gh.add_issue(issue)
         gh.seed_state(
-            55,
+            issue.number,
             awaiting_human=True,
             last_action_comment_id=41000,
             question_agent=config.DECOMPOSE_AGENT_SPEC,
@@ -1250,7 +1261,7 @@ class HandleQuestionSessionPersistenceTest(
         # The fresh spawn's returned session id is captured for
         # future ticks (already covered by another test, but
         # asserting it here keeps the recovery path self-contained).
-        data = gh.pinned_data(55)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["question_session_id"], "q-sess-fresh")
 
     def test_resume_persists_new_session_id_from_agent_result(self) -> None:
@@ -1265,7 +1276,7 @@ class HandleQuestionSessionPersistenceTest(
         issue.comments.append(FakeComment(id=32000, body="follow-up reply"))
         gh.add_issue(issue)
         gh.seed_state(
-            7,
+            issue.number,
             awaiting_human=True,
             last_action_comment_id=31000,
             question_agent=config.DECOMPOSE_AGENT_SPEC,
@@ -1279,7 +1290,7 @@ class HandleQuestionSessionPersistenceTest(
                 last_message="continued discussion",
             ),
         )
-        data = gh.pinned_data(7)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["question_session_id"], "q-sess-recovered")
 
     def test_pinned_session_id_is_reused_on_resume(self) -> None:
@@ -1291,7 +1302,7 @@ class HandleQuestionSessionPersistenceTest(
         issue.comments.append(FakeComment(id=22000, body="another reply"))
         gh.add_issue(issue)
         gh.seed_state(
-            6,
+            issue.number,
             awaiting_human=True,
             last_action_comment_id=21000,
             question_agent="codex",
@@ -1332,7 +1343,7 @@ class HandleQuestionRunUsageAccumulationTest(
             run_agent=_agent(session_id="q-sess", last_message="X is in x.py."),
         )
 
-        data = gh.pinned_data(610)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data["issue_agent_runs"], 1)
         self.assertEqual(data["issue_total_tokens"], 0)
         self.assertEqual(data["issue_cost_sources"], ["no-usage"])
@@ -1345,7 +1356,7 @@ class HandleQuestionRunUsageAccumulationTest(
         )
         gh.add_issue(issue)
         gh.seed_state(
-            611,
+            issue.number,
             awaiting_human=True,
             last_action_comment_id=QUESTION_REPLY_WATERMARK,
             question_agent="claude",
@@ -1361,14 +1372,16 @@ class HandleQuestionRunUsageAccumulationTest(
         )
 
         # Exactly one real resume exit folded.
-        self.assertEqual(gh.pinned_data(611)["issue_agent_runs"], 1)
+        self.assertEqual(
+            gh.pinned_data(issue.number)["issue_agent_runs"], 1,
+        )
 
     def test_no_new_comment_resume_leaves_counters_untouched(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(612, label="question")
         gh.add_issue(issue)
         gh.seed_state(
-            612,
+            issue.number,
             awaiting_human=True,
             last_action_comment_id=9999,
             question_agent="claude",
@@ -1384,7 +1397,7 @@ class HandleQuestionRunUsageAccumulationTest(
         # No reply -> the resume returns before spawning, so no run is
         # counted and no counter key is created.
         mocks["run_agent"].assert_not_called()
-        data = gh.pinned_data(612)
+        data = gh.pinned_data(issue.number)
         self.assertNotIn("issue_agent_runs", data)
         self.assertNotIn("issue_total_tokens", data)
 
@@ -1403,7 +1416,7 @@ class HandleQuestionRunUsageAccumulationTest(
         # A shutdown-killed question agent returns before
         # `write_pinned_state`, so neither the folded counters nor a silent
         # park reach GitHub.
-        data = gh.pinned_data(613)
+        data = gh.pinned_data(issue.number)
         self.assertNotIn("issue_agent_runs", data)
         self.assertNotIn("issue_total_tokens", data)
         self.assertFalse(data.get("awaiting_human"))
@@ -1428,7 +1441,7 @@ class HandleQuestionRunUsageAccumulationTest(
             has_new_commits=True,
         )
 
-        data = gh.pinned_data(614)
+        data = gh.pinned_data(issue.number)
         self.assertEqual(data.get("park_reason"), "question_commits")
         # Worktree kept for inspection (the commits park's contract).
         mocks["_cleanup_question_worktree"].assert_not_called()
@@ -1513,14 +1526,15 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
         # `orchestrator/orch__realgit/issue-N` exists at exactly origin/main: a
         # fresh-from-base branch has no commits to inspect.
         with tempfile.TemporaryDirectory(prefix="bhpc-atBase-") as td:
+            issue_number = 701
             target, base_sha = _seed_target_root(Path(td))
             _run_git(
-                "branch", _issue_branch(701, slug="orch__realgit"),
+                "branch", _issue_branch(issue_number, slug="orch__realgit"),
                 base_sha, cwd=target,
             )
             spec = _spec_for(target)
             self.assertFalse(
-                worktrees._branch_has_unpushed_commits(spec, 701),
+                worktrees._branch_has_unpushed_commits(spec, issue_number),
             )
 
     def test_returns_true_when_branch_has_commits_ahead_of_base(
@@ -1530,9 +1544,10 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
         # origin/main. This is the read-only-violation we are
         # trying to detect.
         with tempfile.TemporaryDirectory(prefix="bhpc-ahead-") as td:
+            issue_number = 702
             target, base_sha = _seed_target_root(Path(td))
             _run_git(
-                "branch", _issue_branch(702, slug="orch__realgit"),
+                "branch", _issue_branch(issue_number, slug="orch__realgit"),
                 base_sha, cwd=target,
             )
             # Add a commit on the issue branch. Update the ref
@@ -1546,12 +1561,13 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
                 cwd=target,
             ).stdout.strip()
             _run_git(
-                "update-ref", f"refs/heads/{_issue_branch(702, slug='orch__realgit')}",
+                "update-ref",
+                f"refs/heads/{_issue_branch(issue_number, slug='orch__realgit')}",
                 new_commit, cwd=target,
             )
             spec = _spec_for(target)
             self.assertTrue(
-                worktrees._branch_has_unpushed_commits(spec, 702),
+                worktrees._branch_has_unpushed_commits(spec, issue_number),
             )
 
     def test_returns_false_when_base_remote_ref_missing(self) -> None:
@@ -1561,9 +1577,10 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
         # conservatively returns None -- the caller's later steps
         # surface any persistent problem.
         with tempfile.TemporaryDirectory(prefix="bhpc-noBase-") as td:
+            issue_number = 703
             target, base_sha = _seed_target_root(Path(td))
             _run_git(
-                "branch", _issue_branch(703, slug="orch__realgit"),
+                "branch", _issue_branch(issue_number, slug="orch__realgit"),
                 base_sha, cwd=target,
             )
             _run_git(
@@ -1572,7 +1589,7 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
             )
             spec = _spec_for(target)
             self.assertIsNone(
-                worktrees._branch_has_unpushed_commits(spec, 703),
+                worktrees._branch_has_unpushed_commits(spec, issue_number),
             )
 
     def test_detects_commits_on_legacy_orchestrator_issue_branch(
@@ -1592,8 +1609,9 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
         # also probe the legacy ref and name it in the return value
         # so the operator hint targets the right branch.
         with tempfile.TemporaryDirectory(prefix="bhpc-legacy-") as td:
+            issue_number = 704
             target, base_sha = _seed_target_root(Path(td))
-            legacy = _legacy_branch(704)
+            legacy = _legacy_branch(issue_number)
             _run_git("branch", legacy, base_sha, cwd=target)
             tree = _run_git(
                 "rev-parse", "HEAD^{tree}", cwd=target,
@@ -1612,7 +1630,7 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
             # form does. Helper must still return the offending
             # branch name (the legacy ref) so the relabel guard fires.
             self.assertEqual(
-                worktrees._branch_has_unpushed_commits(spec, 704),
+                worktrees._branch_has_unpushed_commits(spec, issue_number),
                 legacy,
             )
 
@@ -1624,9 +1642,10 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
         # tick will operate on, so it is the one the operator should
         # reset.
         with tempfile.TemporaryDirectory(prefix="bhpc-both-") as td:
+            issue_number = 705
             target, base_sha = _seed_target_root(Path(td))
-            namespaced = _issue_branch(705, slug="orch__realgit")
-            legacy = _legacy_branch(705)
+            namespaced = _issue_branch(issue_number, slug="orch__realgit")
+            legacy = _legacy_branch(issue_number)
             tree = _run_git(
                 "rev-parse", "HEAD^{tree}", cwd=target,
             ).stdout.strip()
@@ -1641,7 +1660,7 @@ class BranchHasUnpushedCommitsRealGitTest(unittest.TestCase):
                 )
             spec = _spec_for(target)
             self.assertEqual(
-                worktrees._branch_has_unpushed_commits(spec, 705),
+                worktrees._branch_has_unpushed_commits(spec, issue_number),
                 namespaced,
             )
 
@@ -1666,6 +1685,8 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
 
     def test_removes_existing_worktree_and_local_branch(self) -> None:
         with tempfile.TemporaryDirectory(prefix="cqw-both-") as td:
+            issue_number = 800
+            branch = _issue_branch(issue_number, slug="orch__realgit")
             tdp = Path(td)
             target, base_sha = _seed_target_root(tdp)
             # Stand up a worktree at the path `_worktree_path` will
@@ -1674,11 +1695,10 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
             worktrees_dir = tdp / "wts"
             with patch.object(config, "WORKTREES_DIR", worktrees_dir):
                 spec = self._spec_with_worktrees_dir(target, tdp)
-                expected = worktrees._worktree_path(spec, 800)
+                expected = worktrees._worktree_path(spec, issue_number)
                 expected.parent.mkdir(parents=True, exist_ok=True)
                 _run_git(
-                    "worktree", "add", "-b",
-                    _issue_branch(800, slug="orch__realgit"),
+                    "worktree", "add", "-b", branch,
                     str(expected), base_sha, cwd=target,
                 )
                 self.assertTrue(expected.exists())
@@ -1687,13 +1707,13 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
                     0,
                     subprocess.run(
                         ["git", "rev-parse", "--verify", "--quiet",
-                         f"refs/heads/{_issue_branch(800, slug='orch__realgit')}"],
+                         f"refs/heads/{branch}"],
                         cwd=str(target), env=_git_env(),
                         capture_output=True, text=True,
                     ).returncode,
                 )
 
-                worktrees._cleanup_question_worktree(spec, 800)
+                worktrees._cleanup_question_worktree(spec, issue_number)
 
                 self.assertFalse(expected.exists())
                 # Local branch is gone.
@@ -1701,7 +1721,7 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
                     0,
                     subprocess.run(
                         ["git", "rev-parse", "--verify", "--quiet",
-                         f"refs/heads/{_issue_branch(800, slug='orch__realgit')}"],
+                         f"refs/heads/{branch}"],
                         cwd=str(target), env=_git_env(),
                         capture_output=True, text=True,
                     ).returncode,
@@ -1726,24 +1746,27 @@ class CleanupQuestionWorktreeRealGitTest(unittest.TestCase):
         # still tear the branch down so a later `_ensure_worktree`
         # cannot reuse it.
         with tempfile.TemporaryDirectory(prefix="cqw-branchOnly-") as td:
+            issue_number = 802
+            branch = _issue_branch(issue_number, slug="orch__realgit")
             tdp = Path(td)
             target, base_sha = _seed_target_root(tdp)
             _run_git(
-                "branch", _issue_branch(802, slug="orch__realgit"),
-                base_sha, cwd=target,
+                "branch", branch, base_sha, cwd=target,
             )
             with patch.object(config, "WORKTREES_DIR", tdp / "wts"):
                 spec = self._spec_with_worktrees_dir(target, tdp)
                 # Sanity: worktree path does not exist.
-                self.assertFalse(worktrees._worktree_path(spec, 802).exists())
+                self.assertFalse(
+                    worktrees._worktree_path(spec, issue_number).exists(),
+                )
 
-                worktrees._cleanup_question_worktree(spec, 802)
+                worktrees._cleanup_question_worktree(spec, issue_number)
 
                 self.assertNotEqual(
                     0,
                     subprocess.run(
                         ["git", "rev-parse", "--verify", "--quiet",
-                         f"refs/heads/{_issue_branch(802, slug='orch__realgit')}"],
+                         f"refs/heads/{branch}"],
                         cwd=str(target), env=_git_env(),
                         capture_output=True, text=True,
                     ).returncode,

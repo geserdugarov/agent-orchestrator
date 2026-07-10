@@ -55,6 +55,21 @@ VERIFY = "verify"
 
 TOKENS_PER_MILLION = 1_000_000
 
+# Reused Codex pricing fixtures. Rate-table values stay inline in each cost
+# assertion; these names identify the token shapes being priced.
+LONG_CONTEXT_THRESHOLD_TOKENS = 272_000
+LONG_CONTEXT_INPUT_TOKENS = 300_000
+LONG_CONTEXT_CACHED_INPUT_TOKENS = 100_000
+CODEX_PRICING_OUTPUT_TOKENS = 1_000
+PRO_PRICING_INPUT_TOKENS = 100_000
+PRO_PRICING_CACHED_INPUT_TOKENS = 50_000
+
+# The representative Claude turn reused by parsing and serialization tests.
+CLAUDE_TURN_INPUT_TOKENS = 12
+CLAUDE_TURN_OUTPUT_TOKENS = 340
+CLAUDE_TURN_CACHE_READ_TOKENS = 18_240
+CLAUDE_TURN_CACHE_WRITE_TOKENS = 512
+
 
 # --- Stream frame builders -----------------------------------------------
 # Each returns one decoded stream event; ``_jsonl`` serializes a sequence of
@@ -444,13 +459,19 @@ class CodexJsonTest(unittest.TestCase):
         # column for long-context sessions before any operator
         # notices the under-reporting.
         stdout = _jsonl(
-            _turn_complete(model="gpt-5.5", input=300_000, cached=0, output=1_000),
+            _turn_complete(
+                model="gpt-5.5",
+                input=LONG_CONTEXT_INPUT_TOKENS,
+                cached=0,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # Long-context tier: input * 5 * 2 + output * 30 * 1.5, /1M.
         expected = (
-            300_000 * 5 * 2.0 + 1_000 * 30 * 1.5
+            LONG_CONTEXT_INPUT_TOKENS * 5 * 2.0
+            + CODEX_PRICING_OUTPUT_TOKENS * 30 * 1.5
         ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
@@ -461,12 +482,20 @@ class CodexJsonTest(unittest.TestCase):
         # is the boundary regression guard for the new long-context
         # branch.
         stdout = _jsonl(
-            _turn_complete(model="gpt-5.5", input=272_000, cached=0, output=1_000),
+            _turn_complete(
+                model="gpt-5.5",
+                input=LONG_CONTEXT_THRESHOLD_TOKENS,
+                cached=0,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # Flat rate: input * 5 + output * 30, /1M (no multipliers).
-        expected = (272_000 * 5 + 1_000 * 30) / TOKENS_PER_MILLION
+        expected = (
+            LONG_CONTEXT_THRESHOLD_TOKENS * 5
+            + CODEX_PRICING_OUTPUT_TOKENS * 30
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -481,12 +510,20 @@ class CodexJsonTest(unittest.TestCase):
         # the run carries any cached input -- see
         # test_cached_tokens_without_cached_rate_blocks_estimate).
         stdout = _jsonl(
-            _turn_complete(model="gpt-5.5-pro", input=300_000, cached=0, output=1_000),
+            _turn_complete(
+                model="gpt-5.5-pro",
+                input=LONG_CONTEXT_INPUT_TOKENS,
+                cached=0,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # Flat pro rates: input=30, output=180; NO multipliers.
-        expected = (300_000 * 30 + 1_000 * 180) / TOKENS_PER_MILLION
+        expected = (
+            LONG_CONTEXT_INPUT_TOKENS * 30
+            + CODEX_PRICING_OUTPUT_TOKENS * 180
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -496,13 +533,19 @@ class CodexJsonTest(unittest.TestCase):
         # output. Same regression-guard shape as the gpt-5.5 test --
         # a flat-rate fallback would silently undercount real runs.
         stdout = _jsonl(
-            _turn_complete(model="gpt-5.4", input=300_000, cached=0, output=1_000),
+            _turn_complete(
+                model="gpt-5.4",
+                input=LONG_CONTEXT_INPUT_TOKENS,
+                cached=0,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # gpt-5.4 rates: input=2.50, output=15; long-context 2x / 1.5x.
         expected = (
-            300_000 * 2.50 * 2.0 + 1_000 * 15 * 1.5
+            LONG_CONTEXT_INPUT_TOKENS * 2.50 * 2.0
+            + CODEX_PRICING_OUTPUT_TOKENS * 15 * 1.5
         ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
@@ -510,12 +553,18 @@ class CodexJsonTest(unittest.TestCase):
     def test_gpt_5_4_pro_long_context_uses_tiered_pricing(self) -> None:
         # gpt-5.4-pro mirrors gpt-5.5-pro: same threshold + multipliers.
         stdout = _jsonl(
-            _turn_complete(model="gpt-5.4-pro", input=300_000, cached=0, output=1_000),
+            _turn_complete(
+                model="gpt-5.4-pro",
+                input=LONG_CONTEXT_INPUT_TOKENS,
+                cached=0,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         expected = (
-            300_000 * 30 * 2.0 + 1_000 * 180 * 1.5
+            LONG_CONTEXT_INPUT_TOKENS * 30 * 2.0
+            + CODEX_PRICING_OUTPUT_TOKENS * 180 * 1.5
         ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
@@ -531,13 +580,18 @@ class CodexJsonTest(unittest.TestCase):
         ):
             with self.subTest(model=model):
                 stdout = _jsonl(
-                    _turn_complete(model=model, input=300_000, cached=0,
-                                   output=1_000),
+                    _turn_complete(
+                        model=model,
+                        input=LONG_CONTEXT_INPUT_TOKENS,
+                        cached=0,
+                        output=CODEX_PRICING_OUTPUT_TOKENS,
+                    ),
                 )
                 metrics = parse_codex_usage(stdout)
                 self.assertEqual(metrics.cost_source, "estimated")
                 expected = (
-                    300_000 * rates["input"] + 1_000 * rates["output"]
+                    LONG_CONTEXT_INPUT_TOKENS * rates["input"]
+                    + CODEX_PRICING_OUTPUT_TOKENS * rates["output"]
                 ) / TOKENS_PER_MILLION
                 assert metrics.cost_usd is not None
                 self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
@@ -549,12 +603,20 @@ class CodexJsonTest(unittest.TestCase):
         # by an order of magnitude. Pin the pro rate so an accidental
         # entry removal or reorder fails loudly here.
         stdout = _jsonl(
-            _turn_complete(model="gpt-5.2-pro", input=100_000, cached=0, output=1_000),
+            _turn_complete(
+                model="gpt-5.2-pro",
+                input=PRO_PRICING_INPUT_TOKENS,
+                cached=0,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # Per OpenAI's gpt-5.2-pro page: $21 / $168, no cached rate.
-        expected = (100_000 * 21 + 1_000 * 168) / TOKENS_PER_MILLION
+        expected = (
+            PRO_PRICING_INPUT_TOKENS * 21
+            + CODEX_PRICING_OUTPUT_TOKENS * 168
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
@@ -564,8 +626,12 @@ class CodexJsonTest(unittest.TestCase):
         # bill those tokens at the input rate (overcharge) or the
         # fallthrough sibling's cached rate (undercharge).
         stdout = _jsonl(
-            _turn_complete(model="gpt-5.2-pro", input=100_000, cached=50_000,
-                           output=1_000),
+            _turn_complete(
+                model="gpt-5.2-pro",
+                input=PRO_PRICING_INPUT_TOKENS,
+                cached=PRO_PRICING_CACHED_INPUT_TOKENS,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "unknown-price")
@@ -576,19 +642,31 @@ class CodexJsonTest(unittest.TestCase):
         # would otherwise hit the `gpt-5` entry ($1.25 / $10) and
         # undercount by an order of magnitude.
         stdout = _jsonl(
-            _turn_complete(model="gpt-5-pro", input=100_000, cached=0, output=1_000),
+            _turn_complete(
+                model="gpt-5-pro",
+                input=PRO_PRICING_INPUT_TOKENS,
+                cached=0,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
         # Per OpenAI's gpt-5-pro page: $15 / $120, no cached rate.
-        expected = (100_000 * 15 + 1_000 * 120) / TOKENS_PER_MILLION
+        expected = (
+            PRO_PRICING_INPUT_TOKENS * 15
+            + CODEX_PRICING_OUTPUT_TOKENS * 120
+        ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
 
     def test_gpt_5_pro_cached_tokens_block_estimate(self) -> None:
         stdout = _jsonl(
-            _turn_complete(model="gpt-5-pro", input=100_000, cached=50_000,
-                           output=1_000),
+            _turn_complete(
+                model="gpt-5-pro",
+                input=PRO_PRICING_INPUT_TOKENS,
+                cached=PRO_PRICING_CACHED_INPUT_TOKENS,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "unknown-price")
@@ -600,16 +678,20 @@ class CodexJsonTest(unittest.TestCase):
         # cache-heavy session over the threshold would silently
         # under-report against OpenAI's actual bill.
         stdout = _jsonl(
-            _turn_complete(model="gpt-5.5", input=300_000, cached=100_000,
-                           output=1_000),
+            _turn_complete(
+                model="gpt-5.5",
+                input=LONG_CONTEXT_INPUT_TOKENS,
+                cached=LONG_CONTEXT_CACHED_INPUT_TOKENS,
+                output=CODEX_PRICING_OUTPUT_TOKENS,
+            ),
         )
         metrics = parse_codex_usage(stdout)
         self.assertEqual(metrics.cost_source, "estimated")
-        uncached = 300_000 - 100_000
+        uncached = LONG_CONTEXT_INPUT_TOKENS - LONG_CONTEXT_CACHED_INPUT_TOKENS
         expected = (
             uncached * 5 * 2.0
-            + 100_000 * 0.50 * 2.0
-            + 1_000 * 30 * 1.5
+            + LONG_CONTEXT_CACHED_INPUT_TOKENS * 0.50 * 2.0
+            + CODEX_PRICING_OUTPUT_TOKENS * 30 * 1.5
         ) / TOKENS_PER_MILLION
         assert metrics.cost_usd is not None
         self.assertAlmostEqual(metrics.cost_usd, expected, places=9)
@@ -1279,8 +1361,12 @@ class ClaudeTurnUsageTest(unittest.TestCase):
                 _text("working"),
                 _tool_use("Bash", {"command": "ls"}, id="t1"),
                 _tool_use("Edit", {"file_path": "a.py"}, id="t2"),
-            ], usage=_claude_usage(input=12, cache_write=512,
-                                   cache_read=18240, output=340)),
+            ], usage=_claude_usage(
+                input=CLAUDE_TURN_INPUT_TOKENS,
+                cache_write=CLAUDE_TURN_CACHE_WRITE_TOKENS,
+                cache_read=CLAUDE_TURN_CACHE_READ_TOKENS,
+                output=CLAUDE_TURN_OUTPUT_TOKENS,
+            )),
             _user([
                 _tool_result("t1", "o1"),
                 _tool_result("t2", "o2"),
@@ -1299,13 +1385,24 @@ class ClaudeTurnUsageTest(unittest.TestCase):
         self.assertEqual(len(trajectory.turns), 2)
         turn0, turn1 = trajectory.turns
         # sonnet: input=3, cw5m=3.75, cr=0.30, output=15 (per 1M).
-        expected0 = (12 * 3 + 512 * 3.75 + 18240 * 0.30 + 340 * 15) / TOKENS_PER_MILLION
+        expected0 = (
+            CLAUDE_TURN_INPUT_TOKENS * 3
+            + CLAUDE_TURN_CACHE_WRITE_TOKENS * 3.75
+            + CLAUDE_TURN_CACHE_READ_TOKENS * 0.30
+            + CLAUDE_TURN_OUTPUT_TOKENS * 15
+        ) / TOKENS_PER_MILLION
         self.assertEqual(
             turn0,
-            TurnUsage(turn=0, model=SONNET, input_tokens=12,
-                      output_tokens=340, cache_read_tokens=18240,
-                      cache_write_tokens=512, cost_usd=turn0.cost_usd,
-                      cost_source="estimated"),
+            TurnUsage(
+                turn=0,
+                model=SONNET,
+                input_tokens=CLAUDE_TURN_INPUT_TOKENS,
+                output_tokens=CLAUDE_TURN_OUTPUT_TOKENS,
+                cache_read_tokens=CLAUDE_TURN_CACHE_READ_TOKENS,
+                cache_write_tokens=CLAUDE_TURN_CACHE_WRITE_TOKENS,
+                cost_usd=turn0.cost_usd,
+                cost_source="estimated",
+            ),
         )
         assert turn0.cost_usd is not None
         self.assertAlmostEqual(turn0.cost_usd, expected0, places=12)
@@ -1604,10 +1701,16 @@ class AgentTrajectoryTest(unittest.TestCase):
             ),
             final_output="done",
             turns=(
-                TurnUsage(turn=0, model=OPUS_4_8, input_tokens=12,
-                          output_tokens=340, cache_read_tokens=18240,
-                          cache_write_tokens=512, cost_usd=0.0123,
-                          cost_source="estimated"),
+                TurnUsage(
+                    turn=0,
+                    model=OPUS_4_8,
+                    input_tokens=CLAUDE_TURN_INPUT_TOKENS,
+                    output_tokens=CLAUDE_TURN_OUTPUT_TOKENS,
+                    cache_read_tokens=CLAUDE_TURN_CACHE_READ_TOKENS,
+                    cache_write_tokens=CLAUDE_TURN_CACHE_WRITE_TOKENS,
+                    cost_usd=0.0123,
+                    cost_source="estimated",
+                ),
             ),
         )
         encoded = json.dumps(trajectory.to_dict(), sort_keys=True)
@@ -1625,7 +1728,10 @@ class AgentTrajectoryTest(unittest.TestCase):
         self.assertIsNone(decoded["steps"][1]["turn"])
         self.assertEqual(len(decoded["turns"]), 1)
         self.assertEqual(decoded["turns"][0]["model"], OPUS_4_8)
-        self.assertEqual(decoded["turns"][0]["cache_read_tokens"], 18240)
+        self.assertEqual(
+            decoded["turns"][0]["cache_read_tokens"],
+            CLAUDE_TURN_CACHE_READ_TOKENS,
+        )
         self.assertEqual(decoded["turns"][0]["cost_source"], "estimated")
 
 
