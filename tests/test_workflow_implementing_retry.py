@@ -62,8 +62,8 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
                 # but the agent still failed to commit). We do NOT update
                 # last_action_comment_id, but we also drop awaiting_human so the
                 # else branch runs.
-                data = gh._pinned[8].data
-                data["awaiting_human"] = False
+                pinned_data = gh._pinned[8].data
+                pinned_data["awaiting_human"] = False
 
             self.assertEqual(gh.pinned_data(8).get("retry_count"), 3)
             self.assertIsNotNone(gh.pinned_data(8).get("retry_window_start"))
@@ -97,10 +97,10 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
             push_branch=True,
         )
 
-        data = gh.pinned_data(8)
-        self.assertEqual(data.get("retry_count"), 0)
+        pinned_data = gh.pinned_data(8)
+        self.assertEqual(pinned_data.get("retry_count"), 0)
         # window_start cleared back to falsy.
-        self.assertFalse(data.get("retry_window_start"))
+        self.assertFalse(pinned_data.get("retry_window_start"))
         self.assertEqual(len(gh.opened_prs), 1)
 
     def test_window_older_than_24h_resets_counter(self) -> None:
@@ -118,9 +118,9 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         mocks["run_agent"].assert_called_once()
-        data = gh.pinned_data(8)
+        pinned_data = gh.pinned_data(8)
         # Reset to 0 by the window-expired branch, then incremented to 1.
-        self.assertEqual(data.get("retry_count"), 1)
+        self.assertEqual(pinned_data.get("retry_count"), 1)
         # Park message must NOT be the cap message.
         last_comment = gh.posted_comments[-1][1]
         self.assertNotIn("hit retry cap", last_comment)
@@ -153,8 +153,8 @@ class HandleImplementingRetryCapTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks["run_agent"].assert_called_once()
         # retry_count NOT incremented by the resume itself. The successful
         # _on_commits then clears it to 0.
-        data = gh.pinned_data(9)
-        self.assertEqual(data.get("retry_count"), 0)
+        pinned_data = gh.pinned_data(9)
+        self.assertEqual(pinned_data.get("retry_count"), 0)
 
 
 class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -178,10 +178,10 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         self.assertEqual(mocks["run_agent"].call_args.args[0], "claude")
-        data = gh.pinned_data(20)
-        self.assertEqual(data["dev_agent"], "claude")
-        self.assertEqual(data["dev_session_id"], "sess-fresh")
-        self.assertNotIn("codex_session_id", data)
+        pinned_data = gh.pinned_data(20)
+        self.assertEqual(pinned_data["dev_agent"], "claude")
+        self.assertEqual(pinned_data["dev_session_id"], "sess-fresh")
+        self.assertNotIn("codex_session_id", pinned_data)
 
     def test_reviewer_spawn_uses_review_agent_config(self) -> None:
         gh = FakeGitHubClient()
@@ -206,9 +206,9 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         self.assertEqual(mocks["run_agent"].call_args.args[0], "codex")
-        data = gh.pinned_data(21)
-        self.assertEqual(data["review_agent"], "codex")
-        self.assertEqual(data["last_review_session_id"], "rev-sess")
+        pinned_data = gh.pinned_data(21)
+        self.assertEqual(pinned_data["review_agent"], "codex")
+        self.assertEqual(pinned_data["last_review_session_id"], "rev-sess")
 
     def test_dev_fix_uses_recorded_backend_not_config(self) -> None:
         # Issue locked to codex via pinned state; even if config flips to
@@ -282,10 +282,10 @@ class ConfigurableBackendTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         # No proactive migration: legacy key stays put, no new keys written
         # by a resume (only fresh spawns write `dev_agent`/`dev_session_id`).
-        data = gh.pinned_data(23)
-        self.assertEqual(data.get("codex_session_id"), "sess-legacy")
-        self.assertNotIn("dev_agent", data)
-        self.assertNotIn("dev_session_id", data)
+        pinned_data = gh.pinned_data(23)
+        self.assertEqual(pinned_data.get("codex_session_id"), "sess-legacy")
+        self.assertNotIn("dev_agent", pinned_data)
+        self.assertNotIn("dev_session_id", pinned_data)
 
 
 class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -321,7 +321,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             captured["resume_session_id"] = resume_session_id
             return _agent(session_id="ignored", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -350,7 +350,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             captured["resume_session_id"] = resume_session_id
             return _agent(session_id="fresh-sess", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -376,10 +376,10 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seeded_issue(silent_park_count=threshold)
         state = gh.read_pinned_state(issue)
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(
                  workflow, "run_agent",
-                 lambda *a, **kw: _agent(session_id="", last_message=""),
+                 lambda *args, **kwargs: _agent(session_id="", last_message=""),
              ):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -414,7 +414,7 @@ class SilentSessionResumeFallbackTest(unittest.TestCase, _PatchedWorkflowMixin):
             captured["resume_session_id"] = resume_session_id
             return _agent(session_id="fresh-legacy", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -466,30 +466,30 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
             "NO CONVERSATION FOUND WITH SESSION ID foo",
         ):
             with self.subTest(stderr=stderr):
-                result = _agent(session_id="", last_message="", stderr=stderr)
+                agent_result = _agent(session_id="", last_message="", stderr=stderr)
                 self.assertTrue(
-                    workflow._is_stale_session_failure("claude", result),
+                    workflow._is_stale_session_failure("claude", agent_result),
                     f"{stderr!r} should be classified stale-session",
                 )
 
     def test_marker_detector_ignores_unrelated_stderr(self) -> None:
-        result = _agent(
+        agent_result = _agent(
             session_id="", last_message="",
             stderr="Error: rate limited, please retry shortly",
         )
         self.assertFalse(
-            workflow._is_stale_session_failure("claude", result)
+            workflow._is_stale_session_failure("claude", agent_result)
         )
 
     def test_marker_detector_only_triggers_for_claude(self) -> None:
         # Codex has no analogous stable marker today; the detector must
         # not misfire on a codex resume whose stderr happens to share text.
-        result = _agent(
+        agent_result = _agent(
             session_id="", last_message="",
             stderr="No conversation found with session ID: xyz",
         )
         self.assertFalse(
-            workflow._is_stale_session_failure("codex", result)
+            workflow._is_stale_session_failure("codex", agent_result)
         )
 
     def test_claude_stale_session_retries_once_with_fresh_spawn(self) -> None:
@@ -511,7 +511,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 )
             return _agent(session_id="fresh-sess", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -544,7 +544,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 )
             return _agent(session_id="", last_message="")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -569,9 +569,9 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 session_id="", last_message="", stderr=self.STALE_STDERR,
             )
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
-            _, result, _ = workflow._resume_dev_with_text(
+            _, agent_result, _ = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "go",
             )
 
@@ -581,7 +581,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         # Result reflects the still-failing retry; caller's downstream
         # `_on_question` will handle the agent_silent park.
-        self.assertEqual(result.stderr, self.STALE_STDERR)
+        self.assertEqual(agent_result.stderr, self.STALE_STDERR)
 
     def test_codex_stale_stderr_no_immediate_retry(self) -> None:
         # Codex falls back to the silent-park-count path. A first resume
@@ -598,7 +598,7 @@ class StaleSessionImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin):
                 session_id="", last_message="", stderr=self.STALE_STDERR,
             )
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -646,48 +646,48 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             "input length and `max_tokens` exceed context limit: ...",
         ):
             with self.subTest(last_message=last_message):
-                result = _agent(session_id="", last_message=last_message)
+                agent_result = _agent(session_id="", last_message=last_message)
                 self.assertTrue(
-                    workflow._is_context_overflow_failure("claude", result),
+                    workflow._is_context_overflow_failure("claude", agent_result),
                     f"{last_message!r} should be classified context overflow",
                 )
 
     def test_overflow_detector_matches_stderr(self) -> None:
         # The CLI may print the diagnostic to stderr without emitting a result
         # event (empty last_message); a substring match still trips recovery.
-        result = _agent(
+        agent_result = _agent(
             session_id="", last_message="",
             stderr="API Error: prompt is too long: 210000 tokens > 200000",
         )
         self.assertTrue(
-            workflow._is_context_overflow_failure("claude", result)
+            workflow._is_context_overflow_failure("claude", agent_result)
         )
 
     def test_overflow_detector_ignores_phrase_midanswer(self) -> None:
         # An agent that merely MENTIONS the phrase inside a normal answer must
         # not be misclassified -- last_message is matched as a prefix only.
-        result = _agent(
+        agent_result = _agent(
             session_id="sess-1",
             last_message="I split the work because the prompt is too long "
             "to handle in one pass; see the sub-issues.",
         )
         self.assertFalse(
-            workflow._is_context_overflow_failure("claude", result)
+            workflow._is_context_overflow_failure("claude", agent_result)
         )
 
     def test_overflow_detector_ignores_unrelated(self) -> None:
-        result = _agent(
+        agent_result = _agent(
             session_id="sess-1", last_message="done",
             stderr="Error: rate limited, please retry shortly",
         )
         self.assertFalse(
-            workflow._is_context_overflow_failure("claude", result)
+            workflow._is_context_overflow_failure("claude", agent_result)
         )
 
     def test_overflow_detector_only_triggers_for_claude(self) -> None:
-        result = _agent(session_id="", last_message=self.OVERFLOW_MSG)
+        agent_result = _agent(session_id="", last_message=self.OVERFLOW_MSG)
         self.assertFalse(
-            workflow._is_context_overflow_failure("codex", result)
+            workflow._is_context_overflow_failure("codex", agent_result)
         )
 
     def test_poisoned_predicate_covers_stale_and_overflow(self) -> None:
@@ -718,7 +718,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
                 return _agent(session_id="", last_message=self.OVERFLOW_MSG)
             return _agent(session_id="fresh-sess", last_message="ok")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -744,7 +744,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
                 return _agent(session_id="", last_message=self.OVERFLOW_MSG)
             return _agent(session_id="", last_message="")
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -764,9 +764,9 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             calls.append(resume_session_id)
             return _agent(session_id="", last_message=self.OVERFLOW_MSG)
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
-            _, result, _ = workflow._resume_dev_with_text(
+            _, agent_result, _ = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "go",
             )
 
@@ -774,7 +774,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             calls, ["poisoned-sess", None],
             "retry must be bounded to a single fresh spawn",
         )
-        self.assertEqual(result.last_message, self.OVERFLOW_MSG)
+        self.assertEqual(agent_result.last_message, self.OVERFLOW_MSG)
 
     def test_codex_overflow_no_immediate_retry(self) -> None:
         # Codex has no analogous stable marker; a codex resume whose message
@@ -788,7 +788,7 @@ class ContextOverflowImmediateRetryTest(unittest.TestCase, _PatchedWorkflowMixin
             calls.append(resume_session_id)
             return _agent(session_id="", last_message=self.OVERFLOW_MSG)
 
-        with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+        with patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
@@ -819,9 +819,9 @@ class SessionLimitMessageClassifierTest(unittest.TestCase):
             "  CLAUDE USAGE LIMIT REACHED",
         ):
             with self.subTest(last_message=last_message):
-                result = _agent(session_id="sess-1", last_message=last_message)
+                agent_result = _agent(session_id="sess-1", last_message=last_message)
                 self.assertTrue(
-                    workflow._is_session_limit_message(result),
+                    workflow._is_session_limit_message(agent_result),
                     f"{last_message!r} should classify as a session limit",
                 )
 
@@ -834,9 +834,9 @@ class SessionLimitMessageClassifierTest(unittest.TestCase):
             "I added a note about the session limit handling in fixing.py.",
         ):
             with self.subTest(last_message=last_message):
-                result = _agent(session_id="sess-1", last_message=last_message)
+                agent_result = _agent(session_id="sess-1", last_message=last_message)
                 self.assertFalse(
-                    workflow._is_session_limit_message(result),
+                    workflow._is_session_limit_message(agent_result),
                     f"{last_message!r} must not classify as a session limit",
                 )
 
@@ -866,12 +866,12 @@ class ProactiveSessionRotationTest(unittest.TestCase, _PatchedWorkflowMixin):
     def _run_resume(self, gh, issue, *, fake_run, threshold):
         state = gh.read_pinned_state(issue)
         with patch.object(config, "DEV_SESSION_MAX_RESUMES", threshold), \
-             patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
+             patch.object(workflow, "_ensure_worktree", lambda spec, issue_number, **_: _FAKE_WT), \
              patch.object(workflow, "run_agent", fake_run):
-            wt, result, _ = workflow._resume_dev_with_text(
+            wt, agent_result, _ = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "fix it",
             )
-        return state, result
+        return state, agent_result
 
     def test_resume_below_threshold_increments_and_keeps_session(self) -> None:
         gh, issue = self._seeded_issue(resume_count=3)

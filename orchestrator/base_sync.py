@@ -93,11 +93,11 @@ def _rebase_base_into_worktree(
     a planted hooksPath / fsmonitor would otherwise execute attacker
     code under the orchestrator's UID at diff time.
     """
-    r = _git_hardened(
+    rebase_result = _git_hardened(
         "rebase",
         f"{spec.remote_name}/{spec.base_branch}", cwd=worktree,
     )
-    if r.returncode == 0:
+    if rebase_result.returncode == 0:
         return True, []
     conflicted = _git_hardened(
         "diff", "--name-only", "--diff-filter=U", cwd=worktree,
@@ -123,10 +123,12 @@ def _merge_base_into_worktree(
 def _rebase_in_progress(worktree: Path) -> bool:
     """Return True when the worktree still has an unfinished rebase."""
     for state_dir in ("rebase-merge", "rebase-apply"):
-        r = _git_hardened("rev-parse", "--git-path", state_dir, cwd=worktree)
-        if r.returncode != 0:
+        git_path_result = _git_hardened(
+            "rev-parse", "--git-path", state_dir, cwd=worktree,
+        )
+        if git_path_result.returncode != 0:
             continue
-        path = (r.stdout or "").strip()
+        path = (git_path_result.stdout or "").strip()
         if not path:
             continue
         state_path = Path(path)
@@ -1057,7 +1059,7 @@ def _sync_pr_worktree_to_base(
                 park_reason,
             )
             return
-        unparking_consumed_max = max(c.id for c in new_comments)
+        unparking_consumed_max = max(comment.id for comment in new_comments)
         log.info(
             "issue=#%d parked on %r had a new human comment; will clear "
             "the park if a retry is actually attempted this tick (gates "

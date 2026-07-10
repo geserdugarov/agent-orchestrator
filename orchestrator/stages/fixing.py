@@ -292,14 +292,16 @@ def _rescan_fixing_feedback(
     # old ids on long-lived issues, after which an id-only filter would
     # start re-feeding old bot comments to the dev.
     new_issue_side = [
-        c for c in gh.comments_after(issue, issue_wm)
-        if c.id not in orchestrator_ids
-        and _wf._ORCH_COMMENT_MARKER not in (c.body or "")
+        comment
+        for comment in gh.comments_after(issue, issue_wm)
+        if comment.id not in orchestrator_ids
+        and _wf._ORCH_COMMENT_MARKER not in (comment.body or "")
     ]
     new_pr_conv = [
-        c for c in gh.pr_conversation_comments_after(pr, issue_wm)
-        if c.id not in orchestrator_ids
-        and _wf._ORCH_COMMENT_MARKER not in (c.body or "")
+        comment
+        for comment in gh.pr_conversation_comments_after(pr, issue_wm)
+        if comment.id not in orchestrator_ids
+        and _wf._ORCH_COMMENT_MARKER not in (comment.body or "")
     ]
     # Inline review comments and review summaries live in their own id
     # spaces; the orchestrator never posts on those surfaces so no
@@ -312,11 +314,15 @@ def _rescan_fixing_feedback(
     # not resume the dev. The orchestrator marker/id filtering (above) is
     # preserved; an empty allowlist trusts everyone.
     issue_space_new = filter_trusted(sorted(
-        list(new_issue_side) + list(new_pr_conv), key=lambda c: c.id,
+        list(new_issue_side) + list(new_pr_conv),
+        key=lambda comment: comment.id,
     ))
-    review_space_new = filter_trusted(sorted(new_pr_inline, key=lambda c: c.id))
+    review_space_new = filter_trusted(sorted(
+        new_pr_inline,
+        key=lambda comment: comment.id,
+    ))
     review_summary_new = filter_trusted(
-        sorted(new_pr_reviews, key=lambda r: r.id)
+        sorted(new_pr_reviews, key=lambda review: review.id)
     )
     return _FixingFeedback(
         issue_space=issue_space_new,
@@ -378,14 +384,14 @@ def _dispatch_parked_fixing(
     replay_batch = None
     continue_cmds = _wf._parse_orchestrator_continue(feedback.issue_space)
     if continue_cmds:
-        action, items = _handle_continue_command(
+        action, replay_items = _handle_continue_command(
             gh, issue, state, pr, park_reason, continue_cmds, feedback,
         )
         if action == "refuse":
             gh.write_pinned_state(issue, state)
             return _ParkedFixingDecision(stop=True)
         if action == "replay":
-            replay_batch = items
+            replay_batch = replay_items
         # "passthrough": fall through to the normal resume below.
 
     # Exception to the stay-parked default: when the park reason can
@@ -484,8 +490,8 @@ def _fixing_debounce_open(
         return False
     now = datetime.now(timezone.utc)
     latest_ts: Optional[datetime] = None
-    for c in feedback.all_items:
-        ts = _wf._comment_created_at(c)
+    for feedback_item in feedback.all_items:
+        ts = _wf._comment_created_at(feedback_item)
         if ts is None:
             continue
         if latest_ts is None or ts > latest_ts:
@@ -922,7 +928,7 @@ def _pending_fix_id_set(state, ids_key: str, max_id_key: str) -> set:
     """
     ids = state.get(ids_key)
     if isinstance(ids, list) and ids:
-        return {int(i) for i in ids}
+        return {int(comment_id) for comment_id in ids}
     max_id = state.get(max_id_key)
     if isinstance(max_id, int) and not isinstance(max_id, bool):
         return {max_id}
@@ -953,9 +959,9 @@ def _reviewer_anchor_comment(gh, pr, state):
     anchor_id = state.get("pending_fix_reviewer_comment_id")
     if not isinstance(anchor_id, int) or isinstance(anchor_id, bool):
         return None
-    for c in gh.pr_conversation_comments_after(pr, None):
-        if c.id == anchor_id:
-            return c
+    for pr_comment in gh.pr_conversation_comments_after(pr, None):
+        if pr_comment.id == anchor_id:
+            return pr_comment
     return None
 
 
@@ -1004,29 +1010,31 @@ def _reconstruct_pending_fix_batch(gh, issue, pr, state) -> list:
 
     issue_space: list = []
     if issue_ids:
-        for c in gh.comments_after(issue, None):
-            if c.id in issue_ids:
-                issue_space.append(c)
-        for c in gh.pr_conversation_comments_after(pr, None):
-            if c.id in issue_ids:
-                issue_space.append(c)
-        issue_space.sort(key=lambda c: c.id)
+        for issue_comment in gh.comments_after(issue, None):
+            if issue_comment.id in issue_ids:
+                issue_space.append(issue_comment)
+        for pr_comment in gh.pr_conversation_comments_after(pr, None):
+            if pr_comment.id in issue_ids:
+                issue_space.append(pr_comment)
+        issue_space.sort(key=lambda comment: comment.id)
 
     review_space: list = []
     if review_ids:
         review_space = [
-            c for c in gh.pr_inline_comments_after(pr, None)
-            if c.id in review_ids
+            review_comment
+            for review_comment in gh.pr_inline_comments_after(pr, None)
+            if review_comment.id in review_ids
         ]
-        review_space.sort(key=lambda c: c.id)
+        review_space.sort(key=lambda comment: comment.id)
 
     review_summary: list = []
     if summary_ids:
         review_summary = [
-            r for r in gh.pr_reviews_after(pr, None)
-            if r.id in summary_ids
+            review
+            for review in gh.pr_reviews_after(pr, None)
+            if review.id in summary_ids
         ]
-        review_summary.sort(key=lambda r: r.id)
+        review_summary.sort(key=lambda review: review.id)
 
     # Re-apply the author allowlist at reconstruction time, not only at route
     # time: an issue parked before the trust gate shipped can carry untrusted
@@ -1044,7 +1052,9 @@ def _reconstruct_pending_fix_batch(gh, issue, pr, state) -> list:
     # the two routes are mutually exclusive, so `trusted_batch` is empty here.
     if state.get("pending_fix_at") is None:
         anchor = _reviewer_anchor_comment(gh, pr, state)
-        if anchor is not None and all(o.id != anchor.id for o in trusted_batch):
+        if anchor is not None and all(
+            feedback_item.id != anchor.id for feedback_item in trusted_batch
+        ):
             return [anchor] + trusted_batch
     return trusted_batch
 
@@ -1069,21 +1079,21 @@ def _advance_consumed_watermarks(
     """
     cur_issue_wm = state.get("pr_last_comment_id")
     if feedback.issue_space:
-        new_wm = max(c.id for c in feedback.issue_space)
+        new_wm = max(comment.id for comment in feedback.issue_space)
         if isinstance(cur_issue_wm, int):
             new_wm = max(new_wm, cur_issue_wm)
         state.set("pr_last_comment_id", new_wm)
 
     cur_review_wm = state.get("pr_last_review_comment_id")
     if feedback.review_comments:
-        new_wm = max(c.id for c in feedback.review_comments)
+        new_wm = max(comment.id for comment in feedback.review_comments)
         if isinstance(cur_review_wm, int):
             new_wm = max(new_wm, cur_review_wm)
         state.set("pr_last_review_comment_id", new_wm)
 
     cur_summary_wm = state.get("pr_last_review_summary_id")
     if feedback.review_summaries:
-        new_wm = max(r.id for r in feedback.review_summaries)
+        new_wm = max(review.id for review in feedback.review_summaries)
         if isinstance(cur_summary_wm, int):
             new_wm = max(new_wm, cur_summary_wm)
         state.set("pr_last_review_summary_id", new_wm)
@@ -1154,7 +1164,10 @@ def _handle_continue_command(
         # consumed without the dev ever seeing it.
         return "replay", batch + feedback.all_items
 
-    if all(_wf._is_bare_orchestrator_continue(c) for c in feedback.all_items):
+    if all(
+        _wf._is_bare_orchestrator_continue(comment)
+        for comment in feedback.all_items
+    ):
         # Content-free continue with nothing else to act on. Consume only the
         # command comment(s) (`new_feedback` is all bare commands here, so this
         # covers them) so the refusal is not re-posted every tick, then stay

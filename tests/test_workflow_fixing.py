@@ -306,9 +306,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         self.assertIn((ISSUE, IN_REVIEW), gh.label_history)
-        data = gh.pinned_data(ISSUE)
-        self.assertFalse(data.get(AWAITING_HUMAN))
-        self.assertIsNone(data.get(PENDING_FIX_AT))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
+        self.assertIsNone(pinned_data.get(PENDING_FIX_AT))
         mocks[PUSH_BRANCH].assert_not_called()
         # An FYI quoting the ack reason is posted on the issue thread.
         self.assertTrue(any(
@@ -376,13 +376,13 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.posted_comments, [])
         # Watermarks and bookmarks unmoved; awaiting_human not cleared/set.
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         self.assertEqual(
-            data.get(PR_LAST_COMMENT_ID), INITIAL_PR_COMMENT_WATERMARK,
+            pinned_data.get(PR_LAST_COMMENT_ID), INITIAL_PR_COMMENT_WATERMARK,
         )
-        self.assertEqual(data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS)
-        self.assertEqual(data.get(PENDING_FIX_ISSUE_MAX_ID), TRIGGER_ID)
-        self.assertFalse(data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS)
+        self.assertEqual(pinned_data.get(PENDING_FIX_ISSUE_MAX_ID), TRIGGER_ID)
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
 
     def test_interrupted_with_new_commit_is_ignored(self) -> None:
         # An interrupted resume that DID advance HEAD must also be ignored:
@@ -418,13 +418,13 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(gh.write_state_calls, 0)
         self.assertEqual(gh.label_history, [])
         self.assertEqual(gh.posted_comments, [])
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         self.assertEqual(
-            data.get(PR_LAST_COMMENT_ID), INITIAL_PR_COMMENT_WATERMARK,
+            pinned_data.get(PR_LAST_COMMENT_ID), INITIAL_PR_COMMENT_WATERMARK,
         )
-        self.assertEqual(data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS)
-        self.assertEqual(data.get(PENDING_FIX_ISSUE_MAX_ID), TRIGGER_ID)
-        self.assertFalse(data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS)
+        self.assertEqual(pinned_data.get(PENDING_FIX_ISSUE_MAX_ID), TRIGGER_ID)
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
 
     def test_no_ack_in_review_park_stays_parked(self) -> None:
         # Regression: a no-commit no-ACK reply parks via `_on_question`
@@ -465,10 +465,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         self.assertNotIn((ISSUE, IN_REVIEW), gh.label_history)
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         # Bookmarks left intact for the eventual human-reply re-entry.
-        self.assertEqual(data.get(PENDING_FIX_AT), EARLIER_PENDING_FIX_AT_TS)
+        self.assertEqual(pinned_data.get(PENDING_FIX_AT), EARLIER_PENDING_FIX_AT_TS)
         # The handler short-circuits at the awaiting-human + no-new-feedback
         # gate -- no dev resume, no push.
         mocks[RUN_AGENT].assert_not_called()
@@ -583,14 +583,14 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # And NOT through documenting -- docs run after reviewer
         # approval before `in_review`, not on the pushed-fix exit.
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Review round reset so validating starts fresh on the new diff.
-        self.assertEqual(data.get(REVIEW_ROUND), 0)
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 0)
         # Bookmarks cleared after consumption.
-        self.assertIsNone(data.get(PENDING_FIX_AT))
-        self.assertIsNone(data.get(PENDING_FIX_ISSUE_MAX_ID))
+        self.assertIsNone(pinned_data.get(PENDING_FIX_AT))
+        self.assertIsNone(pinned_data.get(PENDING_FIX_ISSUE_MAX_ID))
         # Watermark advanced past the consumed comment.
-        self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
+        self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
 
     def test_dev_timeout_parks_and_advances_watermarks(self) -> None:
         # On dev timeout `_handle_dev_fix_result` parks awaiting human.
@@ -612,11 +612,11 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 head_shas=(SHA_BEFORE,),
             )
 
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         # Watermark advanced even though no fix landed -- the dev saw
         # the feedback via the resume prompt.
-        self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
+        self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
         # Did NOT advance to validating; stays in fixing for the
         # operator. (A pushed fix would relabel to validating.)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
@@ -671,13 +671,13 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks[PUSH_BRANCH].assert_called_once()
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
-        data = gh.pinned_data(ISSUE)
-        self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
         self.assertEqual(
-            data.get(PR_LAST_REVIEW_COMMENT_ID), INLINE_FEEDBACK_ID,
+            pinned_data.get(PR_LAST_REVIEW_COMMENT_ID), INLINE_FEEDBACK_ID,
         )
         self.assertEqual(
-            data.get(PR_LAST_REVIEW_SUMMARY_ID), REVIEW_SUMMARY_FEEDBACK_ID,
+            pinned_data.get(PR_LAST_REVIEW_SUMMARY_ID), REVIEW_SUMMARY_FEEDBACK_ID,
         )
         # Prompt also quoted every surface.
         prompt = mocks[RUN_AGENT].call_args.args[1]
@@ -720,7 +720,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 head_shas=(SHA_BEFORE, SHA_AFTER),
             )
 
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Pushed successfully, flipped directly to validating.
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         # The stored hash matches the current computed hash, i.e. the
@@ -731,12 +731,12 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         expected = _compute_user_content_hash(
             issue,
             _orchestrator_ids(
-                workflow.PinnedState(data=dict(data)),
+                workflow.PinnedState(data=dict(pinned_data)),
             ),
         )
-        self.assertEqual(data.get(USER_CONTENT_HASH), expected)
+        self.assertEqual(pinned_data.get(USER_CONTENT_HASH), expected)
         self.assertNotEqual(
-            data.get(USER_CONTENT_HASH), "stale-hash-pre-comment",
+            pinned_data.get(USER_CONTENT_HASH), "stale-hash-pre-comment",
         )
 
     def test_failed_fix_also_refreshes_user_content_hash(self) -> None:
@@ -764,10 +764,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 head_shas=(SHA_BEFORE,),
             )
 
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         self.assertNotEqual(
-            data.get(USER_CONTENT_HASH), "stale-hash-pre-comment",
+            pinned_data.get(USER_CONTENT_HASH), "stale-hash-pre-comment",
         )
 
     def test_pushed_fix_bump_does_not_swallow_concurrent_comment(
@@ -800,9 +800,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         original_handle_fix_result = workflow._handle_dev_fix_result
 
         def push_then_inject(*args, **kwargs):
-            result = original_handle_fix_result(*args, **kwargs)
+            fix_result = original_handle_fix_result(*args, **kwargs)
             issue.comments.append(concurrent)
-            return result
+            return fix_result
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              _patch_mock.object(
@@ -817,15 +817,15 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 head_shas=(SHA_BEFORE, SHA_AFTER),
             )
 
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Label flipped to validating (push succeeded; reviewer
         # re-evaluates the new head next tick).
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         # Watermark advanced past the consumed triggering comment but
         # NOT past the concurrent one -- the next in_review tick must
         # still see the concurrent comment as fresh feedback.
-        self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
-        self.assertLess(data.get(PR_LAST_COMMENT_ID), CONCURRENT_COMMENT_ID)
+        self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
+        self.assertLess(pinned_data.get(PR_LAST_COMMENT_ID), CONCURRENT_COMMENT_ID)
 
     def test_failed_fix_bump_does_not_swallow_concurrent_comment(
         self,
@@ -858,9 +858,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             # park comment and returns False. Splice the concurrent
             # human comment in AFTER that post but BEFORE the handler
             # advances the watermark.
-            result = original_handle_fix_result(*args, **kwargs)
+            fix_result = original_handle_fix_result(*args, **kwargs)
             issue.comments.append(concurrent)
-            return result
+            return fix_result
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              _patch_mock.object(
@@ -872,14 +872,14 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 head_shas=(SHA_BEFORE,),
             )
 
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Parked awaiting human (timeout failure).
-        self.assertTrue(data.get(AWAITING_HUMAN))
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         # Watermark advanced past the consumed triggering comment but
         # NOT past the concurrent one -- the next fixing tick must
         # still see the concurrent comment as fresh feedback.
-        self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
-        self.assertLess(data.get(PR_LAST_COMMENT_ID), CONCURRENT_COMMENT_ID)
+        self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
+        self.assertLess(pinned_data.get(PR_LAST_COMMENT_ID), CONCURRENT_COMMENT_ID)
 
         # Second tick: rescan picks up the concurrent comment so
         # `awaiting_human and not new_feedback` is False; park flags
@@ -958,13 +958,13 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks[RUN_AGENT].assert_called_once()
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Park flags cleared (either by _resume_dev_with_text or after
         # the successful push). After a successful push we end up in
         # validating directly so the reviewer re-evaluates the new
         # head next tick.
-        self.assertFalse(data.get(AWAITING_HUMAN))
-        self.assertIsNone(data.get(PARK_REASON))
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
+        self.assertIsNone(pinned_data.get(PARK_REASON))
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
 
@@ -1009,10 +1009,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 head_shas=(SHA_BEFORE, SHA_AFTER),
             )
 
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # `review_round` bumped from 2 to 3 -- the review cycle continues
         # under MAX_REVIEW_ROUNDS rather than starting over at 0.
-        self.assertEqual(data.get(REVIEW_ROUND), 3)
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 3)
         # Flipped back to validating so the reviewer re-evaluates next tick.
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
@@ -1059,12 +1059,12 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Recovery ran -- not a human-comment driven resume.
         mocks[RUN_AGENT].assert_not_called()
         mocks[PUSH_BRANCH].assert_called_once()
-        data = gh.pinned_data(ISSUE)
-        self.assertFalse(data.get(AWAITING_HUMAN))
-        self.assertIsNone(data.get(PARK_REASON))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
+        self.assertIsNone(pinned_data.get(PARK_REASON))
         # Round bumped because a fix landed (the recovery helper bumps
         # on its `pushed` outcome).
-        self.assertEqual(data.get(REVIEW_ROUND), 2)
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 2)
         # Flipped back to validating so the reviewer reruns next tick.
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
@@ -1096,10 +1096,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks[RUN_AGENT].assert_not_called()
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Park flags unchanged.
-        self.assertTrue(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(PARK_REASON), PARK_PUSH_FAILED)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PARK_REASON), PARK_PUSH_FAILED)
         # Still on `fixing` (no relabel emitted this tick).
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         # Did NOT re-post the park comment (would be repetitive churn).
@@ -1138,15 +1138,15 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks[RUN_AGENT].assert_not_called()
-        data = gh.pinned_data(ISSUE)
-        self.assertFalse(data.get(AWAITING_HUMAN))
-        self.assertIsNone(data.get(PARK_REASON))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
+        self.assertIsNone(pinned_data.get(PARK_REASON))
         # No round bump -- the timeout produced no fix.
-        self.assertEqual(data.get(REVIEW_ROUND), 1)
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 1)
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         # `pre_dev_fix_sha` watermark cleared by the recovery helper so
         # a future park does not re-use a stale value.
-        self.assertIsNone(data.get(PRE_DEV_FIX_SHA))
+        self.assertIsNone(pinned_data.get(PRE_DEV_FIX_SHA))
 
     def test_agent_timeout_park_finishes_push_when_dev_committed(
         self,
@@ -1180,9 +1180,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks[PUSH_BRANCH].assert_called_once()
-        data = gh.pinned_data(ISSUE)
-        self.assertFalse(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(REVIEW_ROUND), 2)
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 2)
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
     def test_in_review_routed_agent_timeout_park_not_recovered(
@@ -1229,16 +1229,16 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # was attempted on the gated path.
         mocks[RUN_AGENT].assert_not_called()
         mocks[PUSH_BRANCH].assert_not_called()
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Park flags preserved -- the route waits for a human comment.
-        self.assertTrue(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(PARK_REASON), PARK_AGENT_TIMEOUT)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PARK_REASON), PARK_AGENT_TIMEOUT)
         # Stayed on `fixing`; did NOT relabel.
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         # Bookmark untouched so the in_review semantics survive into
         # the next tick after the human replies.
         self.assertEqual(
-            data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS,
+            pinned_data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS,
         )
 
     def test_in_review_routed_push_failed_park_not_recovered(
@@ -1273,16 +1273,16 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks[PUSH_BRANCH].assert_not_called()
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Park preserved; waits for human input.
-        self.assertTrue(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(PARK_REASON), PARK_PUSH_FAILED)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PARK_REASON), PARK_PUSH_FAILED)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         # Bookmark and round unchanged.
         self.assertEqual(
-            data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS,
+            pinned_data.get(PENDING_FIX_AT), PENDING_FIX_AT_TS,
         )
-        self.assertEqual(data.get(REVIEW_ROUND), 0)
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 0)
 
     def test_non_transient_park_stays_silent_without_recovery(self) -> None:
         # Park reasons that REQUIRE a human comment to unstick (an
@@ -1313,11 +1313,11 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         mocks[RUN_AGENT].assert_not_called()
         mocks[PUSH_BRANCH].assert_not_called()
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Unchanged park.
-        self.assertTrue(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(PARK_REASON), PARK_AGENT_QUESTION)
-        self.assertEqual(data.get(REVIEW_ROUND), 1)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PARK_REASON), PARK_AGENT_QUESTION)
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 1)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
 
     def test_in_review_routed_fix_resets_round_to_zero(self) -> None:
@@ -1351,10 +1351,10 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 push_branch=True,
             )
 
-        data = gh.pinned_data(ISSUE)
+        pinned_data = gh.pinned_data(ISSUE)
         # Reset to 0 since the previous round was APPROVED.
-        self.assertEqual(data.get(REVIEW_ROUND), 0)
-        self.assertIsNone(data.get(PENDING_FIX_AT))
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 0)
+        self.assertIsNone(pinned_data.get(PENDING_FIX_AT))
 
     # --- no unread feedback at all --------------------------------------
 
@@ -1382,9 +1382,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks[RUN_AGENT].assert_not_called()
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
-        data = gh.pinned_data(ISSUE)
-        self.assertIsNone(data.get(PENDING_FIX_AT))
-        self.assertIsNone(data.get(PENDING_FIX_ISSUE_MAX_ID))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertIsNone(pinned_data.get(PENDING_FIX_AT))
+        self.assertIsNone(pinned_data.get(PENDING_FIX_ISSUE_MAX_ID))
 
     # --- PR fetch failure bails this tick instead of crashing -----------
 
@@ -1548,8 +1548,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNone(call_args.kwargs.get("resume_session_id"))
         # Did NOT park -- the issue made progress instead (advancing
         # directly to validating for the reviewer to re-evaluate).
-        data = gh.pinned_data(ISSUE)
-        self.assertFalse(data.get(AWAITING_HUMAN))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
 
@@ -1577,15 +1577,15 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 push_branch=False,
             )
 
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(PARK_REASON), PARK_PUSH_FAILED)
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PARK_REASON), PARK_PUSH_FAILED)
         # Label stayed at `fixing` -- no relabel to `validating`.
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
         # Watermark advanced past the consumed feedback so the next
         # fixing tick does not replay it on top of the park.
-        self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
+        self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
 
     def test_dirty_tree_parks_in_fixing(self) -> None:
         # Dev committed but left the tree dirty -> park (refuses to
@@ -1608,15 +1608,15 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 dirty_files=["orchestrator/foo.py"],
             )
 
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         # `_on_dirty_worktree` clears `park_reason` (terminal, needs
         # human reply); the audit event still records the reason.
-        self.assertIsNone(data.get(PARK_REASON))
+        self.assertIsNone(pinned_data.get(PARK_REASON))
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
         # Watermark advanced past the consumed feedback.
-        self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
+        self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
 
     def test_no_commit_question_parks_in_fixing(self) -> None:
         # Dev returned a clarifying question with no new commit. The
@@ -1642,12 +1642,14 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 head_shas=(SHA_BEFORE, SHA_BEFORE),
             )
 
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
         # Agent's question was surfaced to the human.
-        joined = "\n".join(b for _, b in gh.posted_comments)
+        joined = "\n".join(
+            comment_body for _, comment_body in gh.posted_comments
+        )
         self.assertIn("Should I prefer ruff or black for this?", joined)
 
     # --- stranded-fix deferred publish -----------------------------------
@@ -1696,9 +1698,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks[PUSH_BRANCH].assert_called_once()
-        data = gh.pinned_data(ISSUE)
-        self.assertFalse(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(REVIEW_ROUND), 3)
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 3)
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
     def test_no_commit_stranded_fix_behind_remote_parks(self) -> None:
@@ -1718,8 +1720,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks[PUSH_BRANCH].assert_not_called()
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
 
     def test_no_commit_stranded_fix_fetch_failure_parks(self) -> None:
@@ -1781,9 +1783,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             )
 
         mocks[PUSH_BRANCH].assert_called_once()
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(PARK_REASON), PARK_PUSH_FAILED)
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PARK_REASON), PARK_PUSH_FAILED)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
 
     def test_ack_stranded_fix_publishes_instead_of_in_review(self) -> None:
@@ -1821,13 +1823,13 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         mocks[PUSH_BRANCH].assert_called_once()
         self.assertNotIn((ISSUE, IN_REVIEW), gh.label_history)
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
-        data = gh.pinned_data(ISSUE)
-        self.assertFalse(data.get(AWAITING_HUMAN))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertFalse(pinned_data.get(AWAITING_HUMAN))
         # in_review route: a pushed fix starts a fresh review cycle.
-        self.assertEqual(data.get(REVIEW_ROUND), 0)
-        self.assertIsNone(data.get(PENDING_FIX_AT))
+        self.assertEqual(pinned_data.get(REVIEW_ROUND), 0)
+        self.assertIsNone(pinned_data.get(PENDING_FIX_AT))
         # Watermark advanced past the consumed feedback.
-        self.assertGreaterEqual(data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
+        self.assertGreaterEqual(pinned_data.get(PR_LAST_COMMENT_ID), TRIGGER_ID)
 
     def test_ack_stranded_behind_remote_keeps_in_review(self) -> None:
         # The remote PR branch moved past the local view (behind > 0):
@@ -1887,15 +1889,15 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 head_shas=(SHA_BEFORE, SHA_BEFORE),
             )
 
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(PARK_REASON), PARK_AGENT_SILENT)
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PARK_REASON), PARK_AGENT_SILENT)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
         # Silent-park streak counter ticked so the next resume can
         # drop the poisoned session after the configured threshold.
         self.assertGreaterEqual(
-            int(data.get("silent_park_count") or 0), 1,
+            int(pinned_data.get("silent_park_count") or 0), 1,
         )
 
     def test_session_limit_parks_then_continue_retries(
@@ -2020,9 +2022,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # re-evaluates the new head next tick); bookmarks cleared.
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
         self.assertNotIn((ISSUE, DOCUMENTING), gh.label_history)
-        data = gh.pinned_data(ISSUE)
-        self.assertIsNone(data.get(PENDING_FIX_AT))
-        self.assertIsNone(data.get(PENDING_FIX_ISSUE_MAX_ID))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertIsNone(pinned_data.get(PENDING_FIX_AT))
+        self.assertIsNone(pinned_data.get(PENDING_FIX_ISSUE_MAX_ID))
 
 
 class ReconstructPendingFixBatchTest(unittest.TestCase):
@@ -2128,11 +2130,11 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         # Exact batch: issue-space, then inline, then summaries; each surface
         # sorted by id.
         self.assertEqual(
-            [o.id for o in batch],
+            [feedback_item.id for feedback_item in batch],
             [*BATCH_ISSUE_IDS, *BATCH_INLINE_IDS, *BATCH_SUMMARY_IDS],
         )
         # Non-batch noise on every surface is excluded.
-        ids = {o.id for o in batch}
+        ids = {feedback_item.id for feedback_item in batch}
         self.assertNotIn(BATCH_LATER_ISSUE_ID, ids)
         self.assertNotIn(BATCH_ORCHESTRATOR_NOTE_ID, ids)
         self.assertNotIn(BATCH_INLINE_NOISE_ID, ids)
@@ -2166,7 +2168,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         # Only the single max-id item per surface; a legacy bookmark cannot
         # prove lower ids were in the batch.
         self.assertEqual(
-            [o.id for o in batch],
+            [feedback_item.id for feedback_item in batch],
             [
                 BATCH_PR_CONVERSATION_ID,
                 BATCH_INLINE_SECOND_ID,
@@ -2220,7 +2222,10 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
 
         # Only the trusted recorded id survives.
-        self.assertEqual([o.id for o in batch], [BATCH_ISSUE_ID])
+        self.assertEqual(
+            [feedback_item.id for feedback_item in batch],
+            [BATCH_ISSUE_ID],
+        )
         prompt = workflow._build_pr_comment_followup(batch)
         self.assertIn("trusted issue ask", prompt)
         self.assertNotIn(malicious_url, prompt)
@@ -2266,7 +2271,10 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
 
         batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
 
-        self.assertEqual([o.id for o in batch], [BATCH_PR_CONVERSATION_ID])
+        self.assertEqual(
+            [feedback_item.id for feedback_item in batch],
+            [BATCH_PR_CONVERSATION_ID],
+        )
         prompt = workflow._build_pr_comment_followup(batch)
         self.assertIn("please fix the docstring ordering", prompt)
 
@@ -2285,7 +2293,10 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
             batch = _reconstruct_pending_fix_batch(gh, issue, pr, state)
 
-        self.assertEqual([o.id for o in batch], [BATCH_PR_CONVERSATION_ID])
+        self.assertEqual(
+            [feedback_item.id for feedback_item in batch],
+            [BATCH_PR_CONVERSATION_ID],
+        )
 
     def test_reviewer_anchor_ignored_when_pending_fix_at_set(self) -> None:
         # A stale anchor left behind by an earlier validating park must NOT be
@@ -2496,17 +2507,17 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 # The poisoned/timed-out session was dropped: the retry is a
                 # FRESH spawn (no resume id) and the new id is pinned.
                 self.assertIsNone(call.kwargs.get("resume_session_id"))
-                data = gh.pinned_data(ISSUE)
-                self.assertEqual(data.get("dev_session_id"), FRESH_SESSION)
+                pinned_data = gh.pinned_data(ISSUE)
+                self.assertEqual(pinned_data.get("dev_session_id"), FRESH_SESSION)
                 # Pushed fix -> validating, round reset (in_review route),
                 # bookmarks cleared, command consumed, park cleared.
                 self.assertIn((ISSUE, VALIDATING), gh.label_history)
-                self.assertEqual(data.get(REVIEW_ROUND), 0)
-                self.assertIsNone(data.get(PENDING_FIX_AT))
-                self.assertIsNone(data.get(PENDING_FIX_ISSUE_IDS))
-                self.assertEqual(data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
-                self.assertFalse(data.get(AWAITING_HUMAN))
-                self.assertIsNone(data.get(PARK_REASON))
+                self.assertEqual(pinned_data.get(REVIEW_ROUND), 0)
+                self.assertIsNone(pinned_data.get(PENDING_FIX_AT))
+                self.assertIsNone(pinned_data.get(PENDING_FIX_ISSUE_IDS))
+                self.assertEqual(pinned_data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
+                self.assertFalse(pinned_data.get(AWAITING_HUMAN))
+                self.assertIsNone(pinned_data.get(PARK_REASON))
 
     def test_refuses_continue_on_question_park(self) -> None:
         # A real agent question / dirty worktree parks with `park_reason=None`.
@@ -2521,11 +2532,11 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         mocks[RUN_AGENT].assert_not_called()
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
-        self.assertEqual(data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
-        self.assertEqual(data.get(PENDING_FIX_ISSUE_IDS), BATCH_ISSUE_IDS)
+        self.assertEqual(pinned_data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
+        self.assertEqual(pinned_data.get(PENDING_FIX_ISSUE_IDS), BATCH_ISSUE_IDS)
         self.assertTrue(any(
             "/orchestrator continue" in body and "guidance" in body
             for _, body in gh.posted_comments
@@ -2545,10 +2556,10 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         mocks[RUN_AGENT].assert_not_called()
-        data = gh.pinned_data(ISSUE)
-        self.assertTrue(data.get(AWAITING_HUMAN))
-        self.assertEqual(data.get(PARK_REASON), PARK_AGENT_SILENT)
-        self.assertEqual(data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
+        pinned_data = gh.pinned_data(ISSUE)
+        self.assertTrue(pinned_data.get(AWAITING_HUMAN))
+        self.assertEqual(pinned_data.get(PARK_REASON), PARK_AGENT_SILENT)
+        self.assertEqual(pinned_data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
         self.assertTrue(any(
             "no preserved" in body for _, body in gh.posted_comments
         ))
@@ -2599,11 +2610,11 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 )
 
                 mocks[RUN_AGENT].assert_not_called()
-                data = gh.pinned_data(ISSUE)
-                self.assertTrue(data.get(AWAITING_HUMAN))
-                self.assertEqual(data.get(PARK_REASON), reason)
+                pinned_data = gh.pinned_data(ISSUE)
+                self.assertTrue(pinned_data.get(AWAITING_HUMAN))
+                self.assertEqual(pinned_data.get(PARK_REASON), reason)
                 self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
-                self.assertEqual(data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
+                self.assertEqual(pinned_data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
                 self.assertTrue(any(
                     "no preserved" in body for _, body in gh.posted_comments
                 ))
@@ -2699,17 +2710,17 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 self.assertFalse(any(
                     "no preserved" in body for _, body in gh.posted_comments
                 ))
-                data = gh.pinned_data(ISSUE)
-                self.assertEqual(data.get("dev_session_id"), FRESH_SESSION)
+                pinned_data = gh.pinned_data(ISSUE)
+                self.assertEqual(pinned_data.get("dev_session_id"), FRESH_SESSION)
                 # Pushed fix -> back to `validating`, park cleared.
                 self.assertIn((ISSUE, VALIDATING), gh.label_history)
-                self.assertFalse(data.get(AWAITING_HUMAN))
-                self.assertIsNone(data.get(PARK_REASON))
+                self.assertFalse(pinned_data.get(AWAITING_HUMAN))
+                self.assertIsNone(pinned_data.get(PARK_REASON))
                 # Validating-route round accounting: BUMP (2 -> 3), NOT the
                 # in_review-route reset to 0.
-                self.assertEqual(data.get(REVIEW_ROUND), 3)
+                self.assertEqual(pinned_data.get(REVIEW_ROUND), 3)
                 # Anchor cleared on the pushed fix so it is not replayed again.
-                self.assertIsNone(data.get(PENDING_FIX_REVIEWER_COMMENT_ID))
+                self.assertIsNone(pinned_data.get(PENDING_FIX_REVIEWER_COMMENT_ID))
 
     def test_command_mixed_with_guidance_is_not_swallowed(self) -> None:
         # A PR-conversation comment mixing real guidance with a
@@ -2823,15 +2834,15 @@ class FixingAllowlistFeedbackFilterTest(
             head=FakePRRef(sha=PR_HEAD_SHA),
             mergeable=True, check_state="success",
         )
-        item = self._feedback_item(surface, body, login)
+        feedback_item = self._feedback_item(surface, body, login)
         if surface == "issue_thread":
-            issue.comments.append(item)
+            issue.comments.append(feedback_item)
         elif surface == "pr_conversation":
-            pr.issue_comments.append(item)
+            pr.issue_comments.append(feedback_item)
         elif surface == "inline_review":
-            pr.review_comments.append(item)
+            pr.review_comments.append(feedback_item)
         elif surface == "review_summary":
-            pr.reviews.append(item)
+            pr.reviews.append(feedback_item)
         gh.add_pr(pr)
         gh.seed_state(
             ISSUE,

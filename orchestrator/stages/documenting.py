@@ -122,11 +122,11 @@ def _ratchet_in_review_watermark_for_final_docs(
         return
     try:
         pr = gh.get_pr(int(pr_number))
-    except Exception as e:
+    except Exception as error:
         _wf.log.warning(
             "issue=#%s could not fetch PR #%s to ratchet "
             "`pr_last_comment_id` on the final-docs handoff: %s",
-            issue.number, pr_number, e,
+            issue.number, pr_number, error,
         )
         return
 
@@ -607,7 +607,7 @@ def _run_documenting_dev(
         new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
         if not new_comments:
             return None
-        consumed_max = max(c.id for c in new_comments)
+        consumed_max = max(comment.id for comment in new_comments)
         state.set("last_action_comment_id", consumed_max)
         # Anchor `before_sha` from the just-fetched PR worktree BEFORE the
         # resume so the post-spawn check sees a real difference if (and
@@ -625,7 +625,7 @@ def _run_documenting_dev(
             spec, issue, _wf._recent_comments_text(issue),
             config.default_repo_specs(),
         )
-        wt, result, paused = _wf._resume_dev_with_text(
+        wt, documentation_result, paused = _wf._resume_dev_with_text(
             gh, spec, issue, state, prompt,
             followup_has_tracked_repos=True,
             pause_guard=True,
@@ -647,7 +647,7 @@ def _run_documenting_dev(
             issue.number, ahead,
         )
         _, _, _, dev_sid = _wf._read_dev_session(state)
-        result = AgentResult(
+        documentation_result = AgentResult(
             session_id=dev_sid,
             last_message=(
                 "(orchestrator restart: pushing previously committed docs)"
@@ -686,7 +686,7 @@ def _run_documenting_dev(
         # overflow on the final docs pass without ever rotating. The
         # `_ensure_worktree` fallback inside the helper is harmless here
         # because the PR-anchored worktree was already restored above.
-        wt, result, paused = _wf._resume_dev_with_text(
+        wt, documentation_result, paused = _wf._resume_dev_with_text(
             gh, spec, issue, state, prompt,
             followup_has_tracked_repos=True,
             pause_guard=True,
@@ -694,7 +694,7 @@ def _run_documenting_dev(
         state.set("branch", branch)
         recovered = False
 
-    return wt, result, before_sha, recovered, paused
+    return wt, documentation_result, before_sha, recovered, paused
 
 
 def _push_docs_and_advance(
@@ -800,7 +800,7 @@ def _route_documenting_no_change(
 def _dispose_documenting_outcome(
     gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
     branch: str, pr_number, before_sha: str, ahead: int, recovered: bool,
-    result: AgentResult,
+    documentation_result: AgentResult,
 ) -> None:
     """Route the post-agent outcome: timeout / dirty / commit / no-change
     / question.
@@ -810,7 +810,7 @@ def _dispose_documenting_outcome(
     """
     from orchestrator import workflow as _wf
 
-    if result.timed_out:
+    if documentation_result.timed_out:
         _wf._park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} agent timed out after "
@@ -840,7 +840,9 @@ def _dispose_documenting_outcome(
     # nothing) cannot slip past.
     dirty = _wf._worktree_dirty_files(wt)
     if dirty:
-        _wf._on_dirty_worktree(gh, issue, state, result, dirty)
+        _wf._on_dirty_worktree(
+            gh, issue, state, documentation_result, dirty,
+        )
         gh.write_pinned_state(issue, state)
         return
 
@@ -860,7 +862,9 @@ def _dispose_documenting_outcome(
     # change or asked a question. The explicit DOCS: NO_CHANGE marker is
     # the only signal that confirms the diff was checked and nothing was
     # needed.
-    verdict, body = _wf._parse_documentation_verdict(result.last_message or "")
+    verdict, body = _wf._parse_documentation_verdict(
+        documentation_result.last_message or "",
+    )
     if verdict == "no_change":
         _route_documenting_no_change(
             gh, spec, issue, state, wt, branch, pr_number, ahead,
@@ -873,7 +877,7 @@ def _dispose_documenting_outcome(
     # distinguishes the silent-crash case via stderr diagnostics, and tags
     # `silent_park_count` so a poisoned session can be dropped on the next
     # resume.
-    _wf._on_question(gh, issue, state, result)
+    _wf._on_question(gh, issue, state, documentation_result)
     gh.write_pinned_state(issue, state)
 
 
@@ -951,10 +955,12 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     if ahead is None:
         return
 
-    run = _run_documenting_dev(gh, spec, issue, state, branch, wt, ahead)
-    if run is None:
+    documenting_run = _run_documenting_dev(
+        gh, spec, issue, state, branch, wt, ahead,
+    )
+    if documenting_run is None:
         return
-    wt, result, before_sha, recovered, paused = run
+    wt, documentation_result, before_sha, recovered, paused = documenting_run
 
     state.set("last_agent_action_at", _wf._now_iso())
 
@@ -966,7 +972,7 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # watermark mutations are discarded so the next process re-runs the
     # docs pass. Must precede the timeout/dirty/commit/no-change/question
     # disposition below.
-    if _wf._ignore_if_interrupted(issue, result):
+    if _wf._ignore_if_interrupted(issue, documentation_result):
         return
 
     # Live pause applied while the docs agent ran: honor the decision the
@@ -980,5 +986,5 @@ def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     _dispose_documenting_outcome(
         gh, spec, issue, state, branch, pr_number,
-        before_sha, ahead, recovered, result,
+        before_sha, ahead, recovered, documentation_result,
     )

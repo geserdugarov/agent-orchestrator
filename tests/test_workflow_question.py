@@ -41,7 +41,7 @@ def _legacy_branch(issue_number: int) -> str:
 
 
 def _dirty_files(count: int = DIRTY_FILE_COUNT) -> list[str]:
-    return [f"file_{i}.py" for i in range(count)]
+    return [f"file_{file_index}.py" for file_index in range(count)]
 
 
 class HandleQuestionFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -81,12 +81,12 @@ class HandleQuestionFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("> X lives in src/x.py:42.", body)
 
         # Pinned state records the agent spec, session id, and park reason.
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["question_agent"], config.DECOMPOSE_AGENT_SPEC)
-        self.assertEqual(data["question_session_id"], "q-sess-1")
-        self.assertTrue(data["awaiting_human"])
-        self.assertEqual(data["park_reason"], "question_answer")
-        self.assertIn("last_question_at", data)
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["question_agent"], config.DECOMPOSE_AGENT_SPEC)
+        self.assertEqual(pinned_data["question_session_id"], "q-sess-1")
+        self.assertTrue(pinned_data["awaiting_human"])
+        self.assertEqual(pinned_data["park_reason"], "question_answer")
+        self.assertIn("last_question_at", pinned_data)
 
         # The agent ran in the per-issue worktree, not the decomposer one.
         mocks["_ensure_worktree"].assert_called_once_with(
@@ -152,9 +152,9 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
             run_agent=_agent(timed_out=True, last_message=""),
         )
         self._assert_no_pr_no_push_no_relabel(gh, mocks)
-        data = gh.pinned_data(issue.number)
-        self.assertTrue(data["awaiting_human"])
-        self.assertEqual(data["park_reason"], "question_timeout")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertTrue(pinned_data["awaiting_human"])
+        self.assertEqual(pinned_data["park_reason"], "question_timeout")
         self.assertIn(config.HITL_MENTIONS, gh.posted_comments[-1][1])
         self.assertIn("timed out", gh.posted_comments[-1][1])
 
@@ -170,8 +170,8 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
             ),
         )
         self._assert_no_pr_no_push_no_relabel(gh, mocks)
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["park_reason"], "question_silent")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["park_reason"], "question_silent")
         # Silent-path park surfaces stderr diagnostics for the operator.
         self.assertIn("something broke", gh.posted_comments[-1][1])
 
@@ -186,8 +186,8 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
             has_new_commits=True,
         )
         self._assert_no_pr_no_push_no_relabel(gh, mocks)
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["park_reason"], "question_commits")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["park_reason"], "question_commits")
         self.assertIn("read-only", gh.posted_comments[-1][1])
 
     def test_dirty_worktree_parks_without_pushing(self) -> None:
@@ -200,8 +200,8 @@ class HandleQuestionParkPathsTest(unittest.TestCase, _PatchedWorkflowMixin):
             dirty_files=dirty,
         )
         self._assert_no_pr_no_push_no_relabel(gh, mocks)
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["park_reason"], "question_dirty")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["park_reason"], "question_dirty")
         comment = gh.posted_comments[-1][1]
         self.assertIn("file_0.py", comment)
         self.assertIn(f"file_{DIRTY_DISPLAY_LIMIT - 1}.py", comment)
@@ -274,12 +274,12 @@ class HandleQuestionAwaitingHumanResumeTest(
         self.assertIn("please clarify Y", spawn_args[1])
         # Watermark advanced past the consumed comment so the next tick
         # without a new reply is a no-op.
-        data = gh.pinned_data(issue.number)
-        self.assertGreaterEqual(data["last_action_comment_id"], QUESTION_REPLY_ID)
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertGreaterEqual(pinned_data["last_action_comment_id"], QUESTION_REPLY_ID)
         # The follow-up answer was posted and the issue re-parks awaiting
         # human (so the human can either answer again or close / relabel).
-        self.assertTrue(data["awaiting_human"])
-        self.assertEqual(data["park_reason"], "question_answer")
+        self.assertTrue(pinned_data["awaiting_human"])
+        self.assertEqual(pinned_data["park_reason"], "question_answer")
         self.assertIn("Y is defined in y.py.", gh.posted_comments[-1][1])
 
     def test_multi_round_qa_advances_watermark_each_tick(self) -> None:
@@ -302,10 +302,10 @@ class HandleQuestionAwaitingHumanResumeTest(
             ),
             has_new_commits=False,
         )
-        data = gh.pinned_data(issue.number)
-        self.assertTrue(data["awaiting_human"])
-        self.assertEqual(data["park_reason"], "question_answer")
-        wm_after_r1 = data["last_action_comment_id"]
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertTrue(pinned_data["awaiting_human"])
+        self.assertEqual(pinned_data["park_reason"], "question_answer")
+        wm_after_r1 = pinned_data["last_action_comment_id"]
         # Watermark is at or past the orchestrator's just-posted answer
         # comment (the one carrying the answer body). The subsequent
         # pinned-state comment also lives on the issue but is filtered
@@ -317,7 +317,7 @@ class HandleQuestionAwaitingHumanResumeTest(
         ]
         self.assertEqual(len(answer_comments), 1)
         self.assertGreaterEqual(wm_after_r1, answer_comments[0].id)
-        self.assertEqual(data["question_session_id"], "q-sess-rolling")
+        self.assertEqual(pinned_data["question_session_id"], "q-sess-rolling")
 
         # A no-reply tick between rounds must be a no-op: the
         # orchestrator's own comment is below the watermark and
@@ -352,10 +352,10 @@ class HandleQuestionAwaitingHumanResumeTest(
         prompt_r2 = mocks_r2["run_agent"].call_args.args[1]
         self.assertIn("follow-up Q2", prompt_r2)
         self.assertNotIn("round-1 answer", prompt_r2)
-        data = gh.pinned_data(issue.number)
-        self.assertTrue(data["awaiting_human"])
-        self.assertEqual(data["park_reason"], "question_answer")
-        wm_after_r2 = data["last_action_comment_id"]
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertTrue(pinned_data["awaiting_human"])
+        self.assertEqual(pinned_data["park_reason"], "question_answer")
+        wm_after_r2 = pinned_data["last_action_comment_id"]
         self.assertGreater(wm_after_r2, wm_after_r1)
 
         # Round 3: another human reply.
@@ -382,8 +382,8 @@ class HandleQuestionAwaitingHumanResumeTest(
         # The prior bot answers did not leak into the resume prompt.
         self.assertNotIn("round-1 answer", prompt_r3)
         self.assertNotIn("round-2 answer", prompt_r3)
-        data = gh.pinned_data(issue.number)
-        wm_after_r3 = data["last_action_comment_id"]
+        pinned_data = gh.pinned_data(issue.number)
+        wm_after_r3 = pinned_data["last_action_comment_id"]
         self.assertGreater(wm_after_r3, wm_after_r2)
 
         # All three orchestrator answer comments were posted to the
@@ -443,8 +443,8 @@ class HandleQuestionClosedIssueTerminalTest(
         # Workflow label flipped to `done`.
         self.assertEqual(gh.label_history, [(issue.number, "done")])
         # Terminal stamp in pinned state.
-        data = gh.pinned_data(issue.number)
-        self.assertIn("question_closed_at", data)
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertIn("question_closed_at", pinned_data)
         # Cleanup ran.
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, issue.number,
@@ -496,8 +496,8 @@ class HandleQuestionClosedIssueTerminalTest(
         )
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.label_history, [(issue.number, "done")])
-        data = gh.pinned_data(issue.number)
-        self.assertIn("question_closed_at", data)
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertIn("question_closed_at", pinned_data)
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, issue.number,
             branch=_issue_branch(issue.number),
@@ -527,8 +527,9 @@ class HandleQuestionClosedIssueTerminalTest(
         mocks["run_agent"].assert_not_called()
         self.assertEqual(gh.label_history, [(issue.number, "done")])
         receipts = [
-            body for n, body in gh.posted_comments
-            if n == issue.number and body.startswith(":receipt:")
+            body
+            for issue_number, body in gh.posted_comments
+            if issue_number == issue.number and body.startswith(":receipt:")
         ]
         self.assertEqual(len(receipts), 1)
         self.assertIn(
@@ -626,8 +627,8 @@ class HandleQuestionWorktreeCleanupTest(
             run_agent=_agent(timed_out=True, last_message=""),
         )
         mocks["_cleanup_question_worktree"].assert_not_called()
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["park_reason"], "question_timeout")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["park_reason"], "question_timeout")
         self.assertIn("worktree is left intact", gh.posted_comments[-1][1])
 
     def test_commits_park_keeps_worktree_for_inspection(self) -> None:
@@ -638,8 +639,8 @@ class HandleQuestionWorktreeCleanupTest(
             has_new_commits=True,
         )
         mocks["_cleanup_question_worktree"].assert_not_called()
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["park_reason"], "question_commits")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["park_reason"], "question_commits")
 
     def test_dirty_park_keeps_worktree_for_inspection(self) -> None:
         gh, issue = self._seeded(105)
@@ -650,8 +651,8 @@ class HandleQuestionWorktreeCleanupTest(
             dirty_files=["src/x.py"],
         )
         mocks["_cleanup_question_worktree"].assert_not_called()
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["park_reason"], "question_dirty")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["park_reason"], "question_dirty")
 
 
 class HandleQuestionUnsafeParkStabilityTest(
@@ -768,8 +769,8 @@ class HandleQuestionUnsafeParkStabilityTest(
         )
         # Agent ran (human replied) and produced a clean answer.
         mocks["run_agent"].assert_called_once()
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["park_reason"], "question_answer")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["park_reason"], "question_answer")
         # Worktree is now safe to reap.
         mocks["_cleanup_question_worktree"].assert_called_once_with(
             _TEST_SPEC, issue.number,
@@ -907,9 +908,9 @@ class QuestionRelabelToImplementingTest(
         self.assertEqual(len(gh.opened_prs), 1)
         self.assertIn((issue.number, "validating"), gh.label_history)
 
-        data = gh.pinned_data(issue.number)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertFalse(pinned_data.get("awaiting_human"))
+        self.assertIsNone(pinned_data.get("park_reason"))
 
     def test_relabel_with_question_committed_state_refuses_to_push(
         self,
@@ -953,9 +954,9 @@ class QuestionRelabelToImplementingTest(
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
         self.assertEqual(gh.opened_prs, [])
-        data = gh.pinned_data(issue.number)
-        self.assertTrue(data["awaiting_human"])
-        self.assertEqual(data["park_reason"], "question_unsafe_relabel")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertTrue(pinned_data["awaiting_human"])
+        self.assertEqual(pinned_data["park_reason"], "question_unsafe_relabel")
         last = gh.posted_comments[-1][1]
         self.assertIn("question_commits", last)
         self.assertIn("reset the worktree", last.lower())
@@ -1055,8 +1056,8 @@ class QuestionRelabelToImplementingTest(
 
         mocks["run_agent"].assert_not_called()
         mocks["_push_branch"].assert_not_called()
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["park_reason"], "question_unsafe_relabel")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["park_reason"], "question_unsafe_relabel")
 
     def test_unsafe_relabel_tick_is_idempotent_until_worktree_reset(
         self,
@@ -1097,9 +1098,9 @@ class QuestionRelabelToImplementingTest(
 
             self.assertEqual(gh.posted_comments, [])
             mocks["run_agent"].assert_not_called()
-            data = gh.pinned_data(issue.number)
-            self.assertTrue(data["awaiting_human"])
-            self.assertEqual(data["park_reason"], "question_unsafe_relabel")
+            pinned_data = gh.pinned_data(issue.number)
+            self.assertTrue(pinned_data["awaiting_human"])
+            self.assertEqual(pinned_data["park_reason"], "question_unsafe_relabel")
 
     def test_unsafe_relabel_recovers_after_worktree_reset(self) -> None:
         # After the operator resets the worktree (no commits, no dirty
@@ -1151,9 +1152,9 @@ class QuestionRelabelToImplementingTest(
         # which now hands off straight to `validating` (no pre-review
         # docs hop).
         self.assertIn((issue.number, "validating"), gh.label_history)
-        data = gh.pinned_data(issue.number)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertIsNone(data.get("park_reason"))
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertFalse(pinned_data.get("awaiting_human"))
+        self.assertIsNone(pinned_data.get("park_reason"))
 
     def test_relabel_with_no_new_comments_no_longer_no_ops(self) -> None:
         # Regression for the leak: prior to the fix, this scenario
@@ -1200,11 +1201,11 @@ class HandleQuestionSessionPersistenceTest(
             lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
             run_agent=_agent(session_id="", last_message="best-effort answer"),
         )
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["question_agent"], config.DECOMPOSE_AGENT_SPEC)
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["question_agent"], config.DECOMPOSE_AGENT_SPEC)
         # No session id was returned -- the field is absent / falsy, but
         # the role identity is still durable.
-        self.assertFalse(data.get("question_session_id"))
+        self.assertFalse(pinned_data.get("question_session_id"))
 
     def test_resume_without_session_id_uses_full_question_prompt(
         self,
@@ -1261,8 +1262,8 @@ class HandleQuestionSessionPersistenceTest(
         # The fresh spawn's returned session id is captured for
         # future ticks (already covered by another test, but
         # asserting it here keeps the recovery path self-contained).
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["question_session_id"], "q-sess-fresh")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["question_session_id"], "q-sess-fresh")
 
     def test_resume_persists_new_session_id_from_agent_result(self) -> None:
         # Regression: a prior question tick that yielded no session id
@@ -1290,8 +1291,8 @@ class HandleQuestionSessionPersistenceTest(
                 last_message="continued discussion",
             ),
         )
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["question_session_id"], "q-sess-recovered")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["question_session_id"], "q-sess-recovered")
 
     def test_pinned_session_id_is_reused_on_resume(self) -> None:
         # Regression: when the issue already has a persisted spec and
@@ -1343,10 +1344,10 @@ class HandleQuestionRunUsageAccumulationTest(
             run_agent=_agent(session_id="q-sess", last_message="X is in x.py."),
         )
 
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data["issue_agent_runs"], 1)
-        self.assertEqual(data["issue_total_tokens"], 0)
-        self.assertEqual(data["issue_cost_sources"], ["no-usage"])
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data["issue_agent_runs"], 1)
+        self.assertEqual(pinned_data["issue_total_tokens"], 0)
+        self.assertEqual(pinned_data["issue_cost_sources"], ["no-usage"])
 
     def test_resume_counts_one_exit(self) -> None:
         gh = FakeGitHubClient()
@@ -1397,9 +1398,9 @@ class HandleQuestionRunUsageAccumulationTest(
         # No reply -> the resume returns before spawning, so no run is
         # counted and no counter key is created.
         mocks["run_agent"].assert_not_called()
-        data = gh.pinned_data(issue.number)
-        self.assertNotIn("issue_agent_runs", data)
-        self.assertNotIn("issue_total_tokens", data)
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertNotIn("issue_agent_runs", pinned_data)
+        self.assertNotIn("issue_total_tokens", pinned_data)
 
     def test_interrupted_run_does_not_persist_counters(self) -> None:
         gh = FakeGitHubClient()
@@ -1416,11 +1417,11 @@ class HandleQuestionRunUsageAccumulationTest(
         # A shutdown-killed question agent returns before
         # `write_pinned_state`, so neither the folded counters nor a silent
         # park reach GitHub.
-        data = gh.pinned_data(issue.number)
-        self.assertNotIn("issue_agent_runs", data)
-        self.assertNotIn("issue_total_tokens", data)
-        self.assertFalse(data.get("awaiting_human"))
-        self.assertNotEqual(data.get("park_reason"), "question_silent")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertNotIn("issue_agent_runs", pinned_data)
+        self.assertNotIn("issue_total_tokens", pinned_data)
+        self.assertFalse(pinned_data.get("awaiting_human"))
+        self.assertNotEqual(pinned_data.get("park_reason"), "question_silent")
         self.assertEqual(gh.posted_comments, [])
 
     def test_interrupted_but_committed_run_parks_without_counters(self) -> None:
@@ -1441,14 +1442,14 @@ class HandleQuestionRunUsageAccumulationTest(
             has_new_commits=True,
         )
 
-        data = gh.pinned_data(issue.number)
-        self.assertEqual(data.get("park_reason"), "question_commits")
+        pinned_data = gh.pinned_data(issue.number)
+        self.assertEqual(pinned_data.get("park_reason"), "question_commits")
         # Worktree kept for inspection (the commits park's contract).
         mocks["_cleanup_question_worktree"].assert_not_called()
         # The park wrote pinned state, but the killed run's usage was NOT
         # folded, so no counter accrued.
-        self.assertNotIn("issue_agent_runs", data)
-        self.assertNotIn("issue_total_tokens", data)
+        self.assertNotIn("issue_agent_runs", pinned_data)
+        self.assertNotIn("issue_total_tokens", pinned_data)
 
 
 def _git_env() -> dict:
@@ -1845,7 +1846,10 @@ class HandleQuestionResumeTrustFilterTest(
         pinned_state = gh.read_pinned_state(issue)
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
             trusted_comments = _consume_new_human_replies(gh, issue, pinned_state)
-        self.assertEqual([c.id for c in trusted_comments], [TRUSTED_REPLY_ID])
+        self.assertEqual(
+            [comment.id for comment in trusted_comments],
+            [TRUSTED_REPLY_ID],
+        )
         self.assertEqual(pinned_state.get("last_action_comment_id"), TRUSTED_REPLY_ID)
 
     def test_all_outsider_batch_does_not_resume(self) -> None:

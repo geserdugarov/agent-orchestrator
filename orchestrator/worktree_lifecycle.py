@@ -118,29 +118,29 @@ def _sanitize_branch_segment(slug: str) -> str:
     surface, so it gets its own sanitizer rather than tightening the
     filesystem one and uglifying every common slug's worktree path.
     """
-    s_path = _sanitize_slug(slug)
-    s = s_path
+    sanitized_path = _sanitize_slug(slug)
+    sanitized_segment = sanitized_path
     # `..` anywhere is forbidden. Collapse any run of dots to a single
     # `_` so a segment cannot smuggle the sequence past the trailing-
     # dot / `.lock` checks below.
-    s = re.sub(r"\.{2,}", "_", s)
+    sanitized_segment = re.sub(r"\.{2,}", "_", sanitized_segment)
     # `.lock` suffix on a component is reserved by git.
-    if s.endswith(".lock"):
-        s = s[: -len(".lock")] + "_lock"
+    if sanitized_segment.endswith(".lock"):
+        sanitized_segment = sanitized_segment[: -len(".lock")] + "_lock"
     # Trailing `.` on a component is rejected. Loop so any
     # follow-on dot revealed by the trim is also handled.
-    while s.endswith("."):
-        s = s[:-1] + "_"
+    while sanitized_segment.endswith("."):
+        sanitized_segment = sanitized_segment[:-1] + "_"
     # Defensive fallbacks: the substitutions above could in principle
     # produce an empty / leading-dot string (e.g. an input of `.` or
     # `..` collapses far enough that the leading-dot escape from
     # `_sanitize_slug` no longer covers the result).
-    if not s:
-        s = "_"
-    if s.startswith("."):
-        s = "_" + s
-    if s == s_path:
-        return s
+    if not sanitized_segment:
+        sanitized_segment = "_"
+    if sanitized_segment.startswith("."):
+        sanitized_segment = "_" + sanitized_segment
+    if sanitized_segment == sanitized_path:
+        return sanitized_segment
     # Ref-only rewrites changed the filesystem form. Append a
     # content-derived hash of the ORIGINAL slug so two distinct
     # inputs that collapsed to the same `s` (e.g. `owner/foo.lock`
@@ -149,7 +149,7 @@ def _sanitize_branch_segment(slug: str) -> str:
     # would collide on the same branch and the slug-namespacing
     # fix would silently regress for those slug shapes.
     digest = hashlib.sha1((slug or "").encode("utf-8")).hexdigest()[:16]
-    return f"{s}__h{digest}"
+    return f"{sanitized_segment}__h{digest}"
 
 
 def _branch_name(spec: RepoSpec, issue_number: int) -> str:
@@ -280,17 +280,19 @@ def _ensure_worktree(
             "rev-parse", "--verify", branch, cwd=spec.target_root
         ).returncode == 0
         if have_branch:
-            result = _git(
+            worktree_result = _git(
                 "worktree", "add", str(wt), branch, cwd=spec.target_root,
             )
         else:
-            result = _git(
+            worktree_result = _git(
                 "worktree", "add", "-b", branch, str(wt),
                 f"{spec.remote_name}/{spec.base_branch}",
                 cwd=spec.target_root,
             )
-        if result.returncode != 0:
-            raise RuntimeError(f"git worktree add failed: {result.stderr}")
+        if worktree_result.returncode != 0:
+            raise RuntimeError(
+                f"git worktree add failed: {worktree_result.stderr}"
+            )
         return wt
 
 
@@ -357,7 +359,7 @@ def _ensure_pr_worktree(
             "rev-parse", "--verify", branch, cwd=spec.target_root,
         ).returncode == 0
         if have_local:
-            result = _git(
+            worktree_result = _git(
                 "worktree", "add", str(wt), branch, cwd=spec.target_root,
             )
         else:
@@ -365,25 +367,27 @@ def _ensure_pr_worktree(
             # from `<remote>/<base>` -- the dev's commits live on
             # `<remote>/<branch>` and rebuilding from base would discard
             # them.
-            result = _git(
+            worktree_result = _git(
                 "worktree", "add", "-b", branch, str(wt),
                 f"{spec.remote_name}/{branch}",
                 cwd=spec.target_root,
             )
-        if result.returncode != 0:
-            raise RuntimeError(f"git worktree add failed: {result.stderr}")
+        if worktree_result.returncode != 0:
+            raise RuntimeError(
+                f"git worktree add failed: {worktree_result.stderr}"
+            )
         return wt
 
 
 def _has_new_commits(spec: RepoSpec, worktree: Path) -> bool:
-    r = _git(
+    commit_count_result = _git(
         "rev-list", "--count",
         f"{spec.remote_name}/{spec.base_branch}..HEAD",
         cwd=worktree,
     )
-    if r.returncode != 0:
+    if commit_count_result.returncode != 0:
         return False
-    return int((r.stdout or "0").strip() or "0") > 0
+    return int((commit_count_result.stdout or "0").strip() or "0") > 0
 
 
 # The decomposer needs a working directory to run `git ls-files` / `wc -l`
@@ -421,13 +425,15 @@ def _ensure_decompose_worktree(spec: RepoSpec, issue_number: int) -> Path:
                 cwd=spec.target_root,
             )
         _authed_target_fetch(spec, spec.base_branch)
-        result = _git(
+        worktree_result = _git(
             "worktree", "add", "--detach", str(wt),
             f"{spec.remote_name}/{spec.base_branch}",
             cwd=spec.target_root,
         )
-        if result.returncode != 0:
-            raise RuntimeError(f"git worktree add failed: {result.stderr}")
+        if worktree_result.returncode != 0:
+            raise RuntimeError(
+                f"git worktree add failed: {worktree_result.stderr}"
+            )
         return wt
 
 
@@ -529,15 +535,15 @@ def _branch_has_unpushed_commits(
             ).returncode == 0
             if not have_local:
                 continue
-            r = _git(
+            commit_count_result = _git(
                 "rev-list", "--count",
                 f"{base_ref}..refs/heads/{branch}",
                 cwd=spec.target_root,
             )
-            if r.returncode != 0:
+            if commit_count_result.returncode != 0:
                 continue
             try:
-                count = int((r.stdout or "0").strip() or "0")
+                count = int((commit_count_result.stdout or "0").strip() or "0")
             except ValueError:
                 continue
             if count > 0:
@@ -588,14 +594,14 @@ def _cleanup_question_worktree(
         wt = _worktree_path(spec, issue_number)
         if wt.exists():
             with _target_root_lock(spec.target_root):
-                r = _git(
+                remove_result = _git(
                     "worktree", "remove", "--force", str(wt),
                     cwd=spec.target_root,
                 )
-            if r.returncode != 0:
+            if remove_result.returncode != 0:
                 log.warning(
                     "issue=#%d question worktree remove failed: %s",
-                    issue_number, (r.stderr or "").strip(),
+                    issue_number, (remove_result.stderr or "").strip(),
                 )
     except Exception:
         log.exception(
@@ -609,11 +615,15 @@ def _cleanup_question_worktree(
                 cwd=spec.target_root,
             ).returncode == 0
             if have_local:
-                r = _git("branch", "-D", branch, cwd=spec.target_root)
-                if r.returncode != 0:
+                delete_result = _git(
+                    "branch", "-D", branch, cwd=spec.target_root,
+                )
+                if delete_result.returncode != 0:
                     log.warning(
                         "issue=#%d question local branch %r delete failed: %s",
-                        issue_number, branch, (r.stderr or "").strip(),
+                        issue_number,
+                        branch,
+                        (delete_result.stderr or "").strip(),
                     )
     except Exception:
         log.exception(
@@ -675,14 +685,14 @@ def _cleanup_terminal_branch(
         wt = _worktree_path(spec, issue_number)
         if wt.exists():
             with _target_root_lock(spec.target_root):
-                r = _git(
+                remove_result = _git(
                     "worktree", "remove", "--force", str(wt),
                     cwd=spec.target_root,
                 )
-            if r.returncode != 0:
+            if remove_result.returncode != 0:
                 log.warning(
                     "issue=#%d worktree remove failed: %s",
-                    issue_number, (r.stderr or "").strip(),
+                    issue_number, (remove_result.stderr or "").strip(),
                 )
     except Exception:
         log.exception(
@@ -696,11 +706,15 @@ def _cleanup_terminal_branch(
                 cwd=spec.target_root,
             ).returncode == 0
             if have_local:
-                r = _git("branch", "-D", branch, cwd=spec.target_root)
-                if r.returncode != 0:
+                delete_result = _git(
+                    "branch", "-D", branch, cwd=spec.target_root,
+                )
+                if delete_result.returncode != 0:
                     log.warning(
                         "issue=#%d local branch %r delete failed: %s",
-                        issue_number, branch, (r.stderr or "").strip(),
+                        issue_number,
+                        branch,
+                        (delete_result.stderr or "").strip(),
                     )
     except Exception:
         log.exception(

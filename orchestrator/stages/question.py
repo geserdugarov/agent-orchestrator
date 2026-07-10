@@ -121,7 +121,10 @@ def _consume_new_human_replies(
     new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
     if not new_comments:
         return None
-    state.set("last_action_comment_id", max(c.id for c in new_comments))
+    state.set(
+        "last_action_comment_id",
+        max(reply_comment.id for reply_comment in new_comments),
+    )
     return new_comments
 
 
@@ -179,7 +182,7 @@ def _resume_question_on_human_reply(
     prompt = _build_question_resume_prompt(
         spec, issue, new_comments, question_sid,
     )
-    result = _wf._run_agent_tracked(
+    question_result = _wf._run_agent_tracked(
         gh, issue.number,
         agent_role="question",
         stage="question",
@@ -196,10 +199,10 @@ def _resume_question_on_human_reply(
     # future resume would re-spawn fresh instead of continuing the
     # locked conversation. Mirrors the fresh-spawn persistence in
     # `_handle_question`.
-    if result.session_id:
-        state.set("question_session_id", result.session_id)
+    if question_result.session_id:
+        state.set("question_session_id", question_result.session_id)
     state.set("awaiting_human", False)
-    return result
+    return question_result
 
 
 def _park_question(
@@ -290,7 +293,7 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             )
             if resumed is None:
                 return
-            result = resumed
+            question_result = resumed
             wt = _wf._worktree_path(spec, issue.number)
         else:
             wt = _wf._ensure_worktree(
@@ -313,7 +316,7 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 spec, issue, _wf._recent_comments_text(issue),
                 config.default_repo_specs(),
             )
-            result = _wf._run_agent_tracked(
+            question_result = _wf._run_agent_tracked(
                 gh, issue.number,
                 agent_role="question",
                 stage="question",
@@ -323,8 +326,8 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
                 agent_spec=question_spec,
                 extra_args=question_args,
             )
-            if result.session_id:
-                state.set("question_session_id", result.session_id)
+            if question_result.session_id:
+                state.set("question_session_id", question_result.session_id)
 
         # Live pause: an operator applied `paused` / `backlog` while the
         # question agent ran (fresh spawn or awaiting-human resume). Dispatch
@@ -349,10 +352,10 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # persist a counter the interrupted contract says must not accrue. The
         # clean-interrupted case is additionally short-circuited by the
         # `_ignore_if_interrupted` guard below.
-        if not result.interrupted:
-            _wf._accumulate_issue_usage(state, result.usage)
+        if not question_result.interrupted:
+            _wf._accumulate_issue_usage(state, question_result.usage)
 
-        if result.timed_out:
+        if question_result.timed_out:
             # Keep the worktree: the timeout killed the agent mid-run
             # and it may have committed or left dirty edits before
             # being killed. The operator inspects, then resets.
@@ -389,7 +392,9 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         if dirty:
             keep_worktree = True
             shown = dirty[:10]
-            files_md = "\n".join(f"- `{p}`" for p in shown)
+            files_md = "\n".join(
+                f"- `{file_path}`" for file_path in shown
+            )
             if len(dirty) > len(shown):
                 files_md += f"\n- ... ({len(dirty) - len(shown)} more)"
             _park_question(
@@ -411,10 +416,10 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         # reply). Placed AFTER the read-only commits/dirty parks so an
         # interrupted run that left changes still parks for inspection, and
         # BEFORE the silent/answer parks so no partial `last_message` is posted.
-        if _wf._ignore_if_interrupted(issue, result):
+        if _wf._ignore_if_interrupted(issue, question_result):
             return
 
-        raw = (result.last_message or "").strip()
+        raw = (question_result.last_message or "").strip()
         if not raw:
             # Fully silent run: no commit AND no final message. Same
             # diagnosis as the implementer's silent-failure park --
@@ -425,7 +430,7 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             # current worktree state is provably clean.
             keep_worktree = False
             diag = _wf._format_stderr_diagnostics(
-                result, "Question agent",
+                question_result, "Question agent",
             )
             _park_question(
                 gh, issue, state,
@@ -437,8 +442,10 @@ def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
             _wf.log.warning(
                 "issue=#%s question agent produced no output; "
                 "exit_code=%d timed_out=%s stderr_tail=%r",
-                issue.number, result.exit_code, result.timed_out,
-                _wf._stderr_log_tail(result),
+                issue.number,
+                question_result.exit_code,
+                question_result.timed_out,
+                _wf._stderr_log_tail(question_result),
             )
             gh.write_pinned_state(issue, state)
             return

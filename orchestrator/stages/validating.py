@@ -69,7 +69,7 @@ class _ReviewerRun:
     wt: Path
     round_n: int
     pr_number: Any
-    result: AgentResult
+    agent_result: AgentResult
 
 
 def _parse_add_review_rounds(
@@ -84,15 +84,18 @@ def _parse_add_review_rounds(
     newest-first so a corrected command supersedes a stale one posted
     earlier in the same batch.
     """
-    for c in reversed(comments):
-        body = c.body or ""
-        m = _ADD_REVIEW_ROUNDS_RE.search(body)
-        if not m:
+    for comment in reversed(comments):
+        body = comment.body or ""
+        command_match = _ADD_REVIEW_ROUNDS_RE.search(body)
+        if not command_match:
             continue
-        n = int(m.group(1))
-        if n <= 0:
-            return (n, f"expected a positive integer (got `{n}`)")
-        return (n, None)
+        additional_rounds = int(command_match.group(1))
+        if additional_rounds <= 0:
+            return (
+                additional_rounds,
+                f"expected a positive integer (got `{additional_rounds}`)",
+            )
+        return (additional_rounds, None)
     return None
 
 
@@ -158,7 +161,7 @@ def _handle_dev_fix_result(
     issue: Issue,
     state: PinnedState,
     wt: Path,
-    result: AgentResult,
+    agent_result: AgentResult,
     before_sha: str,
     after_sha: Optional[str] = None,
 ) -> bool:
@@ -181,7 +184,7 @@ def _handle_dev_fix_result(
     """
     from orchestrator import workflow as _wf
 
-    if result.interrupted:
+    if agent_result.interrupted:
         # A shutdown-killed run is not a considered result: its partial
         # `last_message` is not a real question, and a no-commit kill
         # addressed nothing. Treat it as "no fix" WITHOUT parking
@@ -191,7 +194,7 @@ def _handle_dev_fix_result(
         # it via the stranded-fix tail.
         return False
 
-    if result.timed_out:
+    if agent_result.timed_out:
         _wf._park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} agent timed out after {config.AGENT_TIMEOUT}s, "
@@ -218,7 +221,7 @@ def _handle_dev_fix_result(
     if after_sha == before_sha or not after_sha:
         if not after_sha or not _stranded_fix_unpushed(spec, wt, state, issue):
             # No new commit: dev asked a question or did nothing.
-            _wf._on_question(gh, issue, state, result)
+            _wf._on_question(gh, issue, state, agent_result)
             return False
         # HEAD carries a committed-but-unpublished fix from a prior
         # parked run; fall through to the shared push tail exactly as
@@ -236,7 +239,7 @@ def _handle_dev_fix_result(
 
     dirty = _wf._worktree_dirty_files(wt)
     if dirty:
-        _wf._on_dirty_worktree(gh, issue, state, result, dirty)
+        _wf._on_dirty_worktree(gh, issue, state, agent_result, dirty)
         return False
 
     branch = _wf._resolve_branch_name(state, spec, issue.number)
@@ -261,7 +264,7 @@ def _post_user_content_change_result(
     issue: Issue,
     state: PinnedState,
     wt: Path,
-    result: AgentResult,
+    agent_result: AgentResult,
     before_sha: str,
 ) -> str:
     """Post-resume handling for a user-content-change dev resume.
@@ -304,7 +307,7 @@ def _post_user_content_change_result(
     """
     from orchestrator import workflow as _wf
 
-    if result.interrupted:
+    if agent_result.interrupted:
         # Shutdown-killed: ignore the run. Report "parked" WITHOUT posting an
         # ack / HITL comment, touching awaiting_human, or pushing -- the
         # caller writes state and the next tick retries the resume. The
@@ -312,7 +315,7 @@ def _post_user_content_change_result(
         # must not be swallowed as either.
         return "parked"
 
-    if result.timed_out:
+    if agent_result.timed_out:
         _wf._park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} agent timed out after "
@@ -326,7 +329,7 @@ def _post_user_content_change_result(
     after_sha = _wf._head_sha(wt)
     if not after_sha or after_sha == before_sha:
         if not after_sha or not _stranded_fix_unpushed(spec, wt, state, issue):
-            ack_reason = _wf._drift_ack_reason(result.last_message or "")
+            ack_reason = _wf._drift_ack_reason(agent_result.last_message or "")
             if ack_reason:
                 quoted = "> " + ack_reason.replace("\n", "\n> ")
                 _wf._post_issue_comment(
@@ -347,7 +350,7 @@ def _post_user_content_change_result(
             # land in the same branch and surface as the silent-failure
             # park (`_resume_dev_with_text` uses the streak counter to
             # eventually drop a poisoned session id).
-            _wf._on_question(gh, issue, state, result)
+            _wf._on_question(gh, issue, state, agent_result)
             return "parked"
         # HEAD carries a committed-but-unpublished fix that a prior parked or
         # interrupted drift resume left on the branch (it committed before
@@ -360,7 +363,7 @@ def _post_user_content_change_result(
     state.set("silent_park_count", 0)
     dirty = _wf._worktree_dirty_files(wt)
     if dirty:
-        _wf._on_dirty_worktree(gh, issue, state, result, dirty)
+        _wf._on_dirty_worktree(gh, issue, state, agent_result, dirty)
         return "parked"
 
     branch = _wf._resolve_branch_name(state, spec, issue.number)
@@ -544,39 +547,40 @@ def _seed_watermark_past_self(
     # Tag each comment with its surface so the walk below can apply
     # `consumed_through` to the issue thread only.
     sorted_pairs: list[Tuple[Any, bool]] = sorted(
-        [(c, True) for c in issue_thread_comments]
-        + [(c, False) for c in pr_conversation_comments],
-        key=lambda p: p[0].id,
+        [(comment, True) for comment in issue_thread_comments]
+        + [(comment, False) for comment in pr_conversation_comments],
+        key=lambda comment_pair: comment_pair[0].id,
     )
 
-    def _is_self(c) -> bool:
+    def _is_self(comment) -> bool:
         return (
-            c.id in orchestrator_ids
-            or _wf._ORCH_COMMENT_MARKER in (getattr(c, "body", None) or "")
+            comment.id in orchestrator_ids
+            or _wf._ORCH_COMMENT_MARKER
+            in (getattr(comment, "body", None) or "")
         )
 
-    if not any(_is_self(c) for c, _ in sorted_pairs):
+    if not any(_is_self(comment) for comment, _ in sorted_pairs):
         return None
     watermark: Optional[int] = None
     seen_self = False
-    for c, is_issue_thread in sorted_pairs:
-        is_self = _is_self(c)
+    for comment, is_issue_thread in sorted_pairs:
+        is_self = _is_self(comment)
         already_consumed = (
             is_issue_thread
             and consumed_through is not None
-            and c.id <= consumed_through
+            and comment.id <= consumed_through
         )
         if is_self:
-            watermark = c.id
+            watermark = comment.id
             seen_self = True
-        elif not seen_self and c.id < pickup_comment_id:
+        elif not seen_self and comment.id < pickup_comment_id:
             # Pre-pickup chatter -- already in the dev agent's spawn context.
-            watermark = c.id
+            watermark = comment.id
         elif already_consumed:
             # Fed to the dev via a prior implementing/validating resume.
             # Replaying it as fresh PR feedback would re-spawn the dev on
             # input it has already handled.
-            watermark = c.id
+            watermark = comment.id
         else:
             # Post-pickup human comment that has NOT been consumed yet.
             # Stop and preserve for the next in_review tick.
@@ -657,7 +661,9 @@ def _verify_failure_detail(verify) -> str:
             f"{config.VERIFY_TIMEOUT}s"
         )
     if verify.status == "dirty":
-        files = ", ".join(f"`{p}`" for p in verify.dirty_files[:10])
+        files = ", ".join(
+            f"`{file_path}`" for file_path in verify.dirty_files[:10]
+        )
         if len(verify.dirty_files) > 10:
             files += f", … (+{len(verify.dirty_files) - 10} more)"
         return f"`{verify.command}` left the worktree dirty: {files}"
@@ -815,7 +821,7 @@ def _resume_dev_on_validating_drift(
     followup = _wf._build_user_content_change_prompt(
         issue, _wf._recent_comments_text(issue),
     )
-    wt, result, paused = _wf._resume_dev_with_text(
+    wt, agent_result, paused = _wf._resume_dev_with_text(
         gh, spec, issue, state, followup, pause_guard=True,
     )
     state.set("last_agent_action_at", _wf._now_iso())
@@ -834,9 +840,9 @@ def _resume_dev_on_validating_drift(
     # park on it via `_on_question`; use the user-content-specific helper so a
     # harmless clarification does not stall the issue.
     outcome = _post_user_content_change_result(
-        gh, spec, issue, state, wt, result, before_sha,
+        gh, spec, issue, state, wt, agent_result, before_sha,
     )
-    if result.interrupted:
+    if agent_result.interrupted:
         # Shutdown-killed resume: the consumption pre-staged before the spawn
         # (`user_content_hash`, the consumed drift-comment watermark via
         # `_mark_drift_comments_consumed`, and `last_agent_action_at`) must NOT
@@ -914,9 +920,9 @@ def _handle_validating_awaiting_human(
         cmd = _parse_add_review_rounds(new_comments)
         if cmd is None:
             return "return"
-        consumed_max = max(c.id for c in new_comments)
+        consumed_max = max(comment.id for comment in new_comments)
         state.set("last_action_comment_id", consumed_max)
-        n, err = cmd
+        additional_rounds, err = cmd
         if err is not None:
             _wf._post_issue_comment(
                 gh, issue, state,
@@ -925,13 +931,14 @@ def _handle_validating_awaiting_human(
             )
             gh.write_pinned_state(issue, state)
             return "return"
-        new_round = max(0, config.MAX_REVIEW_ROUNDS - n)
+        new_round = max(0, config.MAX_REVIEW_ROUNDS - additional_rounds)
         state.set("review_round", new_round)
         state.set("awaiting_human", False)
         state.set("park_reason", None)
         _wf._post_issue_comment(
             gh, issue, state,
-            f":arrows_counterclockwise: review-cap reset: granting {n} "
+            f":arrows_counterclockwise: review-cap reset: granting "
+            f"{additional_rounds} "
             f"more round(s) "
             f"(`review_round`={new_round}/{config.MAX_REVIEW_ROUNDS}); "
             "rerunning reviewer.",
@@ -971,7 +978,7 @@ def _handle_validating_awaiting_human(
         # it just yields a "nothing to do" question that re-parks
         # the issue. Advance the watermark past the consumed
         # comments, clear the park flags, and rerun the reviewer.
-        consumed_max = max(c.id for c in new_comments)
+        consumed_max = max(comment.id for comment in new_comments)
         state.set("last_action_comment_id", consumed_max)
         state.set("awaiting_human", False)
         state.set("park_reason", None)
@@ -1004,12 +1011,13 @@ def _handle_validating_awaiting_human(
             # prompt (not the bare command). `_handle_dev_fix_result` below
             # still publishes any stranded commit or a fresh fix.
             state.set(
-                "last_action_comment_id", max(c.id for c in new_comments),
+                "last_action_comment_id",
+                max(comment.id for comment in new_comments),
             )
             followup = (
                 f"{_wf._CONTINUE_RETRY_PROMPT}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
             )
-            wt, result, paused = _wf._resume_dev_with_text(
+            wt, agent_result, paused = _wf._resume_dev_with_text(
                 gh, spec, issue, state, followup, pause_guard=True,
             )
         else:
@@ -1018,7 +1026,7 @@ def _handle_validating_awaiting_human(
             )
             if resumed is None:
                 return "return"
-            wt, result, paused = resumed
+            wt, agent_result, paused = resumed
         state.set("last_agent_action_at", _wf._now_iso())
         if paused:
             # Live pause applied mid-resume: stop before
@@ -1029,9 +1037,9 @@ def _handle_validating_awaiting_human(
             # republishes once the label is removed.
             return "return"
         if not _handle_dev_fix_result(
-            gh, spec, issue, state, wt, result, before_sha
+            gh, spec, issue, state, wt, agent_result, before_sha
         ):
-            if result.interrupted:
+            if agent_result.interrupted:
                 # Shutdown-killed resume:
                 # `_resume_developer_on_human_reply` advanced
                 # `last_action_comment_id` and `_resume_dev_with_text`
@@ -1071,11 +1079,11 @@ def _seed_in_review_handoff_watermarks(
         return
     try:
         pr = gh.get_pr(int(pr_number))
-    except Exception as e:
+    except Exception as error:
         # Surface the failure but skip the traceback -- it adds no signal.
         _wf.log.warning(
             "issue=#%s could not snapshot PR #%s for in_review "
-            "handoff: %s", issue.number, pr_number, e,
+            "handoff: %s", issue.number, pr_number, error,
         )
         return
     # Post the squash PR comment BEFORE seeding watermarks so the seed walks
@@ -1457,7 +1465,7 @@ def _run_reviewer_round(
         wt=wt,
         round_n=round_n,
         pr_number=pr_number,
-        result=review,
+        agent_result=review,
     )
 
 
@@ -1470,7 +1478,7 @@ def _dispatch_reviewer_result(
 ) -> None:
     from orchestrator import workflow as _wf
 
-    review = reviewer_run.result
+    review = reviewer_run.agent_result
     if review.timed_out:
         _wf._park_awaiting_human(
             gh, issue, state,
