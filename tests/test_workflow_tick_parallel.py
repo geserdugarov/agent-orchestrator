@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -11,6 +12,74 @@ from orchestrator import config, workflow
 
 from tests.fakes import FakeGitHubClient, make_issue
 from tests.workflow_helpers import _TEST_SPEC
+
+
+_WORKER_ISSUE_NUMBERS = (1, 2, 3)
+
+
+class _TrackingGitHubClient(FakeGitHubClient):
+    def __init__(
+        self,
+        get_issue_calls: list[tuple[int, int]],
+        calls_lock: threading.Lock,
+    ) -> None:
+        super().__init__()
+        self._get_issue_calls = get_issue_calls
+        self._calls_lock = calls_lock
+
+    def get_issue(self, number: int):
+        with self._calls_lock:
+            self._get_issue_calls.append((number, id(self)))
+        return super().get_issue(number)
+
+
+class _WorkerClientScenario:
+    def __init__(self) -> None:
+        self.get_issue_calls: list[tuple[int, int]] = []
+        self.process_calls: list[tuple[int, int]] = []
+        self._calls_lock = threading.Lock()
+        self.parent = _TrackingGitHubClient(
+            self.get_issue_calls,
+            self._calls_lock,
+        )
+        self.cloned_clients: list[FakeGitHubClient] = []
+        self._seed_issues(self.parent)
+
+    @staticmethod
+    def _seed_issues(client: FakeGitHubClient) -> None:
+        for number in _WORKER_ISSUE_NUMBERS:
+            client.add_issue(make_issue(number, label="implementing"))
+
+    def clone_client(self) -> FakeGitHubClient:
+        twin = _TrackingGitHubClient(self.get_issue_calls, self._calls_lock)
+        self._seed_issues(twin)
+        with self._calls_lock:
+            self.cloned_clients.append(twin)
+        return twin
+
+    def process_issue(self, worker_client, _spec, issue) -> None:
+        with self._calls_lock:
+            self.process_calls.append((issue.number, id(worker_client)))
+
+    def assert_distinct_worker_clients(self, case: unittest.TestCase) -> None:
+        worker_ids = {id(client) for client in self.cloned_clients}
+        case.assertEqual(len(self.cloned_clients), len(_WORKER_ISSUE_NUMBERS))
+        case.assertEqual(len(worker_ids), len(_WORKER_ISSUE_NUMBERS))
+        case.assertNotIn(id(self.parent), worker_ids)
+
+    def assert_worker_refetches(self, case: unittest.TestCase) -> None:
+        parent_id = id(self.parent)
+        fetched_by_issue = dict(self.get_issue_calls)
+        case.assertEqual(len(self.get_issue_calls), len(_WORKER_ISSUE_NUMBERS))
+        case.assertNotIn(parent_id, fetched_by_issue.values())
+        case.assertEqual(
+            dict(self.process_calls),
+            fetched_by_issue,
+        )
+        case.assertEqual(
+            sorted(fetched_by_issue),
+            list(_WORKER_ISSUE_NUMBERS),
+        )
 
 
 class TickInvokesBaseRefreshTest(unittest.TestCase):
@@ -762,69 +831,23 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # worker gets its own client, and (b) refetch the Issue via the
         # WORKER'S client so the Issue's parent requester chain matches
         # the thread that actually drives it.
-        import threading
-        gh = FakeGitHubClient()
-        for n in (1, 2, 3):
-            gh.add_issue(make_issue(n, label="implementing"))
+        scenario = _WorkerClientScenario()
 
-        # Each `_for_worker_thread()` call mints a distinct client object,
-        # so a workflow regression that reused the parent client across
-        # threads would fail the `is`-identity check below.
-        cloned_clients: list[FakeGitHubClient] = []
-        clone_lock = threading.Lock()
-
-        def fake_clone() -> FakeGitHubClient:
-            twin = FakeGitHubClient()
-            # Mirror the parent's issues so `get_issue` on the worker
-            # client resolves against the same issue numbers the test
-            # seeded.
-            for n in (1, 2, 3):
-                twin.add_issue(make_issue(n, label="implementing"))
-            with clone_lock:
-                cloned_clients.append(twin)
-            return twin
-
-        seen: list[tuple[int, int]] = []  # (issue_number, id(worker_gh))
-        get_issue_calls: list[tuple[int, int]] = []
-        seen_lock = threading.Lock()
-
-        original_get_issue = FakeGitHubClient.get_issue
-
-        def tracking_get_issue(self, number):
-            with seen_lock:
-                get_issue_calls.append((number, id(self)))
-            return original_get_issue(self, number)
-
-        def fake_process(worker_gh, _spec, issue) -> None:
-            with seen_lock:
-                seen.append((issue.number, id(worker_gh)))
-
-        with patch.object(gh, "_for_worker_thread", fake_clone), \
-             patch.object(FakeGitHubClient, "get_issue", tracking_get_issue), \
+        with patch.object(
+            scenario.parent,
+            "_for_worker_thread",
+            side_effect=scenario.clone_client,
+        ), \
              patch.object(workflow, "_refresh_base_and_worktrees"), \
-             patch.object(workflow, "_process_issue", side_effect=fake_process):
-            workflow.tick(gh, self._spec(parallel_limit=3))
+             patch.object(
+                 workflow,
+                 "_process_issue",
+                 side_effect=scenario.process_issue,
+             ):
+            workflow.tick(scenario.parent, self._spec(parallel_limit=3))
 
-        # Every submitted issue produced exactly one worker-client clone.
-        self.assertEqual(len(cloned_clients), 3)
-        # Every worker client is a fresh object (no two share identity).
-        self.assertEqual(len({id(c) for c in cloned_clients}), 3)
-        # The parent client is NOT one of the worker clients: tick must
-        # not hand the shared parent to any worker.
-        self.assertNotIn(id(gh), {id(c) for c in cloned_clients})
-        # Each worker called `get_issue` on its OWN client (not the parent),
-        # so the refetch resolves against that client's Requester.
-        parent_id = id(gh)
-        for _number, client_id in get_issue_calls:
-            self.assertNotEqual(client_id, parent_id)
-        # And each `_process_issue` invocation saw an issue paired with the
-        # same worker client that fetched it (no cross-thread Issue handoff).
-        for issue_number, process_client_id in seen:
-            fetch_clients = [
-                cid for n, cid in get_issue_calls if n == issue_number
-            ]
-            self.assertIn(process_client_id, fetch_clients)
-        self.assertEqual(sorted(n for n, _ in seen), [1, 2, 3])
+        scenario.assert_distinct_worker_clients(self)
+        scenario.assert_worker_refetches(self)
 
     def test_limit_one_does_not_clone_per_issue(self) -> None:
         # Sequential mode runs on the caller thread; the PyGithub thread

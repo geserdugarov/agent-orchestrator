@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
@@ -42,6 +43,91 @@ def _legacy_branch(issue_number: int) -> str:
 
 def _dirty_files(count: int = DIRTY_FILE_COUNT) -> list[str]:
     return [f"file_{file_index}.py" for file_index in range(count)]
+
+
+@dataclass(frozen=True)
+class _QuestionRound:
+    state: dict
+    watermark: int
+    prompt: str
+    resume_session_id: str | None
+    answer_comment_id: int
+    answer_comment_count: int
+
+
+class _QuestionConversation:
+    issue_number = 40
+    session_id = "q-sess-rolling"
+
+    def __init__(self) -> None:
+        self.gh = FakeGitHubClient()
+        self.issue = make_issue(
+            self.issue_number,
+            label="question",
+            body="open question?",
+        )
+        self.gh.add_issue(self.issue)
+
+    def answer(
+        self,
+        case,
+        answer: str,
+        *,
+        human_reply: str | None = None,
+    ) -> _QuestionRound:
+        if human_reply is not None:
+            self.issue.comments.append(
+                FakeComment(
+                    id=self.watermark + MULTI_ROUND_REPLY_ID_STEP,
+                    body=human_reply,
+                ),
+            )
+        mocks = case._run(
+            lambda: workflow._handle_question(self.gh, _TEST_SPEC, self.issue),
+            run_agent=_agent(
+                session_id=self.session_id,
+                last_message=answer,
+            ),
+            has_new_commits=False,
+        )
+        call = mocks["run_agent"].call_args
+        state = dict(self.gh.pinned_data(self.issue_number))
+        answer_comments = [
+            comment
+            for comment in reversed(self.issue.comments)
+            if answer in (comment.body or "")
+        ]
+        return _QuestionRound(
+            state=state,
+            watermark=state["last_action_comment_id"],
+            prompt=call.args[1],
+            resume_session_id=call.kwargs.get("resume_session_id"),
+            answer_comment_id=answer_comments[0].id,
+            answer_comment_count=len(answer_comments),
+        )
+
+    @property
+    def watermark(self) -> int:
+        return self.gh.pinned_data(self.issue_number)["last_action_comment_id"]
+
+    def assert_no_reply_is_a_noop(self, case) -> None:
+        mocks = case._run(
+            lambda: workflow._handle_question(self.gh, _TEST_SPEC, self.issue),
+            run_agent=_agent(last_message="should not run"),
+        )
+        mocks["run_agent"].assert_not_called()
+
+    def assert_answers_posted_once(
+        self,
+        case,
+        answers: tuple[str, ...],
+    ) -> None:
+        bodies = [body for _, body in self.gh.posted_comments]
+        counts = {
+            answer: sum(answer in body for body in bodies)
+            for answer in answers
+        }
+        case.assertEqual(counts, dict.fromkeys(answers, 1))
 
 
 class HandleQuestionFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
@@ -218,6 +304,38 @@ class HandleQuestionAwaitingHumanResumeTest(
     without spawning the agent.
     """
 
+    def _assert_fresh_round(self, round_result: _QuestionRound) -> None:
+        self.assertTrue(round_result.state["awaiting_human"])
+        self.assertEqual(round_result.state["park_reason"], "question_answer")
+        self.assertEqual(
+            round_result.state["question_session_id"],
+            _QuestionConversation.session_id,
+        )
+        self.assertEqual(round_result.answer_comment_count, 1)
+        self.assertGreaterEqual(
+            round_result.watermark,
+            round_result.answer_comment_id,
+        )
+
+    def _assert_resumed_round(
+        self,
+        round_result: _QuestionRound,
+        *,
+        previous_watermark: int,
+        human_reply: str,
+        excluded_answers: tuple[str, ...],
+    ) -> None:
+        self.assertEqual(
+            round_result.resume_session_id,
+            _QuestionConversation.session_id,
+        )
+        self.assertIn(human_reply, round_result.prompt)
+        for answer in excluded_answers:
+            self.assertNotIn(answer, round_result.prompt)
+        self.assertTrue(round_result.state["awaiting_human"])
+        self.assertEqual(round_result.state["park_reason"], "question_answer")
+        self.assertGreater(round_result.watermark, previous_watermark)
+
     def test_no_new_comments_returns_without_spawning(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(3, label="question")
@@ -289,116 +407,38 @@ class HandleQuestionAwaitingHumanResumeTest(
         # OWN answer comment so the next no-reply tick is a no-op (i.e.
         # bot comments do not feed back into the resume loop) AND past
         # the consumed human comment so the same reply is not replayed.
-        gh = FakeGitHubClient()
-        issue = make_issue(40, label="question", body="open question?")
-        gh.add_issue(issue)
+        conversation = _QuestionConversation()
 
-        # Round 1: fresh spawn.
-        self._run(
-            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id="q-sess-rolling",
-                last_message="round-1 answer",
-            ),
-            has_new_commits=False,
-        )
-        pinned_data = gh.pinned_data(issue.number)
-        self.assertTrue(pinned_data["awaiting_human"])
-        self.assertEqual(pinned_data["park_reason"], "question_answer")
-        wm_after_r1 = pinned_data["last_action_comment_id"]
-        # Watermark is at or past the orchestrator's just-posted answer
-        # comment (the one carrying the answer body). The subsequent
-        # pinned-state comment also lives on the issue but is filtered
-        # out of `comments_after` by its marker, so the relevant id to
-        # compare against is the answer comment, not the latest overall.
-        answer_comments = [
-            comment for comment in issue.comments
-            if "round-1 answer" in (comment.body or "")
-        ]
-        self.assertEqual(len(answer_comments), 1)
-        self.assertGreaterEqual(wm_after_r1, answer_comments[0].id)
-        self.assertEqual(pinned_data["question_session_id"], "q-sess-rolling")
+        first_round = conversation.answer(self, "round-1 answer")
+        self._assert_fresh_round(first_round)
+        conversation.assert_no_reply_is_a_noop(self)
 
-        # A no-reply tick between rounds must be a no-op: the
-        # orchestrator's own comment is below the watermark and
-        # `comments_after` returns nothing.
-        mocks_noop = self._run(
-            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
-            run_agent=_agent(last_message="should not run"),
+        second_round = conversation.answer(
+            self,
+            "round-2 answer",
+            human_reply="follow-up Q2",
         )
-        mocks_noop["run_agent"].assert_not_called()
+        self._assert_resumed_round(
+            second_round,
+            previous_watermark=first_round.watermark,
+            human_reply="follow-up Q2",
+            excluded_answers=("round-1 answer",),
+        )
 
-        # Round 2: human replies.
-        issue.comments.append(
-            FakeComment(
-                id=wm_after_r1 + MULTI_ROUND_REPLY_ID_STEP,
-                body="follow-up Q2",
-            ),
+        third_round = conversation.answer(
+            self,
+            "round-3 answer",
+            human_reply="follow-up Q3",
         )
-        mocks_r2 = self._run(
-            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id="q-sess-rolling",
-                last_message="round-2 answer",
-            ),
-            has_new_commits=False,
+        self._assert_resumed_round(
+            third_round,
+            previous_watermark=second_round.watermark,
+            human_reply="follow-up Q3",
+            excluded_answers=("round-1 answer", "round-2 answer"),
         )
-        # The resume hit the locked session, NOT a fresh spawn.
-        self.assertEqual(
-            mocks_r2["run_agent"].call_args.kwargs.get("resume_session_id"),
-            "q-sess-rolling",
-        )
-        # The prompt quoted the new human reply, not the prior bot answer.
-        prompt_r2 = mocks_r2["run_agent"].call_args.args[1]
-        self.assertIn("follow-up Q2", prompt_r2)
-        self.assertNotIn("round-1 answer", prompt_r2)
-        pinned_data = gh.pinned_data(issue.number)
-        self.assertTrue(pinned_data["awaiting_human"])
-        self.assertEqual(pinned_data["park_reason"], "question_answer")
-        wm_after_r2 = pinned_data["last_action_comment_id"]
-        self.assertGreater(wm_after_r2, wm_after_r1)
-
-        # Round 3: another human reply.
-        issue.comments.append(
-            FakeComment(
-                id=wm_after_r2 + MULTI_ROUND_REPLY_ID_STEP,
-                body="follow-up Q3",
-            ),
-        )
-        mocks_r3 = self._run(
-            lambda: workflow._handle_question(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id="q-sess-rolling",
-                last_message="round-3 answer",
-            ),
-            has_new_commits=False,
-        )
-        self.assertEqual(
-            mocks_r3["run_agent"].call_args.kwargs.get("resume_session_id"),
-            "q-sess-rolling",
-        )
-        prompt_r3 = mocks_r3["run_agent"].call_args.args[1]
-        self.assertIn("follow-up Q3", prompt_r3)
-        # The prior bot answers did not leak into the resume prompt.
-        self.assertNotIn("round-1 answer", prompt_r3)
-        self.assertNotIn("round-2 answer", prompt_r3)
-        pinned_data = gh.pinned_data(issue.number)
-        wm_after_r3 = pinned_data["last_action_comment_id"]
-        self.assertGreater(wm_after_r3, wm_after_r2)
-
-        # All three orchestrator answer comments were posted to the
-        # issue thread (and the issue carries them plus the two human
-        # replies). The agent only ran three times across the three
-        # rounds; the no-reply tick in between did not spawn it.
-        answer_bodies = [body for _, body in gh.posted_comments]
-        self.assertEqual(
-            sum(1 for body in answer_bodies if "round-1 answer" in body), 1,
-        )
-        self.assertEqual(
-            sum(1 for body in answer_bodies if "round-2 answer" in body), 1,
-        )
-        self.assertEqual(
-            sum(1 for body in answer_bodies if "round-3 answer" in body), 1,
+        conversation.assert_answers_posted_once(
+            self,
+            ("round-1 answer", "round-2 answer", "round-3 answer"),
         )
 
 
