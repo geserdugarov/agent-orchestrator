@@ -59,6 +59,39 @@ class _DecomposerRunPlan:
     keep_worktree: bool = False
 
 
+@dataclass(frozen=True)
+class _DecomposerSession:
+    spec: str
+    backend: str
+    extra_args: tuple[str, ...]
+    session_id: Optional[str]
+
+
+@dataclass
+class _SplitPlan:
+    children_manifest: list
+    is_umbrella: bool
+    created: list[Tuple[int, dict]]
+    dep_graph: dict[str, list[int]]
+
+    @classmethod
+    def start(cls, children_manifest: list, is_umbrella: bool) -> _SplitPlan:
+        return cls(children_manifest, is_umbrella, [], {})
+
+    def record(self, idx: int, issue_number: int, child: dict) -> None:
+        self.created.append((issue_number, child))
+        depends_on = list(child.get("depends_on") or [])
+        if depends_on:
+            self.dep_graph[str(idx)] = depends_on
+
+
+@dataclass(frozen=True)
+class _ChildScan:
+    children: list
+    issues: dict[int, Issue]
+    labels: dict[int, Optional[str]]
+
+
 def _read_decomposer_session(
     state: PinnedState,
 ) -> Tuple[str, str, tuple[str, ...], Optional[str]]:
@@ -107,42 +140,42 @@ def _resume_decomposer_on_human_reply(
     """
     from orchestrator import workflow as _wf
 
-    last_action_id = state.get("last_action_comment_id")
-    # Drop untrusted authors up front (mirrors `_resume_developer_on_human_reply`):
-    # with `ALLOWED_ISSUE_AUTHORS` set an outsider reply on a parked decomposer
-    # session must not steer it NOR advance the consumed watermark. Only trusted
-    # comments are consumed, so an outsider reply trailing a trusted one is left
-    # unconsumed; an all-untrusted batch leaves nothing to resume on.
-    new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
-    if not new_comments:
+    followup = _decomposer_followup(gh, issue, state)
+    if followup is None:
         return None
-    consumed_max = max(comment.id for comment in new_comments)
-    state.set("last_action_comment_id", consumed_max)
-    followup = "\n\n".join(
-        f"@{comment.user.login if comment.user else 'user'}: {comment.body}"
-        for comment in new_comments
-        if comment.body
-    )
     wt = _wf._decompose_worktree_path(spec, issue.number)
     if not wt.exists():
         wt = _wf._ensure_decompose_worktree(spec, issue.number)
-    decomposer_spec, decomposer_backend, decomposer_args, decomposer_sid = (
-        _read_decomposer_session(state)
-    )
+    session = _DecomposerSession(*_read_decomposer_session(state))
     decomposer_result = _wf._run_agent_tracked(
         gh, issue.number,
         agent_role="decomposer",
         stage="decomposing",
-        backend=decomposer_backend,
+        backend=session.backend,
         prompt=followup,
         cwd=wt,
-        agent_spec=decomposer_spec,
-        resume_session_id=decomposer_sid,
-        extra_args=decomposer_args,
+        agent_spec=session.spec,
+        resume_session_id=session.session_id,
+        extra_args=session.extra_args,
         retry_count=state.get("retry_count"),
     )
     state.set("awaiting_human", False)
     return decomposer_result
+
+
+def _decomposer_followup(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> Optional[str]:
+    comments = filter_trusted(
+        gh.comments_after(issue, state.get("last_action_comment_id"))
+    )
+    if not comments:
+        return None
+    state.set("last_action_comment_id", max(comment.id for comment in comments))
+    return "\n\n".join(
+        f"@{comment.user.login if comment.user else 'user'}: {comment.body}"
+        for comment in comments if comment.body
+    )
 
 
 def _reset_decomposing_on_drift(
@@ -173,25 +206,10 @@ def _reset_decomposing_on_drift(
     new_hash = _wf._detect_user_content_change(gh, issue, state)
     if new_hash is None:
         return
-    orphans = list(state.get("children") or [])
-    if orphans:
-        orphan_list = ", ".join(
-            f"#{child_number}" for child_number in orphans
-        )
-        notice = (
-            ":pencil2: issue content changed; re-running "
-            "decomposer against the updated body. The "
-            f"previously-tracked children ({orphan_list}) "
-            "will be ORPHANED -- the orchestrator no longer "
-            "tracks them; please close any that no longer "
-            "apply to the updated requirements."
-        )
-    else:
-        notice = (
-            ":pencil2: issue content changed; re-running "
-            "decomposer against the updated body."
-        )
-    _wf._post_issue_comment(gh, issue, state, notice)
+    _wf._post_issue_comment(
+        gh, issue, state,
+        _decomposition_drift_notice(list(state.get("children") or [])),
+    )
     state.set("user_content_hash", new_hash)
     # Drop only the SESSION id -- preserve `decomposer_agent`
     # (the locked role spec). Lock-on-first-spawn means a
@@ -199,6 +217,25 @@ def _reset_decomposing_on_drift(
     # an in-flight issue at a different backend; the fresh
     # spawn below picks up the recorded spec via
     # `_read_decomposer_session`.
+    _clear_decomposition_manifest(state)
+
+
+def _decomposition_drift_notice(orphans: list) -> str:
+    notice = (
+        ":pencil2: issue content changed; re-running decomposer against "
+        "the updated body."
+    )
+    if not orphans:
+        return notice
+    orphan_list = ", ".join(f"#{number}" for number in orphans)
+    return (
+        f"{notice} The previously-tracked children ({orphan_list}) will be "
+        "ORPHANED -- the orchestrator no longer tracks them; please close "
+        "any that no longer apply to the updated requirements."
+    )
+
+
+def _clear_decomposition_manifest(state: PinnedState) -> None:
     state.set("decomposer_session_id", None)
     state.set("children", [])
     state.set("dep_graph", {})
@@ -206,6 +243,70 @@ def _reset_decomposing_on_drift(
     state.set("umbrella", None)
     state.set("awaiting_human", False)
     state.set("park_reason", None)
+
+
+def _park_incomplete_decomposition(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    expected,
+    children: list,
+) -> None:
+    from orchestrator import workflow as _wf
+
+    _wf._park_awaiting_human(
+        gh, issue, state,
+        f"{config.HITL_MENTIONS} decomposition crashed mid-way: "
+        f"{len(children)} of {expected} children recorded (an orphan child "
+        "issue may exist on GitHub if the crash landed between "
+        "`create_child_issue` returning and the parent state write); manual "
+        "intervention needed (close any partial children and re-decompose, "
+        "or finish creating the missing ones).",
+        reason="decomposition_crash",
+    )
+    gh.write_pinned_state(issue, state)
+
+
+def _repair_recovered_child(
+    gh: GitHubClient, issue: Issue, state: PinnedState, child_number,
+) -> bool:
+    from orchestrator import workflow as _wf
+
+    try:
+        child_issue = gh.get_issue(int(child_number))
+        child_state = gh.read_pinned_state(child_issue)
+        if not child_state.get("parent_number"):
+            child_state.set("parent_number", issue.number)
+            if not child_state.get("created_at"):
+                child_state.set("created_at", _wf._now_iso())
+            child_state.set("awaiting_human", False)
+            child_state.set("park_reason", None)
+            gh.write_pinned_state(child_issue, child_state)
+    except Exception:
+        _wf.log.exception(
+            "issue=#%s could not repair orphan child #%s during "
+            "decomposition recovery", issue.number, child_number,
+        )
+        _wf._park_awaiting_human(
+            gh, issue, state,
+            f"{config.HITL_MENTIONS} could not repair child #{child_number} "
+            "during decomposition recovery (seed `parent_number` on its "
+            "pinned state); manual intervention needed (check orchestrator "
+            "logs).",
+            reason="child_seed_failed",
+        )
+        gh.write_pinned_state(issue, state)
+        return False
+    return True
+
+
+def _repair_recovered_children(
+    gh: GitHubClient, issue: Issue, state: PinnedState, children: list,
+) -> bool:
+    return all(
+        _repair_recovered_child(gh, issue, state, child_number)
+        for child_number in children
+    )
 
 
 def _recover_stale_manifest(
@@ -235,8 +336,6 @@ def _recover_stale_manifest(
     pre-dates `expected_children_count` still routes through the
     `children`-only branch and finalizes.
     """
-    from orchestrator import workflow as _wf
-
     expected_raw = state.get("expected_children_count")
     children_recorded = state.get("children") or []
     if expected_raw is None and not children_recorded:
@@ -244,18 +343,9 @@ def _recover_stale_manifest(
     if state.get("awaiting_human"):
         return True
     if expected_raw is not None and len(children_recorded) < int(expected_raw):
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} decomposition crashed mid-way: "
-            f"{len(children_recorded)} of {expected_raw} children "
-            "recorded (an orphan child issue may exist on GitHub if "
-            "the crash landed between `create_child_issue` returning "
-            "and the parent state write); manual intervention needed "
-            "(close any partial children and re-decompose, or finish "
-            "creating the missing ones).",
-            reason="decomposition_crash",
+        _park_incomplete_decomposition(
+            gh, issue, state, expected_raw, children_recorded,
         )
-        gh.write_pinned_state(issue, state)
         return True
     # Before finalizing to `blocked`, repair any child whose pinned
     # state was never seeded. A SIGKILL between the parent's
@@ -267,32 +357,8 @@ def _recover_stale_manifest(
     # Without repair, the parent's later walk flips the orphan to
     # `ready`, but `_handle_implementing` reads the stale park and
     # sits waiting for a human reply that never comes.
-    for child_number in children_recorded:
-        try:
-            child_issue = gh.get_issue(int(child_number))
-            child_state = gh.read_pinned_state(child_issue)
-            if not child_state.get("parent_number"):
-                child_state.set("parent_number", issue.number)
-                if not child_state.get("created_at"):
-                    child_state.set("created_at", _wf._now_iso())
-                child_state.set("awaiting_human", False)
-                child_state.set("park_reason", None)
-                gh.write_pinned_state(child_issue, child_state)
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not repair orphan child #%s during "
-                "decomposition recovery", issue.number, child_number,
-            )
-            _wf._park_awaiting_human(
-                gh, issue, state,
-                f"{config.HITL_MENTIONS} could not repair child "
-                f"#{child_number} during decomposition recovery "
-                "(seed `parent_number` on its pinned state); manual "
-                "intervention needed (check orchestrator logs).",
-                reason="child_seed_failed",
-            )
-            gh.write_pinned_state(issue, state)
-            return True
+    if not _repair_recovered_children(gh, issue, state, children_recorded):
+        return True
     # `umbrella=True` is persisted alongside `expected_children_count`
     # before any child is created, so the recovery path here picks
     # it up and finalizes to `umbrella` instead of `blocked`. Without
@@ -384,9 +450,7 @@ def _spawn_fresh_decomposer(
         gh.write_pinned_state(issue, state)
         return None
     wt = _wf._ensure_decompose_worktree(spec, issue.number)
-    decomposer_spec, decomposer_backend, decomposer_args, _ = (
-        _read_decomposer_session(state)
-    )
+    session = _DecomposerSession(*_read_decomposer_session(state))
     # Persist the spec BEFORE the spawn so a backend hiccup
     # that yields no `session_id` -- yet still produces a
     # manifest in the worktree or parks awaiting human -- does
@@ -395,20 +459,19 @@ def _spawn_fresh_decomposer(
     # awaiting-human resume at a backend that never ran on
     # this issue. Storing the parsed backend alone would also
     # strip configured CLI args on subsequent resumes.
-    state.set("decomposer_agent", decomposer_spec)
-    prompt = _wf._build_decompose_prompt(
-        spec, issue, _wf._recent_comments_text(issue),
-        config.default_repo_specs(),
-    )
+    state.set("decomposer_agent", session.spec)
     decomposer_result = _wf._run_agent_tracked(
         gh, issue.number,
         agent_role="decomposer",
         stage="decomposing",
-        backend=decomposer_backend,
-        prompt=prompt,
+        backend=session.backend,
+        prompt=_wf._build_decompose_prompt(
+            spec, issue, _wf._recent_comments_text(issue),
+            config.default_repo_specs(),
+        ),
         cwd=wt,
-        agent_spec=decomposer_spec,
-        extra_args=decomposer_args,
+        agent_spec=session.spec,
+        extra_args=session.extra_args,
         retry_count=state.get("retry_count"),
     )
     if decomposer_result.session_id:
@@ -492,13 +555,111 @@ def _finalize_single_decision(
     gh.write_pinned_state(issue, state)
 
 
+def _prepare_split_plan(
+    gh: GitHubClient, issue: Issue, state: PinnedState, plan: _SplitPlan,
+) -> None:
+    state.set("expected_children_count", len(plan.children_manifest))
+    state.set("umbrella", plan.is_umbrella)
+    gh.write_pinned_state(issue, state)
+
+
+def _park_child_create_failure(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    idx: int,
+    child: dict,
+) -> None:
+    from orchestrator import workflow as _wf
+
+    _wf.log.exception(
+        "issue=#%s could not create child %d (%r)",
+        issue.number, idx, child.get("title"),
+    )
+    _wf._park_awaiting_human(
+        gh, issue, state,
+        f"{config.HITL_MENTIONS} could not create child issue index={idx} "
+        f"({child.get('title')!r}); manual intervention needed (check "
+        "orchestrator logs).",
+        reason="child_create_failed",
+    )
+    gh.write_pinned_state(issue, state)
+
+
+def _persist_created_child(
+    gh: GitHubClient, issue: Issue, state: PinnedState, plan: _SplitPlan,
+) -> None:
+    from orchestrator import workflow as _wf
+
+    state.set("children", [number for number, _ in plan.created])
+    if plan.dep_graph:
+        state.set("dep_graph", plan.dep_graph)
+    state.set("decomposed_at", _wf._now_iso())
+    gh.write_pinned_state(issue, state)
+
+
+def _seed_created_child(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    new_issue: Issue,
+    child: dict,
+) -> bool:
+    from orchestrator import workflow as _wf
+
+    try:
+        child_state = PinnedState()
+        child_state.set("parent_number", issue.number)
+        child_state.set("created_at", _wf._now_iso())
+        gh.write_pinned_state(new_issue, child_state)
+    except Exception:
+        _wf.log.exception(
+            "issue=#%s could not seed pinned state on child #%d",
+            issue.number, new_issue.number,
+        )
+        _wf._park_awaiting_human(
+            gh, issue, state,
+            f"{config.HITL_MENTIONS} created child #{new_issue.number} "
+            f"({child.get('title')!r}) but could not seed its pinned state "
+            "with `parent_number`; manual intervention needed (seed "
+            "parent_number on the child or close it).",
+            reason="child_seed_failed",
+        )
+        gh.write_pinned_state(issue, state)
+        return False
+    return True
+
+
+def _create_planned_child(
+    gh: GitHubClient,
+    issue: Issue,
+    state: PinnedState,
+    plan: _SplitPlan,
+    idx: int,
+) -> bool:
+    child = plan.children_manifest[idx]
+    try:
+        new_issue = gh.create_child_issue(
+            title=child["title"],
+            body=child["body"],
+            parent_number=issue.number,
+            labels=[WorkflowLabel.BLOCKED],
+        )
+    except Exception:
+        _park_child_create_failure(gh, issue, state, idx, child)
+        return False
+    plan.record(idx, new_issue.number, child)
+    _persist_created_child(gh, issue, state, plan)
+    return _seed_created_child(gh, issue, state, new_issue, child)
+
+
 def _create_child_issues(
     gh: GitHubClient, issue: Issue, state: PinnedState,
     children_manifest: list, is_umbrella: bool,
-) -> Optional[Tuple[list, dict]]:
+) -> Optional[_SplitPlan]:
     """Crash-safe child issue creation loop for a `split` manifest.
 
-    Returns `(created, dep_graph)` on success, or None when a create/seed
+    Returns the populated split plan on success, or None when a create/seed
     step failed and the parent was parked (caller must return).
 
     Crash-safe sequence:
@@ -515,96 +676,16 @@ def _create_child_issues(
       3. Seed child pinned state. Failure here parks but parent state
          already records the child, so no respawn happens.
     """
-    from orchestrator import workflow as _wf
-
-    created: list[Tuple[int, dict]] = []
-    dep_graph: dict[str, list[int]] = {}
-    state.set("expected_children_count", len(children_manifest))
-    # Persist the umbrella flag alongside the count so the half-finished
-    # recovery path can finalize to the right label after a mid-loop
-    # SIGKILL. Always write it (including when False) so a buggy state
-    # migration that left a stale True from a prior aborted decomposition
-    # cannot survive into the recovery branch.
-    state.set("umbrella", is_umbrella)
-    gh.write_pinned_state(issue, state)
-    for idx, child in enumerate(children_manifest):
-        depends_on = list(child.get("depends_on") or [])
-        try:
-            new_issue = gh.create_child_issue(
-                title=child["title"],
-                body=child["body"],
-                parent_number=issue.number,
-                labels=[WorkflowLabel.BLOCKED],
-            )
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not create child %d (%r)",
-                issue.number, idx, child.get("title"),
-            )
-            _wf._park_awaiting_human(
-                gh, issue, state,
-                f"{config.HITL_MENTIONS} could not create child issue "
-                f"index={idx} ({child.get('title')!r}); manual intervention "
-                "needed (check orchestrator logs).",
-                reason="child_create_failed",
-            )
-            gh.write_pinned_state(issue, state)
+    plan = _SplitPlan.start(children_manifest, is_umbrella)
+    _prepare_split_plan(gh, issue, state, plan)
+    for idx in range(len(children_manifest)):
+        if not _create_planned_child(gh, issue, state, plan, idx):
             return None
-
-        # Persist the child number on the parent BEFORE doing any
-        # further work for this child. A SIGKILL between
-        # `create_child_issue` returning and this write would leave
-        # an orphan child on GitHub that the parent does not know
-        # about; the next tick would re-spawn the decomposer and
-        # create duplicates.
-        created.append((new_issue.number, child))
-        if depends_on:
-            dep_graph[str(idx)] = depends_on
-        state.set(
-            "children",
-            [child_number for child_number, _ in created],
-        )
-        if dep_graph:
-            state.set("dep_graph", dep_graph)
-        state.set("decomposed_at", _wf._now_iso())
-        gh.write_pinned_state(issue, state)
-
-        # Seed `parent_number` on the child. Mandatory: without
-        # it `_handle_blocked` parks the child as "manual relabel
-        # suspected" and that park leaves `awaiting_human=True`
-        # behind even after the parent later flips the child's
-        # label to `ready` -- the child's `_handle_implementing`
-        # would then sit waiting for a human comment instead of
-        # starting work.
-        try:
-            child_state = PinnedState()
-            child_state.set("parent_number", issue.number)
-            child_state.set("created_at", _wf._now_iso())
-            gh.write_pinned_state(new_issue, child_state)
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not seed pinned state on child #%d",
-                issue.number, new_issue.number,
-            )
-            # Parent already records the child (no duplicate
-            # risk). Park so a human can either seed the child
-            # manually or close it.
-            _wf._park_awaiting_human(
-                gh, issue, state,
-                f"{config.HITL_MENTIONS} created child #{new_issue.number} "
-                f"({child.get('title')!r}) but could not seed its pinned "
-                "state with `parent_number`; manual intervention needed "
-                "(seed parent_number on the child or close it).",
-                reason="child_seed_failed",
-            )
-            gh.write_pinned_state(issue, state)
-            return None
-    return created, dep_graph
+    return plan
 
 
 def _finalize_split(
-    gh: GitHubClient, issue: Issue, state: PinnedState,
-    created: list, dep_graph: dict, is_umbrella: bool,
+    gh: GitHubClient, issue: Issue, state: PinnedState, plan: _SplitPlan,
 ) -> None:
     """Post the split summary, flip the parent label, and activate children.
 
@@ -617,34 +698,43 @@ def _finalize_split(
     """
     from orchestrator import workflow as _wf
 
-    summary = "\n".join(
-        f"- #{child_number}: {child['title']}"
-        for child_number, child in created
-    )
-    if is_umbrella:
-        summary_intro = (
-            f":bookmark_tabs: decomposer split this into {len(created)} "
-            f"child issue(s); marking parent as `umbrella` (no "
-            f"implementation of its own; will auto-resolve once every "
-            f"child resolves):\n\n{summary}"
-        )
-        final_label = WorkflowLabel.UMBRELLA
-    else:
-        summary_intro = (
-            f":bookmark_tabs: decomposer split this into {len(created)} "
-            f"child issue(s):\n\n{summary}"
-        )
-        final_label = WorkflowLabel.BLOCKED
+    summary_intro, final_label = _split_summary(plan)
     _wf._post_issue_comment(gh, issue, state, summary_intro)
     gh.set_workflow_label(issue, final_label)
     gh.write_pinned_state(issue, state)
+    _activate_initial_split_children(gh, issue, plan)
+
+
+def _split_summary(plan: _SplitPlan) -> tuple[str, WorkflowLabel]:
+    summary = "\n".join(
+        f"- #{number}: {child['title']}" for number, child in plan.created
+    )
+    if plan.is_umbrella:
+        return (
+            f":bookmark_tabs: decomposer split this into {len(plan.created)} "
+            "child issue(s); marking parent as `umbrella` (no implementation "
+            "of its own; will auto-resolve once every child resolves):\n\n"
+            f"{summary}",
+            WorkflowLabel.UMBRELLA,
+        )
+    return (
+        f":bookmark_tabs: decomposer split this into {len(plan.created)} "
+        f"child issue(s):\n\n{summary}",
+        WorkflowLabel.BLOCKED,
+    )
+
+
+def _activate_initial_split_children(
+    gh: GitHubClient, issue: Issue, plan: _SplitPlan,
+) -> None:
+    from orchestrator import workflow as _wf
 
     # Activation: flip no-dep children from `blocked` to `ready`.
     # Best-effort -- if any flip fails the parent's `_handle_blocked`
     # walk handles it on the next tick (the walk treats a child with
     # no recorded deps as deps-satisfied).
-    for idx, (child_number, _) in enumerate(created):
-        if str(idx) in dep_graph:
+    for idx, (child_number, _) in enumerate(plan.created):
+        if str(idx) in plan.dep_graph:
             continue
         try:
             child_issue = gh.get_issue(child_number)
@@ -740,15 +830,16 @@ def _dispatch_decomposer_manifest(
         return
 
     # decision == "split".
-    children_manifest = parsed["children"]
-    is_umbrella = bool(parsed.get("umbrella"))
-    created_deps = _create_child_issues(
-        gh, issue, state, children_manifest, is_umbrella
+    split_plan = _create_child_issues(
+        gh,
+        issue,
+        state,
+        parsed["children"],
+        bool(parsed.get("umbrella")),
     )
-    if created_deps is None:
+    if split_plan is None:
         return
-    created, dep_graph = created_deps
-    _finalize_split(gh, issue, state, created, dep_graph, is_umbrella)
+    _finalize_split(gh, issue, state, split_plan)
 
 
 def _prepare_decomposer_run(
@@ -772,20 +863,14 @@ def _prepare_decomposer_run(
         decomposer_result = _resume_decomposer_on_human_reply(
             gh, spec, issue, state,
         )
-        if decomposer_result is None:
-            # Keep the worktree intact: if a prior tick parked on dirty/commits,
-            # the HITL message asks the operator to inspect and reset it before
-            # resuming, and cleanup here would silently delete that state.
-            return _DecomposerRunPlan(
-                agent_result=None,
-                keep_worktree=True,
-            )
-        return _DecomposerRunPlan(agent_result=decomposer_result)
-
-    decomposer_result = _spawn_fresh_decomposer(gh, spec, issue, state)
-    if decomposer_result is None:
-        return None
-    return _DecomposerRunPlan(agent_result=decomposer_result)
+        return _DecomposerRunPlan(
+            agent_result=decomposer_result,
+            # A no-reply dirty park keeps its inspection worktree intact.
+            keep_worktree=decomposer_result is None,
+        )
+    return _DecomposerRunPlan(
+        agent_result=_spawn_fresh_decomposer(gh, spec, issue, state),
+    )
 
 
 def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
@@ -885,12 +970,12 @@ def _route_parent_drift(
 
 def _read_child_labels(
     gh: GitHubClient, issue: Issue, children: list,
-) -> Optional[Tuple[dict, dict]]:
+) -> Optional[_ChildScan]:
     """Fetch each recorded child issue and its current workflow label.
 
-    Returns `(child_issues, child_labels)` keyed by child number, or None
-    if any child read raised (the caller returns and the tick retries on
-    the next poll). Labels are read fresh here: the family-aware bucket
+    Returns a child scan with issues and labels keyed by child number, or
+    None if any child read raised (the caller returns and the tick retries
+    on the next poll). Labels are read fresh here: the family-aware bucket
     (see `workflow._FAMILY_AWARE_LABELS`) serializes decomposing / blocked
     / umbrella within a tick, so a child's own label flip cannot race this
     read.
@@ -909,7 +994,7 @@ def _read_child_labels(
             return None
         child_issues[int(child_number)] = child_issue
         child_labels[int(child_number)] = gh.workflow_label(child_issue)
-    return child_issues, child_labels
+    return _ChildScan(children, child_issues, child_labels)
 
 
 def _park_rejected_children(
@@ -945,7 +1030,7 @@ def _park_rejected_children(
 
 def _park_manually_closed_children(
     gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
-    child_issues: dict, child_labels: dict,
+    scan: _ChildScan,
 ) -> bool:
     """Park the parent when a child was closed without reaching a terminal
     label.
@@ -969,23 +1054,11 @@ def _park_manually_closed_children(
     """
     from orchestrator import workflow as _wf
 
-    manually_closed = [
-        child_number
-        for child_number, child_issue in child_issues.items()
-        if getattr(child_issue, "state", "open") == "closed"
-        and child_labels.get(child_number)
-        not in ("done", "rejected", "in_review")
-    ]
+    manually_closed = _manually_closed_children(scan)
     if manually_closed:
-        still_closed: list[int] = []
-        for child_number in manually_closed:
-            child_issue = child_issues[child_number]
-            child_state = gh.read_pinned_state(child_issue)
-            if _wf._finalize_if_pr_merged(gh, spec, child_issue, child_state):
-                child_labels[child_number] = "done"
-                continue
-            still_closed.append(child_number)
-        manually_closed = still_closed
+        manually_closed = _remaining_manually_closed(
+            gh, spec, scan, manually_closed,
+        )
     if not manually_closed:
         return False
     if state.get("awaiting_human"):
@@ -1002,9 +1075,76 @@ def _park_manually_closed_children(
     return True
 
 
+def _manually_closed_children(scan: _ChildScan) -> list[int]:
+    return [
+        number for number, child_issue in scan.issues.items()
+        if getattr(child_issue, "state", "open") == "closed"
+        and scan.labels.get(number) not in ("done", "rejected", "in_review")
+    ]
+
+
+def _remaining_manually_closed(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    scan: _ChildScan,
+    candidates: list[int],
+) -> list[int]:
+    from orchestrator import workflow as _wf
+
+    remaining: list[int] = []
+    for number in candidates:
+        child_issue = scan.issues[number]
+        child_state = gh.read_pinned_state(child_issue)
+        if _wf._finalize_if_pr_merged(gh, spec, child_issue, child_state):
+            scan.labels[number] = "done"
+        else:
+            remaining.append(number)
+    return remaining
+
+
+@dataclass
+class _ChildActivation:
+    gh: GitHubClient
+    state: PinnedState
+    scan: _ChildScan
+    held: list[tuple[int, list[int]]]
+    relabeled: bool = False
+
+    @classmethod
+    def start(
+        cls, gh: GitHubClient, state: PinnedState, scan: _ChildScan,
+    ) -> _ChildActivation:
+        return cls(gh, state, scan, [])
+
+    def consider(self, idx: int, child_number) -> None:
+        number = int(child_number)
+        if self.scan.labels.get(number) != "blocked":
+            return
+        pending = self._pending_dependencies(idx)
+        if pending:
+            self.held.append((number, pending))
+        else:
+            self.gh.set_workflow_label(
+                self.scan.issues[number], WorkflowLabel.READY,
+            )
+            self.relabeled = True
+
+    def _pending_dependencies(self, idx: int) -> list[int]:
+        dep_graph = self.state.get("dep_graph") or {}
+        dependencies = dep_graph.get(str(idx), [])
+        dep_numbers = [
+            int(self.scan.children[int(dep_idx)])
+            for dep_idx in dependencies
+            if int(dep_idx) < len(self.scan.children)
+        ]
+        return [
+            number for number in dep_numbers
+            if self.scan.labels.get(number) != "done"
+        ]
+
+
 def _activate_ready_children(
-    gh: GitHubClient, issue: Issue, state: PinnedState,
-    children: list, child_labels: dict, child_issues: dict,
+    gh: GitHubClient, issue: Issue, state: PinnedState, scan: _ChildScan,
 ) -> list:
     """Dep-graph activation walk shared by `_handle_blocked` / `_handle_umbrella`.
 
@@ -1016,28 +1156,12 @@ def _activate_ready_children(
     was relabeled. Returns the still-held children as
     `[(child_number, pending_dep_numbers)]` for visibility logging.
     """
-    dep_graph = state.get("dep_graph") or {}
-    relabeled = False
-    held: list[tuple[int, list[int]]] = []
-    for idx, child_number in enumerate(children):
-        cn = int(child_number)
-        if child_labels.get(cn) != "blocked":
-            continue
-        deps = dep_graph.get(str(idx), [])
-        dep_numbers = [
-            int(children[int(dependency_index)])
-            for dependency_index in deps
-            if int(dependency_index) < len(children)
-        ]
-        pending = [dn for dn in dep_numbers if child_labels.get(dn) != "done"]
-        if not pending:
-            gh.set_workflow_label(child_issues[cn], WorkflowLabel.READY)
-            relabeled = True
-        else:
-            held.append((cn, pending))
-    if relabeled:
+    activation = _ChildActivation.start(gh, state, scan)
+    for idx, child_number in enumerate(scan.children):
+        activation.consider(idx, child_number)
+    if activation.relabeled:
         gh.write_pinned_state(issue, state)
-    return held
+    return activation.held
 
 
 def _log_held_children(
@@ -1125,6 +1249,54 @@ def _handle_ready(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     _wf._handle_implementing(gh, spec, issue)
 
 
+def _usable_child_scan(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+    children: list,
+) -> Optional[_ChildScan]:
+    scan = _read_child_labels(gh, issue, children)
+    if scan is None:
+        return None
+    if _park_rejected_children(gh, issue, state, scan.labels):
+        return None
+    if _park_manually_closed_children(gh, spec, issue, state, scan):
+        return None
+    return scan
+
+
+def _handle_empty_blocked_parent(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> None:
+    from orchestrator import workflow as _wf
+
+    if state.get("parent_number") or state.get("awaiting_human"):
+        return
+    _wf._park_awaiting_human(
+        gh, issue, state,
+        f"{config.HITL_MENTIONS} `blocked` without recorded children; "
+        "manual relabel suspected.",
+        reason="blocked_no_children",
+    )
+    gh.write_pinned_state(issue, state)
+
+
+def _complete_blocked_parent(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> None:
+    from orchestrator import workflow as _wf
+
+    _wf._post_issue_comment(
+        gh, issue, state,
+        ":white_check_mark: all children resolved; ready for implementation.",
+    )
+    state.set("awaiting_human", False)
+    state.set("park_reason", None)
+    gh.set_workflow_label(issue, WorkflowLabel.READY)
+    gh.write_pinned_state(issue, state)
+
+
 def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     """Poll children to decide whether the parent unblocks (or one of the
     children unblocks).
@@ -1141,8 +1313,6 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     `resolving_conflict`) may run concurrently alongside, but their
     handlers do not write across parent/child boundaries.
     """
-    from orchestrator import workflow as _wf
-
     state = gh.read_pinned_state(issue)
     children = state.get("children") or []
 
@@ -1150,64 +1320,58 @@ def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         return
 
     if not children:
-        # A blocked issue with `parent_number` recorded is a child waiting
-        # on a sibling. The parent's `_handle_blocked` walks the dep graph
-        # and flips the child to `ready` when its dependencies finish; this
-        # tick has nothing to do. Without this branch the polling loop
-        # would route every `blocked` child here, treat it as a parent
-        # missing its `children` list, and park it as "manual relabel
-        # suspected" -- leaving `awaiting_human=True` on the child even
-        # after the parent later relabels it `ready`.
-        if state.get("parent_number"):
-            return
-        if state.get("awaiting_human"):
-            return
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} `blocked` without recorded children; "
-            "manual relabel suspected.",
-            reason="blocked_no_children",
-        )
-        gh.write_pinned_state(issue, state)
+        _handle_empty_blocked_parent(gh, issue, state)
         return
 
-    scan = _read_child_labels(gh, issue, children)
+    scan = _usable_child_scan(gh, spec, issue, state, children)
     if scan is None:
         return
-    child_issues, child_labels = scan
-
-    if _park_rejected_children(gh, issue, state, child_labels):
+    if all(label == "done" for label in scan.labels.values()):
+        _complete_blocked_parent(gh, issue, state)
         return
 
-    if _park_manually_closed_children(
-        gh, spec, issue, state, child_issues, child_labels
-    ):
-        return
+    held = _activate_ready_children(gh, issue, state, scan)
+    _log_held_children(issue, "blocked", children, scan.labels, held)
 
-    if all(lbl == "done" for lbl in child_labels.values()):
-        _wf._post_issue_comment(
-            gh, issue, state,
-            ":white_check_mark: all children resolved; ready for "
-            "implementation.",
-        )
-        # Clear any stale park left by a prior `rejected`-child tick: the
-        # operator may have re-implemented the rejected child since, and
-        # the parent now reaches `ready` legitimately. Without this clear,
-        # `awaiting_human=True` survives into `_handle_implementing`,
-        # which would route through `_resume_developer_on_human_reply`
-        # and either replay long-stale comments or sit silent until a new
-        # human reply arrives -- instead of just starting the parent's
-        # implementation.
-        state.set("awaiting_human", False)
-        state.set("park_reason", None)
-        gh.set_workflow_label(issue, WorkflowLabel.READY)
-        gh.write_pinned_state(issue, state)
-        return
 
-    held = _activate_ready_children(
-        gh, issue, state, children, child_labels, child_issues
+def _handle_empty_umbrella(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> None:
+    from orchestrator import workflow as _wf
+
+    if state.get("awaiting_human"):
+        return
+    _wf._park_awaiting_human(
+        gh, issue, state,
+        f"{config.HITL_MENTIONS} `umbrella` without recorded children; "
+        "manual relabel suspected.",
+        reason="umbrella_no_children",
     )
-    _log_held_children(issue, "blocked", children, child_labels, held)
+    gh.write_pinned_state(issue, state)
+
+
+def _complete_umbrella(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> None:
+    from orchestrator import workflow as _wf
+
+    close_body = ":white_check_mark: all children resolved; closing umbrella issue."
+    verdict = _wf._format_issue_usage_verdict(state)
+    if verdict:
+        close_body = f"{close_body}\n\n{verdict}"
+    _wf._post_issue_comment(gh, issue, state, close_body)
+    state.set("awaiting_human", False)
+    state.set("park_reason", None)
+    state.set("umbrella_resolved_at", _wf._now_iso())
+    gh.set_workflow_label(issue, WorkflowLabel.DONE)
+    gh.write_pinned_state(issue, state)
+    try:
+        issue.edit(state="closed")
+    except Exception:
+        _wf.log.exception(
+            "issue=#%s could not close umbrella after children done",
+            issue.number,
+        )
 
 
 def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
@@ -1220,8 +1384,6 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     `ready` -- there is no implementation pass for an umbrella, so the
     only terminal path is "every child resolved -> close".
     """
-    from orchestrator import workflow as _wf
-
     state = gh.read_pinned_state(issue)
 
     # An umbrella parent NEVER enters implementation -- it just closes when
@@ -1235,57 +1397,15 @@ def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
     children = state.get("children") or []
     if not children:
-        # An umbrella with no recorded children is corrupt state (the
-        # decomposer only applies the umbrella label after creating
-        # children), but still surface to a human rather than silently
-        # closing an issue with no aggregated work.
-        if state.get("awaiting_human"):
-            return
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} `umbrella` without recorded children; "
-            "manual relabel suspected.",
-            reason="umbrella_no_children",
-        )
-        gh.write_pinned_state(issue, state)
+        _handle_empty_umbrella(gh, issue, state)
         return
 
-    scan = _read_child_labels(gh, issue, children)
+    scan = _usable_child_scan(gh, spec, issue, state, children)
     if scan is None:
         return
-    child_issues, child_labels = scan
-
-    if _park_rejected_children(gh, issue, state, child_labels):
+    if all(label == "done" for label in scan.labels.values()):
+        _complete_umbrella(gh, issue, state)
         return
 
-    if _park_manually_closed_children(
-        gh, spec, issue, state, child_issues, child_labels
-    ):
-        return
-
-    if all(lbl == "done" for lbl in child_labels.values()):
-        close_body = (
-            ":white_check_mark: all children resolved; closing umbrella issue."
-        )
-        verdict = _wf._format_issue_usage_verdict(state)
-        if verdict:
-            close_body = f"{close_body}\n\n{verdict}"
-        _wf._post_issue_comment(gh, issue, state, close_body)
-        state.set("awaiting_human", False)
-        state.set("park_reason", None)
-        state.set("umbrella_resolved_at", _wf._now_iso())
-        gh.set_workflow_label(issue, WorkflowLabel.DONE)
-        gh.write_pinned_state(issue, state)
-        try:
-            issue.edit(state="closed")
-        except Exception:
-            _wf.log.exception(
-                "issue=#%s could not close umbrella after children done",
-                issue.number,
-            )
-        return
-
-    held = _activate_ready_children(
-        gh, issue, state, children, child_labels, child_issues
-    )
-    _log_held_children(issue, "umbrella", children, child_labels, held)
+    held = _activate_ready_children(gh, issue, state, scan)
+    _log_held_children(issue, "umbrella", children, scan.labels, held)

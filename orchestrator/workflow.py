@@ -39,7 +39,7 @@ import subprocess  # noqa: F401 -- re-exported so tests can `patch.object(workfl
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -470,21 +470,101 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+@dataclass(frozen=True)
+class _AgentRunRequest:
+    """Agent invocation plus the audit/analytics context that follows it."""
+
+    agent_role: str
+    stage: str
+    backend: str
+    prompt: str
+    cwd: Path
+    agent_spec: Optional[str] = None
+    resume_session_id: Optional[str] = None
+    timeout: Optional[int] = None
+    extra_args: tuple[str, ...] = ()
+    review_round: Optional[int] = None
+    retry_count: Optional[int] = None
+
+
+def _agent_run_kwargs(request: _AgentRunRequest) -> dict[str, Any]:
+    """Forward only optional runner kwargs that the caller supplied."""
+    kwargs: dict[str, Any] = {"extra_args": request.extra_args}
+    if request.resume_session_id is not None:
+        kwargs["resume_session_id"] = request.resume_session_id
+    if request.timeout is not None:
+        kwargs["timeout"] = request.timeout
+    return kwargs
+
+
+def _record_tracked_agent_exit(
+    gh: GitHubClient,
+    issue_number: int,
+    request: _AgentRunRequest,
+    agent_result: AgentResult,
+    duration_s: float,
+):
+    gh.emit_event(
+        "agent_exit",
+        issue_number=issue_number,
+        stage=request.stage,
+        agent=request.backend,
+        agent_role=request.agent_role,
+        session_id=agent_result.session_id,
+        duration_s=duration_s,
+        exit_code=agent_result.exit_code,
+        timed_out=agent_result.timed_out,
+        review_round=request.review_round,
+        retry_count=request.retry_count,
+    )
+    return analytics.record_agent_exit(
+        repo=getattr(gh, "_repo_slug", None) or "",
+        issue=issue_number,
+        stage=request.stage,
+        agent_role=request.agent_role,
+        backend=request.backend,
+        agent_spec=request.agent_spec,
+        resume_session_id=request.resume_session_id,
+        result=agent_result,
+        duration_s=duration_s,
+        review_round=request.review_round,
+        retry_count=request.retry_count,
+        fallback_model=_configured_model(request.backend, request.extra_args),
+        prompt=request.prompt,
+        cwd=request.cwd,
+    )
+
+
+def _emit_triggered_skills(
+    gh: GitHubClient,
+    issue_number: int,
+    request: _AgentRunRequest,
+    triggered_skills,
+) -> None:
+    try:
+        for skill in triggered_skills or ():
+            gh.emit_event(
+                "skill_triggered",
+                issue_number=issue_number,
+                stage=request.stage,
+                agent=request.backend,
+                agent_role=request.agent_role,
+                review_round=request.review_round,
+                retry_count=request.retry_count,
+                skill=skill,
+            )
+    except Exception:
+        log.exception(
+            "issue=#%d: skill_triggered audit emission failed; continuing",
+            issue_number,
+        )
+
+
 def _run_agent_tracked(
     gh: GitHubClient,
     issue_number: int,
-    *,
-    agent_role: str,
-    stage: str,
-    backend: str,
-    prompt: str,
-    cwd: Path,
-    agent_spec: Optional[str] = None,
-    resume_session_id: Optional[str] = None,
-    timeout: Optional[int] = None,
-    extra_args: tuple[str, ...] = (),
-    review_round: Optional[int] = None,
-    retry_count: Optional[int] = None,
+    request: Optional[_AgentRunRequest] = None,
+    **request_fields: Any,
 ) -> AgentResult:
     """Run an agent, bookending the spawn with `agent_spawn` / `agent_exit`
     audit events and appending a per-invocation analytics record on exit.
@@ -548,55 +628,32 @@ def _run_agent_tracked(
     cost a run whose baseline `agent_spawn` / `agent_exit` events already
     fired.
     """
+    if request is not None and request_fields:
+        raise TypeError("pass either request or keyword request fields, not both")
+    run_request = request or _AgentRunRequest(**request_fields)
     start = time.monotonic()
     gh.emit_event(
         "agent_spawn",
         issue_number=issue_number,
-        stage=stage,
-        agent=backend,
-        agent_role=agent_role,
-        session_id=resume_session_id,
-        review_round=review_round,
-        retry_count=retry_count,
+        stage=run_request.stage,
+        agent=run_request.backend,
+        agent_role=run_request.agent_role,
+        session_id=run_request.resume_session_id,
+        review_round=run_request.review_round,
+        retry_count=run_request.retry_count,
     )
     # Forward only the kwargs the original call sites set so the
     # wrapper's run_agent invocation matches the pre-tracking signature
     # call-for-call (test fakes assert on `call.kwargs`).
-    run_agent_kwargs: dict[str, Any] = {"extra_args": extra_args}
-    if resume_session_id is not None:
-        run_agent_kwargs["resume_session_id"] = resume_session_id
-    if timeout is not None:
-        run_agent_kwargs["timeout"] = timeout
-    agent_result = run_agent(backend, prompt, cwd, **run_agent_kwargs)
-    duration_s = round(time.monotonic() - start, 3)
-    gh.emit_event(
-        "agent_exit",
-        issue_number=issue_number,
-        stage=stage,
-        agent=backend,
-        agent_role=agent_role,
-        session_id=agent_result.session_id,
-        duration_s=duration_s,
-        exit_code=agent_result.exit_code,
-        timed_out=agent_result.timed_out,
-        review_round=review_round,
-        retry_count=retry_count,
+    agent_result = run_agent(
+        run_request.backend,
+        run_request.prompt,
+        run_request.cwd,
+        **_agent_run_kwargs(run_request),
     )
-    triggered_skills = analytics.record_agent_exit(
-        repo=getattr(gh, "_repo_slug", None) or "",
-        issue=issue_number,
-        stage=stage,
-        agent_role=agent_role,
-        backend=backend,
-        agent_spec=agent_spec,
-        resume_session_id=resume_session_id,
-        result=agent_result,
-        duration_s=duration_s,
-        review_round=review_round,
-        retry_count=retry_count,
-        fallback_model=_configured_model(backend, extra_args),
-        prompt=prompt,
-        cwd=cwd,
+    duration_s = round(time.monotonic() - start, 3)
+    triggered_skills = _record_tracked_agent_exit(
+        gh, issue_number, run_request, agent_result, duration_s,
     )
     # One `skill_triggered` audit event per distinct triggered skill, reusing
     # the list `record_agent_exit` already parsed (no second pass over stdout).
@@ -604,23 +661,7 @@ def _run_agent_tracked(
     # from the analytics layer. This is opt-in observability, so it rides its
     # own fail-open guard exactly like the skill parse does -- a bug here must
     # never break a run whose baseline audit events have already fired.
-    try:
-        for skill in triggered_skills or ():
-            gh.emit_event(
-                "skill_triggered",
-                issue_number=issue_number,
-                stage=stage,
-                agent=backend,
-                agent_role=agent_role,
-                review_round=review_round,
-                retry_count=retry_count,
-                skill=skill,
-            )
-    except Exception:
-        log.exception(
-            "issue=#%d: skill_triggered audit emission failed; continuing",
-            issue_number,
-        )
+    _emit_triggered_skills(gh, issue_number, run_request, triggered_skills)
     return agent_result
 
 
@@ -766,6 +807,45 @@ def _post_issue_usage_verdict(
         _post_issue_comment(gh, issue, state, verdict)
 
 
+@dataclass(frozen=True)
+class _CommunityContribution:
+    author: str
+
+
+def _community_contribution_for_pr(
+    gh: GitHubClient, pr, allowed_lower: set[str],
+) -> Optional[_CommunityContribution]:
+    user = getattr(pr, "user", None)
+    if getattr(user, "type", None) == "Bot":
+        return None
+    author = getattr(user, "login", None) or ""
+    if author.lower() in allowed_lower:
+        return None
+    if gh.pr_has_label(pr, COMMUNITY_CONTRIBUTION_LABEL):
+        return None
+    return _CommunityContribution(author)
+
+
+def _label_community_contribution(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    pr,
+    contribution: _CommunityContribution,
+) -> None:
+    # The label is the dedup marker, so the ping must land first. A label
+    # failure may repeat a ping; a comment failure must not suppress one.
+    gh.pr_comment(
+        pr.number,
+        f"{config.HITL_MENTIONS} community contribution from "
+        f"@{contribution.author or 'unknown'} -- please review this PR.",
+    )
+    gh.add_pr_label(pr, COMMUNITY_CONTRIBUTION_LABEL)
+    log.info(
+        "repo=%s pr=#%s author=%r pinged HITL and labeled %r",
+        spec.slug, pr.number, contribution.author, COMMUNITY_CONTRIBUTION_LABEL,
+    )
+
+
 def _sweep_community_contribution_prs(
     gh: GitHubClient, spec: RepoSpec
 ) -> None:
@@ -800,37 +880,11 @@ def _sweep_community_contribution_prs(
         return
     for pr in prs:
         try:
-            user = getattr(pr, "user", None)
-            # Bot accounts (Dependabot, Renovate, CI bots) open PRs
-            # structurally and are not community contributions. Skip them
-            # by GitHub's `user.type == "Bot"` flag -- the same structural
-            # signal the drift detector uses -- so a weekly Dependabot bump
-            # never earns the `community_contribution` label or a HITL ping.
-            if getattr(user, "type", None) == "Bot":
-                continue
-            author = getattr(user, "login", None) or ""
-            if author.lower() in allowed_lower:
-                continue
-            if gh.pr_has_label(pr, COMMUNITY_CONTRIBUTION_LABEL):
-                continue
-            # Post the HITL ping BEFORE adding the label. The label is the
-            # dedup marker that suppresses re-pinging on later ticks, so a
-            # failure between the two writes must leave the PR un-labeled --
-            # otherwise a comment failure would mark the PR done while no
-            # human was ever called. Order: comment first, then label.
-            # Worst case (comment ok, label fails) is a double-ping on the
-            # next tick, which is acceptable; the silent-skip failure mode
-            # is not.
-            gh.pr_comment(
-                pr.number,
-                f"{config.HITL_MENTIONS} community contribution from "
-                f"@{author or 'unknown'} -- please review this PR.",
+            contribution = _community_contribution_for_pr(
+                gh, pr, allowed_lower,
             )
-            gh.add_pr_label(pr, COMMUNITY_CONTRIBUTION_LABEL)
-            log.info(
-                "repo=%s pr=#%s author=%r pinged HITL and labeled %r",
-                spec.slug, pr.number, author, COMMUNITY_CONTRIBUTION_LABEL,
-            )
+            if contribution is not None:
+                _label_community_contribution(gh, spec, pr, contribution)
         except Exception:
             log.exception(
                 "repo=%s pr=#%s community-contribution sweep step failed; continuing",
@@ -852,6 +906,31 @@ class _PollablePartition:
     family_labels: list[Optional[str]]
     fanout_numbers: list[int]
     fanout_closed: set[int]
+
+
+@dataclass
+class _PollablePartitionBuilder:
+    family_numbers: list[int] = field(default_factory=list)
+    family_labels: list[Optional[str]] = field(default_factory=list)
+    fanout_numbers: list[int] = field(default_factory=list)
+    fanout_closed: set[int] = field(default_factory=set)
+
+    def add(self, issue_number: int, label: Optional[str], closed: bool) -> None:
+        if label is None or label in _FAMILY_AWARE_LABELS:
+            self.family_numbers.append(issue_number)
+            self.family_labels.append(label)
+        else:
+            self.fanout_numbers.append(issue_number)
+            if closed:
+                self.fanout_closed.add(issue_number)
+
+    def build(self) -> _PollablePartition:
+        return _PollablePartition(
+            self.family_numbers,
+            self.family_labels,
+            self.fanout_numbers,
+            self.fanout_closed,
+        )
 
 
 def _classify_pollable_issue(
@@ -906,25 +985,13 @@ def _partition_pollable_issues(
     its handler is a cheap terminal finalize submitted cap-exempt. Hard-skip
     (``backlog`` / ``paused``) issues are dropped entirely.
     """
-    family_numbers: list[int] = []
-    family_labels: list[Optional[str]] = []
-    fanout_numbers: list[int] = []
-    fanout_closed: set[int] = set()
+    builder = _PollablePartitionBuilder()
     for issue in gh.list_pollable_issues():
         skip, label = _classify_pollable_issue(gh, spec, issue)
         if skip:
             continue
-        issue_number = int(issue.number)
-        if label is None or label in _FAMILY_AWARE_LABELS:
-            family_numbers.append(issue_number)
-            family_labels.append(label)
-        else:
-            fanout_numbers.append(issue_number)
-            if _issue_is_closed(issue):
-                fanout_closed.add(issue_number)
-    return _PollablePartition(
-        family_numbers, family_labels, fanout_numbers, fanout_closed,
-    )
+        builder.add(int(issue.number), label, _issue_is_closed(issue))
+    return builder.build()
 
 
 def _family_bucket_cap_exempt(family_labels: list[Optional[str]]) -> bool:
@@ -1029,6 +1096,70 @@ def _drain_family_bucket(
             )
 
 
+@dataclass(frozen=True)
+class _ParallelTickPlan:
+    gh: GitHubClient
+    spec: RepoSpec
+    partition: _PollablePartition
+    semaphore_cm: contextlib.AbstractContextManager
+
+    @property
+    def task_count(self) -> int:
+        return (
+            (1 if self.partition.family_numbers else 0)
+            + len(self.partition.fanout_numbers)
+        )
+
+    def submit(self, executor) -> tuple[dict[Any, Any], object]:
+        family_sentinel: object = object()
+        futures: dict[Any, Any] = {}
+        if self.partition.family_numbers:
+            futures[
+                executor.submit(
+                    _drain_family_bucket,
+                    self.gh,
+                    self.spec,
+                    self.partition.family_numbers,
+                    semaphore_cm=self.semaphore_cm,
+                )
+            ] = family_sentinel
+        for issue_number in self.partition.fanout_numbers:
+            futures[
+                executor.submit(
+                    _refetch_and_process,
+                    self.gh,
+                    self.spec,
+                    issue_number,
+                    semaphore_cm=self.semaphore_cm,
+                )
+            ] = issue_number
+        return futures, family_sentinel
+
+
+def _drain_parallel_futures(
+    spec: RepoSpec,
+    futures: dict[Any, Any],
+    family_sentinel: object,
+) -> None:
+    for future in as_completed(futures):
+        tag = futures[future]
+        try:
+            future.result()
+        except Exception:
+            if tag is family_sentinel:
+                # Per-issue failures are caught by the family drain itself;
+                # only a programming-level drain failure reaches this path.
+                log.exception(
+                    "repo=%s family bucket drain raised (programming "
+                    "error -- per-issue exceptions are handled inside "
+                    "the drain)", spec.slug,
+                )
+            else:
+                log.exception(
+                    "repo=%s issue=#%s processing failed", spec.slug, tag,
+                )
+
+
 def _run_parallel_tick(
     gh: GitHubClient,
     spec: RepoSpec,
@@ -1055,63 +1186,23 @@ def _run_parallel_tick(
     instead let a waiting family future occupy the other worker slot and
     starve fanout under a small `limit`.
     """
-    partition = _partition_pollable_issues(gh, spec)
-    family_numbers = partition.family_numbers
-    fanout_numbers = partition.fanout_numbers
-    if not family_numbers and not fanout_numbers:
+    plan = _ParallelTickPlan(
+        gh, spec, _partition_pollable_issues(gh, spec), semaphore_cm,
+    )
+    if plan.task_count == 0:
         return
-    total_tasks = (1 if family_numbers else 0) + len(fanout_numbers)
     # max_workers is capped at `limit` AND at the submitted-task count so a
     # quiet tick (e.g. one fan-out issue) does not spin up idle worker threads.
-    workers = min(limit, total_tasks)
+    workers = min(limit, plan.task_count)
     with ThreadPoolExecutor(
         max_workers=workers,
         thread_name_prefix=f"orch-{spec.slug.replace('/', '__')}",
-    ) as ex:
-        # Sentinel for the family bucket future so the as_completed loop can
-        # distinguish it from per-fanout-issue futures.
-        family_sentinel: object = object()
-        futures: dict[Any, Any] = {}
-        if family_numbers:
-            futures[
-                ex.submit(
-                    _drain_family_bucket, gh, spec, family_numbers,
-                    semaphore_cm=semaphore_cm,
-                )
-            ] = family_sentinel
-        for issue_number in fanout_numbers:
-            futures[
-                ex.submit(
-                    _refetch_and_process,
-                    gh,
-                    spec,
-                    issue_number,
-                    semaphore_cm=semaphore_cm,
-                )
-            ] = issue_number
+    ) as executor:
+        futures, family_sentinel = plan.submit(executor)
         # `as_completed` so a slow issue does not delay logging the failures
         # of faster ones. Each `fut.result()` is wrapped individually so one
         # raising issue cannot abort the remaining futures' result drain.
-        for fut in as_completed(futures):
-            tag = futures[fut]
-            try:
-                fut.result()
-            except Exception:
-                if tag is family_sentinel:
-                    # `_drain_family_bucket` catches per-issue exceptions
-                    # itself; reaching here means a programming error in
-                    # the drain loop. Log it loudly but don't kill the
-                    # remaining (fanout) futures' drain.
-                    log.exception(
-                        "repo=%s family bucket drain raised (programming "
-                        "error -- per-issue exceptions are handled inside "
-                        "the drain)", spec.slug,
-                    )
-                else:
-                    log.exception(
-                        "repo=%s issue=#%s processing failed",
-                        spec.slug, tag,
-                    )
+        _drain_parallel_futures(spec, futures, family_sentinel)
 
 
 def tick(
@@ -1420,6 +1511,22 @@ def _dispatch_via_scheduler(
     _submit_scheduler_fanout_issues(gh, spec, scheduler, partition, per_repo_cap)
 
 
+_ISSUE_HANDLER_NAMES: dict[Optional[str], str] = {
+    None: "_handle_pickup",
+    "decomposing": "_handle_decomposing",
+    "ready": "_handle_ready",
+    "blocked": "_handle_blocked",
+    "umbrella": "_handle_umbrella",
+    "implementing": "_handle_implementing",
+    "documenting": "_handle_documenting",
+    "validating": "_handle_validating",
+    "in_review": "_handle_in_review",
+    "fixing": "_handle_fixing",
+    "resolving_conflict": "_handle_resolving_conflict",
+    "question": "_handle_question",
+}
+
+
 def _route_issue_to_handler(
     gh: GitHubClient, spec: RepoSpec, issue: Issue, label: Optional[str],
 ) -> None:
@@ -1432,33 +1539,10 @@ def _route_issue_to_handler(
     ``stage_evaluation`` analytics record stay in ``_process_issue``, which
     wraps this call in its try / except / finally.
     """
-    if label is None:
-        _handle_pickup(gh, spec, issue)
-    elif label == "decomposing":
-        _handle_decomposing(gh, spec, issue)
-    elif label == "ready":
-        _handle_ready(gh, spec, issue)
-    elif label == "blocked":
-        _handle_blocked(gh, spec, issue)
-    elif label == "umbrella":
-        _handle_umbrella(gh, spec, issue)
-    elif label == "implementing":
-        _handle_implementing(gh, spec, issue)
-    elif label == "documenting":
-        _handle_documenting(gh, spec, issue)
-    elif label == "validating":
-        _handle_validating(gh, spec, issue)
-    elif label == "in_review":
-        _handle_in_review(gh, spec, issue)
-    elif label == "fixing":
-        _handle_fixing(gh, spec, issue)
-    elif label == "resolving_conflict":
-        _handle_resolving_conflict(gh, spec, issue)
-    elif label == "question":
-        _handle_question(gh, spec, issue)
-    elif label in ("done", "rejected"):
-        return
-    else:
+    handler_name = _ISSUE_HANDLER_NAMES.get(label)
+    if handler_name is not None:
+        globals()[handler_name](gh, spec, issue)
+    elif label not in ("done", "rejected"):
         log.warning(
             "repo=%s issue=#%s label=%r not implemented yet; leaving alone",
             spec.slug, issue.number, label,
@@ -1507,51 +1591,53 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         )
 
 
-def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _pickup_author_allowed(spec: RepoSpec, issue: Issue) -> bool:
     # Author allowlist: when configured, silently skip unlabeled issues from
     # anyone outside the list so random users can't burn agent budget on a
     # public repo. Maintainers can still drive an outsider's issue manually
     # by adding a workflow label themselves -- the guard only fires here.
-    if config.ALLOWED_ISSUE_AUTHORS:
-        author = getattr(getattr(issue, "user", None), "login", None) or ""
-        # GitHub logins are case-insensitive (Alice and alice resolve to the
-        # same account), so normalize both sides before comparing.
-        allowed = {
-            github_handle.lower()
-            for github_handle in config.ALLOWED_ISSUE_AUTHORS
-        }
-        if author.lower() not in allowed:
-            log.info(
-                "repo=%s issue=#%s author=%r not in ALLOWED_ISSUE_AUTHORS; skipping pickup",
-                spec.slug, issue.number, author,
-            )
-            return
-    state = PinnedState()
-    state.set("created_at", _now_iso())
-    if config.DECOMPOSE:
-        pickup = _post_issue_comment(
-            gh, issue, state,
-            ":robot: orchestrator picking this up; decomposing.",
-        )
-        # Anchor the validating-handoff seed-watermark on the exact pickup
-        # comment id (see legacy branch comment).
-        pickup_id = getattr(pickup, "id", None)
-        if pickup_id is not None:
-            state.set("pickup_comment_id", int(pickup_id))
-        # Snapshot the user-visible content so future ticks can detect a
-        # human edit to the title/body mid-flight. Computed AFTER recording
-        # the pickup comment id so the pickup itself is filtered out by
-        # `_orchestrator_ids` -- otherwise the next tick would include it
-        # and the hash would flap once the orchestrator_comment_ids set is
-        # consulted there.
-        state.set(
-            "user_content_hash",
-            _compute_user_content_hash(issue, _orchestrator_ids(state)),
-        )
-        gh.set_workflow_label(issue, WorkflowLabel.DECOMPOSING)
-        gh.write_pinned_state(issue, state)
-        _handle_decomposing(gh, spec, issue)
-        return
+    if not config.ALLOWED_ISSUE_AUTHORS:
+        return True
+    author = getattr(getattr(issue, "user", None), "login", None) or ""
+    allowed = {
+        github_handle.lower()
+        for github_handle in config.ALLOWED_ISSUE_AUTHORS
+    }
+    if author.lower() in allowed:
+        return True
+    log.info(
+        "repo=%s issue=#%s author=%r not in ALLOWED_ISSUE_AUTHORS; skipping pickup",
+        spec.slug, issue.number, author,
+    )
+    return False
+
+
+def _record_pickup_comment(state: PinnedState, pickup) -> None:
+    pickup_id = getattr(pickup, "id", None)
+    if pickup_id is not None:
+        state.set("pickup_comment_id", int(pickup_id))
+
+
+def _start_decomposing(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+) -> None:
+    pickup = _post_issue_comment(
+        gh, issue, state,
+        ":robot: orchestrator picking this up; decomposing.",
+    )
+    _record_pickup_comment(state, pickup)
+    state.set(
+        "user_content_hash",
+        _compute_user_content_hash(issue, _orchestrator_ids(state)),
+    )
+    gh.set_workflow_label(issue, WorkflowLabel.DECOMPOSING)
+    gh.write_pinned_state(issue, state)
+    _handle_decomposing(gh, spec, issue)
+
+
+def _start_implementing(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+) -> None:
     # Legacy path with DECOMPOSE=off: skip decomposition entirely and route
     # the unlabeled issue straight to implementing, exactly as the
     # bootstrap-milestone code did.
@@ -1567,9 +1653,7 @@ def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # approval), causing `_seed_watermark_past_self` to silently advance
     # past every issue/PR comment in between -- including any human
     # "do not merge yet" posted during implementing.
-    pickup_id = getattr(pickup, "id", None)
-    if pickup_id is not None:
-        state.set("pickup_comment_id", int(pickup_id))
+    _record_pickup_comment(state, pickup)
     state.set(
         "user_content_hash",
         _compute_user_content_hash(issue, _orchestrator_ids(state)),
@@ -1577,6 +1661,17 @@ def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     gh.set_workflow_label(issue, WorkflowLabel.IMPLEMENTING)
     gh.write_pinned_state(issue, state)
     _handle_implementing(gh, spec, issue)
+
+
+def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+    if not _pickup_author_allowed(spec, issue):
+        return
+    state = PinnedState()
+    state.set("created_at", _now_iso())
+    if config.DECOMPOSE:
+        _start_decomposing(gh, spec, issue, state)
+    else:
+        _start_implementing(gh, spec, issue, state)
 
 
 def _ignore_if_interrupted(issue: Issue, agent_result: AgentResult) -> bool:
@@ -1719,44 +1814,138 @@ def _finalize_if_pr_merged(
         return False
     if gh.pr_state(pr) != "merged":
         return False
-    stage = gh.workflow_label(issue)
-    state.set("merged_at", _now_iso())
-    gh.set_workflow_label(issue, WorkflowLabel.DONE)
-    _post_issue_usage_verdict(gh, issue, state)
-    gh.write_pinned_state(issue, state)
-    gh.emit_event(
-        "pr_merged",
-        issue_number=issue.number,
-        stage=stage,
-        pr_number=int(pr_number),
-        sha=getattr(pr.head, "sha", None) or None,
-        merge_method="external",
-        review_round=int(state.get("review_round") or 0),
-        conflict_round=state.get("conflict_round"),
-        retry_count=state.get("retry_count"),
-    )
-    if getattr(issue, "state", "open") != "closed":
-        try:
-            issue.edit(state="closed")
-        except Exception:
-            log.exception(
-                "issue=#%s could not close after detecting external merge",
-                issue.number,
-            )
-    _cleanup_terminal_branch(
-        gh, spec, issue.number,
-        branch=_resolve_branch_name(state, spec, issue.number),
+    _finalize_merged_pr(
+        _ReviewTerminalContext(
+            gh=gh,
+            spec=spec,
+            issue=issue,
+            state=state,
+            pr=pr,
+            stage=gh.workflow_label(issue),
+        ),
+        close_error="could not close after detecting external merge",
+        close_if_open_only=True,
     )
     return True
 
 
+@dataclass(frozen=True)
+class _ReviewTerminalContext:
+    gh: GitHubClient
+    spec: RepoSpec
+    issue: Issue
+    state: PinnedState
+    pr: Any
+    stage: Optional[str]
+
+    @property
+    def pr_number(self) -> int:
+        return int(self.state.get("pr_number"))
+
+    @property
+    def conflict_round(self):
+        conflict_round = self.state.get("conflict_round")
+        if self.stage == "resolving_conflict":
+            return int(conflict_round or 0)
+        return conflict_round
+
+
+def _close_terminal_issue(
+    context: _ReviewTerminalContext, error_message: str,
+) -> None:
+    try:
+        context.issue.edit(state="closed")
+    except Exception:
+        log.exception(
+            "issue=#%s %s", context.issue.number, error_message,
+        )
+
+
+def _cleanup_review_terminal(context: _ReviewTerminalContext) -> None:
+    _cleanup_terminal_branch(
+        context.gh,
+        context.spec,
+        context.issue.number,
+        branch=_resolve_branch_name(
+            context.state, context.spec, context.issue.number,
+        ),
+    )
+
+
+def _finalize_merged_pr(
+    context: _ReviewTerminalContext,
+    *,
+    close_error: str,
+    close_if_open_only: bool = False,
+) -> None:
+    context.state.set("merged_at", _now_iso())
+    context.gh.set_workflow_label(context.issue, WorkflowLabel.DONE)
+    _post_issue_usage_verdict(context.gh, context.issue, context.state)
+    context.gh.write_pinned_state(context.issue, context.state)
+    context.gh.emit_event(
+        "pr_merged",
+        issue_number=context.issue.number,
+        stage=context.stage,
+        pr_number=context.pr_number,
+        sha=getattr(context.pr.head, "sha", None) or None,
+        merge_method="external",
+        review_round=int(context.state.get("review_round") or 0),
+        conflict_round=context.conflict_round,
+        retry_count=context.state.get("retry_count"),
+    )
+    if (
+        not close_if_open_only
+        or getattr(context.issue, "state", "open") != "closed"
+    ):
+        _close_terminal_issue(context, close_error)
+    _cleanup_review_terminal(context)
+
+
+def _finalize_rejected_pr(context: _ReviewTerminalContext) -> None:
+    context.state.set("closed_without_merge_at", _now_iso())
+    context.gh.set_workflow_label(context.issue, WorkflowLabel.REJECTED)
+    _post_issue_usage_verdict(context.gh, context.issue, context.state)
+    context.gh.write_pinned_state(context.issue, context.state)
+    context.gh.emit_event(
+        "pr_closed_without_merge",
+        issue_number=context.issue.number,
+        stage=context.stage,
+        pr_number=context.pr_number,
+        sha=getattr(context.pr.head, "sha", None) or None,
+        review_round=int(context.state.get("review_round") or 0),
+        conflict_round=context.conflict_round,
+        retry_count=context.state.get("retry_count"),
+    )
+    _close_terminal_issue(context, "could not close after reject")
+    _cleanup_review_terminal(context)
+
+
+def _finalize_closed_issue_with_open_pr(context: _ReviewTerminalContext) -> None:
+    context.state.set("closed_without_merge_at", _now_iso())
+    context.gh.set_workflow_label(context.issue, WorkflowLabel.REJECTED)
+    _post_issue_usage_verdict(context.gh, context.issue, context.state)
+    context.gh.write_pinned_state(context.issue, context.state)
+
+
+def _drain_review_terminal(context: _ReviewTerminalContext) -> bool:
+    if context.pr is None:
+        return False
+    pr_status = context.gh.pr_state(context.pr)
+    if pr_status == "merged":
+        _finalize_merged_pr(context, close_error="could not close after merge")
+        return True
+    if pr_status == "closed":
+        _finalize_rejected_pr(context)
+        return True
+    if getattr(context.issue, "state", "open") == "closed":
+        _finalize_closed_issue_with_open_pr(context)
+        return True
+    return False
+
+
 def _drain_review_pr_terminals(
     gh: GitHubClient,
-    spec: RepoSpec,
-    issue: Issue,
-    state: PinnedState,
-    pr,
-    *,
+    *context_args,
     stage: str,
 ) -> bool:
     """Drain the three PR/issue terminal arcs shared by `_handle_in_review`,
@@ -1787,82 +1976,54 @@ def _drain_review_pr_terminals(
     Returns True when an arc fired (caller must return immediately).
     Returns False when none fired (caller continues with the same `pr`).
     """
-    if pr is None:
-        return False
-    pr_number = int(state.get("pr_number"))
-    pr_status = gh.pr_state(pr)
-    # `resolving_conflict` terminal events historically coerced
-    # `conflict_round` via `int(state.get("conflict_round") or 0)` so a
-    # legacy / manually-relabelled state without the counter still landed
-    # `0` in the audit record. `build_event_record` drops None-valued
-    # kwargs, so without this coercion those legacy states would lose the
-    # field entirely. The other two stages have always emitted the raw
-    # `state.get("conflict_round")` (so a missing counter stays missing),
-    # so the stage-conditional coercion preserves both pre-refactor
-    # behaviours exactly.
-    conflict_round_field = state.get("conflict_round")
-    if stage == "resolving_conflict":
-        conflict_round_field = int(conflict_round_field or 0)
-    if pr_status == "merged":
-        state.set("merged_at", _now_iso())
-        gh.set_workflow_label(issue, WorkflowLabel.DONE)
-        _post_issue_usage_verdict(gh, issue, state)
-        gh.write_pinned_state(issue, state)
-        gh.emit_event(
-            "pr_merged",
-            issue_number=issue.number,
-            stage=stage,
-            pr_number=pr_number,
-            sha=getattr(pr.head, "sha", None) or None,
-            merge_method="external",
-            review_round=int(state.get("review_round") or 0),
-            conflict_round=conflict_round_field,
-            retry_count=state.get("retry_count"),
+    spec, issue, state, pr = context_args
+    return _drain_review_terminal(
+        _ReviewTerminalContext(gh, spec, issue, state, pr, stage),
+    )
+
+
+@dataclass(frozen=True)
+class _ClosedIssuePR:
+    number: Optional[int]
+    pr: Any = None
+    defer: bool = False
+
+
+def _closed_issue_pr(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> _ClosedIssuePR:
+    raw_number = state.get("pr_number")
+    if raw_number is None:
+        return _ClosedIssuePR(number=None)
+    number = int(raw_number)
+    try:
+        pr = gh.get_pr(number)
+    except Exception:
+        log.exception(
+            "issue=#%s could not fetch PR #%s while finalizing a "
+            "closed issue; deferring (next tick retries the "
+            "merged-PR path)", issue.number, raw_number,
         )
-        try:
-            issue.edit(state="closed")
-        except Exception:
-            log.exception(
-                "issue=#%s could not close after merge", issue.number,
-            )
-        _cleanup_terminal_branch(
-            gh, spec, issue.number,
-            branch=_resolve_branch_name(state, spec, issue.number),
-        )
-        return True
-    if pr_status == "closed":
-        state.set("closed_without_merge_at", _now_iso())
-        gh.set_workflow_label(issue, WorkflowLabel.REJECTED)
-        _post_issue_usage_verdict(gh, issue, state)
-        gh.write_pinned_state(issue, state)
-        gh.emit_event(
-            "pr_closed_without_merge",
-            issue_number=issue.number,
-            stage=stage,
-            pr_number=pr_number,
-            sha=getattr(pr.head, "sha", None) or None,
-            review_round=int(state.get("review_round") or 0),
-            conflict_round=conflict_round_field,
-            retry_count=state.get("retry_count"),
-        )
-        try:
-            issue.edit(state="closed")
-        except Exception:
-            log.exception(
-                "issue=#%s could not close after reject", issue.number,
-            )
-        _cleanup_terminal_branch(
-            gh, spec, issue.number,
-            branch=_resolve_branch_name(state, spec, issue.number),
-        )
-        return True
-    if getattr(issue, "state", "open") == "closed":
-        state.set("closed_without_merge_at", _now_iso())
-        gh.set_workflow_label(issue, WorkflowLabel.REJECTED)
-        _post_issue_usage_verdict(gh, issue, state)
-        gh.write_pinned_state(issue, state)
-        return True
-    return False
+        return _ClosedIssuePR(number=number, defer=True)
+    return _ClosedIssuePR(
+        number=number,
+        pr=pr,
+        defer=gh.pr_state(pr) == "merged",
+    )
+
+
+def _emit_closed_pr_rejection(context: _ReviewTerminalContext) -> None:
+    context.gh.emit_event(
+        "pr_closed_without_merge",
+        issue_number=context.issue.number,
+        stage=context.stage,
+        pr_number=context.pr_number,
+        sha=getattr(context.pr.head, "sha", None) or None,
+        review_round=int(context.state.get("review_round") or 0),
+        conflict_round=context.state.get("conflict_round"),
+        retry_count=context.state.get("retry_count"),
+    )
+    _cleanup_review_terminal(context)
 
 
 def _finalize_if_issue_closed(
@@ -1897,66 +2058,13 @@ def _finalize_if_issue_closed(
     """
     if getattr(issue, "state", "open") != "closed":
         return False
-    pr_number = state.get("pr_number")
-    pr = None
-    if pr_number is not None:
-        # Read the PR state BEFORE mutating issue state.
-        # `_finalize_if_pr_merged` ran first and returned False, but
-        # that helper returns False on BOTH "not merged" AND "could
-        # not fetch PR" -- the two are indistinguishable to the
-        # caller. Flipping to `rejected` without our own successful
-        # fetch could permanently terminal-label a merged-PR issue
-        # whose merge finalize hit a transient GitHub / network
-        # failure. Defer instead so the next tick's
-        # `_finalize_if_pr_merged` can re-attempt the merged path
-        # against a fresh PR state -- but still return True so the
-        # caller does NOT continue spawning the dev / docs / reviewer
-        # agent against an issue that is already closed.
-        try:
-            pr = gh.get_pr(int(pr_number))
-        except Exception:
-            log.exception(
-                "issue=#%s could not fetch PR #%s while finalizing a "
-                "closed issue; deferring (next tick retries the "
-                "merged-PR path)", issue.number, pr_number,
-            )
-            return True
-        if gh.pr_state(pr) == "merged":
-            # Our fetch succeeded and the PR IS merged -- the prior
-            # `_finalize_if_pr_merged` call hit a transient fetch
-            # failure of its own. Defer so the next tick runs the
-            # full merged-path cleanup (stamp `merged_at`, flip to
-            # `done`, emit `pr_merged` with `merge_method="external"`,
-            # cleanup branch). Flipping to `rejected` here would
-            # permanently mis-label this issue; returning True
-            # without state changes keeps the dev / docs / reviewer
-            # agent from running against a closed issue this tick.
-            return True
-    stage = gh.workflow_label(issue)
-    state.set("closed_without_merge_at", _now_iso())
-    gh.set_workflow_label(issue, WorkflowLabel.REJECTED)
-    _post_issue_usage_verdict(gh, issue, state)
-    gh.write_pinned_state(issue, state)
-    if pr is None:
+    linked_pr = _closed_issue_pr(gh, issue, state)
+    if linked_pr.defer:
         return True
-    if gh.pr_state(pr) != "closed":
-        # Open PR + closed issue: do NOT emit `pr_closed_without_merge`
-        # (the PR is still open and may be reopened / salvaged) and do
-        # NOT clean up the branch. Mirrors the in_review / fixing
-        # open-PR + closed-issue arc.
-        return True
-    gh.emit_event(
-        "pr_closed_without_merge",
-        issue_number=issue.number,
-        stage=stage,
-        pr_number=int(pr_number),
-        sha=getattr(pr.head, "sha", None) or None,
-        review_round=int(state.get("review_round") or 0),
-        conflict_round=state.get("conflict_round"),
-        retry_count=state.get("retry_count"),
+    context = _ReviewTerminalContext(
+        gh, spec, issue, state, linked_pr.pr, gh.workflow_label(issue),
     )
-    _cleanup_terminal_branch(
-        gh, spec, issue.number,
-        branch=_resolve_branch_name(state, spec, issue.number),
-    )
+    _finalize_closed_issue_with_open_pr(context)
+    if linked_pr.pr is not None and gh.pr_state(linked_pr.pr) == "closed":
+        _emit_closed_pr_rejection(context)
     return True

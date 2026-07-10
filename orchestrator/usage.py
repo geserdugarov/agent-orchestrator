@@ -259,18 +259,17 @@ def _num(value: Any) -> int:
     reference uses ``tonumber?`` for the same reason. Anything we cannot
     coerce becomes 0 rather than blowing up the whole parse.
     """
-    if value is None:
-        return 0
+    number = 0
     if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, str):
+        number = int(value)
+    elif isinstance(value, (int, float)):
+        number = int(value)
+    elif isinstance(value, str):
         try:
-            return int(float(value))
+            number = int(float(value))
         except ValueError:
-            return 0
-    return 0
+            pass
+    return number
 
 
 def _walk_objects(value: Any) -> Iterable[dict[str, Any]]:
@@ -409,9 +408,41 @@ def _claude_usage_record(usage: dict[str, Any]) -> dict[str, int]:
     }
 
 
+_ClaudeUsageRow = tuple[int, str, dict[str, int]]
+
+
+def _claude_assistant_usage_row(
+    idx: int, event: dict[str, Any],
+) -> Optional[tuple[str, _ClaudeUsageRow]]:
+    if event.get("type") != "assistant":
+        return None
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return None
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    message_id = message.get("id") or event.get("request_id") or str(idx)
+    return (
+        str(message_id),
+        (idx, _claude_model_name(event), _claude_usage_record(usage)),
+    )
+
+
+def _claude_result_usage_row(
+    idx: int, event: dict[str, Any],
+) -> Optional[_ClaudeUsageRow]:
+    if event.get("type") != "result":
+        return None
+    usage = event.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return idx, _claude_model_name(event), _claude_usage_record(usage)
+
+
 def _claude_usage_records(
     events: list[dict[str, Any]],
-) -> list[tuple[int, str, dict[str, int]]]:
+) -> list[_ClaudeUsageRow]:
     """Group claude usage into ``(idx, model, record)`` rows, last frame wins.
 
     Per-message usage events are keyed by ``message.id`` (falling back to
@@ -422,57 +453,74 @@ def _claude_usage_records(
     occurrence). When no assistant usage events exist we fall back to the
     terminal ``type:"result"`` frame's ``usage`` block.
     """
-    by_id: dict[str, tuple[int, str, dict[str, int]]] = {}
-    for idx, ev in enumerate(events):
-        if ev.get("type") != "assistant":
-            continue
-        msg = ev.get("message")
-        if not isinstance(msg, dict):
-            continue
-        usage = msg.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        msg_id = msg.get("id") or ev.get("request_id") or str(idx)
-        by_id[msg_id] = (idx, _claude_model_name(ev), _claude_usage_record(usage))
+    by_id: dict[str, _ClaudeUsageRow] = {}
+    for idx, event in enumerate(events):
+        identified = _claude_assistant_usage_row(idx, event)
+        if identified is not None:
+            by_id[identified[0]] = identified[1]
 
     if by_id:
-        return [v for _, v in sorted(by_id.items(), key=lambda kv: kv[1][0])]
+        return _sorted_claude_usage_rows(by_id)
+    return _claude_result_usage_records(events)
 
-    records: list[tuple[int, str, dict[str, int]]] = []
-    for idx, ev in enumerate(events):
-        if ev.get("type") != "result":
-            continue
-        usage = ev.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        records.append(
-            (idx, _claude_model_name(ev), _claude_usage_record(usage))
+
+def _sorted_claude_usage_rows(
+    by_id: dict[str, _ClaudeUsageRow],
+) -> list[_ClaudeUsageRow]:
+    return [row for _, row in sorted(by_id.items(), key=lambda item: item[1][0])]
+
+
+def _claude_result_usage_records(
+    events: list[dict[str, Any]],
+) -> list[_ClaudeUsageRow]:
+    return [
+        row for idx, event in enumerate(events)
+        if (row := _claude_result_usage_row(idx, event)) is not None
+    ]
+
+
+@dataclass
+class _ClaudeUsageAggregate:
+    """Per-model token buckets with stable first-seen model order."""
+
+    per_model: dict[str, dict[str, int]] = field(default_factory=dict)
+    model_order: list[str] = field(default_factory=list)
+
+    def add(self, model: str, record: dict[str, int]) -> None:
+        bucket = self.per_model.setdefault(
+            model,
+            {"input": 0, "cache_write_5m": 0, "cache_write_1h": 0,
+             "cache_read": 0, "output": 0},
         )
-    return records
+        if model not in self.model_order:
+            self.model_order.append(model)
+        for key, value in record.items():
+            bucket[key] += value
+
+    def apply_tokens(self, metrics: UsageMetrics) -> None:
+        for bucket in self.per_model.values():
+            metrics.input_tokens += bucket["input"]
+            metrics.output_tokens += bucket["output"]
+            metrics.cache_read_tokens += bucket["cache_read"]
+            metrics.cache_write_tokens += (
+                bucket["cache_write_5m"] + bucket["cache_write_1h"]
+            )
+        metrics.models = _dedup_models(self.model_order)
 
 
 def _claude_aggregate_by_model(
-    records: list[tuple[int, str, dict[str, int]]],
-) -> tuple[dict[str, dict[str, int]], list[str]]:
+    records: list[_ClaudeUsageRow],
+) -> _ClaudeUsageAggregate:
     """Sum usage records into per-model token buckets, keeping first-seen order.
 
     Per-model aggregation (rather than one flat total) keeps each model's
     tokens together so ``_claude_estimate_total`` can price a mixed-model run
     at each model's own rate.
     """
-    per_model: dict[str, dict[str, int]] = {}
-    model_order: list[str] = []
-    for _, model, rec in records:
-        bucket = per_model.setdefault(
-            model,
-            {"input": 0, "cache_write_5m": 0, "cache_write_1h": 0,
-             "cache_read": 0, "output": 0},
-        )
-        if model not in model_order:
-            model_order.append(model)
-        for k, v in rec.items():
-            bucket[k] += v
-    return per_model, model_order
+    aggregate = _ClaudeUsageAggregate()
+    for _, model, record in records:
+        aggregate.add(model, record)
+    return aggregate
 
 
 def _claude_estimate_total(
@@ -497,7 +545,7 @@ def _claude_estimate_total(
 
 def _claude_turn_count(
     events: list[dict[str, Any]],
-    records: list[tuple[int, str, dict[str, int]]],
+    records: list[_ClaudeUsageRow],
 ) -> Optional[int]:
     """Turn count for a claude run: the ``result`` frame's ``num_turns``.
 
@@ -528,23 +576,13 @@ def parse_claude_usage(stdout: str) -> UsageMetrics:
     metrics = UsageMetrics(backend="claude")
 
     records = _claude_usage_records(events)
-    per_model, model_order = _claude_aggregate_by_model(records)
-
-    for bucket in per_model.values():
-        metrics.input_tokens += bucket["input"]
-        metrics.output_tokens += bucket["output"]
-        metrics.cache_read_tokens += bucket["cache_read"]
-        metrics.cache_write_tokens += (
-            bucket["cache_write_5m"] + bucket["cache_write_1h"]
-        )
-    metrics.models = _dedup_models(model_order)
-
-    reported = _find_last_reported_cost(events)
-    estimated = _claude_estimate_total(per_model)
+    aggregate = _claude_aggregate_by_model(records)
+    aggregate.apply_tokens(metrics)
     metrics.cost_usd, metrics.cost_source = _select_cost(
-        reported, estimated, bool(records)
+        _find_last_reported_cost(events),
+        _claude_estimate_total(aggregate.per_model),
+        bool(records),
     )
-
     metrics.turns = _claude_turn_count(events, records)
     return metrics
 
@@ -711,55 +749,126 @@ def _codex_estimate_cost(
     rates = _codex_rates(model)
     if rates is None or (usage["input"] + usage["output"]) <= 0:
         return None
-    cached = usage["cached"]
-    # Codex/OpenAI reports input_tokens as the *total* prompt count and
-    # cached_input_tokens as the portion of that prompt served from cache.
-    # Bill the non-cached remainder at the input rate; bill the cached
-    # portion at the cached rate when published, otherwise leave the
-    # estimate unknown rather than overcharge.
-    uncached = max(usage["input"] - cached, 0)
-    cached_rate = rates["cached"]
-    # Long-context tier: some Codex SKUs (e.g. gpt-5.5) bill the
-    # entire session at elevated rates once total input crosses a
-    # threshold. The multipliers default to 1.0 (no change) for any
-    # rate entry without long-context keys, so flat-priced families
-    # are unaffected.
-    threshold = rates.get("long_context_threshold")
-    input_mult = 1.0
-    output_mult = 1.0
-    if threshold is not None and usage["input"] > threshold:
-        input_mult = rates.get("long_context_input_mult") or 1.0
-        output_mult = rates.get("long_context_output_mult") or 1.0
-    if cached > 0 and cached_rate is None:
-        return None
-    cr = cached_rate if cached_rate is not None else rates["input"]
-    return (
-        uncached * rates["input"] * input_mult
-        + cached * cr * input_mult
-        + usage["output"] * rates["output"] * output_mult
-    ) / 1_000_000
+    return _CodexPrice(rates, usage).estimate()
+
+
+@dataclass(frozen=True)
+class _CodexPrice:
+    """Inputs needed to price one Codex cumulative usage frame."""
+
+    rates: dict[str, Optional[float]]
+    usage: dict[str, int]
+
+    def _multipliers(self) -> tuple[float, float]:
+        threshold = self.rates.get("long_context_threshold")
+        if threshold is None or self.usage["input"] <= threshold:
+            return 1.0, 1.0
+        return (
+            self.rates.get("long_context_input_mult") or 1.0,
+            self.rates.get("long_context_output_mult") or 1.0,
+        )
+
+    def estimate(self) -> Optional[float]:
+        input_mult, output_mult = self._multipliers()
+        input_cost = self._input_cost(input_mult)
+        if input_cost is None:
+            return None
+        return (
+            input_cost
+            + self.usage["output"] * self.rates["output"] * output_mult
+        ) / 1_000_000
+
+    def _input_cost(self, multiplier: float) -> Optional[float]:
+        # Codex reports cached input as a subset of total input. Price only
+        # the uncached remainder at the full input rate; an unpublished cached
+        # rate makes the estimate unknown instead of silently overcharging.
+        cached = self.usage["cached"]
+        cached_rate = self.rates["cached"]
+        if cached > 0 and cached_rate is None:
+            return None
+        uncached = max(self.usage["input"] - cached, 0)
+        effective_cached_rate = (
+            cached_rate if cached_rate is not None else self.rates["input"]
+        )
+        return (
+            uncached * self.rates["input"]
+            + cached * effective_cached_rate
+        ) * multiplier
+
+
+def _reported_codex_turn_count(
+    events: list[dict[str, Any]],
+) -> Optional[int]:
+    reported: Optional[int] = None
+    for event in events:
+        for obj in _walk_objects(event):
+            value = obj.get("num_turns")
+            if isinstance(value, (int, float)):
+                reported = int(value)
+    return reported
+
+
+def _completed_codex_turn_count(events: list[dict[str, Any]]) -> Optional[int]:
+    count = sum(
+        1 for event in events
+        if isinstance(event.get("type"), str)
+        and _TURN_COMPLETE_RE.search(event["type"])
+    )
+    return count or None
+
+
+def _last_codex_usage(
+    usage_events: list[tuple[str, dict[str, int]]],
+) -> tuple[str, dict[str, int]]:
+    if usage_events:
+        return usage_events[-1]
+    return "unknown", {"input": 0, "cached": 0, "output": 0}
+
+
+@dataclass(frozen=True)
+class _CodexUsageSummary:
+    """Authoritative cumulative usage frame and selected model for one run."""
+
+    events: list[dict[str, Any]]
+    usage_events: list[tuple[str, dict[str, int]]]
+    usage: dict[str, int]
+    model: Optional[str]
+
+    @classmethod
+    def build(
+        cls,
+        events: list[dict[str, Any]],
+        fallback_model: Optional[str],
+    ) -> _CodexUsageSummary:
+        usage_events = _codex_usage_events(events)
+        last_model, usage = _last_codex_usage(usage_events)
+        return cls(
+            events=events,
+            usage_events=usage_events,
+            usage=usage,
+            model=_codex_select_model(events, last_model, fallback_model),
+        )
+
+    def apply(self, metrics: UsageMetrics) -> None:
+        metrics.input_tokens = self.usage["input"]
+        metrics.cached_tokens = self.usage["cached"]
+        metrics.output_tokens = self.usage["output"]
+        if self.model is not None:
+            metrics.models = (self.model,)
+        metrics.cost_usd, metrics.cost_source = _select_cost(
+            _find_last_reported_cost(self.events),
+            _codex_estimate_cost(self.model or "unknown", self.usage),
+            bool(self.usage_events),
+        )
+        metrics.turns = _codex_turn_count(self.events)
 
 
 def _codex_turn_count(events: list[dict[str, Any]]) -> Optional[int]:
-    """Turn count for a codex run: a ``num_turns`` reported anywhere in stream.
-
-    Falls back to counting ``turn_complete``-typed events -- codex has no
-    per-turn usage frame -- and returns ``None`` when neither signal is present.
-    """
-    num_turns: Optional[int] = None
-    for ev in events:
-        for obj in _walk_objects(ev):
-            nt = obj.get("num_turns")
-            if isinstance(nt, (int, float)):
-                num_turns = int(nt)
-    if num_turns is None:
-        count = 0
-        for ev in events:
-            t = ev.get("type")
-            if isinstance(t, str) and _TURN_COMPLETE_RE.search(t):
-                count += 1
-        num_turns = count or None
-    return num_turns
+    """Turn count from a reported total, else completed-turn event count."""
+    reported = _reported_codex_turn_count(events)
+    if reported is not None:
+        return reported
+    return _completed_codex_turn_count(events)
 
 
 def parse_codex_usage(
@@ -773,29 +882,7 @@ def parse_codex_usage(
     """
     events = _iter_events(stdout)
     metrics = UsageMetrics(backend="codex")
-
-    usage_events = _codex_usage_events(events)
-    if usage_events:
-        last_model, last_usage = usage_events[-1]
-    else:
-        last_model, last_usage = "unknown", {"input": 0, "cached": 0, "output": 0}
-
-    chosen_model = _codex_select_model(events, last_model, fallback_model)
-    model_label = chosen_model or "unknown"
-
-    metrics.input_tokens = last_usage["input"]
-    metrics.cached_tokens = last_usage["cached"]
-    metrics.output_tokens = last_usage["output"]
-    if chosen_model is not None:
-        metrics.models = (chosen_model,)
-
-    reported = _find_last_reported_cost(events)
-    estimated = _codex_estimate_cost(model_label, last_usage)
-    metrics.cost_usd, metrics.cost_source = _select_cost(
-        reported, estimated, bool(usage_events)
-    )
-
-    metrics.turns = _codex_turn_count(events)
+    _CodexUsageSummary.build(events, fallback_model).apply(metrics)
     return metrics
 
 
@@ -943,28 +1030,42 @@ def parse_claude_skills(stdout: str) -> SkillTriggers:
     triggered set and is empty when that frame/field is absent.
     """
     events = _iter_events(stdout)
-    names: list[str] = []
-    seen_ids: set[str] = set()
-    for ev in events:
-        if ev.get("type") != "assistant":
-            continue
-        msg = ev.get("message")
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content")
+    collector = _ClaudeSkillCollector()
+    for event in events:
+        collector.add_event(event)
+    return _collect(
+        collector.names,
+        available=_claude_offered_skills(events),
+    )
+
+
+@dataclass
+class _ClaudeSkillCollector:
+    names: list[str] = field(default_factory=list)
+    seen_ids: set[str] = field(default_factory=set)
+
+    def add_event(self, event: dict[str, Any]) -> None:
+        if event.get("type") != "assistant":
+            return
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return
+        content = message.get("content")
         if not isinstance(content, list):
-            continue
+            return
         for block in content:
-            name = _claude_skill_name(block)
-            if name is None:
-                continue
-            block_id = block.get("id")
-            if isinstance(block_id, str) and block_id:
-                if block_id in seen_ids:
-                    continue
-                seen_ids.add(block_id)
-            names.append(name)
-    return _collect(names, available=_claude_offered_skills(events))
+            self._add_block(block)
+
+    def _add_block(self, block: Any) -> None:
+        name = _claude_skill_name(block)
+        if name is None:
+            return
+        block_id = block.get("id")
+        if isinstance(block_id, str) and block_id:
+            if block_id in self.seen_ids:
+                return
+            self.seen_ids.add(block_id)
+        self.names.append(name)
 
 
 # Codex has no dedicated ``Skill`` tool the way claude does -- its skill
@@ -1012,31 +1113,41 @@ def parse_codex_skills(stdout: str) -> SkillTriggers:
     reads a SKILL.md for an unrelated reason (e.g. reviewing a PR that edits
     one) would also register; that limitation is inherent to the heuristic.
     """
-    by_id: dict[str, list[str]] = {}
-    id_order: list[str] = []
-    anon: list[str] = []
-    for ev in _iter_events(stdout):
-        item = ev.get("item")
+    collector = _CodexSkillCollector()
+    for event in _iter_events(stdout):
+        collector.add_event(event)
+    return _collect(collector.names())
+
+
+@dataclass
+class _CodexSkillCollector:
+    by_id: dict[str, list[str]] = field(default_factory=dict)
+    id_order: list[str] = field(default_factory=list)
+    anonymous: list[str] = field(default_factory=list)
+
+    def add_event(self, event: dict[str, Any]) -> None:
+        item = event.get("item")
         if not isinstance(item, dict) or item.get("type") != "command_execution":
-            continue
+            return
         command = item.get("command")
         if not isinstance(command, str):
-            continue
+            return
         names = _CODEX_SKILL_PATH_RE.findall(command)
         if not names:
-            continue
+            return
         item_id = item.get("id")
         if isinstance(item_id, str) and item_id:
-            if item_id not in by_id:
-                id_order.append(item_id)
-            by_id[item_id] = names
+            if item_id not in self.by_id:
+                self.id_order.append(item_id)
+            self.by_id[item_id] = names
         else:
-            anon.extend(names)
-    flat: list[str] = []
-    for item_id in id_order:
-        flat.extend(by_id[item_id])
-    flat.extend(anon)
-    return _collect(flat)
+            self.anonymous.extend(names)
+
+    def names(self) -> list[str]:
+        ordered = [
+            name for item_id in self.id_order for name in self.by_id[item_id]
+        ]
+        return ordered + self.anonymous
 
 
 def parse_agent_skills(backend: str, stdout: str) -> SkillTriggers:
@@ -1266,35 +1377,52 @@ def _claude_assistant_steps(
     """
     steps: list[TrajectoryStep] = []
     for block in content:
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type")
-        if btype == "text":
-            text = block.get("text")
-            if isinstance(text, str) and text:
-                steps.append(TrajectoryStep(
-                    kind="assistant_message",
-                    turn=turn,
-                    content=text,
-                ))
-        elif btype == "tool_use":
-            name = block.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            bid = block.get("id")
-            tool_id = bid if isinstance(bid, str) and bid else ""
-            if tool_id:
-                if tool_id in seen_calls:
-                    continue
-                seen_calls.add(tool_id)
-            steps.append(TrajectoryStep(
-                kind="tool_call",
-                name=name,
-                tool_id=tool_id,
-                turn=turn,
-                content=block.get("input"),
-            ))
+        step = _claude_assistant_step(block, turn, seen_calls)
+        if step is not None:
+            steps.append(step)
     return steps
+
+
+def _claude_assistant_step(
+    block: Any, turn: Optional[int], seen_calls: set[str],
+) -> Optional[TrajectoryStep]:
+    if not isinstance(block, dict):
+        return None
+    if block.get("type") == "text":
+        return _claude_message_step(block, "assistant_message", turn=turn)
+    if block.get("type") == "tool_use":
+        return _claude_tool_call_step(block, turn, seen_calls)
+    return None
+
+
+def _claude_message_step(
+    block: dict[str, Any], kind: str, *, turn: Optional[int] = None,
+) -> Optional[TrajectoryStep]:
+    message = block.get("text")
+    if not isinstance(message, str) or not message:
+        return None
+    return TrajectoryStep(kind=kind, turn=turn, content=message)
+
+
+def _claude_tool_call_step(
+    block: dict[str, Any], turn: Optional[int], seen_calls: set[str],
+) -> Optional[TrajectoryStep]:
+    name = block.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    block_id = block.get("id")
+    tool_id = block_id if isinstance(block_id, str) and block_id else ""
+    if tool_id in seen_calls:
+        return None
+    if tool_id:
+        seen_calls.add(tool_id)
+    return TrajectoryStep(
+        kind="tool_call",
+        name=name,
+        tool_id=tool_id,
+        turn=turn,
+        content=block.get("input"),
+    )
 
 
 def _claude_user_steps(
@@ -1310,29 +1438,67 @@ def _claude_user_steps(
     """
     steps: list[TrajectoryStep] = []
     for block in content:
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type")
-        if btype == "text":
-            text = block.get("text")
-            if isinstance(text, str) and text:
-                steps.append(TrajectoryStep(
-                    kind="user_message",
-                    content=text,
-                ))
-        elif btype == "tool_result":
-            rid = block.get("tool_use_id")
-            tool_id = rid if isinstance(rid, str) and rid else ""
-            if tool_id:
-                if tool_id in seen_results:
-                    continue
-                seen_results.add(tool_id)
-            steps.append(TrajectoryStep(
-                kind="tool_result",
-                tool_id=tool_id,
-                content=block.get("content"),
-            ))
+        step = _claude_user_step(block, seen_results)
+        if step is not None:
+            steps.append(step)
     return steps
+
+
+def _claude_user_step(
+    block: Any, seen_results: set[str],
+) -> Optional[TrajectoryStep]:
+    if not isinstance(block, dict):
+        return None
+    if block.get("type") == "text":
+        return _claude_message_step(block, "user_message")
+    if block.get("type") == "tool_result":
+        return _claude_tool_result_step(block, seen_results)
+    return None
+
+
+def _claude_tool_result_step(
+    block: dict[str, Any], seen_results: set[str],
+) -> Optional[TrajectoryStep]:
+    result_id = block.get("tool_use_id")
+    tool_id = result_id if isinstance(result_id, str) and result_id else ""
+    if tool_id in seen_results:
+        return None
+    if tool_id:
+        seen_results.add(tool_id)
+    return TrajectoryStep(
+        kind="tool_result", tool_id=tool_id, content=block.get("content"),
+    )
+
+
+@dataclass
+class _ClaudeTrajectoryBuilder:
+    steps: list[TrajectoryStep] = field(default_factory=list)
+    seen_calls: set[str] = field(default_factory=set)
+    seen_results: set[str] = field(default_factory=set)
+    turn_index: dict[str, int] = field(default_factory=dict)
+
+    def add_event(self, idx: int, event: dict[str, Any]) -> None:
+        event_type = event.get("type")
+        if event_type not in ("assistant", "user"):
+            return
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return
+        turn = self._turn(idx, event) if event_type == "assistant" else None
+        content = message.get("content")
+        if not isinstance(content, list):
+            return
+        if event_type == "assistant":
+            self.steps.extend(
+                _claude_assistant_steps(content, turn, self.seen_calls)
+            )
+        else:
+            self.steps.extend(_claude_user_steps(content, self.seen_results))
+
+    def _turn(self, idx: int, event: dict[str, Any]) -> int:
+        return self.turn_index.setdefault(
+            _claude_turn_key(idx, event), len(self.turn_index),
+        )
 
 
 def _claude_trajectory_steps(
@@ -1363,30 +1529,55 @@ def _claude_trajectory_steps(
     and independent of usage presence -- so it stays in lock-step with
     ``_claude_turn_usage``.
     """
-    steps: list[TrajectoryStep] = []
-    seen_calls: set[str] = set()
-    seen_results: set[str] = set()
-    turn_index: dict[str, int] = {}
-    for idx, ev in enumerate(events):
-        etype = ev.get("type")
-        if etype not in ("assistant", "user"):
-            continue
-        msg = ev.get("message")
-        if not isinstance(msg, dict):
-            continue
-        turn: Optional[int] = None
-        if etype == "assistant":
-            turn = turn_index.setdefault(
-                _claude_turn_key(idx, ev), len(turn_index)
+    builder = _ClaudeTrajectoryBuilder()
+    for idx, event in enumerate(events):
+        builder.add_event(idx, event)
+    return tuple(builder.steps)
+
+
+@dataclass
+class _ClaudeTurnUsageBuilder:
+    turn_index: dict[str, int] = field(default_factory=dict)
+    by_key: dict[str, tuple[int, str, dict[str, int]]] = field(
+        default_factory=dict,
+    )
+
+    def add_event(self, idx: int, event: dict[str, Any]) -> None:
+        if event.get("type") != "assistant":
+            return
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return
+        key = _claude_turn_key(idx, event)
+        turn = self.turn_index.setdefault(key, len(self.turn_index))
+        usage = message.get("usage")
+        if isinstance(usage, dict):
+            self.by_key[key] = (
+                turn, _claude_model_name(event), _claude_usage_record(usage),
             )
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        if etype == "assistant":
-            steps.extend(_claude_assistant_steps(content, turn, seen_calls))
-        else:
-            steps.extend(_claude_user_steps(content, seen_results))
-    return tuple(steps)
+
+    def build(self) -> tuple[TurnUsage, ...]:
+        return tuple(
+            _turn_usage_from_row(row)
+            for row in sorted(self.by_key.values(), key=lambda item: item[0])
+        )
+
+
+def _turn_usage_from_row(
+    row: tuple[int, str, dict[str, int]],
+) -> TurnUsage:
+    turn, model, record = row
+    cost = _claude_estimate_cost(model, record)
+    return TurnUsage(
+        turn=turn,
+        model=model,
+        input_tokens=record["input"],
+        output_tokens=record["output"],
+        cache_read_tokens=record["cache_read"],
+        cache_write_tokens=record["cache_write_5m"] + record["cache_write_1h"],
+        cost_usd=cost,
+        cost_source="estimated" if cost is not None else "unknown-price",
+    )
 
 
 def _claude_turn_usage(
@@ -1404,36 +1595,10 @@ def _claude_turn_usage(
     ``cost_usd = None``) otherwise; ``total_cost_usd`` is run-level only and
     never reaches a turn.
     """
-    turn_index: dict[str, int] = {}
-    by_key: dict[str, tuple[int, str, dict[str, int]]] = {}
-    for idx, ev in enumerate(events):
-        if ev.get("type") != "assistant":
-            continue
-        msg = ev.get("message")
-        if not isinstance(msg, dict):
-            continue
-        key = _claude_turn_key(idx, ev)
-        turn = turn_index.setdefault(key, len(turn_index))
-        usage = msg.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        by_key[key] = (
-            turn, _claude_model_name(ev), _claude_usage_record(usage)
-        )
-    turns: list[TurnUsage] = []
-    for turn, model, rec in sorted(by_key.values(), key=lambda t: t[0]):
-        cost = _claude_estimate_cost(model, rec)
-        turns.append(TurnUsage(
-            turn=turn,
-            model=model,
-            input_tokens=rec["input"],
-            output_tokens=rec["output"],
-            cache_read_tokens=rec["cache_read"],
-            cache_write_tokens=rec["cache_write_5m"] + rec["cache_write_1h"],
-            cost_usd=cost,
-            cost_source="estimated" if cost is not None else "unknown-price",
-        ))
-    return tuple(turns)
+    builder = _ClaudeTurnUsageBuilder()
+    for idx, event in enumerate(events):
+        builder.add_event(idx, event)
+    return builder.build()
 
 
 def parse_claude_trajectory(stdout: str) -> AgentTrajectory:
@@ -1494,57 +1659,76 @@ def _codex_trajectory_steps(
     id order; an item without an id falls back to inline emission. Raw command
     / output / message text rides along verbatim (no redaction here).
     """
-    order: list[str] = []
-    seen: set[str] = set()
-    commands: dict[str, str] = {}
-    outputs: dict[str, Any] = {}
-    messages: dict[str, str] = {}
-    anon: list[TrajectoryStep] = []
-    for ev in events:
-        item = ev.get("item")
+    builder = _CodexTrajectoryBuilder()
+    for event in events:
+        builder.add_event(event)
+    return builder.build()
+
+
+@dataclass
+class _CodexTrajectoryBuilder:
+    order: list[str] = field(default_factory=list)
+    seen: set[str] = field(default_factory=set)
+    commands: dict[str, str] = field(default_factory=dict)
+    outputs: dict[str, Any] = field(default_factory=dict)
+    messages: dict[str, str] = field(default_factory=dict)
+    anonymous: list[TrajectoryStep] = field(default_factory=list)
+
+    def add_event(self, event: dict[str, Any]) -> None:
+        item = event.get("item")
         if not isinstance(item, dict):
-            continue
-        itype = item.get("type")
-        if itype == "command_execution":
-            command = item.get("command")
-            has_output = "aggregated_output" in item
-            iid = item.get("id")
-            if isinstance(iid, str) and iid:
-                if iid not in seen:
-                    seen.add(iid)
-                    order.append(iid)
-                if isinstance(command, str):
-                    commands[iid] = command
-                if has_output:
-                    outputs[iid] = item.get("aggregated_output")
-            else:
-                if isinstance(command, str):
-                    anon.append(TrajectoryStep(
-                        kind="tool_call",
-                        name="command_execution",
-                        content=command,
-                    ))
-                if has_output:
-                    anon.append(TrajectoryStep(
-                        kind="tool_result",
-                        content=item.get("aggregated_output"),
-                    ))
-        elif itype == "agent_message":
-            text = item.get("text")
-            if not isinstance(text, str) or not text:
-                continue
-            iid = item.get("id")
-            if isinstance(iid, str) and iid:
-                if iid not in seen:
-                    seen.add(iid)
-                    order.append(iid)
-                messages[iid] = text
-            else:
-                anon.append(TrajectoryStep(
-                    kind="assistant_message",
-                    content=text,
-                ))
-    return _codex_assemble_steps(order, commands, outputs, messages, anon)
+            return
+        item_id = self._item_id(item)
+        if item.get("type") == "command_execution":
+            self._add_command(item, item_id)
+        elif item.get("type") == "agent_message":
+            self._add_message(item, item_id)
+
+    def _item_id(self, item: dict[str, Any]) -> str:
+        raw_id = item.get("id")
+        item_id = raw_id if isinstance(raw_id, str) and raw_id else ""
+        if item_id and item_id not in self.seen:
+            self.seen.add(item_id)
+            self.order.append(item_id)
+        return item_id
+
+    def _add_command(self, item: dict[str, Any], item_id: str) -> None:
+        command = item.get("command")
+        has_output = "aggregated_output" in item
+        if item_id:
+            if isinstance(command, str):
+                self.commands[item_id] = command
+            if has_output:
+                self.outputs[item_id] = item.get("aggregated_output")
+            return
+        if isinstance(command, str):
+            self.anonymous.append(TrajectoryStep(
+                kind="tool_call", name="command_execution", content=command,
+            ))
+        if has_output:
+            self.anonymous.append(TrajectoryStep(
+                kind="tool_result", content=item.get("aggregated_output"),
+            ))
+
+    def _add_message(self, item: dict[str, Any], item_id: str) -> None:
+        message = item.get("text")
+        if not isinstance(message, str) or not message:
+            return
+        if item_id:
+            self.messages[item_id] = message
+        else:
+            self.anonymous.append(TrajectoryStep(
+                kind="assistant_message", content=message,
+            ))
+
+    def build(self) -> tuple[TrajectoryStep, ...]:
+        return _codex_assemble_steps(
+            self.order,
+            self.commands,
+            self.outputs,
+            self.messages,
+            self.anonymous,
+        )
 
 
 def _codex_assemble_steps(
