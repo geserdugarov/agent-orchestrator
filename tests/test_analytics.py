@@ -1439,6 +1439,95 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 prompt=prompt,
             )
 
+    def _assert_baseline_exit_record(self, path: Path) -> None:
+        records = _read_records(path)
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["event"], "agent_exit")
+        self.assertEqual(
+            record["input_tokens"],
+            CLAUDE_TRAJECTORY_INPUT_TOKENS,
+        )
+        self.assertNotIn("user_input", record)
+        self.assertNotIn("run_usage", record)
+
+    def _read_single_trajectory(self, path: Path) -> dict:
+        records = _read_records(path)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["event"], "agent_trajectory")
+        return records[0]
+
+    def _assert_claude_trajectory_identity(self, record: dict) -> None:
+        expected = {
+            "event": "agent_trajectory",
+            "repo": "owner/repo",
+            "issue": AGENT_EXIT_ISSUE_NUMBER,
+            "stage": "implementing",
+            "agent_role": "developer",
+            "backend": "claude",
+            "session_id": "sess-traj",
+            "review_round": TRAJECTORY_REVIEW_ROUND,
+            "retry_count": TRAJECTORY_RETRY_COUNT,
+            "user_input": "implement X",
+            "tools": ["Read", "Bash"],
+            "output": "implemented",
+        }
+        self.assertEqual(
+            {key: record[key] for key in expected},
+            expected,
+        )
+
+    def _assert_claude_trajectory_steps(self, record: dict) -> None:
+        steps = record["steps"]
+        tool_call = steps[0]
+        self.assertEqual(
+            {
+                "kinds": [step["kind"] for step in steps],
+                "tool_name": tool_call["name"],
+                "tool_result": steps[1]["content"],
+                "tool_turn": tool_call["turn"],
+            },
+            {
+                "kinds": ["tool_call", "tool_result"],
+                "tool_name": "Bash",
+                "tool_result": "hi",
+                "tool_turn": 0,
+            },
+        )
+        self.assertIn("echo hi", tool_call["content"])
+        # Tool results become the next turn's input; only the billed call
+        # carries the current turn index.
+        self.assertNotIn("turn", steps[1])
+
+    def _assert_claude_trajectory_usage(self, record: dict) -> None:
+        run_usage = record["run_usage"]
+        expected_run = {
+            "input_tokens": CLAUDE_TRAJECTORY_INPUT_TOKENS,
+            "output_tokens": CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
+            "models": ["claude-sonnet-4-6"],
+            "turns": 1,
+            "cost_source": "estimated",
+        }
+        self.assertNotIn("backend", run_usage)
+        self.assertEqual(
+            {key: run_usage[key] for key in expected_run},
+            expected_run,
+        )
+
+        turns = record["turns"]
+        expected_turn = {
+            "turn": 0,
+            "model": "claude-sonnet-4-6",
+            "input_tokens": CLAUDE_TRAJECTORY_INPUT_TOKENS,
+            "output_tokens": CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
+            "cost_source": "estimated",
+        }
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(
+            {key: turns[0][key] for key in expected_turn},
+            expected_turn,
+        )
+
     def test_sink_off_writes_no_trajectory_and_no_user_input(self) -> None:
         # Default off: a prompt is passed but, with the trajectory sink
         # disabled, no trajectory file is created and the baseline
@@ -1468,7 +1557,7 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
         # user_input, the offered tools, the ordered steps with their
         # tool_call input / tool_result content, and the final output --
         # alongside (not replacing) the baseline `agent_exit` record.
-        _, analytics = _reload()
+        analytics = _reload()[1]
         with tempfile.TemporaryDirectory() as td:
             a_path = Path(td) / "analytics.jsonl"
             t_path = Path(td) / "trajectory.jsonl"
@@ -1483,71 +1572,12 @@ class RecordAgentExitTrajectoryTest(unittest.TestCase):
                 traj_path=t_path,
                 analytics_path=a_path,
             )
-            # Baseline agent_exit untouched: it carries the flat usage fields
-            # but never the trajectory-only `run_usage` summary.
-            base = _read_records(a_path)
-            self.assertEqual(len(base), 1)
-            self.assertEqual(base[0]["event"], "agent_exit")
-            self.assertEqual(
-                base[0]["input_tokens"], CLAUDE_TRAJECTORY_INPUT_TOKENS,
-            )
-            self.assertNotIn("user_input", base[0])
-            self.assertNotIn("run_usage", base[0])
-            # One trajectory record carrying the full surface.
-            traj = _read_records(t_path)
-            self.assertEqual(len(traj), 1)
-            rec = traj[0]
-            self.assertEqual(rec["event"], "agent_trajectory")
-            self.assertEqual(rec["repo"], "owner/repo")
-            self.assertEqual(rec["issue"], AGENT_EXIT_ISSUE_NUMBER)
-            self.assertEqual(rec["stage"], "implementing")
-            self.assertEqual(rec["agent_role"], "developer")
-            self.assertEqual(rec["backend"], "claude")
-            self.assertEqual(rec["session_id"], "sess-traj")
-            self.assertEqual(rec["review_round"], TRAJECTORY_REVIEW_ROUND)
-            self.assertEqual(rec["retry_count"], TRAJECTORY_RETRY_COUNT)
-            self.assertEqual(rec["user_input"], "implement X")
-            self.assertEqual(rec["tools"], ["Read", "Bash"])
-            self.assertEqual(rec["output"], "implemented")
-            kinds = [step["kind"] for step in rec["steps"]]
-            self.assertEqual(kinds, ["tool_call", "tool_result"])
-            call = rec["steps"][0]
-            self.assertEqual(call["name"], "Bash")
-            self.assertIn("echo hi", call["content"])
-            self.assertEqual(rec["steps"][1]["content"], "hi")
-            # run_usage is the denormalized UsageMetrics minus `backend`
-            # (already a record field) -- the run headline the file-only
-            # viewer reads without re-parsing.
-            run_usage = rec["run_usage"]
-            self.assertNotIn("backend", run_usage)
-            self.assertEqual(
-                run_usage["input_tokens"], CLAUDE_TRAJECTORY_INPUT_TOKENS,
-            )
-            self.assertEqual(
-                run_usage["output_tokens"], CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
-            )
-            self.assertEqual(run_usage["models"], ["claude-sonnet-4-6"])
-            self.assertEqual(run_usage["turns"], 1)  # run-level turn count
-            self.assertEqual(run_usage["cost_source"], "estimated")
-            # The claude per-turn breakdown: one entry for the single turn,
-            # its 0-based index matching the billed steps' `turn`.
-            self.assertEqual(len(rec["turns"]), 1)
-            turn = rec["turns"][0]
-            self.assertEqual(turn["turn"], 0)
-            self.assertEqual(turn["model"], "claude-sonnet-4-6")
-            self.assertEqual(
-                turn["input_tokens"], CLAUDE_TRAJECTORY_INPUT_TOKENS,
-            )
-            self.assertEqual(
-                turn["output_tokens"], CLAUDE_TRAJECTORY_OUTPUT_TOKENS,
-            )
-            self.assertEqual(turn["cost_source"], "estimated")
-            # The billed tool_call carries its turn index; the tool_result is
-            # a turn *input*, not billed output, so it omits `turn`.
-            self.assertEqual(call["turn"], 0)
-            self.assertNotIn("turn", rec["steps"][1])
-            # Nothing was truncated for this small run.
-            self.assertNotIn("truncated", rec)
+            self._assert_baseline_exit_record(a_path)
+            record = self._read_single_trajectory(t_path)
+            self._assert_claude_trajectory_identity(record)
+            self._assert_claude_trajectory_steps(record)
+            self._assert_claude_trajectory_usage(record)
+            self.assertNotIn("truncated", record)
 
     def test_codex_trajectory_record(self) -> None:
         # The codex backend dispatches through the same path: command +

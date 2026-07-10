@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import textwrap
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,108 @@ def _write_fake_python(root: Path, *exit_codes: int) -> None:
     )
 
 
+def _write_fake_sleep(fake_bin: Path) -> None:
+    _write_executable(
+        fake_bin / "sleep",
+        """
+        #!/usr/bin/env bash
+        echo "$*" >> "$SLEEP_CALLS"
+        exit 0
+        """,
+    )
+
+
+@dataclass(frozen=True)
+class _WrapperScenario:
+    root: Path
+    fake_bin: Path
+    git_calls: Path
+    python_calls: Path
+    python_count: Path
+    sleep_calls: Path
+
+    @classmethod
+    def create(
+        cls,
+        tmp_path: Path,
+        *python_exit_codes: int,
+        record_sleep: bool = False,
+    ) -> _WrapperScenario:
+        scenario = cls(
+            root=_wrapper_copy(tmp_path),
+            fake_bin=tmp_path / "bin",
+            git_calls=tmp_path / "git-calls",
+            python_calls=tmp_path / "python-calls",
+            python_count=tmp_path / "python-count",
+            sleep_calls=tmp_path / "sleep-calls",
+        )
+        scenario.fake_bin.mkdir()
+        _write_fake_git(scenario.fake_bin)
+        _write_fake_python(scenario.root, *python_exit_codes)
+        if record_sleep:
+            _write_fake_sleep(scenario.fake_bin)
+        return scenario
+
+    def run(
+        self,
+        *,
+        git_branch: str = "main",
+        git_pull_rc: str = "0",
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "run.sh"],
+            cwd=self.root,
+            env=_env(
+                self.fake_bin,
+                GIT_CALLS=str(self.git_calls),
+                GIT_BRANCH=git_branch,
+                GIT_PULL_RC=git_pull_rc,
+                PYTHON_CALLS=str(self.python_calls),
+                PYTHON_COUNT=str(self.python_count),
+                SLEEP_CALLS=str(self.sleep_calls),
+            ),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+
+def _assert_launches(
+    scenario: _WrapperScenario,
+    result: subprocess.CompletedProcess[str],
+    *,
+    count: int,
+) -> None:
+    assert result.returncode == 130
+    assert scenario.python_calls.read_text(encoding="utf-8") == (
+        "-m orchestrator.main\n" * count
+    )
+
+
+def _assert_self_update_attempt(
+    scenario: _WrapperScenario,
+    *,
+    expect_pull: bool,
+) -> None:
+    git_log = scenario.git_calls.read_text(encoding="utf-8")
+    if expect_pull:
+        assert "pull --ff-only origin main" in git_log
+    else:
+        assert "pull" not in git_log
+        assert "branch --show-current" in git_log
+
+
+def _assert_warning(
+    result: subprocess.CompletedProcess[str],
+    warning: str | None,
+) -> None:
+    if warning is None:
+        assert "WARNING" not in result.stderr
+    else:
+        assert warning in result.stderr
+        assert "running existing code" in result.stderr
+
+
 @pytest.mark.parametrize(
     "git_branch, git_pull_rc, expect_pull, warn_substr",
     [
@@ -94,103 +197,28 @@ def test_self_update_launches_instead_of_crash_looping(
     expect_pull: bool,
     warn_substr: str | None,
 ) -> None:
-    root = _wrapper_copy(tmp_path)
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    git_calls = tmp_path / "git-calls"
-    python_calls = tmp_path / "python-calls"
-    python_count = tmp_path / "python-count"
+    scenario = _WrapperScenario.create(tmp_path, 130)
+    result = scenario.run(git_branch=git_branch, git_pull_rc=git_pull_rc)
 
-    _write_fake_git(fake_bin)
-    _write_fake_python(root, 130)  # signal exit terminates the loop after one launch
-
-    result = subprocess.run(
-        ["bash", "run.sh"],
-        cwd=root,
-        env=_env(
-            fake_bin,
-            GIT_CALLS=str(git_calls),
-            GIT_BRANCH=git_branch,
-            GIT_PULL_RC=git_pull_rc,
-            PYTHON_CALLS=str(python_calls),
-            PYTHON_COUNT=str(python_count),
-        ),
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-
-    # The orchestrator is always launched -- a self-update problem must not stop
-    # the wrapper before it runs.
-    assert result.returncode == 130
-    assert python_calls.read_text(encoding="utf-8") == "-m orchestrator.main\n"
-
-    git_log = git_calls.read_text(encoding="utf-8")
-    if expect_pull:
-        assert "pull --ff-only origin main" in git_log
-    else:
-        assert "pull" not in git_log
-        assert "branch --show-current" in git_log
-
-    if warn_substr is not None:
-        assert warn_substr in result.stderr
-        assert "running existing code" in result.stderr
-    else:
-        assert "WARNING" not in result.stderr
+    _assert_launches(scenario, result, count=1)
+    _assert_self_update_attempt(scenario, expect_pull=expect_pull)
+    _assert_warning(result, warn_substr)
 
 
 def test_clean_fast_forward_updates_on_self_modifying_restart(
     tmp_path: Path,
 ) -> None:
-    root = _wrapper_copy(tmp_path)
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    git_calls = tmp_path / "git-calls"
-    python_calls = tmp_path / "python-calls"
-    python_count = tmp_path / "python-count"
-    sleep_calls = tmp_path / "sleep-calls"
+    scenario = _WrapperScenario.create(tmp_path, 0, 130, record_sleep=True)
+    result = scenario.run()
 
-    _write_fake_git(fake_bin)
-    _write_executable(
-        fake_bin / "sleep",
-        """
-        #!/usr/bin/env bash
-        echo "$*" >> "$SLEEP_CALLS"
-        exit 0
-        """,
-    )
-    # First run exits 0 (self-modifying merge) so the wrapper restarts; the
-    # second run exits via signal so the loop terminates.
-    _write_fake_python(root, 0, 130)
-
-    result = subprocess.run(
-        ["bash", "run.sh"],
-        cwd=root,
-        env=_env(
-            fake_bin,
-            GIT_CALLS=str(git_calls),
-            GIT_BRANCH="main",
-            GIT_PULL_RC="0",
-            PYTHON_CALLS=str(python_calls),
-            PYTHON_COUNT=str(python_count),
-            SLEEP_CALLS=str(sleep_calls),
-        ),
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-
-    assert result.returncode == 130
+    _assert_launches(scenario, result, count=2)
     # A fast-forward runs before each launch: once at startup, once on restart.
-    assert git_calls.read_text(encoding="utf-8").splitlines() == [
+    assert scenario.git_calls.read_text(encoding="utf-8").splitlines() == [
         "branch --show-current",
         "pull --ff-only origin main",
         "branch --show-current",
         "pull --ff-only origin main",
     ]
-    assert python_calls.read_text(encoding="utf-8") == (
-        "-m orchestrator.main\n-m orchestrator.main\n"
-    )
-    assert sleep_calls.read_text(encoding="utf-8") == "1\n"
+    assert scenario.sleep_calls.read_text(encoding="utf-8") == "1\n"
     assert "orchestrator exited with code 0; restarting in 1s" in result.stdout
     assert "WARNING" not in result.stderr
