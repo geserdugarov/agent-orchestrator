@@ -40,7 +40,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
-| 2 | Extreme production complexity hotspots | 3/8 | [ ] |
+| 2 | Extreme production complexity hotspots | 4/8 | [ ] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
@@ -187,9 +187,9 @@ normally be implemented in its own PR or commit.
 
 ### Package 2.4 — Trajectory filtering
 
-- [ ] Refactor [`filter_runs()`](../orchestrator/trajectory_reader.py), initial score 48.
-- [ ] Extract independent predicates, ordering, and limit handling.
-- [ ] Preserve stable ordering and every existing filter combination.
+- [x] Refactor [`filter_runs()`](../orchestrator/trajectory_reader.py), initial score 48.
+- [x] Extract filter normalization and independent predicates while retaining input order.
+- [x] Preserve stable ordering and every existing filter combination.
 
 ### Package 2.5 — Agent-exit analytics
 
@@ -461,4 +461,5 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 1.9 | Complete | WPS441, 77 focused, Ruff, diff, 2093 passed, 3 skipped | 403c4d6 | Start Package 2.1 |
 | 2026-07-11 | 2.1 | Complete | Target WPS, 81 focused, Ruff, diff, 2094 passed, 3 skipped | d6216d1 | Package 2.2 |
 | 2026-07-11 | 2.2 | Complete | WPS210/220/231, 55 focused, Ruff, diff, 2096 passed, 3 skipped | None | Package 2.3 |
-| 2026-07-11 | 2.3 | Complete | WPS210/WPS231, 50 focused, Ruff, diff, 2096 passed, 3 skipped | Not committed | Package 2.4 |
+| 2026-07-11 | 2.3 | Complete | WPS210/WPS231, 50, Ruff, diff, 2096 passed, 3 skipped | Not committed | Package 2.4 |
+| 2026-07-11 | 2.4 | Complete | 90 focused; WPS/Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.5 |

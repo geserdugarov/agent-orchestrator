@@ -413,6 +413,19 @@ class FilterOptions:
 
 
 @dataclass(frozen=True)
+class _RunFilters:
+    """Normalized constraints for one trajectory-filtering pass."""
+
+    repo: Optional[str]
+    backends: Optional[frozenset[str]]
+    agent_roles: Optional[frozenset[str]]
+    stages: Optional[frozenset[str]]
+    issue: Optional[int]
+    query: Optional[str]
+    exclude_fixtures: bool
+
+
+@dataclass(frozen=True)
 class TrajectorySummary:
     """Headline counts for the filtered run set (the KPI strip)."""
 
@@ -699,6 +712,64 @@ def _matches_query(run: TrajectoryRun, needle: str) -> bool:
     return any(needle in h.lower() for h in haystacks if h)
 
 
+def _normalize_filter_values(
+    selected_values: Optional[Sequence[str]],
+) -> Optional[frozenset[str]]:
+    """Normalize an optional multi-value filter for membership checks."""
+    return frozenset(selected_values) if selected_values else None
+
+
+def _normalize_filter_query(query: Optional[str]) -> Optional[str]:
+    """Normalize free-text search input, dropping an empty query."""
+    if query is None:
+        return None
+    normalized_query = query.strip().lower()
+    return normalized_query or None
+
+
+def _matches_scalar_filters(
+    run: TrajectoryRun,
+    run_filters: _RunFilters,
+) -> bool:
+    """Match exact repository and issue constraints."""
+    return (
+        (run_filters.repo is None or run.repo == run_filters.repo)
+        and (run_filters.issue is None or run.issue == run_filters.issue)
+    )
+
+
+def _matches_dimension_filters(
+    run: TrajectoryRun,
+    run_filters: _RunFilters,
+) -> bool:
+    """Match the optional backend, role, and stage selections."""
+    return (
+        (run_filters.backends is None or run.backend in run_filters.backends)
+        and (
+            run_filters.agent_roles is None
+            or run.agent_role in run_filters.agent_roles
+        )
+        and (run_filters.stages is None or run.stage in run_filters.stages)
+    )
+
+
+def _matches_run_filters(
+    run: TrajectoryRun,
+    run_filters: _RunFilters,
+) -> bool:
+    """Match one run against every normalized filter constraint."""
+    if run_filters.exclude_fixtures and run.is_fixture:
+        return False
+    if not _matches_scalar_filters(run, run_filters):
+        return False
+    if not _matches_dimension_filters(run, run_filters):
+        return False
+    return (
+        run_filters.query is None
+        or _matches_query(run, run_filters.query)
+    )
+
+
 def filter_runs(
     runs: Sequence[TrajectoryRun],
     *,
@@ -721,29 +792,16 @@ def filter_runs(
     drops the synthetic test-suite records `TrajectoryRun.is_fixture`
     flags. Relative order is preserved.
     """
-    backend_set = set(backends) if backends else None
-    role_set = set(agent_roles) if agent_roles else None
-    stage_set = set(stages) if stages else None
-    needle = query.strip().lower() if query and query.strip() else None
-
-    out: list[TrajectoryRun] = []
-    for r in runs:
-        if exclude_fixtures and r.is_fixture:
-            continue
-        if repo is not None and r.repo != repo:
-            continue
-        if issue is not None and r.issue != issue:
-            continue
-        if backend_set is not None and r.backend not in backend_set:
-            continue
-        if role_set is not None and r.agent_role not in role_set:
-            continue
-        if stage_set is not None and r.stage not in stage_set:
-            continue
-        if needle is not None and not _matches_query(r, needle):
-            continue
-        out.append(r)
-    return out
+    run_filters = _RunFilters(
+        repo=repo,
+        backends=_normalize_filter_values(backends),
+        agent_roles=_normalize_filter_values(agent_roles),
+        stages=_normalize_filter_values(stages),
+        issue=issue,
+        query=_normalize_filter_query(query),
+        exclude_fixtures=exclude_fixtures,
+    )
+    return [run for run in runs if _matches_run_filters(run, run_filters)]
 
 
 def summarize(runs: Sequence[TrajectoryRun]) -> TrajectorySummary:

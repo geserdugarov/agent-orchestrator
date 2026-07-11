@@ -506,10 +506,52 @@ class FilterRunsTest(unittest.TestCase):
             [r.issue for r in tr.filter_runs(runs, query="refactor")], [1]
         )
 
-    def test_filters_combine_conjunctively(self) -> None:
-        runs = self._runs()
+    def test_filters_combine_and_preserve_relative_order(self) -> None:
+        base_runs = self._runs()
+        matching_later = tr.parse_record(
+            _record(
+                issue=1,
+                repo="a/a",
+                backend="claude",
+                agent_role="developer",
+                stage="implementing",
+                output="resolved another bug",
+            ),
+            seq=9,
+        )
+        matching_fixture = tr.parse_record(
+            _record(
+                issue=1,
+                repo="a/a",
+                backend="claude",
+                agent_role="developer",
+                stage="implementing",
+                user_input="ignored",
+                output="resolved fixture bug",
+            ),
+            seq=8,
+        )
+        runs = [
+            base_runs[0],
+            matching_fixture,
+            matching_later,
+            base_runs[1],
+        ]
         self.assertEqual(
-            tr.filter_runs(runs, repo="a/a", backends=["codex"]), []
+            [
+                run.seq
+                for run in tr.filter_runs(
+                    runs,
+                    repo="a/a",
+                    backends=["claude"],
+                    agent_roles=["developer"],
+                    stages=["implementing"],
+                    issue=1,
+                    query="RESOLVED",
+                    exclude_fixtures=True,
+                )
+            ],
+            [0, 9],
         )
 
     def test_exclude_fixtures_default_off(self) -> None:
