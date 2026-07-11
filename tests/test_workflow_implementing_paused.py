@@ -227,11 +227,13 @@ class ImplementingLivePauseRetryWindowTest(
         # the second fetch (after the retry) sees the label.
         unpaused = make_issue(740, label="implementing")
         get_issue_mock = MagicMock(side_effect=[unpaused, _paused_view(740)])
-        with patch.object(gh, "get_issue", get_issue_mock), \
-             patch.object(
-                 workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT,
-             ), \
-             patch.object(workflow, "run_agent", fake_run):
+        with (
+            patch.object(gh, "get_issue", get_issue_mock),
+            patch.object(
+                workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT,
+            ),
+            patch.object(workflow, "run_agent", fake_run),
+        ):
             _, _, paused = workflow._resume_dev_with_text(
                 gh, _TEST_SPEC, issue, state, "go", pause_guard=True,
             )

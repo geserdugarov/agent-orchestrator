@@ -907,15 +907,17 @@ class QuestionLabelBaseRefreshSkipTest(unittest.TestCase):
         # The merge / rev-list helpers would shell out if reached;
         # patch them so a regression that lets the sync proceed
         # surfaces as a call on these mocks.
-        with patch.object(base_sync, "_git") as git_mock, \
-             patch.object(
-                 base_sync, "_worktree_dirty_files",
-                 return_value=[],
-             ), \
-             patch.object(
-                 base_sync, "_merge_base_into_worktree",
-                 return_value=(True, []),
-             ) as merge_mock:
+        with (
+            patch.object(base_sync, "_git") as git_mock,
+            patch.object(
+                base_sync, "_worktree_dirty_files",
+                return_value=[],
+            ),
+            patch.object(
+                base_sync, "_merge_base_into_worktree",
+                return_value=(True, []),
+            ) as merge_mock,
+        ):
             base_sync._sync_worktree_with_base(
                 gh,
                 _TEST_SPEC,

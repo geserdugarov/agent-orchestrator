@@ -1616,7 +1616,7 @@ class BuildReadKeysTest(unittest.TestCase):
         self.assertEqual(
             prev_key,
             (prev.start, prev.end, CACHE_REPO, EVENT_NAMES, None,
-            ISSUE_NUMBER),
+             ISSUE_NUMBER),
         )
 
 

@@ -533,11 +533,13 @@ class TickViaSchedulerTest(unittest.TestCase):
             # folds it into the family bucket.
             gh._issues[50].labels = [FakeLabel(LABEL_BLOCKED)]
 
-            with self.assertLogs(
-                "orchestrator.workflow", level=logging.INFO,
-            ) as logs, \
-                 patch.object(workflow, REFRESH_BASE), \
-                 patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process):
+            with (
+                self.assertLogs(
+                    "orchestrator.workflow", level=logging.INFO,
+                ) as logs,
+                patch.object(workflow, REFRESH_BASE),
+                patch.object(workflow, PROCESS_ISSUE, side_effect=fake_process),
+            ):
                 workflow.tick(gh, self._spec(), scheduler=sched)
                 # Wait for the bucket drain to attempt #50 and skip it.
                 deadline = time.monotonic() + 2.0
