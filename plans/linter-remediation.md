@@ -39,7 +39,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
-| 1 | Concrete formatting and correctness cleanup | 7/9 | [ ] |
+| 1 | Concrete formatting and correctness cleanup | 8/9 | [ ] |
 | 2 | Extreme production complexity hotspots | 0/8 | [ ] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
@@ -149,8 +149,8 @@ Goal: remove objective, low-risk findings before structural refactoring.
 
 ### Package 1.8 — Unpacking targets
 
-- [ ] Resolve the two unique production unpacking-target findings in `orchestrator/usage.py`.
-- [ ] Update the related parser tests and preserve all accepted provider payload shapes.
+- [x] Resolve the two unique production unpacking-target findings in `orchestrator/usage.py`.
+- [x] Update the related parser tests and preserve all accepted provider payload shapes.
 
 ### Package 1.9 — Production control-variable reuse
 
@@ -456,4 +456,5 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 1.4 | Complete | E261, 41 tests, Ruff, diff, 2093 passed, 3 skipped | Not committed | Start Package 1.5 |
 | 2026-07-11 | 1.5 | Complete | 3 focused, Ruff, diff, 2093 passed, 3 skipped | Not committed | Start Package 1.6 |
 | 2026-07-11 | 1.6 | Complete | WPS327/349, Ruff, diff, 2093 passed, 3 skipped | None | Start Package 1.7 |
-| 2026-07-11 | 1.7 | Complete | WPS121, 31 focused, Ruff, diff, 2093 passed, 3 skipped | Not committed | Start Package 1.8 |
+| 2026-07-11 | 1.7 | Complete | WPS121, 31 focused, Ruff, diff, 2093 passed, 3 skipped | e2cae6d | Start Package 1.8 |
+| 2026-07-11 | 1.8 | Complete | WPS414, 90 focused, Ruff, diff, 2093 passed, 3 skipped | Not committed | Package 1.9 |

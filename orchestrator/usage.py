@@ -578,11 +578,13 @@ def parse_claude_usage(stdout: str) -> UsageMetrics:
     records = _claude_usage_records(events)
     aggregate = _claude_aggregate_by_model(records)
     aggregate.apply_tokens(metrics)
-    metrics.cost_usd, metrics.cost_source = _select_cost(
+    selected_cost = _select_cost(
         _find_last_reported_cost(events),
         _claude_estimate_total(aggregate.per_model),
         bool(records),
     )
+    metrics.cost_usd = selected_cost[0]
+    metrics.cost_source = selected_cost[1]
     metrics.turns = _claude_turn_count(events, records)
     return metrics
 
@@ -855,11 +857,13 @@ class _CodexUsageSummary:
         metrics.output_tokens = self.usage["output"]
         if self.model is not None:
             metrics.models = (self.model,)
-        metrics.cost_usd, metrics.cost_source = _select_cost(
+        selected_cost = _select_cost(
             _find_last_reported_cost(self.events),
             _codex_estimate_cost(self.model or "unknown", self.usage),
             bool(self.usage_events),
         )
+        metrics.cost_usd = selected_cost[0]
+        metrics.cost_source = selected_cost[1]
         metrics.turns = _codex_turn_count(self.events)
 
 
