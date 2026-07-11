@@ -29,7 +29,7 @@ log = logging.getLogger("orchestrator")
 
 _running = True
 _received_signal: Optional[int] = None
-_scheduler: Optional[IssueScheduler] = None
+active_scheduler: Optional[IssueScheduler] = None
 # Set once `main`'s shutdown drain has finished. The shutdown watchdog waits
 # on this with a timeout so it only force-exits when the drain genuinely
 # overran the grace window -- a clean fast drain sets it and the watchdog
@@ -63,7 +63,7 @@ def _shutdown(signum, _frame) -> None:
     _received_signal = signum
     log.info("signal %s received; will stop after this tick", signum)
     _running = False
-    sched = _scheduler
+    sched = active_scheduler
     if sched is not None:
         try:
             sched.shutdown(wait=False)
@@ -266,8 +266,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     # `_running=False` but cannot close the scheduler -- that window is
     # the brief gap between scheduler construction and this line and is
     # acceptable because no tick has dispatched anything yet.
-    global _scheduler
-    _scheduler = scheduler
+    global active_scheduler
+    active_scheduler = scheduler
 
     try:
         if args.once:
@@ -306,7 +306,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             # watchdog's own sweep.
             agents.terminate_all_running()
         scheduler.shutdown(wait=True)
-        _scheduler = None
+        active_scheduler = None
         # Release the watchdog: the drain is done, so a clean exit must not
         # be pre-empted by a force-exit.
         _shutdown_complete.set()
