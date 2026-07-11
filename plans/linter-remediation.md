@@ -40,7 +40,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
-| 2 | Extreme production complexity hotspots | 5/8 | [ ] |
+| 2 | Extreme production complexity hotspots | 6/8 | [ ] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
@@ -199,9 +199,9 @@ normally be implemented in its own PR or commit.
 
 ### Package 2.6 — Pull-request base synchronization
 
-- [ ] Refactor [`_sync_pr_worktree_to_base()`](../orchestrator/base_sync.py), initial score 42.
-- [ ] Separate state probes, routing decisions, git operations, and event emission.
-- [ ] Preserve command ordering, recovery behavior, locks, and emitted events.
+- [x] Refactor [`_sync_pr_worktree_to_base()`](../orchestrator/base_sync.py), initial score 42.
+- [x] Separate state probes, routing decisions, git operations, and event emission.
+- [x] Preserve command ordering, recovery behavior, locks, and emitted events.
 
 ### Package 2.7 — Question-stage handler
 
@@ -464,3 +464,4 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 2.3 | Complete | WPS210/WPS231, 50, Ruff, diff, 2096 passed, 3 skipped | Not committed | Package 2.4 |
 | 2026-07-11 | 2.4 | Complete | 90 focused; WPS/Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.5 |
 | 2026-07-11 | 2.5 | Complete | WPS210/WPS231, 112 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.6 |
+| 2026-07-11 | 2.6 | Complete | Target WPS, 113 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.7 |
