@@ -458,6 +458,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
 
         original_workflow_label = FakeGitHubClient.workflow_label
         # Raise for issue #2 only; #1 and #3 return their real labels.
+
         def flaky_workflow_label(self, issue):
             if getattr(issue, "number", None) == 2:
                 raise RuntimeError("simulated label-read failure")
@@ -468,6 +469,7 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # bucket (the partition routes label-read failures there) so the
         # fake_process gets called for it too -- but ALSO for #1 and #3,
         # proving the other issues weren't aborted.
+
         def fake_process(_gh, _spec, issue) -> None:
             processed.append(issue.number)
 

@@ -109,6 +109,7 @@ class ConnReusePathTest(unittest.TestCase):
         # exercised: the only way it would land is if a helper
         # short-circuited on the unset URL and then tried to open
         # its own socket, which is the bug we are guarding against.
+
         def _never_called(_url: str) -> _FakeConnection:
             raise AssertionError(
                 "connect= must not be called when conn= is supplied"
