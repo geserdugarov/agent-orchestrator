@@ -20,6 +20,7 @@ remaining view-backed dashboard chart breakdowns in
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Optional, Sequence
 
@@ -41,6 +42,160 @@ from orchestrator.analytics.read_models import (
 )
 
 
+@dataclass(frozen=True)
+class _SummaryFilters:
+    """Filter values applied to the summary's rollup window."""
+
+    start: Optional[datetime]
+    end: Optional[datetime]
+    repo: Optional[str]
+    events: Optional[Sequence[str]]
+    stages: Optional[Sequence[str]]
+    issue: Optional[int]
+
+
+_SUMMARY_TOTAL_FIELD_CASTS = (
+    ("total_events", int),
+    ("distinct_issues", int),
+    ("distinct_repos", int),
+    ("total_cost_usd", float),
+    ("total_input_tokens", int),
+    ("total_output_tokens", int),
+    ("total_agent_runs", int),
+    ("failed_agent_runs", int),
+    ("total_cache_read_tokens", int),
+    ("total_cache_write_tokens", int),
+    ("timed_out_agent_runs", int),
+)
+
+
+def _build_summary_where(
+    filters: _SummaryFilters,
+) -> tuple[str, list[Any]]:
+    """Build the predicate and bound values for one summary window."""
+    return _build_rollup_window_where(
+        start=filters.start,
+        end=filters.end,
+        repo=filters.repo,
+        events=filters.events,
+        stages=filters.stages,
+        issue=filters.issue,
+    )
+
+
+def _build_summary_sql(where_clause: str) -> str:
+    """Build the single rollup query for totals and breakdowns."""
+    # The CTE applies the window once while the discriminator keeps totals,
+    # event counts, and stage counts in one round-trip. Sorting the breakdowns
+    # after the query lets PostgreSQL choose an aggregate plan without an
+    # ordering constraint.
+    return (
+        "WITH win AS ("
+        "SELECT event, stage, repo, issue, "
+        "event_count, failed_count, timed_out_count, "
+        "total_cost_usd, total_input_tokens, total_output_tokens, "
+        "total_cache_read_tokens, total_cache_write_tokens "
+        f"FROM {_DAILY_ROLLUP_VIEW}{where_clause}"
+        ") "
+        "SELECT 't' AS kind, NULL::text AS label, "
+        "COALESCE(SUM(event_count), 0) AS count_val, "
+        # GitHub issue numbers are only unique within a repository.
+        "COUNT(DISTINCT (repo, issue)) AS distinct_issues, "
+        "COUNT(DISTINCT repo) AS distinct_repos, "
+        "COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd, "
+        "COALESCE(SUM(total_input_tokens), 0) AS total_input_tokens, "
+        "COALESCE(SUM(total_output_tokens), 0) AS total_output_tokens, "
+        # Agent-run counters must exclude non-exit events carrying an exit code.
+        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
+        "                  THEN event_count ELSE 0 END), 0) "
+        "  AS total_agent_runs, "
+        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
+        "                  THEN failed_count ELSE 0 END), 0) "
+        "  AS failed_agent_runs, "
+        "COALESCE(SUM(total_cache_read_tokens), 0) "
+        "  AS total_cache_read_tokens, "
+        "COALESCE(SUM(total_cache_write_tokens), 0) "
+        "  AS total_cache_write_tokens, "
+        "COALESCE(SUM(timed_out_count), 0) AS timed_out_agent_runs "
+        "FROM win "
+        "UNION ALL "
+        "SELECT 'e', event, COALESCE(SUM(event_count), 0), "
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL "
+        "FROM win GROUP BY event "
+        "UNION ALL "
+        "SELECT 's', stage, COALESCE(SUM(event_count), 0), "
+        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL "
+        "FROM win WHERE stage IS NOT NULL GROUP BY stage"
+    )
+
+
+def _query_summary_rows(
+    filters: _SummaryFilters,
+    *,
+    db_url: Optional[str],
+    connect_fn: Callable[[str], Any],
+    conn: Any,
+) -> list[tuple]:
+    """Execute one summary query using the requested connection path."""
+    where_clause, query_parameters = _build_summary_where(filters)
+    query_sql = _build_summary_sql(where_clause)
+    return _query(
+        connect_fn,
+        db_url,
+        query_sql,
+        query_parameters,
+        conn=conn,
+    )
+
+
+def _summary_totals_row(rows: Sequence[tuple]) -> Optional[tuple]:
+    """Return the totals row emitted by the combined query, if present."""
+    totals_row: Optional[tuple] = None
+    for row in rows:
+        if row and row[0] == "t":
+            totals_row = row
+    return totals_row
+
+
+def _ordered_summary_counts(
+    rows: Sequence[tuple],
+    row_kind: str,
+) -> dict[str, int]:
+    """Convert one breakdown row kind to count-descending order."""
+    counts = [
+        (row[1], int(row[2] or 0))
+        for row in rows
+        if row and row[0] == row_kind and row[1] is not None
+    ]
+    counts.sort(key=lambda pair: (-pair[1], pair[0]))
+    return dict(counts)
+
+
+def _summary_total_values(totals_row: tuple) -> dict[str, Any]:
+    """Map the totals columns to typed Summary field values."""
+    return {
+        field_name: field_cast(raw_value or 0)
+        for (field_name, field_cast), raw_value in zip(
+            _SUMMARY_TOTAL_FIELD_CASTS,
+            totals_row[2:],
+        )
+    }
+
+
+def _summary_from_rows(rows: Sequence[tuple]) -> Summary:
+    """Convert combined-query rows into the public Summary model."""
+    by_event = _ordered_summary_counts(rows, "e")
+    by_stage = _ordered_summary_counts(rows, "s")
+    totals_row = _summary_totals_row(rows)
+    if totals_row is None:
+        return Summary(by_event=by_event, by_stage=by_stage)
+    return Summary(
+        by_event=by_event,
+        by_stage=by_stage,
+        **_summary_total_values(totals_row),
+    )
+
+
 def get_summary(
     *,
     start: Optional[datetime] = None,
@@ -58,167 +213,29 @@ def get_summary(
     `start` is inclusive, `end` is exclusive -- matching how callers
     typically build day-boundary windows (`[day, day + 1)`). `repo`
     filters to a single repo slug when set. `events` / `stages` /
-    `issue` apply the same `_build_window_where` rules: ``None`` =
+    `issue` apply the same rollup-window rules: ``None`` =
     no filter, non-empty sequence = ``IN (...)``, empty sequence =
     no rows match. Returns a zero-valued `Summary` when the DB URL
     is unset or the (post-filter) window holds no rows.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    resolved_url = _resolve_db_url(db_url)
+    if conn is None and not resolved_url:
         return Summary()
-    connect_fn = connect or _default_connect
-    where, params = _build_rollup_window_where(
-        start=start, end=end, repo=repo,
-        events=events, stages=stages, issue=issue,
+    filters = _SummaryFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-
-    # One round-trip against the rollup materialised view. Each
-    # rollup row already aggregates `(day, repo, issue, event,
-    # stage, backend, cost_source)`-keyed events from the base
-    # table, so `SUM(event_count)` recovers `COUNT(*)`, and the
-    # token / cost / failure / timeout column sums recover their
-    # base-table equivalents without re-scanning `analytics_events`.
-    # The CTE materialises the filtered rollup window once and the
-    # three result sets (totals, by_event, by_stage) union under a
-    # `kind` discriminator. The previous standalone shape fired
-    # three sequential queries that each re-scanned the events
-    # table; the CTE collapses them and, by reading the rollup,
-    # scans roughly orders of magnitude fewer rows once the events
-    # table grows. The totals row carries every aggregate column;
-    # the by_event / by_stage rows only populate `kind`, `label`,
-    # and `count_val` -- the trailing NULLs keep the UNION-ALL
-    # column shape uniform. Per-bucket ordering (`COUNT DESC,
-    # label ASC`, matching the previous standalone queries) is
-    # reasserted in Python so the planner is free to pick a
-    # hash-aggregate / merge plan rather than being forced into a
-    # sort.
-    sql = (
-        "WITH win AS ("
-        "SELECT event, stage, repo, issue, "
-        "event_count, failed_count, timed_out_count, "
-        "total_cost_usd, total_input_tokens, total_output_tokens, "
-        "total_cache_read_tokens, total_cache_write_tokens "
-        f"FROM {_DAILY_ROLLUP_VIEW}{where}"
-        ") "
-        "SELECT 't' AS kind, NULL::text AS label, "
-        "COALESCE(SUM(event_count), 0) AS count_val, "
-        # `(repo, issue)` row-constructor: GitHub issue numbers are
-        # only unique within a repo, so a multi-repo window would
-        # otherwise collapse `owner/a#1` and `owner/b#1` into one.
-        # The rollup key carries `(repo, issue)` so distinct counts
-        # are still exact against the materialised view.
-        "COUNT(DISTINCT (repo, issue)) AS distinct_issues, "
-        "COUNT(DISTINCT repo) AS distinct_repos, "
-        "COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd, "
-        "COALESCE(SUM(total_input_tokens), 0) AS total_input_tokens, "
-        "COALESCE(SUM(total_output_tokens), 0) AS total_output_tokens, "
-        # Agent-run counters: scoped to `event = 'agent_exit'` rows
-        # so the dashboard's success-rate metric reads off the same
-        # query as the rest of the overview. The rollup's
-        # `failed_count` predicate (`exit_code IS NOT NULL AND
-        # exit_code <> 0`) already excludes NULL exit codes, and
-        # `event = 'agent_exit'` narrows away any non-exit row that
-        # happens to carry a non-null exit code.
-        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
-        "                  THEN event_count ELSE 0 END), 0) "
-        "  AS total_agent_runs, "
-        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
-        "                  THEN failed_count ELSE 0 END), 0) "
-        "  AS failed_agent_runs, "
-        # Cache-band token rollups so the redesigned KPI strip and
-        # sparkline can include them in the "Total tokens" headline
-        # (matching the standalone mock's
-        # `input + output + cache_read + cache_write` accounting).
-        "COALESCE(SUM(total_cache_read_tokens), 0) "
-        "  AS total_cache_read_tokens, "
-        "COALESCE(SUM(total_cache_write_tokens), 0) "
-        "  AS total_cache_write_tokens, "
-        # Window-wide timeout counter. The rollup's `timed_out_count`
-        # predicate is already scoped to `event = 'agent_exit' AND
-        # timed_out = TRUE`, so a plain SUM recovers the previous
-        # base-table aggregate without an extra `CASE` here.
-        "COALESCE(SUM(timed_out_count), 0) AS timed_out_agent_runs "
-        "FROM win "
-        "UNION ALL "
-        "SELECT 'e', event, COALESCE(SUM(event_count), 0), "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL "
-        "FROM win GROUP BY event "
-        "UNION ALL "
-        "SELECT 's', stage, COALESCE(SUM(event_count), 0), "
-        "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL "
-        "FROM win WHERE stage IS NOT NULL GROUP BY stage"
+    rows = _query_summary_rows(
+        filters,
+        db_url=resolved_url,
+        connect_fn=connect or _default_connect,
+        conn=conn,
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    if not rows:
-        # Empty fake cursor; the real query always returns the
-        # totals row even when the window is empty (aggregate over
-        # zero rows yields zeros), but guard so a fixture that omits
-        # everything never raises on the unpack below.
-        return Summary()
-
-    totals_row: Optional[tuple] = None
-    by_event_pairs: list[tuple[str, int]] = []
-    by_stage_pairs: list[tuple[str, int]] = []
-    for row in rows:
-        if not row:
-            continue
-        kind = row[0]
-        if kind == "t":
-            totals_row = row
-        elif kind == "e" and row[1] is not None:
-            by_event_pairs.append((row[1], int(row[2] or 0)))
-        elif kind == "s" and row[1] is not None:
-            by_stage_pairs.append((row[1], int(row[2] or 0)))
-
-    # Reassert the `c DESC, label ASC` ordering the standalone
-    # queries used to enforce in SQL so the dashboard sees the same
-    # iteration order regardless of which UNION-ALL plan Postgres
-    # picks.
-    by_event_pairs.sort(key=lambda kv: (-kv[1], kv[0]))
-    by_stage_pairs.sort(key=lambda kv: (-kv[1], kv[0]))
-    by_event = {label: c for label, c in by_event_pairs}
-    by_stage = {label: c for label, c in by_stage_pairs}
-
-    if totals_row is None:
-        return Summary(by_event=by_event, by_stage=by_stage)
-
-    # The combined SQL guarantees a 13-column totals row, but
-    # fixtures that pre-date the agent-run / cache-token / timeout
-    # extensions may still emit shorter tuples; default the missing
-    # columns to zero so the test harness does not have to know
-    # about every new SQL column in unrelated cases. Column layout:
-    # 0=kind, 1=label, 2=total_events, 3=distinct_issues,
-    # 4=distinct_repos, 5=total_cost_usd, 6=total_input_tokens,
-    # 7=total_output_tokens, 8=total_agent_runs,
-    # 9=failed_agent_runs, 10=total_cache_read_tokens,
-    # 11=total_cache_write_tokens, 12=timed_out_agent_runs.
-    total_events = totals_row[2]
-    distinct_issues = totals_row[3]
-    distinct_repos = totals_row[4]
-    total_cost_usd = totals_row[5]
-    total_input_tokens = totals_row[6]
-    total_output_tokens = totals_row[7]
-    total_agent_runs = totals_row[8] if len(totals_row) > 8 else 0
-    failed_agent_runs = totals_row[9] if len(totals_row) > 9 else 0
-    total_cache_read_tokens = totals_row[10] if len(totals_row) > 10 else 0
-    total_cache_write_tokens = totals_row[11] if len(totals_row) > 11 else 0
-    timed_out_agent_runs = totals_row[12] if len(totals_row) > 12 else 0
-
-    return Summary(
-        total_events=int(total_events or 0),
-        distinct_issues=int(distinct_issues or 0),
-        distinct_repos=int(distinct_repos or 0),
-        by_event=by_event,
-        by_stage=by_stage,
-        total_cost_usd=float(total_cost_usd or 0.0),
-        total_input_tokens=int(total_input_tokens or 0),
-        total_output_tokens=int(total_output_tokens or 0),
-        total_agent_runs=int(total_agent_runs or 0),
-        failed_agent_runs=int(failed_agent_runs or 0),
-        total_cache_read_tokens=int(total_cache_read_tokens or 0),
-        total_cache_write_tokens=int(total_cache_write_tokens or 0),
-        timed_out_agent_runs=int(timed_out_agent_runs or 0),
-    )
+    return _summary_from_rows(rows)
 
 
 def get_kpi_prev(
