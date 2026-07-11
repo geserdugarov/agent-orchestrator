@@ -848,17 +848,19 @@ class TickPerRepoParallelLimitTest(unittest.TestCase):
         # the thread that actually drives it.
         scenario = _WorkerClientScenario()
 
-        with patch.object(
-            scenario.parent,
-            "_for_worker_thread",
-            side_effect=scenario.clone_client,
-        ), \
-             patch.object(workflow, REFRESH_BASE), \
-             patch.object(
-                 workflow,
-                 PROCESS_ISSUE,
-                 side_effect=scenario.process_issue,
-             ):
+        with (
+            patch.object(
+                scenario.parent,
+                "_for_worker_thread",
+                side_effect=scenario.clone_client,
+            ),
+            patch.object(workflow, REFRESH_BASE),
+            patch.object(
+                workflow,
+                PROCESS_ISSUE,
+                side_effect=scenario.process_issue,
+            ),
+        ):
             workflow.tick(scenario.parent, self._spec(parallel_limit=3))
 
         scenario.assert_distinct_worker_clients(self)

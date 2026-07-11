@@ -1198,16 +1198,18 @@ class ShutdownWatchdogTest(unittest.TestCase):
                 client.slug = repo_spec.slug
                 return client
 
-            with patch.object(main_mod, "_arm_shutdown_watchdog"), \
-                 patch.object(
-                     main_mod.agents, "terminate_all_running",
-                 ) as term, \
-                 patch.object(
-                     main_mod, "GitHubClient", side_effect=fake_client,
-                 ), \
-                 patch.object(
-                     main_mod.workflow, "tick", side_effect=fake_tick,
-                 ):
+            with (
+                patch.object(main_mod, "_arm_shutdown_watchdog"),
+                patch.object(
+                    main_mod.agents, "terminate_all_running",
+                ) as term,
+                patch.object(
+                    main_mod, "GitHubClient", side_effect=fake_client,
+                ),
+                patch.object(
+                    main_mod.workflow, "tick", side_effect=fake_tick,
+                ),
+            ):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 128 + signal.SIGTERM)
@@ -1227,15 +1229,17 @@ class ShutdownWatchdogTest(unittest.TestCase):
                 client.slug = repo_spec.slug
                 return client
 
-            with patch.object(
-                main_mod.agents, "terminate_all_running",
-            ) as term, \
-                 patch.object(
-                     main_mod, "GitHubClient", side_effect=fake_client,
-                 ), \
-                 patch.object(
-                     main_mod.workflow, "tick", side_effect=fake_tick,
-                 ):
+            with (
+                patch.object(
+                    main_mod.agents, "terminate_all_running",
+                ) as term,
+                patch.object(
+                    main_mod, "GitHubClient", side_effect=fake_client,
+                ),
+                patch.object(
+                    main_mod.workflow, "tick", side_effect=fake_tick,
+                ),
+            ):
                 rc = main_mod.main(["--once"])
 
             self.assertEqual(rc, 0)

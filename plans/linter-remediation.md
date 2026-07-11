@@ -39,7 +39,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
-| 1 | Concrete formatting and correctness cleanup | 2/9 | [ ] |
+| 1 | Concrete formatting and correctness cleanup | 3/9 | [ ] |
 | 2 | Extreme production complexity hotspots | 0/8 | [ ] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
@@ -117,7 +117,7 @@ Goal: remove objective, low-risk findings before structural refactoring.
 
 ### Package 1.3 — Test continuation indentation
 
-- [ ] Correct `E127` and `E128` in:
+- [x] Correct `E127` and `E128` in:
   - `tests/test_dashboard.py`
   - `tests/test_main.py`
   - `tests/test_workflow_implementing_paused.py`
@@ -452,3 +452,4 @@ Add one row for every implementation session, including partial sessions.
 |---|---|---|---|---|---|
 | 2026-07-11 | 1.1 | Complete | E305, Ruff, diff, 2093 passed | Not committed | Start Package 1.2 |
 | 2026-07-11 | 1.2 | Complete | E303/E305/E306, Ruff, diff, 2093 passed, 3 skipped | Not committed | Start Package 1.3 |
+| 2026-07-11 | 1.3 | Complete | E127/E128, Ruff, diff, 2093 passed, 3 skipped | Not committed | Start Package 1.4 |

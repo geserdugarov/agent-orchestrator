@@ -119,14 +119,16 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         def call_ensure(n: int) -> None:
             worktrees._ensure_worktree(spec, n)
 
-        with patch.object(worktree_lifecycle, "_git", side_effect=fake_git), \
-             patch.object(
-                 worktree_lifecycle, "_authed_target_fetch",
-                 side_effect=fake_authed_fetch,
-             ), \
-             patch.object(worktree_lifecycle, "_has_new_commits", fake_has_new_commits), \
-             patch.object(Path, "exists", lambda self: False), \
-             patch.object(Path, "mkdir", lambda self, **_kw: None):
+        with (
+            patch.object(worktree_lifecycle, "_git", side_effect=fake_git),
+            patch.object(
+                worktree_lifecycle, "_authed_target_fetch",
+                side_effect=fake_authed_fetch,
+            ),
+            patch.object(worktree_lifecycle, "_has_new_commits", fake_has_new_commits),
+            patch.object(Path, "exists", lambda self: False),
+            patch.object(Path, "mkdir", lambda self, **_kw: None),
+        ):
             threads = [
                 threading.Thread(target=call_ensure, args=(n,))
                 for n in (1, 2, 3, 4)
@@ -285,14 +287,16 @@ class WorktreePlumbingSerializationTest(unittest.TestCase):
         def fake_has_new_commits(*_a, **_kw) -> bool:
             return False
 
-        with patch.object(worktree_lifecycle, "_git", side_effect=fake_git), \
-             patch.object(
-                 worktree_lifecycle, "_authed_target_fetch",
-                 side_effect=fake_authed_fetch,
-             ), \
-             patch.object(worktree_lifecycle, "_has_new_commits", fake_has_new_commits), \
-             patch.object(Path, "exists", lambda self: False), \
-             patch.object(Path, "mkdir", lambda self, **_kw: None):
+        with (
+            patch.object(worktree_lifecycle, "_git", side_effect=fake_git),
+            patch.object(
+                worktree_lifecycle, "_authed_target_fetch",
+                side_effect=fake_authed_fetch,
+            ),
+            patch.object(worktree_lifecycle, "_has_new_commits", fake_has_new_commits),
+            patch.object(Path, "exists", lambda self: False),
+            patch.object(Path, "mkdir", lambda self, **_kw: None),
+        ):
             t_a = threading.Thread(
                 target=lambda: worktrees._ensure_worktree(spec_a, 1)
             )
