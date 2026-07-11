@@ -635,9 +635,11 @@ def cost_by_stage(
     totals = [
         float(r.total_cost_usd or 0.0) for r in ordered
     ]
-    for i, (nc, c, tot) in enumerate(zip(no_cache, cache, totals)):
-        if nc == 0.0 and c == 0.0 and tot > 0.0:
-            no_cache[i] = tot
+    for row_index, (no_cache_cost, cache_cost, total_cost) in enumerate(
+        zip(no_cache, cache, totals)
+    ):
+        if no_cache_cost == 0.0 and cache_cost == 0.0 and total_cost > 0.0:
+            no_cache[row_index] = total_cost
     colors = [
         theme.color_for(r.stage, explicit=theme.STAGE_COLORS)
         for r in ordered
@@ -645,7 +647,7 @@ def cost_by_stage(
     # 0.45 alpha keeps the cache segment legible on the page
     # background while leaving the no-cache portion as the dominant
     # stage color -- mirroring `cost_by_review_round`.
-    cache_colors = [_lighten_hex(c, 0.45) for c in colors]
+    cache_colors = [_lighten_hex(stage_color, 0.45) for stage_color in colors]
     # Plotly draws the first y-value at the bottom of a horizontal
     # bar chart; reverse so the largest cost sits at the top.
     (

@@ -954,16 +954,16 @@ class GitHubClient:
         `pr_has_changes_requested` without ever reaching the dev agent.
         """
         out: list = []
-        for review in pr.get_reviews():
-            state = (review.state or "").upper()
+        for candidate_review in pr.get_reviews():
+            state = (candidate_review.state or "").upper()
             if state not in ("CHANGES_REQUESTED", "COMMENTED"):
                 continue
-            body = (review.body or "").strip()
+            body = (candidate_review.body or "").strip()
             if not body:
                 continue
-            if after_id is None or review.id > after_id:
-                out.append(review)
-        out.sort(key=lambda review: review.id)
+            if after_id is None or candidate_review.id > after_id:
+                out.append(candidate_review)
+        out.sort(key=lambda review_summary: review_summary.id)
         return out
 
     def ensure_workflow_labels(self) -> None:

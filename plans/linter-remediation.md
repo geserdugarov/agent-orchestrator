@@ -39,7 +39,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
-| 1 | Concrete formatting and correctness cleanup | 8/9 | [ ] |
+| 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 0/8 | [ ] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
@@ -154,11 +154,11 @@ Goal: remove objective, low-risk findings before structural refactoring.
 
 ### Package 1.9 — Production control-variable reuse
 
-- [ ] Rename the reused variables in:
+- [x] Rename the reused variables in:
   - `orchestrator/dashboard_charts.py`
   - `orchestrator/github.py`
   - `orchestrator/state_machine.py`
-- [ ] Confirm that empty iterables cannot expose an unbound-variable path.
+- [x] Confirm that empty iterables cannot expose an unbound-variable path.
 
 Completion gate: all 29 standard `E...` findings and the concrete findings above are gone.
 
@@ -458,3 +458,4 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 1.6 | Complete | WPS327/349, Ruff, diff, 2093 passed, 3 skipped | None | Start Package 1.7 |
 | 2026-07-11 | 1.7 | Complete | WPS121, 31 focused, Ruff, diff, 2093 passed, 3 skipped | e2cae6d | Start Package 1.8 |
 | 2026-07-11 | 1.8 | Complete | WPS414, 90 focused, Ruff, diff, 2093 passed, 3 skipped | Not committed | Package 1.9 |
+| 2026-07-11 | 1.9 | Complete | WPS441, 77 focused, Ruff, diff, 2093 passed, 3 skipped | 403c4d6 | Start Package 2.1 |
