@@ -40,7 +40,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
-| 2 | Extreme production complexity hotspots | 1/8 | [ ] |
+| 2 | Extreme production complexity hotspots | 2/8 | [ ] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
@@ -175,9 +175,9 @@ normally be implemented in its own PR or commit.
 
 ### Package 2.2 — Claude result parsing
 
-- [ ] Refactor [`_claude_last_message()`](../orchestrator/agents.py), initial score 66.
-- [ ] Separate event decoding, content-block collection, diagnostics, and final-result selection.
-- [ ] Preserve malformed-stream, error-result, and fallback behavior.
+- [x] Refactor [`_claude_last_message()`](../orchestrator/agents.py), initial score 66.
+- [x] Separate event decoding, content-block collection, diagnostics, and final-result selection.
+- [x] Preserve malformed-stream, error-result, and fallback behavior.
 
 ### Package 2.3 — Analytics summary query
 
@@ -459,4 +459,5 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 1.7 | Complete | WPS121, 31 focused, Ruff, diff, 2093 passed, 3 skipped | e2cae6d | Start Package 1.8 |
 | 2026-07-11 | 1.8 | Complete | WPS414, 90 focused, Ruff, diff, 2093 passed, 3 skipped | Not committed | Package 1.9 |
 | 2026-07-11 | 1.9 | Complete | WPS441, 77 focused, Ruff, diff, 2093 passed, 3 skipped | 403c4d6 | Start Package 2.1 |
-| 2026-07-11 | 2.1 | Complete | WPS210/WPS231/WPS232, 81 focused, Ruff, diff, 2094 passed, 3 skipped | Not committed | Start Package 2.2 |
+| 2026-07-11 | 2.1 | Complete | Target WPS, 81 focused, Ruff, diff, 2094 passed, 3 skipped | d6216d1 | Package 2.2 |
+| 2026-07-11 | 2.2 | Complete | WPS210/220/231, 55 focused, Ruff, diff, 2096 passed, 3 skipped | None | Package 2.3 |

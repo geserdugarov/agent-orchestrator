@@ -585,6 +585,94 @@ def _run_codex(
         )
 
 
+def _decode_claude_event(raw_line: str) -> Optional[dict[str, Any]]:
+    """Decode one stream event, ignoring blank or diagnostic output."""
+    line = raw_line.strip()
+    if not line:
+        return None
+    try:
+        event_payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return event_payload if isinstance(event_payload, dict) else None
+
+
+def _iter_claude_events(jsonl_output: str) -> Iterator[dict[str, Any]]:
+    """Yield JSON objects from Claude's mixed JSONL output."""
+    for raw_line in jsonl_output.splitlines():
+        event_payload = _decode_claude_event(raw_line)
+        if event_payload is not None:
+            yield event_payload
+
+
+def _collect_claude_text_blocks(
+    content_blocks: list[Any],
+) -> Optional[str]:
+    """Join the valid text blocks from one assistant message."""
+    text_blocks: list[str] = []
+    for content_block in content_blocks:
+        if not isinstance(content_block, dict):
+            continue
+        if content_block.get("type") != "text":
+            continue
+        block_text = content_block.get("text")
+        if isinstance(block_text, str):
+            text_blocks.append(block_text)
+    return "".join(text_blocks) if text_blocks else None
+
+
+def _claude_result_text(event_payload: dict[str, Any]) -> Optional[str]:
+    """Return a terminal result string without filtering its subtype."""
+    if event_payload.get("type") != "result":
+        return None
+    result_text = event_payload.get("result")
+    return result_text if isinstance(result_text, str) else None
+
+
+def _claude_assistant_text(event_payload: dict[str, Any]) -> Optional[str]:
+    """Return text from a supported assistant or message event."""
+    if event_payload.get("type") not in ("assistant", "message"):
+        return None
+    nested_message = event_payload.get("message")
+    message_payload = (
+        nested_message if isinstance(nested_message, dict) else event_payload
+    )
+    message_content = message_payload.get("content")
+    if isinstance(message_content, list):
+        return _collect_claude_text_blocks(message_content)
+    return message_content if isinstance(message_content, str) else None
+
+
+def _collect_claude_message_candidates(
+    events: Iterator[dict[str, Any]],
+) -> tuple[Optional[str], Optional[str]]:
+    """Keep the latest valid terminal and assistant message candidates."""
+    last_result: Optional[str] = None
+    last_assistant_text: Optional[str] = None
+    for event_payload in events:
+        result_text = _claude_result_text(event_payload)
+        if result_text is not None:
+            last_result = result_text
+        assistant_text = _claude_assistant_text(event_payload)
+        if assistant_text is not None:
+            last_assistant_text = assistant_text
+    return last_result, last_assistant_text
+
+
+def _select_claude_last_message(
+    last_result: Optional[str],
+    last_assistant_text: Optional[str],
+    *,
+    allow_assistant_fallback: bool,
+) -> str:
+    """Prefer a terminal result and gate partial-transcript fallback."""
+    if last_result is not None:
+        return last_result
+    if allow_assistant_fallback:
+        return last_assistant_text or ""
+    return ""
+
+
 def _claude_last_message(
     jsonl_output: str, *, allow_assistant_fallback: bool = True,
 ) -> str:
@@ -601,46 +689,15 @@ def _claude_last_message(
     the question/timeout paths in workflow.py already accept an empty
     last_message.
     """
-    last_result: Optional[str] = None
-    last_assistant_text: Optional[str] = None
-    for line in jsonl_output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event_payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event_payload, dict):
-            continue
-        event_type = event_payload.get("type")
-        if event_type == "result":
-            result_text = event_payload.get("result")
-            if isinstance(result_text, str):
-                last_result = result_text
-        elif event_type in ("assistant", "message"):
-            message_payload = (
-                event_payload.get("message")
-                if isinstance(event_payload.get("message"), dict)
-                else event_payload
-            )
-            message_content = message_payload.get("content")
-            if isinstance(message_content, list):
-                texts: list[str] = []
-                for block in message_content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        text = block.get("text")
-                        if isinstance(text, str):
-                            texts.append(text)
-                if texts:
-                    last_assistant_text = "".join(texts)
-            elif isinstance(message_content, str):
-                last_assistant_text = message_content
-    if last_result is not None:
-        return last_result
-    if allow_assistant_fallback:
-        return last_assistant_text or ""
-    return ""
+    events = _iter_claude_events(jsonl_output)
+    last_result, last_assistant_text = _collect_claude_message_candidates(
+        events
+    )
+    return _select_claude_last_message(
+        last_result,
+        last_assistant_text,
+        allow_assistant_fallback=allow_assistant_fallback,
+    )
 
 
 def _run_claude(

@@ -107,16 +107,55 @@ class ClaudeLastMessageTest(unittest.TestCase):
         ]
         self.assertEqual(_claude_last_message("\n".join(events)), "final answer")
 
-    def test_falls_back_to_text_without_result(self) -> None:
+    def test_falls_back_to_supported_message_shapes(self) -> None:
+        cases = (
+            (
+                [{"type": "assistant", "message": {
+                    "content": [
+                        {"type": "text", "text": "hello "},
+                        {"type": "text", "text": "world"},
+                    ],
+                }}],
+                "hello world",
+            ),
+            ([{"type": "message", "content": "direct message"}], "direct message"),
+        )
+        for event_payloads, expected in cases:
+            with self.subTest(expected=expected):
+                events = [json.dumps(payload) for payload in event_payloads]
+                self.assertEqual(
+                    _claude_last_message("\n".join(events)),
+                    expected,
+                )
+
+    def test_ignores_diagnostics_and_invalid_content_blocks(self) -> None:
         events = [
+            "diagnostic text outside the JSON stream",
+            json.dumps(["not", "an", "event"]),
+            json.dumps({"type": "system", "content": "not an answer"}),
             json.dumps({"type": "assistant", "message": {
                 "content": [
-                    {"type": "text", "text": "hello "},
-                    {"type": "text", "text": "world"},
+                    {"type": "tool_use", "text": "ignored tool"},
+                    {"type": "text", "text": 7},
+                    "invalid block",
+                    {"type": "text", "text": "kept answer"},
                 ],
             }}),
         ]
-        self.assertEqual(_claude_last_message("\n".join(events)), "hello world")
+        self.assertEqual(_claude_last_message("\n".join(events)), "kept answer")
+
+    def test_keeps_last_string_result_for_error_event(self) -> None:
+        events = [
+            json.dumps({"type": "result", "result": "earlier result"}),
+            json.dumps({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "result": "error details",
+            }),
+            json.dumps({"type": "result", "result": {"invalid": "shape"}}),
+        ]
+        self.assertEqual(_claude_last_message("\n".join(events)), "error details")
 
     def test_empty_without_known_events(self) -> None:
         self.assertEqual(_claude_last_message(""), "")
