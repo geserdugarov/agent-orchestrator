@@ -209,12 +209,16 @@ def _build_allowed() -> dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]]:
     edge -- an unlabeled issue is never terminalized directly.
     """
     allowed: dict[Optional[WorkflowLabel], set[WorkflowLabel]] = {
-        src: set(forward) for src, forward in _FORWARD.items()
+        forward_source: set(forward_targets)
+        for forward_source, forward_targets in _FORWARD.items()
     }
     for target, sources in _INTERRUPT_SOURCES.items():
-        for src in sources:
-            allowed[src].add(target)
-    return {src: frozenset(edges) for src, edges in allowed.items()}
+        for interrupt_source in sources:
+            allowed[interrupt_source].add(target)
+    return {
+        allowed_source: frozenset(edges)
+        for allowed_source, edges in allowed.items()
+    }
 
 
 ALLOWED_TRANSITIONS: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = (
