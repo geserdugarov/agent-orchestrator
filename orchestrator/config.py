@@ -120,6 +120,7 @@ def _parse_hitl_handles(raw: str) -> tuple[str, ...]:
         seen.add(handle)
     return tuple(handles)
 
+
 REPO: str = os.environ.get("REPO", "geserdugarov/agent-orchestrator")
 GITHUB_TOKEN: str = _resolve_github_token(REPO)
 POLL_INTERVAL: int = int(os.environ.get("POLL_INTERVAL", "60"))
@@ -601,6 +602,7 @@ def default_repo_specs() -> list[RepoSpec]:
     list copy so callers cannot mutate the cached result.
     """
     return list(_REPO_SPECS)
+
 
 # Base branch of the orchestrator's *own* repo (REPO_ROOT). Used only by the
 # self-update path: `_self_modifying_merge_happened` watches `origin/<this>`
