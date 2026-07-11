@@ -95,7 +95,7 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -411,6 +411,222 @@ def record_repo_skill_catalog(
     )
 
 
+@dataclass(frozen=True)
+class _AgentExitContext:
+    """Inputs that describe one completed tracked agent run."""
+
+    repo: str
+    issue: int
+    stage: str
+    agent_role: str
+    backend: str
+    agent_spec: Optional[str]
+    resume_session_id: Optional[str]
+    agent_result: AgentResult
+    duration_s: float
+    review_round: Optional[int]
+    retry_count: Optional[int]
+    fallback_model: Optional[str]
+    prompt: Optional[str]
+    cwd: Optional[Path]
+
+
+@dataclass
+class _CodexCatalog:
+    """Out-of-band capabilities missing from Codex's JSON stream."""
+
+    available_skills: Optional[list[str]] = None
+    tools: Optional[list[str]] = None
+
+
+@dataclass(frozen=True)
+class _AgentExitSkillFields:
+    """Normalized optional skill fields for an `agent_exit` event."""
+
+    skills_triggered: Optional[list[str]] = None
+    skills_triggered_count: Optional[int] = None
+    skills_available: Optional[list[str]] = None
+
+
+def _parse_agent_exit_usage(
+    context: _AgentExitContext,
+) -> Optional[usage.UsageMetrics]:
+    """Parse usage and attach it to the result, failing open on bad streams."""
+    try:
+        metrics = usage.parse_agent_usage(
+            context.backend,
+            context.agent_result.stdout,
+            fallback_model=context.fallback_model,
+        )
+    except Exception:
+        log.exception(
+            "issue=#%d analytics: parse_agent_usage(%s) failed; "
+            "skipping record",
+            context.issue,
+            context.backend,
+        )
+        return None
+    context.agent_result.usage = metrics
+    return metrics
+
+
+def _discover_codex_skills(
+    context: _AgentExitContext,
+    skill_catalog: Any,
+) -> Optional[list[str]]:
+    """Read Codex's offered skills when either sink needs them."""
+    if context.cwd is None or not (
+        TRACK_SKILL_TRIGGERS or TRAJECTORY_LOG_PATH is not None
+    ):
+        return None
+    return list(skill_catalog.discover_local_skills(context.cwd)) or None
+
+
+def _discover_codex_tools(skill_catalog: Any) -> Optional[list[str]]:
+    """Read Codex's baseline tools only for trajectory records."""
+    if TRAJECTORY_LOG_PATH is None:
+        return None
+    return list(skill_catalog.discover_codex_tools()) or None
+
+
+def _populate_codex_catalog(
+    context: _AgentExitContext,
+    catalog: _CodexCatalog,
+) -> None:
+    """Fill Codex capabilities in discovery order."""
+    from orchestrator import skill_catalog
+    catalog.available_skills = _discover_codex_skills(context, skill_catalog)
+    catalog.tools = _discover_codex_tools(skill_catalog)
+
+
+def _discover_codex_catalog(context: _AgentExitContext) -> _CodexCatalog:
+    """Discover Codex capabilities needed by enabled analytics sinks."""
+    catalog = _CodexCatalog()
+    if context.backend != "codex":
+        return catalog
+    try:
+        _populate_codex_catalog(context, catalog)
+    except Exception:
+        log.exception(
+            "issue=#%d analytics: codex out-of-band discovery failed; "
+            "leaving skills_available / tools empty",
+            context.issue,
+        )
+    return catalog
+
+
+def _normalize_agent_exit_skills(
+    parsed_skills: usage.SkillTriggers,
+    codex_catalog: _CodexCatalog,
+) -> _AgentExitSkillFields:
+    """Convert parser output into optional event fields."""
+    skills_triggered = list(parsed_skills.triggered) or None
+    skills_triggered_count = (
+        sum(parsed_skills.trigger_counts.values())
+        if skills_triggered
+        else None
+    )
+    skills_available = (
+        list(parsed_skills.available) or codex_catalog.available_skills
+    )
+    return _AgentExitSkillFields(
+        skills_triggered=skills_triggered,
+        skills_triggered_count=skills_triggered_count,
+        skills_available=skills_available,
+    )
+
+
+def _read_agent_exit_skills(
+    context: _AgentExitContext,
+    codex_catalog: _CodexCatalog,
+) -> _AgentExitSkillFields:
+    """Parse and normalize skill fields for an enabled run."""
+    parsed_skills = usage.parse_agent_skills(
+        context.backend,
+        context.agent_result.stdout,
+    )
+    return _normalize_agent_exit_skills(parsed_skills, codex_catalog)
+
+
+def _parse_agent_exit_skills(
+    context: _AgentExitContext,
+    codex_catalog: _CodexCatalog,
+) -> _AgentExitSkillFields:
+    """Parse opt-in skill fields without risking the baseline event."""
+    if not TRACK_SKILL_TRIGGERS:
+        return _AgentExitSkillFields()
+    try:
+        return _read_agent_exit_skills(context, codex_catalog)
+    except Exception:
+        log.exception(
+            "issue=#%d analytics: parse_agent_skills(%s) failed; "
+            "emitting record without skill fields",
+            context.issue,
+            context.backend,
+        )
+        return _AgentExitSkillFields()
+
+
+def _build_agent_exit_record(
+    context: _AgentExitContext,
+    metrics: usage.UsageMetrics,
+    skill_fields: _AgentExitSkillFields,
+) -> dict:
+    """Build the allowlisted baseline event without raw run content."""
+    return build_record(
+        repo=context.repo,
+        issue=context.issue,
+        event="agent_exit",
+        stage=context.stage,
+        agent_role=context.agent_role,
+        backend=context.backend,
+        agent_spec=context.agent_spec,
+        resume_session_id=context.resume_session_id,
+        session_id=context.agent_result.session_id,
+        review_round=context.review_round,
+        retry_count=context.retry_count,
+        duration_s=context.duration_s,
+        exit_code=context.agent_result.exit_code,
+        timed_out=context.agent_result.timed_out,
+        input_tokens=metrics.input_tokens,
+        output_tokens=metrics.output_tokens,
+        cached_tokens=metrics.cached_tokens,
+        cache_read_tokens=metrics.cache_read_tokens,
+        cache_write_tokens=metrics.cache_write_tokens,
+        models=list(metrics.models),
+        turns=metrics.turns,
+        cost_usd=metrics.cost_usd,
+        cost_source=metrics.cost_source,
+        skills_triggered=skill_fields.skills_triggered,
+        skills_triggered_count=skill_fields.skills_triggered_count,
+        skills_available=skill_fields.skills_available,
+    )
+
+
+def _persist_agent_exit(
+    context: _AgentExitContext,
+    metrics: usage.UsageMetrics,
+    skill_fields: _AgentExitSkillFields,
+    codex_catalog: _CodexCatalog,
+) -> None:
+    """Write the baseline event, then the independently guarded trajectory."""
+    append_record(_build_agent_exit_record(context, metrics, skill_fields))
+    _maybe_record_trajectory(
+        repo=context.repo,
+        issue=context.issue,
+        stage=context.stage,
+        agent_role=context.agent_role,
+        backend=context.backend,
+        result=context.agent_result,
+        prompt=context.prompt,
+        metrics=metrics,
+        review_round=context.review_round,
+        retry_count=context.retry_count,
+        codex_available_skills=codex_catalog.available_skills,
+        codex_tools=codex_catalog.tools,
+    )
+
+
 def record_agent_exit(
     *,
     repo: str,
@@ -430,180 +646,49 @@ def record_agent_exit(
 ) -> Optional[list[str]]:
     """Parse usage from agent stdout and append a single `agent_exit` record.
 
-    Pulled out of `workflow._run_agent_tracked` so the parse + append step
-    has a single try/except boundary: a malformed JSONL stream from a
-    flaky backend, an unknown-price model rev, or a transient IO failure
-    on the sink path must NEVER propagate out of the wrapper -- the audit
-    `agent_exit` is already emitted and the agent itself has exited.
-    `append_record` is internally hardened against OSError; the helper
-    here additionally guards the parse step.
+    Usage parsing is the only failure that suppresses the baseline event. A
+    successful parse is attached to `result.usage` even when the analytics sink
+    is disabled, allowing workflow callers to reuse the structured metrics.
+    `fallback_model` supplies Codex's configured model when its stream omits one.
 
-    `fallback_model` is the configured-spec model name (from
-    `workflow._configured_model`) the codex parser uses when no usage
-    frame carries one; the claude parser ignores it (claude streams always
-    include `message.model`).
+    Skill parsing and Codex capability discovery have independent fail-open
+    guards, so either can fail without dropping usage and cost. The baseline
+    builder allowlists context, session, usage, and normalized skill fields; it
+    never stores raw stdout, stderr, prompts, or worktree contents.
 
-    When `TRACK_SKILL_TRIGGERS` is on, the agent's triggered skills are
-    parsed from the same stdout and folded into the record as
-    `skills_triggered` / `skills_triggered_count` / `skills_available`.
-    That parse rides its OWN inner try/except -- it must NOT share the
-    usage-parse guard above, which `return`s and drops the whole record on
-    failure: an opt-in skill-parser bug must never cost the baseline
-    usage / cost record that ships today. On any skill-parse failure we log
-    and fall through with the three fields left `None`, so `build_record`
-    drops them and the record degrades to "agent_exit without skill
-    fields," never a missing record. With the switch off the extractor
-    never runs and the record stays byte-for-byte shape-compatible with
-    today's.
-
-    `cwd` is the run's worktree. Codex's `--json` stream carries neither an
-    offered-skills nor an offered-tools catalog (claude reads both from its
-    `system`/`init` frame), so for a codex run they are discovered out-of-band
-    instead: `skills_available` from the filesystem
-    (`skill_catalog.discover_local_skills`, needing `cwd`), filling both this
-    record (behind `TRACK_SKILL_TRIGGERS`) and the trajectory record (behind
-    `TRAJECTORY_LOG_PATH`); and the trajectory-only `tools` from
-    `skill_catalog.discover_codex_tools`, a best-effort baseline. The claude
-    offered sets still come from its stream; the discovery runs only for codex
-    and never overrides a non-empty stream-parsed set. Its own guard keeps a
-    discovery failure from disturbing the baseline record.
-
-    `prompt` is the orchestrator-built agent prompt. It is stored only as
-    the redacted `user_input` of the opt-in trajectory record, and ONLY
-    when `TRAJECTORY_LOG_PATH` is enabled -- the baseline `agent_exit`
-    usage / cost record never carries it, so the default-install record
-    shape is unchanged. When the trajectory sink is on, the run's
-    trajectory is parsed from the same stdout, every free-text field is
-    redacted and head/tail truncated, the `metrics` parsed above are
-    denormalized into a `run_usage` summary (with claude's per-turn
-    breakdown), and a single `agent_trajectory` record is appended to the
-    trajectory file. That work rides its OWN
-    inner fail-open guard (`_maybe_record_trajectory`): a parser, redactor,
-    or sink failure logs and is swallowed so it can never drop the baseline
-    record above or the caller's `skill_triggered` audit events.
-
-    As a side effect it attaches the parsed `UsageMetrics` onto `result.usage`
-    so a tracked run can surface structured usage to workflow callers without a
-    second parse. That assignment runs on any successful parse, independent of
-    whether the sink is enabled; a usage-parse failure returns before it, leaving
-    `result.usage` at its `None` default (fail-open).
+    The prompt is passed only to the opt-in trajectory sink, where
+    `_maybe_record_trajectory` redacts and truncates every free-text field under
+    its own fail-open guard. Baseline persistence always happens before that
+    optional work.
 
     Returns the distinct triggered skill names (first-seen order) so the
     caller can emit per-skill audit events without reparsing stdout, or
     `None` when nothing fired, the switch is off, the skill parse failed,
     or the usage parse failed (no record was written).
     """
-    try:
-        metrics = usage.parse_agent_usage(
-            backend, result.stdout, fallback_model=fallback_model,
-        )
-    except Exception:
-        log.exception(
-            "issue=#%d analytics: parse_agent_usage(%s) failed; "
-            "skipping record",
-            issue, backend,
-        )
-        return None
-    # Surface the parsed usage back onto the result so the tracked-run wrapper
-    # (`workflow._run_agent_tracked`) can hand structured metrics to its callers
-    # without re-parsing stdout. Set only after a successful parse -- a parse
-    # failure returns above with `result.usage` left at its `None` default, so
-    # the plumbing is fail-open -- and independent of the sink state below, so
-    # callers see usage even when `ANALYTICS_LOG_PATH` is disabled.
-    result.usage = metrics
-    # Codex exposes neither an offered-skills nor an offered-tools catalog in
-    # its stream, so discover both out-of-band (mirroring claude's `system`/
-    # `init` frame). `codex_available` (skills) needs the worktree `cwd` and
-    # feeds both the `agent_exit` skill block below and the trajectory record;
-    # `codex_tools` is a static baseline that feeds only the trajectory record.
-    # Computed only when a sink that carries them is on, under one guard so a
-    # discovery failure never touches the baseline usage record. Claude keeps
-    # its stream-parsed sets.
-    codex_available: Optional[list[str]] = None
-    codex_tools: Optional[list[str]] = None
-    if backend == "codex":
-        try:
-            from orchestrator import skill_catalog
-            if cwd is not None and (
-                TRACK_SKILL_TRIGGERS or TRAJECTORY_LOG_PATH is not None
-            ):
-                codex_available = (
-                    list(skill_catalog.discover_local_skills(cwd)) or None
-                )
-            if TRAJECTORY_LOG_PATH is not None:
-                codex_tools = list(skill_catalog.discover_codex_tools()) or None
-        except Exception:
-            log.exception(
-                "issue=#%d analytics: codex out-of-band discovery failed; "
-                "leaving skills_available / tools empty",
-                issue,
-            )
-    skills_triggered: Optional[list[str]] = None
-    skills_triggered_count: Optional[int] = None
-    skills_available: Optional[list[str]] = None
-    if TRACK_SKILL_TRIGGERS:
-        try:
-            skills = usage.parse_agent_skills(backend, result.stdout)
-            if skills.triggered:
-                skills_triggered = list(skills.triggered)
-                skills_triggered_count = sum(skills.trigger_counts.values())
-            # Prefer the stream-parsed offered set (claude); fall back to the
-            # out-of-band codex discovery, which fills the offered set for
-            # codex runs whose stream carries none.
-            available = list(skills.available) or codex_available
-            if available:
-                skills_available = available
-        except Exception:
-            log.exception(
-                "issue=#%d analytics: parse_agent_skills(%s) failed; "
-                "emitting record without skill fields",
-                issue, backend,
-            )
-    append_record(
-        build_record(
-            repo=repo,
-            issue=int(issue),
-            event="agent_exit",
-            stage=stage,
-            agent_role=agent_role,
-            backend=backend,
-            agent_spec=agent_spec,
-            resume_session_id=resume_session_id,
-            session_id=result.session_id,
-            review_round=review_round,
-            retry_count=retry_count,
-            duration_s=duration_s,
-            exit_code=result.exit_code,
-            timed_out=result.timed_out,
-            input_tokens=metrics.input_tokens,
-            output_tokens=metrics.output_tokens,
-            cached_tokens=metrics.cached_tokens,
-            cache_read_tokens=metrics.cache_read_tokens,
-            cache_write_tokens=metrics.cache_write_tokens,
-            models=list(metrics.models),
-            turns=metrics.turns,
-            cost_usd=metrics.cost_usd,
-            cost_source=metrics.cost_source,
-            skills_triggered=skills_triggered,
-            skills_triggered_count=skills_triggered_count,
-            skills_available=skills_available,
-        )
-    )
-    _maybe_record_trajectory(
+    context = _AgentExitContext(
         repo=repo,
         issue=int(issue),
         stage=stage,
         agent_role=agent_role,
         backend=backend,
-        result=result,
-        prompt=prompt,
-        metrics=metrics,
+        agent_spec=agent_spec,
+        resume_session_id=resume_session_id,
+        agent_result=result,
+        duration_s=duration_s,
         review_round=review_round,
         retry_count=retry_count,
-        codex_available_skills=codex_available,
-        codex_tools=codex_tools,
+        fallback_model=fallback_model,
+        prompt=prompt,
+        cwd=cwd,
     )
-    return skills_triggered
+    metrics = _parse_agent_exit_usage(context)
+    if metrics is None:
+        return None
+    codex_catalog = _discover_codex_catalog(context)
+    skill_fields = _parse_agent_exit_skills(context, codex_catalog)
+    _persist_agent_exit(context, metrics, skill_fields, codex_catalog)
+    return skill_fields.skills_triggered
 
 
 # --- trajectory recording ---------------------------------------------------
