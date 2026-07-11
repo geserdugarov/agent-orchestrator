@@ -5,7 +5,6 @@ from __future__ import annotations
 import unittest
 
 
-
 class CreateChildIssueAlwaysUsesParentRepoTest(unittest.TestCase):
     """`create_child_issue` is structurally bound to `self.repo` so a
     misuse cannot accidentally file a child against a different repo

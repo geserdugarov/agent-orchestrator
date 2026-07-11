@@ -614,5 +614,6 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         self.post.assert_not_called()
         self.recover.assert_not_called()
 
+
 if __name__ == "__main__":
     unittest.main()

@@ -715,6 +715,7 @@ class TickViaSchedulerTest(unittest.TestCase):
         class _FakeWtDir:
             def __init__(self, name: str) -> None:
                 self.name = name
+
             def is_dir(self) -> bool:
                 return True
 

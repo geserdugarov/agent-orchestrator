@@ -7,7 +7,6 @@ from __future__ import annotations
 import unittest
 
 
-
 class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
     """Real PyGithub's `Repository.get_issues(labels=...)` expects Label
     OBJECTS and reads `label.name`. The closed-issue sweep used to pass a
