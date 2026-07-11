@@ -171,6 +171,7 @@ def terminate_all_running(grace: float = 5.0) -> int:
         _sigkill_unless_group_gone(proc, remaining)
     return len(procs)
 
+
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,

@@ -39,7 +39,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
-| 1 | Concrete formatting and correctness cleanup | 0/9 | [ ] |
+| 1 | Concrete formatting and correctness cleanup | 1/9 | [ ] |
 | 2 | Extreme production complexity hotspots | 0/8 | [ ] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
@@ -101,8 +101,8 @@ Goal: remove objective, low-risk findings before structural refactoring.
 
 ### Package 1.1 — Production blank-line findings
 
-- [ ] Correct the three production `E305` findings in `orchestrator/agents.py` and `orchestrator/config.py`.
-- [ ] Verify that only blank-line layout changes.
+- [x] Correct the three production `E305` findings in `orchestrator/agents.py` and `orchestrator/config.py`.
+- [x] Verify that only blank-line layout changes.
 
 ### Package 1.2 — Test blank-line findings
 
@@ -450,4 +450,4 @@ Add one row for every implementation session, including partial sessions.
 
 | Date | Package | Result | Validation | PR or commit | Exact next action |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-07-11 | 1.1 | Complete | E305, Ruff, diff, 2093 passed | Not committed | Start Package 1.2 |
