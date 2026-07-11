@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -442,6 +443,152 @@ class RepoSpec:
     parallel_limit: int = 1
 
 
+@dataclass(frozen=True)
+class _RepoEnvEntry:
+    """Required fields and raw options from one REPOS entry."""
+
+    entry_no: int
+    slug: str
+    target_root: str
+    base_branch: str
+    remote_name: str
+    parallel_limit_raw: str | None
+
+
+def _iter_repos_entries(raw: str) -> Iterator[tuple[int, str]]:
+    """Yield numbered, non-comment entries from a REPOS value."""
+    # ';' accepted in addition to '\n' so the value can be one line in .env.
+    for entry_no, raw_line in enumerate(
+        raw.replace(";", "\n").splitlines(), start=1
+    ):
+        line = raw_line.strip()
+        if line and not line.startswith("#"):
+            yield entry_no, line
+
+
+def _parse_repo_remote_name(entry_no: int, parts: tuple[str, ...]) -> str:
+    """Return the remote option, rejecting an explicitly empty value."""
+    if len(parts) == 3:
+        return "origin"
+    remote_name = parts[3]
+    if not remote_name:
+        raise SystemExit(
+            f"orchestrator: REPOS entry #{entry_no} has empty "
+            "remote_name (omit the trailing '|' to default to 'origin')"
+        )
+    return remote_name
+
+
+def _validate_repo_required_fields(
+    entry_no: int,
+    slug: str,
+    target_root: str,
+    base_branch: str,
+) -> None:
+    """Validate the required fields of one REPOS entry."""
+    # Require exactly two non-empty components separated by a single '/'.
+    # A substring check also accepts empty or extra path components.
+    slug_components = slug.split("/")
+    if len(slug_components) != 2 or not all(slug_components):
+        raise SystemExit(
+            f"orchestrator: REPOS entry #{entry_no} has invalid "
+            f"owner/name {slug!r}; expected exactly 'owner/name' "
+            "with non-empty owner and name"
+        )
+    if not target_root:
+        raise SystemExit(
+            f"orchestrator: REPOS entry #{entry_no} has empty target_root"
+        )
+    if not base_branch:
+        raise SystemExit(
+            f"orchestrator: REPOS entry #{entry_no} has empty base_branch"
+        )
+
+
+def _parse_repo_entry(entry_no: int, line: str) -> _RepoEnvEntry:
+    """Parse and validate the fields of one REPOS entry."""
+    parts = tuple(part.strip() for part in line.split("|"))
+    if len(parts) not in (3, 4, 5):
+        raise SystemExit(
+            f"orchestrator: REPOS entry #{entry_no} is malformed "
+            f"(expected 'owner/name|target_root|base_branch' "
+            f"with optional '|remote_name' and '|parallel_limit'): "
+            f"{line!r}"
+        )
+    slug, target_root, base_branch = parts[:3]
+    remote_name = _parse_repo_remote_name(entry_no, parts)
+    _validate_repo_required_fields(
+        entry_no,
+        slug,
+        target_root,
+        base_branch,
+    )
+    return _RepoEnvEntry(
+        entry_no=entry_no,
+        slug=slug,
+        target_root=target_root,
+        base_branch=base_branch,
+        remote_name=remote_name,
+        parallel_limit_raw=parts[4] if len(parts) == 5 else None,
+    )
+
+
+def _record_repo_slug(entry: _RepoEnvEntry, seen: set[str]) -> None:
+    """Reject duplicate repository slugs and record a unique one."""
+    if entry.slug in seen:
+        raise SystemExit(
+            f"orchestrator: REPOS lists duplicate slug {entry.slug!r}; "
+            "each repo can appear only once"
+        )
+    seen.add(entry.slug)
+
+
+def _parse_repo_parallel_limit(entry: _RepoEnvEntry) -> int:
+    """Validate one entry's optional parallel limit."""
+    if entry.parallel_limit_raw is None:
+        return MAX_PARALLEL_ISSUES_PER_REPO
+    if not entry.parallel_limit_raw:
+        raise SystemExit(
+            f"orchestrator: REPOS entry #{entry.entry_no} has empty "
+            "parallel_limit (omit the trailing '|' to default to "
+            f"MAX_PARALLEL_ISSUES_PER_REPO={MAX_PARALLEL_ISSUES_PER_REPO})"
+        )
+    try:
+        parallel_limit = int(entry.parallel_limit_raw)
+    except ValueError:
+        raise SystemExit(
+            f"orchestrator: REPOS entry #{entry.entry_no} parallel_limit "
+            f"{entry.parallel_limit_raw!r} is not a valid integer; expected "
+            "a positive integer (>= 1)"
+        )
+    if parallel_limit < 1:
+        raise SystemExit(
+            f"orchestrator: REPOS entry #{entry.entry_no} parallel_limit "
+            f"{entry.parallel_limit_raw!r} must be >= 1 (zero or negative "
+            "would block all work for this repo)"
+        )
+    return parallel_limit
+
+
+def _repo_spec_from_env_entry(entry: _RepoEnvEntry) -> RepoSpec:
+    """Validate entry options and build a RepoSpec."""
+    parallel_limit = _parse_repo_parallel_limit(entry)
+    target_path = Path(entry.target_root)
+    if not target_path.exists():
+        print(
+            f"orchestrator: REPOS entry {entry.slug!r} target_root "
+            f"{target_path} does not exist; worktree creation will fail",
+            file=sys.stderr,
+        )
+    return RepoSpec(
+        slug=entry.slug,
+        target_root=target_path,
+        base_branch=entry.base_branch,
+        remote_name=entry.remote_name,
+        parallel_limit=parallel_limit,
+    )
+
+
 def _parse_repos_env(raw: str) -> list[RepoSpec]:
     """Parse the REPOS env value into a list of RepoSpecs.
 
@@ -462,112 +609,10 @@ def _parse_repos_env(raw: str) -> list[RepoSpec]:
     """
     specs: list[RepoSpec] = []
     seen: set[str] = set()
-    # ';' accepted in addition to '\n' so the value can be one line in .env.
-    for entry_no, raw_line in enumerate(
-        raw.replace(";", "\n").splitlines(), start=1
-    ):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split("|")
-        if len(parts) not in (3, 4, 5):
-            raise SystemExit(
-                f"orchestrator: REPOS entry #{entry_no} is malformed "
-                f"(expected 'owner/name|target_root|base_branch' "
-                f"with optional '|remote_name' and '|parallel_limit'): "
-                f"{line!r}"
-            )
-        parallel_limit_raw: str | None = None
-        if len(parts) == 3:
-            slug, target_root, base_branch = (p.strip() for p in parts)
-            remote_name = "origin"
-        elif len(parts) == 4:
-            slug, target_root, base_branch, remote_name = (
-                p.strip() for p in parts
-            )
-            if not remote_name:
-                raise SystemExit(
-                    f"orchestrator: REPOS entry #{entry_no} has empty "
-                    "remote_name (omit the trailing '|' to default to "
-                    "'origin')"
-                )
-        else:
-            (
-                slug,
-                target_root,
-                base_branch,
-                remote_name,
-                parallel_limit_raw,
-            ) = (p.strip() for p in parts)
-            if not remote_name:
-                raise SystemExit(
-                    f"orchestrator: REPOS entry #{entry_no} has empty "
-                    "remote_name (omit the trailing '|' to default to "
-                    "'origin')"
-                )
-        # Require exactly two non-empty components separated by a single
-        # '/'. A bare substring check would accept 'owner//repo' (empty
-        # owner or repo) and 'owner/repo/extra' (extra path segment).
-        slug_components = slug.split("/")
-        if len(slug_components) != 2 or not all(slug_components):
-            raise SystemExit(
-                f"orchestrator: REPOS entry #{entry_no} has invalid "
-                f"owner/name {slug!r}; expected exactly 'owner/name' "
-                "with non-empty owner and name"
-            )
-        if not target_root:
-            raise SystemExit(
-                f"orchestrator: REPOS entry #{entry_no} has empty target_root"
-            )
-        if not base_branch:
-            raise SystemExit(
-                f"orchestrator: REPOS entry #{entry_no} has empty base_branch"
-            )
-        if slug in seen:
-            raise SystemExit(
-                f"orchestrator: REPOS lists duplicate slug {slug!r}; "
-                "each repo can appear only once"
-            )
-        seen.add(slug)
-        if parallel_limit_raw is None:
-            parallel_limit = MAX_PARALLEL_ISSUES_PER_REPO
-        elif not parallel_limit_raw:
-            raise SystemExit(
-                f"orchestrator: REPOS entry #{entry_no} has empty "
-                "parallel_limit (omit the trailing '|' to default to "
-                f"MAX_PARALLEL_ISSUES_PER_REPO={MAX_PARALLEL_ISSUES_PER_REPO})"
-            )
-        else:
-            try:
-                parallel_limit = int(parallel_limit_raw)
-            except ValueError:
-                raise SystemExit(
-                    f"orchestrator: REPOS entry #{entry_no} parallel_limit "
-                    f"{parallel_limit_raw!r} is not a valid integer; expected "
-                    "a positive integer (>= 1)"
-                )
-            if parallel_limit < 1:
-                raise SystemExit(
-                    f"orchestrator: REPOS entry #{entry_no} parallel_limit "
-                    f"{parallel_limit_raw!r} must be >= 1 (zero or negative "
-                    "would block all work for this repo)"
-                )
-        target_path = Path(target_root)
-        if not target_path.exists():
-            print(
-                f"orchestrator: REPOS entry {slug!r} target_root "
-                f"{target_path} does not exist; worktree creation will fail",
-                file=sys.stderr,
-            )
-        specs.append(
-            RepoSpec(
-                slug=slug,
-                target_root=target_path,
-                base_branch=base_branch,
-                remote_name=remote_name,
-                parallel_limit=parallel_limit,
-            )
-        )
+    for entry_no, line in _iter_repos_entries(raw):
+        entry = _parse_repo_entry(entry_no, line)
+        _record_repo_slug(entry, seen)
+        specs.append(_repo_spec_from_env_entry(entry))
     if not specs:
         raise SystemExit(
             "orchestrator: REPOS is set but contains no valid entries; "

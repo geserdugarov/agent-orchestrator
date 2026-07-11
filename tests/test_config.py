@@ -728,6 +728,17 @@ class MultiRepoConfigTest(unittest.TestCase):
             self.assertIn("duplicate slug", msg)
             self.assertIn("alpha/one", msg)
 
+    def test_duplicate_slug_error_precedes_option_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit) as cm:
+                self._load_config({
+                    "REPOS": (
+                        f"alpha/one|{td}|main\n"
+                        f"alpha/one|{td}|develop|origin|invalid"
+                    ),
+                })
+            self.assertIn("duplicate slug", str(cm.exception))
+
     def test_malformed_entry_aborts_at_import(self) -> None:
         # Wrong number of '|' segments.
         with self.assertRaises(SystemExit) as cm:
