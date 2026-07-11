@@ -705,7 +705,7 @@ def _lighten_hex(hex_color: str, alpha: float) -> str:
     only emits 6-hex strings.
     """
     h = hex_color.lstrip("#")
-    r = int(h[0:2], 16)
+    r = int(h[:2], 16)
     g = int(h[2:4], 16)
     b = int(h[4:6], 16)
     return f"rgba({r},{g},{b},{alpha:.2f})"

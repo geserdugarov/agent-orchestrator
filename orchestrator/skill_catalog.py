@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import suppress
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -204,11 +205,9 @@ def _direct_skill_names(root: Path) -> list[str]:
     for entry in entries:
         if entry.name.startswith("."):
             continue
-        try:
+        with suppress(OSError):
             if entry.is_dir() and (Path(entry.path) / _SKILL_FILE).is_file():
                 names.append(entry.name)
-        except OSError:
-            continue
     return sorted(names)
 
 
