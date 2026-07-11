@@ -39,7 +39,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
-| 1 | Concrete formatting and correctness cleanup | 3/9 | [ ] |
+| 1 | Concrete formatting and correctness cleanup | 4/9 | [ ] |
 | 2 | Extreme production complexity hotspots | 0/8 | [ ] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
@@ -128,7 +128,7 @@ Goal: remove objective, low-risk findings before structural refactoring.
 
 ### Package 1.4 — Inline-comment spacing
 
-- [ ] Correct `E261` in `tests/test_workflow_implementing_pr_reuse.py`.
+- [x] Correct `E261` in `tests/test_workflow_implementing_pr_reuse.py`.
 
 ### Package 1.5 — File resource handling
 
@@ -453,3 +453,4 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 1.1 | Complete | E305, Ruff, diff, 2093 passed | Not committed | Start Package 1.2 |
 | 2026-07-11 | 1.2 | Complete | E303/E305/E306, Ruff, diff, 2093 passed, 3 skipped | Not committed | Start Package 1.3 |
 | 2026-07-11 | 1.3 | Complete | E127/E128, Ruff, diff, 2093 passed, 3 skipped | Not committed | Start Package 1.4 |
+| 2026-07-11 | 1.4 | Complete | E261, 41 focused, Ruff, diff, 2093 passed, 3 skipped | Not committed | Start Package 1.5 |

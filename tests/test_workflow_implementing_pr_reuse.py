@@ -519,7 +519,7 @@ class ConventionalSubjectHelperTest(unittest.TestCase):
             "feat:",            # no subject after colon
             "feat:   ",         # whitespace-only subject
             "Feat: cap type",   # types must be lowercase
-            "  feat: leading", # leading whitespace not accepted
+            "  feat: leading",  # leading whitespace not accepted
         ):
             self.assertFalse(
                 workflow._is_conventional_subject(subject),
