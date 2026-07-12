@@ -21,6 +21,7 @@ tick's import surface never touches it.
 from __future__ import annotations
 
 import html
+from dataclasses import dataclass
 from datetime import date
 from typing import Callable, Optional, Sequence
 
@@ -87,7 +88,9 @@ def _short_repo_name(repo: str) -> str:
 
 
 def _sparkline_y(value: float, *, lo: float, span: float, pad: int, h: int) -> float:
-    return pad + (1 - (value - lo) / span) * (h - pad * 2)
+    normalized_value = (value - lo) / span
+    drawable_height = h - pad * 2
+    return pad + (1 - normalized_value) * drawable_height
 
 
 def _int_or_zero(raw: object) -> int:
@@ -108,6 +111,91 @@ def _plural_s(count: int) -> str:
     return "s"
 
 
+@dataclass(frozen=True)
+class _SparklineLayout:
+    low: float
+    span: float
+    padding: int
+    height: int
+    step: float
+
+
+@dataclass(frozen=True)
+class _SparklinePaths:
+    polyline: str
+    area: str
+
+
+def _sparkline_step(width: int, padding: int, value_count: int) -> float:
+    drawable_width = width - padding * 2
+    intervals = max(value_count - 1, 1)
+    return drawable_width / intervals
+
+
+def _sparkline_layout(values: Sequence[float], *, width: int, height: int) -> _SparklineLayout:
+    low = min(values)
+    padding = 2
+    return _SparklineLayout(
+        low=low,
+        span=max(max(values) - low, 1e-9),
+        padding=padding,
+        height=height,
+        step=_sparkline_step(width, padding, len(values)),
+    )
+
+
+def _sparkline_point(index: int, value: float, layout: _SparklineLayout) -> tuple[float, float]:
+    return (
+        layout.padding + index * layout.step,
+        _sparkline_y(
+            value,
+            lo=layout.low,
+            span=layout.span,
+            pad=layout.padding,
+            h=layout.height,
+        ),
+    )
+
+
+def _sparkline_points(
+    values: Sequence[float], *, width: int, height: int,
+) -> list[tuple[float, float]]:
+    numbers = [float(value or 0) for value in values]
+    if not numbers or max(numbers) == min(numbers) == 0:
+        return []
+    layout = _sparkline_layout(numbers, width=width, height=height)
+    return [
+        _sparkline_point(index, value, layout)
+        for index, value in enumerate(numbers)
+    ]
+
+
+def _sparkline_paths(
+    points: Sequence[tuple[float, float]], *, height: int,
+) -> _SparklinePaths:
+    padding = 2
+    polyline = " ".join(map(_sparkline_point_text, points))
+    area = _sparkline_area_path(points, height=height, padding=padding)
+    return _SparklinePaths(polyline=polyline, area=area)
+
+
+def _sparkline_point_text(point: tuple[float, float]) -> str:
+    return f"{point[0]:.1f},{point[1]:.1f}"
+
+
+def _sparkline_area_path(
+    points: Sequence[tuple[float, float]],
+    *,
+    height: int,
+    padding: int,
+) -> str:
+    baseline = height - padding
+    start = f"M{points[0][0]:.1f},{baseline:.1f}"
+    line = " L" + " L".join(map(_sparkline_point_text, points))
+    end = f" L{points[-1][0]:.1f},{baseline:.1f} Z"
+    return start + line + end
+
+
 def _sparkline_svg(
     values: Sequence[float], *, color: str, w: int = 96, h: int = 26
 ) -> str:
@@ -118,31 +206,15 @@ def _sparkline_svg(
     without a chart round-trip. Empty / flat data renders an empty SVG
     so the layout slot stays consistent across KPIs.
     """
-    nums = [float(v or 0) for v in values]
-    if len(nums) == 0 or max(nums) == min(nums) == 0:
+    points = _sparkline_points(values, width=w, height=h)
+    if not points:
         return f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}"></svg>'
-    lo, hi = min(nums), max(nums)
-    span = max(hi - lo, 1e-9)
-    pad = 2
-    step = (w - pad * 2) / max(len(nums) - 1, 1)
-    points = [
-        (
-            pad + i * step,
-            _sparkline_y(v, lo=lo, span=span, pad=pad, h=h),
-        )
-        for i, v in enumerate(nums)
-    ]
-    poly = " ".join(f"{x:.1f},{yv:.1f}" for x, yv in points)
-    area_path = (
-        "M" + f"{points[0][0]:.1f},{h - pad:.1f}"
-        + " L" + " L".join(f"{x:.1f},{yv:.1f}" for x, yv in points)
-        + f" L{points[-1][0]:.1f},{h - pad:.1f} Z"
-    )
+    paths = _sparkline_paths(points, height=h)
     return (
         f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
         f'style="display:block">'
-        f'<path d="{area_path}" fill="{color}" fill-opacity="0.18" />'
-        f'<polyline points="{poly}" fill="none" stroke="{color}" '
+        f'<path d="{paths.area}" fill="{color}" fill-opacity="0.18" />'
+        f'<polyline points="{paths.polyline}" fill="none" stroke="{color}" '
         f'stroke-width="1.6" stroke-linecap="round" '
         f'stroke-linejoin="round" />'
         "</svg>"
@@ -305,29 +377,44 @@ def _review_round_html(review_rounds: int) -> str:
     return str(review_rounds)
 
 
+@dataclass(frozen=True)
+class _IssueRowView:
+    short_repo: str
+    cost_text: str
+    bar_pct: float
+    review_rounds: int
+    retries: int
+    failed: int
+
+
+def _issue_row_view(row: IssueSummaryRow, max_cost: float) -> _IssueRowView:
+    return _IssueRowView(
+        short_repo=_short_repo_name(row.repo),
+        cost_text=_money_or_dash(row.total_cost_usd),
+        bar_pct=_relative_width_pct(float(row.total_cost_usd or 0.0), max_cost),
+        review_rounds=_int_or_zero(row.max_review_round),
+        retries=_int_or_zero(row.max_retry_count),
+        failed=int(row.failed_agent_runs or 0),
+    )
+
+
 def _issue_table_row_html(row: IssueSummaryRow, *, max_cost: float) -> str:
-    short = _short_repo_name(row.repo)
-    cost = float(row.total_cost_usd or 0.0)
-    bar_pct = _relative_width_pct(cost, max_cost)
-    cost_text = _money_or_dash(row.total_cost_usd)
-    review_rounds = _int_or_zero(row.max_review_round)
-    retries = _int_or_zero(row.max_retry_count)
-    failed = int(row.failed_agent_runs or 0)
+    view = _issue_row_view(row, max_cost)
     return (
         "<tr>"
         "<td>"
         '<div class="orch-issue-cell">'
-        f'<span><span class="orch-issue-name">{html.escape(short)}</span>'
+        f'<span><span class="orch-issue-name">{html.escape(view.short_repo)}</span>'
         f' <span class="orch-issue-num">#{int(row.issue)}</span></span>'
-        f'<span class="orch-issue-bar"><span style="width:{bar_pct:.1f}%">'
+        f'<span class="orch-issue-bar"><span style="width:{view.bar_pct:.1f}%">'
         "</span></span>"
         "</div>"
         "</td>"
-        f'<td class="r strong">{html.escape(cost_text)}</td>'
+        f'<td class="r strong">{html.escape(view.cost_text)}</td>'
         f'<td class="r">{int(row.agent_exits or 0)}</td>'
-        f'<td class="r">{_review_round_html(review_rounds)}</td>'
-        f'<td class="r">{retries}</td>'
-        f'<td class="r">{_issue_status_pill(failed)}</td>'
+        f'<td class="r">{_review_round_html(view.review_rounds)}</td>'
+        f'<td class="r">{view.retries}</td>'
+        f'<td class="r">{_issue_status_pill(view.failed)}</td>'
         "</tr>"
     )
 
@@ -467,21 +554,25 @@ _SKILL_MATRIX_EXTRA_CSS = """
   .orch-skillmatrix-sort { margin-left: 3px; color: var(--orch-accent); }
 """
 
-# Column model for the per-skill trigger matrix. Each entry is
-# `(param key, header label, right-aligned?, sort-value function)`. The
-# key is the stable identifier a clickable header encodes into the
-# `mtx_sort` query param, and the sort function pulls exactly the value
-# the column shows so a header click sorts on what the operator sees.
-_SKILL_MATRIX_COLUMNS: tuple[
-    tuple[str, str, bool, Callable[[SkillTriggerMatrixRow], object]], ...
-] = (
-    ("repo", "Repo", False, lambda r: (r.repo or "").lower()),
-    ("role", "Role", False, lambda r: (r.agent_role or "").lower()),
-    ("backend", "Backend", False, lambda r: (r.backend or "").lower()),
-    ("skill", "Skill", False, lambda r: (r.skill or "").lower()),
-    ("runs", "Runs", True, lambda r: int(r.runs)),
-    ("skill_runs", "Runs with skill", True, lambda r: int(r.skill_runs)),
-    ("rate", "Trigger rate", True, lambda r: r.rate),
+@dataclass(frozen=True)
+class _SkillMatrixColumn:
+    key: str
+    label: str
+    right_aligned: bool
+    sort_value: Callable[[SkillTriggerMatrixRow], object]
+
+
+# Column model for the per-skill trigger matrix. The key is the stable
+# identifier a clickable header encodes into the `mtx_sort` query param,
+# and the sort function pulls exactly the value the column shows.
+_SKILL_MATRIX_COLUMNS = (
+    _SkillMatrixColumn("repo", "Repo", False, lambda row: (row.repo or "").lower()),
+    _SkillMatrixColumn("role", "Role", False, lambda row: (row.agent_role or "").lower()),
+    _SkillMatrixColumn("backend", "Backend", False, lambda row: (row.backend or "").lower()),
+    _SkillMatrixColumn("skill", "Skill", False, lambda row: (row.skill or "").lower()),
+    _SkillMatrixColumn("runs", "Runs", True, lambda row: int(row.runs)),
+    _SkillMatrixColumn("skill_runs", "Runs with skill", True, lambda row: int(row.skill_runs)),
+    _SkillMatrixColumn("rate", "Trigger rate", True, lambda row: row.rate),
 )
 
 # Numeric columns default a first click to descending (largest first is
@@ -490,7 +581,7 @@ _SKILL_MATRIX_COLUMNS: tuple[
 _SKILL_MATRIX_NUMERIC_KEYS = frozenset({"runs", "skill_runs", "rate"})
 
 _SKILL_MATRIX_SORT_KEYS: dict[str, Callable[[SkillTriggerMatrixRow], object]] = {
-    key: fn for key, _label, _right, fn in _SKILL_MATRIX_COLUMNS
+    column.key: column.sort_value for column in _SKILL_MATRIX_COLUMNS
 }
 
 # Query-param names the clickable headers write and the dashboard reads
@@ -542,7 +633,55 @@ def _default_sort_skill_matrix_rows(
     tying on both keys keep the read model's order (Runs-with-skill DESC
     then Runs DESC then a stable repo/role/backend/skill tiebreak).
     """
-    return sorted(rows, key=lambda r: ((r.repo or "").lower(), -r.rate))
+    return sorted(rows, key=_skill_matrix_default_sort_key)
+
+
+def _skill_matrix_default_sort_key(
+    row: SkillTriggerMatrixRow,
+) -> tuple[str, float]:
+    repo = (row.repo or "").lower()
+    rate = -row.rate
+    return repo, rate
+
+
+@dataclass(frozen=True)
+class _SkillMatrixHeaderState:
+    direction: str
+    arrow: str
+
+
+def _skill_matrix_header_state(
+    column: _SkillMatrixColumn,
+    active_key: Optional[str],
+    descending: bool,
+) -> _SkillMatrixHeaderState:
+    if column.key == active_key:
+        direction = "asc" if descending else "desc"
+        arrow = "▼" if descending else "▲"
+        return _SkillMatrixHeaderState(direction=direction, arrow=arrow)
+    if column.key in _SKILL_MATRIX_NUMERIC_KEYS:
+        return _SkillMatrixHeaderState(direction="desc", arrow="")
+    return _SkillMatrixHeaderState(direction="asc", arrow="")
+
+
+def _skill_matrix_header_cell(
+    column: _SkillMatrixColumn,
+    active_key: Optional[str],
+    descending: bool,
+) -> str:
+    state = _skill_matrix_header_state(column, active_key, descending)
+    cell_class = ' class="r"' if column.right_aligned else ""
+    arrow_html = ""
+    if state.arrow:
+        arrow_html = f'<span class="orch-skillmatrix-sort">{state.arrow}</span>'
+    return (
+        f"<th{cell_class}>"
+        f'<a class="orch-skillmatrix-h" '
+        f'href="?{SKILL_MATRIX_SORT_PARAM}={column.key}'
+        f'&{SKILL_MATRIX_DIR_PARAM}={state.direction}" target="_self">'
+        f"{html.escape(column.label)}</a>{arrow_html}"
+        "</th>"
+    )
 
 
 def _skill_matrix_header_html(active_key: Optional[str], descending: bool) -> str:
@@ -556,31 +695,10 @@ def _skill_matrix_header_html(active_key: Optional[str], descending: bool) -> st
     `target="_self"` keeps the navigation in-tab so Streamlit reruns in
     place rather than opening a new window.
     """
-    cells: list[str] = []
-    for key, label, right, _fn in _SKILL_MATRIX_COLUMNS:
-        if key == active_key:
-            next_desc = not descending
-            arrow = "▼" if descending else "▲"
-        else:
-            next_desc = key in _SKILL_MATRIX_NUMERIC_KEYS
-            arrow = ""
-        direction = "desc" if next_desc else "asc"
-        href = (
-            f"?{SKILL_MATRIX_SORT_PARAM}={key}"
-            f"&{SKILL_MATRIX_DIR_PARAM}={direction}"
-        )
-        cls = ' class="r"' if right else ""
-        arrow_html = (
-            f'<span class="orch-skillmatrix-sort">{arrow}</span>'
-            if arrow
-            else ""
-        )
-        cells.append(
-            f"<th{cls}>"
-            f'<a class="orch-skillmatrix-h" href="{href}" target="_self">'
-            f"{html.escape(label)}</a>{arrow_html}"
-            "</th>"
-        )
+    cells = (
+        _skill_matrix_header_cell(column, active_key, descending)
+        for column in _SKILL_MATRIX_COLUMNS
+    )
     return "<thead><tr>" + "".join(cells) + "</tr></thead>"
 
 
@@ -588,30 +706,47 @@ def _muted_zero_html(value: str) -> str:
     return f'<span class="orch-skillmatrix-zero">{value}</span>'
 
 
-def _skill_matrix_row_html(row: SkillTriggerMatrixRow) -> str:
-    repo = row.repo or "unknown"
-    role = row.agent_role or "unknown"
-    backend = row.backend or "unknown"
-    skill = row.skill or "unknown"
-    runs = int(row.runs)
+@dataclass(frozen=True)
+class _SkillMatrixRowView:
+    repo: str
+    role: str
+    backend: str
+    skill: str
+    runs: int
+    skill_runs_html: str
+    rate_html: str
+
+
+def _skill_matrix_row_view(row: SkillTriggerMatrixRow) -> _SkillMatrixRowView:
     skill_runs = int(row.skill_runs)
-    skill_runs_html = (
-        _muted_zero_html("0") if skill_runs == 0 else str(skill_runs)
+    if skill_runs == 0:
+        skill_runs_html = _muted_zero_html("0")
+        rate_html = _muted_zero_html("0%")
+    else:
+        skill_runs_html = str(skill_runs)
+        rate_html = f"{row.rate * 100.0:.0f}%"
+    return _SkillMatrixRowView(
+        repo=row.repo or "unknown",
+        role=row.agent_role or "unknown",
+        backend=row.backend or "unknown",
+        skill=row.skill or "unknown",
+        runs=int(row.runs),
+        skill_runs_html=skill_runs_html,
+        rate_html=rate_html,
     )
-    rate_html = (
-        _muted_zero_html("0%")
-        if skill_runs == 0
-        else f"{row.rate * 100.0:.0f}%"
-    )
+
+
+def _skill_matrix_row_html(row: SkillTriggerMatrixRow) -> str:
+    view = _skill_matrix_row_view(row)
     return (
         "<tr>"
-        f'<td class="strong">{html.escape(repo)}</td>'
-        f'<td>{html.escape(role)}</td>'
-        f'<td>{html.escape(backend)}</td>'
-        f'<td>{html.escape(skill)}</td>'
-        f'<td class="r">{runs}</td>'
-        f'<td class="r">{skill_runs_html}</td>'
-        f'<td class="r">{rate_html}</td>'
+        f'<td class="strong">{html.escape(view.repo)}</td>'
+        f'<td>{html.escape(view.role)}</td>'
+        f'<td>{html.escape(view.backend)}</td>'
+        f'<td>{html.escape(view.skill)}</td>'
+        f'<td class="r">{view.runs}</td>'
+        f'<td class="r">{view.skill_runs_html}</td>'
+        f'<td class="r">{view.rate_html}</td>'
         "</tr>"
     )
 
@@ -755,9 +890,7 @@ def _backend_efficiency_card_html(
     handle so this module stays free of the theme import (and the
     lazy-import invariant the dashboard relies on).
     """
-    tokens, cost_per_m, cost_per_run, cache_hit_pct = (
-        _backend_efficiency_metrics(row)
-    )
+    metrics = _backend_efficiency_metrics(row)
     color = theme.color_for(
         row.backend, explicit=theme.BACKEND_COLORS
     )
@@ -774,7 +907,7 @@ def _backend_efficiency_card_html(
         f'{html.escape(row.backend)}</b>'
         f'<span style="color:{theme.MUTED_TEXT};'
         f'font-size:12px;margin-left:auto">'
-        f'{row.runs} runs · {theme.fmt_tokens(tokens)} tok'
+        f'{row.runs} runs · {theme.fmt_tokens(metrics.tokens)} tok'
         '</span>'
         '</div>'
         f'<div style="color:{theme.TEXT};font-size:20px;'
@@ -788,38 +921,44 @@ def _backend_efficiency_card_html(
         f'spend</span></div>'
         f'<div style="display:flex;gap:14px;font-size:12px;'
         f'color:{theme.MUTED_TEXT}">'
-        f'<span>${cost_per_m:.2f} / 1M tok</span>'
-        f'<span>{cache_hit_pct:.0f}% cache hit</span>'
-        f'<span>${cost_per_run:.2f} / run</span>'
+        f'<span>${metrics.cost_per_million:.2f} / 1M tok</span>'
+        f'<span>{metrics.cache_hit_pct:.0f}% cache hit</span>'
+        f'<span>${metrics.cost_per_run:.2f} / run</span>'
         '</div></div>'
     )
 
 
+@dataclass(frozen=True)
+class _BackendEfficiencyMetrics:
+    tokens: int
+    cost_per_million: float
+    cost_per_run: float
+    cache_hit_pct: float
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator
+
+
 def _backend_efficiency_metrics(
     row: BackendEfficiencyRow,
-) -> tuple[int, float, float, float]:
+) -> _BackendEfficiencyMetrics:
     tokens = int(
         (row.total_input_tokens or 0)
         + (row.total_output_tokens or 0)
         + (row.total_cache_read_tokens or 0)
         + (row.total_cache_write_tokens or 0)
     )
-    cost_per_m = (
-        (row.total_cost_usd / (tokens / 1_000_000))
-        if tokens > 0 else 0.0
-    )
-    cost_per_run = (
-        (row.total_cost_usd / row.runs)
-        if row.runs > 0 else 0.0
-    )
     cache_read = int(row.total_cache_read_tokens or 0)
-    input_tok = int(row.total_input_tokens or 0)
-    cache_input_total = cache_read + input_tok
-    cache_hit_pct = (
-        (cache_read / cache_input_total * 100)
-        if cache_input_total > 0 else 0.0
+    cache_input_total = cache_read + int(row.total_input_tokens or 0)
+    return _BackendEfficiencyMetrics(
+        tokens=tokens,
+        cost_per_million=_safe_ratio(row.total_cost_usd, tokens / 1_000_000),
+        cost_per_run=_safe_ratio(row.total_cost_usd, row.runs),
+        cache_hit_pct=_safe_ratio(cache_read, cache_input_total) * 100,
     )
-    return tokens, cost_per_m, cost_per_run, cache_hit_pct
 
 
 def _cost_coverage_weights(
@@ -842,6 +981,49 @@ def _cost_source_color(
     )
 
 
+@dataclass(frozen=True)
+class _CoverageSegment:
+    bar: str
+    legend: str
+
+
+def _coverage_segment(
+    row: CostCoverageRow,
+    weight: int,
+    total: int,
+    cost_sources: Sequence[str],
+    theme,
+) -> _CoverageSegment:
+    pct = weight / total * 100
+    color = _cost_source_color(row.cost_source, cost_sources, theme)
+    return _CoverageSegment(
+        bar=(
+            f'<span style="width:{pct:.1f}%;background:{color}" '
+            f'title="{html.escape(row.cost_source)}"></span>'
+        ),
+        legend=(
+            f'<span><span class="dot" style="background:{color}"></span>'
+            f'{html.escape(row.cost_source)} '
+            f'<b style="color:{theme.TEXT};'
+            f'font-family:{theme.MONO_FONT_FAMILY}">{pct:.1f}%</b>'
+            '</span>'
+        ),
+    )
+
+
+def _coverage_segments(
+    rows: Sequence[CostCoverageRow],
+    weights: Sequence[int],
+    total: int,
+    cost_sources: Sequence[str],
+    theme,
+) -> list[_CoverageSegment]:
+    return [
+        _coverage_segment(row, weight, total, cost_sources, theme)
+        for row, weight in zip(rows, weights)
+    ]
+
+
 def _cost_coverage_bar_html(
     rows: Sequence[CostCoverageRow], *, theme
 ) -> str:
@@ -857,29 +1039,14 @@ def _cost_coverage_bar_html(
     """
     weights, total = _cost_coverage_weights(rows)
     cost_sources = [row.cost_source for row in rows]
-    segs = []
-    legend = []
-    for r, w in zip(rows, weights):
-        pct = w / total * 100
-        color = _cost_source_color(r.cost_source, cost_sources, theme)
-        segs.append(
-            f'<span style="width:{pct:.1f}%;background:{color}" '
-            f'title="{html.escape(r.cost_source)}"></span>'
-        )
-        legend.append(
-            f'<span><span class="dot" '
-            f'style="background:{color}"></span>'
-            f'{html.escape(r.cost_source)} '
-            f'<b style="color:{theme.TEXT};'
-            f'font-family:{theme.MONO_FONT_FAMILY}">'
-            f'{pct:.1f}%</b>'
-            '</span>'
-        )
+    segments = _coverage_segments(rows, weights, total, cost_sources, theme)
     return (
         '<div class="orch-cov-title">'
         'Cost attribution coverage</div>'
-        f'<div class="orch-cov-bar">{"".join(segs)}</div>'
-        f'<div class="orch-cov-legend">{"".join(legend)}</div>'
+        f'<div class="orch-cov-bar">'
+        f'{"".join(segment.bar for segment in segments)}</div>'
+        f'<div class="orch-cov-legend">'
+        f'{"".join(segment.legend for segment in segments)}</div>'
     )
 
 

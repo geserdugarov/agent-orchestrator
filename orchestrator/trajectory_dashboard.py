@@ -52,6 +52,8 @@ from __future__ import annotations
 
 import html
 import logging
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional, Sequence
 
 # `streamlit run orchestrator/trajectory_dashboard.py` launches this file
@@ -283,6 +285,50 @@ def _fmt_cost_usd(value: float, *, decimals: int = 2) -> str:
     return f"${value:,.{decimals}f}"
 
 
+@dataclass(frozen=True)
+class _TrajectoryKpi:
+    label: str
+    value: str
+    foot: str = ""
+
+
+def _trajectory_kpis(
+    summary: trajectory_reader.TrajectorySummary,
+) -> tuple[_TrajectoryKpi, ...]:
+    if summary.truncated_runs:
+        truncated_foot = f"{theme.fmt_num(summary.truncated_runs)} truncated"
+    else:
+        truncated_foot = "none truncated"
+    return (
+        _TrajectoryKpi("Runs", theme.fmt_num(summary.total_runs), truncated_foot),
+        _TrajectoryKpi("Issues", theme.fmt_num(summary.distinct_issues)),
+        _TrajectoryKpi("Repos", theme.fmt_num(summary.distinct_repos)),
+        _TrajectoryKpi("Tool calls", theme.fmt_num(summary.total_tool_calls)),
+        _TrajectoryKpi(
+            "Total cost",
+            _fmt_cost_usd(summary.total_cost_usd),
+            "reported + est.",
+        ),
+    )
+
+
+def _trajectory_kpi_html(kpi: _TrajectoryKpi) -> str:
+    if kpi.foot:
+        foot_html = (
+            f'<div class="kpi-foot"><span>{html.escape(kpi.foot)}</span></div>'
+        )
+    else:
+        foot_html = '<div class="kpi-foot"></div>'
+    return (
+        '<div class="orch-kpi">'
+        f'<div class="kpi-top"><span class="kpi-label">'
+        f'{html.escape(kpi.label)}</span></div>'
+        f'<div class="kpi-value">{html.escape(kpi.value)}</div>'
+        f'{foot_html}'
+        '</div>'
+    )
+
+
 def _kpi_strip_html(summary: trajectory_reader.TrajectorySummary) -> str:
     """Five-tile KPI strip reusing the dashboard's `.orch-kpi` markup.
 
@@ -290,33 +336,7 @@ def _kpi_strip_html(summary: trajectory_reader.TrajectorySummary) -> str:
     runs that recorded one (a mix of reported and estimated figures, hence
     the foot), read entirely from the file -- no Postgres.
     """
-    truncated_foot = (
-        f"{theme.fmt_num(summary.truncated_runs)} truncated"
-        if summary.truncated_runs
-        else "none truncated"
-    )
-    tiles = [
-        ("Runs", theme.fmt_num(summary.total_runs), truncated_foot),
-        ("Issues", theme.fmt_num(summary.distinct_issues), ""),
-        ("Repos", theme.fmt_num(summary.distinct_repos), ""),
-        ("Tool calls", theme.fmt_num(summary.total_tool_calls), ""),
-        ("Total cost", _fmt_cost_usd(summary.total_cost_usd), "reported + est."),
-    ]
-    cells = []
-    for label, value, foot in tiles:
-        foot_html = (
-            f'<div class="kpi-foot"><span>{html.escape(foot)}</span></div>'
-            if foot
-            else '<div class="kpi-foot"></div>'
-        )
-        cells.append(
-            '<div class="orch-kpi">'
-            f'<div class="kpi-top"><span class="kpi-label">'
-            f'{html.escape(label)}</span></div>'
-            f'<div class="kpi-value">{html.escape(value)}</div>'
-            f'{foot_html}'
-            '</div>'
-        )
+    cells = (_trajectory_kpi_html(kpi) for kpi in _trajectory_kpis(summary))
     return f'<div class="orch-kpis">{"".join(cells)}</div>'
 
 
@@ -364,6 +384,29 @@ def _labeled_chips_html(label: str, names: Sequence[str]) -> str:
     )
 
 
+def _run_table_row_html(run: TrajectoryRun) -> str:
+    round_cell = ""
+    if run.review_round is not None:
+        round_cell = str(run.review_round)
+    row_class = ' class="fixture"' if run.is_fixture else ""
+    fixture_tag = ""
+    if run.is_fixture:
+        fixture_tag = '<span class="orch-traj-fixture-tag">fixture</span>'
+    return (
+        f"<tr{row_class}>"
+        f'<td class="num">#{html.escape(str(run.issue))}</td>'
+        f"<td>{html.escape(run.repo)}{fixture_tag}</td>"
+        f"<td>{html.escape(run.stage)}</td>"
+        f"<td>{html.escape(run.agent_role)}</td>"
+        f"<td>{html.escape(run.backend)}</td>"
+        f'<td class="num">{html.escape(round_cell)}</td>'
+        f'<td class="num">{html.escape(str(run.step_count))}</td>'
+        f'<td class="num">{html.escape(str(run.tool_calls))}</td>'
+        f"<td>{html.escape(run.ts)}</td>"
+        "</tr>"
+    )
+
+
 def _runs_table_html(runs: Sequence[TrajectoryRun]) -> str:
     """Compact overview table of the (already-sliced) run list."""
     headers = (
@@ -371,28 +414,7 @@ def _runs_table_html(runs: Sequence[TrajectoryRun]) -> str:
         "Round", "Steps", "Tool calls", "Recorded",
     )
     head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
-    rows = []
-    for r in runs:
-        round_cell = "" if r.review_round is None else str(r.review_round)
-        row_class = ' class="fixture"' if r.is_fixture else ""
-        fixture_tag = (
-            '<span class="orch-traj-fixture-tag">fixture</span>'
-            if r.is_fixture
-            else ""
-        )
-        rows.append(
-            f"<tr{row_class}>"
-            f'<td class="num">#{html.escape(str(r.issue))}</td>'
-            f"<td>{html.escape(r.repo)}{fixture_tag}</td>"
-            f"<td>{html.escape(r.stage)}</td>"
-            f"<td>{html.escape(r.agent_role)}</td>"
-            f"<td>{html.escape(r.backend)}</td>"
-            f'<td class="num">{html.escape(round_cell)}</td>'
-            f'<td class="num">{html.escape(str(r.step_count))}</td>'
-            f'<td class="num">{html.escape(str(r.tool_calls))}</td>'
-            f"<td>{html.escape(r.ts)}</td>"
-            "</tr>"
-        )
+    rows = (_run_table_row_html(run) for run in runs)
     return (
         '<table class="orch-traj-table">'
         f"<thead><tr>{head}</tr></thead>"
@@ -455,6 +477,51 @@ def _timeline_entry_html(
     )
 
 
+def _usage_chip(text: str, css_class: str = "") -> str:
+    classes = f"orch-traj-chip {css_class}".rstrip()
+    return f'<span class="{classes}">{html.escape(text)}</span>'
+
+
+def _run_usage_chips(run: TrajectoryRun) -> list[str]:
+    usage = run.run_usage
+    if usage is None:
+        return []
+    chips = [_usage_chip(model) for model in usage.models]
+    chips.extend((
+        _usage_chip(f"total {theme.fmt_num(usage.total_tokens)} tok"),
+        _usage_chip(f"in {theme.fmt_num(usage.input_tokens)}"),
+        _usage_chip(f"out {theme.fmt_num(usage.output_tokens)}"),
+        _usage_chip(f"cache-read {theme.fmt_num(usage.cache_read_tokens)}"),
+        _usage_chip(f"cache-write {theme.fmt_num(usage.cache_write_tokens)}"),
+    ))
+    if usage.cached_tokens:
+        chips.append(_usage_chip(f"cached {theme.fmt_num(usage.cached_tokens)}"))
+    if usage.turns is not None:
+        chips.append(_usage_chip(f"{usage.turns} turns"))
+    source = run.cost_source or "unknown"
+    if run.cost_usd is None:
+        cost_label = source
+    else:
+        cost_label = f"{source} {_fmt_cost_usd(run.cost_usd)}"
+    chips.append(_usage_chip(cost_label, "cost"))
+    return chips
+
+
+def _run_usage_note(run: TrajectoryRun) -> str:
+    if run.turns:
+        return (
+            "Run cost is authoritative when reported. The per-turn strips in "
+            "the timeline are claude-only estimates and need not sum to it; "
+            "entries with no strip (tool results, user turns) are turn inputs, "
+            "billed on the next assistant turn."
+        )
+    return (
+        "Run cost is authoritative when reported. Per-turn usage is not "
+        "available for this backend, so the run-level summary is its only "
+        "usage surface."
+    )
+
+
 def _run_usage_html(run: TrajectoryRun) -> str:
     """Run-level usage / cost summary as a labeled chip row, plus a note.
 
@@ -468,54 +535,16 @@ def _run_usage_html(run: TrajectoryRun) -> str:
     estimates that need not sum to it -- or, when the run has no per-turn
     detail (codex), that per-turn usage is unavailable for the backend.
     """
-    usage = run.run_usage
-    if usage is None:
+    if run.run_usage is None:
         return ""
-
-    def chip(text: str, cls: str = "") -> str:
-        klass = f"orch-traj-chip {cls}".rstrip()
-        return f'<span class="{klass}">{html.escape(text)}</span>'
-
-    chips = [chip(m) for m in usage.models]
-    chips.append(chip(f"total {theme.fmt_num(usage.total_tokens)} tok"))
-    chips.append(chip(f"in {theme.fmt_num(usage.input_tokens)}"))
-    chips.append(chip(f"out {theme.fmt_num(usage.output_tokens)}"))
-    chips.append(chip(f"cache-read {theme.fmt_num(usage.cache_read_tokens)}"))
-    chips.append(chip(f"cache-write {theme.fmt_num(usage.cache_write_tokens)}"))
-    # `cached_tokens` is codex's only cache signal (it has no read/write
-    # split); it is 0 on claude, so the chip renders only when a run recorded
-    # it rather than adding an always-zero column to the claude row.
-    if usage.cached_tokens:
-        chips.append(chip(f"cached {theme.fmt_num(usage.cached_tokens)}"))
-    if usage.turns is not None:
-        chips.append(chip(f"{usage.turns} turns"))
-    source = run.cost_source or "unknown"
-    cost_label = (
-        source
-        if run.cost_usd is None
-        else f"{source} {_fmt_cost_usd(run.cost_usd)}"
-    )
-    chips.append(chip(cost_label, "cost"))
-
+    chips = _run_usage_chips(run)
     row = (
         '<div class="orch-traj-chips">'
         '<span class="lbl">Run usage</span>'
         f'{"".join(chips)}'
         '</div>'
     )
-    if run.turns:
-        note = (
-            "Run cost is authoritative when reported. The per-turn strips in "
-            "the timeline are claude-only estimates and need not sum to it; "
-            "entries with no strip (tool results, user turns) are turn inputs, "
-            "billed on the next assistant turn."
-        )
-    else:
-        note = (
-            "Run cost is authoritative when reported. Per-turn usage is not "
-            "available for this backend, so the run-level summary is its only "
-            "usage surface."
-        )
+    note = _run_usage_note(run)
     return f'{row}<p class="orch-traj-usage-note">{html.escape(note)}</p>'
 
 
@@ -602,76 +631,354 @@ def _run_picker_label(run: TrajectoryRun) -> str:
     return f"{_FIXTURE_LABEL_PREFIX}{label}" if run.is_fixture else label
 
 
+def _render_run_notices(st: Any, run: TrajectoryRun) -> None:
+    if run.is_fixture:
+        st.info(
+            "This run is flagged as a likely synthetic test fixture "
+            "(a sentinel `ignored` prompt, a `sess-*` session id, or a "
+            "Skill-only run). Such records can appear in a trajectory "
+            "file inherited from a run with the sink enabled during the "
+            "test suite."
+        )
+    if run.truncated:
+        st.warning(
+            "This trajectory was truncated by the sink's record budget; "
+            "later steps were dropped before the run finished."
+        )
+
+
+def _render_run_usage_and_chips(st: Any, run: TrajectoryRun) -> None:
+    usage_html = _run_usage_html(run)
+    if usage_html:
+        st.markdown(usage_html, unsafe_allow_html=True)
+    for label, names in (
+        ("Tools offered", run.tools),
+        ("Skills triggered", run.skills_triggered),
+        ("Skills available", run.skills_available),
+    ):
+        chips = _labeled_chips_html(label, names)
+        if chips:
+            st.markdown(chips, unsafe_allow_html=True)
+
+
+def _render_system_prompt(st: Any, run: TrajectoryRun) -> None:
+    if not run.system_prompt:
+        return
+    with st.expander("System prompt", expanded=False):
+        st.code(run.system_prompt)
+
+
+def _render_timeline_entry(
+    st: Any,
+    index: int,
+    strip: Optional[trajectory_reader.TurnUsageView],
+    entry: trajectory_reader.TimelineEntry,
+) -> None:
+    if strip is not None:
+        st.markdown(_turn_usage_html(strip), unsafe_allow_html=True)
+    st.markdown(_timeline_entry_html(entry, index), unsafe_allow_html=True)
+    if not entry.content:
+        return
+    if entry.is_output:
+        st.markdown(entry.content)
+    else:
+        st.code(entry.content)
+
+
+def _render_timeline(st: Any, run: TrajectoryRun) -> None:
+    st.markdown(
+        '<p class="orch-card-sub" style="margin-top:14px">'
+        f'Trajectory timeline · {run.step_count} steps · '
+        f'{run.tool_calls} tool calls</p>',
+        unsafe_allow_html=True,
+    )
+    if not run.timeline:
+        st.caption("No timeline entries were recorded for this run.")
+        return
+    for index, (strip, entry) in enumerate(_timeline_with_usage(run)):
+        _render_timeline_entry(st, index, strip, entry)
+
+
+def _render_run_card(st: Any, run: TrajectoryRun) -> None:
+    st.markdown('<div class="orch-cardmark"></div>', unsafe_allow_html=True)
+    st.markdown(
+        _card_header_html(
+            f"Run #{run.issue} · {run.repo or 'unknown repo'}",
+            "Ordered timeline: prompt, text turns, tool calls, output",
+        ),
+        unsafe_allow_html=True,
+    )
+    _render_run_notices(st, run)
+    st.markdown(_meta_html(run), unsafe_allow_html=True)
+    _render_run_usage_and_chips(st, run)
+    _render_system_prompt(st, run)
+    _render_timeline(st, run)
+
+
 def _render_run(*, st: Any, run: TrajectoryRun) -> None:
     """Render the detail card for one selected run."""
     with st.container(border=True):
-        st.markdown('<div class="orch-cardmark"></div>', unsafe_allow_html=True)
-        st.markdown(
-            _card_header_html(
-                f"Run #{run.issue} · {run.repo or 'unknown repo'}",
-                "Ordered timeline: prompt, text turns, tool calls, output",
+        _render_run_card(st, run)
+
+
+@dataclass(frozen=True)
+class _TrajectoryFilters:
+    repo: Optional[str]
+    backends: Optional[Sequence[str]]
+    agent_roles: Optional[Sequence[str]]
+    stages: Optional[Sequence[str]]
+    issue: Optional[int]
+    query: str
+    hide_fixtures: bool
+
+
+@dataclass(frozen=True)
+class _TrajectoryPage:
+    log_path: Optional[Path]
+    runs: Sequence[TrajectoryRun]
+    options: trajectory_reader.FilterOptions
+    fixture_total: int
+
+    @property
+    def total(self) -> int:
+        return len(self.runs)
+
+
+def _configure_page(st: Any) -> None:
+    st.set_page_config(
+        page_title="Orchestrator Trajectories",
+        layout="wide",
+    )
+    st.markdown(theme.PAGE_CSS, unsafe_allow_html=True)
+    st.markdown(EXTRA_CSS, unsafe_allow_html=True)
+
+
+def _stop_if_unconfigured(st: Any) -> None:
+    message = trajectory_reader.log_unconfigured_message()
+    if not message:
+        return
+    st.markdown(_topbar_html(0, 0), unsafe_allow_html=True)
+    st.warning(message)
+    st.stop()
+
+
+def _load_trajectory_page() -> _TrajectoryPage:
+    log_path = trajectory_reader.resolve_log_path()
+    runs = trajectory_reader.read_trajectories()
+    return _TrajectoryPage(
+        log_path=log_path,
+        runs=runs,
+        options=trajectory_reader.filter_options(runs),
+        fixture_total=sum(1 for run in runs if run.is_fixture),
+    )
+
+
+def _render_categorical_filters(
+    st: Any,
+    options: trajectory_reader.FilterOptions,
+) -> tuple[Sequence[str], Sequence[str], Sequence[str]]:
+    backends = st.multiselect(
+        "Backend",
+        list(options.backends),
+        help="Leave empty to include every backend.",
+    )
+    roles = st.multiselect(
+        "Agent role",
+        list(options.agent_roles),
+        help="Leave empty to include every role.",
+    )
+    stages = st.multiselect(
+        "Stage",
+        list(options.stages),
+        help="Leave empty to include every stage.",
+    )
+    return backends, roles, stages
+
+
+def _render_text_filters(st: Any) -> tuple[str, str]:
+    issue_input = st.text_input(
+        "Issue number",
+        value="",
+        help="Enter `123` or `#123` to narrow to one issue.",
+    )
+    query_input = st.text_input(
+        "Search",
+        value="",
+        help=(
+            "Case-insensitive substring matched across the prompt, "
+            "system prompt, output, tool names, tool payloads, and "
+            "skill names."
+        ),
+    )
+    return issue_input, query_input
+
+
+def _render_trajectory_sidebar(
+    st: Any,
+    options: trajectory_reader.FilterOptions,
+) -> _TrajectoryFilters:
+    with st.sidebar:
+        st.header("Filters")
+        repo_choice = st.selectbox("Repo", ("All", *options.repos), index=0)
+        categorical = _render_categorical_filters(st, options)
+        text_filters = _render_text_filters(st)
+        hide_fixtures = st.checkbox(
+            "Hide synthetic fixtures",
+            value=False,
+            help=(
+                "Drop records that look like test-suite fixtures -- a "
+                "sentinel `ignored` prompt, a `sess-*` session id, or a "
+                "Skill-only run. Leave off to keep them, flagged with a "
+                "`fixture` tag in the table and run picker."
             ),
-            unsafe_allow_html=True,
         )
-        if run.is_fixture:
-            st.info(
-                "This run is flagged as a likely synthetic test fixture "
-                "(a sentinel `ignored` prompt, a `sess-*` session id, or a "
-                "Skill-only run). Such records can appear in a trajectory "
-                "file inherited from a run with the sink enabled during the "
-                "test suite."
-            )
-        if run.truncated:
-            st.warning(
-                "This trajectory was truncated by the sink's record budget; "
-                "later steps were dropped before the run finished."
-            )
-        st.markdown(_meta_html(run), unsafe_allow_html=True)
+    return _TrajectoryFilters(
+        repo=None if repo_choice == "All" else repo_choice,
+        backends=categorical[0] or None,
+        agent_roles=categorical[1] or None,
+        stages=categorical[2] or None,
+        issue=dashboard_state.parse_issue_number(text_filters[0]),
+        query=text_filters[1],
+        hide_fixtures=hide_fixtures,
+    )
 
-        usage_html = _run_usage_html(run)
-        if usage_html:
-            st.markdown(usage_html, unsafe_allow_html=True)
 
-        for label, names in (
-            ("Tools offered", run.tools),
-            ("Skills triggered", run.skills_triggered),
-            ("Skills available", run.skills_available),
-        ):
-            chips = _labeled_chips_html(label, names)
-            if chips:
-                st.markdown(chips, unsafe_allow_html=True)
+def _filter_page_runs(
+    page: _TrajectoryPage,
+    filters: _TrajectoryFilters,
+) -> list[TrajectoryRun]:
+    return trajectory_reader.filter_runs(
+        page.runs,
+        repo=filters.repo,
+        backends=filters.backends,
+        agent_roles=filters.agent_roles,
+        stages=filters.stages,
+        issue=filters.issue,
+        query=filters.query,
+        exclude_fixtures=filters.hide_fixtures,
+    )
 
-        if run.system_prompt:
-            with st.expander("System prompt", expanded=False):
-                st.code(run.system_prompt)
 
+def _render_no_trajectories(st: Any, log_path: Optional[Path]) -> None:
+    st.info(NO_TRAJECTORIES_MESSAGE)
+    if log_path is not None:
+        st.caption(f"Reading `{log_path}`.")
+
+
+def _fixture_caption(fixture_total: int, hide_fixtures: bool) -> str:
+    noun = "run" if fixture_total == 1 else "runs"
+    if hide_fixtures:
+        return f"{fixture_total} synthetic fixture {noun} hidden."
+    return (
+        f"{fixture_total} synthetic fixture {noun} flagged; "
+        "tick *Hide synthetic fixtures* in the sidebar to drop them."
+    )
+
+
+def _render_run_list(
+    st: Any,
+    shown: Sequence[TrajectoryRun],
+    fixture_total: int,
+    hide_fixtures: bool,
+) -> None:
+    with st.expander("Recorded runs", expanded=True):
+        st.caption("Most recent first · pick a run below to inspect it")
         st.markdown(
-            '<p class="orch-card-sub" style="margin-top:14px">'
-            f'Trajectory timeline · {run.step_count} steps · '
-            f'{run.tool_calls} tool calls</p>',
+            _runs_table_html(shown[:RUN_TABLE_LIMIT]),
             unsafe_allow_html=True,
         )
-        timeline = run.timeline
-        if timeline:
-            for i, (strip, entry) in enumerate(_timeline_with_usage(run)):
-                if strip is not None:
-                    st.markdown(
-                        _turn_usage_html(strip), unsafe_allow_html=True
-                    )
-                st.markdown(
-                    _timeline_entry_html(entry, i), unsafe_allow_html=True
-                )
-                if entry.content:
-                    # The final answer is markdown the agent authored;
-                    # render it rich. Every other entry -- the orchestrator
-                    # prompt, tool payloads, text turns -- is raw text shown
-                    # verbatim in a code block.
-                    if entry.is_output:
-                        st.markdown(entry.content)
-                    else:
-                        st.code(entry.content)
-        else:
-            st.caption("No timeline entries were recorded for this run.")
+        if len(shown) > RUN_TABLE_LIMIT:
+            st.caption(
+                f"Table shows the {RUN_TABLE_LIMIT} most recent of "
+                f"{len(shown)} matching runs; the picker below lists all of "
+                "them. Narrow the filters to shorten the list."
+            )
+        if fixture_total:
+            st.caption(_fixture_caption(fixture_total, hide_fixtures))
+
+
+def _pick_repo(st: Any, shown: Sequence[TrajectoryRun]) -> str:
+    repos = sorted({run.repo for run in shown})
+    return st.selectbox("Repo", repos)
+
+
+def _pick_issue(
+    st: Any,
+    shown: Sequence[TrajectoryRun],
+    repo: str,
+) -> int:
+    issues = sorted({run.issue for run in shown if run.repo == repo})
+    return st.selectbox("Issue", issues, format_func=lambda issue: f"#{issue}")
+
+
+def _pick_run(
+    st: Any,
+    shown: Sequence[TrajectoryRun],
+    repo: str,
+    issue: int,
+) -> TrajectoryRun:
+    candidates = [
+        run for run in shown
+        if run.repo == repo and run.issue == issue
+    ]
+    selected = st.selectbox(
+        "Run",
+        range(len(candidates)),
+        format_func=lambda index: _run_picker_label(candidates[index]),
+    )
+    return candidates[selected]
+
+
+def _render_run_picker(st: Any, shown: Sequence[TrajectoryRun]) -> None:
+    st.markdown(
+        '<p class="orch-card-sub" style="margin:14px 0 4px">'
+        'Inspect run</p>',
+        unsafe_allow_html=True,
+    )
+    columns = st.columns(3)
+    with columns[0]:
+        repo = _pick_repo(st, shown)
+    with columns[1]:
+        issue = _pick_issue(st, shown, repo)
+    with columns[2]:
+        run = _pick_run(st, shown, repo, issue)
+    _render_run(st=st, run=run)
+
+
+def _render_trajectory_footer(
+    st: Any,
+    shown_count: int,
+    page: _TrajectoryPage,
+) -> None:
+    st.markdown(
+        '<div class="orch-foot">'
+        f'{theme.fmt_num(shown_count)} of {theme.fmt_num(page.total)} recorded '
+        f'trajectories · reading {html.escape(str(page.log_path))}'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_trajectory_page(
+    st: Any,
+    page: _TrajectoryPage,
+    filters: _TrajectoryFilters,
+    shown: Sequence[TrajectoryRun],
+) -> None:
+    st.markdown(_topbar_html(page.total, len(shown)), unsafe_allow_html=True)
+    if page.total == 0:
+        _render_no_trajectories(st, page.log_path)
+        return
+    st.markdown(
+        _kpi_strip_html(trajectory_reader.summarize(shown)),
+        unsafe_allow_html=True,
+    )
+    if not shown:
+        st.info(EMPTY_FILTER_MESSAGE)
+        return
+    _render_run_list(st, shown, page.fixture_total, filters.hide_fixtures)
+    _render_run_picker(st, shown)
+    _render_trajectory_footer(st, len(shown), page)
 
 
 def main() -> None:
@@ -685,161 +992,12 @@ def main() -> None:
     """
     import streamlit as st
 
-    st.set_page_config(
-        page_title="Orchestrator Trajectories",
-        layout="wide",
-    )
-    st.markdown(theme.PAGE_CSS, unsafe_allow_html=True)
-    st.markdown(EXTRA_CSS, unsafe_allow_html=True)
-
-    unset = trajectory_reader.log_unconfigured_message()
-    if unset:
-        st.markdown(_topbar_html(0, 0), unsafe_allow_html=True)
-        st.warning(unset)
-        st.stop()
-
-    log_path = trajectory_reader.resolve_log_path()
-    runs = trajectory_reader.read_trajectories()
-    total = len(runs)
-    options = trajectory_reader.filter_options(runs)
-
-    with st.sidebar:
-        st.header("Filters")
-        repo_options = ("All", *options.repos)
-        repo_choice = st.selectbox("Repo", repo_options, index=0)
-        backend_choice = st.multiselect(
-            "Backend",
-            list(options.backends),
-            help="Leave empty to include every backend.",
-        )
-        role_choice = st.multiselect(
-            "Agent role",
-            list(options.agent_roles),
-            help="Leave empty to include every role.",
-        )
-        stage_choice = st.multiselect(
-            "Stage",
-            list(options.stages),
-            help="Leave empty to include every stage.",
-        )
-        issue_input = st.text_input(
-            "Issue number",
-            value="",
-            help="Enter `123` or `#123` to narrow to one issue.",
-        )
-        query_input = st.text_input(
-            "Search",
-            value="",
-            help=(
-                "Case-insensitive substring matched across the prompt, "
-                "system prompt, output, tool names, tool payloads, and "
-                "skill names."
-            ),
-        )
-        hide_fixtures = st.checkbox(
-            "Hide synthetic fixtures",
-            value=False,
-            help=(
-                "Drop records that look like test-suite fixtures -- a "
-                "sentinel `ignored` prompt, a `sess-*` session id, or a "
-                "Skill-only run. Leave off to keep them, flagged with a "
-                "`fixture` tag in the table and run picker."
-            ),
-        )
-
-    fixture_total = sum(1 for r in runs if r.is_fixture)
-
-    shown = trajectory_reader.filter_runs(
-        runs,
-        repo=None if repo_choice == "All" else repo_choice,
-        backends=backend_choice or None,
-        agent_roles=role_choice or None,
-        stages=stage_choice or None,
-        issue=dashboard_state.parse_issue_number(issue_input),
-        query=query_input,
-        exclude_fixtures=hide_fixtures,
-    )
-    summary = trajectory_reader.summarize(shown)
-
-    st.markdown(_topbar_html(total, len(shown)), unsafe_allow_html=True)
-
-    if total == 0:
-        st.info(NO_TRAJECTORIES_MESSAGE)
-        if log_path is not None:
-            st.caption(f"Reading `{log_path}`.")
-        return
-
-    st.markdown(_kpi_strip_html(summary), unsafe_allow_html=True)
-
-    if not shown:
-        st.info(EMPTY_FILTER_MESSAGE)
-        return
-
-    # ── Run list ────────────────────────────────
-    # A native expander so the operator can fold the overview table away
-    # and focus on the inspected run; expanded by default to preserve the
-    # at-a-glance view.
-    with st.expander("Recorded runs", expanded=True):
-        st.caption("Most recent first · pick a run below to inspect it")
-        table_runs = shown[:RUN_TABLE_LIMIT]
-        st.markdown(_runs_table_html(table_runs), unsafe_allow_html=True)
-        if len(shown) > RUN_TABLE_LIMIT:
-            st.caption(
-                f"Table shows the {RUN_TABLE_LIMIT} most recent of "
-                f"{len(shown)} matching runs; the picker below lists all of "
-                "them. Narrow the filters to shorten the list."
-            )
-        if fixture_total:
-            st.caption(
-                f"{fixture_total} synthetic fixture "
-                f"{'run' if fixture_total == 1 else 'runs'} hidden."
-                if hide_fixtures
-                else f"{fixture_total} synthetic fixture "
-                f"{'run' if fixture_total == 1 else 'runs'} flagged; "
-                "tick *Hide synthetic fixtures* in the sidebar to drop them."
-            )
-
-    # ── Selected-run detail ────────────────────────────
-    # Three cascading pickers narrow `shown` to one run: repo, then the
-    # issue within that repo, then the specific run (by `detail_label`).
-    # Streamlit resets a downstream selectbox to its first option when an
-    # upstream pick makes its prior value no longer offered.
-    st.markdown(
-        '<p class="orch-card-sub" style="margin:14px 0 4px">'
-        'Inspect run</p>',
-        unsafe_allow_html=True,
-    )
-    repo_col, issue_col, run_col = st.columns(3)
-    with repo_col:
-        inspect_repos = sorted({r.repo for r in shown})
-        picked_repo = st.selectbox("Repo", inspect_repos)
-    with issue_col:
-        inspect_issues = sorted(
-            {r.issue for r in shown if r.repo == picked_repo}
-        )
-        picked_issue = st.selectbox(
-            "Issue", inspect_issues, format_func=lambda i: f"#{i}"
-        )
-    with run_col:
-        candidates = [
-            r
-            for r in shown
-            if r.repo == picked_repo and r.issue == picked_issue
-        ]
-        selected = st.selectbox(
-            "Run",
-            range(len(candidates)),
-            format_func=lambda i: _run_picker_label(candidates[i]),
-        )
-    _render_run(st=st, run=candidates[selected])
-
-    st.markdown(
-        '<div class="orch-foot">'
-        f'{theme.fmt_num(len(shown))} of {theme.fmt_num(total)} recorded '
-        f'trajectories · reading {html.escape(str(log_path))}'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    _configure_page(st)
+    _stop_if_unconfigured(st)
+    page = _load_trajectory_page()
+    filters = _render_trajectory_sidebar(st, page.options)
+    shown = _filter_page_runs(page, filters)
+    _render_trajectory_page(st, page, filters, shown)
 
 
 if __name__ == "__main__":
