@@ -41,7 +41,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
-| 3 | Remaining production complexity | 0/6 | [ ] |
+| 3 | Remaining production complexity | 1/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
@@ -238,7 +238,7 @@ Apply this sequence in every package:
 
 ### Package 3.1 — Analytics reads and synchronization
 
-- [ ] Simplify `orchestrator/analytics/__init__.py`, `connection.py`, `predicates.py`, `query.py`,
+- [x] Simplify `orchestrator/analytics/__init__.py`, `connection.py`, `predicates.py`, `query.py`,
   `read_dashboard.py`, `read_raw.py`, `read_rollup.py`, and `sync.py`.
 
 ### Package 3.2 — Dashboard rendering
@@ -442,7 +442,10 @@ considered.
 
 | File and symbol | Rule | Reason it must remain | Tests or contract protecting it | Reviewed |
 |---|---|---|---|---:|
-| | | | | [ ] |
+| `orchestrator/analytics/__init__.py: record_agent_exit` | `WPS211` | The explicit keyword-only run context is called by workflow code and tests; replacing it with a request object breaks the established call contract, while `**kwargs` would discard useful typing and validation. Its implementation delegates to cohesive context-based helpers. | `tests/test_analytics.py`; tracked-agent workflow callers | [x] |
+| `orchestrator/analytics/read_raw.py: get_event_breakdown, get_recent_agent_exits, get_issues, get_issue_events` | `WPS211` | These public facade readers expose one consistent keyword filter contract. A request object would break callers and `**kwargs` would weaken the API; each function delegates to a small filter/query helper. | `orchestrator/analytics/read.py`; `tests/test_analytics_read_*.py` | [x] |
+| `orchestrator/analytics/read_rollup.py: get_summary, get_kpi_prev, get_time_series, get_stage_breakdown, get_backend_efficiency, get_repo_breakdown, get_throughput_breakdown` | `WPS211` | These public facade readers expose one consistent keyword filter contract. A request object would break callers and `**kwargs` would weaken the API; each function delegates to a small filter/query helper. | `orchestrator/analytics/read.py`; `tests/test_analytics_read_*.py` | [x] |
+| `orchestrator/analytics/read_dashboard.py: get_review_round_breakdown, get_skill_trigger_rates, get_skill_trigger_matrix, get_cost_coverage, get_backend_daily_tokens, get_hourly_heatmap` | `WPS211` | These public facade readers expose one consistent keyword filter contract. A request object would break callers and `**kwargs` would weaken the API; each function delegates to a small filter/query helper. | `orchestrator/analytics/read.py`; `tests/test_analytics_read_*.py` | [x] |
 
 ## Session log
 
@@ -467,5 +470,6 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 2.6 | Complete | Target WPS, 113 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.7 |
 | 2026-07-12 | 2.7 | Complete | Target WPS, 90 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.8 |
 | 2026-07-12 | 2.8 | Complete | WPS210/WPS231, 10 focused; Ruff/diff; 2099 passed, 3 skipped | None | Package 3.1 |
+| 2026-07-12 | 3.1 | Complete | Target WPS (18 reviewed API remainders); focused suites; Ruff/diff; 2099 passed, 3 skipped, 627 subtests | Not committed | Package 3.2 |
 
 Package 2.8 ran `tests/` because root collection was blocked by the unreadable ignored database volume.

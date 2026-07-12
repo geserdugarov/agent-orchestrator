@@ -193,6 +193,48 @@ def _parse_ts(raw: Any) -> Optional[datetime]:
     return dt
 
 
+def _required_text(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
+def _issue_number(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _required_columns(record: dict) -> Optional[dict[str, Any]]:
+    if any(key not in record for key in _REQUIRED_KEYS):
+        return None
+    timestamp = _parse_ts(record.get("ts"))
+    repo = _required_text(record.get("repo"))
+    issue = _issue_number(record.get("issue"))
+    event = _required_text(record.get("event"))
+    if timestamp is None or repo is None or issue is None or event is None:
+        return None
+    return {
+        "ts": timestamp,
+        "repo": repo,
+        "issue": issue,
+        "event": event,
+    }
+
+
+def _extra_columns(record: dict, columns: dict[str, Any]) -> dict[str, Any]:
+    extras: dict[str, Any] = {}
+    for key, value in record.items():
+        if key in _REQUIRED_KEYS:
+            continue
+        if key in _PROMOTED_COLUMNS:
+            columns[key] = value
+        else:
+            extras[key] = value
+    return extras
+
+
 def _split_row(record: dict) -> Optional[tuple[dict, dict]]:
     """Promote known columns and route the rest to `extras`.
 
@@ -200,38 +242,10 @@ def _split_row(record: dict) -> Optional[tuple[dict, dict]]:
     or `ts` does not parse. The caller treats None as a malformed-line
     skip so a record with garbled `ts` does not abort the entire sync.
     """
-    for key in _REQUIRED_KEYS:
-        if key not in record:
-            return None
-    ts = _parse_ts(record.get("ts"))
-    if ts is None:
+    columns = _required_columns(record)
+    if columns is None:
         return None
-    repo = record.get("repo")
-    if not isinstance(repo, str) or not repo:
-        return None
-    try:
-        issue = int(record["issue"])
-    except (TypeError, ValueError):
-        return None
-    event = record.get("event")
-    if not isinstance(event, str) or not event:
-        return None
-
-    columns: dict[str, Any] = {
-        "ts": ts,
-        "repo": repo,
-        "issue": issue,
-        "event": event,
-    }
-    extras: dict[str, Any] = {}
-    for key, value in record.items():
-        if key in ("ts", "repo", "issue", "event"):
-            continue
-        if key in _PROMOTED_COLUMNS:
-            columns[key] = value
-        else:
-            extras[key] = value
-    return columns, extras
+    return columns, _extra_columns(record, columns)
 
 
 def _build_insert_sql() -> str:
@@ -257,12 +271,19 @@ def _build_insert_sql() -> str:
     )
 
 
+@dataclass(frozen=True)
+class _RowProvenance:
+    """Source identity and stable dedup hash for one prepared row."""
+
+    source_path: Optional[str]
+    source_line: int
+    content_hash: str
+
+
 def _row_values(
     columns: dict,
     extras: dict,
-    source_path: Optional[str],
-    source_line: int,
-    content_hash: str,
+    provenance: _RowProvenance,
     json_adapter: Callable[[Any], Any],
 ) -> tuple:
     values: list[Any] = []
@@ -272,9 +293,9 @@ def _row_values(
             value = json_adapter(value)
         values.append(value)
     values.append(json_adapter(extras) if extras else None)
-    values.append(source_path)
-    values.append(source_line)
-    values.append(content_hash)
+    values.append(provenance.source_path)
+    values.append(provenance.source_line)
+    values.append(provenance.content_hash)
     return tuple(values)
 
 
@@ -288,6 +309,27 @@ def _row_values(
 _REDACTED_QUERY_PARAMS = frozenset(
     {"user", "password", "passfile", "sslpassword"}
 )
+
+
+def _redacted_netloc(parts: Any) -> str:
+    if not parts.username and not parts.password:
+        return parts.netloc
+    host = parts.hostname or ""
+    netloc = f"{host}:{parts.port}" if parts.port else host
+    return f"***@{netloc}" if netloc else "***"
+
+
+def _redacted_query(query: str) -> str:
+    if not query:
+        return query
+    pairs = parse_qsl(query, keep_blank_values=True)
+    redacted_pairs = [
+        (key, "***" if key.lower() in _REDACTED_QUERY_PARAMS else value)
+        for key, value in pairs
+    ]
+    if redacted_pairs == pairs:
+        return query
+    return urlencode(redacted_pairs, safe="*")
 
 
 def _redact_db_url(url: str) -> str:
@@ -307,31 +349,14 @@ def _redact_db_url(url: str) -> str:
         parts = urlsplit(url)
     except ValueError:
         return "<db-url-unparseable>"
-    netloc = parts.netloc
-    if parts.username or parts.password:
-        host = parts.hostname or ""
-        netloc = f"{host}:{parts.port}" if parts.port else host
-        netloc = f"***@{netloc}" if netloc else "***"
-    query = parts.query
-    if query:
-        # `keep_blank_values=True` so `?password=` (operator left it
-        # empty) still surfaces as a `password=***` pair rather than
-        # silently disappearing -- the operator-visible shape of the
-        # query string should not change just because a value was
-        # blank.
-        pairs = parse_qsl(query, keep_blank_values=True)
-        redacted_pairs = [
-            (key, "***" if key.lower() in _REDACTED_QUERY_PARAMS else value)
-            for key, value in pairs
-        ]
-        if redacted_pairs != pairs:
-            # `safe="*"` keeps the redaction marker readable in the
-            # log line; without it `urlencode` percent-encodes the
-            # asterisks to `%2A` and the redacted URL turns into
-            # `password=%2A%2A%2A`, which obscures the intent.
-            query = urlencode(redacted_pairs, safe="*")
     return urlunsplit(
-        (parts.scheme, netloc, parts.path, query, parts.fragment)
+        (
+            parts.scheme,
+            _redacted_netloc(parts),
+            parts.path,
+            _redacted_query(parts.query),
+            parts.fragment,
+        )
     )
 
 
@@ -502,14 +527,114 @@ def _note_malformed_line(
     )
 
 
+@dataclass(frozen=True)
+class _PreparedRecord:
+    """Validated promoted fields, extras, and hash for one JSONL record."""
+
+    columns: dict[str, Any]
+    extras: dict[str, Any]
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class _IngestContext:
+    """Stable inputs and mutable counters shared by one ingest pass."""
+
+    log_path: Path
+    insert_sql: str
+    source_path: Optional[str]
+    json_adapter: Callable[[Any], Any]
+    counters: _SyncCounters
+    start: float
+
+
+def _prepare_record(
+    raw_line: str,
+) -> tuple[Optional[_PreparedRecord], Optional[str]]:
+    stripped = raw_line.strip()
+    if not stripped:
+        return None, None
+    try:
+        record = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None, "not JSON"
+    if not isinstance(record, dict):
+        return None, "JSON not an object"
+    split = _split_row(record)
+    if split is None:
+        return None, "missing/invalid required keys"
+    columns, extras = split
+    return _PreparedRecord(columns, extras, _content_hash(record)), None
+
+
+def _existing_hashes(cur: Any) -> set[str]:
+    cur.execute(
+        "SELECT content_hash FROM analytics_events "
+        "WHERE content_hash IS NOT NULL"
+    )
+    return {row[0] for row in cur if row[0] is not None}
+
+
+@dataclass
+class _RecordIngester:
+    """Classify, deduplicate, and batch records for one open cursor."""
+
+    cur: Any
+    context: _IngestContext
+    existing_hashes: set[str]
+    batch: list[tuple] = field(default_factory=list)
+
+    def add(self, line_number: int, raw_line: str) -> None:
+        self.context.counters.total_lines += 1
+        prepared, reason = _prepare_record(raw_line)
+        if prepared is None:
+            if reason is not None:
+                _note_malformed_line(
+                    self.context.counters,
+                    line_number,
+                    self.context.log_path,
+                    reason,
+                )
+            return
+        if prepared.content_hash in self.existing_hashes:
+            self.context.counters.skipped_duplicate += 1
+            return
+        provenance = _RowProvenance(
+            source_path=self.context.source_path,
+            source_line=line_number,
+            content_hash=prepared.content_hash,
+        )
+        self.batch.append(
+            _row_values(
+                prepared.columns,
+                prepared.extras,
+                provenance,
+                self.context.json_adapter,
+            )
+        )
+        self.existing_hashes.add(prepared.content_hash)
+        if len(self.batch) >= _BATCH_SIZE:
+            self.flush()
+
+    def flush(self) -> None:
+        _flush_batch(
+            self.cur,
+            self.context.insert_sql,
+            self.batch,
+            self.context.counters,
+            self.context.start,
+        )
+
+
+def _stream_records(ingester: _RecordIngester) -> None:
+    with ingester.context.log_path.open("r", encoding="utf-8") as source_file:
+        for line_number, raw_line in enumerate(source_file, start=1):
+            ingester.add(line_number, raw_line)
+
+
 def _ingest_records(
     conn: Any,
-    log_path: Path,
-    insert_sql: str,
-    source_path_str: Optional[str],
-    json_adapter_fn: Callable[[Any], Any],
-    counters: _SyncCounters,
-    start: float,
+    context: _IngestContext,
 ) -> None:
     """Stream `log_path` into `conn` under one cursor, batching valid rows.
 
@@ -531,59 +656,146 @@ def _ingest_records(
     closes the connection.
     """
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT content_hash FROM analytics_events "
-            "WHERE content_hash IS NOT NULL"
+        ingester = _RecordIngester(
+            cur=cur,
+            context=context,
+            existing_hashes=_existing_hashes(cur),
         )
-        existing_hashes: set[str] = {
-            row[0] for row in cur if row[0] is not None
-        }
+        _stream_records(ingester)
+        ingester.flush()
 
-        batch: list[tuple] = []
-        with Path(log_path).open("r", encoding="utf-8") as fh:
-            for line_number, raw_line in enumerate(fh, start=1):
-                counters.total_lines += 1
-                stripped = raw_line.strip()
-                if not stripped:
-                    continue
-                try:
-                    record = json.loads(stripped)
-                except json.JSONDecodeError:
-                    _note_malformed_line(
-                        counters, line_number, log_path, "not JSON"
-                    )
-                    continue
-                if not isinstance(record, dict):
-                    _note_malformed_line(
-                        counters, line_number, log_path, "JSON not an object"
-                    )
-                    continue
-                split = _split_row(record)
-                if split is None:
-                    _note_malformed_line(
-                        counters, line_number, log_path,
-                        "missing/invalid required keys",
-                    )
-                    continue
-                columns, extras = split
-                content_hash = _content_hash(record)
-                if content_hash in existing_hashes:
-                    counters.skipped_duplicate += 1
-                    continue
-                batch.append(
-                    _row_values(
-                        columns,
-                        extras,
-                        source_path_str,
-                        line_number,
-                        content_hash,
-                        json_adapter_fn,
-                    )
-                )
-                existing_hashes.add(content_hash)
-                if len(batch) >= _BATCH_SIZE:
-                    _flush_batch(cur, insert_sql, batch, counters, start)
-        _flush_batch(cur, insert_sql, batch, counters, start)
+
+@dataclass(frozen=True)
+class _SyncRequest:
+    """Resolved source, destination, and injected adapters for one sync."""
+
+    log_path: Optional[Path]
+    db_url: Optional[str]
+    connect_fn: Callable[[str], Any]
+    json_adapter: Callable[[Any], Any]
+
+    @classmethod
+    def resolve(
+        cls,
+        log_path: Optional[Path],
+        db_url: Optional[str],
+        connect: Optional[Callable[[str], Any]],
+        json_adapter: Optional[Callable[[Any], Any]],
+    ) -> _SyncRequest:
+        return cls(
+            log_path=(
+                log_path
+                if log_path is not None
+                else _analytics.ANALYTICS_LOG_PATH
+            ),
+            db_url=db_url if db_url is not None else _analytics.ANALYTICS_DB_URL,
+            connect_fn=connect or _default_connect,
+            json_adapter=json_adapter or _default_json_adapter,
+        )
+
+    def ready(self) -> bool:
+        """Log and reject configured no-op paths before any connection work."""
+        if self.log_path is None:
+            log.info(
+                "analytics_sync: ANALYTICS_LOG_PATH not configured; "
+                "nothing to sync"
+            )
+            return False
+        if not self.db_url:
+            log.info(
+                "analytics_sync: ANALYTICS_DB_URL not configured; "
+                "nothing to sync"
+            )
+            return False
+        if not self.log_path.exists():
+            log.info(
+                "analytics_sync: %s does not exist yet; nothing to sync",
+                self.log_path,
+            )
+            return False
+        return True
+
+
+@dataclass
+class _SyncRun:
+    """Connection lifecycle, ingest state, and reporting for one replay."""
+
+    request: _SyncRequest
+    counters: _SyncCounters = field(default_factory=_SyncCounters)
+    start: float = field(default_factory=time.monotonic)
+
+    def connect(self) -> Any:
+        redacted_url = _redact_db_url(self.request.db_url or "")
+        log.info(
+            "analytics_sync: connecting to %s (source=%s)",
+            redacted_url,
+            self.request.log_path,
+        )
+        conn = self.request.connect_fn(self.request.db_url)
+        log.info(
+            "analytics_sync: connection established to %s after %.3fs",
+            redacted_url,
+            time.monotonic() - self.start,
+        )
+        return conn
+
+    def ingest_context(self) -> _IngestContext:
+        log_path = Path(self.request.log_path)
+        return _IngestContext(
+            log_path=log_path,
+            insert_sql=_build_insert_sql(),
+            source_path=str(log_path),
+            json_adapter=self.request.json_adapter,
+            counters=self.counters,
+            start=self.start,
+        )
+
+    def commit(self, conn: Any) -> None:
+        """Commit rows and refresh the rollup even for duplicate-only runs."""
+        log.info(
+            "analytics_sync: committing transaction (lines=%d inserted=%d "
+            "duplicate=%d malformed=%d elapsed=%.3fs)",
+            self.counters.total_lines,
+            self.counters.inserted,
+            self.counters.skipped_duplicate,
+            self.counters.skipped_malformed,
+            time.monotonic() - self.start,
+        )
+        conn.commit()
+        _refresh_daily_rollup(conn)
+
+    def result(self) -> SyncResult:
+        duration_s = round(time.monotonic() - self.start, 3)
+        log.info(
+            "analytics_sync: completed in %.3fs (inserted=%d duplicate=%d "
+            "malformed=%d total_lines=%d source=%s)",
+            duration_s,
+            self.counters.inserted,
+            self.counters.skipped_duplicate,
+            self.counters.skipped_malformed,
+            self.counters.total_lines,
+            self.request.log_path,
+        )
+        return SyncResult(
+            inserted=self.counters.inserted,
+            skipped_duplicate=self.counters.skipped_duplicate,
+            skipped_malformed=self.counters.skipped_malformed,
+            total_lines=self.counters.total_lines,
+            malformed_line_numbers=tuple(self.counters.malformed_lines),
+            duration_s=duration_s,
+        )
+
+    def execute(self) -> SyncResult:
+        conn = self.connect()
+        try:
+            _ingest_records(conn, self.ingest_context())
+            self.commit(conn)
+        except Exception:
+            _rollback_quietly(conn, "analytics_sync: rollback failed")
+            raise
+        finally:
+            _close_quietly(conn)
+        return self.result()
 
 
 def sync_jsonl_to_postgres(
@@ -617,99 +829,15 @@ def sync_jsonl_to_postgres(
     psycopg. Production callers leave both at None to get the real
     psycopg connection and the default `Json` wrapper.
     """
-    if log_path is None:
-        log_path = _analytics.ANALYTICS_LOG_PATH
-    if db_url is None:
-        db_url = _analytics.ANALYTICS_DB_URL
-    connect_fn = connect or _default_connect
-    json_adapter_fn = json_adapter or _default_json_adapter
-
-    if log_path is None:
-        log.info("analytics_sync: ANALYTICS_LOG_PATH not configured; nothing to sync")
+    request = _SyncRequest.resolve(
+        log_path,
+        db_url,
+        connect,
+        json_adapter,
+    )
+    if not request.ready():
         return SyncResult()
-    if not db_url:
-        log.info("analytics_sync: ANALYTICS_DB_URL not configured; nothing to sync")
-        return SyncResult()
-    if not Path(log_path).exists():
-        log.info("analytics_sync: %s does not exist yet; nothing to sync", log_path)
-        return SyncResult()
-
-    insert_sql = _build_insert_sql()
-    source_path_str = str(log_path)
-    redacted_url = _redact_db_url(db_url)
-
-    counters = _SyncCounters()
-
-    start = time.monotonic()
-    log.info(
-        "analytics_sync: connecting to %s (source=%s)",
-        redacted_url, log_path,
-    )
-    conn = connect_fn(db_url)
-    log.info(
-        "analytics_sync: connection established to %s after %.3fs",
-        redacted_url, time.monotonic() - start,
-    )
-
-    try:
-        _ingest_records(
-            conn,
-            Path(log_path),
-            insert_sql,
-            source_path_str,
-            json_adapter_fn,
-            counters,
-            start,
-        )
-        log.info(
-            "analytics_sync: committing transaction (lines=%d inserted=%d "
-            "duplicate=%d malformed=%d elapsed=%.3fs)",
-            counters.total_lines, counters.inserted,
-            counters.skipped_duplicate, counters.skipped_malformed,
-            time.monotonic() - start,
-        )
-        conn.commit()
-        # Post-commit refresh of the daily rollup MV defined in
-        # `analytics-db/init/01-schema.sql`. The committed inserts
-        # are durable regardless of what happens here, so a refresh
-        # failure is logged and swallowed -- the operator-driven
-        # sync still reports success on the rows that landed in
-        # `analytics_events`. The refresh fires unconditionally on
-        # every successful commit (rather than only when
-        # `inserted > 0`) so that rerunning the sync is the
-        # documented recovery path for a stale rollup: a prior sync
-        # whose refresh failed leaves the rollup stale, and the
-        # operator's only signal that "the sync committed but the
-        # rollup is out of sync" is the swallowed refresh log line.
-        # Gating refresh on inserted>0 would mean a rerun against a
-        # duplicate-only or empty JSONL never recovers the rollup
-        # and the operator has to fall back to a manual `REFRESH
-        # MATERIALIZED VIEW` -- defeating the purpose of the hook.
-        # The wasted work on a no-insert rerun is bounded by the
-        # rollup's row count, which the dashboard's read pattern
-        # keeps small (one row per day per key tuple).
-        _refresh_daily_rollup(conn)
-    except Exception:
-        _rollback_quietly(conn, "analytics_sync: rollback failed")
-        raise
-    finally:
-        _close_quietly(conn)
-
-    duration_s = round(time.monotonic() - start, 3)
-    log.info(
-        "analytics_sync: completed in %.3fs (inserted=%d duplicate=%d "
-        "malformed=%d total_lines=%d source=%s)",
-        duration_s, counters.inserted, counters.skipped_duplicate,
-        counters.skipped_malformed, counters.total_lines, log_path,
-    )
-    return SyncResult(
-        inserted=counters.inserted,
-        skipped_duplicate=counters.skipped_duplicate,
-        skipped_malformed=counters.skipped_malformed,
-        total_lines=counters.total_lines,
-        malformed_line_numbers=tuple(counters.malformed_lines),
-        duration_s=duration_s,
-    )
+    return _SyncRun(request).execute()
 
 
 def _configure_cli_logging(level: str) -> None:
@@ -751,7 +879,7 @@ def _configure_cli_logging(level: str) -> None:
     root.addHandler(handler)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def _cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m orchestrator.analytics.sync",
         description=(
@@ -780,10 +908,23 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
     )
     parser.add_argument("--log-level", default="INFO")
-    args = parser.parse_args(argv)
+    return parser
 
-    _configure_cli_logging(args.log_level)
 
+def _print_cli_result(result: SyncResult, cli_start: float) -> None:
+    """Print the UTC summary retained even when structured logs are hidden."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    duration_s = result.duration_s or round(time.monotonic() - cli_start, 3)
+    print(
+        f"{timestamp} analytics_sync: inserted={result.inserted} "
+        f"duplicate={result.skipped_duplicate} "
+        f"malformed={result.skipped_malformed} "
+        f"total_lines={result.total_lines} "
+        f"duration_s={duration_s:.3f}"
+    )
+
+
+def _run_cli(args: argparse.Namespace) -> int:
     cli_start = time.monotonic()
     try:
         result = sync_jsonl_to_postgres(
@@ -796,27 +937,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             time.monotonic() - cli_start,
         )
         return 1
-
-    # CLI users want a one-line human-readable summary in addition to
-    # the structured log line; print to stdout so it survives
-    # `--log-level WARNING`. The leading UTC timestamp matches the
-    # `_configure_cli_logging` formatter (which is also UTC with a
-    # "UTC" suffix) so an operator piping stdout + stderr together
-    # gets a uniform time-ordered stream regardless of the host's
-    # local timezone. `duration_s` falls back to the CLI wall-clock
-    # when the sync took the no-op path and reported 0.0 -- otherwise
-    # the printed elapsed would disagree with what the operator just
-    # sat through.
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    duration_s = result.duration_s or round(time.monotonic() - cli_start, 3)
-    print(
-        f"{timestamp} analytics_sync: inserted={result.inserted} "
-        f"duplicate={result.skipped_duplicate} "
-        f"malformed={result.skipped_malformed} "
-        f"total_lines={result.total_lines} "
-        f"duration_s={duration_s:.3f}"
-    )
+    _print_cli_result(result, cli_start)
     return 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = _cli_parser().parse_args(argv)
+    _configure_cli_logging(args.log_level)
+    return _run_cli(args)
 
 
 if __name__ == "__main__":
