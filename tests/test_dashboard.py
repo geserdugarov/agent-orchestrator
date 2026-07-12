@@ -282,19 +282,14 @@ def _sleep_then_return(delay: float, value: str) -> str:
 
 
 class _MainSourceTest(unittest.TestCase):
-    """Base for tests that inspect `dashboard.main`'s source (and the
-    focused read / render helpers it dispatches through) under a
-    configured DB URL.
+    """Base for source checks over the lazy entrypoint and page helpers.
 
     Streamlit / Plotly are opt-in (not installed for the default
     `uv sync --locked`), so these read the rendered function source
-    rather than driving the page under Streamlit. `main()` delegates
-    the staged read fan-out (`_widget_readers` / `_dispatch_reads`),
-    the load-timing log (`_log_dashboard_load`), and the empty / error
-    rendering branches (`_read_static_metadata`, `_render_no_data`,
-    `_render_empty_window`) to module-level helpers, so `_source_of`
-    fetches a named helper's source for the assertions that pin strings
-    living inside it.
+    rather than driving the page under Streamlit. The entrypoint loads
+    optional modules lazily and the page pipeline delegates controls,
+    read waves, empty states, and widget sections to named helpers, so
+    `_source_of` fetches the boundary each assertion protects.
     """
 
     def _main_source(self) -> str:
@@ -1592,8 +1587,8 @@ class ReliabilityTilesHtmlTest(unittest.TestCase):
 
 class BuildReadKeysTest(unittest.TestCase):
     """`_build_read_keys` composes the current + previous-window cache
-    keys the staged fan-out splats into the read wrappers (`*key` /
-    `*prev_key`), so the previous key must carry the same filters over
+    keys the staged fan-out binds to cached reader tasks, so the previous
+    key must carry the same filters over
     the immediately-preceding equal-length window.
     """
 
@@ -1672,13 +1667,15 @@ class DashboardDataPrepTest(unittest.TestCase):
         ]
 
         kpis, resolved, rejected = dashboard._build_kpi_strip_data(
-            theme=theme,
-            summary=summary,
-            prev_summary=prev_summary,
-            ts_points=ts_points,
-            throughput_rows=throughput_rows,
-            review_round_rows=review_round_rows,
-            days_in_window=2,
+            dashboard._KpiInputs(
+                theme=theme,
+                summary=summary,
+                prev_summary=prev_summary,
+                ts_points=ts_points,
+                throughput_rows=throughput_rows,
+                review_round_rows=review_round_rows,
+                days_in_window=2,
+            )
         )
 
         by_label = {kpi["label"]: kpi for kpi in kpis}
@@ -1781,23 +1778,24 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
     connection-free -- a raw `psycopg.Connection` is not a hashable
     cache key and every reload would otherwise look like a cache miss.
 
-    The cached wrappers (in `_widget_readers` and `_read_static_metadata`)
-    and the per-issue drill-down all funnel their reads through the shared
-    `_scoped_read` primitive, which owns the `analytics_connection()`
-    checkout and the `conn=conn` forwarding, so these inspect
-    `_scoped_read`'s source plus the wrappers that route through it -- the
-    suite stays hermetic against the dashboard dependency group (Streamlit
-    + Plotly are opt-in).
+    Windowed wrappers route through `_read_filtered`; static metadata and
+    the per-issue drill-down call `_scoped_read` directly. That primitive
+    owns the `analytics_connection()` checkout and `conn=conn` forwarding,
+    so the suite inspects each link without importing the optional
+    Streamlit and Plotly dependency group.
     """
 
     def _readers_source(self) -> str:
-        return self._source_of("_widget_readers")
+        return self._combined_source(WIDGET_READER_WRAPPER_NAMES)
+
+    def _read_filtered_source(self) -> str:
+        return self._source_of("_read_filtered")
 
     def _metadata_source(self) -> str:
         return self._source_of("_read_static_metadata")
 
     def _drilldown_source(self) -> str:
-        return self._source_of("_render_drilldown")
+        return self._source_of("_render_drilldown_view")
 
     def _combined_source(self, names) -> str:
         return "\n\n".join(self._source_of(name) for name in names)
@@ -1812,8 +1810,9 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
             "analytics_read.analytics_connection()",
             self._source_of("_scoped_read"),
         )
+        self.assertIn("_read_filtered(", self._readers_source())
         for label, src in (
-            ("widget readers", self._combined_source(WIDGET_READER_WRAPPER_NAMES)),
+            ("filtered widget read", self._read_filtered_source()),
             ("static metadata", self._combined_source(STATIC_METADATA_READER_NAMES)),
             ("drill-down", self._drilldown_source()),
         ):
@@ -1821,15 +1820,15 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
                 self.assertIn(SCOPED_READ_CALL_FRAGMENT, src)
 
     def test_cached_wrappers_do_not_accept_conn_arg(self) -> None:
-        # Each `_read_*` wrapper's positional parameter list is the
+        # Each `_read_*` wrapper accepts the hashable filter tuple as its
         # cache key. `conn` must NOT appear there -- it would force
         # st.cache_data to hash a connection object, which crashes
         # on the unhashable psycopg.Connection and (with a stringy
         # fallback) treats every refreshed conn as a cache miss.
         for name in WIDGET_READER_WRAPPER_NAMES:
             with self.subTest(name=name):
-                # Each wrapper's signature is the cache key; `conn`
-                # belongs inside `_scoped_read`, not in the parameter list.
+                # `conn` belongs inside `_scoped_read`, not in the cached
+                # wrapper's parameter list.
                 src = self._source_of(name)
                 marker = f"def {name}("
                 self.assertIn(marker, src)
@@ -1843,15 +1842,13 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
                 )
 
     def test_wrappers_forward_scoped_connection(self) -> None:
-        # Each cached reader delegates to `_scoped_read`, which opens the
-        # thread-local connection and forwards it to the read helper --
-        # otherwise a new socket would open per call (the very thing the
-        # scoping is supposed to eliminate). The wrappers stay
-        # connection-free so `conn` never lands in the cache key.
-        readers_src = self._combined_source(WIDGET_READER_WRAPPER_NAMES)
+        # Cached readers delegate through `_read_filtered` to the scoped
+        # connection adapter. The wrappers stay connection-free so `conn`
+        # never lands in the cache key.
+        readers_src = self._readers_source()
         self.assertGreaterEqual(
-            readers_src.count(SCOPED_READ_CALL_FRAGMENT), 15,
-            "every widget read should route through `_scoped_read`",
+            readers_src.count("_read_filtered("), 15,
+            "every widget read should route through `_read_filtered`",
         )
         # The two static-metadata reads route through it too.
         self.assertGreaterEqual(
@@ -1860,7 +1857,9 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
             ),
             2,
         )
-        # And the per-issue drill-down runs its own scoped read.
+        # The shared filtered-read adapter and per-issue drill-down each
+        # run their own scoped read.
+        self.assertIn(SCOPED_READ_CALL_FRAGMENT, self._read_filtered_source())
         self.assertIn(SCOPED_READ_CALL_FRAGMENT, self._drilldown_source())
         # `_scoped_read` is the single place the scoped connection is
         # opened and forwarded to the read helper.
@@ -1883,9 +1882,9 @@ class CachedReadConnectionScopingTest(_MainSourceTest):
         # And the `prev_summary` entry in the reader fan-out must
         # dispatch through `_read_prev_kpi` so the lightweight path
         # is the one that actually fires when the dashboard renders.
-        src = self._readers_source()
+        src = self._source_of("_first_wave_readers")
         self.assertIn(
-            '("prev_summary", lambda: read_prev_kpi(*prev_key))',
+            '_widget_task(st, "prev_summary", _read_prev_kpi, prev_key)',
             src,
         )
 
@@ -1995,12 +1994,53 @@ class FacadeReExportCompatibilityTest(unittest.TestCase):
         self.assertIsInstance(dashboard._parse_parallel_reads_flag(), bool)
 
 
+class DashboardCompatibilityHelperTest(_MainSourceTest):
+    """Exported dashboard helpers retain their historical call shapes."""
+
+    def test_topbar_signature_is_stable(self) -> None:
+        import inspect
+
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        self.assertEqual(
+            tuple(inspect.signature(dashboard._topbar_html).parameters),
+            (
+                "extent",
+                "distinct_repos",
+                "total_events",
+                "spend_in_range",
+                "fmt_money_exact",
+                "fmt_num",
+            ),
+        )
+
+    def test_drilldown_signature_and_typed_delegate_are_stable(self) -> None:
+        import inspect
+
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        self.assertEqual(
+            tuple(inspect.signature(dashboard._render_drilldown).parameters),
+            (
+                "st",
+                "pd",
+                "window",
+                "repo_filter",
+                "issue_input_parsed",
+                "event_filter",
+                "stage_filter",
+            ),
+        )
+        self.assertIn(
+            "_render_drilldown_view(modules, filters)",
+            self._source_of("_render_drilldown"),
+        )
+
+
 class FanOutReadsSequentialTest(unittest.TestCase):
     """The sequential branch of `_fan_out_reads` runs each reader in
     submission order on the calling thread and returns results keyed
-    by reader name. The helper exists so the `main()` call site can
-    collapse 13 lines of `name = _read_name(*key)` into one dispatch
-    and so tests can inject fake readers without booting Streamlit.
+    by reader name. The helper lets each staged wave dispatch its bound
+    cached-reader tasks through one path and lets tests inject fake
+    readers without booting Streamlit.
     """
 
     def test_results_keep_name_and_submit_order(self) -> None:
@@ -2131,63 +2171,66 @@ class FanOutReadsParallelTest(unittest.TestCase):
 
 
 class MainRenderDispatchTest(_MainSourceTest):
-    """`main()` dispatches its body through focused `_render_*` helpers
-    -- the sidebar / date filter bar up top, then the widget cards in
-    top-to-bottom page order after the fan-out.
-    """
+    """The page pipeline preserves control and widget render order."""
 
     def test_render_helpers_called_in_page_order(self) -> None:
-        src = self._main_source()
-        order = [
-            "_render_sidebar_filters(",
-            "_render_date_filter_bar(",
+        controls_src = self._source_of("_render_dashboard_controls")
+        self.assertLess(
+            controls_src.index("_render_sidebar_filters("),
+            controls_src.index("_render_date_filter_bar("),
+        )
+
+        chart_src = self._source_of("_render_chart_widgets")
+        chart_order = [
             "_render_hero_usage(",
             "_render_stage_review_bars(",
             "_render_issues_and_backends(",
             "_render_repo_and_reliability(",
             "_render_activity_heatmap(",
+        ]
+        chart_indexes = [chart_src.index(marker) for marker in chart_order]
+        self.assertEqual(chart_indexes, sorted(chart_indexes))
+
+        remaining_src = self._source_of("_render_remaining_widgets")
+        remaining_order = [
             "_render_skill_triggers(",
             "_render_recent_runs(",
+            "_render_drilldown_view(",
+            "_render_dashboard_footer(",
         ]
-        idxs = [src.index(marker) for marker in order]
-        self.assertEqual(idxs, sorted(idxs))
-        # The final drill-down is the page's last section. The
-        # empty-window short-circuit also calls `_render_drilldown`
-        # earlier, so anchor on the last occurrence.
-        self.assertLess(idxs[-1], src.rindex("_render_drilldown("))
+        remaining_indexes = [
+            remaining_src.index(marker) for marker in remaining_order
+        ]
+        self.assertEqual(remaining_indexes, sorted(remaining_indexes))
 
-    def test_skill_card_between_heatmap_and_runs(
-        self,
-    ) -> None:
-        src = self._main_source()
-        heatmap = src.index("_render_activity_heatmap(")
-        skill = src.index("_render_skill_triggers(")
-        recent = src.index("_render_recent_runs(")
-        self.assertLess(heatmap, skill)
-        self.assertLess(skill, recent)
+        page_src = self._source_of("_render_dashboard_widgets")
+        self.assertLess(
+            page_src.index("_render_chart_widgets("),
+            page_src.index("_render_remaining_widgets("),
+        )
 
     def test_read_and_error_paths_use_helpers(self) -> None:
         # `main` dispatches the staged read fan-out and the empty /
         # error rendering branches through focused helpers rather than
         # inlining the cached wrappers, the fan-out, the load log, and
         # the metadata / no-data / empty-window banners.
-        src = self._main_source()
-        for marker in (
-            "_read_static_metadata(",
-            "_render_no_data(",
-            "_widget_readers(",
-            "_dispatch_reads(",
-            "_log_dashboard_load(",
-            "_render_empty_window(",
+        for helper, marker in (
+            ("_run_dashboard", "_read_static_metadata("),
+            ("_render_dashboard", "_render_no_data("),
+            ("_prepare_dashboard_page", "_widget_readers("),
+            ("_load_dashboard_data", "_dispatch_reads("),
+            ("_load_dashboard_data", "_log_dashboard_load("),
+            ("_render_first_wave", "_render_empty_window("),
         ):
-            with self.subTest(marker=marker):
-                self.assertIn(marker, src)
+            with self.subTest(helper=helper, marker=marker):
+                self.assertIn(marker, self._source_of(helper))
         # The read-error banners and the cached wrappers belong to the
         # helpers, so `main` never inlines `st.error(`, a
         # `_fan_out_reads` call, or a `_read_*` wrapper definition.
-        self.assertNotIn("st.error(", src)
-        self.assertNotIn("_fan_out_reads(", src)
-        self.assertNotIn("def _read_summary(", src)
+        main_src = self._main_source()
+        self.assertNotIn("st.error(", main_src)
+        self.assertNotIn("_fan_out_reads(", main_src)
+        self.assertNotIn("def _read_summary(", main_src)
 
 
 class MainParallelFanOutWiringTest(_MainSourceTest):
@@ -2203,13 +2246,15 @@ class MainParallelFanOutWiringTest(_MainSourceTest):
     def test_dispatch_wraps_fan_out_helper(self) -> None:
         # `_fan_out_reads` is the single dispatch surface; `main`
         # reaches it through the `_dispatch_reads` wave helper.
-        self.assertIn("_dispatch_reads(", self._main_source())
+        self.assertIn(
+            "_dispatch_reads(", self._source_of("_load_dashboard_data"),
+        )
         self.assertIn(
             "_fan_out_reads(", self._source_of("_dispatch_reads"),
         )
 
     def test_main_drives_parallel_off_env_helper(self) -> None:
-        src = self._main_source()
+        src = self._source_of("_prepare_dashboard_page")
         # The env-backed helper is the single source of truth for the
         # flag so a test or shutdown hook can flip it without
         # rewriting `main()`.
@@ -2220,9 +2265,10 @@ class MainParallelFanOutWiringTest(_MainSourceTest):
         # count, and the parallel flag so the operator can A/B with a
         # single grep; it is emitted by `_log_dashboard_load`, which
         # `main` calls (and clocks with `perf_counter`).
-        main_src = self._main_source()
-        self.assertIn("_log_dashboard_load(", main_src)
-        self.assertIn("perf_counter()", main_src)
+        load_src = self._source_of("_load_dashboard_data")
+        prepare_src = self._source_of("_prepare_dashboard_page")
+        self.assertIn("_log_dashboard_load(", load_src)
+        self.assertIn("perf_counter()", prepare_src)
         self.assertIn(
             "dashboard.load:", self._source_of("_log_dashboard_load"),
         )
@@ -2253,13 +2299,15 @@ class SkillMatrixWiringTest(_MainSourceTest):
         self.assertIn("analytics_read.get_skill_trigger_matrix", src)
 
     def test_matrix_read_forwards_scoped_connection(self) -> None:
-        # Reuse the cached-read pattern: the matrix wrapper delegates to
-        # `_scoped_read`, which checks out the scoped thread-local
+        # Reuse the cached-read pattern: the matrix wrapper delegates via
+        # `_read_filtered` to `_scoped_read`, which checks out the thread-local
         # connection and forwards it to the read helper, so the matrix
         # read shares the open socket rather than opening its own.
         src = self._source_of("_read_skill_trigger_matrix")
-        self.assertIn(SCOPED_READ_CALL_FRAGMENT, src)
+        self.assertIn("_read_filtered(", src)
         self.assertIn("analytics_read.get_skill_trigger_matrix", src)
+        filtered_src = self._source_of("_read_filtered")
+        self.assertIn(SCOPED_READ_CALL_FRAGMENT, filtered_src)
         scoped_src = self._source_of("_scoped_read")
         self.assertIn("analytics_read.analytics_connection()", scoped_src)
         self.assertIn("conn=conn", scoped_src)
@@ -2275,10 +2323,10 @@ class SkillMatrixWiringTest(_MainSourceTest):
         self.assertNotIn(" conn", src[head:tail])
 
     def test_matrix_dispatched_in_second_wave(self) -> None:
-        src = self._source_of("_widget_readers")
+        src = self._source_of("_second_wave_readers")
         self.assertIn(
-            '("skill_matrix_rows", '
-            "lambda: read_skill_trigger_matrix(*key))",
+            '_widget_task(st, "skill_matrix_rows", '
+            "_read_skill_trigger_matrix, key)",
             src,
         )
 
@@ -2387,10 +2435,10 @@ class StaticMetadataCacheTest(_MainSourceTest):
         # `get_data_extent` / `get_filter_options` calls live only
         # inside the helper's cached wrappers (routed through the
         # thread-local connection).
-        main_src = self._main_source()
-        self.assertIn("_read_static_metadata(", main_src)
-        self.assertNotIn("get_data_extent(", main_src)
-        self.assertNotIn("get_filter_options(", main_src)
+        run_src = self._source_of("_run_dashboard")
+        self.assertIn("_read_static_metadata(", run_src)
+        self.assertNotIn("get_data_extent(", run_src)
+        self.assertNotIn("get_filter_options(", run_src)
         # The helper itself dispatches through the cached wrappers.
         meta_src = self._metadata_source()
         self.assertIn("read_data_extent()", meta_src)
@@ -2398,191 +2446,109 @@ class StaticMetadataCacheTest(_MainSourceTest):
 
 
 class StagedRenderTest(_MainSourceTest):
-    """Issue #379 splits the read fan-out into two staged waves so
-    the topbar / filter meta / insight banners / KPI strip paint as
-    soon as their inputs are available, rather than blocking on every
-    widget. The first wave covers the six reads those above-the-fold
-    widgets consume; the second wave covers the eight remaining
-    widget reads. Worker threads only return data; every `st.*` /
-    placeholder write happens on the main render thread between the
-    two waves.
-    """
+    """The two read waves preserve their inputs and progressive render order."""
 
-    def _wave_block(self, src: str, name: str) -> str:
-        # The reader lists are short, indented at the function-body
-        # level (4 spaces), and bracketed by `[` ... `\n    ]`. The
-        # type annotation `list[tuple[str, Callable[[], Any]]]` sits
-        # on the assignment line, so we walk past the `= [` opening
-        # and stop at the first dedented `]` (preceded by the body
-        # indent) to extract just the list literal.
-        marker = f"{name}: list"
-        self.assertIn(marker, src, f"{name} declaration missing")
-        head = src.index("= [", src.index(marker)) + len("= [")
-        tail = src.index("\n    ]", head)
-        return src[head:tail]
+    def _first_wave_source(self) -> str:
+        return self._source_of("_first_wave_readers")
 
-    def _readers_source(self) -> str:
-        # The staged reader lists live in the `_widget_readers` helper.
-        return self._source_of("_widget_readers")
+    def _second_wave_source(self) -> str:
+        return self._source_of("_second_wave_readers")
+
+    def _load_source(self) -> str:
+        return self._source_of("_load_dashboard_data")
 
     def test_first_wave_has_only_topbar_inputs(self) -> None:
-        # The six reads in the first wave are exactly the inputs the
-        # topbar / filter meta / insight banners / KPI strip consume.
-        # Pin the set so a future refactor that adds (or drops) a
-        # reader has to update the staging explicitly.
-        src = self._readers_source()
-        wave = self._wave_block(src, "first_wave_readers")
+        wave = self._first_wave_source()
         for name in FIRST_WAVE_READER_NAMES:
             with self.subTest(name=name):
                 self.assertIn(f'"{name}"', wave)
-        # The remaining widget reads are NOT in the first wave -- they
-        # would force the spinner to wait for the slowest widget read
-        # before the KPI strip can paint.
         for name in SECOND_WAVE_READER_NAMES:
             with self.subTest(name=name):
                 self.assertNotIn(f'"{name}"', wave)
 
     def test_second_wave_has_remaining_reads(self) -> None:
-        src = self._readers_source()
-        wave = self._wave_block(src, "second_wave_readers")
+        wave = self._second_wave_source()
         for name in SECOND_WAVE_READER_NAMES:
             with self.subTest(name=name):
                 self.assertIn(f'"{name}"', wave)
-        # And the topbar / KPI-strip inputs are NOT in the second
-        # wave -- they belong to the first wave so the strip can
-        # paint before the slow widget reads finish.
         for name in FIRST_WAVE_READER_NAMES:
             with self.subTest(name=name):
                 self.assertNotIn(f'"{name}"', wave)
 
     def test_topbar_and_meta_render_between_waves(self) -> None:
-        # `topbar_slot.markdown` and `meta_slot.markdown` (which fill
-        # the above-the-fold content) must happen AFTER the first
-        # wave dispatch and BEFORE the second wave dispatch.
-        # Otherwise the staged-render gain evaporates.
-        src = self._main_source()
-        first = src.index("_dispatch_reads(\n            first_wave_readers")
-        second = src.index("_dispatch_reads(\n            second_wave_readers")
-        topbar_render = src.index("topbar_slot.markdown(")
-        meta_render = src.index("meta_slot.markdown(")
-        kpi_render = src.index("_kpi_strip_html(kpis)")
-        self.assertLess(first, topbar_render)
-        self.assertLess(topbar_render, second)
-        self.assertLess(first, meta_render)
-        self.assertLess(meta_render, second)
-        self.assertLess(first, kpi_render)
-        self.assertLess(kpi_render, second)
+        load_source = self._load_source()
+        first = load_source.index("page.reads.first_wave")
+        render = load_source.index("_render_first_wave(")
+        second = load_source.index("page.reads.second_wave")
+        self.assertLess(first, render)
+        self.assertLess(render, second)
+
+        first_render_source = self._source_of("_render_first_wave")
+        self.assertIn("_render_topbar_and_meta(", first_render_source)
+        self.assertIn("_kpi_strip_html(", first_render_source)
+        topbar_source = self._source_of("_render_topbar_and_meta")
+        self.assertIn("topbar_slot.markdown(", topbar_source)
+        self.assertIn("meta_slot.markdown(", topbar_source)
 
     def test_inline_loading_spinner_wraps_fan_out(self) -> None:
-        # A single in-line "Loading analytics…" spinner spans both
-        # waves so the user gets immediate feedback on a cold load
-        # instead of staring at a blank page. Pin the constant +
-        # `st.spinner` call so a future refactor cannot silently drop
-        # the feedback surface.
         _, dashboard = _reload({ANALYTICS_DB_URL_ENV: ""})
         self.assertEqual(
             dashboard.LOADING_INDICATOR_MESSAGE, "Loading analytics…"
         )
-        src = self._main_source()
-        self.assertIn(
-            "with st.spinner(LOADING_INDICATOR_MESSAGE):", src,
+        source = self._load_source()
+        spinner = source.index(
+            "with modules.st.spinner(LOADING_INDICATOR_MESSAGE):"
         )
-        # And the spinner brackets BOTH dispatch calls -- a spinner
-        # that only covered the first wave would clear before the
-        # second wave painted its widgets.
-        spinner_head = src.index(
-            "with st.spinner(LOADING_INDICATOR_MESSAGE):"
-        )
-        first = src.index(
-            "_dispatch_reads(\n            first_wave_readers"
-        )
-        second = src.index(
-            "_dispatch_reads(\n            second_wave_readers"
-        )
-        self.assertLess(spinner_head, first)
-        self.assertLess(spinner_head, second)
+        first = source.index("page.reads.first_wave")
+        second = source.index("page.reads.second_wave")
+        self.assertLess(spinner, first)
+        self.assertLess(spinner, second)
 
     def test_widgets_render_on_main_thread(self) -> None:
-        # Worker threads in `_fan_out_reads` only return data -- the
-        # `st.*` / `topbar_slot.markdown(...)` calls all live in
-        # `main()` itself, on the main render thread. We assert this
-        # by checking the reader entries in `_widget_readers` are pure
-        # data callables (`lambda: _read_*(...)`) with no Streamlit
-        # writes inside.
-        src = self._readers_source()
-        # The first/second wave list literals are pure data closures --
-        # `st.` (i.e. Streamlit attribute access) only appears outside
-        # those list entries (the wrapper decorators sit above them).
-        for marker, end in (
-            ("first_wave_readers: list", "second_wave_readers"),
-            ("second_wave_readers: list", "return first_wave_readers"),
-        ):
-            with self.subTest(marker=marker):
-                head = src.index(marker)
-                tail = src.index(end, head)
-                wave_block = src[head:tail]
-                self.assertNotIn(" st.", wave_block)
-                self.assertNotIn("slot.markdown", wave_block)
+        for helper in ("_first_wave_readers", "_second_wave_readers"):
+            with self.subTest(helper=helper):
+                wave_source = self._source_of(helper)
+                self.assertIn("_widget_task(", wave_source)
+                self.assertNotIn(".markdown(", wave_source)
+                self.assertNotIn(".info(", wave_source)
+                self.assertNotIn(".plotly_chart(", wave_source)
+        task_source = self._source_of("_widget_task")
+        self.assertIn("partial(cached_reader, *args)", task_source)
+        self.assertNotIn(".markdown(", task_source)
 
     def test_empty_window_short_circuits_second_wave(self) -> None:
-        # When the first wave's summary returns no events, the
-        # second wave never fires -- the eight remaining widget
-        # reads would just paint empty cards. Pin the short-circuit
-        # so a future refactor cannot silently re-introduce the
-        # wasted reads on an empty window.
-        src = self._main_source()
-        # The `summary.total_events == 0` check sits between the
-        # first-wave dispatch and the second-wave dispatch.
-        first = src.index(
-            "_dispatch_reads(\n            first_wave_readers"
-        )
-        second = src.index(
-            "_dispatch_reads(\n            second_wave_readers"
-        )
-        empty_check = src.index("summary.total_events == 0")
-        self.assertLess(first, empty_check)
-        self.assertLess(empty_check, second)
-        # And the empty branch returns early (via `_render_empty_window`)
-        # so the second wave never executes on an empty window.
-        empty_block = src[empty_check:second]
-        self.assertIn("return", empty_block)
-        self.assertIn("_render_empty_window(", empty_block)
+        load_source = self._load_source()
+        first_render = load_source.index("_render_first_wave(")
+        second = load_source.index("page.reads.second_wave")
+        short_circuit = load_source[first_render:second]
+        self.assertIn("if kpis is None:", short_circuit)
+        self.assertIn("return None", short_circuit)
+
+        first_wave_source = self._source_of("_render_first_wave")
+        empty_check = first_wave_source.index("summary.total_events == 0")
+        empty_render = first_wave_source.index("_render_empty_window(")
+        self.assertLess(empty_check, empty_render)
+        self.assertIn("return None", first_wave_source[empty_check:])
 
 
 class StagedRenderErrorTest(_MainSourceTest):
-    """A read error in EITHER wave surfaces as one `st.error` +
-    `st.stop`: both waves route through the single `_dispatch_reads`
-    helper (whose handler is pinned by `MainParallelFanOutWiringTest`),
-    and the second-wave dispatch runs only AFTER the topbar / KPI strip
-    have painted -- so a second-wave error stops a half-rendered
-    dashboard cleanly instead of continuing into broken widget code.
-    """
+    """Both read waves share error handling and retain their render order."""
 
     def test_both_waves_route_through_dispatch_helper(self) -> None:
-        # Each wave is dispatched via `_dispatch_reads`, so both inherit
-        # the same `try/except AnalyticsReadError` -> `st.error` + stop
-        # handling rather than each open-coding it.
-        src = self._main_source()
-        self.assertIn(
-            "_dispatch_reads(\n            first_wave_readers", src
-        )
-        self.assertIn(
-            "_dispatch_reads(\n            second_wave_readers", src
-        )
+        source = self._source_of("_load_dashboard_data")
+        self.assertIn("page.reads.first_wave", source)
+        self.assertIn("page.reads.second_wave", source)
+        self.assertEqual(source.count("_dispatch_reads("), 2)
 
     def test_second_wave_error_after_topbar_paints(self) -> None:
-        # The second-wave dispatch runs AFTER the topbar / KPI strip
-        # have already painted -- so the user sees real content (the
-        # topbar + KPI strip) and then, on a read error, a single
-        # `st.error` instead of a half-rendered dashboard.
-        src = self._main_source()
-        topbar_render = src.index("topbar_slot.markdown(")
-        second_dispatch = src.index(
-            "_dispatch_reads(\n            second_wave_readers"
+        source = self._source_of("_load_dashboard_data")
+        first_wave_render = source.index("_render_first_wave(")
+        second_dispatch = source.index("page.reads.second_wave")
+        self.assertLess(first_wave_render, second_dispatch)
+        self.assertIn(
+            "_render_topbar_and_meta(",
+            self._source_of("_render_first_wave"),
         )
-        self.assertLess(topbar_render, second_dispatch)
-
-
 class FanOutReadsErrorPropagationTest(unittest.TestCase):
     """The first-wave error path must NOT swallow the worker's
     `AnalyticsReadError` -- the existing fan-out helper already

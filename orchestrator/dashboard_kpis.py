@@ -177,12 +177,16 @@ def top_expensive_issues(
     """Issues sorted by total cost desc for the "where did spend go" table."""
     if limit <= 0:
         return []
+    return sorted(rows, key=_expensive_issue_key)[:limit]
 
-    def _key(r: IssueSummaryRow) -> tuple:
-        cost = r.total_cost_usd if r.total_cost_usd is not None else -1.0
-        return (-cost, -int(r.event_count), r.repo, int(r.issue))
 
-    return sorted(rows, key=_key)[:limit]
+def _expensive_issue_key(row: IssueSummaryRow) -> tuple:
+    cost = row.total_cost_usd
+    if cost is None:
+        cost = -1.0
+    event_count = -int(row.event_count)
+    issue_number = int(row.issue)
+    return (-cost, event_count, row.repo, issue_number)
 
 
 def rework_totals(

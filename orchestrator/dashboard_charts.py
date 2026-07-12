@@ -48,6 +48,7 @@ exposed by ``orchestrator.analytics.read``.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Optional, Sequence
 
@@ -218,31 +219,35 @@ def _horizontal_legend(*, traceorder: Optional[str] = None) -> dict[str, object]
     return legend
 
 
+@dataclass(frozen=True)
+class _HorizontalCostLayout:
+    row_count: int
+    height: Optional[int] = None
+    title: Optional[str] = None
+    barmode: Optional[str] = None
+    legend: Optional[dict[str, object]] = None
+    row_height: int = _HORIZONTAL_BAR_ROW_HEIGHT
+    extra_height: int = _HORIZONTAL_BAR_EXTRA_HEIGHT
+
+
 def _apply_horizontal_cost_layout(
     fig: go.Figure,
-    *,
-    row_count: int,
-    height: Optional[int] = None,
-    title: Optional[str] = None,
-    barmode: Optional[str] = None,
-    legend: Optional[dict[str, object]] = None,
-    row_height: int = _HORIZONTAL_BAR_ROW_HEIGHT,
-    extra_height: int = _HORIZONTAL_BAR_EXTRA_HEIGHT,
+    options: _HorizontalCostLayout,
 ) -> None:
-    layout = theme.base_layout(title=title)
-    if barmode is not None:
-        layout["barmode"] = barmode
-    if legend is not None:
-        layout["legend"] = legend
+    layout = theme.base_layout(title=options.title)
+    if options.barmode is not None:
+        layout["barmode"] = options.barmode
+    if options.legend is not None:
+        layout["legend"] = options.legend
     layout["margin"] = {
         **_HORIZONTAL_BAR_MARGIN,
         "t": layout["margin"]["t"],
     }
     layout["height"] = _horizontal_panel_height(
-        row_count,
-        height=height,
-        row_height=row_height,
-        extra_height=extra_height,
+        options.row_count,
+        height=options.height,
+        row_height=options.row_height,
+        extra_height=options.extra_height,
     )
     fig.update_layout(**layout)
     fig.update_xaxes(
@@ -252,31 +257,35 @@ def _apply_horizontal_cost_layout(
     fig.update_yaxes(automargin=True, showline=False, ticks="")
 
 
+@dataclass(frozen=True)
+class _CostBarTrace:
+    name: str
+    values: Sequence[float]
+    y_ticks: Sequence[str]
+    color: object
+    hover_label: str
+    offsetgroup: Optional[str] = None
+    totals: Optional[Sequence[float]] = None
+
+
 def _cost_bar_trace(
-    *,
-    name: str,
-    values: Sequence[float],
-    y_ticks: Sequence[str],
-    color,
-    hover_label: str,
-    offsetgroup: Optional[str] = None,
-    totals: Optional[Sequence[float]] = None,
+    options: _CostBarTrace,
 ) -> go.Bar:
     trace_kwargs = {
-        "x": list(values),
-        "y": list(y_ticks),
-        "name": name,
+        "x": list(options.values),
+        "y": list(options.y_ticks),
+        "name": options.name,
         "orientation": "h",
-        "marker_color": color,
+        "marker_color": options.color,
         "cliponaxis": False,
         "hovertemplate": (
-            "%{y}<br>" + hover_label + ": $%{x:,.2f}<extra></extra>"
+            "%{y}<br>" + options.hover_label + ": $%{x:,.2f}<extra></extra>"
         ),
     }
-    if offsetgroup is not None:
-        trace_kwargs["offsetgroup"] = offsetgroup
-    if totals is not None:
-        trace_kwargs["text"] = _money_text(totals)
+    if options.offsetgroup is not None:
+        trace_kwargs["offsetgroup"] = options.offsetgroup
+    if options.totals is not None:
+        trace_kwargs["text"] = _money_text(options.totals)
         trace_kwargs["textposition"] = "outside"
         trace_kwargs["textfont"] = _monospace_textfont()
     return go.Bar(**trace_kwargs)
@@ -358,10 +367,169 @@ def _usage_stack_totals(
 ) -> list[float]:
     if mode == "backend" and backend_rows_by_day:
         return [sum(backend_rows_by_day.get(day, {}).values()) for day in days]
-    return [
-        daily[day]["input"] + daily[day]["output"] + daily[day]["cache"]
-        for day in days
-    ]
+    return [_daily_token_total(daily[day]) for day in days]
+
+
+def _daily_token_total(bucket: dict[str, float]) -> float:
+    return sum(bucket[token_type] for token_type in ("input", "output", "cache"))
+
+
+@dataclass(frozen=True)
+class _UsageChartData:
+    daily: dict[date, dict[str, float]]
+    days: Sequence[date]
+
+
+@dataclass(frozen=True)
+class _UsageAxisRanges:
+    token_top: float
+    cost_top: float
+
+
+def _prepare_usage_data(
+    points: Sequence[TimeSeriesPoint],
+    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    mode: str,
+) -> Optional[_UsageChartData]:
+    if not points and not backend_rows_by_day:
+        return None
+    daily = _roll_up_time_series(points)
+    if mode == "backend" and backend_rows_by_day:
+        _ensure_backend_days(daily, backend_rows_by_day)
+    days = sorted(daily)
+    if not days:
+        return None
+    return _UsageChartData(daily=daily, days=days)
+
+
+def _add_backend_usage_traces(
+    fig: go.Figure,
+    data: _UsageChartData,
+    backend_rows_by_day: dict[date, dict[str, float]],
+) -> None:
+    backends = _backend_names(backend_rows_by_day)
+    for backend in backends:
+        color = theme.color_for(
+            backend, backends, explicit=theme.BACKEND_COLORS,
+        )
+        _add_token_stack_trace(
+            fig,
+            days=data.days,
+            values=[
+                backend_rows_by_day.get(day, {}).get(backend, 0)
+                for day in data.days
+            ],
+            name=backend,
+            color=color,
+        )
+
+
+def _add_token_type_usage_traces(
+    fig: go.Figure,
+    data: _UsageChartData,
+) -> None:
+    for band, label in (
+        ("input", "Input"),
+        ("output", "Output"),
+        ("cache", "Cache"),
+    ):
+        _add_token_stack_trace(
+            fig,
+            days=data.days,
+            values=[data.daily[day][band] for day in data.days],
+            name=label,
+            color=theme.TOKEN_TYPE_COLORS[label],
+        )
+
+
+def _add_usage_stack_traces(
+    fig: go.Figure,
+    data: _UsageChartData,
+    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    mode: str,
+) -> None:
+    if mode == "backend" and backend_rows_by_day:
+        _add_backend_usage_traces(fig, data, backend_rows_by_day)
+        return
+    _add_token_type_usage_traces(fig, data)
+
+
+def _add_usage_cost_trace(fig: go.Figure, data: _UsageChartData) -> None:
+    fig.add_trace(
+        go.Scatter(
+            x=_date_axis(data.days),
+            y=[data.daily[day]["cost"] for day in data.days],
+            name="Cost",
+            mode="lines+markers",
+            line={"color": theme.INK, "width": 2},
+            marker={"size": 5, "color": theme.INK},
+            yaxis="y2",
+            hovertemplate="%{x}<br>Cost: $%{y:.2f}<extra></extra>",
+        )
+    )
+
+
+def _usage_axis_ranges(
+    data: _UsageChartData,
+    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    mode: str,
+) -> _UsageAxisRanges:
+    stack_totals = _usage_stack_totals(
+        data.days,
+        data.daily,
+        backend_rows_by_day=backend_rows_by_day,
+        mode=mode,
+    )
+    token_max = max(stack_totals, default=0.0)
+    cost_max = max(
+        (data.daily[day]["cost"] for day in data.days),
+        default=0.0,
+    )
+    return _UsageAxisRanges(
+        token_top=_nice_axis_max(token_max, _USAGE_GRID_STEPS),
+        cost_top=_nice_axis_max(cost_max, _USAGE_GRID_STEPS),
+    )
+
+
+def _usage_layout(
+    data: _UsageChartData,
+    backend_rows_by_day: Optional[dict[date, dict[str, float]]],
+    mode: str,
+    title: Optional[str],
+) -> dict[str, object]:
+    layout = theme.base_layout(title=title)
+    ranges = _usage_axis_ranges(data, backend_rows_by_day, mode)
+    layout["yaxis"] = {
+        **layout.get("yaxis", {}),
+        "title": {"text": "tokens"},
+        "range": [0, ranges.token_top],
+        "dtick": ranges.token_top / _USAGE_GRID_STEPS,
+        "rangemode": "tozero",
+        "showgrid": True,
+    }
+    layout["yaxis2"] = {
+        "title": {"text": "USD"},
+        "overlaying": "y",
+        "side": "right",
+        "range": [0, ranges.cost_top],
+        "dtick": ranges.cost_top / _USAGE_GRID_STEPS,
+        "rangemode": "tozero",
+        "gridcolor": theme.GRID,
+        "linecolor": theme.GRID,
+        "showgrid": False,
+        "tickprefix": "$",
+        "tickfont": {"color": theme.MUTED_TEXT},
+    }
+    layout["margin"] = {**layout.get("margin", {}), "t": 28}
+    layout["hovermode"] = "x unified"
+    layout["legend"] = {
+        **layout.get("legend", {}),
+        "orientation": "h",
+        "yanchor": "bottom", "y": 1.02,
+        "xanchor": "left", "x": 0,
+    }
+    layout["height"] = 330
+    return layout
 
 
 def usage_over_time(
@@ -400,70 +568,15 @@ def usage_over_time(
     chart. Cost ticks render in `$1.2K` shorthand via
     `dashboard_theme.fmt_money`.
     """
-    if not points and not backend_rows_by_day:
-        return _empty_figure(
-            "No events match the current filters.", height=330,
-        )
-
-    daily = _roll_up_time_series(points)
-
-    if mode == "backend" and backend_rows_by_day:
-        _ensure_backend_days(daily, backend_rows_by_day)
-
-    days = sorted(daily.keys())
-    if not days:
+    data = _prepare_usage_data(points, backend_rows_by_day, mode)
+    if data is None:
         return _empty_figure(
             "No events match the current filters.", height=330,
         )
 
     fig = go.Figure()
-    if mode == "backend" and backend_rows_by_day:
-        backends = _backend_names(backend_rows_by_day)
-        # Reverse the legend order so the first backend renders at
-        # the bottom of the stack (matching how token type is drawn).
-        for backend in backends:
-            color = theme.color_for(
-                backend, backends, explicit=theme.BACKEND_COLORS
-            )
-            _add_token_stack_trace(
-                fig,
-                days=days,
-                values=[
-                    backend_rows_by_day.get(day, {}).get(backend, 0)
-                    for day in days
-                ],
-                name=backend,
-                color=color,
-            )
-    else:
-        for band, label in (
-            ("input", "Input"),
-            ("output", "Output"),
-            ("cache", "Cache"),
-        ):
-            color = theme.TOKEN_TYPE_COLORS[label]
-            _add_token_stack_trace(
-                fig,
-                days=days,
-                values=[daily[day][band] for day in days],
-                name=label,
-                color=color,
-            )
-
-    fig.add_trace(
-        go.Scatter(
-            x=_date_axis(days),
-            y=[daily[d]["cost"] for d in days],
-            name="Cost",
-            mode="lines+markers",
-            line={"color": theme.INK, "width": 2},
-            marker={"size": 5, "color": theme.INK},
-            yaxis="y2",
-            hovertemplate="%{x}<br>Cost: $%{y:.2f}<extra></extra>",
-        )
-    )
-
-    layout = theme.base_layout(title=title)
+    _add_usage_stack_traces(fig, data, backend_rows_by_day, mode)
+    _add_usage_cost_trace(fig, data)
     # Align the two y-axes on a shared set of horizontal gridlines.
     # Both axes start at zero and split into the same number of equal
     # steps, so each tokens gridline and its USD counterpart sit on the
@@ -471,51 +584,44 @@ def usage_over_time(
     # ranges (e.g. 6 token lines from 0 to 1B vs 5 USD lines to $1000)
     # whose gridlines visually drift apart. Only the left (tokens) axis
     # draws the gridlines; the right (USD) axis ticks land on them.
-    stack_totals = _usage_stack_totals(
-        days, daily, backend_rows_by_day=backend_rows_by_day, mode=mode
-    )
-    token_max = max(stack_totals, default=0.0)
-    cost_max = max((daily[d]["cost"] for d in days), default=0.0)
-    token_top = _nice_axis_max(token_max, _USAGE_GRID_STEPS)
-    cost_top = _nice_axis_max(cost_max, _USAGE_GRID_STEPS)
-    layout["yaxis"] = {
-        **layout.get("yaxis", {}),
-        "title": {"text": "tokens"},
-        "range": [0, token_top],
-        "dtick": token_top / _USAGE_GRID_STEPS,
-        "rangemode": "tozero",
-        "showgrid": True,
-    }
-    layout["yaxis2"] = {
-        "title": {"text": "USD"},
-        "overlaying": "y",
-        "side": "right",
-        "range": [0, cost_top],
-        "dtick": cost_top / _USAGE_GRID_STEPS,
-        "rangemode": "tozero",
-        "gridcolor": theme.GRID,
-        "linecolor": theme.GRID,
-        "showgrid": False,
-        "tickprefix": "$",
-        "tickfont": {"color": theme.MUTED_TEXT},
-    }
-    # The card header already prints the chart title, so `title` is
-    # passed as None from the dashboard; keep enough top margin for the
-    # horizontal legend that floats just above the plot area.
-    layout["margin"] = {**layout.get("margin", {}), "t": 28}
-    layout["hovermode"] = "x unified"
-    layout["legend"] = {
-        **layout.get("legend", {}),
-        "orientation": "h",
-        "yanchor": "bottom", "y": 1.02,
-        "xanchor": "left", "x": 0,
-    }
-    # Hero chart: ~330px matches the standalone mock. Plotly's
-    # default 450px leaves the chart looking over-tall against the
-    # surrounding KPI strip and stage-cost cards.
-    layout["height"] = 330
-    fig.update_layout(**layout)
+    fig.update_layout(**_usage_layout(data, backend_rows_by_day, mode, title))
     return fig
+
+
+@dataclass(frozen=True)
+class _HorizontalBars:
+    labels: Sequence[str]
+    subs: Sequence[str]
+    values: Sequence[float]
+    colors: Sequence[str]
+
+
+def _reverse_horizontal_bars(data: _HorizontalBars) -> _HorizontalBars:
+    reversed_values = _reverse_lists(
+        data.labels, data.subs, data.values, data.colors,
+    )
+    return _HorizontalBars(*reversed_values)
+
+
+def _horizontal_bars_data(
+    items: Sequence[tuple[str, str, float, str]],
+    accent: Optional[str],
+    preserve_order: bool,
+) -> _HorizontalBars:
+    ordered = list(items)
+    if not preserve_order:
+        ordered.sort(key=_cost_item_sort_key)
+    return _reverse_horizontal_bars(_HorizontalBars(
+        labels=[item[0] for item in ordered],
+        subs=[item[1] for item in ordered],
+        values=[float(item[2] or 0.0) for item in ordered],
+        colors=[item[3] or accent or theme.ACCENT for item in ordered],
+    ))
+
+
+def _cost_item_sort_key(item: tuple[str, str, float, str]) -> float:
+    cost = float(item[2] or 0.0)
+    return -cost
 
 
 def cost_horizontal_bars(
@@ -550,31 +656,14 @@ def cost_horizontal_bars(
             "No data matches the current filters.",
             height=height or 120,
         )
-    ordered = (
-        list(items)
-        if preserve_order
-        else sorted(items, key=lambda it: -float(it[2] or 0.0))
-    )
-    labels = [it[0] for it in ordered]
-    subs = [it[1] for it in ordered]
-    values = [float(it[2] or 0.0) for it in ordered]
-    colors = [
-        (it[3] if (len(it) > 3 and it[3]) else (accent or theme.ACCENT))
-        for it in ordered
-    ]
-    # Plotly draws the first y-value at the bottom of a horizontal
-    # bar chart; reverse so the largest cost sits at the top.
-    labels, subs, values, colors = _reverse_lists(
-        labels, subs, values, colors
-    )
-    y_ticks = _two_line_y_ticks(labels, subs)
+    data = _horizontal_bars_data(items, accent, preserve_order)
     fig = go.Figure(
         go.Bar(
-            x=values,
-            y=y_ticks,
+            x=data.values,
+            y=_two_line_y_ticks(data.labels, data.subs),
             orientation="h",
-            marker_color=colors,
-            text=_money_text(values),
+            marker_color=data.colors,
+            text=_money_text(data.values),
             textposition="outside",
             textfont=_monospace_textfont(),
             cliponaxis=False,
@@ -587,9 +676,66 @@ def cost_horizontal_bars(
     # the same hero-chart height. An explicit `height` (e.g. to match
     # a paired panel) overrides the per-row computation.
     _apply_horizontal_cost_layout(
-        fig, title=title, row_count=len(values), height=height
+        fig,
+        _HorizontalCostLayout(
+            title=title,
+            row_count=len(data.values),
+            height=height,
+        ),
     )
     return fig
+
+
+@dataclass(frozen=True)
+class _StageCostBars:
+    labels: Sequence[str]
+    subs: Sequence[str]
+    no_cache: Sequence[float]
+    cache: Sequence[float]
+    totals: Sequence[float]
+    colors: Sequence[str]
+    cache_colors: Sequence[str]
+
+
+def _stage_no_cache_cost(row: StageBreakdown) -> float:
+    no_cache = float(row.no_cache_cost_usd or 0.0)
+    cache = float(row.cache_cost_usd or 0.0)
+    total = float(row.total_cost_usd or 0.0)
+    if no_cache == 0.0 and cache == 0.0 and total > 0.0:
+        return total
+    return no_cache
+
+
+def _reverse_stage_cost_bars(data: _StageCostBars) -> _StageCostBars:
+    reversed_values = _reverse_lists(
+        data.labels,
+        data.subs,
+        data.no_cache,
+        data.cache,
+        data.totals,
+        data.colors,
+        data.cache_colors,
+    )
+    return _StageCostBars(*reversed_values)
+
+
+def _stage_cost_bars(rows: Sequence[StageBreakdown]) -> _StageCostBars:
+    ordered = sorted(
+        rows, key=lambda row: -float(row.total_cost_usd or 0.0),
+    )
+    colors = [
+        theme.color_for(row.stage, explicit=theme.STAGE_COLORS)
+        for row in ordered
+    ]
+    return _reverse_stage_cost_bars(_StageCostBars(
+        labels=[row.stage for row in ordered],
+        subs=[f"{int(row.runs or 0):,} runs" for row in ordered],
+        no_cache=[_stage_no_cache_cost(row) for row in ordered],
+        cache=[float(row.cache_cost_usd or 0.0) for row in ordered],
+        totals=[float(row.total_cost_usd or 0.0) for row in ordered],
+        colors=colors,
+        cache_colors=[_lighten_hex(color, 0.45) for color in colors],
+    ))
 
 
 def cost_by_stage(
@@ -620,48 +766,8 @@ def cost_by_stage(
             "No stage data matches the current filters.",
             height=height or 120,
         )
-    # Sort by total cost descending so the largest spend sits at the
-    # top -- matching the prior `cost_horizontal_bars` layout.
-    ordered = sorted(
-        rows, key=lambda r: -float(r.total_cost_usd or 0.0)
-    )
-    labels = [r.stage for r in ordered]
-    subs = [f"{int(r.runs or 0):,} runs" for r in ordered]
-    no_cache = [float(r.no_cache_cost_usd or 0.0) for r in ordered]
-    cache = [float(r.cache_cost_usd or 0.0) for r in ordered]
-    # When the rollup carries no cache split (legacy fixture with
-    # cache_cost + no_cache_cost both zero) fall back to plotting the
-    # full total as no-cache so the bar length still reads correctly.
-    totals = [
-        float(r.total_cost_usd or 0.0) for r in ordered
-    ]
-    for row_index, (no_cache_cost, cache_cost, total_cost) in enumerate(
-        zip(no_cache, cache, totals)
-    ):
-        if no_cache_cost == 0.0 and cache_cost == 0.0 and total_cost > 0.0:
-            no_cache[row_index] = total_cost
-    colors = [
-        theme.color_for(r.stage, explicit=theme.STAGE_COLORS)
-        for r in ordered
-    ]
-    # 0.45 alpha keeps the cache segment legible on the page
-    # background while leaving the no-cache portion as the dominant
-    # stage color -- mirroring `cost_by_review_round`.
-    cache_colors = [_lighten_hex(stage_color, 0.45) for stage_color in colors]
-    # Plotly draws the first y-value at the bottom of a horizontal
-    # bar chart; reverse so the largest cost sits at the top.
-    (
-        labels,
-        subs,
-        no_cache,
-        cache,
-        totals,
-        colors,
-        cache_colors,
-    ) = _reverse_lists(
-        labels, subs, no_cache, cache, totals, colors, cache_colors
-    )
-    y_ticks = _two_line_y_ticks(labels, subs)
+    data = _stage_cost_bars(rows)
+    y_ticks = _two_line_y_ticks(data.labels, data.subs)
     fig = go.Figure()
     # No-cache trace is added first so it reads as the base segment
     # and cache stacks outward -- matching the issue's "with and
@@ -670,29 +776,35 @@ def cost_by_stage(
     # per bar instead of duplicating on each segment.
     fig.add_trace(
         _cost_bar_trace(
-            name="No cache",
-            values=no_cache,
-            y_ticks=y_ticks,
-            color=colors,
-            hover_label="No cache",
+            _CostBarTrace(
+                name="No cache",
+                values=data.no_cache,
+                y_ticks=y_ticks,
+                color=data.colors,
+                hover_label="No cache",
+            ),
         )
     )
     fig.add_trace(
         _cost_bar_trace(
-            name="Cache",
-            values=cache,
-            y_ticks=y_ticks,
-            color=cache_colors,
-            hover_label="Cache",
-            totals=totals,
+            _CostBarTrace(
+                name="Cache",
+                values=data.cache,
+                y_ticks=y_ticks,
+                color=data.cache_colors,
+                hover_label="Cache",
+                totals=data.totals,
+            ),
         )
     )
     _apply_horizontal_cost_layout(
         fig,
-        row_count=len(y_ticks),
-        height=height,
-        barmode="stack",
-        legend=_horizontal_legend(),
+        _HorizontalCostLayout(
+            row_count=len(y_ticks),
+            height=height,
+            barmode="stack",
+            legend=_horizontal_legend(),
+        ),
     )
     return fig
 
@@ -711,6 +823,125 @@ def _lighten_hex(hex_color: str, alpha: float) -> str:
     g = int(h[2:4], 16)
     b = int(h[4:6], 16)
     return f"rgba({r},{g},{b},{alpha:.2f})"
+
+
+@dataclass(frozen=True)
+class _ReviewCostBars:
+    labels: Sequence[str]
+    subs: Sequence[str]
+    developer_no_cache: Sequence[float]
+    developer_cache: Sequence[float]
+    reviewer_no_cache: Sequence[float]
+    reviewer_cache: Sequence[float]
+    developer_totals: Sequence[float]
+    reviewer_totals: Sequence[float]
+
+
+def _developer_cost_total(row: ReviewRoundBucketRow) -> float:
+    no_cache = float(row.developer_no_cache_cost_usd or 0.0)
+    cache = float(row.developer_cache_cost_usd or 0.0)
+    return no_cache + cache
+
+
+def _reviewer_cost_total(row: ReviewRoundBucketRow) -> float:
+    no_cache = float(row.reviewer_no_cache_cost_usd or 0.0)
+    cache = float(row.reviewer_cache_cost_usd or 0.0)
+    return no_cache + cache
+
+
+def _reverse_review_cost_bars(data: _ReviewCostBars) -> _ReviewCostBars:
+    reversed_values = _reverse_lists(
+        data.labels,
+        data.subs,
+        data.developer_no_cache,
+        data.developer_cache,
+        data.reviewer_no_cache,
+        data.reviewer_cache,
+        data.developer_totals,
+        data.reviewer_totals,
+    )
+    return _ReviewCostBars(*reversed_values)
+
+
+def _review_cost_bars(
+    rows: Sequence[ReviewRoundBucketRow],
+) -> Optional[_ReviewCostBars]:
+    by_bucket = {row.bucket: row for row in rows}
+    ordered = [
+        by_bucket[bucket]
+        for bucket in _REVIEW_ROUND_ORDER
+        if bucket in by_bucket
+    ]
+    if not ordered:
+        return None
+    return _reverse_review_cost_bars(_ReviewCostBars(
+        labels=[_REVIEW_ROUND_LABELS.get(row.bucket, row.bucket) for row in ordered],
+        subs=[
+            f"{int(row.developer_runs or 0):,} dev / "
+            f"{int(row.reviewer_runs or 0):,} review runs"
+            for row in ordered
+        ],
+        developer_no_cache=[
+            float(row.developer_no_cache_cost_usd or 0.0) for row in ordered
+        ],
+        developer_cache=[
+            float(row.developer_cache_cost_usd or 0.0) for row in ordered
+        ],
+        reviewer_no_cache=[
+            float(row.reviewer_no_cache_cost_usd or 0.0) for row in ordered
+        ],
+        reviewer_cache=[
+            float(row.reviewer_cache_cost_usd or 0.0) for row in ordered
+        ],
+        developer_totals=[_developer_cost_total(row) for row in ordered],
+        reviewer_totals=[_reviewer_cost_total(row) for row in ordered],
+    ))
+
+
+def _review_cost_traces(
+    data: _ReviewCostBars,
+    y_ticks: Sequence[str],
+) -> tuple[_CostBarTrace, ...]:
+    developer_color = theme.AGENT_ROLE_COLORS["developer"]
+    reviewer_color = theme.AGENT_ROLE_COLORS["reviewer"]
+    developer_cache_color = _lighten_hex(developer_color, 0.45)
+    reviewer_cache_color = _lighten_hex(reviewer_color, 0.45)
+    return (
+        _CostBarTrace(
+            name="Review (no cache)",
+            values=data.reviewer_no_cache,
+            y_ticks=y_ticks,
+            color=reviewer_color,
+            offsetgroup="reviewer",
+            hover_label="Review (no cache)",
+        ),
+        _CostBarTrace(
+            name="Review (cache)",
+            values=data.reviewer_cache,
+            y_ticks=y_ticks,
+            color=reviewer_cache_color,
+            offsetgroup="reviewer",
+            totals=data.reviewer_totals,
+            hover_label="Review (cache)",
+        ),
+        _CostBarTrace(
+            name="Development (no cache)",
+            values=data.developer_no_cache,
+            y_ticks=y_ticks,
+            color=developer_color,
+            offsetgroup="developer",
+            hover_label="Development (no cache)",
+        ),
+        _CostBarTrace(
+            name="Development (cache)",
+            values=data.developer_cache,
+            y_ticks=y_ticks,
+            color=developer_cache_color,
+            offsetgroup="developer",
+            totals=data.developer_totals,
+            hover_label="Development (cache)",
+        ),
+    )
 
 
 def cost_by_review_round(
@@ -738,72 +969,13 @@ def cost_by_review_round(
             "No `agent_exit` rows match the current filters.",
             height=height or 120,
         )
-    # Logical sequence before Plotly's horizontal-bar reversal:
-    # Initial -> Round 1 -> ... -> No review round.
-    by_bucket = {r.bucket: r for r in rows}
-    ordered_rows = [
-        by_bucket[bucket]
-        for bucket in _REVIEW_ROUND_ORDER
-        if bucket in by_bucket
-    ]
-    if not ordered_rows:
+    data = _review_cost_bars(rows)
+    if data is None:
         return _empty_figure(
             "No development or review runs match the current filters.",
             height=height or 120,
         )
-    labels = [
-        _REVIEW_ROUND_LABELS.get(r.bucket, r.bucket)
-        for r in ordered_rows
-    ]
-    subs = [
-        (
-            f"{int(r.developer_runs or 0):,} dev / "
-            f"{int(r.reviewer_runs or 0):,} review runs"
-        )
-        for r in ordered_rows
-    ]
-    # Each role splits into (no-cache portion, cache portion). The
-    # read model guarantees no_cache + cache == role total, so the
-    # stacked segments add back to the per-role total the previous
-    # design plotted.
-    dev_no_cache = [
-        float(r.developer_no_cache_cost_usd or 0.0) for r in ordered_rows
-    ]
-    dev_cache = [
-        float(r.developer_cache_cost_usd or 0.0) for r in ordered_rows
-    ]
-    review_no_cache = [
-        float(r.reviewer_no_cache_cost_usd or 0.0) for r in ordered_rows
-    ]
-    review_cache = [
-        float(r.reviewer_cache_cost_usd or 0.0) for r in ordered_rows
-    ]
-    dev_totals = [a + b for a, b in zip(dev_no_cache, dev_cache)]
-    review_totals = [a + b for a, b in zip(review_no_cache, review_cache)]
-
-    # Plotly draws the first y-value at the bottom of a horizontal
-    # grouped bar chart, so reverse to keep Initial at the top.
-    (
-        labels,
-        subs,
-        dev_no_cache,
-        dev_cache,
-        review_no_cache,
-        review_cache,
-        dev_totals,
-        review_totals,
-    ) = _reverse_lists(
-        labels, subs, dev_no_cache, dev_cache, review_no_cache,
-        review_cache, dev_totals, review_totals,
-    )
-    y_ticks = _two_line_y_ticks(labels, subs)
-    dev_color = theme.AGENT_ROLE_COLORS["developer"]
-    review_color = theme.AGENT_ROLE_COLORS["reviewer"]
-    # 0.45 alpha keeps the cache segment legible on the page
-    # background while leaving the no-cache portion as the dominant
-    # role color.
-    dev_cache_color = _lighten_hex(dev_color, 0.45)
-    review_cache_color = _lighten_hex(review_color, 0.45)
+    y_ticks = _two_line_y_ticks(data.labels, data.subs)
     fig = go.Figure()
     # Horizontal grouped+stacked layout: `offsetgroup` controls the
     # side-by-side offset (one for development, one for review); two
@@ -814,49 +986,26 @@ def cost_by_review_round(
     # offset, the no-cache trace is added before the cache trace so
     # no-cache reads as the base segment and cache stacks outward --
     # matching the issue's "no-cache + cache in stacked form" framing.
-    for name, values, color, offset, totals in (
-        (
-            "Review (no cache)", review_no_cache, review_color,
-            "reviewer", None,
-        ),
-        (
-            "Review (cache)", review_cache, review_cache_color,
-            "reviewer", review_totals,
-        ),
-        (
-            "Development (no cache)", dev_no_cache, dev_color,
-            "developer", None,
-        ),
-        (
-            "Development (cache)", dev_cache, dev_cache_color,
-            "developer", dev_totals,
-        ),
-    ):
+    for trace in _review_cost_traces(data, y_ticks):
         # Only the outer (cache) trace carries the per-role total
         # text so the dollar label still lands once per role bar
         # instead of duplicating on each segment.
         fig.add_trace(
-            _cost_bar_trace(
-                name=name,
-                values=values,
-                y_ticks=y_ticks,
-                color=color,
-                offsetgroup=offset,
-                totals=totals,
-                hover_label=name,
-            )
+            _cost_bar_trace(trace)
         )
     # `relative` honors `offsetgroup` so same-offset traces stack and
     # different-offset traces sit side-by-side. With all-positive
     # values this acts identically to `stack` per offset.
     _apply_horizontal_cost_layout(
         fig,
-        row_count=len(y_ticks),
-        height=height,
-        barmode="relative",
-        legend=_horizontal_legend(traceorder="reversed"),
-        row_height=_REVIEW_BAR_ROW_HEIGHT,
-        extra_height=_REVIEW_BAR_EXTRA_HEIGHT,
+        _HorizontalCostLayout(
+            row_count=len(y_ticks),
+            height=height,
+            barmode="relative",
+            legend=_horizontal_legend(traceorder="reversed"),
+            row_height=_REVIEW_BAR_ROW_HEIGHT,
+            extra_height=_REVIEW_BAR_EXTRA_HEIGHT,
+        ),
     )
     return fig
 
@@ -876,17 +1025,50 @@ def cost_by_repo(rows: Sequence[RepoBreakdownRow]) -> go.Figure:
             "No repos match the current filters.", height=120,
         )
     items = []
-    for r in rows:
-        short = r.repo.split("/")[-1] if "/" in r.repo else r.repo
+    for row in rows:
         items.append(
             (
-                short,
-                f"{int(r.agent_exits):,} runs",
-                float(r.total_cost_usd or 0.0),
+                _repo_short_name(row.repo),
+                f"{int(row.agent_exits):,} runs",
+                float(row.total_cost_usd or 0.0),
                 theme.ACCENT,
             )
         )
     return cost_horizontal_bars(items)
+
+
+def _repo_short_name(repo: str) -> str:
+    if "/" not in repo:
+        return repo
+    return repo.rsplit("/", maxsplit=1)[-1]
+
+
+def _valid_heatmap_point(point: HourlyHeatmapPoint, weekdays: int) -> bool:
+    valid_weekday = 0 <= int(point.weekday) < weekdays
+    valid_hour = 0 <= int(point.hour) < _HOURS_PER_DAY
+    return valid_weekday and valid_hour
+
+
+def _heatmap_matrix(
+    points: Sequence[HourlyHeatmapPoint],
+) -> list[list[int]]:
+    weekdays = len(_WEEKDAY_LABELS)
+    matrix = [[0] * _HOURS_PER_DAY for _ in range(weekdays)]
+    for point in points:
+        if _valid_heatmap_point(point, weekdays):
+            matrix[int(point.weekday)][int(point.hour)] = int(
+                getattr(point, "total_tokens", 0) or 0
+            )
+    return matrix
+
+
+def _heatmap_layout(title: Optional[str]) -> dict[str, object]:
+    layout = theme.base_layout(title=title)
+    top_margin = layout["margin"]["t"]
+    layout["margin"] = {"l": 48, "r": 24, "t": top_margin, "b": 32}
+    layout["height"] = 240
+    layout["plot_bgcolor"] = theme.BORDER
+    return layout
 
 
 def hour_weekday_heatmap(
@@ -911,16 +1093,9 @@ def hour_weekday_heatmap(
     caller is responsible for passing the matching offset to
     `get_hourly_heatmap` so the cells already reflect that zone.
     """
-    weekdays = len(_WEEKDAY_LABELS)
-    matrix = [[0] * _HOURS_PER_DAY for _ in range(weekdays)]
-    for p in points:
-        if 0 <= int(p.weekday) < weekdays and 0 <= int(p.hour) < _HOURS_PER_DAY:
-            matrix[int(p.weekday)][int(p.hour)] = int(
-                getattr(p, "total_tokens", 0) or 0
-            )
     fig = go.Figure(
         go.Heatmap(
-            z=matrix,
+            z=_heatmap_matrix(points),
             x=[f"{h:02d}" for h in range(_HOURS_PER_DAY)],
             y=list(_WEEKDAY_LABELS),
             colorscale=[
@@ -934,19 +1109,15 @@ def hour_weekday_heatmap(
             hovertemplate="%{y} %{x}:00 -- %{z:,} tokens<extra></extra>",
         )
     )
-    layout = theme.base_layout(title=title)
-    layout["margin"] = {"l": 48, "r": 24, "t": layout["margin"]["t"], "b": 32}
     # 7 rows x 24 columns: ~240px keeps the cells close to the
     # mock's compact squares instead of stretching them into tall
     # rectangles at the default 450px.
-    layout["height"] = 240
     # Paint the plot background the border colour so the `xgap`/`ygap`
     # between cells reads as a weekday x hour grid. Zero-volume cells
     # are white (colorscale[0] == CARD_BG), so without a contrasting
     # backdrop the gaps vanish and the sparse right-hand hours look
     # like missing data rather than empty cells.
-    layout["plot_bgcolor"] = theme.BORDER
-    fig.update_layout(**layout)
+    fig.update_layout(**_heatmap_layout(title))
     fig.update_xaxes(
         title_text=f"hour ({tz_label})", type="category", showgrid=False,
     )
@@ -958,6 +1129,37 @@ def hour_weekday_heatmap(
             font={"color": theme.MUTED_TEXT, "size": theme.FONT_SIZE},
         )
     return fig
+
+
+@dataclass(frozen=True)
+class _ThroughputSeries:
+    days: Sequence[date]
+    resolved: Sequence[int]
+
+
+def _calendar_days(window_start: date, window_end: date) -> list[date]:
+    days: list[date] = []
+    current = window_start
+    while current <= window_end:
+        days.append(current)
+        current = current + timedelta(days=1)
+    return days
+
+
+def _throughput_series(
+    rows: Sequence[ThroughputDayRow],
+    window_start: Optional[date],
+    window_end: Optional[date],
+) -> _ThroughputSeries:
+    resolved_by_day = {row.day: int(row.resolved or 0) for row in rows}
+    if window_start is not None and window_end is not None:
+        days = _calendar_days(window_start, window_end)
+    else:
+        days = sorted(resolved_by_day)
+    return _ThroughputSeries(
+        days=days,
+        resolved=[resolved_by_day.get(day, 0) for day in days],
+    )
 
 
 def done_per_day_bars(
@@ -981,32 +1183,22 @@ def done_per_day_bars(
     back to the legacy behavior (one bar per SQL row only) so
     existing callers / tests keep working.
     """
-    days_index = {r.day: int(r.resolved or 0) for r in rows}
-    if window_start is not None and window_end is not None:
-        days: list[date] = []
-        d = window_start
-        # Walk inclusive end day by day; using `timedelta` keeps the
-        # rollover safe across month / year boundaries.
-        while d <= window_end:
-            days.append(d)
-            d = d + timedelta(days=1)
-    else:
-        days = sorted(days_index)
-    if not days:
+    series = _throughput_series(rows, window_start, window_end)
+    if not series.days:
         return _empty_figure(
             "No resolved issues in the current window.", height=150,
         )
-    resolved = [days_index.get(d, 0) for d in days]
     fig = go.Figure(
         go.Bar(
-            x=days,
-            y=resolved,
+            x=series.days,
+            y=series.resolved,
             marker_color=theme.SUCCESS,
             hovertemplate="%{x}: %{y} resolved<extra></extra>",
         )
     )
     layout = theme.base_layout(title=title)
-    layout["margin"] = {"l": 40, "r": 16, "t": layout["margin"]["t"], "b": 32}
+    top_margin = layout["margin"]["t"]
+    layout["margin"] = {"l": 40, "r": 16, "t": top_margin, "b": 32}
     layout["yaxis"] = {
         **layout.get("yaxis", {}),
         "title": {"text": "resolved"},

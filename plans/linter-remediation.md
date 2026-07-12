@@ -41,7 +41,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
-| 3 | Remaining production complexity | 1/6 | [ ] |
+| 3 | Remaining production complexity | 2/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
@@ -62,7 +62,7 @@ signal between scans.
 | Standard `E...` findings | 29 | 29 | 0 |
 
 Minimum acceptable fallback: reduce the total by at least 90%, leave no production correctness or formatting
-findings, and explain every retained finding in the accepted-remainder table.
+findings, and explain every retained finding in the accepted-remainder register.
 
 ## Initial rule inventory
 
@@ -243,9 +243,9 @@ Apply this sequence in every package:
 
 ### Package 3.2 — Dashboard rendering
 
-- [ ] Simplify `dashboard.py`, `dashboard_charts.py`, `dashboard_html.py`, `dashboard_kpis.py`,
+- [x] Simplify `dashboard.py`, `dashboard_charts.py`, `dashboard_html.py`, `dashboard_kpis.py`,
   `dashboard_state.py`, `dashboard_theme.py`, and `trajectory_dashboard.py`.
-- [ ] Keep the optional dashboard dependency boundary intact.
+- [x] Keep the optional dashboard dependency boundary intact.
 
 ### Package 3.3 — Agent, usage, configuration, and trajectory code
 
@@ -271,7 +271,7 @@ Apply this sequence in every package:
 - [ ] Update the matching focused stage tests and documentation pointers after helper moves.
 
 Completion gate: no production function remains above the selected complexity limits unless recorded in the
-accepted-remainder table with a concrete contract or readability reason.
+accepted-remainder register with a concrete contract or readability reason.
 
 ## Stage 4 — Remaining production style and structure
 
@@ -423,7 +423,8 @@ Completion gate: high-volume test rules are cleared while individual test scenar
 
 ### Package 7.4 — Review accepted remainder
 
-- [ ] Challenge every entry in the accepted-remainder table and remove it if a clear implementation is now available.
+- [ ] Challenge every entry in the accepted-remainder register and remove it if a clear implementation is now
+  available.
 - [ ] Confirm each retained entry protects readability or a documented compatibility contract rather than convenience.
 
 ### Package 7.5 — Final repository validation
@@ -437,15 +438,67 @@ unexplained remainder and no production correctness or formatting findings.
 
 ## Accepted remainder
 
-Use this table only when a finding cannot be removed safely. Do not add an entry until a concrete refactor has been
+Use this register only when a finding cannot be removed safely. Do not add an entry until a concrete refactor has been
 considered.
 
-| File and symbol | Rule | Reason it must remain | Tests or contract protecting it | Reviewed |
-|---|---|---|---|---:|
-| `orchestrator/analytics/__init__.py: record_agent_exit` | `WPS211` | The explicit keyword-only run context is called by workflow code and tests; replacing it with a request object breaks the established call contract, while `**kwargs` would discard useful typing and validation. Its implementation delegates to cohesive context-based helpers. | `tests/test_analytics.py`; tracked-agent workflow callers | [x] |
-| `orchestrator/analytics/read_raw.py: get_event_breakdown, get_recent_agent_exits, get_issues, get_issue_events` | `WPS211` | These public facade readers expose one consistent keyword filter contract. A request object would break callers and `**kwargs` would weaken the API; each function delegates to a small filter/query helper. | `orchestrator/analytics/read.py`; `tests/test_analytics_read_*.py` | [x] |
-| `orchestrator/analytics/read_rollup.py: get_summary, get_kpi_prev, get_time_series, get_stage_breakdown, get_backend_efficiency, get_repo_breakdown, get_throughput_breakdown` | `WPS211` | These public facade readers expose one consistent keyword filter contract. A request object would break callers and `**kwargs` would weaken the API; each function delegates to a small filter/query helper. | `orchestrator/analytics/read.py`; `tests/test_analytics_read_*.py` | [x] |
-| `orchestrator/analytics/read_dashboard.py: get_review_round_breakdown, get_skill_trigger_rates, get_skill_trigger_matrix, get_cost_coverage, get_backend_daily_tokens, get_hourly_heatmap` | `WPS211` | These public facade readers expose one consistent keyword filter contract. A request object would break callers and `**kwargs` would weaken the API; each function delegates to a small filter/query helper. | `orchestrator/analytics/read.py`; `tests/test_analytics_read_*.py` | [x] |
+### Agent-exit analytics context
+
+- File and symbol: `orchestrator/analytics/__init__.py: record_agent_exit`
+- Rule: `WPS211`
+- Reason: The explicit keyword-only run context is called by workflow code and tests. A request object would break the
+  established call contract, while `**kwargs` would discard useful typing and validation. Cohesive context helpers own
+  the implementation.
+- Protected by: `tests/test_analytics.py` and tracked-agent workflow callers.
+- Reviewed: [x]
+
+### Raw analytics facade readers
+
+- File and symbols: `orchestrator/analytics/read_raw.py`: `get_event_breakdown`, `get_recent_agent_exits`, `get_issues`,
+  and `get_issue_events`.
+- Rule: `WPS211`
+- Reason: These public readers expose one consistent keyword filter contract. A request object would break callers and
+  `**kwargs` would weaken the API; each function delegates to a small filter/query helper.
+- Protected by: `orchestrator/analytics/read.py` and `tests/test_analytics_read_*.py`.
+- Reviewed: [x]
+
+### Rollup analytics facade readers
+
+- File and symbols: `orchestrator/analytics/read_rollup.py`: `get_summary`, `get_kpi_prev`, `get_time_series`,
+  `get_stage_breakdown`, `get_backend_efficiency`, `get_repo_breakdown`, and `get_throughput_breakdown`.
+- Rule: `WPS211`
+- Reason: These public readers expose one consistent keyword filter contract. A request object would break callers and
+  `**kwargs` would weaken the API; each function delegates to a small filter/query helper.
+- Protected by: `orchestrator/analytics/read.py` and `tests/test_analytics_read_*.py`.
+- Reviewed: [x]
+
+### Dashboard analytics facade readers
+
+- File and symbols: `orchestrator/analytics/read_dashboard.py`: `get_review_round_breakdown`,
+  `get_skill_trigger_rates`, `get_skill_trigger_matrix`, `get_cost_coverage`, `get_backend_daily_tokens`, and
+  `get_hourly_heatmap`.
+- Rule: `WPS211`
+- Reason: These public readers expose one consistent keyword filter contract. A request object would break callers and
+  `**kwargs` would weaken the API; each function delegates to a small filter/query helper.
+- Protected by: `orchestrator/analytics/read.py` and `tests/test_analytics_read_*.py`.
+- Reviewed: [x]
+
+### Dashboard topbar compatibility helper
+
+- File and symbol: `orchestrator/dashboard_html.py: _topbar_html`
+- Rule: `WPS211`
+- Reason: The six explicit keyword arguments are part of the historical `orchestrator.dashboard` export surface. A
+  request object would break callers and `**kwargs` would weaken the formatter contract.
+- Protected by: `orchestrator.dashboard.__all__` and `tests/test_dashboard.py`.
+- Reviewed: [x]
+
+### Dashboard drill-down compatibility helper
+
+- File and symbol: `orchestrator/dashboard.py: _render_drilldown`
+- Rule: `WPS211`
+- Reason: The seven explicit keyword arguments are part of the historical `orchestrator.dashboard` export surface. The
+  adapter preserves that call contract while delegating implementation to typed page/filter state.
+- Protected by: `orchestrator.dashboard.__all__` and `tests/test_dashboard.py`.
+- Reviewed: [x]
 
 ## Session log
 
@@ -470,6 +523,12 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 2.6 | Complete | Target WPS, 113 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.7 |
 | 2026-07-12 | 2.7 | Complete | Target WPS, 90 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.8 |
 | 2026-07-12 | 2.8 | Complete | WPS210/WPS231, 10 focused; Ruff/diff; 2099 passed, 3 skipped | None | Package 3.1 |
-| 2026-07-12 | 3.1 | Complete | Target WPS (18 reviewed API remainders); focused suites; Ruff/diff; 2099 passed, 3 skipped, 627 subtests | Not committed | Package 3.2 |
+| 2026-07-12 | 3.1 | Complete | Target WPS; focused; Ruff/diff; full suite | Not committed | Package 3.2 |
+| 2026-07-12 | 3.2 | Complete | Target WPS; Ruff/diff; full suite | Not committed | Package 3.3 |
 
-Package 2.8 ran `tests/` because root collection was blocked by the unreadable ignored database volume.
+Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
+
+Package 3.2 retained two reviewed `WPS211` compatibility findings. All 246 focused tests and 2,100 full tests passed;
+3 live-Postgres tests were skipped because `ANALYTICS_TEST_DB_URL` was unset.
+
+Packages 2.8 and 3.2 ran `tests/` because root collection was blocked by the unreadable ignored database volume.

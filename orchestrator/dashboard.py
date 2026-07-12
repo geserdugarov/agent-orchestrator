@@ -37,21 +37,20 @@ file stays the Streamlit orchestration layer:
   per-skill trigger matrix, the backend-efficiency card, the
   cost-coverage bar, and the reliability-tile strip.
 
-`main()` is a thin orchestrator: it delegates the static-metadata read
-(`_read_static_metadata`), the staged widget fan-out (`_widget_readers`
-+ `_dispatch_reads`), the load-timing log (`_log_dashboard_load`), the
-empty / error states (`_render_no_data`, `_render_empty_window`), and
-every filter / widget section (the `_render_*` helpers) to focused
-module-level helpers, so it reads as a top-to-bottom sequence of calls
-rather than a single 1000-line function.
+`main()` is the lazy Streamlit entrypoint. The page pipeline below it
+groups the imported dashboard modules, resolved filters, read waves,
+and KPI results into small immutable state objects. Focused helpers own
+static metadata, controls, staged reads, empty states, and card sections,
+so the two-wave render order remains explicit without one oversized
+entrypoint.
 
 Every pure helper from those three modules is re-exported below under
 its original name so `streamlit run orchestrator/dashboard.py`, the
 historical `orchestrator.dashboard.*` helper surface, and the existing
 dashboard tests keep working without touching the extracted modules.
-The `main()`-support helpers (the read / dispatch / logging helpers and
-the `_render_*` render helpers) are defined in this module, are not
-re-exported, and stay module-private.
+The page-pipeline helpers are module-private. `_render_drilldown` is the
+one exception: its historical signature remains on the explicit export
+surface and delegates to the typed internal drill-down renderer.
 
 Reads go through `orchestrator.analytics.read` (which already
 handles unset DB, connection errors, and lazy psycopg import) and
@@ -74,8 +73,8 @@ write runs on the main thread.
 
 Streamlit (and its transitive pandas), `plotly`, the chart builders
 in `orchestrator.dashboard_charts`, and the theme tokens in
-`orchestrator.dashboard_theme` are imported *lazily* inside `main()`
-so the polling tick's `orchestrator.*` import surface stays free of
+`orchestrator.dashboard_theme` are imported *lazily* on the `main()`
+call path so the polling tick's `orchestrator.*` import surface stays free of
 the dashboard's dependency footprint. The module loads without
 `streamlit` or `plotly` installed -- only `streamlit run
 orchestrator/dashboard.py` (or a direct `main()` call) materializes
@@ -90,7 +89,9 @@ Run:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, timedelta
+from functools import partial
 from time import perf_counter
 from typing import Any, Callable, Optional, Sequence
 
@@ -312,262 +313,417 @@ EMPTY_WINDOW_MESSAGE = (
 
 
 def main() -> None:
-    """Streamlit entrypoint.
-
-    Imports Streamlit, pandas, plotly, the chart builders, and the
-    theme tokens lazily so the orchestrator polling path never pulls
-    them in. Run via `streamlit run orchestrator/dashboard.py`;
-    Streamlit invokes the script with `__name__ == "__main__"`, which
-    falls through to the sentinel at the bottom of this file.
-    """
-    import pandas as pd
+    """Run the Streamlit analytics page with lazily loaded dependencies."""
     import streamlit as st
 
-    from orchestrator import dashboard_charts, dashboard_theme as theme
+    _run_dashboard(st)
 
-    st.set_page_config(
+
+@dataclass(frozen=True)
+class _DashboardModules:
+    st: Any
+    pd: Any
+    charts: Any
+    theme: Any
+
+
+@dataclass(frozen=True)
+class _SidebarSelections:
+    repo: str
+    events: Sequence[str]
+    stages: Sequence[str]
+    issue_input: str
+
+
+@dataclass(frozen=True)
+class _DashboardFilters:
+    window: DateWindow
+    repo: Optional[str]
+    issue_input: Optional[int]
+    events: Optional[Sequence[str]]
+    stages: Optional[Sequence[str]]
+
+    @property
+    def issue(self) -> Optional[int]:
+        if self.repo is None:
+            return None
+        return self.issue_input
+
+    @property
+    def days(self) -> int:
+        return max((self.window.end - self.window.start).days, 1)
+
+
+@dataclass(frozen=True)
+class _DashboardControls:
+    filters: _DashboardFilters
+    topbar_slot: Any
+    meta_slot: Any
+    timezone_offset: int
+
+
+@dataclass(frozen=True)
+class _DashboardReadPlan:
+    first_wave: Sequence[tuple[str, Callable[[], Any]]]
+    second_wave: Sequence[tuple[str, Callable[[], Any]]]
+    parallel: bool
+    started_at: float
+
+    @property
+    def total_reads(self) -> int:
+        return len(self.first_wave) + len(self.second_wave)
+
+
+@dataclass(frozen=True)
+class _DashboardPage:
+    extent: DataExtent
+    controls: _DashboardControls
+    reads: _DashboardReadPlan
+
+
+@dataclass(frozen=True)
+class _DashboardKpis:
+    items: Sequence[dict[str, Any]]
+    resolved: int
+    rejected: int
+
+
+@dataclass(frozen=True)
+class _LoadedDashboard:
+    results: dict[str, Any]
+    kpis: _DashboardKpis
+
+
+@dataclass(frozen=True)
+class _ReliabilityPanelData:
+    repos: Sequence[Any]
+    summary: Summary
+    throughput: Sequence[Any]
+    window: DateWindow
+    resolved: int
+    rejected: int
+
+
+def _load_dashboard_modules(st: Any) -> _DashboardModules:
+    import pandas as pd
+
+    from orchestrator import dashboard_charts, dashboard_theme
+
+    return _DashboardModules(
+        st=st,
+        pd=pd,
+        charts=dashboard_charts,
+        theme=dashboard_theme,
+    )
+
+
+def _configure_dashboard(modules: _DashboardModules) -> None:
+    modules.st.set_page_config(
         page_title="Orchestrator Analytics",
         layout="wide",
     )
-    st.markdown(theme.PAGE_CSS, unsafe_allow_html=True)
+    modules.st.markdown(modules.theme.PAGE_CSS, unsafe_allow_html=True)
 
-    unset = db_unconfigured_message()
-    if unset:
-        st.warning(unset)
-        st.stop()
 
-    extent, options = _read_static_metadata(st=st)
-
-    if extent.min_ts is None or extent.max_ts is None:
-        _render_no_data(st=st, extent=extent, theme=theme)
+def _stop_if_dashboard_unconfigured(modules: _DashboardModules) -> None:
+    message = db_unconfigured_message()
+    if not message:
         return
+    modules.st.warning(message)
+    modules.st.stop()
 
-    extent_min_d = extent.min_ts.date()
-    extent_max_d = extent.max_ts.date()
 
-    repo_choice, event_choice, stage_choice, issue_input = (
-        _render_sidebar_filters(st=st, options=options)
+def _run_dashboard(st: Any) -> None:
+    modules = _load_dashboard_modules(st)
+    _configure_dashboard(modules)
+    _stop_if_dashboard_unconfigured(modules)
+    _render_dashboard(
+        modules,
+        *_read_static_metadata(st=modules.st),
     )
 
-    # Timezone selector lives inside the "When agents run" block (see
-    # the heatmap card below), but the offset is read here so the
-    # second-wave fan-out can bucket the heatmap in the chosen zone.
-    # Seeding session_state on first render lets the selectbox default
-    # to UTC+7 while subsequent renders read whatever the operator
-    # picked. The widget is wired with `key="tz_offset_hours"` further
-    # down so it round-trips through this same session_state slot.
+
+def _render_dashboard(
+    modules: _DashboardModules,
+    extent: DataExtent,
+    options: Any,
+) -> None:
+    if extent.min_ts is None or extent.max_ts is None:
+        _render_no_data(st=modules.st, extent=extent, theme=modules.theme)
+        return
+    page = _prepare_dashboard_page(modules, extent, options)
+    loaded = _load_dashboard_data(modules, page)
+    if loaded is None:
+        return
+    _render_dashboard_widgets(modules, page, loaded)
+
+
+def _timezone_choice(st: Any) -> int:
     if "tz_offset_hours" not in st.session_state:
         st.session_state.tz_offset_hours = DEFAULT_TZ_OFFSET_HOURS
-    tz_offset_choice = int(st.session_state.tz_offset_hours)
+    return int(st.session_state.tz_offset_hours)
 
-    # Topbar: title + spend pill. We render a placeholder spend now
-    # so it occupies the right slot; we replace it after the summary
-    # query lands below.
-    topbar_slot = st.empty()
 
-    # Filter bar: presets + date inputs + range meta inside a bordered
-    # container styled as the "Date range" card. `meta_slot` is filled
-    # after the summary read lands (the run count is not known yet);
-    # `window` feeds every downstream read.
-    window, meta_slot = _render_date_filter_bar(
-        st=st,
+def _resolve_dashboard_filters(
+    window: DateWindow,
+    selections: _SidebarSelections,
+    options: Any,
+) -> _DashboardFilters:
+    repo = None
+    if selections.repo != "All":
+        repo = selections.repo
+    return _DashboardFilters(
+        window=window,
+        repo=repo,
+        issue_input=parse_issue_number(selections.issue_input),
+        events=list(selections.events),
+        stages=resolve_stage_filter(selections.stages, options.stages),
+    )
+
+
+def _render_dashboard_controls(
+    modules: _DashboardModules,
+    extent: DataExtent,
+    options: Any,
+) -> _DashboardControls:
+    selections = _render_sidebar_filters(st=modules.st, options=options)
+    timezone_offset = _timezone_choice(modules.st)
+    topbar_slot = modules.st.empty()
+    window_meta = _render_date_filter_bar(
+        st=modules.st,
         extent=extent,
-        extent_min_d=extent_min_d,
-        extent_max_d=extent_max_d,
+        extent_min_d=extent.min_ts.date(),
+        extent_max_d=extent.max_ts.date(),
+    )
+    return _DashboardControls(
+        filters=_resolve_dashboard_filters(window_meta[0], selections, options),
+        topbar_slot=topbar_slot,
+        meta_slot=window_meta[1],
+        timezone_offset=timezone_offset,
     )
 
-    repo_filter = None if repo_choice == "All" else repo_choice
-    issue_input_parsed = parse_issue_number(issue_input)
-    issue_filter = None
-    if repo_filter:
-        issue_filter = issue_input_parsed
-    event_filter = list(event_choice)
-    stage_filter = resolve_stage_filter(stage_choice, options.stages)
 
-    key, prev_key = _build_read_keys(
-        window=window,
-        repo_filter=repo_filter,
-        event_filter=event_filter,
-        stage_filter=stage_filter,
-        issue_filter=issue_filter,
+def _prepare_dashboard_page(
+    modules: _DashboardModules,
+    extent: DataExtent,
+    options: Any,
+) -> _DashboardPage:
+    controls = _render_dashboard_controls(modules, extent, options)
+    keys = _build_read_keys(
+        window=controls.filters.window,
+        repo_filter=controls.filters.repo,
+        event_filter=controls.filters.events,
+        stage_filter=controls.filters.stages,
+        issue_filter=controls.filters.issue,
+    )
+    readers = _widget_readers(
+        st=modules.st,
+        key=keys[0],
+        prev_key=keys[1],
+        tz_offset_choice=controls.timezone_offset,
+    )
+    return _DashboardPage(
+        extent=extent,
+        controls=controls,
+        reads=_DashboardReadPlan(
+            first_wave=readers[0],
+            second_wave=readers[1],
+            parallel=dashboard_parallel_reads_enabled(),
+            started_at=perf_counter(),
+        ),
     )
 
-    first_wave_readers, second_wave_readers = _widget_readers(
-        st=st,
-        key=key,
-        prev_key=prev_key,
-        tz_offset_choice=tz_offset_choice,
-    )
-    total_reads = len(first_wave_readers) + len(second_wave_readers)
-    parallel = dashboard_parallel_reads_enabled()
-    load_start = perf_counter()
-    # Single inline spinner spans both waves -- the topbar / KPI
-    # strip rendered between waves provides progressive feedback
-    # while the second wave finishes, and the spinner clears once
-    # every widget has its data. UI writes always run on this main
-    # thread (the worker threads `_fan_out_reads` spawns only return
-    # data back through the futures), so the staged renders below
-    # never reach Streamlit from a worker.
-    with st.spinner(LOADING_INDICATOR_MESSAGE):
-        results = _dispatch_reads(
-            first_wave_readers, st=st, parallel=parallel,
-        )
-        summary = results["summary"]
-        prev_summary = results["prev_summary"]
-        ts_points = results["ts_points"]
-        review_round_rows = results["review_round_rows"]
-        throughput_rows = results["throughput_rows"]
-        cost_coverage_rows = results["cost_coverage_rows"]
 
-        # Topbar / filter meta paint on the first-wave results so the
-        # user sees real content before the second wave fires.
-        topbar_slot.markdown(
-            _topbar_html(
-                extent=extent,
-                distinct_repos=summary.distinct_repos,
-                total_events=summary.total_events,
-                spend_in_range=summary.total_cost_usd,
-                fmt_money_exact=theme.fmt_money_exact,
-                fmt_num=theme.fmt_num,
-            ),
-            unsafe_allow_html=True,
-        )
-        days_in_window = max((window.end - window.start).days, 1)
-        meta_slot.markdown(
-            _filter_meta_html(
-                from_d=window.start.date(),
-                to_d=(window.end - timedelta(days=1)).date(),
-                days=days_in_window,
-                runs=summary.total_agent_runs,
-                fmt_num=theme.fmt_num,
-            ),
-            unsafe_allow_html=True,
-        )
-
-        if summary.total_events == 0:
-            # Empty window -- skip the second wave entirely; the
-            # remaining reads would only paint empty cards.
-            _render_empty_window(
-                st=st,
-                pd=pd,
-                load_start=load_start,
-                reads=len(first_wave_readers),
-                parallel=parallel,
-                window=window,
-                repo_filter=repo_filter,
-                issue_input_parsed=issue_input_parsed,
-                event_filter=event_filter,
-                stage_filter=stage_filter,
-            )
-            return
-
-        # Insights + KPI strip ---------------------------------------
-        banners = compute_insights(
-            summary,
-            cost_coverage_rows=cost_coverage_rows,
-        )
-        if banners:
-            st.markdown(_insights_html(banners), unsafe_allow_html=True)
-        kpis, resolved, rejected = _build_kpi_strip_data(
-            theme=theme,
-            summary=summary,
-            prev_summary=prev_summary,
-            ts_points=ts_points,
-            throughput_rows=throughput_rows,
-            review_round_rows=review_round_rows,
-            days_in_window=days_in_window,
-        )
-        st.markdown(_kpi_strip_html(kpis), unsafe_allow_html=True)
-
-        # Second wave -- the remaining widget reads. The KPI strip
-        # already painted above, so the user has real content on
-        # screen while the second wave finishes.
-        results.update(_dispatch_reads(
-            second_wave_readers, st=st, parallel=parallel,
-        ))
-    _log_dashboard_load(
-        load_start=load_start, reads=total_reads, parallel=parallel,
+def _render_topbar_and_meta(
+    modules: _DashboardModules,
+    page: _DashboardPage,
+    summary: Summary,
+) -> None:
+    page.controls.topbar_slot.markdown(
+        _topbar_html(
+            extent=page.extent,
+            distinct_repos=summary.distinct_repos,
+            total_events=summary.total_events,
+            spend_in_range=summary.total_cost_usd,
+            fmt_money_exact=modules.theme.fmt_money_exact,
+            fmt_num=modules.theme.fmt_num,
+        ),
+        unsafe_allow_html=True,
     )
-    stage_rows = results["stage_rows"]
-    agent_exits = results["agent_exits"]
-    issues_rows = results["issues_rows"]
-    backend_rows = results["backend_rows"]
-    repo_rows = results["repo_rows"]
-    heatmap_rows = results["heatmap_rows"]
-    backend_daily_rows = results["backend_daily_rows"]
-    skill_rows = results["skill_rows"]
-    skill_matrix_rows = results["skill_matrix_rows"]
-
-    _render_hero_usage(
-        st=st,
-        dashboard_charts=dashboard_charts,
-        ts_points=ts_points,
-        backend_daily_rows=backend_daily_rows,
-    )
-    _render_stage_review_bars(
-        st=st,
-        dashboard_charts=dashboard_charts,
-        stage_rows=stage_rows,
-        review_round_rows=review_round_rows,
-    )
-    _render_issues_and_backends(
-        st=st,
-        theme=theme,
-        issues_rows=issues_rows,
-        backend_rows=backend_rows,
-        cost_coverage_rows=cost_coverage_rows,
-    )
-    _render_repo_and_reliability(
-        st=st,
-        dashboard_charts=dashboard_charts,
-        theme=theme,
-        repo_rows=repo_rows,
-        summary=summary,
-        throughput_rows=throughput_rows,
-        window=window,
-        resolved=resolved,
-        rejected=rejected,
-    )
-    _render_activity_heatmap(
-        st=st,
-        dashboard_charts=dashboard_charts,
-        heatmap_rows=heatmap_rows,
-        tz_offset_choice=tz_offset_choice,
-    )
-
-    _render_skill_triggers(
-        st=st,
-        skill_rows=skill_rows,
-        skill_matrix_rows=skill_matrix_rows,
-    )
-
-    _render_recent_runs(
-        st=st,
-        pd=pd,
-        agent_exits=agent_exits,
-        tz_offset_choice=tz_offset_choice,
-    )
-
-    _render_drilldown(
-        st=st,
-        pd=pd,
-        window=window,
-        repo_filter=repo_filter,
-        issue_input_parsed=issue_input_parsed,
-        event_filter=event_filter,
-        stage_filter=stage_filter,
-    )
-
-    st.markdown(
-        '<div class="orch-foot">'
-        f'Real data · window {window.start.date().isoformat()} → '
-        f'{(window.end - timedelta(days=1)).date().isoformat()} · '
-        f'{theme.fmt_num(summary.total_agent_runs)} agent runs'
-        '</div>',
+    page.controls.meta_slot.markdown(
+        _filter_meta_html(
+            from_d=page.controls.filters.window.start.date(),
+            to_d=(
+                page.controls.filters.window.end - timedelta(days=1)
+            ).date(),
+            days=page.controls.filters.days,
+            runs=summary.total_agent_runs,
+            fmt_num=modules.theme.fmt_num,
+        ),
         unsafe_allow_html=True,
     )
 
 
+def _render_dashboard_insights(
+    modules: _DashboardModules,
+    summary: Summary,
+    cost_coverage_rows: Sequence[CostCoverageRow],
+) -> None:
+    banners = compute_insights(
+        summary,
+        cost_coverage_rows=cost_coverage_rows,
+    )
+    if banners:
+        modules.st.markdown(_insights_html(banners), unsafe_allow_html=True)
+
+
+def _render_first_wave(
+    modules: _DashboardModules,
+    page: _DashboardPage,
+    results: dict[str, Any],
+) -> Optional[_DashboardKpis]:
+    summary = results["summary"]
+    _render_topbar_and_meta(modules, page, summary)
+    if summary.total_events == 0:
+        _render_empty_window(modules, page)
+        return None
+    _render_dashboard_insights(
+        modules,
+        summary,
+        results["cost_coverage_rows"],
+    )
+    kpi_values = _build_kpi_strip_data(_KpiInputs(
+        theme=modules.theme,
+        summary=summary,
+        prev_summary=results["prev_summary"],
+        ts_points=results["ts_points"],
+        throughput_rows=results["throughput_rows"],
+        review_round_rows=results["review_round_rows"],
+        days_in_window=page.controls.filters.days,
+    ))
+    modules.st.markdown(
+        _kpi_strip_html(kpi_values[0]),
+        unsafe_allow_html=True,
+    )
+    return _DashboardKpis(*kpi_values)
+
+
+def _load_dashboard_data(
+    modules: _DashboardModules,
+    page: _DashboardPage,
+) -> Optional[_LoadedDashboard]:
+    with modules.st.spinner(LOADING_INDICATOR_MESSAGE):
+        results = _dispatch_reads(
+            page.reads.first_wave,
+            st=modules.st,
+            parallel=page.reads.parallel,
+        )
+        kpis = _render_first_wave(modules, page, results)
+        if kpis is None:
+            return None
+        results.update(_dispatch_reads(
+            page.reads.second_wave,
+            st=modules.st,
+            parallel=page.reads.parallel,
+        ))
+    _log_dashboard_load(
+        load_start=page.reads.started_at,
+        reads=page.reads.total_reads,
+        parallel=page.reads.parallel,
+    )
+    return _LoadedDashboard(results=results, kpis=kpis)
+
+
+def _render_chart_widgets(
+    modules: _DashboardModules,
+    page: _DashboardPage,
+    loaded: _LoadedDashboard,
+) -> None:
+    _render_hero_usage(
+        st=modules.st,
+        dashboard_charts=modules.charts,
+        ts_points=loaded.results["ts_points"],
+        backend_daily_rows=loaded.results["backend_daily_rows"],
+    )
+    _render_stage_review_bars(
+        st=modules.st,
+        dashboard_charts=modules.charts,
+        stage_rows=loaded.results["stage_rows"],
+        review_round_rows=loaded.results["review_round_rows"],
+    )
+    _render_issues_and_backends(
+        st=modules.st,
+        theme=modules.theme,
+        issues_rows=loaded.results["issues_rows"],
+        backend_rows=loaded.results["backend_rows"],
+        cost_coverage_rows=loaded.results["cost_coverage_rows"],
+    )
+    _render_repo_and_reliability(
+        modules,
+        _ReliabilityPanelData(
+            repos=loaded.results["repo_rows"],
+            summary=loaded.results["summary"],
+            throughput=loaded.results["throughput_rows"],
+            window=page.controls.filters.window,
+            resolved=loaded.kpis.resolved,
+            rejected=loaded.kpis.rejected,
+        ),
+    )
+    _render_activity_heatmap(
+        st=modules.st,
+        dashboard_charts=modules.charts,
+        heatmap_rows=loaded.results["heatmap_rows"],
+        tz_offset_choice=page.controls.timezone_offset,
+    )
+
+
+def _render_remaining_widgets(
+    modules: _DashboardModules,
+    page: _DashboardPage,
+    loaded: _LoadedDashboard,
+) -> None:
+    _render_skill_triggers(
+        st=modules.st,
+        skill_rows=loaded.results["skill_rows"],
+        skill_matrix_rows=loaded.results["skill_matrix_rows"],
+    )
+    _render_recent_runs(
+        st=modules.st,
+        pd=modules.pd,
+        agent_exits=loaded.results["agent_exits"],
+        tz_offset_choice=page.controls.timezone_offset,
+    )
+    _render_drilldown_view(modules, page.controls.filters)
+    _render_dashboard_footer(
+        modules,
+        page.controls.filters,
+        loaded.results["summary"],
+    )
+
+
+def _render_dashboard_widgets(
+    modules: _DashboardModules,
+    page: _DashboardPage,
+    loaded: _LoadedDashboard,
+) -> None:
+    _render_chart_widgets(modules, page, loaded)
+    _render_remaining_widgets(modules, page, loaded)
+
+
+def _render_dashboard_footer(
+    modules: _DashboardModules,
+    filters: _DashboardFilters,
+    summary: Summary,
+) -> None:
+    end_date = (filters.window.end - timedelta(days=1)).date()
+    modules.st.markdown(
+        '<div class="orch-foot">'
+        f'Real data · window {filters.window.start.date().isoformat()} → '
+        f'{end_date.isoformat()} · '
+        f'{modules.theme.fmt_num(summary.total_agent_runs)} agent runs'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 def _filter_list(values_t: Optional[Sequence[str]]) -> Optional[list[str]]:
     """Convert a cached filter tuple back to the read model's list arg.
 
@@ -655,151 +811,157 @@ def _render_no_data(*, st: Any, extent: DataExtent, theme: Any) -> None:
     st.stop()
 
 
-def _read_summary(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_summary,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_filter_kwargs(key: tuple) -> dict[str, Any]:
+    return {
+        "start": key[0],
+        "end": key[1],
+        "repo": key[2],
+        "events": _filter_list(key[3]),
+        "stages": _filter_list(key[4]),
+        "issue": key[5],
+    }
 
 
-def _read_prev_kpi(start, end, repo, events_t, stages_t, issue):
+def _read_filtered(
+    getter: Callable[..., Any],
+    key: tuple,
+    **extra_filters: Any,
+) -> Any:
+    filters = _read_filter_kwargs(key)
+    filters.update(extra_filters)
+    return _scoped_read(getter, **filters)
+
+
+def _read_summary(key: tuple):
+    return _read_filtered(analytics_read.get_summary, key)
+
+
+def _read_prev_kpi(key: tuple):
     # Previous-window read for the KPI delta pills and cost-trend
     # banner only. The full `get_summary` shape is never read off
     # `prev_summary`, so a thinner reader saves a `GROUP BY` follow-up
     # while leaving the cache key identical to `_read_summary`.
-    return _scoped_read(
-        analytics_read.get_kpi_prev,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+    return _read_filtered(analytics_read.get_kpi_prev, key)
 
 
-def _read_time_series(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_time_series,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_time_series(key: tuple):
+    return _read_filtered(analytics_read.get_time_series, key)
 
 
-def _read_stage_breakdown(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_stage_breakdown,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_stage_breakdown(key: tuple):
+    return _read_filtered(analytics_read.get_stage_breakdown, key)
 
 
-def _read_recent_agent_exits(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
+def _read_recent_agent_exits(key: tuple):
+    return _read_filtered(
         analytics_read.get_recent_agent_exits,
+        key,
         limit=DEFAULT_RECENT_AGENT_EXITS,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
     )
 
 
-def _read_top_cost_issues(start, end, repo, events_t, stages_t, issue):
+def _read_top_cost_issues(key: tuple):
     # Ask the database for the top-cost issues directly. Reading the
     # latest N issues by `last_seen` and re-sorting in Python silently
     # drops older high-cost issues that fall outside the truncated set.
-    return _scoped_read(
+    return _read_filtered(
         analytics_read.get_issues,
+        key,
         limit=DEFAULT_EXPENSIVE_LIMIT,
         sort_by=analytics_read.SORT_BY_COST,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
     )
 
 
-def _read_review_round(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_review_round_breakdown,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_review_round(key: tuple):
+    return _read_filtered(analytics_read.get_review_round_breakdown, key)
 
 
-def _read_backend_efficiency(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_backend_efficiency,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_backend_efficiency(key: tuple):
+    return _read_filtered(analytics_read.get_backend_efficiency, key)
 
 
-def _read_repo_breakdown(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_repo_breakdown,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_repo_breakdown(key: tuple):
+    return _read_filtered(analytics_read.get_repo_breakdown, key)
 
 
-def _read_cost_coverage(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_cost_coverage,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_cost_coverage(key: tuple):
+    return _read_filtered(analytics_read.get_cost_coverage, key)
 
 
 def _read_hourly_heatmap(
-    start, end, repo, events_t, stages_t, issue, tz_offset_hours,
+    key: tuple,
+    tz_offset_hours: int,
 ):
-    return _scoped_read(
+    return _read_filtered(
         analytics_read.get_hourly_heatmap,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue, tz_offset_hours=tz_offset_hours,
+        key,
+        tz_offset_hours=tz_offset_hours,
     )
 
 
-def _read_throughput(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_throughput_breakdown,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_throughput(key: tuple):
+    return _read_filtered(analytics_read.get_throughput_breakdown, key)
 
 
-def _read_backend_daily_tokens(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_backend_daily_tokens,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_backend_daily_tokens(key: tuple):
+    return _read_filtered(analytics_read.get_backend_daily_tokens, key)
 
 
-def _read_skill_trigger_rates(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_skill_trigger_rates,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_skill_trigger_rates(key: tuple):
+    return _read_filtered(analytics_read.get_skill_trigger_rates, key)
 
 
-def _read_skill_trigger_matrix(start, end, repo, events_t, stages_t, issue):
-    return _scoped_read(
-        analytics_read.get_skill_trigger_matrix,
-        start=start, end=end, repo=repo,
-        events=_filter_list(events_t), stages=_filter_list(stages_t),
-        issue=issue,
-    )
+def _read_skill_trigger_matrix(key: tuple):
+    return _read_filtered(analytics_read.get_skill_trigger_matrix, key)
+
+
+def _widget_task(
+    st: Any,
+    name: str,
+    reader: Callable[..., Any],
+    *args: Any,
+) -> tuple[str, Callable[[], Any]]:
+    cached_reader = st.cache_data(show_spinner=False, ttl=60)(reader)
+    return name, partial(cached_reader, *args)
+
+
+def _first_wave_readers(
+    st: Any,
+    key: tuple,
+    prev_key: tuple,
+) -> list[tuple[str, Callable[[], Any]]]:
+    return [
+        _widget_task(st, "summary", _read_summary, key),
+        _widget_task(st, "prev_summary", _read_prev_kpi, prev_key),
+        _widget_task(st, "ts_points", _read_time_series, key),
+        _widget_task(st, "review_round_rows", _read_review_round, key),
+        _widget_task(st, "throughput_rows", _read_throughput, key),
+        _widget_task(st, "cost_coverage_rows", _read_cost_coverage, key),
+    ]
+
+
+def _second_wave_readers(
+    st: Any,
+    key: tuple,
+    tz_offset_choice: int,
+) -> list[tuple[str, Callable[[], Any]]]:
+    return [
+        _widget_task(st, "stage_rows", _read_stage_breakdown, key),
+        _widget_task(st, "agent_exits", _read_recent_agent_exits, key),
+        _widget_task(st, "issues_rows", _read_top_cost_issues, key),
+        _widget_task(st, "backend_rows", _read_backend_efficiency, key),
+        _widget_task(st, "repo_rows", _read_repo_breakdown, key),
+        _widget_task(
+            st,
+            "heatmap_rows",
+            _read_hourly_heatmap,
+            key,
+            int(tz_offset_choice),
+        ),
+        _widget_task(st, "backend_daily_rows", _read_backend_daily_tokens, key),
+        _widget_task(st, "skill_rows", _read_skill_trigger_rates, key),
+        _widget_task(st, "skill_matrix_rows", _read_skill_trigger_matrix, key),
+    ]
 
 
 def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
@@ -808,8 +970,8 @@ def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
     Returns `(first_wave_readers, second_wave_readers)` -- each a list of
     `(name, zero-arg callable)` pairs `_fan_out_reads` dispatches.
 
-    Connection scoping: each wrapper delegates its read to `_scoped_read`,
-    which checks out the thread-local analytics connection via
+    Connection scoping: each wrapper delegates through `_read_filtered`
+    to `_scoped_read`, which checks out the thread-local connection via
     `analytics_connection()` and forwards it to the read helper rather
     than threading a connection through the cache key (a raw
     `psycopg.Connection` is not hashable and would crash the wrapper, and
@@ -823,87 +985,14 @@ def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
     banners / KPI strip can paint as soon as their inputs are available
     instead of blocking on every widget: the first wave carries the six
     reads those above-the-fold widgets consume, the second the nine
-    remaining widget reads. The lambdas close over `key` / `prev_key` so
-    the executor never threads filter tuples through the futures, and
-    worker threads only return data -- every `st.*` write happens on the
-    caller's render thread between the waves.
+    remaining widget reads. Each task is a zero-argument `partial` bound
+    to its immutable filter tuple, and worker threads only return data --
+    every `st.*` write happens on the caller's render thread between waves.
     """
-    read_summary = st.cache_data(show_spinner=False, ttl=60)(_read_summary)
-    read_prev_kpi = st.cache_data(show_spinner=False, ttl=60)(_read_prev_kpi)
-    read_time_series = st.cache_data(show_spinner=False, ttl=60)(_read_time_series)
-    read_stage_breakdown = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_stage_breakdown)
-    read_recent_agent_exits = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_recent_agent_exits)
-    read_top_cost_issues = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_top_cost_issues)
-    read_review_round = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_review_round)
-    read_backend_efficiency = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_backend_efficiency)
-    read_repo_breakdown = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_repo_breakdown)
-    read_cost_coverage = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_cost_coverage)
-    read_hourly_heatmap = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_hourly_heatmap)
-    read_throughput = st.cache_data(show_spinner=False, ttl=60)(_read_throughput)
-    read_backend_daily_tokens = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_backend_daily_tokens)
-    read_skill_trigger_rates = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_skill_trigger_rates)
-    read_skill_trigger_matrix = st.cache_data(
-        show_spinner=False, ttl=60,
-    )(_read_skill_trigger_matrix)
-
-    # Read fan-out. Each entry is `(name, zero-arg callable)` so
-    # `_fan_out_reads` can dispatch them across worker threads when
-    # `DASHBOARD_PARALLEL_READS` is set; the sequential path stays in
-    # this thread under the existing thread-local `analytics_connection`.
-    # Lambdas close over `key` / `prev_key` so the executor never has
-    # to thread filter tuples through the futures.
-    #
-    # Split into two staged waves so the topbar / filter meta /
-    # insight banners / KPI strip paint as soon as their inputs are
-    # available instead of blocking on every widget. The first wave
-    # carries the six reads those above-the-fold widgets consume
-    # (`summary`, `prev_summary`, `ts_points`, `review_round_rows`,
-    # `throughput_rows`, `cost_coverage_rows`); the second wave runs
-    # the nine remaining widget reads. Worker threads only return
-    # data back to this render thread -- every `st.*` / placeholder
-    # write happens on the main thread between waves.
-    first_wave_readers: list[tuple[str, Callable[[], Any]]] = [
-        ("summary", lambda: read_summary(*key)),
-        ("prev_summary", lambda: read_prev_kpi(*prev_key)),
-        ("ts_points", lambda: read_time_series(*key)),
-        ("review_round_rows", lambda: read_review_round(*key)),
-        ("throughput_rows", lambda: read_throughput(*key)),
-        ("cost_coverage_rows", lambda: read_cost_coverage(*key)),
-    ]
-    second_wave_readers: list[tuple[str, Callable[[], Any]]] = [
-        ("stage_rows", lambda: read_stage_breakdown(*key)),
-        ("agent_exits", lambda: read_recent_agent_exits(*key)),
-        ("issues_rows", lambda: read_top_cost_issues(*key)),
-        ("backend_rows", lambda: read_backend_efficiency(*key)),
-        ("repo_rows", lambda: read_repo_breakdown(*key)),
-        ("heatmap_rows", lambda: read_hourly_heatmap(
-            *key, int(tz_offset_choice),
-        )),
-        ("backend_daily_rows", lambda: read_backend_daily_tokens(*key)),
-        ("skill_rows", lambda: read_skill_trigger_rates(*key)),
-        ("skill_matrix_rows", lambda: read_skill_trigger_matrix(*key)),
-    ]
-    return first_wave_readers, second_wave_readers
+    return (
+        _first_wave_readers(st, key, prev_key),
+        _second_wave_readers(st, key, tz_offset_choice),
+    )
 
 
 def _dispatch_reads(readers, *, st: Any, parallel: bool):
@@ -943,17 +1032,8 @@ def _log_dashboard_load(*, load_start: float, reads: int, parallel: bool) -> Non
 
 
 def _render_empty_window(
-    *,
-    st: Any,
-    pd: Any,
-    load_start: float,
-    reads: int,
-    parallel: bool,
-    window: DateWindow,
-    repo_filter: Optional[str],
-    issue_input_parsed: Optional[int],
-    event_filter: Optional[Sequence[str]],
-    stage_filter: Optional[Sequence[str]],
+    modules: _DashboardModules,
+    page: _DashboardPage,
 ) -> None:
     """Render the empty-window state (no events match the filters).
 
@@ -963,17 +1043,13 @@ def _render_empty_window(
     `EMPTY_WINDOW_MESSAGE`, and still renders the per-issue drill-down
     (which runs its own read).
     """
-    _log_dashboard_load(load_start=load_start, reads=reads, parallel=parallel)
-    st.info(EMPTY_WINDOW_MESSAGE)
-    _render_drilldown(
-        st=st,
-        pd=pd,
-        window=window,
-        repo_filter=repo_filter,
-        issue_input_parsed=issue_input_parsed,
-        event_filter=event_filter,
-        stage_filter=stage_filter,
+    _log_dashboard_load(
+        load_start=page.reads.started_at,
+        reads=len(page.reads.first_wave),
+        parallel=page.reads.parallel,
     )
+    modules.st.info(EMPTY_WINDOW_MESSAGE)
+    _render_drilldown_view(modules, page.controls.filters)
 
 
 def _render_sidebar_filters(*, st: Any, options: Any):
@@ -1017,7 +1093,94 @@ def _render_sidebar_filters(*, st: Any, options: Any):
                 "bottom. Requires a specific repo above."
             ),
         )
-    return repo_choice, event_choice, stage_choice, issue_input
+    return _SidebarSelections(
+        repo=repo_choice,
+        events=event_choice,
+        stages=stage_choice,
+        issue_input=issue_input,
+    )
+
+
+@dataclass(frozen=True)
+class _DateFilterColumns:
+    label: Any
+    preset: Any
+    start: Any
+    end: Any
+    meta: Any
+
+
+def _date_filter_columns(st: Any) -> _DateFilterColumns:
+    columns = st.columns(
+        [1.0, 1.7, 1.4, 1.4, 3.0],
+        vertical_alignment="bottom",
+    )
+    return _DateFilterColumns(*columns)
+
+
+def _render_date_filter_label(st: Any, column: Any) -> None:
+    with column:
+        st.markdown(
+            '<div class="orch-filterbar-anchor"></div>'
+            '<span class="orch-filter-label">Date range</span>',
+            unsafe_allow_html=True,
+        )
+
+
+def _preset_radio_index(preset: str) -> int:
+    choices = (PRESET_3D, PRESET_7D, PRESET_ALL)
+    if preset not in choices:
+        return 2
+    return choices.index(preset)
+
+
+def _render_preset_choice(st: Any, column: Any) -> str:
+    with column:
+        return st.radio(
+            "Range preset",
+            options=(PRESET_3D, PRESET_7D, PRESET_ALL),
+            format_func=lambda preset: PRESET_INLINE_LABELS[preset],
+            index=_preset_radio_index(st.session_state.preset),
+            horizontal=True,
+            label_visibility="collapsed",
+            key="_preset_radio",
+        )
+
+
+def _initial_filter_window(
+    preset_choice: str,
+    extent: DataExtent,
+    extent_min_d: date,
+    extent_max_d: date,
+) -> DateWindow:
+    return (
+        preset_window(preset_choice, extent)
+        or to_window(extent_min_d, extent_max_d)
+    )
+
+
+def _render_date_inputs(
+    st: Any,
+    columns: _DateFilterColumns,
+    initial_window: DateWindow,
+    extent_min_d: date,
+    extent_max_d: date,
+) -> tuple[date, date]:
+    with columns.start:
+        start_date = st.date_input(
+            "From",
+            value=initial_window.start.date(),
+            min_value=extent_min_d,
+            max_value=extent_max_d,
+        )
+    with columns.end:
+        end_date = st.date_input(
+            "To",
+            value=(initial_window.end - timedelta(days=1)).date(),
+            min_value=extent_min_d,
+            max_value=extent_max_d,
+        )
+    return start_date, end_date
 
 
 def _render_date_filter_bar(
@@ -1048,68 +1211,21 @@ def _render_date_filter_bar(
         st.markdown(
             '<div class="orch-cardmark"></div>', unsafe_allow_html=True
         )
-        # Single-line filter bar: label · preset switch · From · To ·
-        # range meta, all bottom-aligned so the short controls (label,
-        # radio, meta) sit on the same baseline as the taller date
-        # inputs.
-        (
-            fb_label,
-            fb_preset,
-            fb_from,
-            fb_to,
-            fb_meta,
-        ) = st.columns(
-            [1.0, 1.7, 1.4, 1.4, 3.0], vertical_alignment="bottom"
+        columns = _date_filter_columns(st)
+        _render_date_filter_label(st, columns.label)
+        preset_choice = _render_preset_choice(st, columns.preset)
+        initial_window = _initial_filter_window(
+            preset_choice, extent, extent_min_d, extent_max_d,
         )
-        with fb_label:
-            st.markdown(
-                '<div class="orch-filterbar-anchor"></div>'
-                '<span class="orch-filter-label">Date range</span>',
-                unsafe_allow_html=True,
-            )
-        with fb_preset:
-            preset_choice = st.radio(
-                "Range preset",
-                options=(PRESET_3D, PRESET_7D, PRESET_ALL),
-                format_func=lambda p: PRESET_INLINE_LABELS[p],
-                index=(
-                    (PRESET_3D, PRESET_7D, PRESET_ALL).index(
-                        st.session_state.preset
-                    )
-                    if st.session_state.preset
-                    in (PRESET_3D, PRESET_7D, PRESET_ALL)
-                    else 2
-                ),
-                horizontal=True,
-                label_visibility="collapsed",
-                key="_preset_radio",
-            )
-        initial_window = (
-            preset_window(preset_choice, extent)
-            or to_window(extent_min_d, extent_max_d)
+        dates = _render_date_inputs(
+            st, columns, initial_window, extent_min_d, extent_max_d,
         )
-        with fb_from:
-            start_date = st.date_input(
-                "From",
-                value=initial_window.start.date(),
-                min_value=extent_min_d,
-                max_value=extent_max_d,
-            )
-        with fb_to:
-            end_default = (initial_window.end - timedelta(days=1)).date()
-            end_date = st.date_input(
-                "To",
-                value=end_default,
-                min_value=extent_min_d,
-                max_value=extent_max_d,
-            )
         # The run count is not known until the summary read lands, so
         # capture the meta slot now and fill it between fan-out waves.
-        with fb_meta:
+        with columns.meta:
             meta_slot = st.empty()
-    window = to_window(start_date, end_date)
     st.session_state.preset = preset_choice
-    return window, meta_slot
+    return to_window(*dates), meta_slot
 
 
 def _build_read_keys(
@@ -1125,9 +1241,9 @@ def _build_read_keys(
     Returns `(key, prev_key)`: the `(start, end, repo, events, stages,
     issue)` tuple the fan-out reads are cached under, and the same
     tuple shifted to the immediately-preceding equal-length window for
-    the KPI delta pills. The reader lambdas splat these with `*key` /
-    `*prev_key`, so the tuple order is the read helpers' positional
-    contract.
+    the KPI delta pills. Cached readers accept the tuple as one hashable
+    key and `_read_filter_kwargs` expands its stable field order for the
+    read model.
     """
     key = cache_key(
         window, repo_filter, event_filter, stage_filter, issue_filter
@@ -1173,93 +1289,143 @@ def _throughput_totals(throughput_rows: Sequence[Any]) -> tuple[int, int]:
     return resolved, rejected
 
 
+def _daily_point_totals(
+    ts_points: Sequence[Any],
+) -> dict[date, list[float]]:
+    totals: dict[date, list[float]] = {}
+    for point in ts_points:
+        daily = totals.setdefault(point.day, [0.0, 0.0])
+        daily[0] += float(point.cost_usd or 0.0)
+        daily[1] += _time_series_total_tokens(point)
+    return totals
+
+
+@dataclass(frozen=True)
+class _DailyKpiSeries:
+    cost: Sequence[float]
+    tokens: Sequence[float]
+    done: Sequence[int]
+
+
 def _daily_kpi_series(
     *, ts_points: Sequence[Any], throughput_rows: Sequence[Any]
-) -> tuple[list[float], list[float], list[int]]:
+) -> _DailyKpiSeries:
     """Return cost/token/resolved sparkline series for KPI cards.
 
     One entry is emitted per day present in the time-series read. Daily
     tokens use the same input + output + cache_read + cache_write
     accounting as the headline token KPI.
     """
-    days = sorted({point.day for point in ts_points})
-    days_index = {day: i for i, day in enumerate(days)}
-    daily_cost = [0.0] * len(days)
-    daily_tokens = [0.0] * len(days)
-    for point in ts_points:
-        i = days_index[point.day]
-        daily_cost[i] += float(point.cost_usd or 0.0)
-        daily_tokens[i] += _time_series_total_tokens(point)
-
+    totals = _daily_point_totals(ts_points)
+    days = sorted(totals)
     done_index = {row.day: int(row.resolved or 0) for row in throughput_rows}
-    daily_done = [done_index.get(day, 0) for day in days]
-    return daily_cost, daily_tokens, daily_done
+    return _DailyKpiSeries(
+        cost=[totals[day][0] for day in days],
+        tokens=[totals[day][1] for day in days],
+        done=[done_index.get(day, 0) for day in days],
+    )
+
+
+@dataclass(frozen=True)
+class _KpiInputs:
+    theme: Any
+    summary: Summary
+    prev_summary: Summary
+    ts_points: Sequence[Any]
+    throughput_rows: Sequence[Any]
+    review_round_rows: Sequence[Any]
+    days_in_window: int
+
+
+@dataclass(frozen=True)
+class _KpiTotals:
+    cost: float
+    tokens: int
+    previous_cost: float
+    previous_tokens: int
+    resolved: int
+    rejected: int
+    review_cost: float
+    rework_cost: float
+
+
+def _kpi_totals(inputs: _KpiInputs) -> _KpiTotals:
+    throughput = _throughput_totals(inputs.throughput_rows)
+    review_costs = rework_totals(inputs.review_round_rows)
+    return _KpiTotals(
+        cost=float(inputs.summary.total_cost_usd or 0.0),
+        tokens=_summary_total_tokens(inputs.summary),
+        previous_cost=float(inputs.prev_summary.total_cost_usd or 0.0),
+        previous_tokens=_summary_total_tokens(inputs.prev_summary),
+        resolved=throughput[0],
+        rejected=throughput[1],
+        review_cost=review_costs[0],
+        rework_cost=review_costs[1],
+    )
 
 
 def _build_kpi_strip_data(
-    *,
-    theme: Any,
-    summary: Summary,
-    prev_summary: Summary,
-    ts_points: Sequence[Any],
-    throughput_rows: Sequence[Any],
-    review_round_rows: Sequence[Any],
-    days_in_window: int,
+    inputs: _KpiInputs,
 ) -> tuple[list[dict[str, Any]], int, int]:
     """Build the KPI-strip dictionaries plus throughput totals."""
-    total_cost = float(summary.total_cost_usd or 0.0)
-    total_tokens = _summary_total_tokens(summary)
-    total_cost_prev = float(prev_summary.total_cost_usd or 0.0)
-    total_tokens_prev = _summary_total_tokens(prev_summary)
-    resolved, rejected = _throughput_totals(throughput_rows)
-    rr_total_cost, rr_rework_cost = rework_totals(review_round_rows)
+    totals = _kpi_totals(inputs)
     rework_share = (
-        (rr_rework_cost / rr_total_cost) if rr_total_cost > 0 else 0.0
+        (totals.rework_cost / totals.review_cost)
+        if totals.review_cost > 0
+        else 0.0
     )
-    daily_cost, daily_tokens, daily_done = _daily_kpi_series(
-        ts_points=ts_points,
-        throughput_rows=throughput_rows,
+    daily = _daily_kpi_series(
+        ts_points=inputs.ts_points,
+        throughput_rows=inputs.throughput_rows,
     )
     cost_per_resolved = (
-        f"${total_cost / resolved:,.2f}" if resolved > 0 else "—"
+        f"${totals.cost / totals.resolved:,.2f}"
+        if totals.resolved > 0
+        else "—"
     )
     kpis = [
         {
             "label": "Total spend",
-            "value": theme.fmt_money_exact(total_cost),
-            "delta": kpi_delta(total_cost, total_cost_prev),
-            "sub": f"{theme.fmt_money(total_cost / days_in_window)}/day",
-            "spark": daily_cost,
-            "spark_color": theme.ACCENT,
+            "value": inputs.theme.fmt_money_exact(totals.cost),
+            "delta": kpi_delta(totals.cost, totals.previous_cost),
+            "sub": (
+                f"{inputs.theme.fmt_money(totals.cost / inputs.days_in_window)}"
+                "/day"
+            ),
+            "spark": daily.cost,
+            "spark_color": inputs.theme.ACCENT,
         },
         {
             "label": "Total tokens",
-            "value": theme.fmt_tokens(total_tokens),
-            "delta": kpi_delta(total_tokens, total_tokens_prev),
-            "sub": f"{theme.fmt_tokens(total_tokens / days_in_window)}/day",
-            "spark": daily_tokens,
-            "spark_color": theme.TOKEN_TYPE_COLORS["Input"],
+            "value": inputs.theme.fmt_tokens(totals.tokens),
+            "delta": kpi_delta(totals.tokens, totals.previous_tokens),
+            "sub": (
+                f"{inputs.theme.fmt_tokens(totals.tokens / inputs.days_in_window)}"
+                "/day"
+            ),
+            "spark": daily.tokens,
+            "spark_color": inputs.theme.TOKEN_TYPE_COLORS["Input"],
         },
         {
             "label": "Cost / resolved issue",
             "value": cost_per_resolved,
             "delta": None,
-            "sub": f"{resolved} resolved · {rejected} rejected",
-            "spark": daily_done,
-            "spark_color": theme.TOKEN_TYPE_COLORS["Cache"],
+            "sub": f"{totals.resolved} resolved · {totals.rejected} rejected",
+            "spark": daily.done,
+            "spark_color": inputs.theme.TOKEN_TYPE_COLORS["Cache"],
         },
         {
             "label": "Rework share",
             "value": f"{rework_share * 100:.0f}%",
             "delta": None,
             "sub": (
-                f"{theme.fmt_money_exact(rr_rework_cost)} in review "
+                f"{inputs.theme.fmt_money_exact(totals.rework_cost)} in review "
                 "rounds >= 1"
             ),
             "spark": None,
         },
     ]
-    return kpis, resolved, rejected
+    return kpis, totals.resolved, totals.rejected
 
 
 def _backend_tokens_by_day(
@@ -1273,6 +1439,18 @@ def _backend_tokens_by_day(
             + float(row.total_tokens or 0)
         )
     return backend_by_day
+
+
+def _stack_mode_label(mode: str) -> str:
+    if mode == "type":
+        return "By token type"
+    return "By backend"
+
+
+def _stack_mode_index(mode: str) -> int:
+    if mode == "type":
+        return 0
+    return 1
 
 
 def _render_hero_usage(
@@ -1302,10 +1480,8 @@ def _render_hero_usage(
         stack_mode = st.radio(
             "Stack mode",
             options=("type", "backend"),
-            format_func=lambda m: (
-                "By token type" if m == "type" else "By backend"
-            ),
-            index=0 if st.session_state.stack_mode == "type" else 1,
+            format_func=_stack_mode_label,
+            index=_stack_mode_index(st.session_state.stack_mode),
             horizontal=True,
             label_visibility="collapsed",
             key="_stack_mode_radio",
@@ -1343,7 +1519,7 @@ def _render_stage_review_bars(
     Both bar panels are pinned to the same height (driven by whichever
     has more bars) so the two cards line up bottom-to-bottom.
     """
-    bars_h = 40 * max(len(stage_rows), len(review_round_rows), 1) + 80
+    bars_h = _paired_bars_height(stage_rows, review_round_rows)
     col_stage, col_round = st.columns([7, 5])
     with col_stage:
         with st.container(border=True):
@@ -1375,6 +1551,11 @@ def _render_stage_review_bars(
                 use_container_width=True,
                 config=PLOTLY_CONFIG,
             )
+
+
+def _paired_bars_height(stage_rows: Sequence[Any], review_rows: Sequence[Any]) -> int:
+    row_count = max(len(stage_rows), len(review_rows), 1)
+    return 40 * row_count + 80
 
 
 def _render_issues_and_backends(
@@ -1441,16 +1622,8 @@ def _render_issues_and_backends(
 
 
 def _render_repo_and_reliability(
-    *,
-    st: Any,
-    dashboard_charts: Any,
-    theme: Any,
-    repo_rows: Any,
-    summary: Summary,
-    throughput_rows: Any,
-    window: DateWindow,
-    resolved: int,
-    rejected: int,
+    modules: _DashboardModules,
+    data: _ReliabilityPanelData,
 ) -> None:
     """Render the per-repo cost bars + reliability / throughput column.
 
@@ -1460,24 +1633,24 @@ def _render_repo_and_reliability(
     chart is passed the window so zero-resolution days the SQL elides
     still render an explicit bar against the calendar baseline.
     """
-    col_repo, col_rel = st.columns([7, 5])
+    col_repo, col_rel = modules.st.columns([7, 5])
     with col_repo:
-        with st.container(border=True):
-            st.markdown(
+        with modules.st.container(border=True):
+            modules.st.markdown(
                 _card_header_html(
                     "Cost by repository",
                     "Spend across managed repos",
                 ),
                 unsafe_allow_html=True,
             )
-            st.plotly_chart(
-                dashboard_charts.cost_by_repo(repo_rows),
+            modules.st.plotly_chart(
+                modules.charts.cost_by_repo(data.repos),
                 use_container_width=True,
                 config=PLOTLY_CONFIG,
             )
     with col_rel:
-        with st.container(border=True):
-            st.markdown(
+        with modules.st.container(border=True):
+            modules.st.markdown(
                 _card_header_html(
                     "Reliability & throughput",
                     "Run health and issues resolved per day",
@@ -1485,17 +1658,24 @@ def _render_repo_and_reliability(
                 unsafe_allow_html=True,
             )
             raw_tiles = reliability_tile_data(
-                summary, resolved=resolved, rejected=rejected,
+                data.summary,
+                resolved=data.resolved,
+                rejected=data.rejected,
             )
-            st.markdown(
-                _reliability_tiles_html(raw_tiles, fmt_num=theme.fmt_num),
+            modules.st.markdown(
+                _reliability_tiles_html(
+                    raw_tiles,
+                    fmt_num=modules.theme.fmt_num,
+                ),
                 unsafe_allow_html=True,
             )
-            st.plotly_chart(
-                dashboard_charts.done_per_day_bars(
-                    throughput_rows,
-                    window_start=window.start.date(),
-                    window_end=(window.end - timedelta(days=1)).date(),
+            modules.st.plotly_chart(
+                modules.charts.done_per_day_bars(
+                    data.throughput,
+                    window_start=data.window.start.date(),
+                    window_end=(
+                        data.window.end - timedelta(days=1)
+                    ).date(),
                     title=None,
                 ),
                 use_container_width=True,
@@ -1513,10 +1693,10 @@ def _render_activity_heatmap(
     """Render the weekday × hour token-volume heatmap card.
 
     The in-card UTC-offset selectbox binds to
-    `st.session_state["tz_offset_hours"]` (seeded in `main()` before
-    the second-wave fan-out) so the heatmap read and this widget agree
-    on the offset; on change Streamlit reruns and the next read buckets
-    in the newly-picked zone.
+    `st.session_state["tz_offset_hours"]` (seeded with the other controls
+    before the second-wave fan-out) so the heatmap read and this widget
+    agree on the offset; on change Streamlit reruns and the next read
+    buckets in the newly-picked zone.
     """
     tz_label = format_tz_offset(int(tz_offset_choice))
     with st.container(border=True):
@@ -1661,15 +1841,9 @@ def _render_recent_runs(
             st.info("No `agent_exit` rows match the current filters.")
 
 
-def _render_drilldown(
-    *,
-    st: Any,
-    pd: Any,
-    window: DateWindow,
-    repo_filter: Optional[str],
-    issue_input_parsed: Optional[int],
-    event_filter: Optional[Sequence[str]],
-    stage_filter: Optional[Sequence[str]],
+def _render_drilldown_view(
+    modules: _DashboardModules,
+    filters: _DashboardFilters,
 ) -> None:
     """Per-issue event trace section.
 
@@ -1679,11 +1853,11 @@ def _render_drilldown(
     read model are caught and surfaced inline -- a drill-down error
     must not poison the overview the operator already scrolled past.
     """
-    if issue_input_parsed is None:
+    if filters.issue_input is None:
         return
-    st.subheader(f"Issue #{issue_input_parsed} drill-down")
-    if repo_filter is None:
-        st.info(
+    modules.st.subheader(f"Issue #{filters.issue_input} drill-down")
+    if filters.repo is None:
+        modules.st.info(
             "Pick a specific repo in the sidebar before drilling "
             "into an issue number -- GitHub issue numbers repeat "
             "across repos."
@@ -1692,19 +1866,19 @@ def _render_drilldown(
     try:
         trace = _scoped_read(
             analytics_read.get_issue_events,
-            repo=repo_filter,
-            issue=issue_input_parsed,
-            start=window.start,
-            end=window.end,
-            events=_filter_list(event_filter),
-            stages=_filter_list(stage_filter),
+            repo=filters.repo,
+            issue=filters.issue_input,
+            start=filters.window.start,
+            end=filters.window.end,
+            events=_filter_list(filters.events),
+            stages=_filter_list(filters.stages),
         )
     except analytics_read.AnalyticsReadError as e:
-        st.error(f"Issue drill-down failed: {e}")
+        modules.st.error(f"Issue drill-down failed: {e}")
         return
     if trace:
-        st.dataframe(
-            pd.DataFrame([
+        modules.st.dataframe(
+            modules.pd.DataFrame([
                 {
                     "ts": ev.ts,
                     "event": ev.event,
@@ -1721,11 +1895,33 @@ def _render_drilldown(
             use_container_width=True,
         )
     else:
-        st.info(
+        modules.st.info(
             f"No analytics events recorded for "
-            f"`{repo_filter}#{issue_input_parsed}` "
+            f"`{filters.repo}#{filters.issue_input}` "
             "under the current filters."
         )
+
+
+def _render_drilldown(
+    *,
+    st: Any,
+    pd: Any,
+    window: DateWindow,
+    repo_filter: Optional[str],
+    issue_input_parsed: Optional[int],
+    event_filter: Optional[Sequence[str]],
+    stage_filter: Optional[Sequence[str]],
+) -> None:
+    """Render the drill-down through the historical dashboard helper API."""
+    modules = _DashboardModules(st=st, pd=pd, charts=None, theme=None)
+    filters = _DashboardFilters(
+        window=window,
+        repo=repo_filter,
+        issue_input=issue_input_parsed,
+        events=event_filter,
+        stages=stage_filter,
+    )
+    _render_drilldown_view(modules, filters)
 
 
 if __name__ == "__main__":
