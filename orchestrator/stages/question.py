@@ -31,24 +31,32 @@ fan-out concurrency is preserved.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from pathlib import Path
 
 from github.Issue import Issue
 
 from orchestrator import config
 from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import filter_trusted
-from orchestrator.config import RepoSpec
-from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import GitHubClient, PinnedState
+from orchestrator.state_machine import WorkflowLabel
+
+
+_QUESTION_STAGE = "question"
+_QUESTION_AGENT_KEY = "question_agent"
+_QUESTION_SESSION_KEY = "question_session_id"
+_QUESTION_ANSWER = "question_answer"
+_QUESTION_COMMITS = "question_commits"
+_QUESTION_DIRTY = "question_dirty"
+_QUESTION_SILENT = "question_silent"
+_QUESTION_TIMEOUT = "question_timeout"
 
 
 # Park reasons whose underlying condition keeps the per-issue
-# worktree on disk for human inspection. The `_handle_question`
-# finally block reads `state.park_reason` against this set so a
-# no-reply tick that returns early via the awaiting-human branch
-# does NOT tear down the worktree the prior tick explicitly left
-# for the operator to inspect.
+# worktree on disk for human inspection. `_QuestionRun.start` seeds
+# the cleanup policy from this set so a no-reply tick does not tear
+# down the inspection target.
 #
 #   `question_timeout` -- agent killed mid-run; may have committed
 #                          or dirtied the tree before timeout.
@@ -61,15 +69,59 @@ from orchestrator.github import GitHubClient, PinnedState
 # (set by the implementing handler when refusing the relabel; the
 # worktree state is already the operator's responsibility there),
 # or `None` (no prior park).
-_UNSAFE_QUESTION_PARKS = frozenset({
-    "question_timeout", "question_commits", "question_dirty",
-})
+_UNSAFE_QUESTION_PARKS = frozenset((
+    _QUESTION_TIMEOUT, _QUESTION_COMMITS, _QUESTION_DIRTY,
+))
+
+
+@dataclass
+class _QuestionRun:
+    """Mutable cleanup policy and stable inputs for one question-stage tick."""
+
+    gh: GitHubClient
+    spec: config.RepoSpec
+    issue: Issue
+    state: PinnedState
+    keep_worktree: bool
+
+    @classmethod
+    def start(
+        cls, gh: GitHubClient, spec: config.RepoSpec, issue: Issue,
+    ) -> _QuestionRun:
+        state = gh.read_pinned_state(issue)
+        return cls(
+            gh=gh,
+            spec=spec,
+            issue=issue,
+            state=state,
+            keep_worktree=state.get("park_reason") in _UNSAFE_QUESTION_PARKS,
+        )
+
+
+@dataclass(frozen=True)
+class _QuestionSession:
+    """Locked agent identity used by one question-agent invocation."""
+
+    agent_spec: str
+    backend: str
+    extra_args: tuple[str, ...]
+    session_id: str | None
+
+
+@dataclass(frozen=True)
+class _QuestionOutcome:
+    """Post-agent route and the cleanup policy it requires."""
+
+    park_reason: str | None
+    keep_worktree: bool
+    answer: str = ""
+    dirty_files: tuple[str, ...] = ()
 
 
 def _read_question_session(
     state: PinnedState,
-) -> Tuple[str, str, tuple[str, ...], Optional[str]]:
-    """Return (spec, backend, extra_args, question_session_id) for an issue.
+) -> _QuestionSession:
+    """Return the locked question-agent identity for an issue.
 
     Mirrors `_read_dev_session` / `_read_decomposer_session`: `spec` is
     the full configured command string the next run will use. Callers
@@ -81,26 +133,33 @@ def _read_question_session(
 
     Legacy bare-backend values (`"codex"` / `"claude"`) round-trip
     cleanly to `(backend, ())`. When the issue has never spawned a
-    question agent, returns the current config's
-    `(DECOMPOSE_AGENT_SPEC, DECOMPOSE_AGENT, DECOMPOSE_AGENT_ARGS, None)`.
+    question agent, the returned fields carry the current decomposer spec,
+    backend, args, and an empty session id.
     """
-    stored = state.get("question_agent")
+    stored = state.get(_QUESTION_AGENT_KEY)
     if stored:
         spec = str(stored)
-        backend, args = config._parse_agent_spec("question_agent", spec)
-        sid = state.get("question_session_id")
-        return spec, backend, args, str(sid) if sid is not None else None
-    return (
-        config.DECOMPOSE_AGENT_SPEC,
-        config.DECOMPOSE_AGENT,
-        config.DECOMPOSE_AGENT_ARGS,
-        None,
+        backend, args = config._parse_agent_spec(_QUESTION_AGENT_KEY, spec)
+        session_id = state.get(_QUESTION_SESSION_KEY)
+        return _QuestionSession(
+            agent_spec=spec,
+            backend=backend,
+            extra_args=args,
+            session_id=(
+                str(session_id) if session_id is not None else None
+            ),
+        )
+    return _QuestionSession(
+        agent_spec=config.DECOMPOSE_AGENT_SPEC,
+        backend=config.DECOMPOSE_AGENT,
+        extra_args=config.DECOMPOSE_AGENT_ARGS,
+        session_id=None,
     )
 
 
 def _consume_new_human_replies(
     gh: GitHubClient, issue: Issue, state: PinnedState
-) -> Optional[list]:
+) -> list | None:
     """Return new issue-thread comments since the last park, advancing the
     consume watermark past them.
 
@@ -129,10 +188,10 @@ def _consume_new_human_replies(
 
 
 def _build_question_resume_prompt(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     new_comments: list,
-    question_sid: Optional[str],
+    question_session_id: str | None,
 ) -> str:
     """Assemble the resume prompt for a human reply.
 
@@ -149,7 +208,7 @@ def _build_question_resume_prompt(
     """
     from orchestrator import workflow as _wf
 
-    if question_sid is None:
+    if question_session_id is None:
         return _wf._build_question_prompt(
             spec, issue, _wf._recent_comments_text(issue),
             config.default_repo_specs(),
@@ -157,9 +216,36 @@ def _build_question_resume_prompt(
     return _wf._build_question_followup_prompt(new_comments)
 
 
+def _execute_question_prompt(
+    run: _QuestionRun,
+    session: _QuestionSession,
+    prompt: str,
+    worktree: Path,
+    resume_session_id: str | None = None,
+) -> AgentResult:
+    """Run one question prompt and retain any session id it returns."""
+    from orchestrator import workflow as _wf
+
+    question_result = _wf._run_agent_tracked(
+        run.gh,
+        run.issue.number,
+        agent_role=_QUESTION_STAGE,
+        stage=_QUESTION_STAGE,
+        backend=session.backend,
+        prompt=prompt,
+        cwd=worktree,
+        agent_spec=session.agent_spec,
+        resume_session_id=resume_session_id,
+        extra_args=session.extra_args,
+    )
+    if question_result.session_id:
+        run.state.set(_QUESTION_SESSION_KEY, question_result.session_id)
+    return question_result
+
+
 def _resume_question_on_human_reply(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
-) -> Optional[AgentResult]:
+    run: _QuestionRun,
+) -> AgentResult | None:
     """Resume the question session with new issue-thread comments.
 
     Returns the AgentResult, or None if no new comments arrived since
@@ -167,48 +253,70 @@ def _resume_question_on_human_reply(
     """
     from orchestrator import workflow as _wf
 
-    new_comments = _consume_new_human_replies(gh, issue, state)
+    new_comments = _consume_new_human_replies(
+        run.gh, run.issue, run.state,
+    )
     if new_comments is None:
         return None
-    wt = _wf._worktree_path(spec, issue.number)
-    if not wt.exists():
-        wt = _wf._ensure_worktree(
-            spec, issue.number,
-            branch=_wf._resolve_branch_name(state, spec, issue.number),
+    worktree = _wf._worktree_path(run.spec, run.issue.number)
+    if not worktree.exists():
+        worktree = _wf._ensure_worktree(
+            run.spec,
+            run.issue.number,
+            branch=_wf._resolve_branch_name(
+                run.state, run.spec, run.issue.number,
+            ),
         )
-    question_spec, question_backend, question_args, question_sid = (
-        _read_question_session(state)
-    )
+    session = _read_question_session(run.state)
     prompt = _build_question_resume_prompt(
-        spec, issue, new_comments, question_sid,
+        run.spec, run.issue, new_comments, session.session_id,
     )
-    question_result = _wf._run_agent_tracked(
-        gh, issue.number,
-        agent_role="question",
-        stage="question",
-        backend=question_backend,
-        prompt=prompt,
-        cwd=wt,
-        agent_spec=question_spec,
-        resume_session_id=question_sid,
-        extra_args=question_args,
+    question_result = _execute_question_prompt(
+        run,
+        session,
+        prompt,
+        worktree,
+        session.session_id,
     )
-    # Persist the (possibly new) session id from this resume too. A
-    # prior tick that yielded no session id (CLI hiccup) would
-    # otherwise leave `question_session_id` empty forever and every
-    # future resume would re-spawn fresh instead of continuing the
-    # locked conversation. Mirrors the fresh-spawn persistence in
-    # `_handle_question`.
-    if question_result.session_id:
-        state.set("question_session_id", question_result.session_id)
-    state.set("awaiting_human", False)
+    # Result routing will establish the next park; until then this consumed
+    # reply is no longer waiting on a human response.
+    run.state.set("awaiting_human", False)
     return question_result
 
 
+def _spawn_fresh_question(run: _QuestionRun) -> AgentResult:
+    """Create a clean worktree and execute the initial question prompt."""
+    from orchestrator import workflow as _wf
+
+    worktree = _wf._ensure_worktree(
+        run.spec,
+        run.issue.number,
+        branch=_wf._resolve_branch_name(
+            run.state, run.spec, run.issue.number,
+        ),
+    )
+    session = _read_question_session(run.state)
+    # Persist the full spec before the spawn so a run that returns no session
+    # id still locks future replies to the backend and args that actually ran.
+    run.state.set(_QUESTION_AGENT_KEY, session.agent_spec)
+    prompt = _wf._build_question_prompt(
+        run.spec,
+        run.issue,
+        _wf._recent_comments_text(run.issue),
+        config.default_repo_specs(),
+    )
+    return _execute_question_prompt(run, session, prompt, worktree)
+
+
+def _select_question_run(run: _QuestionRun) -> AgentResult | None:
+    """Resume a parked conversation or start its first agent run."""
+    if run.state.get("awaiting_human"):
+        return _resume_question_on_human_reply(run)
+    return _spawn_fresh_question(run)
+
+
 def _park_question(
-    gh: GitHubClient,
-    issue: Issue,
-    state: PinnedState,
+    run: _QuestionRun,
     message: str,
     *,
     reason: str,
@@ -216,264 +324,202 @@ def _park_question(
     """Park the issue awaiting human and emit the `park_awaiting_human`
     audit event with the question-stage reason tag.
 
-    Wraps `_park_awaiting_human` so every question-stage park funnels
-    through one place and the persistent `park_reason` field is
-    re-set after the helper clears it (callers that need a transient
-    reason re-set it themselves -- see the `_park_awaiting_human`
-    docstring).
+    The shared park helper clears `park_reason`, so this funnel restores the
+    stage-specific reason and persists the completed state mutation.
     """
     from orchestrator import workflow as _wf
 
-    _wf._park_awaiting_human(gh, issue, state, message, reason=reason)
-    state.set("park_reason", reason)
+    _wf._park_awaiting_human(
+        run.gh, run.issue, run.state, message, reason=reason,
+    )
+    run.state.set("park_reason", reason)
+    run.gh.write_pinned_state(run.issue, run.state)
 
 
-def _handle_question(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _finalize_closed_question(run: _QuestionRun) -> bool:
+    """Finalize a manually closed Q&A thread without spawning an agent."""
     from orchestrator import workflow as _wf
 
-    state = gh.read_pinned_state(issue)
+    if getattr(run.issue, "state", "open") != "closed":
+        return False
+    run.state.set("question_closed_at", _wf._now_iso())
+    run.gh.set_workflow_label(run.issue, WorkflowLabel.DONE)
+    # The receipt is posted before the single state write so its comment id is
+    # tracked alongside the terminal timestamp.
+    _wf._post_issue_usage_verdict(run.gh, run.issue, run.state)
+    run.gh.write_pinned_state(run.issue, run.state)
+    _wf._cleanup_question_worktree(
+        run.spec,
+        run.issue.number,
+        branch=_wf._resolve_branch_name(
+            run.state, run.spec, run.issue.number,
+        ),
+    )
+    return True
 
-    # Human closed the Q&A thread: that's the terminal signal. Do NOT
-    # spawn the agent (the question is moot once the issue is closed),
-    # stamp terminal state, flip the workflow label to `done`, and tear
-    # down the per-issue worktree + local branch. `list_pollable_issues`
-    # is what surfaces a closed `question` issue here in the first place;
-    # once we flip the label to `done`, the closed-issue sweep no longer
-    # yields it and the tick cost stays bounded in steady state. Even
-    # an unsafe park's preserved worktree is reaped here -- by closing
-    # the issue the operator has signaled they're done with it, so the
-    # inspection window ends.
-    if getattr(issue, "state", "open") == "closed":
-        state.set("question_closed_at", _wf._now_iso())
-        gh.set_workflow_label(issue, WorkflowLabel.DONE)
-        # Surface the terminal usage verdict on the closed Q&A thread when
-        # any question run accrued counters; posted before the single
-        # write so its comment id is tracked in the same persisted state.
-        _wf._post_issue_usage_verdict(gh, issue, state)
-        gh.write_pinned_state(issue, state)
-        _wf._cleanup_question_worktree(
-            spec, issue.number,
-            branch=_wf._resolve_branch_name(state, spec, issue.number),
+
+def _assess_question_outcome(
+    run: _QuestionRun, question_result: AgentResult,
+) -> _QuestionOutcome:
+    """Inspect a completed agent run in the stage's required order."""
+    from orchestrator import workflow as _wf
+
+    # A live pause must leave every in-memory session and watermark mutation
+    # unpersisted so the next active tick can replay the same durable state.
+    if _wf._paused_during_agent_run(run.gh, run.issue):
+        return _QuestionOutcome(None, run.keep_worktree)
+
+    run.state.set("last_question_at", _wf._now_iso())
+    if not question_result.interrupted:
+        _wf._accumulate_issue_usage(run.state, question_result.usage)
+
+    if question_result.timed_out:
+        return _QuestionOutcome(_QUESTION_TIMEOUT, True)
+
+    worktree = _wf._worktree_path(run.spec, run.issue.number)
+    if _wf._has_new_commits(run.spec, worktree):
+        return _QuestionOutcome(_QUESTION_COMMITS, True)
+
+    dirty_files = tuple(_wf._worktree_dirty_files(worktree))
+    if dirty_files:
+        return _QuestionOutcome(
+            _QUESTION_DIRTY, True, dirty_files=dirty_files,
+        )
+
+    # Read-only violations take precedence over interruption so a killed run
+    # that changed the tree still leaves an inspection target for the operator.
+    if _wf._ignore_if_interrupted(run.issue, question_result):
+        return _QuestionOutcome(None, run.keep_worktree)
+
+    answer = (question_result.last_message or "").strip()
+    if answer:
+        return _QuestionOutcome(
+            _QUESTION_ANSWER, False, answer=answer,
+        )
+    return _QuestionOutcome(_QUESTION_SILENT, False)
+
+
+def _park_dirty_question(
+    run: _QuestionRun, dirty_files: tuple[str, ...],
+) -> None:
+    shown_files = dirty_files[:10]
+    display_lines = [f"- `{file_path}`" for file_path in shown_files]
+    hidden_count = len(dirty_files) - len(shown_files)
+    if hidden_count:
+        display_lines.append(f"- ... ({hidden_count} more)")
+    files_markdown = "\n".join(display_lines)
+    _park_question(
+        run,
+        f"{config.HITL_MENTIONS} question agent left "
+        f"{len(dirty_files)} uncommitted change(s) but this stage "
+        "is read-only; refusing to push. Reset the worktree "
+        f"before resuming.\n\n{files_markdown}",
+        reason=_QUESTION_DIRTY,
+    )
+
+
+def _park_silent_question(
+    run: _QuestionRun, question_result: AgentResult,
+) -> None:
+    from orchestrator import workflow as _wf
+
+    diagnostics = _wf._format_stderr_diagnostics(
+        question_result, "Question agent",
+    )
+    _park_question(
+        run,
+        f"{config.HITL_MENTIONS} question agent produced no "
+        "output (likely a session-resume failure); manual "
+        f"intervention needed.{diagnostics}",
+        reason=_QUESTION_SILENT,
+    )
+    _wf.log.warning(
+        "issue=#%s question agent produced no output; "
+        "exit_code=%d timed_out=%s stderr_tail=%r",
+        run.issue.number,
+        question_result.exit_code,
+        question_result.timed_out,
+        _wf._stderr_log_tail(question_result),
+    )
+
+
+def _park_answered_question(run: _QuestionRun, answer: str) -> None:
+    quoted_lines = answer.replace("\n", "\n> ")
+    quoted_answer = f"> {quoted_lines}"
+    _park_question(
+        run,
+        f"{config.HITL_MENTIONS} question agent responded:\n\n"
+        f"{quoted_answer}",
+        reason=_QUESTION_ANSWER,
+    )
+
+
+def _route_question_outcome(
+    run: _QuestionRun,
+    question_result: AgentResult,
+    outcome: _QuestionOutcome,
+) -> None:
+    """Persist the park selected by `_assess_question_outcome`."""
+    if outcome.park_reason == _QUESTION_TIMEOUT:
+        _park_question(
+            run,
+            f"{config.HITL_MENTIONS} question agent timed out "
+            f"after {config.AGENT_TIMEOUT}s; manual intervention "
+            "needed. The per-issue worktree is left intact for inspection.",
+            reason=_QUESTION_TIMEOUT,
         )
         return
-
-    # Tracks whether to KEEP the per-issue worktree past this tick.
-    # The question stage is read-only, so the default is to tear it
-    # down (see `_cleanup_question_worktree` for the leak this
-    # closes). Only the three unsafe-park branches below set
-    # `keep_worktree = True` so the operator can inspect what the
-    # misbehaving agent did before resetting:
-    #   * `question_commits` -- the agent committed.
-    #   * `question_dirty`   -- the agent left uncommitted edits.
-    #   * `question_timeout` -- the agent was killed mid-run and may
-    #                            have left either of the above.
-    # The defensive `_sync_worktree_with_base` label skip then
-    # prevents the per-tick base refresh from merging
-    # `origin/<base>` over that kept inspection state.
-    #
-    # Seeded from `state.park_reason` so a no-reply tick on a prior
-    # unsafe park ALSO preserves the worktree: without this, the
-    # awaiting-human early return below would let the `finally`
-    # tear down the inspection target on every subsequent tick.
-    # The safe / answer branches override this initial value
-    # explicitly so an operator who resets the worktree and replies
-    # cleanly (resume produces a clean answer with no new commits /
-    # dirty) ends the inspection window normally.
-    keep_worktree = state.get("park_reason") in _UNSAFE_QUESTION_PARKS
-    try:
-        # Awaiting-human resume: the prior tick posted an answer /
-        # follow-up and parked. If the human has replied since,
-        # resume the locked session with their text. If they have
-        # not, this tick is a no-op -- but we still let the finally
-        # block tear down any worktree left from a prior tick so
-        # the base refresh has nothing to merge into.
-        if state.get("awaiting_human"):
-            resumed = _resume_question_on_human_reply(
-                gh, spec, issue, state,
-            )
-            if resumed is None:
-                return
-            question_result = resumed
-            wt = _wf._worktree_path(spec, issue.number)
-        else:
-            wt = _wf._ensure_worktree(
-                spec, issue.number,
-                branch=_wf._resolve_branch_name(state, spec, issue.number),
-            )
-            question_spec, question_backend, question_args, _ = (
-                _read_question_session(state)
-            )
-            # Persist the spec BEFORE the spawn so a backend hiccup
-            # that yields no session id (empty codex `-o` file,
-            # unparseable claude JSONL line) still leaves a durable
-            # role-identity record. A later `DECOMPOSE_AGENT` env
-            # flip otherwise retargets the next resume at a backend
-            # that never ran on this issue. Storing the parsed
-            # backend alone would also strip configured CLI args
-            # from subsequent resumes.
-            state.set("question_agent", question_spec)
-            prompt = _wf._build_question_prompt(
-                spec, issue, _wf._recent_comments_text(issue),
-                config.default_repo_specs(),
-            )
-            question_result = _wf._run_agent_tracked(
-                gh, issue.number,
-                agent_role="question",
-                stage="question",
-                backend=question_backend,
-                prompt=prompt,
-                cwd=wt,
-                agent_spec=question_spec,
-                extra_args=question_args,
-            )
-            if question_result.session_id:
-                state.set("question_session_id", question_result.session_id)
-
-        # Live pause: an operator applied `paused` / `backlog` while the
-        # question agent ran (fresh spawn or awaiting-human resume). Dispatch
-        # only saw the pre-run labels, so re-check a freshly fetched issue and
-        # return WITHOUT folding usage, parking, or writing pinned state --
-        # durable GitHub state stays exactly as the prior tick left it and the
-        # next tick re-runs once the label is removed. The read-only worktree is
-        # disposed by the `finally` per the `keep_worktree` flag as on any
-        # normal exit: a prior unsafe park's kept worktree survives (the flag
-        # was seeded True), a clean tick's is reaped and recreated on the re-run.
-        if _wf._paused_during_agent_run(gh, issue):
-            return
-
-        state.set("last_question_at", _wf._now_iso())
-        # Fold this run's usage into the per-issue counters at the convergence
-        # of the fresh-spawn and awaiting-human resume branches, so a real
-        # resume exit is counted exactly once and the no-new-comment resume
-        # (which returned above without running the agent) never touches the
-        # counters. Interrupted runs are excluded entirely: the read-only
-        # commits/dirty parks below still write pinned state (to preserve the
-        # inspection worktree), so folding a killed run's usage first would
-        # persist a counter the interrupted contract says must not accrue. The
-        # clean-interrupted case is additionally short-circuited by the
-        # `_ignore_if_interrupted` guard below.
-        if not question_result.interrupted:
-            _wf._accumulate_issue_usage(state, question_result.usage)
-
-        if question_result.timed_out:
-            # Keep the worktree: the timeout killed the agent mid-run
-            # and it may have committed or left dirty edits before
-            # being killed. The operator inspects, then resets.
-            keep_worktree = True
-            _park_question(
-                gh, issue, state,
-                f"{config.HITL_MENTIONS} question agent timed out "
-                f"after {config.AGENT_TIMEOUT}s; manual intervention "
-                "needed. The per-issue worktree is left intact for "
-                "inspection.",
-                reason="question_timeout",
-            )
-            gh.write_pinned_state(issue, state)
-            return
-
-        # The question agent must be read-only. Commits or a dirty
-        # index are misbehavior -- park with the worktree intact so
-        # the operator can inspect what the agent did (mirrors the
-        # decomposer's dirty park, which also keeps its worktree
-        # past the tick).
-        if _wf._has_new_commits(spec, wt):
-            keep_worktree = True
-            _park_question(
-                gh, issue, state,
-                f"{config.HITL_MENTIONS} question agent committed in "
-                "the worktree but this stage is read-only; refusing "
-                "to push. Reset the worktree before resuming.",
-                reason="question_commits",
-            )
-            gh.write_pinned_state(issue, state)
-            return
-
-        dirty = _wf._worktree_dirty_files(wt)
-        if dirty:
-            keep_worktree = True
-            shown = dirty[:10]
-            files_md = "\n".join(
-                f"- `{file_path}`" for file_path in shown
-            )
-            if len(dirty) > len(shown):
-                files_md += f"\n- ... ({len(dirty) - len(shown)} more)"
-            _park_question(
-                gh, issue, state,
-                f"{config.HITL_MENTIONS} question agent left "
-                f"{len(dirty)} uncommitted change(s) but this stage "
-                "is read-only; refusing to push. Reset the worktree "
-                f"before resuming.\n\n{files_md}",
-                reason="question_dirty",
-            )
-            gh.write_pinned_state(issue, state)
-            return
-
-        # Shutdown-sweep interruption: a killed question run has no trustworthy
-        # answer. Its empty/partial output would otherwise fall through to the
-        # silent park below and persist the session / `last_question_at`
-        # mutations. Ignore it and return WITHOUT writing so the next process
-        # re-runs from durable state (a resume replays the still-unconsumed
-        # reply). Placed AFTER the read-only commits/dirty parks so an
-        # interrupted run that left changes still parks for inspection, and
-        # BEFORE the silent/answer parks so no partial `last_message` is posted.
-        if _wf._ignore_if_interrupted(issue, question_result):
-            return
-
-        raw = (question_result.last_message or "").strip()
-        if not raw:
-            # Fully silent run: no commit AND no final message. Same
-            # diagnosis as the implementer's silent-failure park --
-            # usually a poisoned resume of a session previously
-            # killed mid-stream. Safe to clean up the worktree (we
-            # just verified it is not dirty / committed above) -- a
-            # prior unsafe park's preservation ends here because the
-            # current worktree state is provably clean.
-            keep_worktree = False
-            diag = _wf._format_stderr_diagnostics(
-                question_result, "Question agent",
-            )
-            _park_question(
-                gh, issue, state,
-                f"{config.HITL_MENTIONS} question agent produced no "
-                "output (likely a session-resume failure); manual "
-                f"intervention needed.{diag}",
-                reason="question_silent",
-            )
-            _wf.log.warning(
-                "issue=#%s question agent produced no output; "
-                "exit_code=%d timed_out=%s stderr_tail=%r",
-                issue.number,
-                question_result.exit_code,
-                question_result.timed_out,
-                _wf._stderr_log_tail(question_result),
-            )
-            gh.write_pinned_state(issue, state)
-            return
-
-        # Happy path: post the agent's answer (or clarifying
-        # follow-up) to the issue thread, pinging HITL_MENTIONS so
-        # the human is notified, and park awaiting human. The
-        # human's reply -- whether an answer, a relabel to
-        # `implementing`, or a close -- is the unblock signal. The
-        # worktree is torn down in the finally block so the next
-        # tick's `_refresh_base_and_worktrees` has nothing to merge
-        # into. The explicit clear here ends a prior unsafe park's
-        # inspection window: the agent's resume produced a clean
-        # answer with no new commits / dirty, so the worktree is
-        # safe to reap (the operator either reset it before
-        # replying, or the prior unsafe state was transient).
-        keep_worktree = False
-        quoted = "> " + raw.replace("\n", "\n> ")
+    if outcome.park_reason == _QUESTION_COMMITS:
         _park_question(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} question agent responded:\n\n"
-            f"{quoted}",
-            reason="question_answer",
+            run,
+            f"{config.HITL_MENTIONS} question agent committed in "
+            "the worktree but this stage is read-only; refusing "
+            "to push. Reset the worktree before resuming.",
+            reason=_QUESTION_COMMITS,
         )
-        gh.write_pinned_state(issue, state)
+        return
+    if outcome.park_reason == _QUESTION_DIRTY:
+        _park_dirty_question(run, outcome.dirty_files)
+        return
+    if outcome.park_reason == _QUESTION_SILENT:
+        _park_silent_question(run, question_result)
+        return
+    _park_answered_question(run, outcome.answer)
+
+
+def _process_question_run(run: _QuestionRun) -> None:
+    question_result = _select_question_run(run)
+    if question_result is None:
+        return
+    outcome = _assess_question_outcome(run, question_result)
+    # Set the cleanup policy before any park side effect can fail. Unsafe
+    # outcomes must preserve the worktree even when posting the park raises.
+    run.keep_worktree = outcome.keep_worktree
+    if outcome.park_reason is not None:
+        _route_question_outcome(run, question_result, outcome)
+
+
+def _cleanup_question_run(run: _QuestionRun) -> None:
+    if run.keep_worktree:
+        return
+    from orchestrator import workflow as _wf
+
+    _wf._cleanup_question_worktree(
+        run.spec,
+        run.issue.number,
+        branch=_wf._resolve_branch_name(
+            run.state, run.spec, run.issue.number,
+        ),
+    )
+
+
+def _handle_question(
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue,
+) -> None:
+    run = _QuestionRun.start(gh, spec, issue)
+    if _finalize_closed_question(run):
+        return
+    try:
+        _process_question_run(run)
     finally:
-        if not keep_worktree:
-            _wf._cleanup_question_worktree(
-                spec, issue.number,
-                branch=_wf._resolve_branch_name(state, spec, issue.number),
-            )
+        _cleanup_question_run(run)
