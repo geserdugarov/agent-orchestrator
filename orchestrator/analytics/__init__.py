@@ -95,7 +95,7 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -611,20 +611,7 @@ def _persist_agent_exit(
 ) -> None:
     """Write the baseline event, then the independently guarded trajectory."""
     append_record(_build_agent_exit_record(context, metrics, skill_fields))
-    _maybe_record_trajectory(
-        repo=context.repo,
-        issue=context.issue,
-        stage=context.stage,
-        agent_role=context.agent_role,
-        backend=context.backend,
-        result=context.agent_result,
-        prompt=context.prompt,
-        metrics=metrics,
-        review_round=context.review_round,
-        retry_count=context.retry_count,
-        codex_available_skills=codex_catalog.available_skills,
-        codex_tools=codex_catalog.tools,
-    )
+    _maybe_record_trajectory(context, metrics, codex_catalog)
 
 
 def record_agent_exit(
@@ -714,6 +701,39 @@ _TRAJECTORY_FIELD_TAIL = 2000
 _TRAJECTORY_RECORD_BUDGET = 200_000
 
 
+@dataclass(frozen=True)
+class _TrajectoryHeadline:
+    """Always-retained trajectory fields charged before variable arrays."""
+
+    user_input: Optional[str]
+    system_prompt: Optional[str]
+    output: Optional[str]
+    run_usage: dict[str, Any]
+
+    @property
+    def serialized_size(self) -> int:
+        text_size = sum(
+            len(value or "")
+            for value in (self.user_input, self.system_prompt, self.output)
+        )
+        return text_size + len(json.dumps(self.run_usage, default=str))
+
+
+@dataclass
+class _TrajectoryBudget:
+    """Track serialized variable-field bytes retained in one record."""
+
+    used: int
+    truncated: bool = False
+
+    def include(self, value: Any) -> bool:
+        self.used += len(json.dumps(value, default=str))
+        if self.used <= _TRAJECTORY_RECORD_BUDGET:
+            return True
+        self.truncated = True
+        return False
+
+
 def _truncate_head_tail(text: str, head: int, tail: int) -> str:
     """Keep the first `head` + last `tail` chars of `text`, eliding the
     middle with a marker recording how many chars were dropped. Returns
@@ -780,19 +800,71 @@ def _redact_and_truncate(value: Any, redact) -> Optional[str]:
     )
 
 
-def _build_trajectory_record(
-    *,
-    repo: str,
-    issue: int,
-    stage: str,
-    agent_role: str,
-    backend: str,
-    session_id: Optional[str],
-    prompt: Optional[str],
+def _trajectory_usage(metrics: usage.UsageMetrics) -> dict[str, Any]:
+    run_usage = metrics.to_dict()
+    run_usage.pop("backend", None)
+    return run_usage
+
+
+def _trajectory_headline(
+    context: _AgentExitContext,
     trajectory: usage.AgentTrajectory,
     metrics: usage.UsageMetrics,
-    review_round: Optional[int],
-    retry_count: Optional[int],
+    redact,
+) -> _TrajectoryHeadline:
+    return _TrajectoryHeadline(
+        user_input=_redact_and_truncate(context.prompt, redact),
+        system_prompt=_redact_and_truncate(trajectory.system_prompt, redact),
+        output=_redact_and_truncate(trajectory.final_output, redact),
+        run_usage=_trajectory_usage(metrics),
+    )
+
+
+def _bounded_trajectory_turns(
+    trajectory: usage.AgentTrajectory,
+    budget: _TrajectoryBudget,
+) -> list[dict[str, Any]]:
+    turns: list[dict[str, Any]] = []
+    for turn in trajectory.turns:
+        turn_dict = turn.to_dict()
+        if not budget.include(turn_dict):
+            break
+        turns.append(turn_dict)
+    return turns
+
+
+def _trajectory_step(step: usage.TrajectoryStep, redact) -> dict[str, Any]:
+    step_dict: dict[str, Any] = {
+        "kind": step.kind,
+        "name": step.name or None,
+        "tool_id": step.tool_id or None,
+        "content": _redact_and_truncate(step.content, redact),
+    }
+    if step.turn is not None:
+        step_dict["turn"] = step.turn
+    return step_dict
+
+
+def _bounded_trajectory_steps(
+    trajectory: usage.AgentTrajectory,
+    budget: _TrajectoryBudget,
+    redact,
+) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    if budget.truncated:
+        return steps
+    for step in trajectory.steps:
+        step_dict = _trajectory_step(step, redact)
+        if not budget.include(step_dict):
+            break
+        steps.append(step_dict)
+    return steps
+
+
+def _build_trajectory_record(
+    context: _AgentExitContext,
+    trajectory: usage.AgentTrajectory,
+    metrics: usage.UsageMetrics,
     redact,
 ) -> dict:
     """Assemble one redacted, truncated `agent_trajectory` record.
@@ -820,94 +892,68 @@ def _build_trajectory_record(
     no-trigger skill set, or codex's empty per-turn array leaves its key off
     rather than storing a null.
     """
-    user_input = _redact_and_truncate(prompt, redact)
-    system_prompt = _redact_and_truncate(trajectory.system_prompt, redact)
-    output = _redact_and_truncate(trajectory.final_output, redact)
-
-    run_usage = {k: v for k, v in metrics.to_dict().items() if k != "backend"}
-
-    used = len(user_input or "") + len(system_prompt or "") + len(output or "")
-    used += len(json.dumps(run_usage, default=str))
-    truncated = False
-
-    # The per-turn array is charged AND truncated under the record budget, not
-    # merely charged: a pathological claude run (thousands of turns) would
-    # otherwise write the whole array in full via `build_record` and blow the
-    # budget by its size. Turns are drawn down before steps, so `truncated` may
-    # already be set by the time the step loop runs. `run_usage` above is the
-    # small fixed run headline and stays whole.
-    turns: list[dict[str, Any]] = []
-    for turn in trajectory.turns:
-        turn_dict = turn.to_dict()
-        used += len(json.dumps(turn_dict, default=str))
-        if used > _TRAJECTORY_RECORD_BUDGET:
-            truncated = True
-            break
-        turns.append(turn_dict)
-
-    steps: list[dict[str, Any]] = []
-    for step in trajectory.steps:
-        if truncated:
-            break
-        step_dict: dict[str, Any] = {
-            "kind": step.kind,
-            "name": step.name or None,
-            "tool_id": step.tool_id or None,
-            "content": _redact_and_truncate(step.content, redact),
-        }
-        # `turn` is the assistant turn that produced this step (claude only);
-        # `tool_result` / `user_message` steps are turn *inputs*, not billed
-        # output, so their `turn` is None and the key is omitted -- matching
-        # the design's "step.turn only when present".
-        if step.turn is not None:
-            step_dict["turn"] = step.turn
-        # Charge the whole serialized step, not just its content: a run with
-        # thousands of empty- / metadata-only steps would otherwise evade a
-        # content-length-only budget and write an unbounded record.
-        used += len(json.dumps(step_dict, default=str))
-        if used > _TRAJECTORY_RECORD_BUDGET:
-            truncated = True
-            break
-        steps.append(step_dict)
-
-    skills = trajectory.skills
+    headline = _trajectory_headline(context, trajectory, metrics, redact)
+    budget = _TrajectoryBudget(headline.serialized_size)
+    turns = _bounded_trajectory_turns(trajectory, budget)
+    steps = _bounded_trajectory_steps(trajectory, budget, redact)
     return build_record(
-        repo=repo,
-        issue=int(issue),
+        repo=context.repo,
+        issue=context.issue,
         event="agent_trajectory",
-        stage=stage,
-        agent_role=agent_role,
-        backend=backend,
-        session_id=session_id,
-        review_round=review_round,
-        retry_count=retry_count,
-        user_input=user_input,
-        system_prompt=system_prompt,
+        stage=context.stage,
+        agent_role=context.agent_role,
+        backend=context.backend,
+        session_id=context.agent_result.session_id,
+        review_round=context.review_round,
+        retry_count=context.retry_count,
+        user_input=headline.user_input,
+        system_prompt=headline.system_prompt,
         tools=list(trajectory.tools) or None,
-        skills_triggered=list(skills.triggered) or None,
-        skills_available=list(skills.available) or None,
-        run_usage=run_usage,
+        skills_triggered=list(trajectory.skills.triggered) or None,
+        skills_available=list(trajectory.skills.available) or None,
+        run_usage=headline.run_usage,
         turns=turns or None,
         steps=steps,
-        output=output,
-        truncated=truncated or None,
+        output=headline.output,
+        truncated=budget.truncated or None,
     )
 
 
+def _codex_trajectory_changes(
+    trajectory: usage.AgentTrajectory,
+    catalog: _CodexCatalog,
+) -> dict[str, Any]:
+    changes: dict[str, Any] = {}
+    if catalog.available_skills and not trajectory.skills.available:
+        changes["skills"] = replace(
+            trajectory.skills,
+            available=tuple(catalog.available_skills),
+        )
+    if catalog.tools and not trajectory.tools:
+        changes["tools"] = tuple(catalog.tools)
+    return changes
+
+
+def _agent_trajectory(
+    context: _AgentExitContext,
+    catalog: _CodexCatalog,
+) -> usage.AgentTrajectory:
+    trajectory = usage.parse_agent_trajectory(
+        context.backend,
+        context.agent_result.stdout,
+    )
+    if context.backend != "codex":
+        return trajectory
+    changes = _codex_trajectory_changes(trajectory, catalog)
+    if not changes:
+        return trajectory
+    return replace(trajectory, **changes)
+
+
 def _maybe_record_trajectory(
-    *,
-    repo: str,
-    issue: int,
-    stage: str,
-    agent_role: str,
-    backend: str,
-    result: AgentResult,
-    prompt: Optional[str],
+    context: _AgentExitContext,
     metrics: usage.UsageMetrics,
-    review_round: Optional[int],
-    retry_count: Optional[int],
-    codex_available_skills: Optional[list[str]] = None,
-    codex_tools: Optional[list[str]] = None,
+    codex_catalog: _CodexCatalog,
 ) -> None:
     """Parse, redact, truncate, and append one trajectory record -- gated on
     the opt-in `TRAJECTORY_LOG_PATH` and wrapped in its own fail-open guard.
@@ -925,10 +971,10 @@ def _maybe_record_trajectory(
     `_redact_secrets` is imported at call time to avoid a
     `github` -> `analytics` -> `workflow_messages` -> `github` import cycle.
 
-    `codex_available_skills` / `codex_tools` are the out-of-band offered-skills
-    and offered-tools sets `record_agent_exit` discovered for a codex run
-    (empty / `None` for claude, whose offered sets already ride its stream).
-    When present they backfill the codex trajectory's otherwise-empty
+    `codex_catalog` carries the out-of-band offered-skills and offered-tools
+    sets `record_agent_exit` discovered for a codex run (empty for claude,
+    whose offered sets already ride its stream). When present they backfill
+    the codex trajectory's otherwise-empty
     `skills.available` / `tools` so the trajectory viewer's "Skills available"
     and "Tools offered" chips match a claude run's; a non-empty stream-parsed
     set is never overridden.
@@ -937,39 +983,16 @@ def _maybe_record_trajectory(
         return
     try:
         from orchestrator.workflow_messages import _redact_secrets
-        trajectory = usage.parse_agent_trajectory(backend, result.stdout)
-        if backend == "codex":
-            changes: dict[str, Any] = {}
-            if codex_available_skills and not trajectory.skills.available:
-                changes["skills"] = replace(
-                    trajectory.skills,
-                    available=tuple(codex_available_skills),
-                )
-            if codex_tools and not trajectory.tools:
-                changes["tools"] = tuple(codex_tools)
-            if changes:
-                trajectory = replace(trajectory, **changes)
+        trajectory = _agent_trajectory(context, codex_catalog)
         append_trajectory_record(
-            _build_trajectory_record(
-                repo=repo,
-                issue=int(issue),
-                stage=stage,
-                agent_role=agent_role,
-                backend=backend,
-                session_id=result.session_id,
-                prompt=prompt,
-                trajectory=trajectory,
-                metrics=metrics,
-                review_round=review_round,
-                retry_count=retry_count,
-                redact=_redact_secrets,
-            )
+            _build_trajectory_record(context, trajectory, metrics, _redact_secrets)
         )
     except Exception:
         log.exception(
             "issue=#%d analytics: trajectory record(%s) failed; "
             "baseline agent_exit record is unaffected",
-            issue, backend,
+            context.issue,
+            context.backend,
         )
 
 
@@ -1044,6 +1067,47 @@ def _probe_exists(path: Path) -> bool:
         return False
 
 
+def _prune_timestamp(raw_line: str) -> Optional[datetime]:
+    """Parse a JSONL record timestamp, returning None for kept malformed data."""
+    try:
+        record = json.loads(raw_line)
+    except json.JSONDecodeError:
+        return None
+    raw_timestamp = record.get("ts") if isinstance(record, dict) else None
+    if not isinstance(raw_timestamp, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(raw_timestamp)
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp
+
+
+def _normalized_jsonl_line(raw_line: str) -> str:
+    if raw_line.endswith("\n"):
+        return raw_line
+    return raw_line + "\n"
+
+
+@dataclass
+class _PruneScan:
+    """Mutable partition of retained and expired JSONL records."""
+
+    kept: list[str] = field(default_factory=list)
+    removed: int = 0
+
+    def add(self, raw_line: str, cutoff: datetime) -> None:
+        if not raw_line.strip():
+            return
+        timestamp = _prune_timestamp(raw_line)
+        if timestamp is not None and timestamp < cutoff:
+            self.removed += 1
+            return
+        self.kept.append(_normalized_jsonl_line(raw_line))
+
+
 def _read_kept_records(
     path: Path, cutoff: datetime,
 ) -> Optional[tuple[list[str], int]]:
@@ -1056,40 +1120,15 @@ def _read_kept_records(
     to match the writer's forward-compat behavior. Returns None when the read
     itself raises OSError, which the caller turns into a logged no-op.
     """
-    kept: list[str] = []
-    removed = 0
+    scan = _PruneScan()
     try:
         with path.open("r", encoding="utf-8") as fh:
             for raw_line in fh:
-                if not raw_line.strip():
-                    continue
-                line = (
-                    raw_line if raw_line.endswith("\n") else raw_line + "\n"
-                )
-                try:
-                    rec = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    kept.append(line)
-                    continue
-                ts_raw = rec.get("ts") if isinstance(rec, dict) else None
-                if not isinstance(ts_raw, str):
-                    kept.append(line)
-                    continue
-                try:
-                    ts = datetime.fromisoformat(ts_raw)
-                except ValueError:
-                    kept.append(line)
-                    continue
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                if ts < cutoff:
-                    removed += 1
-                    continue
-                kept.append(line)
+                scan.add(raw_line, cutoff)
     except OSError as e:
         log.warning("could not read file %s for prune: %s", path, e)
         return None
-    return kept, removed
+    return scan.kept, scan.removed
 
 
 def _unlink_quietly(path: str) -> None:

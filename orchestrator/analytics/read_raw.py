@@ -21,10 +21,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable, Optional, Sequence
 
-from orchestrator.analytics.connection import _default_connect
-from orchestrator.analytics.db_url import _resolve_db_url
-from orchestrator.analytics.predicates import _build_window_where
-from orchestrator.analytics.query import _query
+from orchestrator.analytics.predicates import (
+    _WindowFilters,
+    _agent_event_excluded,
+    _build_window_where,
+    _prepend_where_condition,
+)
+from orchestrator.analytics.query import _ReadQuery
 from orchestrator.analytics.read_models import (
     AgentExitRow,
     DataExtent,
@@ -52,6 +55,12 @@ def _float_or_none(raw: Any) -> Optional[float]:
     return float(raw)
 
 
+def _row_int(row: Sequence[Any], index: int) -> int:
+    if len(row) <= index:
+        return 0
+    return int(row[index] or 0)
+
+
 def _bool_or_none(raw: Any) -> Optional[bool]:
     if raw is None:
         return None
@@ -62,6 +71,35 @@ def _empty_filter_selected(values: Optional[Sequence[str]]) -> bool:
     if values is None:
         return False
     return len(values) == 0
+
+
+def _filter_options_sql() -> str:
+    return " UNION ".join(
+        f"SELECT '{column}' AS dim, {column} AS value "
+        f"FROM analytics_events WHERE {column} IS NOT NULL"
+        for column in _FILTER_OPTION_COLUMNS
+    )
+
+
+def _filter_options_from_rows(rows: Sequence[tuple]) -> FilterOptions:
+    buckets: dict[str, list[str]] = {
+        column: [] for column in _FILTER_OPTION_COLUMNS
+    }
+    for row in rows:
+        if not row or row[1] is None:
+            continue
+        dimension = row[0]
+        if dimension in buckets:
+            buckets[dimension].append(row[1])
+    for values in buckets.values():
+        values.sort()
+    return FilterOptions(
+        repos=tuple(buckets["repo"]),
+        events=tuple(buckets["event"]),
+        stages=tuple(buckets["stage"]),
+        backends=tuple(buckets["backend"]),
+        agent_roles=tuple(buckets["agent_role"]),
+    )
 
 
 def get_filter_options(
@@ -86,34 +124,10 @@ def get_filter_options(
     Python after the fetch (the lists are tiny -- at most a few
     hundred values per column).
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return FilterOptions()
-    connect_fn = connect or _default_connect
-    sql = " UNION ".join(
-        f"SELECT '{col}' AS dim, {col} AS value "
-        f"FROM analytics_events WHERE {col} IS NOT NULL"
-        for col in _FILTER_OPTION_COLUMNS
-    )
-    rows = _query(connect_fn, url, sql, conn=conn)
-    buckets: dict[str, list[str]] = {
-        col: [] for col in _FILTER_OPTION_COLUMNS
-    }
-    for row in rows:
-        if not row or row[1] is None:
-            continue
-        dim = row[0]
-        if dim in buckets:
-            buckets[dim].append(row[1])
-    for values in buckets.values():
-        values.sort()
-    return FilterOptions(
-        repos=tuple(buckets["repo"]),
-        events=tuple(buckets["event"]),
-        stages=tuple(buckets["stage"]),
-        backends=tuple(buckets["backend"]),
-        agent_roles=tuple(buckets["agent_role"]),
-    )
+    return _filter_options_from_rows(query.select(_filter_options_sql()))
 
 
 def get_data_extent(
@@ -130,21 +144,34 @@ def get_data_extent(
     `DataExtent()` (both fields `None`) when the DB URL is unset or
     the table is empty.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return DataExtent()
-    connect_fn = connect or _default_connect
-    rows = _query(
-        connect_fn,
-        url,
+    rows = query.select(
         "SELECT MIN(ts) AS data_min_ts, MAX(ts) AS data_max_ts "
         "FROM analytics_events",
-        conn=conn,
     )
     if not rows:
         return DataExtent()
     min_ts, max_ts = rows[0]
     return DataExtent(min_ts=min_ts, max_ts=max_ts)
+
+
+def _event_breakdown_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[EventBreakdown]:
+    where, params = _build_window_where(filters)
+    rows = query.select(
+        "SELECT event, COUNT(*) AS c "
+        f"FROM analytics_events{where} "
+        "GROUP BY event ORDER BY c DESC, event ASC",
+        params,
+    )
+    return [
+        EventBreakdown(event=event, count=int(count))
+        for event, count in rows
+    ]
 
 
 def get_event_breakdown(
@@ -164,21 +191,62 @@ def get_event_breakdown(
     Mirrors `get_stage_breakdown`'s shape so the dashboard can render
     the two side-by-side without divergent typing.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_window_where(
-        start=start, end=end, repo=repo,
-        events=events, stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-    sql = (
-        "SELECT event, COUNT(*) AS c "
+    return _event_breakdown_rows(query, filters)
+
+
+def _agent_exit_from_row(row: Sequence[Any]) -> AgentExitRow:
+    return AgentExitRow(
+        ts=row[0],
+        repo=row[1],
+        issue=int(row[2]),
+        stage=row[3],
+        agent_role=row[4],
+        backend=row[5],
+        duration_s=_float_or_none(row[6]),
+        exit_code=_int_or_none(row[7]),
+        timed_out=_bool_or_none(row[8]),
+        review_round=_int_or_none(row[9]),
+        retry_count=_int_or_none(row[10]),
+        input_tokens=_int_or_none(row[11]),
+        output_tokens=_int_or_none(row[12]),
+        cost_usd=_float_or_none(row[13]),
+        cost_source=row[14],
+    )
+
+
+def _recent_agent_exit_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+    limit: int,
+) -> list[AgentExitRow]:
+    if _agent_event_excluded(filters.events):
+        return []
+    if _empty_filter_selected(filters.stages):
+        return []
+    where, params = _build_window_where(filters.without_events())
+    where = _prepend_where_condition(where, "event = %s")
+    params.insert(0, "agent_exit")
+    params.append(int(limit))
+    rows = query.select(
+        "SELECT ts, repo, issue, stage, agent_role, backend, "
+        "duration_s, exit_code, timed_out, review_round, retry_count, "
+        "input_tokens, output_tokens, cost_usd, cost_source "
         f"FROM analytics_events{where} "
-        "GROUP BY event ORDER BY c DESC, event ASC"
+        "ORDER BY ts DESC LIMIT %s",
+        params,
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    return [EventBreakdown(event=ev, count=int(c)) for ev, c in rows]
+    return [_agent_exit_from_row(row) for row in rows]
 
 
 def get_recent_agent_exits(
@@ -210,86 +278,20 @@ def get_recent_agent_exits(
     which is the consistent answer when the operator excludes the
     rows this widget displays.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
-        return []
+    query = _ReadQuery.resolve(db_url, connect, conn)
     if limit <= 0:
         return []
-    # Operator deselected agent_exit from the events multiselect;
-    # this widget is exclusively about agent_exit rows, so short
-    # circuit to an empty table without a DB round trip.
-    if events is not None and "agent_exit" not in events:
+    if not query.available:
         return []
-    connect_fn = connect or _default_connect
-    conditions = ["event = %s"]
-    params: list[Any] = ["agent_exit"]
-    if start is not None:
-        conditions.append("ts >= %s")
-        params.append(start)
-    if end is not None:
-        conditions.append("ts < %s")
-        params.append(end)
-    if repo is not None:
-        conditions.append("repo = %s")
-        params.append(repo)
-    if issue is not None:
-        conditions.append("issue = %s")
-        params.append(int(issue))
-    if stages is not None:
-        if not stages:
-            return []
-        placeholders = ", ".join(["%s"] * len(stages))
-        conditions.append(f"stage IN ({placeholders})")
-        params.extend(stages)
-    where = " WHERE " + " AND ".join(conditions)
-    params.append(int(limit))
-    sql = (
-        "SELECT ts, repo, issue, stage, agent_role, backend, "
-        "duration_s, exit_code, timed_out, review_round, retry_count, "
-        "input_tokens, output_tokens, cost_usd, cost_source "
-        f"FROM analytics_events{where} "
-        "ORDER BY ts DESC LIMIT %s"
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[AgentExitRow] = []
-    for row in rows:
-        (
-            ts,
-            repo_v,
-            issue_v,
-            stage,
-            agent_role,
-            backend,
-            duration_s,
-            exit_code,
-            timed_out,
-            review_round,
-            retry_count,
-            input_tokens,
-            output_tokens,
-            cost_usd,
-            cost_source,
-        ) = row
-        out.append(
-            AgentExitRow(
-                ts=ts,
-                repo=repo_v,
-                issue=int(issue_v),
-                stage=stage,
-                agent_role=agent_role,
-                backend=backend,
-                duration_s=_float_or_none(duration_s),
-                exit_code=_int_or_none(exit_code),
-                timed_out=_bool_or_none(timed_out),
-                review_round=_int_or_none(review_round),
-                retry_count=_int_or_none(retry_count),
-                input_tokens=_int_or_none(input_tokens),
-                output_tokens=_int_or_none(output_tokens),
-                cost_usd=_float_or_none(cost_usd),
-                cost_source=cost_source,
-            )
-        )
-    return out
+    return _recent_agent_exit_rows(query, filters, limit)
 
 
 SORT_BY_LAST_SEEN = "last_seen"
@@ -297,6 +299,72 @@ SORT_BY_COST = "cost"
 _ISSUE_SORT_BY_OPTIONS: frozenset[str] = frozenset(
     {SORT_BY_LAST_SEEN, SORT_BY_COST}
 )
+
+
+def _issue_order_sql(sort_by: str) -> str:
+    if sort_by == SORT_BY_COST:
+        return (
+            "ORDER BY SUM(cost_usd) DESC NULLS LAST, "
+            "last_seen DESC, repo ASC, issue ASC"
+        )
+    return "ORDER BY last_seen DESC, repo ASC, issue ASC"
+
+
+def _issues_sql(where: str, sort_by: str) -> str:
+    return (
+        "SELECT "
+        "repo, issue, "
+        "COUNT(*) AS event_count, "
+        "MIN(ts) AS first_seen, "
+        "MAX(ts) AS last_seen, "
+        "(array_agg(stage ORDER BY ts DESC) "
+        "  FILTER (WHERE stage IS NOT NULL))[1] AS latest_stage, "
+        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
+        "  AS agent_exits, "
+        "SUM(cost_usd) AS total_cost_usd, "
+        "COALESCE(SUM(input_tokens), 0) AS total_input_tokens, "
+        "COALESCE(SUM(output_tokens), 0) AS total_output_tokens, "
+        "MAX(review_round) AS max_review_round, "
+        "SUM(CASE WHEN event = 'agent_exit' AND exit_code <> 0 "
+        "         THEN 1 ELSE 0 END) AS failed_agent_runs, "
+        "MAX(retry_count) AS max_retry_count "
+        f"FROM analytics_events{where} "
+        "GROUP BY repo, issue "
+        f"{_issue_order_sql(sort_by)} "
+        "LIMIT %s"
+    )
+
+
+def _issue_summary_from_row(row: Sequence[Any]) -> IssueSummaryRow:
+    return IssueSummaryRow(
+        repo=row[0],
+        issue=int(row[1]),
+        event_count=int(row[2] or 0),
+        first_seen=row[3],
+        last_seen=row[4],
+        latest_stage=row[5],
+        agent_exits=int(row[6] or 0),
+        total_cost_usd=_float_or_none(row[7]),
+        total_input_tokens=int(row[8] or 0),
+        total_output_tokens=int(row[9] or 0),
+        max_review_round=_int_or_none(row[10] if len(row) > 10 else None),
+        failed_agent_runs=_row_int(row, 11),
+        max_retry_count=_int_or_none(row[12] if len(row) > 12 else None),
+    )
+
+
+def _issue_summary_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+    limit: int,
+    sort_by: str,
+) -> list[IssueSummaryRow]:
+    where, params = _build_window_where(filters)
+    rows = query.select(
+        _issues_sql(where, sort_by),
+        [*params, int(limit)],
+    )
+    return [_issue_summary_from_row(row) for row in rows]
 
 
 def get_issues(
@@ -353,93 +421,52 @@ def get_issues(
             f"unknown sort_by {sort_by!r}; expected one of "
             f"{sorted(_ISSUE_SORT_BY_OPTIONS)}"
         )
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
-        return []
+    query = _ReadQuery.resolve(db_url, connect, conn)
     if limit <= 0:
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_window_where(
-        start=start, end=end, repo=repo,
-        events=events, stages=stages, issue=issue,
+    if not query.available:
+        return []
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-    # Order primary key matches `sort_by`; secondary keys
-    # (`last_seen DESC, repo ASC, issue ASC`) keep the ordering
-    # deterministic when the primary key ties.
-    if sort_by == SORT_BY_COST:
-        order_sql = (
-            "ORDER BY SUM(cost_usd) DESC NULLS LAST, "
-            "last_seen DESC, repo ASC, issue ASC"
-        )
-    else:
-        order_sql = "ORDER BY last_seen DESC, repo ASC, issue ASC"
-    sql = (
-        "SELECT "
-        "repo, issue, "
-        "COUNT(*) AS event_count, "
-        "MIN(ts) AS first_seen, "
-        "MAX(ts) AS last_seen, "
-        "(array_agg(stage ORDER BY ts DESC) "
-        "  FILTER (WHERE stage IS NOT NULL))[1] AS latest_stage, "
-        "SUM(CASE WHEN event = 'agent_exit' THEN 1 ELSE 0 END) "
-        "  AS agent_exits, "
-        "SUM(cost_usd) AS total_cost_usd, "
-        "COALESCE(SUM(input_tokens), 0) AS total_input_tokens, "
-        "COALESCE(SUM(output_tokens), 0) AS total_output_tokens, "
-        # `review_round` is only ever set on agent_exit rows so a
-        # plain MAX is correct -- the filter is implicit.
-        "MAX(review_round) AS max_review_round, "
-        "SUM(CASE WHEN event = 'agent_exit' AND exit_code <> 0 "
-        "         THEN 1 ELSE 0 END) AS failed_agent_runs, "
-        # `retry_count` is also only ever set on agent_exit rows,
-        # so a plain MAX picks the highest retry the implementer
-        # ever rode up to before the issue cleared. The redesigned
-        # "Most expensive issues" table renders this as the
-        # "Retries" column matching the standalone mock.
-        "MAX(retry_count) AS max_retry_count "
+    return _issue_summary_rows(query, filters, limit, sort_by)
+
+
+def _issue_event_from_row(row: Sequence[Any]) -> IssueEventRow:
+    return IssueEventRow(
+        ts=row[0],
+        event=row[1],
+        stage=row[2],
+        duration_s=_float_or_none(row[3]),
+        result=row[4],
+        agent_role=row[5],
+        backend=row[6],
+        exit_code=_int_or_none(row[7]),
+        cost_usd=_float_or_none(row[8]),
+    )
+
+
+def _issue_event_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+    repo: str,
+    issue: int,
+) -> list[IssueEventRow]:
+    where, params = _build_window_where(filters)
+    where = _prepend_where_condition(where, "repo = %s AND issue = %s")
+    rows = query.select(
+        "SELECT ts, event, stage, duration_s, result, "
+        "agent_role, backend, exit_code, cost_usd "
         f"FROM analytics_events{where} "
-        "GROUP BY repo, issue "
-        f"{order_sql} "
-        "LIMIT %s"
+        "ORDER BY ts ASC, id ASC",
+        [repo, int(issue), *params],
     )
-    bound_params = list(params) + [int(limit)]
-    rows = _query(connect_fn, url, sql, bound_params, conn=conn)
-    out: list[IssueSummaryRow] = []
-    for row in rows:
-        repo_v = row[0]
-        issue_v = row[1]
-        event_count = row[2]
-        first_seen = row[3]
-        last_seen = row[4]
-        latest_stage = row[5]
-        agent_exits = row[6]
-        total_cost_usd = row[7]
-        total_input_tokens = row[8]
-        total_output_tokens = row[9]
-        # Old fixtures may still emit 10- or 12-tuple rows; default
-        # the extensions to None / 0 so tests written against the
-        # prior shape continue to round-trip.
-        max_review_round = row[10] if len(row) > 10 else None
-        failed_agent_runs = row[11] if len(row) > 11 else 0
-        max_retry_count = row[12] if len(row) > 12 else None
-        out.append(
-            IssueSummaryRow(
-                repo=repo_v,
-                issue=int(issue_v),
-                event_count=int(event_count or 0),
-                first_seen=first_seen,
-                last_seen=last_seen,
-                latest_stage=latest_stage,
-                agent_exits=int(agent_exits or 0),
-                total_cost_usd=_float_or_none(total_cost_usd),
-                total_input_tokens=int(total_input_tokens or 0),
-                total_output_tokens=int(total_output_tokens or 0),
-                max_review_round=_int_or_none(max_review_round),
-                failed_agent_runs=int(failed_agent_runs or 0),
-                max_retry_count=_int_or_none(max_retry_count),
-            )
-        )
-    return out
+    return [_issue_event_from_row(row) for row in rows]
 
 
 def get_issue_events(
@@ -465,62 +492,17 @@ def get_issue_events(
     / `stages` follow the standard shape: ``None`` = no filter,
     empty = no rows match, non-empty = ``IN (...)``.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
-        return []
     if _empty_filter_selected(events):
         return []
     if _empty_filter_selected(stages):
         return []
-    connect_fn = connect or _default_connect
-    conditions = ["repo = %s", "issue = %s"]
-    params: list[Any] = [repo, int(issue)]
-    if start is not None:
-        conditions.append("ts >= %s")
-        params.append(start)
-    if end is not None:
-        conditions.append("ts < %s")
-        params.append(end)
-    if events:
-        placeholders = ", ".join(["%s"] * len(events))
-        conditions.append(f"event IN ({placeholders})")
-        params.extend(events)
-    if stages:
-        placeholders = ", ".join(["%s"] * len(stages))
-        conditions.append(f"stage IN ({placeholders})")
-        params.extend(stages)
-    sql = (
-        "SELECT ts, event, stage, duration_s, result, "
-        "agent_role, backend, exit_code, cost_usd "
-        "FROM analytics_events "
-        f"WHERE {' AND '.join(conditions)} "
-        "ORDER BY ts ASC, id ASC"
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
+        return []
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        events=events,
+        stages=stages,
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[IssueEventRow] = []
-    for row in rows:
-        (
-            ts,
-            event,
-            stage,
-            duration_s,
-            result,
-            agent_role,
-            backend,
-            exit_code,
-            cost_usd,
-        ) = row
-        out.append(
-            IssueEventRow(
-                ts=ts,
-                event=event,
-                stage=stage,
-                duration_s=_float_or_none(duration_s),
-                result=result,
-                agent_role=agent_role,
-                backend=backend,
-                exit_code=_int_or_none(exit_code),
-                cost_usd=_float_or_none(cost_usd),
-            )
-        )
-    return out
+    return _issue_event_rows(query, filters, repo, issue)

@@ -22,18 +22,18 @@ aggregates in `read_rollup`.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import datetime
-from functools import partial
 from typing import Any, Callable, Optional, Sequence
 
-from orchestrator.analytics.connection import _default_connect
-from orchestrator.analytics.db_url import _resolve_db_url
 from orchestrator.analytics.predicates import (
+    _WindowFilters,
     _agent_event_excluded,
+    _append_where_condition,
     _build_view_window_where,
     _build_window_where,
 )
-from orchestrator.analytics.query import _query
+from orchestrator.analytics.query import _ReadQuery
 from orchestrator.analytics.read_models import (
     BackendDailyTokensRow,
     CostCoverageRow,
@@ -85,9 +85,44 @@ def _skill_matrix_order_key(
     cohort_runs: dict[tuple[str, str, str], int],
 ) -> tuple:
     repo, role, backend, skill = key
-    skill_runs = counts.get(key, 0)
-    total = cohort_runs.get((repo, role, backend), 0)
-    return (-skill_runs, -total, repo, role, backend, skill)
+    return (
+        -counts.get(key, 0),
+        -cohort_runs.get((repo, role, backend), 0),
+        repo,
+        role,
+        backend,
+        skill,
+    )
+
+
+def _row_value(row: Sequence[Any], index: int, default: Any = 0) -> Any:
+    if len(row) <= index:
+        return default
+    return row[index]
+
+
+def _day_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+_AGENT_CACHE_TOKENS_SQL = (
+    "(COALESCE(cached_tokens, 0) "
+    "+ COALESCE(cache_read_tokens, 0) "
+    "+ COALESCE(cache_write_tokens, 0))"
+)
+_AGENT_ALL_TOKENS_SQL = (
+    "(COALESCE(input_tokens, 0) "
+    "+ COALESCE(output_tokens, 0) "
+    "+ COALESCE(cache_read_tokens, 0) "
+    "+ COALESCE(cache_write_tokens, 0))"
+)
+_AGENT_CACHE_FRACTION_SQL = (
+    f"CASE WHEN {_AGENT_ALL_TOKENS_SQL} = 0 THEN 0 "
+    f"ELSE {_AGENT_CACHE_TOKENS_SQL}::numeric "
+    f"/ {_AGENT_ALL_TOKENS_SQL}::numeric END"
+)
 
 
 # Default cap on the rows `get_skill_trigger_matrix` returns. The
@@ -95,6 +130,77 @@ def _skill_matrix_order_key(
 # expand from flooding the page when many repos x cohorts x catalog
 # skills multiply out. A non-positive `limit` disables the cap.
 SKILL_MATRIX_ROW_LIMIT = 100
+
+
+def _review_round_sql(where: str) -> str:
+    return (
+        "SELECT "
+        "CASE "
+        "WHEN review_round IS NULL "
+        "AND agent_role = 'developer' "
+        "AND stage = 'implementing' THEN '0' "
+        "WHEN review_round IS NULL THEN 'unknown' "
+        "WHEN review_round <= 0 THEN '0' "
+        "WHEN review_round >= 6 THEN '6+' "
+        "ELSE review_round::text "
+        "END AS bucket, "
+        "COUNT(*) AS runs, "
+        "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs, "
+        "COALESCE(SUM(cost_usd), 0) AS bucket_cost_usd, "
+        "SUM(CASE WHEN agent_role = 'developer' THEN 1 ELSE 0 END) "
+        "AS developer_runs, "
+        "SUM(CASE WHEN agent_role = 'reviewer' THEN 1 ELSE 0 END) "
+        "AS reviewer_runs, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
+        "THEN cost_usd ELSE 0 END), 0) AS developer_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
+        "THEN cost_usd ELSE 0 END), 0) AS reviewer_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
+        f"THEN COALESCE(cost_usd, 0) * ({_AGENT_CACHE_FRACTION_SQL}) "
+        "ELSE 0 END), 0) AS developer_cache_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
+        f"THEN COALESCE(cost_usd, 0) * (1 - ({_AGENT_CACHE_FRACTION_SQL})) "
+        "ELSE 0 END), 0) AS developer_no_cache_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
+        f"THEN COALESCE(cost_usd, 0) * ({_AGENT_CACHE_FRACTION_SQL}) "
+        "ELSE 0 END), 0) AS reviewer_cache_cost_usd, "
+        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
+        f"THEN COALESCE(cost_usd, 0) * (1 - ({_AGENT_CACHE_FRACTION_SQL})) "
+        "ELSE 0 END), 0) AS reviewer_no_cache_cost_usd "
+        f"FROM analytics_agent_runs{where} "
+        "GROUP BY bucket "
+        "ORDER BY runs DESC, bucket ASC"
+    )
+
+
+def _review_round_from_row(row: Sequence[Any]) -> ReviewRoundBucketRow:
+    return ReviewRoundBucketRow(
+        bucket=str(row[0]),
+        runs=int(row[1] or 0),
+        failed=int(row[2] or 0),
+        total_cost_usd=float(_row_value(row, 3, 0.0) or 0.0),
+        developer_runs=int(_row_value(row, 4) or 0),
+        reviewer_runs=int(_row_value(row, 5) or 0),
+        developer_cost_usd=float(_row_value(row, 6, 0.0) or 0.0),
+        reviewer_cost_usd=float(_row_value(row, 7, 0.0) or 0.0),
+        developer_cache_cost_usd=float(_row_value(row, 8, 0.0) or 0.0),
+        developer_no_cache_cost_usd=float(_row_value(row, 9, 0.0) or 0.0),
+        reviewer_cache_cost_usd=float(_row_value(row, 10, 0.0) or 0.0),
+        reviewer_no_cache_cost_usd=float(_row_value(row, 11, 0.0) or 0.0),
+    )
+
+
+def _review_round_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[ReviewRoundBucketRow]:
+    where, params = _build_view_window_where(filters)
+    where = _append_where_condition(
+        where,
+        "agent_role IN ('developer', 'reviewer')",
+    )
+    rows = query.select(_review_round_sql(where), params)
+    return [_review_round_from_row(row) for row in rows]
 
 
 def get_review_round_breakdown(
@@ -127,141 +233,56 @@ def get_review_round_breakdown(
     returns empty so the dashboard's "show nothing for this
     dimension" semantics stays consistent across widgets.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
     if _agent_event_excluded(events):
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_view_window_where(
-        start=start, end=end, repo=repo,
-        stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        stages=stages,
+        issue=issue,
     )
-    role_clause = "agent_role IN ('developer', 'reviewer')"
-    if where:
-        where = f"{where} AND {role_clause}"
-    else:
-        where = f" WHERE {role_clause}"
-    # Each run is split into a cache portion (the share of its tokens
-    # billed as cached / cache-read / cache-write) and a no-cache
-    # portion (the remaining input + output tokens). Cost is attributed
-    # proportionally so the per-round chart shows what fraction of
-    # spend actually flowed through the cache vs ran against fresh
-    # tokens -- the prior binary "any cache token => fully cache"
-    # classification collapsed to ~100% cache once every backend
-    # started reporting cache writes on the first call, leaving the
-    # no-cache stack empty. `total_cache_tokens` / `total_tokens` would
-    # let us inline these from the view but the columns only live
-    # there, not on the raw table, so encode the expressions directly
-    # off the underlying token columns for forward-compat with rollup
-    # paths.
-    #
-    # `cached_tokens` (Codex) is a subset of `input_tokens` -- the
-    # portion of the prompt served from cache -- so it stays out of
-    # the denominator to avoid double-counting. `cache_read_tokens` /
-    # `cache_write_tokens` (Claude) are reported alongside `input_tokens`
-    # rather than inside it, so they add to the denominator normally.
-    cache_tokens_expr = (
-        "(COALESCE(cached_tokens, 0) "
-        "+ COALESCE(cache_read_tokens, 0) "
-        "+ COALESCE(cache_write_tokens, 0))"
-    )
-    all_tokens_expr = (
-        "(COALESCE(input_tokens, 0) "
-        "+ COALESCE(output_tokens, 0) "
-        "+ COALESCE(cache_read_tokens, 0) "
-        "+ COALESCE(cache_write_tokens, 0))"
-    )
-    # Guard the denominator so a token-less row contributes its whole
-    # cost (if any) to the no-cache stack rather than dividing by zero.
-    cache_fraction_expr = (
-        f"CASE WHEN {all_tokens_expr} = 0 THEN 0 "
-        f"ELSE {cache_tokens_expr}::numeric / {all_tokens_expr}::numeric "
-        f"END"
-    )
-    sql = (
+    return _review_round_rows(query, filters)
+
+
+def _skill_trigger_rate_sql(clause: str) -> str:
+    return (
         "SELECT "
-        # Derive the bucket from the raw `review_round` so rounds 3, 4
-        # and 5 stay separate (the view's `review_round_bucket` collapses
-        # them into a single `3-5`). 6+ is still grouped to bound the
-        # long tail. Fresh implementing runs now log review_round=0;
-        # this explicit stage/role fallback keeps older rows in the
-        # same first-pass development bucket.
-        "CASE "
-        "WHEN review_round IS NULL "
-        "AND agent_role = 'developer' "
-        "AND stage = 'implementing' THEN '0' "
-        "WHEN review_round IS NULL THEN 'unknown' "
-        "WHEN review_round <= 0 THEN '0' "
-        "WHEN review_round >= 6 THEN '6+' "
-        "ELSE review_round::text "
-        "END AS bucket, "
+        "COALESCE(agent_role, 'unknown') AS role_label, "
+        "COALESCE(backend, 'unknown') AS backend_label, "
         "COUNT(*) AS runs, "
-        "SUM(CASE WHEN failed THEN 1 ELSE 0 END) AS failed_runs, "
-        "COALESCE(SUM(cost_usd), 0) AS bucket_cost_usd, "
-        "SUM(CASE WHEN agent_role = 'developer' THEN 1 ELSE 0 END) "
-        "AS developer_runs, "
-        "SUM(CASE WHEN agent_role = 'reviewer' THEN 1 ELSE 0 END) "
-        "AS reviewer_runs, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
-        "THEN cost_usd ELSE 0 END), 0) AS developer_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
-        "THEN cost_usd ELSE 0 END), 0) AS reviewer_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
-        f"THEN COALESCE(cost_usd, 0) * ({cache_fraction_expr}) "
-        "ELSE 0 END), 0) AS developer_cache_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'developer' "
-        f"THEN COALESCE(cost_usd, 0) * (1 - ({cache_fraction_expr})) "
-        "ELSE 0 END), 0) AS developer_no_cache_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
-        f"THEN COALESCE(cost_usd, 0) * ({cache_fraction_expr}) "
-        "ELSE 0 END), 0) AS reviewer_cache_cost_usd, "
-        "COALESCE(SUM(CASE WHEN agent_role = 'reviewer' "
-        f"THEN COALESCE(cost_usd, 0) * (1 - ({cache_fraction_expr})) "
-        "ELSE 0 END), 0) AS reviewer_no_cache_cost_usd "
-        f"FROM analytics_agent_runs{where} "
-        "GROUP BY bucket "
-        "ORDER BY runs DESC, bucket ASC"
+        "COUNT(*) FILTER "
+        "  (WHERE extras -> 'skills_triggered' IS NOT NULL) AS skill_runs, "
+        "COALESCE(SUM((extras ->> 'skills_triggered_count')::int), 0) "
+        "  AS total_triggers "
+        f"FROM analytics_events{clause} "
+        "GROUP BY role_label, backend_label "
+        "ORDER BY skill_runs DESC, runs DESC, role_label ASC, "
+        "backend_label ASC"
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[ReviewRoundBucketRow] = []
-    for row in rows:
-        bucket = row[0]
-        runs = row[1]
-        failed = row[2]
-        # Older fixtures may still emit rows without the role / cache
-        # split; default those columns so unrelated tests keep
-        # round-tripping.
-        cost = row[3] if len(row) > 3 else 0.0
-        developer_runs = row[4] if len(row) > 4 else 0
-        reviewer_runs = row[5] if len(row) > 5 else 0
-        developer_cost = row[6] if len(row) > 6 else 0.0
-        reviewer_cost = row[7] if len(row) > 7 else 0.0
-        developer_cache_cost = row[8] if len(row) > 8 else 0.0
-        developer_no_cache_cost = row[9] if len(row) > 9 else 0.0
-        reviewer_cache_cost = row[10] if len(row) > 10 else 0.0
-        reviewer_no_cache_cost = row[11] if len(row) > 11 else 0.0
-        out.append(
-            ReviewRoundBucketRow(
-                bucket=str(bucket),
-                runs=int(runs or 0),
-                failed=int(failed or 0),
-                total_cost_usd=float(cost or 0.0),
-                developer_runs=int(developer_runs or 0),
-                reviewer_runs=int(reviewer_runs or 0),
-                developer_cost_usd=float(developer_cost or 0.0),
-                reviewer_cost_usd=float(reviewer_cost or 0.0),
-                developer_cache_cost_usd=float(developer_cache_cost or 0.0),
-                developer_no_cache_cost_usd=float(
-                    developer_no_cache_cost or 0.0
-                ),
-                reviewer_cache_cost_usd=float(reviewer_cache_cost or 0.0),
-                reviewer_no_cache_cost_usd=float(
-                    reviewer_no_cache_cost or 0.0
-                ),
-            )
-        )
-    return out
+
+
+def _skill_trigger_rate_from_row(row: Sequence[Any]) -> SkillTriggerRateRow:
+    return SkillTriggerRateRow(
+        agent_role=_label_or_unknown(row[0]),
+        backend=_label_or_unknown(row[1]),
+        runs=int(row[2] or 0),
+        skill_runs=int(_row_value(row, 3) or 0),
+        total_triggers=int(_row_value(row, 4) or 0),
+    )
+
+
+def _skill_trigger_rate_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[SkillTriggerRateRow]:
+    where, params = _build_window_where(filters.without_events())
+    clause = _append_where_condition(where, "event = 'agent_exit'")
+    rows = query.select(_skill_trigger_rate_sql(clause), params)
+    return [_skill_trigger_rate_from_row(row) for row in rows]
 
 
 def get_skill_trigger_rates(
@@ -291,59 +312,131 @@ def get_skill_trigger_rates(
     sums `skills_triggered_count`. NULL `agent_role` / `backend` bucket
     under `"unknown"`. Rows are ordered skill-active groups first.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
     if _agent_event_excluded(events):
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_window_where(
-        start=start, end=end, repo=repo,
-        events=None, stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        stages=stages,
+        issue=issue,
     )
-    clause = (
-        f"{where} AND event = 'agent_exit'"
-        if where
-        else " WHERE event = 'agent_exit'"
+    return _skill_trigger_rate_rows(query, filters)
+
+
+_SkillCohort = tuple[str, str, str]
+_SkillMatrixKey = tuple[str, str, str, str]
+
+
+def _skill_catalog_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[tuple]:
+    where, params = _build_window_where(filters.catalog_scope())
+    clause = _append_where_condition(where, "event = 'repo_skill_catalog'")
+    return query.select(
+        "SELECT repo, extras -> 'skills_available' AS skills_available "
+        f"FROM analytics_events{clause}",
+        params,
     )
-    # `extras -> 'skills_triggered' IS NOT NULL` (not the jsonb `?`
-    # operator) tests key presence without tripping the `?`/`%s`
-    # placeholder ambiguity some drivers and poolers apply.
-    sql = (
-        "SELECT "
+
+
+def _skill_catalog(rows: Sequence[tuple]) -> dict[str, set[str]]:
+    catalog: dict[str, set[str]] = {}
+    for row in rows:
+        if row[0] is None:
+            continue
+        repo = str(row[0])
+        names = _as_skill_names(_row_value(row, 1, None))
+        catalog.setdefault(repo, set()).update(names)
+    return catalog
+
+
+def _skill_run_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[tuple]:
+    where, params = _build_window_where(filters.without_events())
+    clause = _append_where_condition(where, "event = 'agent_exit'")
+    return query.select(
+        "SELECT repo, "
         "COALESCE(agent_role, 'unknown') AS role_label, "
         "COALESCE(backend, 'unknown') AS backend_label, "
-        "COUNT(*) AS runs, "
-        "COUNT(*) FILTER "
-        "  (WHERE extras -> 'skills_triggered' IS NOT NULL) AS skill_runs, "
-        "COALESCE(SUM((extras ->> 'skills_triggered_count')::int), 0) "
-        "  AS total_triggers "
-        f"FROM analytics_events{clause} "
-        "GROUP BY role_label, backend_label "
-        "ORDER BY skill_runs DESC, runs DESC, role_label ASC, "
-        "backend_label ASC"
+        "extras -> 'skills_triggered' AS skills_triggered "
+        f"FROM analytics_events{clause}",
+        params,
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[SkillTriggerRateRow] = []
-    for row in rows:
-        role = row[0]
-        backend = row[1]
-        runs = row[2]
-        # Older fixtures may emit 3-tuple rows without the skill
-        # columns; default to zero so unrelated test cases need not
-        # know about the JSONB aggregates.
-        skill_runs = row[3] if len(row) > 3 else 0
-        total_triggers = row[4] if len(row) > 4 else 0
-        out.append(
-            SkillTriggerRateRow(
-                agent_role=_label_or_unknown(role),
-                backend=_label_or_unknown(backend),
-                runs=int(runs or 0),
-                skill_runs=int(skill_runs or 0),
-                total_triggers=int(total_triggers or 0),
-            )
+
+
+def _skill_cohort(row: Sequence[Any]) -> _SkillCohort:
+    return (
+        _label_or_unknown(row[0]),
+        _row_label(row, 1),
+        _row_label(row, 2),
+    )
+
+
+@dataclass
+class _SkillMatrixCounts:
+    """Run and trigger counts used to assemble the skill matrix."""
+
+    cohort_runs: dict[_SkillCohort, int] = field(default_factory=dict)
+    skill_runs: dict[_SkillMatrixKey, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_rows(cls, rows: Sequence[tuple]) -> _SkillMatrixCounts:
+        counts = cls()
+        for row in rows:
+            cohort = _skill_cohort(row)
+            counts.cohort_runs[cohort] = counts.cohort_runs.get(cohort, 0) + 1
+            for skill in set(_as_skill_names(_row_value(row, 3, None))):
+                key = (*cohort, skill)
+                counts.skill_runs[key] = counts.skill_runs.get(key, 0) + 1
+        return counts
+
+    def matrix_keys(
+        self,
+        catalog: dict[str, set[str]],
+    ) -> set[_SkillMatrixKey]:
+        keys = set(self.skill_runs)
+        for cohort in self.cohort_runs:
+            for skill in catalog.get(cohort[0], ()):
+                keys.add((*cohort, skill))
+        return keys
+
+    def order_key(self, key: _SkillMatrixKey) -> tuple:
+        return _skill_matrix_order_key(
+            key,
+            counts=self.skill_runs,
+            cohort_runs=self.cohort_runs,
         )
-    return out
+
+    def as_row(self, key: _SkillMatrixKey) -> SkillTriggerMatrixRow:
+        repo, role, backend, skill = key
+        return SkillTriggerMatrixRow(
+            repo=repo,
+            skill=skill,
+            agent_role=role,
+            backend=backend,
+            runs=self.cohort_runs.get((repo, role, backend), 0),
+            skill_runs=self.skill_runs.get(key, 0),
+        )
+
+
+def _skill_trigger_matrix_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+    limit: int,
+) -> list[SkillTriggerMatrixRow]:
+    catalog = _skill_catalog(_skill_catalog_rows(query, filters))
+    counts = _SkillMatrixCounts.from_rows(_skill_run_rows(query, filters))
+    keys = sorted(counts.matrix_keys(catalog), key=counts.order_key)
+    if limit > 0:
+        keys = keys[:limit]
+    return [counts.as_row(key) for key in keys]
 
 
 def get_skill_trigger_matrix(
@@ -398,115 +491,49 @@ def get_skill_trigger_matrix(
     non-positive `limit` disables the cap) so the dashboard's fold-out
     never floods the page.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
     if _agent_event_excluded(events):
         return []
-    connect_fn = connect or _default_connect
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        stages=stages,
+        issue=issue,
+    )
+    return _skill_trigger_matrix_rows(query, filters, limit)
 
-    # 1. Catalog universe. Catalog records are repo-level (issue == 0,
-    #    NULL stage), so only the date / repo filters apply -- pushing
-    #    the issue / stage filters down here would drop every row.
-    cat_where, cat_params = _build_window_where(
-        start=start, end=end, repo=repo,
-        events=None, stages=None, issue=None,
-    )
-    cat_clause = (
-        f"{cat_where} AND event = 'repo_skill_catalog'"
-        if cat_where
-        else " WHERE event = 'repo_skill_catalog'"
-    )
-    cat_sql = (
-        "SELECT repo, extras -> 'skills_available' AS skills_available "
-        f"FROM analytics_events{cat_clause}"
-    )
-    cat_rows = _query(connect_fn, url, cat_sql, cat_params, conn=conn)
-    catalog: dict[str, set[str]] = {}
-    for row in cat_rows:
-        if row[0] is None:
-            continue
-        c_repo = str(row[0])
-        names = _as_skill_names(row[1] if len(row) > 1 else None)
-        # `setdefault` even on an empty catalog so a "scanned, found
-        # none" record still registers the repo (it just contributes no
-        # zero rows).
-        catalog.setdefault(c_repo, set()).update(names)
 
-    # 2. Observed triggers. One `(repo, role, backend)` cohort per
-    #    agent-exit run plus the distinct skills it fired. `skills_triggered`
-    #    is already de-duplicated per run, but the per-row `set()` guards
-    #    against a malformed array so a name is never double-counted.
-    run_where, run_params = _build_window_where(
-        start=start, end=end, repo=repo,
-        events=None, stages=stages, issue=issue,
+def _cost_coverage_from_row(row: Sequence[Any]) -> CostCoverageRow:
+    return CostCoverageRow(
+        cost_source=str(row[0]),
+        runs=int(row[1] or 0),
+        total_tokens=int(_row_value(row, 2) or 0),
     )
-    run_clause = (
-        f"{run_where} AND event = 'agent_exit'"
-        if run_where
-        else " WHERE event = 'agent_exit'"
+
+
+def _cost_coverage_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[CostCoverageRow]:
+    where, params = _build_view_window_where(filters)
+    rows = query.select(
+        "SELECT "
+        "COALESCE(cost_source, 'unknown') AS source_label, "
+        "COUNT(*) AS runs, "
+        "COALESCE(SUM("
+        "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
+        "  COALESCE(cache_read_tokens, 0) + "
+        "  COALESCE(cache_write_tokens, 0)"
+        "), 0) AS source_total_tokens "
+        f"FROM analytics_agent_runs{where} "
+        "GROUP BY source_label "
+        "ORDER BY runs DESC, source_label ASC",
+        params,
     )
-    run_sql = (
-        "SELECT repo, "
-        "COALESCE(agent_role, 'unknown') AS role_label, "
-        "COALESCE(backend, 'unknown') AS backend_label, "
-        "extras -> 'skills_triggered' AS skills_triggered "
-        f"FROM analytics_events{run_clause}"
-    )
-    run_rows = _query(connect_fn, url, run_sql, run_params, conn=conn)
-
-    cohort_runs: dict[tuple[str, str, str], int] = {}
-    counts: dict[tuple[str, str, str, str], int] = {}
-    for row in run_rows:
-        r_repo = _label_or_unknown(row[0])
-        role = _row_label(row, 1)
-        backend = _row_label(row, 2)
-        cohort = (r_repo, role, backend)
-        # One agent-exit row == one run in the cohort, regardless of how
-        # many (or whether any) skills it fired.
-        cohort_runs[cohort] = cohort_runs.get(cohort, 0) + 1
-        names = _as_skill_names(row[3] if len(row) > 3 else None)
-        for skill in set(names):
-            key = (r_repo, role, backend, skill)
-            counts[key] = counts.get(key, 0) + 1
-
-    # 3. Assemble the matrix: every observed cell carries its skill-run
-    #    count, and every catalog skill is zero-padded across the cohorts
-    #    seen for that repo. `catalog.get(repo, ())` yields no skills when
-    #    the catalog is missing, so the fall-back path emits only the
-    #    observed-trigger cells.
-    keys: set[tuple[str, str, str, str]] = set(counts)
-    for (catalog_repo, catalog_role, catalog_backend) in cohort_runs:
-        for catalog_skill in catalog.get(catalog_repo, ()):
-            keys.add((catalog_repo, catalog_role, catalog_backend, catalog_skill))
-
-    ordered = sorted(
-        keys,
-        key=partial(
-            _skill_matrix_order_key,
-            counts=counts,
-            cohort_runs=cohort_runs,
-        ),
-    )
-    if limit > 0:
-        ordered = ordered[:limit]
-
-    out: list[SkillTriggerMatrixRow] = []
-    for key in ordered:
-        matrix_repo, matrix_role, matrix_backend, matrix_skill = key
-        out.append(
-            SkillTriggerMatrixRow(
-                repo=matrix_repo,
-                skill=matrix_skill,
-                agent_role=matrix_role,
-                backend=matrix_backend,
-                runs=cohort_runs.get(
-                    (matrix_repo, matrix_role, matrix_backend), 0
-                ),
-                skill_runs=counts.get(key, 0),
-            )
-        )
-    return out
+    return [_cost_coverage_from_row(row) for row in rows]
 
 
 def get_cost_coverage(
@@ -533,51 +560,51 @@ def get_cost_coverage(
     not priced). The `events` filter is honored by short-circuit
     against `_agent_event_excluded`.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
     if _agent_event_excluded(events):
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_view_window_where(
-        start=start, end=end, repo=repo,
-        stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        stages=stages,
+        issue=issue,
     )
-    sql = (
+    return _cost_coverage_rows(query, filters)
+
+
+def _backend_daily_tokens_from_row(
+    row: Sequence[Any],
+) -> BackendDailyTokensRow:
+    return BackendDailyTokensRow(
+        day=_day_value(row[0]),
+        backend=str(row[1]),
+        total_tokens=int(row[2] or 0),
+    )
+
+
+def _backend_daily_token_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[BackendDailyTokensRow]:
+    where, params = _build_view_window_where(filters)
+    rows = query.select(
         "SELECT "
-        "COALESCE(cost_source, 'unknown') AS source_label, "
-        "COUNT(*) AS runs, "
-        # Tokens-by-cost-source rollup so the dashboard can render
-        # coverage as a token share. The view exposes the cache
-        # columns; the standalone mock totals
-        # `input + output + cache_read + cache_write` per row, so
-        # we mirror that accounting here.
+        "date_trunc('day', ts)::date AS day, "
+        "COALESCE(backend, 'unknown') AS backend_label, "
         "COALESCE(SUM("
         "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
         "  COALESCE(cache_read_tokens, 0) + "
         "  COALESCE(cache_write_tokens, 0)"
-        "), 0) AS source_total_tokens "
+        "), 0) AS day_backend_tokens "
         f"FROM analytics_agent_runs{where} "
-        "GROUP BY source_label "
-        "ORDER BY runs DESC, source_label ASC"
+        "GROUP BY day, backend_label "
+        "ORDER BY day ASC, backend_label ASC",
+        params,
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[CostCoverageRow] = []
-    for row in rows:
-        source = row[0]
-        runs = row[1]
-        # Older fixtures may still emit 2-tuple rows; default the
-        # token total to 0 so the test harness does not have to
-        # know about the new SQL column in unrelated cases.
-        tokens = row[2] if len(row) > 2 else 0
-        out.append(
-            CostCoverageRow(
-                cost_source=str(source),
-                runs=int(runs or 0),
-                total_tokens=int(tokens or 0),
-            )
-        )
-    return out
+    return [_backend_daily_tokens_from_row(row) for row in rows]
 
 
 def get_backend_daily_tokens(
@@ -605,46 +632,55 @@ def get_backend_daily_tokens(
     is honored by short-circuit against `_agent_event_excluded` --
     see `get_review_round_breakdown` for the rationale.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
     if _agent_event_excluded(events):
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_view_window_where(
-        start=start, end=end, repo=repo,
-        stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        stages=stages,
+        issue=issue,
     )
-    sql = (
+    return _backend_daily_token_rows(query, filters)
+
+
+def _hourly_heatmap_from_row(row: Sequence[Any]) -> HourlyHeatmapPoint:
+    return HourlyHeatmapPoint(
+        weekday=int(row[0]),
+        hour=int(row[1]),
+        count=int(row[2] or 0),
+        total_tokens=int(_row_value(row, 3) or 0),
+    )
+
+
+def _hourly_heatmap_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+    tz_offset_hours: int,
+) -> list[HourlyHeatmapPoint]:
+    where, params = _build_window_where(filters)
+    offset = int(tz_offset_hours)
+    rows = query.select(
         "SELECT "
-        "date_trunc('day', ts)::date AS day, "
-        "COALESCE(backend, 'unknown') AS backend_label, "
-        # Token total includes cache_read / cache_write so the
-        # backend stack mirrors the standalone mock's
-        # `input + output + cache_read + cache_write` accounting.
+        "EXTRACT(DOW FROM ((ts AT TIME ZONE 'UTC') "
+        "+ %s * INTERVAL '1 hour'))::int AS weekday, "
+        "EXTRACT(HOUR FROM ((ts AT TIME ZONE 'UTC') "
+        "+ %s * INTERVAL '1 hour'))::int AS hour, "
+        "COUNT(*) AS c, "
         "COALESCE(SUM("
         "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
         "  COALESCE(cache_read_tokens, 0) + "
         "  COALESCE(cache_write_tokens, 0)"
-        "), 0) AS day_backend_tokens "
-        f"FROM analytics_agent_runs{where} "
-        "GROUP BY day, backend_label "
-        "ORDER BY day ASC, backend_label ASC"
+        "), 0) AS cell_total_tokens "
+        f"FROM analytics_events{where} "
+        "GROUP BY weekday, hour "
+        "ORDER BY weekday ASC, hour ASC",
+        [offset, offset, *params],
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[BackendDailyTokensRow] = []
-    for row in rows:
-        day_value, backend, tokens = row
-        if isinstance(day_value, datetime):
-            day_value = day_value.date()
-        out.append(
-            BackendDailyTokensRow(
-                day=day_value,
-                backend=str(backend),
-                total_tokens=int(tokens or 0),
-            )
-        )
-    return out
+    return [_hourly_heatmap_from_row(row) for row in rows]
 
 
 def get_hourly_heatmap(
@@ -674,56 +710,15 @@ def get_hourly_heatmap(
     the heatmap in a non-UTC timezone (the orchestrator stores
     `ts` in UTC). Zero is the historical behavior.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_window_where(
-        start=start, end=end, repo=repo,
-        events=events, stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-    # Normalize `ts` (TIMESTAMPTZ) to a UTC naive `TIMESTAMP` via
-    # `AT TIME ZONE 'UTC'` before applying the offset and extracting.
-    # `EXTRACT()` on a TIMESTAMPTZ is read in the database session
-    # timezone, so without this normalization a non-UTC session would
-    # shift the buckets again on top of our explicit offset.
-    # Parameterised so the integer is never spliced into the SQL.
-    sql = (
-        "SELECT "
-        "EXTRACT(DOW FROM ((ts AT TIME ZONE 'UTC') "
-        "+ %s * INTERVAL '1 hour'))::int AS weekday, "
-        "EXTRACT(HOUR FROM ((ts AT TIME ZONE 'UTC') "
-        "+ %s * INTERVAL '1 hour'))::int AS hour, "
-        "COUNT(*) AS c, "
-        # Per-cell token volume so the dashboard heatmap can render
-        # token intensity instead of event count -- matching the
-        # standalone mock's "Token volume by hour x weekday" panel.
-        "COALESCE(SUM("
-        "  COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + "
-        "  COALESCE(cache_read_tokens, 0) + "
-        "  COALESCE(cache_write_tokens, 0)"
-        "), 0) AS cell_total_tokens "
-        f"FROM analytics_events{where} "
-        "GROUP BY weekday, hour "
-        "ORDER BY weekday ASC, hour ASC"
-    )
-    offset_int = int(tz_offset_hours)
-    params = [offset_int, offset_int, *params]
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[HourlyHeatmapPoint] = []
-    for row in rows:
-        weekday = row[0]
-        hour = row[1]
-        count = row[2]
-        # Older 3-tuple fixtures (no token column) round-trip with
-        # zero token volume so unrelated tests keep working.
-        tokens = row[3] if len(row) > 3 else 0
-        out.append(
-            HourlyHeatmapPoint(
-                weekday=int(weekday),
-                hour=int(hour),
-                count=int(count or 0),
-                total_tokens=int(tokens or 0),
-            )
-        )
-    return out
+    return _hourly_heatmap_rows(query, filters, tz_offset_hours)

@@ -20,18 +20,19 @@ remaining view-backed dashboard chart breakdowns in
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable, Optional, Sequence
 
-from orchestrator.analytics.connection import _default_connect
-from orchestrator.analytics.db_url import _resolve_db_url
 from orchestrator.analytics.predicates import (
     _DAILY_ROLLUP_VIEW,
+    _WindowFilters,
     _agent_event_excluded,
+    _append_where_condition,
     _build_rollup_window_where,
+    _prepend_where_condition,
 )
-from orchestrator.analytics.query import _query
+from orchestrator.analytics.query import _ReadQuery
 from orchestrator.analytics.read_models import (
     BackendEfficiencyRow,
     RepoBreakdownRow,
@@ -40,18 +41,6 @@ from orchestrator.analytics.read_models import (
     ThroughputDayRow,
     TimeSeriesPoint,
 )
-
-
-@dataclass(frozen=True)
-class _SummaryFilters:
-    """Filter values applied to the summary's rollup window."""
-
-    start: Optional[datetime]
-    end: Optional[datetime]
-    repo: Optional[str]
-    events: Optional[Sequence[str]]
-    stages: Optional[Sequence[str]]
-    issue: Optional[int]
 
 
 _SUMMARY_TOTAL_FIELD_CASTS = (
@@ -70,17 +59,10 @@ _SUMMARY_TOTAL_FIELD_CASTS = (
 
 
 def _build_summary_where(
-    filters: _SummaryFilters,
+    filters: _WindowFilters,
 ) -> tuple[str, list[Any]]:
     """Build the predicate and bound values for one summary window."""
-    return _build_rollup_window_where(
-        start=filters.start,
-        end=filters.end,
-        repo=filters.repo,
-        events=filters.events,
-        stages=filters.stages,
-        issue=filters.issue,
-    )
+    return _build_rollup_window_where(filters)
 
 
 def _build_summary_sql(where_clause: str) -> str:
@@ -130,22 +112,13 @@ def _build_summary_sql(where_clause: str) -> str:
 
 
 def _query_summary_rows(
-    filters: _SummaryFilters,
-    *,
-    db_url: Optional[str],
-    connect_fn: Callable[[str], Any],
-    conn: Any,
+    query: _ReadQuery,
+    filters: _WindowFilters,
 ) -> list[tuple]:
     """Execute one summary query using the requested connection path."""
     where_clause, query_parameters = _build_summary_where(filters)
     query_sql = _build_summary_sql(where_clause)
-    return _query(
-        connect_fn,
-        db_url,
-        query_sql,
-        query_parameters,
-        conn=conn,
-    )
+    return query.select(query_sql, query_parameters)
 
 
 def _summary_totals_row(rows: Sequence[tuple]) -> Optional[tuple]:
@@ -167,8 +140,12 @@ def _ordered_summary_counts(
         for row in rows
         if row and row[0] == row_kind and row[1] is not None
     ]
-    counts.sort(key=lambda pair: (-pair[1], pair[0]))
+    counts.sort(key=_summary_count_order)
     return dict(counts)
+
+
+def _summary_count_order(pair: tuple[str, int]) -> tuple[int, str]:
+    return -pair[1], pair[0]
 
 
 def _summary_total_values(totals_row: tuple) -> dict[str, Any]:
@@ -196,6 +173,24 @@ def _summary_from_rows(rows: Sequence[tuple]) -> Summary:
     )
 
 
+def _row_value(row: Sequence[Any], index: int, default: Any = 0) -> Any:
+    if len(row) <= index:
+        return default
+    return row[index]
+
+
+def _day_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    return float(value)
+
+
 def get_summary(
     *,
     start: Optional[datetime] = None,
@@ -218,10 +213,10 @@ def get_summary(
     no rows match. Returns a zero-valued `Summary` when the DB URL
     is unset or the (post-filter) window holds no rows.
     """
-    resolved_url = _resolve_db_url(db_url)
-    if conn is None and not resolved_url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return Summary()
-    filters = _SummaryFilters(
+    filters = _WindowFilters(
         start=start,
         end=end,
         repo=repo,
@@ -229,13 +224,7 @@ def get_summary(
         stages=stages,
         issue=issue,
     )
-    rows = _query_summary_rows(
-        filters,
-        db_url=resolved_url,
-        connect_fn=connect or _default_connect,
-        conn=conn,
-    )
-    return _summary_from_rows(rows)
+    return _summary_from_rows(_query_summary_rows(query, filters))
 
 
 def get_kpi_prev(
@@ -271,15 +260,22 @@ def get_kpi_prev(
     `events` / `stages` / `issue` are identical to `get_summary` --
     they share `_build_window_where`.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return Summary()
-    connect_fn = connect or _default_connect
-    where, params = _build_rollup_window_where(
-        start=start, end=end, repo=repo,
-        events=events, stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-    sql = (
+    return _kpi_prev_summary(query, filters)
+
+
+def _kpi_prev_sql(where: str) -> str:
+    return (
         "SELECT "
         "COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd, "
         "COALESCE(SUM(total_input_tokens), 0) AS total_input_tokens, "
@@ -293,7 +289,14 @@ def get_kpi_prev(
         "  AS total_agent_runs "
         f"FROM {_DAILY_ROLLUP_VIEW}{where}"
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
+
+
+def _kpi_prev_summary(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> Summary:
+    where, params = _build_rollup_window_where(filters)
+    rows = query.select(_kpi_prev_sql(where), params)
     if not rows:
         return Summary()
     row = rows[0]
@@ -303,8 +306,44 @@ def get_kpi_prev(
         total_output_tokens=int(row[2] or 0),
         total_cache_read_tokens=int(row[3] or 0),
         total_cache_write_tokens=int(row[4] or 0),
-        total_agent_runs=int(row[5] or 0) if len(row) > 5 else 0,
+        total_agent_runs=int(_row_value(row, 5) or 0),
     )
+
+
+def _time_series_from_row(row: Sequence[Any]) -> TimeSeriesPoint:
+    return TimeSeriesPoint(
+        day=_day_value(row[0]),
+        event=row[1],
+        count=int(row[2]),
+        cost_usd=float(_row_value(row, 3, 0.0) or 0.0),
+        input_tokens=int(_row_value(row, 4) or 0),
+        output_tokens=int(_row_value(row, 5) or 0),
+        cache_read_tokens=int(_row_value(row, 6) or 0),
+        cache_write_tokens=int(_row_value(row, 7) or 0),
+    )
+
+
+def _time_series_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[TimeSeriesPoint]:
+    where, params = _build_rollup_window_where(filters)
+    rows = query.select(
+        "SELECT day, event, "
+        "COALESCE(SUM(event_count), 0) AS c, "
+        "COALESCE(SUM(total_cost_usd), 0) AS day_cost_usd, "
+        "COALESCE(SUM(total_input_tokens), 0) AS day_input_tokens, "
+        "COALESCE(SUM(total_output_tokens), 0) AS day_output_tokens, "
+        "COALESCE(SUM(total_cache_read_tokens), 0) "
+        "  AS day_cache_read_tokens, "
+        "COALESCE(SUM(total_cache_write_tokens), 0) "
+        "  AS day_cache_write_tokens "
+        f"FROM {_DAILY_ROLLUP_VIEW}{where} "
+        "GROUP BY day, event "
+        "ORDER BY day ASC, event ASC",
+        params,
+    )
+    return [_time_series_from_row(row) for row in rows]
 
 
 def get_time_series(
@@ -328,58 +367,82 @@ def get_time_series(
     DB round trip. Returns an empty list when the DB URL is unset or
     no rows match.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_rollup_window_where(
-        start=start, end=end, repo=repo,
-        events=events, stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-    # Reads directly from the daily rollup: `day` is the GROUP BY
-    # key the view is keyed on, so a per-day per-event aggregate
-    # collapses to a tiny scan compared with the equivalent
-    # `date_trunc('day', ts)` over the events table.
-    sql = (
-        "SELECT day, event, "
+    return _time_series_rows(query, filters)
+
+
+_ROLLUP_CACHE_TOKENS_SQL = (
+    "(COALESCE(total_cached_tokens, 0) "
+    "+ COALESCE(total_cache_read_tokens, 0) "
+    "+ COALESCE(total_cache_write_tokens, 0))"
+)
+_ROLLUP_ALL_TOKENS_SQL = (
+    "(COALESCE(total_input_tokens, 0) "
+    "+ COALESCE(total_output_tokens, 0) "
+    "+ COALESCE(total_cache_read_tokens, 0) "
+    "+ COALESCE(total_cache_write_tokens, 0))"
+)
+_ROLLUP_CACHE_FRACTION_SQL = (
+    f"CASE WHEN {_ROLLUP_ALL_TOKENS_SQL} = 0 THEN 0 "
+    f"ELSE {_ROLLUP_CACHE_TOKENS_SQL}::numeric "
+    f"/ {_ROLLUP_ALL_TOKENS_SQL}::numeric END"
+)
+
+
+def _stage_breakdown_sql(clause: str) -> str:
+    return (
+        "SELECT stage, "
         "COALESCE(SUM(event_count), 0) AS c, "
-        "COALESCE(SUM(total_cost_usd), 0) AS day_cost_usd, "
-        "COALESCE(SUM(total_input_tokens), 0) AS day_input_tokens, "
-        "COALESCE(SUM(total_output_tokens), 0) AS day_output_tokens, "
-        "COALESCE(SUM(total_cache_read_tokens), 0) "
-        "  AS day_cache_read_tokens, "
-        "COALESCE(SUM(total_cache_write_tokens), 0) "
-        "  AS day_cache_write_tokens "
-        f"FROM {_DAILY_ROLLUP_VIEW}{where} "
-        "GROUP BY day, event "
-        "ORDER BY day ASC, event ASC"
+        "SUM(duration_s_sum) / NULLIF(SUM(duration_s_count), 0) "
+        "  AS avg_dur, "
+        "COALESCE(SUM(total_cost_usd), 0) AS stage_cost_usd, "
+        "COALESCE(SUM(total_input_tokens), 0) AS stage_input_tokens, "
+        "COALESCE(SUM(total_output_tokens), 0) AS stage_output_tokens, "
+        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
+        "                  THEN event_count ELSE 0 END), 0) "
+        "  AS stage_agent_runs, "
+        "COALESCE(SUM(COALESCE(total_cost_usd, 0) "
+        f"* ({_ROLLUP_CACHE_FRACTION_SQL})), 0) AS stage_cache_cost_usd, "
+        "COALESCE(SUM(COALESCE(total_cost_usd, 0) "
+        f"* (1 - ({_ROLLUP_CACHE_FRACTION_SQL}))), 0) "
+        "AS stage_no_cache_cost_usd "
+        f"FROM {_DAILY_ROLLUP_VIEW}{clause} "
+        "GROUP BY stage ORDER BY c DESC, stage ASC"
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    points: list[TimeSeriesPoint] = []
-    for row in rows:
-        day_value = row[0]
-        event = row[1]
-        count = row[2]
-        cost_usd = row[3] if len(row) > 3 else 0.0
-        input_tokens = row[4] if len(row) > 4 else 0
-        output_tokens = row[5] if len(row) > 5 else 0
-        cache_read_tokens = row[6] if len(row) > 6 else 0
-        cache_write_tokens = row[7] if len(row) > 7 else 0
-        if isinstance(day_value, datetime):
-            day_value = day_value.date()
-        points.append(
-            TimeSeriesPoint(
-                day=day_value,
-                event=event,
-                count=int(count),
-                cost_usd=float(cost_usd or 0.0),
-                input_tokens=int(input_tokens or 0),
-                output_tokens=int(output_tokens or 0),
-                cache_read_tokens=int(cache_read_tokens or 0),
-                cache_write_tokens=int(cache_write_tokens or 0),
-            )
-        )
-    return points
+
+
+def _stage_breakdown_from_row(row: Sequence[Any]) -> StageBreakdown:
+    return StageBreakdown(
+        stage=row[0],
+        count=int(row[1]),
+        avg_duration_s=_float_or_none(row[2]),
+        total_cost_usd=float(_row_value(row, 3, 0.0) or 0.0),
+        total_input_tokens=int(_row_value(row, 4) or 0),
+        total_output_tokens=int(_row_value(row, 5) or 0),
+        runs=int(_row_value(row, 6) or 0),
+        cache_cost_usd=float(_row_value(row, 7, 0.0) or 0.0),
+        no_cache_cost_usd=float(_row_value(row, 8, 0.0) or 0.0),
+    )
+
+
+def _stage_breakdown_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[StageBreakdown]:
+    where, params = _build_rollup_window_where(filters)
+    clause = _append_where_condition(where, "stage IS NOT NULL")
+    rows = query.select(_stage_breakdown_sql(clause), params)
+    return [_stage_breakdown_from_row(row) for row in rows]
 
 
 def get_stage_breakdown(
@@ -402,107 +465,65 @@ def get_stage_breakdown(
     columns are summed across the stage so the breakdown can plot
     "spend per stage" without a second query.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_rollup_window_where(
-        start=start, end=end, repo=repo,
-        events=events, stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-    clause = (
-        f"{where} AND stage IS NOT NULL"
-        if where
-        else " WHERE stage IS NOT NULL"
-    )
-    # Reads from the daily rollup. `duration_s_sum` / `duration_s_count`
-    # are the prerequisites for `AVG(duration_s)` -- averaging averages
-    # across days does not preserve the row-weighted mean, so the
-    # rollup carries the sum and the non-NULL count separately and
-    # the reader recovers `AVG` as `SUM(sum) / SUM(count)` here.
-    # `NULLIF` keeps the denominator-NULL case (no row in the window
-    # carried a duration) returning NULL rather than raising.
-    #
-    # Each rollup row is split into a cache portion (the share of its
-    # tokens billed as cached / cache-read / cache-write) and a
-    # no-cache portion (the remaining input + output tokens). Cost is
-    # attributed proportionally so the per-stage chart shows what
-    # fraction of spend flowed through the cache vs ran against fresh
-    # tokens -- mirroring `get_review_round_breakdown`'s per-row
-    # proration. Codex `cached_tokens` is a subset of `input_tokens`,
-    # so it stays out of the denominator to avoid double-counting;
-    # Claude `cache_read_tokens` / `cache_write_tokens` are reported
-    # alongside `input_tokens` and so add to the denominator normally.
-    # Proration is per rollup row -- one `(day, repo, issue, event,
-    # stage, backend, cost_source)` bucket -- which is the finest
-    # granularity available without bypassing the rollup.
-    cache_tokens_expr = (
-        "(COALESCE(total_cached_tokens, 0) "
-        "+ COALESCE(total_cache_read_tokens, 0) "
-        "+ COALESCE(total_cache_write_tokens, 0))"
-    )
-    all_tokens_expr = (
-        "(COALESCE(total_input_tokens, 0) "
-        "+ COALESCE(total_output_tokens, 0) "
-        "+ COALESCE(total_cache_read_tokens, 0) "
-        "+ COALESCE(total_cache_write_tokens, 0))"
-    )
-    cache_fraction_expr = (
-        f"CASE WHEN {all_tokens_expr} = 0 THEN 0 "
-        f"ELSE {cache_tokens_expr}::numeric / {all_tokens_expr}::numeric "
-        f"END"
-    )
-    sql = (
-        "SELECT stage, "
-        "COALESCE(SUM(event_count), 0) AS c, "
+    return _stage_breakdown_rows(query, filters)
+
+
+def _backend_efficiency_sql(clause: str) -> str:
+    return (
+        "SELECT "
+        "COALESCE(backend, 'unknown') AS backend_label, "
+        "COALESCE(SUM(event_count), 0) AS runs, "
+        "COALESCE(SUM(failed_count), 0) AS failed_runs, "
         "SUM(duration_s_sum) / NULLIF(SUM(duration_s_count), 0) "
         "  AS avg_dur, "
-        "COALESCE(SUM(total_cost_usd), 0) AS stage_cost_usd, "
-        "COALESCE(SUM(total_input_tokens), 0) AS stage_input_tokens, "
-        "COALESCE(SUM(total_output_tokens), 0) AS stage_output_tokens, "
-        # Agent-run subset of `count`: the rollup carries `event_count`
-        # per `(day, repo, issue, event, stage, backend, cost_source)`
-        # bucket, so summing `event_count` over the agent_exit slice
-        # recovers the per-stage run count without double-counting
-        # rows the way a `COUNT(*)` on the rollup table would.
-        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
-        "                  THEN event_count ELSE 0 END), 0) "
-        "  AS stage_agent_runs, "
-        "COALESCE(SUM(COALESCE(total_cost_usd, 0) "
-        f"* ({cache_fraction_expr})), 0) AS stage_cache_cost_usd, "
-        "COALESCE(SUM(COALESCE(total_cost_usd, 0) "
-        f"* (1 - ({cache_fraction_expr}))), 0) AS stage_no_cache_cost_usd "
+        "COALESCE(SUM(total_cost_usd), 0) AS backend_cost_usd, "
+        "COALESCE(SUM(total_input_tokens), 0) AS backend_input_tokens, "
+        "COALESCE(SUM(total_output_tokens), 0) AS backend_output_tokens, "
+        "COALESCE(SUM(total_cache_read_tokens), 0) "
+        "  AS backend_cache_read_tokens, "
+        "COALESCE(SUM(total_cache_write_tokens), 0) "
+        "  AS backend_cache_write_tokens "
         f"FROM {_DAILY_ROLLUP_VIEW}{clause} "
-        "GROUP BY stage ORDER BY c DESC, stage ASC"
+        "GROUP BY backend_label "
+        "ORDER BY runs DESC, backend_label ASC"
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[StageBreakdown] = []
-    for row in rows:
-        stage = row[0]
-        count = row[1]
-        avg_dur = row[2]
-        cost = row[3] if len(row) > 3 else 0.0
-        in_tok = row[4] if len(row) > 4 else 0
-        out_tok = row[5] if len(row) > 5 else 0
-        runs = row[6] if len(row) > 6 else 0
-        # Older fixtures may still emit rows without the cache split;
-        # default those columns so unrelated tests round-trip.
-        cache_cost = row[7] if len(row) > 7 else 0.0
-        no_cache_cost = row[8] if len(row) > 8 else 0.0
-        out.append(
-            StageBreakdown(
-                stage=stage,
-                count=int(count),
-                avg_duration_s=float(avg_dur) if avg_dur is not None else None,
-                total_cost_usd=float(cost or 0.0),
-                total_input_tokens=int(in_tok or 0),
-                total_output_tokens=int(out_tok or 0),
-                runs=int(runs or 0),
-                cache_cost_usd=float(cache_cost or 0.0),
-                no_cache_cost_usd=float(no_cache_cost or 0.0),
-            )
-        )
-    return out
+
+
+def _backend_efficiency_from_row(
+    row: Sequence[Any],
+) -> BackendEfficiencyRow:
+    return BackendEfficiencyRow(
+        backend=str(row[0]),
+        runs=int(row[1] or 0),
+        failed=int(row[2] or 0),
+        avg_duration_s=_float_or_none(row[3]),
+        total_cost_usd=float(row[4] or 0.0),
+        total_input_tokens=int(row[5] or 0),
+        total_output_tokens=int(row[6] or 0),
+        total_cache_read_tokens=int(_row_value(row, 7) or 0),
+        total_cache_write_tokens=int(_row_value(row, 8) or 0),
+    )
+
+
+def _backend_efficiency_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[BackendEfficiencyRow]:
+    where, params = _build_rollup_window_where(filters.without_events())
+    clause = _append_where_condition(where, "event = 'agent_exit'")
+    rows = query.select(_backend_efficiency_sql(clause), params)
+    return [_backend_efficiency_from_row(row) for row in rows]
 
 
 def get_backend_efficiency(
@@ -532,71 +553,49 @@ def get_backend_efficiency(
     `SUM(duration_s_sum) / SUM(duration_s_count)` so averaging
     averages across days never blurs the row-weighted mean.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
     if _agent_event_excluded(events):
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_rollup_window_where(
-        start=start, end=end, repo=repo,
-        events=None, stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        stages=stages,
+        issue=issue,
     )
-    clause = (
-        f"{where} AND event = 'agent_exit'"
-        if where
-        else " WHERE event = 'agent_exit'"
+    return _backend_efficiency_rows(query, filters)
+
+
+def _repo_breakdown_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[RepoBreakdownRow]:
+    where, params = _build_rollup_window_where(filters)
+    rows = query.select(
+        "SELECT repo, "
+        "COUNT(DISTINCT issue) AS repo_issues, "
+        "COALESCE(SUM(event_count), 0) AS repo_events, "
+        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
+        "                  THEN event_count ELSE 0 END), 0) "
+        "  AS repo_agent_exits, "
+        "COALESCE(SUM(total_cost_usd), 0) AS repo_cost_usd "
+        f"FROM {_DAILY_ROLLUP_VIEW}{where} "
+        "GROUP BY repo "
+        "ORDER BY repo_events DESC, repo ASC",
+        params,
     )
-    sql = (
-        "SELECT "
-        "COALESCE(backend, 'unknown') AS backend_label, "
-        "COALESCE(SUM(event_count), 0) AS runs, "
-        "COALESCE(SUM(failed_count), 0) AS failed_runs, "
-        "SUM(duration_s_sum) / NULLIF(SUM(duration_s_count), 0) "
-        "  AS avg_dur, "
-        "COALESCE(SUM(total_cost_usd), 0) AS backend_cost_usd, "
-        "COALESCE(SUM(total_input_tokens), 0) AS backend_input_tokens, "
-        "COALESCE(SUM(total_output_tokens), 0) AS backend_output_tokens, "
-        "COALESCE(SUM(total_cache_read_tokens), 0) "
-        "  AS backend_cache_read_tokens, "
-        "COALESCE(SUM(total_cache_write_tokens), 0) "
-        "  AS backend_cache_write_tokens "
-        f"FROM {_DAILY_ROLLUP_VIEW}{clause} "
-        "GROUP BY backend_label "
-        "ORDER BY runs DESC, backend_label ASC"
-    )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[BackendEfficiencyRow] = []
-    for row in rows:
-        backend = row[0]
-        runs = row[1]
-        failed = row[2]
-        avg_dur = row[3]
-        cost = row[4]
-        in_tok = row[5]
-        out_tok = row[6]
-        # Older fixtures may still emit 7-tuple rows without the
-        # cache totals; default to zero so the test harness does
-        # not have to know about the new SQL columns in unrelated
-        # cases.
-        cache_read = row[7] if len(row) > 7 else 0
-        cache_write = row[8] if len(row) > 8 else 0
-        out.append(
-            BackendEfficiencyRow(
-                backend=str(backend),
-                runs=int(runs or 0),
-                failed=int(failed or 0),
-                avg_duration_s=(
-                    float(avg_dur) if avg_dur is not None else None
-                ),
-                total_cost_usd=float(cost or 0.0),
-                total_input_tokens=int(in_tok or 0),
-                total_output_tokens=int(out_tok or 0),
-                total_cache_read_tokens=int(cache_read or 0),
-                total_cache_write_tokens=int(cache_write or 0),
-            )
+    return [
+        RepoBreakdownRow(
+            repo=row[0],
+            issues=int(row[1] or 0),
+            events=int(row[2] or 0),
+            agent_exits=int(row[3] or 0),
+            total_cost_usd=float(row[4] or 0.0),
         )
-    return out
+        for row in rows
+    ]
 
 
 def get_repo_breakdown(
@@ -622,37 +621,18 @@ def get_repo_breakdown(
     each rollup row carries one issue, so distinct counting after
     `GROUP BY repo` does not over-count.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
-    connect_fn = connect or _default_connect
-    where, params = _build_rollup_window_where(
-        start=start, end=end, repo=repo,
-        events=events, stages=stages, issue=issue,
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-    sql = (
-        "SELECT repo, "
-        "COUNT(DISTINCT issue) AS repo_issues, "
-        "COALESCE(SUM(event_count), 0) AS repo_events, "
-        "COALESCE(SUM(CASE WHEN event = 'agent_exit' "
-        "                  THEN event_count ELSE 0 END), 0) "
-        "  AS repo_agent_exits, "
-        "COALESCE(SUM(total_cost_usd), 0) AS repo_cost_usd "
-        f"FROM {_DAILY_ROLLUP_VIEW}{where} "
-        "GROUP BY repo "
-        "ORDER BY repo_events DESC, repo ASC"
-    )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    return [
-        RepoBreakdownRow(
-            repo=r,
-            issues=int(iss or 0),
-            events=int(ev or 0),
-            agent_exits=int(ax or 0),
-            total_cost_usd=float(cost or 0.0),
-        )
-        for r, iss, ev, ax, cost in rows
-    ]
+    return _repo_breakdown_rows(query, filters)
 
 
 # Stages a `stage_enter` event must carry to count as a terminal
@@ -661,6 +641,51 @@ def get_repo_breakdown(
 # because the throughput helper is the only consumer; if a future
 # caller needs the same set, promote it to a documented constant.
 _THROUGHPUT_RESOLVED_STAGES: tuple[str, ...] = ("done", "rejected")
+
+
+def _selected_throughput_stages(
+    stages: Optional[Sequence[str]],
+) -> tuple[str, ...]:
+    if stages is None:
+        return _THROUGHPUT_RESOLVED_STAGES
+    return tuple(
+        stage for stage in stages if stage in _THROUGHPUT_RESOLVED_STAGES
+    )
+
+
+def _throughput_from_row(row: Sequence[Any]) -> ThroughputDayRow:
+    return ThroughputDayRow(
+        day=_day_value(row[0]),
+        resolved=int(row[1] or 0),
+        rejected=int(row[2] or 0),
+    )
+
+
+def _throughput_rows(
+    query: _ReadQuery,
+    filters: _WindowFilters,
+) -> list[ThroughputDayRow]:
+    if filters.events is not None and "stage_enter" not in filters.events:
+        return []
+    active_stages = _selected_throughput_stages(filters.stages)
+    if not active_stages:
+        return []
+    scoped_filters = replace(filters, events=None, stages=active_stages)
+    where, params = _build_rollup_window_where(scoped_filters)
+    where = _prepend_where_condition(where, "event = %s")
+    params.insert(0, "stage_enter")
+    rows = query.select(
+        "SELECT day, "
+        "COALESCE(SUM(CASE WHEN stage = 'done' "
+        "                  THEN event_count ELSE 0 END), 0) AS resolved, "
+        "COALESCE(SUM(CASE WHEN stage = 'rejected' "
+        "                  THEN event_count ELSE 0 END), 0) AS rejected "
+        f"FROM {_DAILY_ROLLUP_VIEW}{where} "
+        "GROUP BY day "
+        "ORDER BY day ASC",
+        params,
+    )
+    return [_throughput_from_row(row) for row in rows]
 
 
 def get_throughput_breakdown(
@@ -694,66 +719,15 @@ def get_throughput_breakdown(
     - `start` / `end` / `repo` / `issue` apply as in every other
       reader.
     """
-    url = _resolve_db_url(db_url)
-    if conn is None and not url:
+    query = _ReadQuery.resolve(db_url, connect, conn)
+    if not query.available:
         return []
-    if events is not None and "stage_enter" not in events:
-        return []
-    # Intersect the user's stage selection with the resolved /
-    # rejected pair this widget is by definition about.
-    if stages is None:
-        active_stages = list(_THROUGHPUT_RESOLVED_STAGES)
-    elif not stages:
-        return []
-    else:
-        active_stages = [s for s in stages if s in _THROUGHPUT_RESOLVED_STAGES]
-        if not active_stages:
-            return []
-    connect_fn = connect or _default_connect
-    conditions = ["event = %s"]
-    params: list[Any] = ["stage_enter"]
-    if start is not None:
-        conditions.append("day >= %s")
-        params.append(start.date() if isinstance(start, datetime) else start)
-    if end is not None:
-        conditions.append("day < %s")
-        params.append(end.date() if isinstance(end, datetime) else end)
-    if repo is not None:
-        conditions.append("repo = %s")
-        params.append(repo)
-    if issue is not None:
-        conditions.append("issue = %s")
-        params.append(int(issue))
-    placeholders = ", ".join(["%s"] * len(active_stages))
-    conditions.append(f"stage IN ({placeholders})")
-    params.extend(active_stages)
-    where = " WHERE " + " AND ".join(conditions)
-    # Reads from the daily rollup: `event_count` already collapses
-    # multiple `stage_enter` rows for the same `(day, repo, issue,
-    # stage, backend, cost_source)` bucket into one row, so summing
-    # `event_count` per day per terminal stage recovers the prior
-    # per-day `COUNT(*)` without re-scanning `analytics_events`.
-    sql = (
-        "SELECT day, "
-        "COALESCE(SUM(CASE WHEN stage = 'done' "
-        "                  THEN event_count ELSE 0 END), 0) AS resolved, "
-        "COALESCE(SUM(CASE WHEN stage = 'rejected' "
-        "                  THEN event_count ELSE 0 END), 0) AS rejected "
-        f"FROM {_DAILY_ROLLUP_VIEW}{where} "
-        "GROUP BY day "
-        "ORDER BY day ASC"
+    filters = _WindowFilters(
+        start=start,
+        end=end,
+        repo=repo,
+        events=events,
+        stages=stages,
+        issue=issue,
     )
-    rows = _query(connect_fn, url, sql, params, conn=conn)
-    out: list[ThroughputDayRow] = []
-    for row in rows:
-        day_value, resolved, rejected = row
-        if isinstance(day_value, datetime):
-            day_value = day_value.date()
-        out.append(
-            ThroughputDayRow(
-                day=day_value,
-                resolved=int(resolved or 0),
-                rejected=int(rejected or 0),
-            )
-        )
-    return out
+    return _throughput_rows(query, filters)

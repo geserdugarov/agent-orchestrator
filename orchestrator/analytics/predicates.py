@@ -15,18 +15,100 @@ built.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Optional, Sequence
 
 
-def _build_window_where(
+@dataclass(frozen=True)
+class _WindowFilters:
+    """The common window and selection filters accepted by readers."""
+
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    repo: Optional[str] = None
+    events: Optional[Sequence[str]] = None
+    stages: Optional[Sequence[str]] = None
+    issue: Optional[int] = None
+
+    def without_events(self) -> _WindowFilters:
+        """Return filters suitable for a view with no `event` column."""
+        return replace(self, events=None)
+
+    def catalog_scope(self) -> _WindowFilters:
+        """Return the date/repo subset valid for repo-level catalog rows."""
+        return replace(self, events=None, stages=None, issue=None)
+
+
+@dataclass
+class _WhereBuilder:
+    """Accumulate one parameterized SQL predicate and its values."""
+
+    conditions: list[str] = field(default_factory=list)
+    params: list[Any] = field(default_factory=list)
+
+    def add_scalar(
+        self,
+        column: str,
+        value: Any,
+        *,
+        operator: str = "=",
+    ) -> None:
+        if value is None:
+            return
+        self.conditions.append(f"{column} {operator} %s")
+        self.params.append(value)
+
+    def add_selection(
+        self,
+        column: str,
+        values: Optional[Sequence[str]],
+    ) -> None:
+        if values is None:
+            return
+        if not values:
+            self.conditions.append("FALSE")
+            return
+        placeholders = ", ".join(["%s"] * len(values))
+        self.conditions.append(f"{column} IN ({placeholders})")
+        self.params.extend(values)
+
+    def render(self) -> tuple[str, list[Any]]:
+        if not self.conditions:
+            return "", self.params
+        return " WHERE " + " AND ".join(self.conditions), self.params
+
+
+def _day_bound(value: Optional[datetime]) -> Any:
+    if isinstance(value, datetime):
+        return value.date()
+    return value
+
+
+def _build_where(
+    filters: _WindowFilters,
     *,
-    start: Optional[datetime],
-    end: Optional[datetime],
-    repo: Optional[str],
-    events: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
+    time_column: str,
+    day_bounds: bool,
+) -> tuple[str, list[Any]]:
+    """Build a base-table or daily-rollup predicate from common filters."""
+    builder = _WhereBuilder()
+    start = _day_bound(filters.start) if day_bounds else filters.start
+    end = _day_bound(filters.end) if day_bounds else filters.end
+    builder.add_scalar(time_column, start, operator=">=")
+    builder.add_scalar(time_column, end, operator="<")
+    builder.add_scalar("repo", filters.repo)
+    builder.add_scalar(
+        "issue",
+        int(filters.issue) if filters.issue is not None else None,
+    )
+    builder.add_selection("event", filters.events)
+    builder.add_selection("stage", filters.stages)
+    return builder.render()
+
+
+def _build_window_where(
+    filters: _WindowFilters,
 ) -> tuple[str, list[Any]]:
     """Compose the shared `WHERE` clause for window-scoped queries.
 
@@ -56,37 +138,21 @@ def _build_window_where(
     to apply this filter when ``repo`` is not also set; the helper
     itself does not enforce that -- it just emits the predicate.
     """
-    conditions: list[str] = []
-    params: list[Any] = []
-    if start is not None:
-        conditions.append("ts >= %s")
-        params.append(start)
-    if end is not None:
-        conditions.append("ts < %s")
-        params.append(end)
-    if repo is not None:
-        conditions.append("repo = %s")
-        params.append(repo)
-    if issue is not None:
-        conditions.append("issue = %s")
-        params.append(int(issue))
-    if events is not None:
-        if not events:
-            conditions.append("FALSE")
-        else:
-            placeholders = ", ".join(["%s"] * len(events))
-            conditions.append(f"event IN ({placeholders})")
-            params.extend(events)
-    if stages is not None:
-        if not stages:
-            conditions.append("FALSE")
-        else:
-            placeholders = ", ".join(["%s"] * len(stages))
-            conditions.append(f"stage IN ({placeholders})")
-            params.extend(stages)
-    if not conditions:
-        return "", params
-    return " WHERE " + " AND ".join(conditions), params
+    return _build_where(filters, time_column="ts", day_bounds=False)
+
+
+def _append_where_condition(where: str, condition: str) -> str:
+    """Add a required condition after an optional generated predicate."""
+    if where:
+        return f"{where} AND {condition}"
+    return f" WHERE {condition}"
+
+
+def _prepend_where_condition(where: str, condition: str) -> str:
+    """Add a required condition before an optional generated predicate."""
+    if where:
+        return f" WHERE {condition} AND {where.removeprefix(' WHERE ')}"
+    return f" WHERE {condition}"
 
 
 def _agent_event_excluded(events: Optional[Sequence[str]]) -> bool:
@@ -113,12 +179,7 @@ def _agent_event_excluded(events: Optional[Sequence[str]]) -> bool:
 
 
 def _build_view_window_where(
-    *,
-    start: Optional[datetime],
-    end: Optional[datetime],
-    repo: Optional[str],
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
+    filters: _WindowFilters,
 ) -> tuple[str, list[Any]]:
     """`_build_window_where` minus the ``events`` clause.
 
@@ -126,23 +187,14 @@ def _build_view_window_where(
     already short-circuited on `_agent_event_excluded(events)` so
     the event-filter contract is honored before the SQL is built.
     """
-    return _build_window_where(
-        start=start, end=end, repo=repo,
-        events=None, stages=stages, issue=issue,
-    )
+    return _build_window_where(filters.without_events())
 
 
 _DAILY_ROLLUP_VIEW = "analytics_daily_rollup"
 
 
 def _build_rollup_window_where(
-    *,
-    start: Optional[datetime],
-    end: Optional[datetime],
-    repo: Optional[str],
-    events: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
+    filters: _WindowFilters,
 ) -> tuple[str, list[Any]]:
     """`_build_window_where` translated to the rollup's `day` column.
 
@@ -162,34 +214,4 @@ def _build_rollup_window_where(
     ``IN (...)``, and an empty sequence emits a tautologically-false
     predicate so the cleared-multiselect signal still drops to zero.
     """
-    conditions: list[str] = []
-    params: list[Any] = []
-    if start is not None:
-        conditions.append("day >= %s")
-        params.append(start.date() if isinstance(start, datetime) else start)
-    if end is not None:
-        conditions.append("day < %s")
-        params.append(end.date() if isinstance(end, datetime) else end)
-    if repo is not None:
-        conditions.append("repo = %s")
-        params.append(repo)
-    if issue is not None:
-        conditions.append("issue = %s")
-        params.append(int(issue))
-    if events is not None:
-        if not events:
-            conditions.append("FALSE")
-        else:
-            placeholders = ", ".join(["%s"] * len(events))
-            conditions.append(f"event IN ({placeholders})")
-            params.extend(events)
-    if stages is not None:
-        if not stages:
-            conditions.append("FALSE")
-        else:
-            placeholders = ", ".join(["%s"] * len(stages))
-            conditions.append(f"stage IN ({placeholders})")
-            params.extend(stages)
-    if not conditions:
-        return "", params
-    return " WHERE " + " AND ".join(conditions), params
+    return _build_where(filters, time_column="day", day_bounds=True)

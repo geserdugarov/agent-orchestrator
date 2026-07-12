@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Single-SELECT query execution for the analytics read path.
 
-`_query` runs one read-only SELECT and returns every row as a tuple,
+`_ReadQuery` resolves the configured URL and injected connection path for a
+reader. `_query` runs one read-only SELECT and returns every row as a tuple,
 either reusing a caller-owned `conn=` (typically an
 `analytics_connection` scope) or opening and closing a fresh
 connection via the injected `connect_fn`. Driver-level failures are
@@ -11,9 +12,56 @@ catch regardless of which step failed.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Optional, Sequence
 
-from orchestrator.analytics.connection import AnalyticsReadError, _close_quietly
+from orchestrator.analytics.connection import (
+    AnalyticsReadError,
+    _close_quietly,
+    _default_connect,
+)
+from orchestrator.analytics.db_url import _resolve_db_url
+
+
+@dataclass(frozen=True)
+class _ReadQuery:
+    """Resolved connection inputs shared by one public read operation."""
+
+    db_url: Optional[str]
+    connect_fn: Callable[[str], Any]
+    conn: Any
+
+    @classmethod
+    def resolve(
+        cls,
+        db_url: Optional[str],
+        connect: Optional[Callable[[str], Any]],
+        conn: Any,
+    ) -> _ReadQuery:
+        return cls(
+            db_url=_resolve_db_url(db_url),
+            connect_fn=connect or _default_connect,
+            conn=conn,
+        )
+
+    @property
+    def available(self) -> bool:
+        """Whether a supplied connection or configured URL can serve reads."""
+        return self.conn is not None or bool(self.db_url)
+
+    def select(
+        self,
+        sql: str,
+        params: Sequence[Any] = (),
+    ) -> list[tuple]:
+        """Execute one SELECT through the resolved connection path."""
+        return _query(
+            self.connect_fn,
+            self.db_url,
+            sql,
+            params,
+            conn=self.conn,
+        )
 
 
 def _execute_select(
