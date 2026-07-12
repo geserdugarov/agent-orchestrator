@@ -40,7 +40,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
-| 2 | Extreme production complexity hotspots | 6/8 | [ ] |
+| 2 | Extreme production complexity hotspots | 7/8 | [ ] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
@@ -205,9 +205,9 @@ normally be implemented in its own PR or commit.
 
 ### Package 2.7 — Question-stage handler
 
-- [ ] Refactor [`_handle_question()`](../orchestrator/stages/question.py), initial score 41.
-- [ ] Extract precondition checks, session selection, prompt execution, and outcome routing.
-- [ ] Preserve labels, pinned-state fields, comments, retries, and resume behavior.
+- [x] Refactor [`_handle_question()`](../orchestrator/stages/question.py), initial score 41.
+- [x] Extract precondition checks, session selection, prompt execution, and outcome routing.
+- [x] Preserve labels, pinned-state fields, comments, retries, and resume behavior.
 
 ### Package 2.8 — Combined check state
 
@@ -465,3 +465,4 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 2.4 | Complete | 90 focused; WPS/Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.5 |
 | 2026-07-11 | 2.5 | Complete | WPS210/WPS231, 112 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.6 |
 | 2026-07-11 | 2.6 | Complete | Target WPS, 113 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.7 |
+| 2026-07-12 | 2.7 | Complete | Target WPS, 90 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.8 |
