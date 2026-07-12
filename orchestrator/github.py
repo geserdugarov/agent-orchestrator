@@ -220,6 +220,62 @@ class PinnedState:
         self.data[key] = state_value
 
 
+@dataclass(frozen=True)
+class _CheckSurfaceRead:
+    """Normalized state and read outcome for one GitHub checks surface."""
+
+    state: Optional[str] = None
+    read_failed: bool = False
+
+
+_FAILED_CHECK_RUN_CONCLUSIONS = frozenset(
+    {"failure", "timed_out", "action_required", "cancelled"}
+)
+_SUCCESSFUL_CHECK_RUN_CONCLUSIONS = frozenset(
+    {"success", "neutral", "skipped"}
+)
+
+
+def _normalize_combined_status(combined_status: Any) -> Optional[str]:
+    """Convert a legacy combined status into the shared check-state model."""
+    status = combined_status.state
+    if not status or (status == "pending" and not combined_status.total_count):
+        return None
+    return "failure" if status == "error" else status
+
+
+def _normalize_check_runs(check_runs: Iterable[Any]) -> Optional[str]:
+    """Convert check-run conclusions into the shared check-state model."""
+    conclusions = {check_run.conclusion for check_run in check_runs}
+    if not conclusions:
+        return None
+    if None in conclusions:
+        return "pending"
+    if conclusions & _FAILED_CHECK_RUN_CONCLUSIONS:
+        return "failure"
+    if conclusions <= _SUCCESSFUL_CHECK_RUN_CONCLUSIONS:
+        return "success"
+    return "failure"
+
+
+def _fold_check_states(
+    states: Iterable[Optional[str]],
+    *,
+    read_failed: bool,
+) -> str:
+    """Fold normalized surfaces using failure-before-pending priority."""
+    observed_states = [state for state in states if state]
+    if observed_states and read_failed:
+        observed_states.append("pending")
+    if not observed_states:
+        return "none"
+    if "failure" in observed_states:
+        return "failure"
+    if "pending" in observed_states:
+        return "pending"
+    return "success"
+
+
 class GitHubClient:
     def __init__(
         self,
@@ -723,44 +779,32 @@ class GitHubClient:
         as green over the unread failing checks.
         """
         head_sha = pr.head.sha
-        states: list[str] = []
-        read_failed = False
+        combined_surface = self._read_combined_status(head_sha)
+        check_run_surface = self._read_check_runs(head_sha)
+        return _fold_check_states(
+            (combined_surface.state, check_run_surface.state),
+            read_failed=(
+                combined_surface.read_failed or check_run_surface.read_failed
+            ),
+        )
 
+    def _read_combined_status(self, head_sha: str) -> _CheckSurfaceRead:
+        """Read and normalize the legacy commit-status surface."""
         try:
             combined = self.repo.get_commit(head_sha).get_combined_status()
-            cs = combined.state
-            if cs and cs != "":
-                # 'success' / 'pending' / 'failure'/'error', plus 'pending'
-                # when there are statuses but none have completed yet.
-                if combined.total_count or cs != "pending":
-                    states.append("failure" if cs == "error" else cs)
         except GithubException as error:
             log.warning(
                 "could not read combined status for %s (HTTP %s); ignoring",
                 head_sha, error.status,
             )
-            read_failed = True
+            return _CheckSurfaceRead(read_failed=True)
+        return _CheckSurfaceRead(state=_normalize_combined_status(combined))
 
+    def _read_check_runs(self, head_sha: str) -> _CheckSurfaceRead:
+        """Read and normalize the check-runs surface."""
         try:
-            check_runs = list(self.repo.get_commit(head_sha).get_check_runs())
-            if check_runs:
-                conclusions = [cr.conclusion for cr in check_runs]
-                if any(conclusion is None for conclusion in conclusions):
-                    states.append("pending")
-                elif any(
-                    conclusion
-                    in ("failure", "timed_out", "action_required", "cancelled")
-                    for conclusion in conclusions
-                ):
-                    states.append("failure")
-                elif all(
-                    conclusion in ("success", "neutral", "skipped")
-                    for conclusion in conclusions
-                ):
-                    states.append("success")
-                else:
-                    # Unknown conclusion shape -- fail safe.
-                    states.append("failure")
+            check_runs = self.repo.get_commit(head_sha).get_check_runs()
+            return _CheckSurfaceRead(state=_normalize_check_runs(check_runs))
         except GithubException as error:
             # 403 here almost always means the fine-grained PAT is missing
             # 'Checks: read'. For Actions-only PRs (no commit statuses,
@@ -782,24 +826,7 @@ class GitHubClient:
                     "could not read check-runs for %s (HTTP %s); ignoring",
                     head_sha, error.status,
                 )
-            read_failed = True
-
-        # Partial read: at least one surface returned a usable signal but
-        # the other surface raised. Treat the unread side as 'pending' so
-        # an unread failing/pending check on that side cannot be masked by
-        # the readable side's 'success'. When BOTH surfaces failed the
-        # branch is skipped and we return 'none' below, which the caller
-        # treats as ambiguous instead of trusting the head as green.
-        if states and read_failed:
-            states.append("pending")
-
-        if not states:
-            return "none"
-        if "failure" in states:
-            return "failure"
-        if "pending" in states:
-            return "pending"
-        return "success"
+            return _CheckSurfaceRead(read_failed=True)
 
     @staticmethod
     def _latest_review_states_for_head(

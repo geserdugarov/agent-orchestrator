@@ -5,6 +5,7 @@ surfaces (check-runs 403 scope hint, partial-read downgrade)."""
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 
 class GitHubClientClosedIssueSweepLabelTest(unittest.TestCase):
@@ -180,6 +181,73 @@ class CheckRunsForbiddenSurfacesScopeHintTest(unittest.TestCase):
         # No ERROR for non-403 failures.
         error_records = [record for record in logs.records if record.levelname == "ERROR"]
         self.assertEqual(error_records, [])
+
+
+class CombinedCheckStateNormalizationTest(unittest.TestCase):
+    def test_normalizes_combined_statuses(self) -> None:
+        from orchestrator.github import _normalize_combined_status
+
+        cases = (
+            ("", 0, None),
+            ("pending", 0, None),
+            ("pending", 1, "pending"),
+            ("error", 1, "failure"),
+            ("failure", 1, "failure"),
+            ("success", 1, "success"),
+        )
+
+        for status, total_count, expected in cases:
+            with self.subTest(status=status, total_count=total_count):
+                combined_status = SimpleNamespace(
+                    state=status,
+                    total_count=total_count,
+                )
+                self.assertEqual(
+                    _normalize_combined_status(combined_status),
+                    expected,
+                )
+
+    def test_normalizes_check_run_conclusions(self) -> None:
+        from orchestrator.github import _normalize_check_runs
+
+        cases = (
+            ((), None),
+            ((None, "failure"), "pending"),
+            (("failure",), "failure"),
+            (("timed_out",), "failure"),
+            (("action_required",), "failure"),
+            (("cancelled",), "failure"),
+            (("success", "neutral", "skipped"), "success"),
+            (("unknown",), "failure"),
+        )
+
+        for conclusions, expected in cases:
+            with self.subTest(conclusions=conclusions):
+                check_runs = [
+                    SimpleNamespace(conclusion=conclusion)
+                    for conclusion in conclusions
+                ]
+                self.assertEqual(_normalize_check_runs(check_runs), expected)
+
+    def test_folds_surface_states_by_priority(self) -> None:
+        from orchestrator.github import _fold_check_states
+
+        cases = (
+            ((), False, "none"),
+            ((None, None), True, "none"),
+            (("success", None), True, "pending"),
+            (("success", "pending"), False, "pending"),
+            (("failure", "pending"), False, "failure"),
+            (("success", "success"), False, "success"),
+            (("unknown",), False, "success"),
+        )
+
+        for states, read_failed, expected in cases:
+            with self.subTest(states=states, read_failed=read_failed):
+                self.assertEqual(
+                    _fold_check_states(states, read_failed=read_failed),
+                    expected,
+                )
 
 
 class PartialCheckReadFailsClosedTest(unittest.TestCase):
