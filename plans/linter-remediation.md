@@ -40,7 +40,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | Stage | Goal | Packages complete | Status |
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
-| 2 | Extreme production complexity hotspots | 7/8 | [ ] |
+| 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 0/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
@@ -211,9 +211,9 @@ normally be implemented in its own PR or commit.
 
 ### Package 2.8 — Combined check state
 
-- [ ] Refactor [`pr_combined_check_state()`](../orchestrator/github.py), initial score 40.
-- [ ] Extract check normalization and status-priority folding.
-- [ ] Preserve GitHub status/check-run precedence and missing-data behavior.
+- [x] Refactor [`pr_combined_check_state()`](../orchestrator/github.py), initial score 40.
+- [x] Extract check normalization and status-priority folding.
+- [x] Preserve GitHub status/check-run precedence and missing-data behavior.
 
 Before Packages 2.2, 2.6, or 2.7, read [`docs/workflow.md`](../docs/workflow.md) and
 [`docs/state-machine.md`](../docs/state-machine.md). Keep the `workflow.py` compatibility facade and late-bound
@@ -466,3 +466,6 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-11 | 2.5 | Complete | WPS210/WPS231, 112 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.6 |
 | 2026-07-11 | 2.6 | Complete | Target WPS, 113 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.7 |
 | 2026-07-12 | 2.7 | Complete | Target WPS, 90 focused; Ruff/diff; 2096 passed, 3 skipped | Not committed | 2.8 |
+| 2026-07-12 | 2.8 | Complete | WPS210/WPS231, 10 focused; Ruff/diff; 2099 passed, 3 skipped | None | Package 3.1 |
+
+Package 2.8 ran `tests/` because root collection was blocked by the unreadable ignored database volume.
