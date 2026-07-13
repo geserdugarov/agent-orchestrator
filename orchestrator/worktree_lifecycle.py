@@ -75,6 +75,13 @@ def _sanitize_slug(slug: str) -> str:
     return cleaned
 
 
+def _slug_digest(slug: str) -> str:
+    """Return the short content digest used for lossy ref rewrites."""
+    encoded_slug = (slug or "").encode("utf-8")
+    slug_hash = hashlib.sha1(encoded_slug)
+    return slug_hash.hexdigest()[:16]
+
+
 def _sanitize_branch_segment(slug: str) -> str:
     """Make a slug safe for use as a single git branch-name segment.
 
@@ -148,7 +155,7 @@ def _sanitize_branch_segment(slug: str) -> str:
     # without this, two `REPOS` entries sharing a `target_root`
     # would collide on the same branch and the slug-namespacing
     # fix would silently regress for those slug shapes.
-    digest = hashlib.sha1((slug or "").encode("utf-8")).hexdigest()[:16]
+    digest = _slug_digest(slug)
     return f"{sanitized_segment}__h{digest}"
 
 
@@ -516,39 +523,110 @@ def _branch_has_unpushed_commits(
     `RLock` re-entry keeps callers that already hold the lock
     safe.
     """
-    namespaced = _branch_name(spec, issue_number)
-    legacy = f"orchestrator/issue-{issue_number}"
-    # Probe the namespaced form first so a worktree created after
-    # slug-namespacing is named in the operator message before any
-    # surviving legacy ref. Dedup so a deployment whose sanitized
-    # slug somehow produced the legacy form does not double-probe.
-    candidates: list[str] = [namespaced]
-    if legacy != namespaced:
-        candidates.append(legacy)
+    candidates = _candidate_issue_branches(spec, issue_number)
     base_ref = f"refs/remotes/{spec.remote_name}/{spec.base_branch}"
     with _target_root_lock(spec.target_root):
         for branch in candidates:
-            have_local = _git(
-                "rev-parse", "--verify", "--quiet",
-                f"refs/heads/{branch}",
-                cwd=spec.target_root,
-            ).returncode == 0
-            if not have_local:
-                continue
-            commit_count_result = _git(
-                "rev-list", "--count",
-                f"{base_ref}..refs/heads/{branch}",
-                cwd=spec.target_root,
-            )
-            if commit_count_result.returncode != 0:
-                continue
-            try:
-                count = int((commit_count_result.stdout or "0").strip() or "0")
-            except ValueError:
-                continue
+            count = _branch_commit_count(spec, branch, base_ref)
             if count > 0:
                 return branch
     return None
+
+
+def _candidate_issue_branches(
+    spec: RepoSpec, issue_number: int,
+) -> tuple[str, ...]:
+    """Return namespaced then legacy branch candidates without duplicates."""
+    namespaced = _branch_name(spec, issue_number)
+    legacy = f"orchestrator/issue-{issue_number}"
+    if legacy == namespaced:
+        return (namespaced,)
+    return namespaced, legacy
+
+
+def _branch_commit_count(
+    spec: RepoSpec, branch: str, base_ref: str,
+) -> int:
+    """Return commits unique to a local branch, or zero on probe failure."""
+    local_ref = f"refs/heads/{branch}"
+    have_local = _git(
+        "rev-parse", "--verify", "--quiet", local_ref,
+        cwd=spec.target_root,
+    ).returncode == 0
+    if not have_local:
+        return 0
+    commit_count_result = _git(
+        "rev-list", "--count", f"{base_ref}..{local_ref}",
+        cwd=spec.target_root,
+    )
+    if commit_count_result.returncode != 0:
+        return 0
+    try:
+        return int((commit_count_result.stdout or "0").strip() or "0")
+    except ValueError:
+        return 0
+
+
+def _remove_issue_worktree(
+    spec: RepoSpec, issue_number: int, *, log_prefix: str = "",
+) -> None:
+    """Best-effort removal of one issue worktree under the parent lock."""
+    try:
+        worktree = _worktree_path(spec, issue_number)
+        if not worktree.exists():
+            return
+        with _target_root_lock(spec.target_root):
+            remove_result = _git(
+                "worktree", "remove", "--force", str(worktree),
+                cwd=spec.target_root,
+            )
+        if remove_result.returncode != 0:
+            log.warning(
+                "issue=#%d %sworktree remove failed: %s",
+                issue_number,
+                log_prefix,
+                (remove_result.stderr or "").strip(),
+            )
+    except Exception:
+        log.exception(
+            "issue=#%d %sworktree remove raised", issue_number, log_prefix,
+        )
+
+
+def _delete_local_issue_branch(
+    spec: RepoSpec,
+    issue_number: int,
+    branch: str,
+    *,
+    log_prefix: str = "",
+) -> None:
+    """Best-effort deletion of one local issue branch under the parent lock."""
+    try:
+        with _target_root_lock(spec.target_root):
+            have_local = _git(
+                "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
+                cwd=spec.target_root,
+            ).returncode == 0
+            if not have_local:
+                return
+            delete_result = _git(
+                "branch", "-D", branch, cwd=spec.target_root,
+            )
+        if delete_result.returncode != 0:
+            log.warning(
+                "issue=#%d %slocal branch %r delete failed: %s",
+                issue_number,
+                log_prefix,
+                branch,
+                (delete_result.stderr or "").strip(),
+            )
+    except Exception:
+        log.exception(
+            "issue=#%d %slocal branch %r delete raised",
+            issue_number,
+            log_prefix,
+            branch,
+        )
 
 
 def _cleanup_question_worktree(
@@ -590,46 +668,10 @@ def _cleanup_question_worktree(
     """
     if branch is None:
         branch = _branch_name(spec, issue_number)
-    try:
-        wt = _worktree_path(spec, issue_number)
-        if wt.exists():
-            with _target_root_lock(spec.target_root):
-                remove_result = _git(
-                    "worktree", "remove", "--force", str(wt),
-                    cwd=spec.target_root,
-                )
-            if remove_result.returncode != 0:
-                log.warning(
-                    "issue=#%d question worktree remove failed: %s",
-                    issue_number, (remove_result.stderr or "").strip(),
-                )
-    except Exception:
-        log.exception(
-            "issue=#%d question worktree remove raised", issue_number,
-        )
-
-    try:
-        with _target_root_lock(spec.target_root):
-            have_local = _git(
-                "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
-                cwd=spec.target_root,
-            ).returncode == 0
-            if have_local:
-                delete_result = _git(
-                    "branch", "-D", branch, cwd=spec.target_root,
-                )
-                if delete_result.returncode != 0:
-                    log.warning(
-                        "issue=#%d question local branch %r delete failed: %s",
-                        issue_number,
-                        branch,
-                        (delete_result.stderr or "").strip(),
-                    )
-    except Exception:
-        log.exception(
-            "issue=#%d question local branch %r delete raised",
-            issue_number, branch,
-        )
+    _remove_issue_worktree(spec, issue_number, log_prefix="question ")
+    _delete_local_issue_branch(
+        spec, issue_number, branch, log_prefix="question ",
+    )
 
 
 def _cleanup_terminal_branch(
@@ -676,50 +718,10 @@ def _cleanup_terminal_branch(
     if branch is None:
         branch = _branch_name(spec, issue_number)
 
-    # Each step is wrapped individually: a raise from `_git` (missing
-    # `spec.target_root`, missing `git` binary, OSError) or from the
-    # `Path.exists()` probe must not skip the later steps, since the
-    # caller has already written the terminal pinned state and expects
-    # cleanup to never propagate.
-    try:
-        wt = _worktree_path(spec, issue_number)
-        if wt.exists():
-            with _target_root_lock(spec.target_root):
-                remove_result = _git(
-                    "worktree", "remove", "--force", str(wt),
-                    cwd=spec.target_root,
-                )
-            if remove_result.returncode != 0:
-                log.warning(
-                    "issue=#%d worktree remove failed: %s",
-                    issue_number, (remove_result.stderr or "").strip(),
-                )
-    except Exception:
-        log.exception(
-            "issue=#%d worktree remove raised", issue_number,
-        )
-
-    try:
-        with _target_root_lock(spec.target_root):
-            have_local = _git(
-                "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
-                cwd=spec.target_root,
-            ).returncode == 0
-            if have_local:
-                delete_result = _git(
-                    "branch", "-D", branch, cwd=spec.target_root,
-                )
-                if delete_result.returncode != 0:
-                    log.warning(
-                        "issue=#%d local branch %r delete failed: %s",
-                        issue_number,
-                        branch,
-                        (delete_result.stderr or "").strip(),
-                    )
-    except Exception:
-        log.exception(
-            "issue=#%d local branch %r delete raised", issue_number, branch,
-        )
+    # Each helper contains its own exception boundary so a local failure
+    # cannot skip the next cleanup surface.
+    _remove_issue_worktree(spec, issue_number)
+    _delete_local_issue_branch(spec, issue_number, branch)
 
     try:
         gh.delete_remote_branch(branch)

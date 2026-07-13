@@ -124,23 +124,63 @@ def _merge_base_into_worktree(
     return _rebase_base_into_worktree(spec, worktree)
 
 
+def _rebase_state_exists(worktree: Path, state_dir: str) -> bool:
+    """Resolve one git rebase-state path and report whether it exists."""
+    git_path_result = _git_hardened(
+        "rev-parse", "--git-path", state_dir, cwd=worktree,
+    )
+    if git_path_result.returncode != 0:
+        return False
+    path = (git_path_result.stdout or "").strip()
+    if not path:
+        return False
+    state_path = Path(path)
+    if not state_path.is_absolute():
+        state_path = worktree / state_path
+    return state_path.exists()
+
+
 def _rebase_in_progress(worktree: Path) -> bool:
     """Return True when the worktree still has an unfinished rebase."""
-    for state_dir in ("rebase-merge", "rebase-apply"):
-        git_path_result = _git_hardened(
-            "rev-parse", "--git-path", state_dir, cwd=worktree,
+    return any(
+        _rebase_state_exists(worktree, state_dir)
+        for state_dir in ("rebase-merge", "rebase-apply")
+    )
+
+
+def _issue_worktree_number(worktree: Path) -> Optional[int]:
+    """Return an issue number only for a valid issue worktree directory."""
+    if not worktree.is_dir() or not worktree.name.startswith("issue-"):
+        return None
+    try:
+        return int(worktree.name[len("issue-"):])
+    except ValueError:
+        return None
+
+
+def _sync_discovered_worktree(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    worktree: Path,
+    issue_number: int,
+    scheduler: Optional[IssueScheduler],
+) -> None:
+    """Sync one discovered worktree unless its handler is still active."""
+    if scheduler is not None and scheduler.is_active(
+        spec.slug, issue_number,
+    ):
+        log.debug(
+            "repo=%s issue=#%d active in scheduler; skipping base "
+            "sync until the worker completes", spec.slug, issue_number,
         )
-        if git_path_result.returncode != 0:
-            continue
-        path = (git_path_result.stdout or "").strip()
-        if not path:
-            continue
-        state_path = Path(path)
-        if not state_path.is_absolute():
-            state_path = worktree / state_path
-        if state_path.exists():
-            return True
-    return False
+        return
+    try:
+        _sync_worktree_with_base(gh, spec, worktree, issue_number)
+    except Exception:
+        log.exception(
+            "repo=%s issue=#%d base sync failed; continuing",
+            spec.slug, issue_number,
+        )
 
 
 def _refresh_base_and_worktrees(
@@ -223,33 +263,11 @@ def _refresh_base_and_worktrees(
     if not root.exists():
         return
 
-    for wt in sorted(root.iterdir()):
-        if not wt.is_dir() or not wt.name.startswith("issue-"):
-            continue
-        try:
-            issue_number = int(wt.name[len("issue-"):])
-        except ValueError:
-            continue
-        if scheduler is not None and scheduler.is_active(
-            spec.slug, issue_number,
-        ):
-            # The handler for this issue is still running on a
-            # scheduler worker thread. Rebasing the pre-PR worktree
-            # would race the agent's working copy; the PR-having
-            # detour would relabel / write pinned state while the
-            # handler is mid-write. Skip the sync this tick -- the
-            # next polling pass picks it up once the worker exits.
-            log.debug(
-                "repo=%s issue=#%d active in scheduler; skipping base "
-                "sync until the worker completes", spec.slug, issue_number,
-            )
-            continue
-        try:
-            _sync_worktree_with_base(gh, spec, wt, issue_number)
-        except Exception:
-            log.exception(
-                "repo=%s issue=#%d base sync failed; continuing",
-                spec.slug, issue_number,
+    for worktree in sorted(root.iterdir()):
+        issue_number = _issue_worktree_number(worktree)
+        if issue_number is not None:
+            _sync_discovered_worktree(
+                gh, spec, worktree, issue_number, scheduler,
             )
 
 
@@ -313,6 +331,33 @@ class _AutoRebaseContext:
 
 
 @dataclass(frozen=True)
+class _AutoRebaseRecoveryContext:
+    """Stable inputs for finalizing one interrupted auto-rebase."""
+
+    gh: GitHubClient
+    spec: RepoSpec
+    issue: Issue
+    state: PinnedState
+    worktree: Path
+    pr_number: int
+    label: str
+    pending_pre_rebase_sha: str
+    behind: int = 0
+    unparking_consumed_max: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class _AutoRebaseRecoverySnapshot:
+    """Local and remote branch state observed during crash recovery."""
+
+    branch: str
+    local_head: str
+    remote_head: str = ""
+    ahead: int = 0
+    behind: int = 0
+
+
+@dataclass(frozen=True)
 class _AutoRebaseDecision:
     """Whether the coordinator should continue its normal rebase flow."""
 
@@ -357,10 +402,7 @@ def _park_auto_rebase_failure(
 
 
 def _reset_clear_and_park(
-    gh: GitHubClient,
-    issue: Issue,
-    state: PinnedState,
-    worktree: Path,
+    context: _AutoRebaseContext | _AutoRebaseRecoveryContext,
     reset_sha: str,
     *,
     message: str,
@@ -385,103 +427,496 @@ def _reset_clear_and_park(
     and it still lands even if the worktree is left on an unexpected SHA
     for the operator to inspect.
     """
-    reset = _git_hardened("reset", "--hard", reset_sha, cwd=worktree)
+    reset = _git_hardened(
+        "reset", "--hard", reset_sha, cwd=context.worktree,
+    )
     if reset.returncode != 0:
         log.error(
             "issue=#%d auto-rebase recovery: reset --hard to %s failed: "
             "%s; the awaiting_human park still short-circuits same-tick "
             "handler dispatch but operator inspection of HEAD is needed",
-            issue.number, reset_sha[:8], (reset.stderr or "").strip(),
+            context.issue.number,
+            reset_sha[:8],
+            (reset.stderr or "").strip(),
         )
     if clean:
-        cleaned = _git_hardened("clean", "-fd", cwd=worktree)
+        cleaned = _git_hardened("clean", "-fd", cwd=context.worktree)
         if cleaned.returncode != 0:
             log.error(
                 "issue=#%d auto-rebase recovery: `git clean -fd` after "
                 "the reset failed: %s",
-                issue.number, (cleaned.stderr or "").strip(),
+                context.issue.number, (cleaned.stderr or "").strip(),
             )
-    state.set("pending_auto_base_rebase_push_sha", None)
+    context.state.set("pending_auto_base_rebase_push_sha", None)
     _park_auto_rebase_failure(
-        gh, issue, state, message=message, reason=reason,
+        context.gh,
+        context.issue,
+        context.state,
+        message=message,
+        reason=reason,
     )
 
 
-def _finalize_recovered_rebase(
-    gh: GitHubClient,
-    spec: RepoSpec,
-    issue: Issue,
-    state: PinnedState,
-    *,
-    pr_number: int,
-    label: str,
-    local_head: str,
-    behind: int,
-    method: str,
-    notice: str,
-    unparking_consumed_max: Optional[int],
-) -> bool:
-    """Commit a recovered auto-rebase's success state and route by `behind`.
+def _prepare_recovered_rebase_state(
+    context: _AutoRebaseRecoveryContext,
+) -> None:
+    """Clear the recovery anchor and commit any pending human retry."""
+    if context.unparking_consumed_max is not None:
+        context.state.set(
+            "last_action_comment_id", context.unparking_consumed_max,
+        )
+        context.state.set("awaiting_human", False)
+        context.state.set("park_reason", None)
+    context.state.set("pending_auto_base_rebase_push_sha", None)
+    context.state.set("review_round", 0)
 
-    Shared tail of recovery cases 2 (push already landed) and 3 (push
-    reissued this tick): the recovered head is confirmed on the PR, so
-    clear the crash-recovery anchor, reset `review_round`, post `notice`
-    on the PR, and emit `base_rebased` with the case-specific `method`.
-    When `unparking_consumed_max` is set, the operator's "retry" reply is
-    committed (park cleared, watermark advanced) atomically with this
-    write; even on the `behind > 0` fall-through the recovered head IS on
-    the PR, so the unpark is safe to commit here.
 
-    `behind == 0` means the recovered head is current: relabel to
-    `validating` and return True (the caller returns immediately).
-    `behind > 0` means base advanced again since the interrupted rebase,
-    so write the recovery progress and return False -- the caller's
-    normal rebase + push flow then rebases the recovered head onto the
-    newer base before the final `validating` flip fires there. Without
-    that split the same-tick `validating` handler would run the reviewer
-    on a PR still behind base.
-    """
-    if unparking_consumed_max is not None:
-        state.set("last_action_comment_id", unparking_consumed_max)
-        state.set("awaiting_human", False)
-        state.set("park_reason", None)
-    state.set("pending_auto_base_rebase_push_sha", None)
-    state.set("review_round", 0)
+def _post_recovered_rebase_notice(
+    context: _AutoRebaseRecoveryContext, notice: str,
+) -> None:
+    """Post the recovery notice without blocking state finalization."""
     try:
-        _post_pr_comment(gh, pr_number, state, notice)
+        _post_pr_comment(
+            context.gh, context.pr_number, context.state, notice,
+        )
     except Exception:
         log.exception(
             "issue=#%s could not post auto-rebase recovery notice to "
-            "PR #%s", issue.number, pr_number,
+            "PR #%s", context.issue.number, context.pr_number,
         )
-    gh.emit_event(
+
+
+def _emit_recovered_rebase_event(
+    context: _AutoRebaseRecoveryContext,
+    local_head: str,
+    method: str,
+) -> None:
+    """Emit the stable audit shape for a recovered auto-rebase."""
+    context.gh.emit_event(
         "base_rebased",
-        issue_number=issue.number,
-        stage=label,
-        pr_number=pr_number,
+        issue_number=context.issue.number,
+        stage=context.label,
+        pr_number=context.pr_number,
         sha=local_head,
         method=method,
         review_round=0,
-        retry_count=state.get("retry_count"),
+        retry_count=context.state.get("retry_count"),
     )
-    if behind == 0:
+
+
+def _route_recovered_rebase(
+    context: _AutoRebaseRecoveryContext,
+    local_head: str,
+    method: str,
+) -> bool:
+    """Persist recovery progress and route only a current head to validation."""
+    if context.behind == 0:
         log.info(
             "issue=#%d auto-rebase recovery (%s): recovered head %s is "
             "current; routing %r -> validating",
-            issue.number, method, local_head[:8], label,
+            context.issue.number,
+            method,
+            local_head[:8],
+            context.label,
         )
-        gh.set_workflow_label(issue, "validating")
-        gh.write_pinned_state(issue, state)
+        context.gh.set_workflow_label(context.issue, "validating")
+        context.gh.write_pinned_state(context.issue, context.state)
         return True
-    gh.write_pinned_state(issue, state)
+    context.gh.write_pinned_state(context.issue, context.state)
     log.info(
         "issue=#%d auto-rebase recovery (%s): recovered head %s is still "
         "%d commit(s) behind %s/%s; falling through to the normal rebase "
         "+ push flow",
-        issue.number, method, local_head[:8], behind,
-        spec.remote_name, spec.base_branch,
+        context.issue.number,
+        method,
+        local_head[:8],
+        context.behind,
+        context.spec.remote_name,
+        context.spec.base_branch,
     )
     return False
+
+
+def _finalize_recovered_rebase(
+    context: _AutoRebaseRecoveryContext,
+    *,
+    local_head: str,
+    method: str,
+    notice: str,
+) -> bool:
+    """Finalize a recovered push and route it according to current base lag."""
+    _prepare_recovered_rebase_state(context)
+    _post_recovered_rebase_notice(context, notice)
+    _emit_recovered_rebase_event(context, local_head, method)
+    return _route_recovered_rebase(context, local_head, method)
+
+
+def _abort_recovery_unverified(
+    context: _AutoRebaseRecoveryContext, detail: str,
+) -> bool:
+    """Restore the recovery anchor when the remote state cannot be verified."""
+    _reset_clear_and_park(
+        context,
+        context.pending_pre_rebase_sha,
+        message=(
+            f"{config.HITL_MENTIONS} crash recovery for PR "
+            f"#{context.pr_number} could not safely finalize: {detail} "
+            f"Local HEAD has been reset to the pre-rebase SHA "
+            f"`{context.pending_pre_rebase_sha[:8]}` so the worktree "
+            "matches the (last-known) remote PR head -- the "
+            "issue is parked so the same-tick stage handlers do "
+            "NOT run against a SHA the PR may not carry. Reply "
+            "on this issue with anything once the underlying "
+            "problem is fixed and the orchestrator will re-"
+            "attempt the auto rebase on the next polling tick."
+        ),
+        reason="auto_base_rebase_push_failed",
+    )
+    return True
+
+
+def _clear_ineligible_recovery(
+    context: _AutoRebaseRecoveryContext,
+) -> bool:
+    """Clear an interrupted-rebase anchor after an operator relabel."""
+    context.state.set("pending_auto_base_rebase_push_sha", None)
+    context.gh.write_pinned_state(context.issue, context.state)
+    log.info(
+        "issue=#%d auto-rebase recovery: label %r is no longer in "
+        "the refresh-driven set; clearing pending flag",
+        context.issue.number,
+        context.label,
+    )
+    return True
+
+
+def _fetch_recovery_snapshot(
+    context: _AutoRebaseRecoveryContext,
+) -> Optional[_AutoRebaseRecoverySnapshot]:
+    """Fetch the PR branch and capture the local recovery head."""
+    branch = _resolve_branch_name(
+        context.state, context.spec, context.issue.number,
+    )
+    fetch_result = _authed_fetch(
+        context.spec,
+        f"+refs/heads/{branch}:refs/remotes/"
+        f"{context.spec.remote_name}/{branch}",
+        cwd=context.worktree,
+    )
+    if fetch_result.returncode != 0:
+        fetch_error = (fetch_result.stderr or "").strip()
+        log.warning(
+            "issue=#%d auto-rebase recovery fetch of %s/%s failed: %s; "
+            "aborting recovery and parking awaiting human",
+            context.issue.number,
+            context.spec.remote_name,
+            branch,
+            fetch_error,
+        )
+        _abort_recovery_unverified(
+            context,
+            f"the fetch of `{context.spec.remote_name}/{branch}` "
+            "needed to verify the recovered SHA against the remote PR "
+            f"head failed (`{fetch_error[:120]}`).",
+        )
+        return None
+    return _AutoRebaseRecoverySnapshot(
+        branch=branch,
+        local_head=_head_sha(context.worktree) or "",
+    )
+
+
+def _clear_unchanged_recovery(
+    context: _AutoRebaseRecoveryContext,
+) -> bool:
+    """Clear an anchor when HEAD never moved beyond the pre-rebase SHA."""
+    context.state.set("pending_auto_base_rebase_push_sha", None)
+    context.gh.write_pinned_state(context.issue, context.state)
+    log.info(
+        "issue=#%d auto-rebase recovery: local HEAD matches pre-"
+        "rebase SHA `%s`; clearing flag and falling through to "
+        "the normal rebase flow",
+        context.issue.number,
+        context.pending_pre_rebase_sha[:8],
+    )
+    return False
+
+
+def _read_remote_recovery_head(
+    context: _AutoRebaseRecoveryContext,
+    branch: str,
+) -> Optional[str]:
+    """Read the freshly fetched remote PR head or park fail-closed."""
+    remote_ref = f"refs/remotes/{context.spec.remote_name}/{branch}"
+    remote_head_result = _git_hardened(
+        "rev-parse", remote_ref, cwd=context.worktree,
+    )
+    if remote_head_result.returncode != 0:
+        remote_error = (remote_head_result.stderr or "").strip()
+        log.warning(
+            "issue=#%d auto-rebase recovery: rev-parse of %s failed "
+            "after fetch: %s; aborting recovery and parking awaiting human",
+            context.issue.number,
+            remote_ref,
+            remote_error,
+        )
+        _abort_recovery_unverified(
+            context,
+            f"`git rev-parse {remote_ref}` failed after the fetch "
+            f"(`{remote_error[:120]}`), so the remote PR head SHA "
+            "needed for the equality check could not be read.",
+        )
+        return None
+    remote_head = (remote_head_result.stdout or "").strip()
+    if remote_head:
+        return remote_head
+    log.warning(
+        "issue=#%d auto-rebase recovery: rev-parse of %s returned "
+        "no SHA; aborting recovery and parking awaiting human",
+        context.issue.number,
+        remote_ref,
+    )
+    _abort_recovery_unverified(
+        context,
+        f"`git rev-parse {remote_ref}` returned no SHA after the "
+        "fetch, so the remote PR head SHA needed for the equality "
+        "check could not be read.",
+    )
+    return None
+
+
+def _complete_recovery_snapshot(
+    context: _AutoRebaseRecoveryContext,
+    snapshot: _AutoRebaseRecoverySnapshot,
+) -> Optional[_AutoRebaseRecoverySnapshot]:
+    """Add the verified remote head and divergence counts to a snapshot."""
+    remote_head = _read_remote_recovery_head(context, snapshot.branch)
+    if remote_head is None:
+        return None
+    if snapshot.local_head == remote_head:
+        return _AutoRebaseRecoverySnapshot(
+            branch=snapshot.branch,
+            local_head=snapshot.local_head,
+            remote_head=remote_head,
+        )
+    ahead, behind = _branch_ahead_behind(
+        context.spec, context.worktree, snapshot.branch,
+    )
+    return _AutoRebaseRecoverySnapshot(
+        branch=snapshot.branch,
+        local_head=snapshot.local_head,
+        remote_head=remote_head,
+        ahead=ahead,
+        behind=behind,
+    )
+
+
+def _already_published_recovery_notice(
+    context: _AutoRebaseRecoveryContext,
+    local_head: str,
+) -> str:
+    """Format the notice for a recovery push that landed before restart."""
+    notice = (
+        f":mag: Recovered an interrupted auto-rebase for PR "
+        f"#{context.pr_number}; the new head `{local_head[:8]}` was "
+        "already published before the orchestrator restart."
+    )
+    if context.behind == 0:
+        return (
+            notice
+            + f" Routing `{context.label}` -> `validating` so the "
+            "reviewer re-runs against the rewritten branch."
+        )
+    return (
+        notice
+        + f" Base advanced again by {context.behind} commit(s)"
+        " since the interrupted rebase; rebasing once "
+        "more before routing to `validating`."
+    )
+
+
+def _pushed_recovery_notice(
+    context: _AutoRebaseRecoveryContext,
+    local_head: str,
+) -> str:
+    """Format the notice for a recovery push reissued this tick."""
+    notice = (
+        f":mag: Recovered an interrupted auto-rebase for PR "
+        f"#{context.pr_number}; pushed the recovered head "
+        f"`{local_head[:8]}`."
+    )
+    if context.behind == 0:
+        return notice + f" Routing `{context.label}` -> `validating`."
+    return (
+        notice
+        + f" Base advanced again by {context.behind} commit(s) "
+        "since the interrupted rebase; rebasing once more "
+        "before routing to `validating`."
+    )
+
+
+def _finalize_already_published_recovery(
+    context: _AutoRebaseRecoveryContext,
+    snapshot: _AutoRebaseRecoverySnapshot,
+) -> bool:
+    """Finalize state after confirming that the interrupted push landed."""
+    return _finalize_recovered_rebase(
+        context,
+        local_head=snapshot.local_head,
+        method="crash_recovery_relabel_only",
+        notice=_already_published_recovery_notice(
+            context, snapshot.local_head,
+        ),
+    )
+
+
+def _reject_unknown_recovery_comparison(
+    context: _AutoRebaseRecoveryContext,
+    snapshot: _AutoRebaseRecoverySnapshot,
+) -> bool:
+    """Park when unequal heads cannot be classified as ahead or behind."""
+    log.warning(
+        "issue=#%d auto-rebase recovery: local HEAD (`%s`) differs "
+        "from remote PR head (`%s`) but `_branch_ahead_behind` "
+        "returned `(0, 0)`; aborting recovery and parking awaiting "
+        "human",
+        context.issue.number,
+        snapshot.local_head[:8],
+        snapshot.remote_head[:8],
+    )
+    return _abort_recovery_unverified(
+        context,
+        f"local HEAD `{snapshot.local_head[:8]}` differs from remote "
+        f"PR head `{snapshot.remote_head[:8]}` but "
+        "`_branch_ahead_behind` returned `(0, 0)`, which means the "
+        "remote-tracking ref we just fetched is unexpectedly missing "
+        "-- the path the recovery would take next cannot be determined "
+        "safely.",
+    )
+
+
+def _park_diverged_recovery(
+    context: _AutoRebaseRecoveryContext,
+    snapshot: _AutoRebaseRecoverySnapshot,
+) -> bool:
+    """Restore the anchor instead of overwriting an out-of-band PR update."""
+    _reset_clear_and_park(
+        context,
+        context.pending_pre_rebase_sha,
+        message=(
+            f"{config.HITL_MENTIONS} crash recovery for PR "
+            f"#{context.pr_number}: local worktree "
+            f"(`{snapshot.local_head[:8]}`) is {snapshot.ahead} ahead "
+            f"and {snapshot.behind} behind remote "
+            f"`{context.spec.remote_name}/{snapshot.branch}` -- the "
+            "remote PR branch was updated out-of-band during the "
+            "interrupted auto rebase. HEAD has been reset to the pre-"
+            f"rebase SHA `{context.pending_pre_rebase_sha[:8]}`. "
+            "Investigate the remote PR head and reply on this issue "
+            "with anything once the divergence is reconciled."
+        ),
+        reason="auto_base_rebase_push_failed",
+    )
+    return True
+
+
+def _park_dirty_recovery(
+    context: _AutoRebaseRecoveryContext,
+    snapshot: _AutoRebaseRecoverySnapshot,
+    dirty_files: list[str],
+) -> bool:
+    """Reset and clean a recovered rebase that carries worktree changes."""
+    _reset_clear_and_park(
+        context,
+        context.pending_pre_rebase_sha,
+        message=(
+            f"{config.HITL_MENTIONS} crash recovery for PR "
+            f"#{context.pr_number}: the rebased worktree (recovered "
+            f"from a prior tick, HEAD `{snapshot.local_head[:8]}`) "
+            f"carries {len(dirty_files)} uncommitted change(s). HEAD "
+            "has been reset to the pre-rebase SHA "
+            f"`{context.pending_pre_rebase_sha[:8]}` and untracked "
+            "files cleaned (use `git reflog` if you need the "
+            "discarded edits). Investigate, then reply on this issue "
+            "with anything to retry."
+        ),
+        reason="auto_base_rebase_dirty",
+        clean=True,
+    )
+    return True
+
+
+def _park_failed_recovery_push(
+    context: _AutoRebaseRecoveryContext,
+    snapshot: _AutoRebaseRecoverySnapshot,
+) -> bool:
+    """Restore the anchor after a recovered force-push fails."""
+    _reset_clear_and_park(
+        context,
+        context.pending_pre_rebase_sha,
+        message=(
+            f"{config.HITL_MENTIONS} crash recovery for PR "
+            f"#{context.pr_number}: `--force-with-lease` push of the "
+            f"recovered rebase (`{snapshot.local_head[:8]}`, lease "
+            f"against `{context.pending_pre_rebase_sha[:8]}`) failed. "
+            "HEAD has been reset to the pre-rebase SHA. Most likely "
+            "the remote PR branch was updated out-of-band; investigate "
+            "and reply on this issue with anything to retry."
+        ),
+        reason="auto_base_rebase_push_failed",
+    )
+    return True
+
+
+def _retry_recovery_push(
+    context: _AutoRebaseRecoveryContext,
+    snapshot: _AutoRebaseRecoverySnapshot,
+) -> bool:
+    """Publish a verified ahead-only recovery head and finalize its state."""
+    dirty_files = _worktree_dirty_files(context.worktree)
+    if dirty_files:
+        return _park_dirty_recovery(context, snapshot, dirty_files)
+    if not _push_branch(
+        context.spec,
+        context.worktree,
+        snapshot.branch,
+        force_with_lease=context.pending_pre_rebase_sha,
+    ):
+        return _park_failed_recovery_push(context, snapshot)
+    return _finalize_recovered_rebase(
+        context,
+        local_head=snapshot.local_head,
+        method="crash_recovery_pushed",
+        notice=_pushed_recovery_notice(context, snapshot.local_head),
+    )
+
+
+def _recover_pending_auto_base_rebase_context(
+    context: _AutoRebaseRecoveryContext,
+) -> bool:
+    """Route an interrupted auto-rebase from verified local/remote state."""
+    if context.label not in _PR_REFRESH_DETOUR_LABELS:
+        return _clear_ineligible_recovery(context)
+
+    snapshot = _fetch_recovery_snapshot(context)
+    if snapshot is None:
+        return True
+    if (
+        snapshot.local_head
+        and snapshot.local_head == context.pending_pre_rebase_sha
+    ):
+        return _clear_unchanged_recovery(context)
+
+    snapshot = _complete_recovery_snapshot(context, snapshot)
+    if snapshot is None:
+        return True
+    if snapshot.local_head and snapshot.local_head == snapshot.remote_head:
+        return _finalize_already_published_recovery(context, snapshot)
+    if snapshot.ahead == 0 and snapshot.behind == 0:
+        return _reject_unknown_recovery_comparison(context, snapshot)
+    if snapshot.behind > 0:
+        return _park_diverged_recovery(context, snapshot)
+    return _retry_recovery_push(context, snapshot)
 
 
 def _recover_pending_auto_base_rebase(
@@ -499,356 +934,134 @@ def _recover_pending_auto_base_rebase(
 ) -> bool:
     """Finalize a clean auto-base-rebase interrupted by a prior crash.
 
-    Called by `_sync_pr_worktree_to_base` when the pinned state carries
-    a `pending_auto_base_rebase_push_sha` from a previous tick. The
-    flag is set BEFORE `_rebase_base_into_worktree` and cleared on
-    every exit; a crash between then and the post-push state write
-    leaves the worktree in one of four shapes, each handled here:
-
-      1. Local HEAD == `pending_pre_rebase_sha` -- rebase was reverted
-         (or never moved HEAD). Nothing to recover. Clear the flag and
-         let the caller's normal flow re-attempt the rebase on this
-         same tick.
-      2. Local HEAD == remote PR head AND != `pending_pre_rebase_sha`
-         -- push went through on a prior tick; the relabel /
-         `review_round=0` write didn't. Finalize: clear flag, reset
-         `review_round`, post a recovery PR notice, emit
-         `base_rebased`, flip the label to `validating`.
-      3. Local HEAD ahead of remote PR head -- rebase done, push
-         didn't (or push succeeded but the remote ref was rolled back
-         out-of-band before the next tick). Push with
-         `--force-with-lease=<pending_pre_rebase_sha>` and finalize on
-         success.
-      4. Local HEAD behind or diverged from remote PR head -- someone
-         else updated the PR branch out-of-band. Reset HEAD back to
-         the pre-rebase SHA and park awaiting human.
-
-    Returns True when recovery finalized / parked (caller must return
-    immediately); False only for case 1 above (caller should continue
-    with the normal flow on this same tick).
+    The pinned pre-rebase SHA distinguishes an unchanged worktree, an
+    already-published rewrite, an ahead-only rewrite that still needs a
+    push, and a branch that diverged through an out-of-band update. Returns
+    False only when HEAD still equals the anchor and the normal rebase flow
+    should continue on the same tick.
     """
-    if label not in _PR_REFRESH_DETOUR_LABELS:
-        # Operator manually relabeled (e.g. to `resolving_conflict`
-        # for an unrelated reason). Clear the flag without acting.
-        state.set("pending_auto_base_rebase_push_sha", None)
-        gh.write_pinned_state(issue, state)
-        log.info(
-            "issue=#%d auto-rebase recovery: label %r is no longer in "
-            "the refresh-driven set; clearing pending flag",
-            issue.number, label,
-        )
-        return True
-
-    branch = _resolve_branch_name(state, spec, issue.number)
-
-    def _abort_recovery_unverified(detail: str) -> bool:
-        """Reset HEAD to the pre-rebase anchor and park awaiting human.
-
-        The four 'cannot positively verify the recovery target' paths
-        below (fetch failed, rev-parse failed, empty remote SHA,
-        `(0, 0)` ahead/behind with a SHA mismatch) must NOT just
-        `return True` without acting: that leaves the issue unparked
-        and the same-tick stage handler dispatch can run on a local
-        HEAD that we have NOT confirmed is published on the PR.
-        `_reset_clear_and_park` restores HEAD to `pending_pre_rebase_sha`
-        (= the local HEAD before the rebase = the remote PR head at the
-        time the anchor was set) and parks; the operator's reply on the
-        issue thread later un-parks via the refresh's
-        `_AUTO_REBASE_PARK_REASONS` recovery branch and re-attempts the
-        rebase fresh.
-        """
-        _reset_clear_and_park(
-            gh, issue, state, worktree, pending_pre_rebase_sha,
-            message=(
-                f"{config.HITL_MENTIONS} crash recovery for PR "
-                f"#{pr_number} could not safely finalize: {detail} "
-                f"Local HEAD has been reset to the pre-rebase SHA "
-                f"`{pending_pre_rebase_sha[:8]}` so the worktree "
-                "matches the (last-known) remote PR head -- the "
-                "issue is parked so the same-tick stage handlers do "
-                "NOT run against a SHA the PR may not carry. Reply "
-                "on this issue with anything once the underlying "
-                "problem is fixed and the orchestrator will re-"
-                "attempt the auto rebase on the next polling tick."
-            ),
-            reason="auto_base_rebase_push_failed",
-        )
-        return True
-
-    fetch_branch = _authed_fetch(
-        spec,
-        f"+refs/heads/{branch}:refs/remotes/{spec.remote_name}/{branch}",
-        cwd=worktree,
+    context = _AutoRebaseRecoveryContext(
+        gh=gh,
+        spec=spec,
+        issue=issue,
+        state=state,
+        worktree=worktree,
+        pr_number=pr_number,
+        label=label,
+        pending_pre_rebase_sha=pending_pre_rebase_sha,
+        behind=behind,
+        unparking_consumed_max=unparking_consumed_max,
     )
-    if fetch_branch.returncode != 0:
-        log.warning(
-            "issue=#%d auto-rebase recovery fetch of %s/%s failed: %s; "
-            "aborting recovery and parking awaiting human",
-            issue.number, spec.remote_name, branch,
-            (fetch_branch.stderr or "").strip(),
-        )
-        return _abort_recovery_unverified(
-            f"the fetch of `{spec.remote_name}/{branch}` needed to "
-            f"verify the recovered SHA against the remote PR head "
-            f"failed (`{(fetch_branch.stderr or '').strip()[:120]}`)."
-        )
+    return _recover_pending_auto_base_rebase_context(context)
 
-    local_head = _head_sha(worktree) or ""
-
-    if local_head and local_head == pending_pre_rebase_sha:
-        # Case 1: HEAD never moved past the pre-rebase SHA (or was
-        # reset back). Clear the flag and let the caller's normal
-        # flow re-attempt the rebase.
-        state.set("pending_auto_base_rebase_push_sha", None)
-        gh.write_pinned_state(issue, state)
-        log.info(
-            "issue=#%d auto-rebase recovery: local HEAD matches pre-"
-            "rebase SHA `%s`; clearing flag and falling through to "
-            "the normal rebase flow",
-            issue.number, pending_pre_rebase_sha[:8],
+def _base_sync_issue(
+    gh: GitHubClient, issue_number: int,
+) -> Optional[Issue]:
+    """Return the issue for a worktree, or None when it is not retrievable."""
+    try:
+        return gh.get_issue(issue_number)
+    except Exception:
+        log.debug(
+            "issue=#%d not retrievable; skipping base sync", issue_number,
         )
+        return None
+
+
+def _issue_skips_base_sync(issue: Issue, issue_number: int) -> bool:
+    """Apply dispatcher hard-skips and the question-stage read-only gate."""
+    skip_label = hard_skip_control_label(issue)
+    if skip_label is not None:
+        log.debug(
+            "issue=#%d has %r; skipping base sync",
+            issue_number,
+            skip_label,
+        )
+        return True
+    if not issue_has_label(issue, "question"):
         return False
-
-    # Read the freshly-fetched remote PR head SHA directly. We do NOT
-    # rely on `_branch_ahead_behind` alone for the case-2 finalize
-    # decision: that helper returns `(0, 0)` on git errors AND on the
-    # legitimate "in sync" case, which is indistinguishable. A
-    # case-2 finalize relabels to `validating` and clears the
-    # recovery anchor, so silently treating a git error as proof
-    # that the push landed would route the issue to validating
-    # against an unpublished SHA. `rev-parse` makes the comparison
-    # source explicit: an unreadable remote ref aborts recovery
-    # this tick AND parks (the same-tick handler dispatch would
-    # otherwise run on a local HEAD that may not be on the PR), and
-    # the case-2 finalize requires positive `local_head ==
-    # remote_pr_head`.
-    remote_ref = f"refs/remotes/{spec.remote_name}/{branch}"
-    remote_head_r = _git_hardened("rev-parse", remote_ref, cwd=worktree)
-    if remote_head_r.returncode != 0:
-        log.warning(
-            "issue=#%d auto-rebase recovery: rev-parse of %s failed "
-            "after fetch: %s; aborting recovery and parking awaiting human",
-            issue.number, remote_ref, (remote_head_r.stderr or "").strip(),
-        )
-        return _abort_recovery_unverified(
-            f"`git rev-parse {remote_ref}` failed after the fetch "
-            f"(`{(remote_head_r.stderr or '').strip()[:120]}`), so "
-            "the remote PR head SHA needed for the equality check "
-            "could not be read."
-        )
-    remote_pr_head = (remote_head_r.stdout or "").strip()
-    if not remote_pr_head:
-        log.warning(
-            "issue=#%d auto-rebase recovery: rev-parse of %s returned "
-            "no SHA; aborting recovery and parking awaiting human",
-            issue.number, remote_ref,
-        )
-        return _abort_recovery_unverified(
-            f"`git rev-parse {remote_ref}` returned no SHA after the "
-            "fetch, so the remote PR head SHA needed for the "
-            "equality check could not be read."
-        )
-
-    if local_head and local_head == remote_pr_head:
-        # Case 2: local HEAD == remote PR head, verified by an explicit
-        # rev-parse against the freshly-fetched remote ref. The push
-        # from the prior tick landed, so hand off to the shared finalize
-        # tail (clear anchor, reset `review_round`, notice, audit event,
-        # behind-aware relabel-or-fall-through).
-        notice = (
-            f":mag: Recovered an interrupted auto-rebase for PR "
-            f"#{pr_number}; the new head `{local_head[:8]}` was "
-            f"already published before the orchestrator restart."
-            + (
-                f" Routing `{label}` -> `validating` so the "
-                "reviewer re-runs against the rewritten branch."
-                if behind == 0
-                else f" Base advanced again by {behind} commit(s)"
-                f" since the interrupted rebase; rebasing once "
-                "more before routing to `validating`."
-            )
-        )
-        return _finalize_recovered_rebase(
-            gh, spec, issue, state,
-            pr_number=pr_number, label=label, local_head=local_head,
-            behind=behind, method="crash_recovery_relabel_only",
-            notice=notice, unparking_consumed_max=unparking_consumed_max,
-        )
-
-    # `local_head != remote_pr_head` here. Use `_branch_ahead_behind`
-    # to distinguish "push pending" (HEAD ahead of remote PR head,
-    # case 3) from "diverged" (HEAD behind / both ahead-and-behind,
-    # case 4). On a `_branch_ahead_behind` git error we get `(0, 0)`,
-    # which we have already ruled out (via the SHA inequality) is
-    # the legitimate in-sync state -- so a `(0, 0)` here means the
-    # remote-tracking ref we just fetched is unexpectedly missing.
-    # Bail rather than guess.
-    ahead, behind_pr = _branch_ahead_behind(spec, worktree, branch)
-    if ahead == 0 and behind_pr == 0:
-        log.warning(
-            "issue=#%d auto-rebase recovery: local HEAD (`%s`) differs "
-            "from remote PR head (`%s`) but `_branch_ahead_behind` "
-            "returned `(0, 0)`; aborting recovery and parking awaiting "
-            "human", issue.number, local_head[:8], remote_pr_head[:8],
-        )
-        return _abort_recovery_unverified(
-            f"local HEAD `{local_head[:8]}` differs from remote PR "
-            f"head `{remote_pr_head[:8]}` but `_branch_ahead_behind` "
-            "returned `(0, 0)`, which means the remote-tracking ref "
-            "we just fetched is unexpectedly missing -- the path the "
-            "recovery would take next cannot be determined safely."
-        )
-
-    if behind_pr > 0:
-        # Case 4: diverged from remote PR head (someone updated the PR
-        # branch out-of-band). Restore HEAD to the pre-rebase SHA and
-        # park -- force-pushing the local rebase here would clobber the
-        # out-of-band update.
-        _reset_clear_and_park(
-            gh, issue, state, worktree, pending_pre_rebase_sha,
-            message=(
-                f"{config.HITL_MENTIONS} crash recovery for PR "
-                f"#{pr_number}: local worktree (`{local_head[:8]}`) "
-                f"is {ahead} ahead and {behind_pr} behind remote "
-                f"`{spec.remote_name}/{branch}` -- the remote PR "
-                "branch was updated out-of-band during the interrupted "
-                "auto rebase. HEAD has been reset to the pre-rebase "
-                f"SHA `{pending_pre_rebase_sha[:8]}`. Investigate the "
-                "remote PR head and reply on this issue with anything "
-                "once the divergence is reconciled."
-            ),
-            reason="auto_base_rebase_push_failed",
-        )
-        return True
-
-    # Case 3: local HEAD ahead of remote PR head. Push didn't go
-    # through on the prior tick; try again with the original lease.
-    dirty = _worktree_dirty_files(worktree)
-    if dirty:
-        _reset_clear_and_park(
-            gh, issue, state, worktree, pending_pre_rebase_sha,
-            message=(
-                f"{config.HITL_MENTIONS} crash recovery for PR "
-                f"#{pr_number}: the rebased worktree (recovered from "
-                f"a prior tick, HEAD `{local_head[:8]}`) carries "
-                f"{len(dirty)} uncommitted change(s). HEAD has been "
-                f"reset to the pre-rebase SHA `{pending_pre_rebase_sha[:8]}` "
-                "and untracked files cleaned (use `git reflog` if you "
-                "need the discarded edits). Investigate, then reply on "
-                "this issue with anything to retry."
-            ),
-            reason="auto_base_rebase_dirty",
-            clean=True,
-        )
-        return True
-
-    if not _push_branch(
-        spec, worktree, branch, force_with_lease=pending_pre_rebase_sha,
-    ):
-        _reset_clear_and_park(
-            gh, issue, state, worktree, pending_pre_rebase_sha,
-            message=(
-                f"{config.HITL_MENTIONS} crash recovery for PR "
-                f"#{pr_number}: `--force-with-lease` push of the "
-                f"recovered rebase (`{local_head[:8]}`, lease against "
-                f"`{pending_pre_rebase_sha[:8]}`) failed. HEAD has been "
-                "reset to the pre-rebase SHA. Most likely the remote "
-                "PR branch was updated out-of-band; investigate and "
-                "reply on this issue with anything to retry."
-            ),
-            reason="auto_base_rebase_push_failed",
-        )
-        return True
-
-    # Recovery push succeeded: hand off to the shared finalize tail with
-    # the same `behind`-aware split as case 2. The recovered head is now
-    # the live PR head, so a fall-through (`behind > 0`) lets the
-    # caller's normal flow rebase it onto the newer base before routing.
-    notice = (
-        f":mag: Recovered an interrupted auto-rebase for PR "
-        f"#{pr_number}; pushed the recovered head "
-        f"`{local_head[:8]}`."
-        + (
-            f" Routing `{label}` -> `validating`."
-            if behind == 0
-            else f" Base advanced again by {behind} commit(s) "
-            "since the interrupted rebase; rebasing once more "
-            "before routing to `validating`."
-        )
+    log.debug(
+        "issue=#%d has 'question' label; skipping base sync "
+        "(read-only stage)",
+        issue_number,
     )
-    return _finalize_recovered_rebase(
-        gh, spec, issue, state,
-        pr_number=pr_number, label=label, local_head=local_head,
-        behind=behind, method="crash_recovery_pushed",
-        notice=notice, unparking_consumed_max=unparking_consumed_max,
+    return True
+
+
+def _worktree_behind_base(
+    spec: RepoSpec, worktree: Path, issue_number: int,
+) -> Optional[int]:
+    """Return the base lag, or None when the comparison cannot be read."""
+    base_ref = f"{spec.remote_name}/{spec.base_branch}"
+    behind_result = _git(
+        "rev-list", "--count", f"HEAD..{base_ref}", cwd=worktree,
+    )
+    if behind_result.returncode != 0:
+        log.debug(
+            "issue=#%d skipping base sync: rev-list failed: %s",
+            issue_number,
+            (behind_result.stderr or "").strip(),
+        )
+        return None
+    try:
+        return int((behind_result.stdout or "0").strip() or "0")
+    except ValueError:
+        return None
+
+
+def _sync_pre_pr_worktree(
+    spec: RepoSpec,
+    worktree: Path,
+    issue_number: int,
+    behind: int,
+) -> None:
+    """Rebase one clean pre-PR worktree and restore it on failure."""
+    base_ref = f"{spec.remote_name}/{spec.base_branch}"
+    succeeded, conflicted_files = _rebase_base_into_worktree(spec, worktree)
+    if succeeded:
+        log.info(
+            "issue=#%d rebased worktree onto %s (was %d commit(s) behind)",
+            issue_number,
+            base_ref,
+            behind,
+        )
+        return
+
+    abort_result = _git_hardened("rebase", "--abort", cwd=worktree)
+    if abort_result.returncode != 0:
+        log.warning(
+            "issue=#%d base rebase failed and abort failed: %s",
+            issue_number,
+            (abort_result.stderr or "").strip(),
+        )
+    if conflicted_files:
+        log.info(
+            "issue=#%d base rebase has %d conflict(s); aborted -- "
+            "resolving_conflict will handle it once a PR exists",
+            issue_number,
+            len(conflicted_files),
+        )
+        return
+    log.warning(
+        "issue=#%d base rebase failed without conflicted files; aborted",
+        issue_number,
     )
 
 
 def _sync_worktree_with_base(
     gh: GitHubClient, spec: RepoSpec, worktree: Path, issue_number: int,
 ) -> None:
-    """Bring a single per-issue worktree up to date with `origin/<base>`.
+    """Bring one per-issue worktree up to date with the configured base.
 
-    Pre-PR: rebase onto `origin/<base>` directly. PR-having + behind
-    base + label in {validating, documenting, in_review, fixing}: hand
-    off to `_sync_pr_worktree_to_base`, which attempts the rebase
-    locally, pushes (force-with-lease pinned to the pre-rebase SHA),
-    resets `review_round`, and relabels to `validating` on a clean
-    rebase. Only when that rebase leaves conflicted files does the
-    helper relabel to `resolving_conflict` so the existing handler
-    drives the dev agent to resolve them. Skips a dirty worktree
-    or a worktree already up to date (no pre-PR rebase attempted, no PR
-    rebase fired). On a pre-PR content conflict, aborts the rebase so
-    the worktree stays on its pre-rebase SHA -- conflict resolution
-    for pre-PR worktrees still lives in `_handle_resolving_conflict`,
-    reached only via an operator relabel until the issue earns a PR.
+    Pre-PR worktrees are rebased locally when clean. PR worktrees always
+    reach the PR-aware coordinator so a pinned crash-recovery anchor is
+    honored even when local HEAD already contains the latest base.
     """
-    try:
-        issue = gh.get_issue(issue_number)
-    except Exception:
-        log.debug(
-            "issue=#%d not retrievable; skipping base sync", issue_number,
-        )
+    issue = _base_sync_issue(gh, issue_number)
+    if issue is None or _issue_skips_base_sync(issue, issue_number):
         return
-    skip_label = hard_skip_control_label(issue)
-    if skip_label is not None:
-        # Match the dispatcher's hard-skip: `backlog` / `paused` mean "the
-        # orchestrator should not touch this issue at all", so refresh must
-        # not rebase base, post a PR comment, or detour the issue to
-        # `resolving_conflict` before `_process_issue` would have skipped it.
-        log.debug(
-            "issue=#%d has %r; skipping base sync",
-            issue_number, skip_label,
-        )
-        return
-    # `question`-labeled issues are read-only: the question agent
-    # must not commit, and `_handle_question` already tears down the
-    # per-issue worktree on every safe exit. The only worktrees that
-    # survive across ticks under this label are the unsafe-park
-    # cases (`question_commits`, `question_dirty`, `question_timeout`)
-    # where the operator is supposed to inspect what the agent did
-    # before resetting; merging `origin/<base>` over that inspection
-    # state would mask it. Skip base sync entirely while the label
-    # is `question` so the read-only contract holds even if the
-    # handler ever leaves the worktree on disk unexpectedly.
-    if issue_has_label(issue, "question"):
-        log.debug(
-            "issue=#%d has 'question' label; skipping base sync "
-            "(read-only stage)", issue_number,
-        )
-        return
+
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")
-
-    # Pre-PR worktrees hard-skip on dirty: no remote anchor to recover
-    # towards, and no crash-recovery flag to honor. PR-having worktrees
-    # defer the dirty check into `_sync_pr_worktree_to_base` so a crash
-    # mid-rebase that left BOTH `pending_auto_base_rebase_push_sha` set
-    # AND uncommitted edits on the worktree still reaches
-    # `_recover_pending_auto_base_rebase`'s reset+clean+park path
-    # instead of being silently skipped here (which would leave the
-    # same-tick stage handler reading a local HEAD that is NOT on the
-    # PR).
     if pr_number is None and _worktree_dirty_files(worktree):
         log.debug(
             "issue=#%d skipping base sync: worktree has uncommitted changes",
@@ -856,68 +1069,16 @@ def _sync_worktree_with_base(
         )
         return
 
-    base_ref = f"{spec.remote_name}/{spec.base_branch}"
-    behind_r = _git(
-        "rev-list", "--count", f"HEAD..{base_ref}", cwd=worktree,
-    )
-    if behind_r.returncode != 0:
-        log.debug(
-            "issue=#%d skipping base sync: rev-list failed: %s",
-            issue_number, (behind_r.stderr or "").strip(),
-        )
+    behind = _worktree_behind_base(spec, worktree, issue_number)
+    if behind is None:
         return
-    try:
-        behind = int((behind_r.stdout or "0").strip() or "0")
-    except ValueError:
-        return
-
     if pr_number is not None:
-        # PR-having worktrees route here even when `behind == 0` -- the
-        # crash-recovery check inside `_sync_pr_worktree_to_base` keys
-        # off the pinned `pending_auto_base_rebase_push_sha` anchor,
-        # which is set on a normal tick BEFORE the rebase. A crash
-        # between rebase and push (or between push and relabel/state
-        # write) leaves local HEAD ahead of (or matching) the remote
-        # PR head AT a SHA that contains base, so the rev-list
-        # `HEAD..<base>` reports 0 even though the PR has not received
-        # the rewrite yet. Skipping here on `behind == 0` would leave
-        # validating reviewing a local SHA not on the PR (scenario 1)
-        # or in_review / documenting / fixing parked on stale state
-        # after a branch rewrite (scenario 2).
         _sync_pr_worktree_to_base(
             gh, spec, issue, state, worktree, int(pr_number), behind,
         )
         return
-
-    if behind == 0:
-        return
-
-    succeeded, conflicted = _rebase_base_into_worktree(spec, worktree)
-    if succeeded:
-        log.info(
-            "issue=#%d rebased worktree onto %s (was %d commit(s) behind)",
-            issue_number, base_ref, behind,
-        )
-        return
-
-    abort = _git_hardened("rebase", "--abort", cwd=worktree)
-    if abort.returncode != 0:
-        log.warning(
-            "issue=#%d base rebase failed and abort failed: %s",
-            issue_number, (abort.stderr or "").strip(),
-        )
-    if conflicted:
-        log.info(
-            "issue=#%d base rebase has %d conflict(s); aborted -- "
-            "resolving_conflict will handle it once a PR exists",
-            issue_number, len(conflicted),
-        )
-    else:
-        log.warning(
-            "issue=#%d base rebase failed without conflicted files; aborted",
-            issue_number,
-        )
-
+    if behind:
+        _sync_pre_pr_worktree(spec, worktree, issue_number, behind)
 
 def _auto_rebase_label_is_eligible(context: _AutoRebaseContext) -> bool:
     """Clear stale recovery state and reject labels refresh does not drive."""
@@ -1195,10 +1356,7 @@ def _park_unreadable_post_rebase_head(
         context.issue.number,
     )
     _reset_clear_and_park(
-        context.gh,
-        context.issue,
-        context.state,
-        context.worktree,
+        context,
         before_sha,
         message=(
             f"{config.HITL_MENTIONS} PR #{context.pr_number} is "
@@ -1242,10 +1400,7 @@ def _park_dirty_auto_rebase(
         len(dirty_files),
     )
     _reset_clear_and_park(
-        context.gh,
-        context.issue,
-        context.state,
-        context.worktree,
+        context,
         before_sha,
         message=(
             f"{config.HITL_MENTIONS} PR #{context.pr_number} is "
@@ -1271,10 +1426,7 @@ def _park_failed_auto_rebase_push(
 ) -> None:
     """Reset and park after a force-with-lease rejection or push failure."""
     _reset_clear_and_park(
-        context.gh,
-        context.issue,
-        context.state,
-        context.worktree,
+        context,
         before_sha,
         message=(
             f"{config.HITL_MENTIONS} PR #{context.pr_number} is "

@@ -61,6 +61,7 @@ import os
 import re
 import subprocess
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -98,6 +99,198 @@ _CONVENTIONAL_RE = re.compile(
 # anchor keeps prose like `Note: ...` or a bare `TODO:` from matching.
 _PREFIXED_RE = re.compile(r"^[a-z][a-z0-9-]*(?:\([^)]+\))?!?:\s+\S")
 _PREFIX_TOKEN_RE = re.compile(r"^([a-z][a-z0-9-]*)(?:\([^)]+\))?!?:\s+\S")
+
+
+class _SquashPreparationError(RuntimeError):
+    """A pre-rewrite probe failed while the original branch was intact."""
+
+
+@dataclass(frozen=True)
+class _SquashPlan:
+    """Inputs that remain stable across the destructive squash rewrite."""
+
+    base_sha: str
+    original_head: str
+    subjects: tuple[str, ...]
+    message: str
+
+
+def _squash_base_sha(spec: RepoSpec, worktree: Path) -> str:
+    """Return the topic branch merge base or raise a preparation error."""
+    base_ref = f"{spec.remote_name}/{spec.base_branch}"
+    merge_base_result = _git("merge-base", base_ref, "HEAD", cwd=worktree)
+    if merge_base_result.returncode != 0:
+        detail = (merge_base_result.stderr or "").strip()
+        raise _SquashPreparationError(f"merge-base failed: {detail}")
+    base_sha = (merge_base_result.stdout or "").strip()
+    if not base_sha:
+        raise _SquashPreparationError("merge-base returned empty")
+    return base_sha
+
+
+def _squash_subjects(worktree: Path, base_sha: str) -> tuple[str, ...]:
+    """Return ordered topic-commit subjects or raise on an unreadable log."""
+    log_result = _git(
+        "log", "--reverse", "--pretty=%s", f"{base_sha}..HEAD",
+        cwd=worktree,
+    )
+    if log_result.returncode != 0:
+        detail = (log_result.stderr or "").strip()
+        raise _SquashPreparationError(f"git log failed: {detail}")
+    return tuple(
+        output_line
+        for output_line in (log_result.stdout or "").splitlines()
+        if output_line.strip()
+    )
+
+
+def _squash_message(
+    spec: RepoSpec,
+    worktree: Path,
+    issue: Issue,
+    subjects: tuple[str, ...],
+) -> str:
+    """Build the subject-only message for a multi-commit squash."""
+    first_subject = subjects[0]
+    if _is_prefixed_subject(first_subject):
+        return first_subject + "\n"
+    fallback_prefix = _infer_subject_prefix(spec, worktree, issue)
+    subject = _pr_title_from_commit_or_issue(
+        issue, first_subject, fallback_prefix,
+    )
+    return subject + "\n"
+
+
+def _prepare_squash(
+    spec: RepoSpec, worktree: Path, issue: Issue,
+) -> _SquashPlan:
+    """Collect every precondition before the branch rewrite begins."""
+    base_sha = _squash_base_sha(spec, worktree)
+    original_head = _head_sha(worktree)
+    if not original_head:
+        raise _SquashPreparationError("could not read original HEAD")
+    if _worktree_dirty_files(worktree):
+        raise _SquashPreparationError("worktree has uncommitted changes")
+    subjects = _squash_subjects(worktree, base_sha)
+    message = (
+        _squash_message(spec, worktree, issue, subjects)
+        if len(subjects) > 1
+        else ""
+    )
+    return _SquashPlan(base_sha, original_head, subjects, message)
+
+
+def _squash_failure(
+    error: str,
+) -> Tuple[bool, Optional[str], int, Optional[str]]:
+    """Return the uniform failure result while leaving commits intact."""
+    return False, None, 0, error
+
+
+def _squash_commit_env() -> dict[str, str]:
+    """Return the hardened agent identity used for the squash commit."""
+    return {
+        **os.environ,
+        **_GIT_NO_PROMPT_ENV,
+        "GIT_AUTHOR_NAME": config.AGENT_GIT_NAME,
+        "GIT_AUTHOR_EMAIL": config.AGENT_GIT_EMAIL,
+        "GIT_COMMITTER_NAME": config.AGENT_GIT_NAME,
+        "GIT_COMMITTER_EMAIL": config.AGENT_GIT_EMAIL,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+
+def _rollback_squash(
+    plan: _SquashPlan,
+    worktree: Path,
+    issue: Issue,
+    reason: str,
+    error: str,
+) -> Tuple[bool, Optional[str], int, Optional[str]]:
+    """Restore the original branch after a post-reset failure."""
+    rollback_result = _git_hardened(
+        "reset", "--hard", plan.original_head, cwd=worktree,
+    )
+    if rollback_result.returncode != 0:
+        log.error(
+            "issue=#%s rollback to %s after %s failed; worktree may be "
+            "in an inconsistent state: %s",
+            issue.number,
+            plan.original_head,
+            reason,
+            (rollback_result.stderr or "").strip(),
+        )
+    return _squash_failure(error)
+
+
+def _create_squash_commit(
+    worktree: Path, message: str,
+) -> subprocess.CompletedProcess:
+    """Create the orchestrator-owned commit with hooks and signing disabled."""
+    return subprocess.run(
+        [
+            "git",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "core.fsmonitor=",
+            "-c", "commit.gpgsign=false",
+            "commit", "-m", message,
+        ],
+        cwd=str(worktree),
+        capture_output=True,
+        text=True,
+        env=_squash_commit_env(),
+    )
+
+
+def _rewrite_squash(
+    spec: RepoSpec,
+    worktree: Path,
+    branch: str,
+    issue: Issue,
+    plan: _SquashPlan,
+) -> Tuple[bool, Optional[str], int, Optional[str]]:
+    """Apply a prepared squash and force-publish it with a pinned lease."""
+    reset_result = _git_hardened(
+        "reset", "--soft", plan.base_sha, cwd=worktree,
+    )
+    if reset_result.returncode != 0:
+        detail = (reset_result.stderr or "").strip()
+        return _squash_failure(f"reset --soft failed: {detail}")
+
+    commit_result = _create_squash_commit(worktree, plan.message)
+    if commit_result.returncode != 0:
+        detail = (commit_result.stderr or "").strip()
+        return _rollback_squash(
+            plan,
+            worktree,
+            issue,
+            "squash commit",
+            f"squash commit failed: {detail}",
+        )
+
+    new_sha = _head_sha(worktree)
+    if not new_sha:
+        return _rollback_squash(
+            plan,
+            worktree,
+            issue,
+            "post-commit head read",
+            "could not read new HEAD after squash",
+        )
+    if not _push_branch(
+        spec, worktree, branch, force_with_lease=plan.original_head,
+    ):
+        return _rollback_squash(
+            plan,
+            worktree,
+            issue,
+            "force-push",
+            "force-push with lease rejected (concurrent update on the "
+            "remote, or lease violation); see orchestrator logs",
+        )
+    return True, new_sha, len(plan.subjects), None
 
 
 def _branch_ahead_behind(
@@ -281,153 +474,10 @@ def _squash_and_force_push(
     authored under the AGENT_GIT_* identity (via env vars) so attribution
     matches the per-step commits this squash replaces.
     """
-    def _fail(error: str) -> Tuple[bool, Optional[str], int, Optional[str]]:
-        """Uniform failure result -- original commits left on the branch."""
-        return False, None, 0, error
-
-    base_ref = f"{spec.remote_name}/{spec.base_branch}"
-    mb = _git("merge-base", base_ref, "HEAD", cwd=worktree)
-    if mb.returncode != 0:
-        return _fail(f"merge-base failed: {(mb.stderr or '').strip()}")
-    base_sha = (mb.stdout or "").strip()
-    if not base_sha:
-        return _fail("merge-base returned empty")
-
-    # Snapshot the original HEAD BEFORE any destructive step. Every
-    # post-reset failure path below restores the branch to this SHA so
-    # the original commits are still on the branch (as the issue spec
-    # requires), and we use it as the pinned lease value for the
-    # force-push (the remote was last set to this SHA by the dev's plain
-    # push, so a remote drift between then and now means an out-of-band
-    # update we must NOT clobber).
-    original_head = _head_sha(worktree)
-    if not original_head:
-        return _fail("could not read original HEAD")
-
-    # Dirty-tree refusal is a hard precondition for the whole helper, NOT
-    # just the rewrite path: the issue spec lists "dirty tree" alongside
-    # push rejection / lease violation as a failure that must park
-    # awaiting_human and leave the original commits in place. A
-    # one-commit branch whose worktree happens to carry uncommitted
-    # changes (operator scratch, agent side-effect) must still surface
-    # to a human -- handing off to in_review with the dirty state
-    # invisible would let the merge land an incomplete head.
-    # (`_worktree_dirty_files` is hardened against a planted
-    # `core.fsmonitor`, the same vector the squash resets and commit
-    # below guard against.)
-    if _worktree_dirty_files(worktree):
-        return _fail("worktree has uncommitted changes")
-
-    log_r = _git(
-        "log", "--reverse", "--pretty=%s", f"{base_sha}..HEAD",
-        cwd=worktree,
-    )
-    if log_r.returncode != 0:
-        return _fail(f"git log failed: {(log_r.stderr or '').strip()}")
-    subjects = [
-        line for line in (log_r.stdout or "").splitlines() if line.strip()
-    ]
-    if len(subjects) <= 1:
-        # Nothing to squash.
-        return True, original_head, 0, None
-
-    if _is_prefixed_subject(subjects[0]):
-        subject = subjects[0]
-    else:
-        fallback_prefix = _infer_subject_prefix(spec, worktree, issue)
-        subject = _pr_title_from_commit_or_issue(
-            issue, subjects[0], fallback_prefix
-        )
-
-    # Subject-only message: the repo's Conventional Commits rule
-    # forbids bodies and trailers on orchestrator-authored commits
-    # (see CLAUDE.md). The per-step commit subjects this squash
-    # replaces are still visible via `git log <branch>@{1}` until the
-    # local ref is reaped, and the squashed PR carries the same
-    # context in its description; aggregating them into the commit
-    # body would just trip the next reviewer's commit-style check.
-    message = subject + "\n"
-
-    # `_git_hardened`, not `_git`: `reset --soft` refreshes the index and
-    # would otherwise execute an agent-planted `core.fsmonitor` helper with
-    # our process environment (ambient secrets) attached. The AGENT_GIT
-    # identity it also injects is inert here -- only HEAD moves, no commit.
-    reset_r = _git_hardened("reset", "--soft", base_sha, cwd=worktree)
-    if reset_r.returncode != 0:
-        return _fail(f"reset --soft failed: {(reset_r.stderr or '').strip()}")
-
-    def _fail_and_rollback(
-        reason: str, error: str
-    ) -> Tuple[bool, Optional[str], int, Optional[str]]:
-        """Restore the branch to original_head, then report `error`.
-
-        Every post-reset failure routes through here so the dev's original
-        commits survive a squash/push that did not complete. Best-effort:
-        a rollback failure leaves the worktree in an inconsistent state,
-        logged loudly so an operator notices.
-
-        `_git_hardened` for the same reason as the squash soft-reset above:
-        this index-touching `reset --hard` must not execute an agent-planted
-        `core.fsmonitor` with our process environment attached.
-        """
-        rb = _git_hardened("reset", "--hard", original_head, cwd=worktree)
-        if rb.returncode != 0:
-            log.error(
-                "issue=#%s rollback to %s after %s failed; worktree may be "
-                "in an inconsistent state: %s",
-                issue.number, original_head, reason,
-                (rb.stderr or "").strip(),
-            )
-        return _fail(error)
-
-    # Hardening for the orchestrator-owned squash commit. The agent has
-    # write access to .git/hooks, .git/config (templatedir), and any
-    # global/system git config the host user owns. Without these flags a
-    # planted pre-commit hook or commit-msg hook would run during this
-    # commit and could exfiltrate secrets we hold (no GIT_TOKEN here, but
-    # ANTHROPIC_API_KEY etc. live in os.environ for the agent to use).
-    # Mirrors the same hardening _push_branch applies.
-    commit_env = {
-        **os.environ,
-        **_GIT_NO_PROMPT_ENV,
-        "GIT_AUTHOR_NAME": config.AGENT_GIT_NAME,
-        "GIT_AUTHOR_EMAIL": config.AGENT_GIT_EMAIL,
-        "GIT_COMMITTER_NAME": config.AGENT_GIT_NAME,
-        "GIT_COMMITTER_EMAIL": config.AGENT_GIT_EMAIL,
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_SYSTEM": os.devnull,
-        "GIT_CONFIG_NOSYSTEM": "1",
-    }
-    commit_r = subprocess.run(
-        [
-            "git",
-            "-c", "core.hooksPath=/dev/null",
-            "-c", "core.fsmonitor=",
-            "-c", "commit.gpgsign=false",
-            "commit", "-m", message,
-        ],
-        cwd=str(worktree),
-        capture_output=True,
-        text=True,
-        env=commit_env,
-    )
-    if commit_r.returncode != 0:
-        return _fail_and_rollback(
-            "squash commit",
-            f"squash commit failed: {(commit_r.stderr or '').strip()}",
-        )
-
-    new_sha = _head_sha(worktree)
-    if not new_sha:
-        return _fail_and_rollback(
-            "post-commit head read", "could not read new HEAD after squash"
-        )
-
-    if not _push_branch(spec, worktree, branch, force_with_lease=original_head):
-        return _fail_and_rollback(
-            "force-push",
-            "force-push with lease rejected (concurrent update on the "
-            "remote, or lease violation); see orchestrator logs",
-        )
-
-    return True, new_sha, len(subjects), None
+    try:
+        plan = _prepare_squash(spec, worktree, issue)
+    except _SquashPreparationError as error:
+        return _squash_failure(str(error))
+    if len(plan.subjects) <= 1:
+        return True, plan.original_head, 0, None
+    return _rewrite_squash(spec, worktree, branch, issue, plan)

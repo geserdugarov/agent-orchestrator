@@ -54,8 +54,10 @@ import os
 import subprocess
 import tempfile
 import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from orchestrator import config
 from orchestrator.config import RepoSpec
@@ -64,6 +66,83 @@ log = logging.getLogger(__name__)
 
 # Disable git's /dev/tty fallback prompts in any subprocess we spawn.
 _GIT_NO_PROMPT_ENV = {"GIT_TERMINAL_PROMPT": "0"}
+
+_AUTHED_GIT_PREFIX = (
+    "git",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "credential.helper=",
+    "-c", "core.fsmonitor=",
+)
+
+
+@dataclass(frozen=True)
+class _GitAuthSession:
+    """Token-bearing subprocess inputs scoped to one askpass directory."""
+
+    token: str
+    auth_url: str
+    env: dict[str, str]
+
+
+def _resolved_git_token(spec: RepoSpec, operation: str) -> Optional[str]:
+    """Resolve a per-repository token and log an operation-specific error."""
+    token = config._resolve_github_token(spec.slug)
+    if token:
+        return token
+    log.error(
+        "GITHUB_TOKEN missing for %s; cannot %s", spec.slug, operation,
+    )
+    return None
+
+
+def _git_auth_env(
+    askpass: Path, token: str, *, include_identity: bool,
+) -> dict[str, str]:
+    """Build the detached environment for one token-bearing git command."""
+    auth_env = {
+        **os.environ,
+        **_GIT_NO_PROMPT_ENV,
+        "GIT_ASKPASS": str(askpass),
+        "GIT_TOKEN": token,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    if include_identity:
+        auth_env.update(
+            {
+                "GIT_AUTHOR_NAME": config.AGENT_GIT_NAME,
+                "GIT_AUTHOR_EMAIL": config.AGENT_GIT_EMAIL,
+                "GIT_COMMITTER_NAME": config.AGENT_GIT_NAME,
+                "GIT_COMMITTER_EMAIL": config.AGENT_GIT_EMAIL,
+            },
+        )
+    return auth_env
+
+
+@contextmanager
+def _git_auth_session(
+    spec: RepoSpec, token: str, *, include_identity: bool = False,
+) -> Iterator[_GitAuthSession]:
+    """Keep a hardened askpass script alive for one authenticated operation."""
+    with tempfile.TemporaryDirectory(prefix="orch-askpass-") as temp_dir:
+        askpass = Path(temp_dir) / "askpass.sh"
+        askpass.write_text('#!/bin/sh\nprintf %s "$GIT_TOKEN"\n')
+        askpass.chmod(0o700)
+        yield _GitAuthSession(
+            token=token,
+            auth_url=f"https://x-access-token@github.com/{spec.slug}.git",
+            env=_git_auth_env(
+                askpass, token, include_identity=include_identity,
+            ),
+        )
+
+
+def _failed_fetch(stderr: str) -> subprocess.CompletedProcess:
+    """Return the stable failure shape shared by authenticated fetches."""
+    return subprocess.CompletedProcess(
+        args=["git", "fetch"], returncode=1, stdout="", stderr=stderr,
+    )
 
 
 # Per-target_root locks that serialize git plumbing against the parent
@@ -277,54 +356,31 @@ def _authed_fetch(
     # Mirrors `_push_branch`'s per-spec token resolution; without this,
     # `_handle_resolving_conflict` would fail conflict resolution for any
     # repo other than the legacy `REPO` (or use the wrong token).
-    token = config._resolve_github_token(spec.slug)
+    token = _resolved_git_token(spec, "fetch")
     if not token:
-        log.error("GITHUB_TOKEN missing for %s; cannot fetch", spec.slug)
-        return subprocess.CompletedProcess(
-            args=["git", "fetch"], returncode=1, stdout="",
-            stderr="GITHUB_TOKEN missing",
-        )
+        return _failed_fetch("GITHUB_TOKEN missing")
     unsafe = _unsafe_local_transport_config(cwd)
     if unsafe:
         log.error(
             "refusing to fetch into %s: worktree .git/config has "
             "transport-hijacking config: %s", cwd, unsafe,
         )
-        return subprocess.CompletedProcess(
-            args=["git", "fetch"], returncode=1, stdout="",
-            stderr="unsafe transport config in worktree .git/config",
+        return _failed_fetch(
+            "unsafe transport config in worktree .git/config",
         )
-    auth_url = f"https://x-access-token@github.com/{spec.slug}.git"
-    with tempfile.TemporaryDirectory(prefix="orch-askpass-") as td:
-        askpass = Path(td) / "askpass.sh"
-        askpass.write_text('#!/bin/sh\nprintf %s "$GIT_TOKEN"\n')
-        askpass.chmod(0o700)
-        env = {
-            **os.environ,
-            **_GIT_NO_PROMPT_ENV,
-            "GIT_ASKPASS": str(askpass),
-            "GIT_TOKEN": token,
-            "GIT_AUTHOR_NAME": config.AGENT_GIT_NAME,
-            "GIT_AUTHOR_EMAIL": config.AGENT_GIT_EMAIL,
-            "GIT_COMMITTER_NAME": config.AGENT_GIT_NAME,
-            "GIT_COMMITTER_EMAIL": config.AGENT_GIT_EMAIL,
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
-            "GIT_CONFIG_NOSYSTEM": "1",
-        }
-        git_prefix = [
-            "git",
-            "-c", "core.hooksPath=/dev/null",
-            "-c", "credential.helper=",
-            "-c", "core.fsmonitor=",
-        ]
+    with _git_auth_session(
+        spec, token, include_identity=True,
+    ) as auth_session:
         with _target_root_lock(spec.target_root):
             return subprocess.run(
-                [*git_prefix, "fetch", "--quiet", auth_url, refspec],
+                [
+                    *_AUTHED_GIT_PREFIX,
+                    "fetch", "--quiet", auth_session.auth_url, refspec,
+                ],
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,
-                env=env,
+                env=auth_session.env,
             )
 
 
@@ -378,54 +434,98 @@ def _authed_target_fetch(
     holding it -- the worktree creators -- re-enters cleanly) for the
     same `.git/config.lock` reason described on `_ensure_worktree`.
     """
-    token = config._resolve_github_token(spec.slug)
+    token = _resolved_git_token(spec, "fetch")
     if not token:
-        log.error("GITHUB_TOKEN missing for %s; cannot fetch", spec.slug)
-        return subprocess.CompletedProcess(
-            args=["git", "fetch"], returncode=1, stdout="",
-            stderr="GITHUB_TOKEN missing",
-        )
+        return _failed_fetch("GITHUB_TOKEN missing")
     unsafe = _unsafe_local_transport_config(spec.target_root)
     if unsafe:
         log.error(
             "refusing to fetch into %s: target_root .git/config has "
             "transport-hijacking config: %s", spec.target_root, unsafe,
         )
-        return subprocess.CompletedProcess(
-            args=["git", "fetch"], returncode=1, stdout="",
-            stderr="unsafe transport config in target_root .git/config",
+        return _failed_fetch(
+            "unsafe transport config in target_root .git/config",
         )
-    auth_url = f"https://x-access-token@github.com/{spec.slug}.git"
     refspec = (
         f"+refs/heads/{branch}:refs/remotes/{spec.remote_name}/{branch}"
     )
-    with tempfile.TemporaryDirectory(prefix="orch-askpass-") as td:
-        askpass = Path(td) / "askpass.sh"
-        askpass.write_text('#!/bin/sh\nprintf %s "$GIT_TOKEN"\n')
-        askpass.chmod(0o700)
-        env = {
-            **os.environ,
-            **_GIT_NO_PROMPT_ENV,
-            "GIT_ASKPASS": str(askpass),
-            "GIT_TOKEN": token,
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
-            "GIT_CONFIG_NOSYSTEM": "1",
-        }
-        git_prefix = [
-            "git",
-            "-c", "core.hooksPath=/dev/null",
-            "-c", "credential.helper=",
-            "-c", "core.fsmonitor=",
-        ]
+    with _git_auth_session(spec, token) as auth_session:
         with _target_root_lock(spec.target_root):
             return subprocess.run(
-                [*git_prefix, "fetch", "--quiet", auth_url, refspec],
+                [
+                    *_AUTHED_GIT_PREFIX,
+                    "fetch", "--quiet", auth_session.auth_url, refspec,
+                ],
                 cwd=str(spec.target_root),
                 capture_output=True,
                 text=True,
-                env=env,
+                env=auth_session.env,
             )
+
+
+def _remote_branch_sha(
+    auth_session: _GitAuthSession,
+    worktree: Path,
+    branch: str,
+    ref: str,
+    force_with_lease: Optional[str],
+) -> Optional[str]:
+    """Return the expected remote SHA, or None when it cannot be read."""
+    if force_with_lease is not None:
+        return force_with_lease
+    ls_remote = subprocess.run(
+        [*_AUTHED_GIT_PREFIX, "ls-remote", auth_session.auth_url, ref],
+        cwd=str(worktree),
+        capture_output=True,
+        text=True,
+        env=auth_session.env,
+    )
+    if ls_remote.returncode != 0:
+        scrubbed = (ls_remote.stderr or "").replace(
+            auth_session.token, "***",
+        )
+        log.error("git ls-remote failed for %s: %s", branch, scrubbed)
+        return None
+    for output_line in (ls_remote.stdout or "").splitlines():
+        parts = output_line.strip().split()
+        if len(parts) >= 2 and parts[1] == ref:
+            return parts[0]
+    return ""
+
+
+def _push_with_auth(
+    auth_session: _GitAuthSession,
+    worktree: Path,
+    branch: str,
+    force_with_lease: Optional[str],
+) -> bool:
+    """Push one branch through an established askpass session."""
+    ref = f"refs/heads/{branch}"
+    remote_sha = _remote_branch_sha(
+        auth_session, worktree, branch, ref, force_with_lease,
+    )
+    if remote_sha is None:
+        return False
+    push_result = subprocess.run(
+        [
+            *_AUTHED_GIT_PREFIX,
+            "push",
+            f"--force-with-lease={ref}:{remote_sha}",
+            auth_session.auth_url,
+            f"HEAD:{ref}",
+        ],
+        cwd=str(worktree),
+        capture_output=True,
+        text=True,
+        env=auth_session.env,
+    )
+    if push_result.returncode == 0:
+        return True
+    scrubbed = (push_result.stderr or "").replace(
+        auth_session.token, "***",
+    )
+    log.error("git push failed for %s: %s", branch, scrubbed)
+    return False
 
 
 def _push_branch(
@@ -496,9 +596,8 @@ def _push_branch(
     # `~/.config/<owner>/<repo>/token` pushes with the right repo's token.
     # Single-repo deployments see identical behavior because
     # `_resolve_github_token(REPO)` returns the same value.
-    token = config._resolve_github_token(spec.slug)
+    token = _resolved_git_token(spec, "push")
     if not token:
-        log.error("GITHUB_TOKEN missing for %s; cannot push", spec.slug)
         return False
     unsafe = _unsafe_local_transport_config(worktree)
     if unsafe:
@@ -507,67 +606,9 @@ def _push_branch(
             "transport-hijacking config: %s", branch, unsafe,
         )
         return False
-    auth_url = f"https://x-access-token@github.com/{spec.slug}.git"
-    with tempfile.TemporaryDirectory(prefix="orch-askpass-") as td:
-        askpass = Path(td) / "askpass.sh"
-        askpass.write_text('#!/bin/sh\nprintf %s "$GIT_TOKEN"\n')
-        askpass.chmod(0o700)
-        env = {
-            **os.environ,
-            **_GIT_NO_PROMPT_ENV,
-            "GIT_ASKPASS": str(askpass),
-            "GIT_TOKEN": token,
-            # Detach from any agent-writable global/system git config; the
-            # only config that applies is the local worktree config (already
-            # checked above) plus our explicit -c overrides below.
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
-            "GIT_CONFIG_NOSYSTEM": "1",
-        }
-        git_prefix = [
-            "git",
-            "-c", "core.hooksPath=/dev/null",
-            "-c", "credential.helper=",
-            "-c", "core.fsmonitor=",
-        ]
-        ref = f"refs/heads/{branch}"
-        if force_with_lease is not None:
-            remote_sha = force_with_lease
-        else:
-            ls = subprocess.run(
-                [*git_prefix, "ls-remote", auth_url, ref],
-                cwd=str(worktree),
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-            if ls.returncode != 0:
-                scrubbed = (ls.stderr or "").replace(token, "***")
-                log.error("git ls-remote failed for %s: %s", branch, scrubbed)
-                return False
-            remote_sha = ""
-            for line in (ls.stdout or "").splitlines():
-                parts = line.strip().split()
-                if len(parts) >= 2 and parts[1] == ref:
-                    remote_sha = parts[0]
-                    break
-        # An empty <expected> in --force-with-lease means "expect the ref to
-        # not exist", which is the right lease for the create-branch case.
-        r = subprocess.run(
-            [
-                *git_prefix,
-                "push",
-                f"--force-with-lease={ref}:{remote_sha}",
-                auth_url, f"HEAD:{ref}",
-            ],
-            cwd=str(worktree),
-            capture_output=True,
-            text=True,
-            env=env,
+    with _git_auth_session(spec, token) as auth_session:
+        # An empty expected SHA means the remote ref must not exist, which
+        # preserves the create-branch lease behavior.
+        return _push_with_auth(
+            auth_session, worktree, branch, force_with_lease,
         )
-    if r.returncode != 0:
-        # Scrub the token out of any error output before logging.
-        scrubbed = (r.stderr or "").replace(token, "***")
-        log.error("git push failed for %s: %s", branch, scrubbed)
-        return False
-    return True
