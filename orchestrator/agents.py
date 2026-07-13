@@ -22,7 +22,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, NamedTuple, Optional, TypedDict, Unpack
 
 from orchestrator import config
 from orchestrator.usage import UsageMetrics
@@ -289,6 +289,21 @@ def _is_secret_shaped(name: str) -> bool:
     return any(upper.endswith(suffix) for suffix in _AGENT_SECRET_SUFFIXES)
 
 
+def _agent_env_key_allowed(
+    env_key: str, *, allow_provider_auth: bool,
+) -> bool:
+    if env_key in _FORBIDDEN_AGENT_ENV:
+        return False
+    if env_key in _AGENT_WRITE_CREDENTIAL_LOCATORS:
+        return False
+    if not _is_secret_shaped(env_key):
+        return True
+    return (
+        allow_provider_auth
+        and env_key in _AGENT_PROVIDER_AUTH_ALLOWLIST
+    )
+
+
 def _filter_agent_env(
     env: dict[str, str], *, allow_provider_auth: bool = True,
 ) -> dict[str, str]:
@@ -322,21 +337,13 @@ def _filter_agent_env(
       string verbatim, so an `ANTHROPIC_API_KEY=sk-… pytest` entry
       would leak the secret to GitHub on the first failure.
     """
-    filtered: dict[str, str] = {}
+    filtered_env: dict[str, str] = {}
     for env_key, env_value in env.items():
-        if env_key in _FORBIDDEN_AGENT_ENV:
-            continue
-        if env_key in _AGENT_WRITE_CREDENTIAL_LOCATORS:
-            continue
-        if _is_secret_shaped(env_key):
-            if (
-                allow_provider_auth
-                and env_key in _AGENT_PROVIDER_AUTH_ALLOWLIST
-            ):
-                filtered[env_key] = env_value
-            continue
-        filtered[env_key] = env_value
-    return filtered
+        if _agent_env_key_allowed(
+            env_key, allow_provider_auth=allow_provider_auth,
+        ):
+            filtered_env[env_key] = env_value
+    return filtered_env
 
 
 # Negative `Popen.returncode` values (the kernel reports `-N` for a child
@@ -375,25 +382,73 @@ class AgentResult:
 CodexResult = AgentResult
 
 
+@dataclass(frozen=True)
+class AgentRunOptions:
+    """Optional controls shared by fresh agent runs and session resumes."""
+
+    resume_session_id: Optional[str] = None
+    extra_env: Optional[dict[str, str]] = None
+    timeout: Optional[int] = None
+    extra_args: tuple[str, ...] = ()
+
+    @property
+    def timeout_seconds(self) -> int:
+        return self.timeout or config.AGENT_TIMEOUT
+
+
+class _AgentRunOptionFields(TypedDict, total=False):
+    resume_session_id: Optional[str]
+    extra_env: Optional[dict[str, str]]
+    timeout: Optional[int]
+    extra_args: tuple[str, ...]
+
+
+class _SubprocessResult(NamedTuple):
+    stdout: str
+    stderr: str
+    exit_code: int
+    timed_out: bool
+    interrupted: bool
+
+
+def _resolve_agent_run_options(
+    options: Optional[AgentRunOptions],
+    option_fields: _AgentRunOptionFields,
+) -> AgentRunOptions:
+    if options is not None and option_fields:
+        raise TypeError("pass either options or keyword option fields, not both")
+    if options is not None:
+        return options
+    return AgentRunOptions(**option_fields)
+
+
+def _first_nested_uuid(payload_nodes: Iterator[Any]) -> Optional[str]:
+    for payload_node in payload_nodes:
+        found = _walk_for_uuid(payload_node)
+        if found is not None:
+            return found
+    return None
+
+
+def _walk_mapping_for_uuid(payload_node: dict[Any, Any]) -> Optional[str]:
+    priority_values = (
+        payload_node[key]
+        for key in _PRIORITY_KEYS
+        if key in payload_node
+    )
+    priority_match = _first_nested_uuid(priority_values)
+    if priority_match is not None:
+        return priority_match
+    return _first_nested_uuid(iter(payload_node.values()))
+
+
 def _walk_for_uuid(payload_node: Any) -> Optional[str]:
     if isinstance(payload_node, str):
         return payload_node if _UUID_RE.match(payload_node) else None
     if isinstance(payload_node, dict):
-        for key in _PRIORITY_KEYS:
-            if key in payload_node:
-                found = _walk_for_uuid(payload_node[key])
-                if found:
-                    return found
-        for child_node in payload_node.values():
-            found = _walk_for_uuid(child_node)
-            if found:
-                return found
-        return None
+        return _walk_mapping_for_uuid(payload_node)
     if isinstance(payload_node, list):
-        for child_node in payload_node:
-            found = _walk_for_uuid(child_node)
-            if found:
-                return found
+        return _first_nested_uuid(iter(payload_node))
     return None
 
 
@@ -431,7 +486,7 @@ def _run_subprocess(
     cwd: Path,
     env: dict[str, str],
     timeout: int,
-) -> tuple[str, str, int, bool, bool]:
+) -> _SubprocessResult:
     # Spawn the agent in its own process group (start_new_session=True =>
     # setsid). On timeout we send SIGTERM to the whole group, not just the
     # direct child, so that grandchildren the agent forked (Maven, gradle,
@@ -455,14 +510,16 @@ def _run_subprocess(
             _terminate_process_group(proc)
             drained = _communicate_bounded(proc, 10)
             stdout, stderr = drained if drained is not None else ("", "")
-            return stdout, stderr, -1, True, False
+            return _SubprocessResult(stdout, stderr, -1, True, False)
         # A child killed by SIGTERM/SIGKILL exits with a negative code; the
         # most common cause is the shutdown sweep reaching this group while we
         # were parked in `communicate`. Flag it interrupted so it is not
         # mistaken for a normal non-timeout completion.
         stdout, stderr = drained
         interrupted = proc.returncode in _INTERRUPTED_RETURNCODES
-        return stdout, stderr, proc.returncode, False, interrupted
+        return _SubprocessResult(
+            stdout, stderr, proc.returncode, False, interrupted,
+        )
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
@@ -524,64 +581,91 @@ def _read_last_message(path: Path) -> str:
         return ""
 
 
-def _run_codex(
+def _build_agent_result(
+    options: AgentRunOptions,
+    process_result: _SubprocessResult,
+    last_message: str,
+) -> AgentResult:
+    return AgentResult(
+        session_id=(
+            options.resume_session_id
+            or parse_session_id(process_result.stdout)
+        ),
+        last_message=last_message,
+        exit_code=process_result.exit_code,
+        timed_out=process_result.timed_out,
+        stdout=process_result.stdout,
+        stderr=process_result.stderr,
+        interrupted=process_result.interrupted,
+    )
+
+
+def _codex_command(
     prompt: str,
     cwd: Path,
-    *,
-    resume_session_id: Optional[str] = None,
-    extra_env: Optional[dict[str, str]] = None,
-    timeout: Optional[int] = None,
-    extra_args: tuple[str, ...] = (),
-) -> AgentResult:
-    timeout = timeout or config.AGENT_TIMEOUT
+    last_message_path: Path,
+    options: AgentRunOptions,
+) -> list[str]:
     # codex applies `-C` AFTER it has already chdir'd into the subprocess cwd,
     # so a relative path resolves twice (once by Popen, once by codex) and
     # codex hits "No such file or directory (os error 2)". Pass an absolute
     # path so the second resolution is a no-op. WORKTREES_DIR=../wt-...
     # in .env is the common shape that triggers this.
     cwd_abs = Path(cwd).resolve()
-    with _codex_last_message_file() as last_msg_path:
-        # `codex exec resume` does not accept -C; we rely on subprocess cwd for it.
-        # Configured `extra_args` (e.g. `-m gpt-5.5 -c '...'`) are codex global
-        # options, so they go BEFORE the `exec` subcommand. The safety/output
-        # flags (`--dangerously-...`, `--json`, `-o`) and the prompt itself
-        # stay where they are -- operator-provided args must not be able to
-        # silently displace them.
-        common = [
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--json",
-            "-o", str(last_msg_path),
+    # `codex exec resume` does not accept -C; we rely on subprocess cwd for it.
+    # Configured `extra_args` (e.g. `-m gpt-5.5 -c '...'`) are codex global
+    # options, so they go BEFORE the `exec` subcommand. The safety/output
+    # flags (`--dangerously-...`, `--json`, `-o`) and the prompt itself
+    # stay where they are -- operator-provided args must not be able to
+    # silently displace them.
+    common_args = [
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--json",
+        "-o", str(last_message_path),
+    ]
+    if options.resume_session_id:
+        return [
+            config.CODEX_BIN, *options.extra_args, "exec", "resume",
+            *common_args, options.resume_session_id, prompt,
         ]
-        if resume_session_id:
-            cmd = [
-                config.CODEX_BIN, *extra_args, "exec", "resume",
-                *common, resume_session_id, prompt,
-            ]
-        else:
-            cmd = [
-                config.CODEX_BIN, *extra_args, "exec", "-C", str(cwd_abs),
-                *common, prompt,
-            ]
+    return [
+        config.CODEX_BIN, *options.extra_args, "exec", "-C", str(cwd_abs),
+        *common_args, prompt,
+    ]
 
-        env = _agent_env(extra_env)
-        log.info(
-            "codex spawn: cwd=%s resume=%s timeout=%ss",
-            cwd, bool(resume_session_id), timeout,
+
+def _log_agent_spawn(
+    backend: str, cwd: Path, options: AgentRunOptions,
+) -> None:
+    log.info(
+        "%s spawn: cwd=%s resume=%s timeout=%ss",
+        backend,
+        cwd,
+        bool(options.resume_session_id),
+        options.timeout_seconds,
+    )
+
+
+def _run_codex(
+    prompt: str,
+    cwd: Path,
+    *,
+    options: Optional[AgentRunOptions] = None,
+    **option_fields: Unpack[_AgentRunOptionFields],
+) -> AgentResult:
+    run_options = _resolve_agent_run_options(options, option_fields)
+    with _codex_last_message_file() as last_message_path:
+        _log_agent_spawn("codex", cwd, run_options)
+        process_result = _run_subprocess(
+            _codex_command(prompt, cwd, last_message_path, run_options),
+            cwd,
+            _agent_env(run_options.extra_env),
+            run_options.timeout_seconds,
         )
-
-        stdout, stderr, exit_code, timed_out, interrupted = _run_subprocess(
-            cmd, cwd, env, timeout
-        )
-
-        sid = resume_session_id or parse_session_id(stdout)
-        return AgentResult(
-            session_id=sid,
-            last_message=_read_last_message(last_msg_path),
-            exit_code=exit_code,
-            timed_out=timed_out,
-            stdout=stdout,
-            stderr=stderr,
-            interrupted=interrupted,
+        return _build_agent_result(
+            run_options,
+            process_result,
+            _read_last_message(last_message_path),
         )
 
 
@@ -700,61 +784,66 @@ def _claude_last_message(
     )
 
 
-def _run_claude(
-    prompt: str,
-    cwd: Path,
-    *,
-    resume_session_id: Optional[str] = None,
-    extra_env: Optional[dict[str, str]] = None,
-    timeout: Optional[int] = None,
-    extra_args: tuple[str, ...] = (),
-) -> AgentResult:
-    timeout = timeout or config.AGENT_TIMEOUT
-
+def _claude_command(
+    prompt: str, options: AgentRunOptions,
+) -> list[str]:
     # Configured `extra_args` (e.g. `--model claude-opus-4-7 --effort high`)
     # go right after the binary, before our own flags and the prompt. The
     # safety/output flags (`-p`, `--dangerously-skip-permissions`,
     # `--output-format stream-json`, `--include-partial-messages`,
     # `--verbose`) and the prompt itself stay where they are so operator
     # args cannot silently override them.
-    cmd = [
+    command = [
         config.CLAUDE_BIN,
-        *extra_args,
+        *options.extra_args,
         "-p",
         "--dangerously-skip-permissions",
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
     ]
-    if resume_session_id:
-        cmd += ["--resume", resume_session_id]
-    cmd.append(prompt)
+    if options.resume_session_id:
+        command += ["--resume", options.resume_session_id]
+    command.append(prompt)
+    return command
 
-    env = _agent_env(extra_env)
-    log.info(
-        "claude spawn: cwd=%s resume=%s timeout=%ss",
-        cwd, bool(resume_session_id), timeout,
-    )
 
-    stdout, stderr, exit_code, timed_out, interrupted = _run_subprocess(
-        cmd, cwd, env, timeout
-    )
-
-    sid = resume_session_id or parse_session_id(stdout)
+def _claude_process_last_message(
+    process_result: _SubprocessResult,
+) -> str:
     # Only a clean, completed run may fall back to the last streamed assistant
     # chunk; interrupted/timed-out/non-zero runs expose "" unless they emitted
     # a terminal `result` event.
-    succeeded = exit_code == 0 and not timed_out and not interrupted
-    last_msg = _claude_last_message(stdout, allow_assistant_fallback=succeeded)
+    succeeded = (
+        process_result.exit_code == 0
+        and not process_result.timed_out
+        and not process_result.interrupted
+    )
+    return _claude_last_message(
+        process_result.stdout,
+        allow_assistant_fallback=succeeded,
+    )
 
-    return AgentResult(
-        session_id=sid,
-        last_message=last_msg,
-        exit_code=exit_code,
-        timed_out=timed_out,
-        stdout=stdout,
-        stderr=stderr,
-        interrupted=interrupted,
+
+def _run_claude(
+    prompt: str,
+    cwd: Path,
+    *,
+    options: Optional[AgentRunOptions] = None,
+    **option_fields: Unpack[_AgentRunOptionFields],
+) -> AgentResult:
+    run_options = _resolve_agent_run_options(options, option_fields)
+    _log_agent_spawn("claude", cwd, run_options)
+    process_result = _run_subprocess(
+        _claude_command(prompt, run_options),
+        cwd,
+        _agent_env(run_options.extra_env),
+        run_options.timeout_seconds,
+    )
+    return _build_agent_result(
+        run_options,
+        process_result,
+        _claude_process_last_message(process_result),
     )
 
 
@@ -763,24 +852,25 @@ def run_agent(
     prompt: str,
     cwd: Path,
     *,
-    resume_session_id: Optional[str] = None,
-    extra_env: Optional[dict[str, str]] = None,
-    timeout: Optional[int] = None,
-    extra_args: tuple[str, ...] = (),
+    options: Optional[AgentRunOptions] = None,
+    **option_fields: Unpack[_AgentRunOptionFields],
 ) -> AgentResult:
     """Dispatch to the per-backend runner. Config validates `backend` at
     import time, but we re-check here so a misuse from non-config call sites
     fails loudly instead of silently no-opping.
 
-    `extra_args` are forwarded verbatim to the backend CLI (e.g. `-m
-    gpt-5.5` for codex, `--model claude-opus-4-7` for claude). Callers
-    typically pull these from the role-specific config entries
+    The optional controls can be passed as an `AgentRunOptions` object or as
+    the established keyword fields. `extra_args` are forwarded verbatim to
+    the backend CLI (e.g. `-m gpt-5.5` for codex, `--model
+    claude-opus-4-7` for claude). Callers typically pull these from the
+    role-specific config entries
     (`DEV_AGENT_ARGS`, `REVIEW_AGENT_ARGS`, `DECOMPOSE_AGENT_ARGS`) so a
     role like "implement with codex at xhigh reasoning" stays declarative
     in env. They are injected for both fresh spawns and resumes; the
     backend's own session store carries forward model/effort selection
     across resumes, but explicit args keep the contract identical.
     """
+    run_options = _resolve_agent_run_options(options, option_fields)
     if backend == "codex":
         runner = _run_codex
     elif backend == "claude":
@@ -792,8 +882,5 @@ def run_agent(
     return runner(
         prompt,
         cwd,
-        resume_session_id=resume_session_id,
-        extra_env=extra_env,
-        timeout=timeout,
-        extra_args=extra_args,
+        options=run_options,
     )

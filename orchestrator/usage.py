@@ -288,6 +288,17 @@ def _walk_objects(value: Any) -> Iterable[dict[str, Any]]:
             yield from _walk_objects(v)
 
 
+def _coerce_reported_cost(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 def _find_last_reported_cost(events: list[dict[str, Any]]) -> Optional[float]:
     """Return the final ``total_cost_usd`` observed anywhere in the stream.
 
@@ -295,20 +306,15 @@ def _find_last_reported_cost(events: list[dict[str, Any]]) -> Optional[float]:
     nests it deeper than the top level; walk every object so a deeper path
     still wins over an estimate.
     """
-    last: Optional[float] = None
-    for ev in events:
-        for obj in _walk_objects(ev):
-            value = obj.get("total_cost_usd")
-            if value is None:
-                continue
-            if isinstance(value, (int, float)):
-                last = float(value)
-            elif isinstance(value, str):
-                try:
-                    last = float(value)
-                except ValueError:
-                    pass
-    return last
+    last_cost: Optional[float] = None
+    for event in events:
+        for payload in _walk_objects(event):
+            reported_cost = _coerce_reported_cost(
+                payload.get("total_cost_usd")
+            )
+            if reported_cost is not None:
+                last_cost = reported_cost
+    return last_cost
 
 
 def _dedup_models(models: Iterable[str]) -> tuple[str, ...]:
@@ -341,30 +347,62 @@ def _select_cost(
     return None, "unknown-price"
 
 
+_ModelPath = tuple[str, ...]
+
+
+def _nested_value(payload: dict[str, Any], path: _ModelPath) -> Any:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _known_model(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value and value != "unknown":
+        return value
+    return None
+
+
+def _nonempty_string(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _first_model_at_paths(
+    event: dict[str, Any], paths: tuple[_ModelPath, ...],
+) -> Optional[str]:
+    for path in paths:
+        model = _known_model(_nested_value(event, path))
+        if model is not None:
+            return model
+    return None
+
+
+def _first_string_at_paths(
+    event: dict[str, Any], paths: tuple[_ModelPath, ...],
+) -> Optional[str]:
+    for path in paths:
+        value = _nonempty_string(_nested_value(event, path))
+        if value is not None:
+            return value
+    return None
+
+
 # --- claude parser ----------------------------------------------------------
 
+_CLAUDE_MODEL_PATHS: tuple[_ModelPath, ...] = (
+    ("message", "model"),
+    ("event", "message", "model"),
+    ("model",),
+    ("response", "model"),
+)
+
+
 def _claude_model_name(event: dict[str, Any]) -> str:
-    msg = event.get("message")
-    if isinstance(msg, dict):
-        m = msg.get("model")
-        if isinstance(m, str) and m:
-            return m
-    nested = event.get("event")
-    if isinstance(nested, dict):
-        n_msg = nested.get("message")
-        if isinstance(n_msg, dict):
-            m = n_msg.get("model")
-            if isinstance(m, str) and m:
-                return m
-    m = event.get("model")
-    if isinstance(m, str) and m:
-        return m
-    resp = event.get("response")
-    if isinstance(resp, dict):
-        m = resp.get("model")
-        if isinstance(m, str) and m:
-            return m
-    return "unknown"
+    return _first_string_at_paths(event, _CLAUDE_MODEL_PATHS) or "unknown"
 
 
 def _claude_usage_record(usage: dict[str, Any]) -> dict[str, int]:
@@ -467,7 +505,13 @@ def _claude_usage_records(
 def _sorted_claude_usage_rows(
     by_id: dict[str, _ClaudeUsageRow],
 ) -> list[_ClaudeUsageRow]:
-    return [row for _, row in sorted(by_id.items(), key=lambda item: item[1][0])]
+    usage_rows = list(by_id.values())
+    usage_rows.sort(key=_claude_usage_row_index)
+    return usage_rows
+
+
+def _claude_usage_row_index(usage_row: _ClaudeUsageRow) -> int:
+    return usage_row[0]
 
 
 def _claude_result_usage_records(
@@ -618,16 +662,8 @@ def _codex_usage_block(event: dict[str, Any]) -> Optional[dict[str, Any]]:
     return None
 
 
-def _codex_known_model(value: Any) -> Optional[str]:
-    if isinstance(value, str) and value and value != "unknown":
-        return value
-    return None
-
-
-_CODEX_MODEL_KEYS: tuple[str, ...] = (
-    "model",
-)
-_CODEX_MODEL_NESTED: tuple[tuple[str, ...], ...] = (
+_CODEX_MODEL_PATHS: tuple[_ModelPath, ...] = (
+    ("model",),
     ("response", "model"),
     ("item", "model"),
     ("event", "model"),
@@ -642,25 +678,11 @@ _CODEX_MODEL_NESTED: tuple[tuple[str, ...], ...] = (
 def _codex_model_name(
     event: dict[str, Any], usage: Optional[dict[str, Any]]
 ) -> str:
-    for key in _CODEX_MODEL_KEYS:
-        m = _codex_known_model(event.get(key))
-        if m:
-            return m
-    for path in _CODEX_MODEL_NESTED:
-        cur: Any = event
-        for key in path:
-            if not isinstance(cur, dict):
-                cur = None
-                break
-            cur = cur.get(key)
-        m = _codex_known_model(cur)
-        if m:
-            return m
-    if usage is not None:
-        m = _codex_known_model(usage.get("model"))
-        if m:
-            return m
-    return "unknown"
+    event_model = _first_model_at_paths(event, _CODEX_MODEL_PATHS)
+    if event_model is not None:
+        return event_model
+    usage_model = _known_model(usage.get("model")) if usage else None
+    return usage_model or "unknown"
 
 
 def _codex_usage_record(usage: dict[str, Any]) -> dict[str, int]:
@@ -727,16 +749,25 @@ def _codex_select_model(
     that, the last ``model`` field seen anywhere in the stream wins, then the
     caller-supplied ``fallback_model``. ``None`` when nothing names a model.
     """
-    chosen = _codex_known_model(last_model)
-    if chosen is None:
-        for ev in events:
-            for obj in _walk_objects(ev):
-                cand = _codex_known_model(obj.get("model"))
-                if cand:
-                    chosen = cand
-        if chosen is None and fallback_model:
-            chosen = _codex_known_model(fallback_model)
-    return chosen
+    chosen_model = _known_model(last_model)
+    if chosen_model is not None:
+        return chosen_model
+    stream_model = _last_stream_model(events)
+    if stream_model is not None:
+        return stream_model
+    return _known_model(fallback_model)
+
+
+def _last_stream_model(
+    events: list[dict[str, Any]],
+) -> Optional[str]:
+    last_model: Optional[str] = None
+    for event in events:
+        for payload in _walk_objects(event):
+            model = _known_model(payload.get("model"))
+            if model is not None:
+                last_model = model
+    return last_model
 
 
 def _codex_estimate_cost(
@@ -980,6 +1011,33 @@ def _claude_skill_name(block: Any) -> Optional[str]:
     return None
 
 
+def _claude_init_field(
+    events: Iterable[dict[str, Any]], field_name: str,
+) -> Any:
+    for event in events:
+        if event.get("type") != "system":
+            continue
+        if event.get("subtype") != "init":
+            continue
+        return event.get(field_name)
+    return None
+
+
+def _ordered_unique_names(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    ordered_names: list[str] = []
+    seen_names: set[str] = set()
+    for name in value:
+        if not isinstance(name, str):
+            continue
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        ordered_names.append(name)
+    return tuple(ordered_names)
+
+
 def _claude_offered_skills(events: Iterable[dict[str, Any]]) -> tuple[str, ...]:
     """Read the offered-skills set from claude's ``system``/``init`` frame.
 
@@ -991,20 +1049,7 @@ def _claude_offered_skills(events: Iterable[dict[str, Any]]) -> tuple[str, ...]:
     names are de-duplicated in first-seen order. The first ``init`` frame
     wins (a single run emits one).
     """
-    for ev in events:
-        if ev.get("type") != "system" or ev.get("subtype") != "init":
-            continue
-        skills = ev.get("skills")
-        if not isinstance(skills, list):
-            return ()
-        order: list[str] = []
-        seen: set[str] = set()
-        for name in skills:
-            if isinstance(name, str) and name and name not in seen:
-                seen.add(name)
-                order.append(name)
-        return tuple(order)
-    return ()
+    return _ordered_unique_names(_claude_init_field(events, "skills"))
 
 
 def parse_claude_skills(stdout: str) -> SkillTriggers:
@@ -1314,20 +1359,7 @@ def _claude_offered_tools(events: Iterable[dict[str, Any]]) -> tuple[str, ...]:
     renamed field, or a non-string entry, filters out rather than raising,
     and names de-duplicate in first-seen order. The first ``init`` frame wins.
     """
-    for ev in events:
-        if ev.get("type") != "system" or ev.get("subtype") != "init":
-            continue
-        tools = ev.get("tools")
-        if not isinstance(tools, list):
-            return ()
-        order: list[str] = []
-        seen: set[str] = set()
-        for name in tools:
-            if isinstance(name, str) and name and name not in seen:
-                seen.add(name)
-                order.append(name)
-        return tuple(order)
-    return ()
+    return _ordered_unique_names(_claude_init_field(events, "tools"))
 
 
 def _claude_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
