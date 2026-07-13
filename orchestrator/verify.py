@@ -204,6 +204,92 @@ def _drain_verify_output(proc: subprocess.Popen) -> tuple[str, str]:
     return drained if drained is not None else ("", "")
 
 
+def _spawn_verify_command(
+    worktree: Path, command: str, child_env: dict[str, str],
+) -> subprocess.Popen:
+    """Start one verify shell in the process group used for bounded cleanup."""
+    return subprocess.Popen(
+        command,
+        shell=True,
+        cwd=str(worktree),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        env=child_env,
+    )
+
+
+def _timeout_verify_result(
+    proc: subprocess.Popen, command: str,
+) -> VerifyResult:
+    """Kill a timed-out verify group and retain its bounded partial output."""
+    _kill_verify_group(proc)
+    partial_output = _combine_output(*_drain_verify_output(proc))
+    return VerifyResult(
+        status="timeout",
+        command=command,
+        exit_code=None,
+        output=_truncate_verify_output(partial_output),
+    )
+
+
+def _completed_verify_result(
+    proc: subprocess.Popen,
+    command: str,
+    drained: tuple[str, str],
+    worktree: Path,
+    head_before: str,
+) -> Optional[VerifyResult]:
+    """Classify one completed command, returning None only when it passed."""
+    combined_output = _combine_output(*drained)
+    if proc.returncode != 0:
+        return VerifyResult(
+            status="failed",
+            command=command,
+            exit_code=proc.returncode,
+            output=_truncate_verify_output(combined_output),
+        )
+    dirty_files = _worktree_dirty_files(worktree)
+    if dirty_files:
+        return VerifyResult(
+            status="dirty",
+            command=command,
+            exit_code=proc.returncode,
+            output=_truncate_verify_output(combined_output),
+            dirty_files=tuple(dirty_files),
+        )
+    head_after = _head_sha(worktree)
+    if head_after == head_before:
+        return None
+    return VerifyResult(
+        status="head_changed",
+        command=command,
+        exit_code=proc.returncode,
+        output=_truncate_verify_output(combined_output),
+        head_before=head_before,
+        head_after=head_after,
+    )
+
+
+def _run_verify_command(
+    worktree: Path,
+    command: str,
+    timeout: int,
+    child_env: dict[str, str],
+    head_before: str,
+) -> Optional[VerifyResult]:
+    """Run and classify one command while registering its process group."""
+    proc = _spawn_verify_command(worktree, command, child_env)
+    with _registered(proc):
+        drained = _communicate_bounded(proc, timeout)
+        if drained is None:
+            return _timeout_verify_result(proc, command)
+        return _completed_verify_result(
+            proc, command, drained, worktree, head_before,
+        )
+
+
 def _run_verify_commands(
     worktree: Path,
     commands: tuple[str, ...],
@@ -264,88 +350,11 @@ def _run_verify_commands(
     # comment publishes `verify.command` verbatim on the issue.
     child_env = _filter_agent_env(dict(os.environ), allow_provider_auth=False)
     for command in commands:
-        # `start_new_session=True` puts the shell in its own process
-        # group (and session) so a timeout-kill can tear down EVERY
-        # descendant in one `killpg` call. Without this, the
-        # `subprocess.run(..., shell=True, timeout=...)` shape only
-        # SIGKILLs the shell; a `make -j` worker, a `pytest-xdist`
-        # forker, or a backgrounded `&` subprocess survives the shell
-        # and can keep mutating the worktree AFTER the orchestrator has
-        # already posted `verify_timeout` and parked the issue. That
-        # silently violates the bounded-timeout gate the operator
-        # configured and can race the orchestrator's own next-tick
-        # reads.
-        proc = subprocess.Popen(
-            command,
-            shell=True,
-            cwd=str(worktree),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-            env=child_env,
+        failure = _run_verify_command(
+            worktree, command, timeout, child_env, head_before,
         )
-        # Register the group so the orchestrator's shutdown sweep
-        # (`agents.terminate_all_running`) can SIGTERM/SIGKILL it. Without
-        # this a slow verify command is invisible to the sweep and survives
-        # the shutdown watchdog's `os._exit`, going on to mutate the worktree
-        # after the orchestrator has stopped -- the same bounded-lifetime
-        # guarantee the agent subprocesses already get. `start_new_session=
-        # True` above makes `proc.pid` the group leader the sweep targets;
-        # `_registered` clears the registry so a completed command does not
-        # leak into it.
-        with _registered(proc):
-            drained = _communicate_bounded(proc, timeout)
-            if drained is None:
-                _kill_verify_group(proc)
-                partial = _combine_output(*_drain_verify_output(proc))
-                return VerifyResult(
-                    status="timeout",
-                    command=command,
-                    exit_code=None,
-                    output=_truncate_verify_output(partial),
-                )
-            combined = _combine_output(*drained)
-            if proc.returncode != 0:
-                return VerifyResult(
-                    status="failed",
-                    command=command,
-                    exit_code=proc.returncode,
-                    output=_truncate_verify_output(combined),
-                )
-            # Check dirtiness PER COMMAND so a dirty failure can be
-            # attributed to the actual command that produced the
-            # untracked/modified files and surface that command's stdout/
-            # stderr in the park comment. A single end-of-loop check would
-            # always blame `commands[-1]` even when an earlier command was
-            # the cause, and would have already lost its captured output
-            # by the time we got here.
-            dirty = _worktree_dirty_files(worktree)
-            if dirty:
-                return VerifyResult(
-                    status="dirty",
-                    command=command,
-                    exit_code=proc.returncode,
-                    output=_truncate_verify_output(combined),
-                    dirty_files=tuple(dirty),
-                )
-            # HEAD-movement check. A verify command that `git commit`s its
-            # own auto-fix leaves `git status` clean and exits 0 -- looking
-            # identical to a passing gate -- yet the squash-on-approval +
-            # force-push that follows would publish that unreviewed commit.
-            # Fail the gate so the operator decides whether the auto-commit
-            # belongs in the PR (re-spawn the reviewer) or should be
-            # reverted before re-trying.
-            head_after = _head_sha(worktree)
-            if head_after != head_before:
-                return VerifyResult(
-                    status="head_changed",
-                    command=command,
-                    exit_code=proc.returncode,
-                    output=_truncate_verify_output(combined),
-                    head_before=head_before,
-                    head_after=head_after,
-                )
+        if failure is not None:
+            return failure
     return VerifyResult(status="ok")
 
 

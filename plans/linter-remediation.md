@@ -41,7 +41,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
-| 3 | Remaining production complexity | 3/6 | [ ] |
+| 3 | Remaining production complexity | 4/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
@@ -254,9 +254,9 @@ Apply this sequence in every package:
 
 ### Package 3.4 — Git and worktree infrastructure
 
-- [ ] Simplify `base_sync.py`, `branch_publication.py`, `git_plumbing.py`, `verify.py`, and
+- [x] Simplify `base_sync.py`, `branch_publication.py`, `git_plumbing.py`, `verify.py`, and
   `worktree_lifecycle.py`.
-- [ ] Preserve authentication envelopes, lock boundaries, command order, and recovery routes.
+- [x] Preserve authentication envelopes, lock boundaries, command order, and recovery routes.
 
 ### Package 3.5 — GitHub, scheduling, state, and shared workflow helpers
 
@@ -500,6 +500,35 @@ considered.
 - Protected by: `orchestrator.dashboard.__all__` and `tests/test_dashboard.py`.
 - Reviewed: [x]
 
+### Auto-rebase recovery compatibility helper
+
+- File and symbol: `orchestrator/base_sync.py: _recover_pending_auto_base_rebase`
+- Rule: `WPS211`
+- Reason: The explicit positional and keyword-only arguments are re-exported from `orchestrator.worktrees`. Replacing
+  them with the typed recovery context would break direct callers and patch targets; the compatibility helper builds
+  that context immediately and delegates the recovery flow.
+- Protected by: `orchestrator.worktrees.__all__` and `tests/test_workflow_base_sync_unit.py`.
+- Reviewed: [x]
+
+### PR worktree synchronization compatibility helper
+
+- File and symbol: `orchestrator/base_sync.py: _sync_pr_worktree_to_base`
+- Rule: `WPS211`
+- Reason: The explicit synchronization contract is re-exported through both `orchestrator.worktrees` and
+  `orchestrator.workflow`. A request object would break existing callers and patch targets; the helper already groups
+  its implementation state in `_AutoRebaseContext`.
+- Protected by: the two compatibility facades and `tests/test_workflow_base_sync_unit.py`.
+- Reviewed: [x]
+
+### PR conflict-routing compatibility helper
+
+- File and symbol: `orchestrator/base_sync.py: _route_pr_worktree_to_resolving_conflict`
+- Rule: `WPS211`
+- Reason: The explicit routing inputs are part of the `orchestrator.worktrees` compatibility surface and map directly
+  to the persisted state and event fields. Replacing them with a request object would break callers and patch targets.
+- Protected by: `orchestrator.worktrees.__all__`, the base-sync tests, and conflict event-emission tests.
+- Reviewed: [x]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -525,11 +554,16 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-12 | 2.8 | Complete | WPS210/WPS231, 10 focused; Ruff/diff; 2099 passed, 3 skipped | None | Package 3.1 |
 | 2026-07-12 | 3.1 | Complete | Target WPS; focused; Ruff/diff; full suite | Not committed | Package 3.2 |
 | 2026-07-12 | 3.2 | Complete | Target WPS; Ruff/diff; full suite | Not committed | Package 3.3 |
-| 2026-07-13 | 3.3 | Complete | Target WPS; 360 focused; Ruff/diff; 2100 passed, 3 skipped | Not committed | Package 3.4 |
+| 2026-07-13 | 3.3 | Complete | Target WPS; 360 focused; full gate | Not committed | Package 3.4 |
+| 2026-07-13 | 3.4 | Complete | WPS (3 retained); 221 focused; full gate | Not committed | Package 3.5 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
 Package 3.2 retained two reviewed `WPS211` compatibility findings. All 246 focused tests and 2,100 full tests passed;
 3 live-Postgres tests were skipped because `ANALYTICS_TEST_DB_URL` was unset.
 
-Packages 2.8, 3.2, and 3.3 ran `tests/` because root collection was blocked by the unreadable ignored database volume.
+Package 3.4 retained three reviewed `WPS211` compatibility findings. All 221 focused tests and 2,100 full tests
+passed; 3 live-Postgres tests were skipped because `ANALYTICS_TEST_DB_URL` was unset.
+
+Packages 2.8, 3.2, 3.3, and 3.4 ran `tests/` because root collection was blocked by the unreadable ignored database
+volume.
