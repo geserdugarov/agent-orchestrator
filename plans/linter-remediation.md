@@ -265,7 +265,8 @@ Apply this sequence in every package:
 
 ### Package 3.6 — Stage handlers
 
-- [ ] Simplify the handlers under `orchestrator/stages/` one stage at a time.
+- [x] Simplify `orchestrator/stages/decomposition.py`.
+- [ ] Simplify the remaining handlers under `orchestrator/stages/` one stage at a time.
 - [ ] Keep cross-module calls late-bound through `from .. import workflow as _wf`.
 - [ ] Keep stage-private helpers private and explicitly alias every facade re-export.
 - [ ] Update the matching focused stage tests and documentation pointers after helper moves.
@@ -567,7 +568,8 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-12 | 3.2 | Complete | Target WPS; Ruff/diff; full suite | Not committed | Package 3.3 |
 | 2026-07-13 | 3.3 | Complete | Target WPS; 360 focused; full gate | Not committed | Package 3.4 |
 | 2026-07-13 | 3.4 | Complete | WPS (3 retained); 221 focused; full gate | Not committed | Package 3.5 |
-| 2026-07-13 | 3.5 | Complete | WPS (1 retained); 217 focused; Ruff/diff; 2100 passed, 3 skipped | Not committed | Package 3.6 |
+| 2026-07-13 | 3.5 | Complete | WPS (1 retained); 217 focused; full gate | Not committed | Package 3.6 |
+| 2026-07-13 | 3.6/decomposition | Complete | Target WPS; 104 focused; full gate | Not committed | `implementing.py` |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 

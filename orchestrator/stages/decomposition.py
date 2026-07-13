@@ -13,13 +13,13 @@ recovery / stale manifest cleanup (`_recover_stale_manifest`), the
 DECOMPOSE kill-switch bailout (`_route_disabled_to_implementing`), the
 fresh decomposer spawn (`_spawn_fresh_decomposer`) or awaiting-human
 resume (`_resume_decomposer_on_human_reply`), the post-run settlement
-(`_settle_decomposer_run`, folds usage and parks on pause / timeout), and
-the manifest-outcome dispatch (`_dispatch_decomposer_manifest`) --
-invalid/silent park (`_park_unparsed_manifest`), `single` finalize
+(`_process_decomposer_run`, including usage, pause / timeout handling, and
+the read-only worktree guard), and the manifest-outcome dispatch
+(`_dispatch_decomposer_manifest`) -- invalid/silent park
+(`_park_unparsed_manifest`), `single` finalize
 (`_finalize_single_decision`), or `split` child creation
 (`_create_child_issues`) plus parent finalize + activation
-(`_finalize_split`). The read-only dirty-worktree park stays inline in
-`_handle_decomposing` so `keep_worktree` is set before its side effects.
+(`_finalize_split`).
 `_handle_blocked` and `_handle_umbrella` share the
 child-poll helpers (`_route_parent_drift`, `_read_child_labels`,
 `_park_rejected_children`, `_park_manually_closed_children`,
@@ -53,7 +53,7 @@ from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import GitHubClient, PinnedState
 
 
-@dataclass(frozen=True)
+@dataclass
 class _DecomposerRunPlan:
     agent_result: Optional[AgentResult]
     keep_worktree: bool = False
@@ -847,17 +847,17 @@ def _prepare_decomposer_run(
     spec: RepoSpec,
     issue: Issue,
     state: PinnedState,
-) -> Optional[_DecomposerRunPlan]:
+) -> _DecomposerRunPlan:
     # User-content drift FIRST, so it runs BEFORE the half-finished recovery:
     # otherwise recovery could finalize against a stale manifest when the issue
     # was edited during a crash window.
     _reset_decomposing_on_drift(gh, issue, state)
 
     if _recover_stale_manifest(gh, issue, state):
-        return None
+        return _DecomposerRunPlan(agent_result=None)
 
     if _route_disabled_to_implementing(gh, spec, issue, state):
-        return None
+        return _DecomposerRunPlan(agent_result=None)
 
     if state.get("awaiting_human"):
         decomposer_result = _resume_decomposer_on_human_reply(
@@ -873,66 +873,56 @@ def _prepare_decomposer_run(
     )
 
 
+def _process_decomposer_run(
+    gh: GitHubClient,
+    spec: RepoSpec,
+    issue: Issue,
+    state: PinnedState,
+    run_plan: _DecomposerRunPlan,
+) -> None:
+    from orchestrator import workflow as _wf
+
+    decomposer_result = run_plan.agent_result
+    if decomposer_result is None:
+        return
+
+    if _settle_decomposer_run(gh, issue, state, decomposer_result):
+        return
+
+    # The decomposer is read-only. Preserve a changed worktree for operator
+    # inspection, setting the cleanup policy before parking or persistence can
+    # raise and trigger the handler's finally block.
+    wt = _wf._decompose_worktree_path(spec, issue.number)
+    if _wf._has_new_commits(spec, wt) or _wf._worktree_dirty_files(wt):
+        run_plan.keep_worktree = True
+        _wf._park_awaiting_human(
+            gh, issue, state,
+            f"{config.HITL_MENTIONS} decomposer left commits or "
+            "uncommitted changes in the worktree, but it must be "
+            "read-only. Reset the worktree before resuming.",
+            reason="decomposer_dirty",
+        )
+        gh.write_pinned_state(issue, state)
+        return
+
+    # An interrupted run has no trustworthy manifest. The read-only check
+    # stays first so changes left by a killed run remain available to inspect.
+    if _wf._ignore_if_interrupted(issue, decomposer_result):
+        return
+
+    _dispatch_decomposer_manifest(gh, issue, state, decomposer_result)
+
+
 def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
-
-    # Track whether to keep the decomposer worktree past this tick. Set
-    # True only in the dirty/commits park below or the awaiting-human
-    # no-reply park, where the operator may want to inspect what the agent
-    # did. Every other exit (success or park) cleans up via the finally so
-    # the next consumer of this issue number starts from current
-    # `origin/<base>`.
-    keep_worktree = False
+    run_plan = _DecomposerRunPlan(agent_result=None)
     try:
         run_plan = _prepare_decomposer_run(gh, spec, issue, state)
-        if run_plan is None:
-            return
-        keep_worktree = run_plan.keep_worktree
-        if run_plan.agent_result is None:
-            return
-        decomposer_result = run_plan.agent_result
-
-        if _settle_decomposer_run(gh, issue, state, decomposer_result):
-            return
-
-        # The decomposer is supposed to be read-only. If it committed or
-        # left uncommitted changes, something has gone wrong (prompt
-        # ignored, agent misbehaving, operator scratch). Park awaiting
-        # human and KEEP the worktree past this tick so the operator can
-        # inspect what the decomposer actually produced before resetting.
-        # Set `keep_worktree` BEFORE the park's side effects so a failing
-        # `_park_awaiting_human` / `write_pinned_state` still leaves the
-        # worktree on disk (the finally would otherwise tear it down).
-        wt = _wf._decompose_worktree_path(spec, issue.number)
-        if _wf._has_new_commits(spec, wt) or _wf._worktree_dirty_files(wt):
-            keep_worktree = True
-            _wf._park_awaiting_human(
-                gh, issue, state,
-                f"{config.HITL_MENTIONS} decomposer left commits or "
-                "uncommitted changes in the worktree, but it must be "
-                "read-only. Reset the worktree before resuming.",
-                reason="decomposer_dirty",
-            )
-            gh.write_pinned_state(issue, state)
-            return
-
-        # Shutdown-sweep interruption: a killed decomposer run has no
-        # trustworthy manifest. Its empty/partial output would otherwise
-        # fall through to the silent/invalid park and persist the session /
-        # `last_agent_action_at` mutations. Ignore it and return WITHOUT
-        # writing so the next process re-runs from durable state. Placed
-        # AFTER the read-only dirty/commits park so an interrupted run that
-        # still left changes parks for inspection (preserving the read-only
-        # semantics), and BEFORE the manifest parse so no partial
-        # `last_message` is read.
-        if _wf._ignore_if_interrupted(issue, decomposer_result):
-            return
-
-        _dispatch_decomposer_manifest(gh, issue, state, decomposer_result)
+        _process_decomposer_run(gh, spec, issue, state, run_plan)
     finally:
-        if not keep_worktree:
+        if not run_plan.keep_worktree:
             _wf._cleanup_decompose_worktree(spec, issue.number)
 
 
