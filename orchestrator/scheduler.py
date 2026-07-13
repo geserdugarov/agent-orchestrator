@@ -54,6 +54,7 @@ import logging
 import threading
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Callable, Iterator, Optional
 
 log = logging.getLogger(__name__)
@@ -73,6 +74,22 @@ deployment without spinning up unbounded threads. A rare burst past the
 bound (e.g. many PRs merged at once) simply queues on this executor and
 drains quickly -- still never blocked by cap-counted agent work.
 """
+
+
+@dataclass(frozen=True)
+class _Submission:
+    """Normalized inputs that travel together through slot reservation."""
+
+    repo_slug: str
+    issue_number: int
+    fn: Callable[[], None]
+    family: bool
+    cap_exempt: bool
+    per_repo_cap: int
+
+    @property
+    def key(self) -> tuple[str, int]:
+        return self.repo_slug, self.issue_number
 
 
 class IssueScheduler:
@@ -216,8 +233,18 @@ class IssueScheduler:
         different caps; the default ``per_repo_cap`` set at construction
         is the fallback for repos that did not override.
         """
-        key = (repo_slug, int(issue_number))
-        cap = self._per_repo_cap if per_repo_cap is None else max(1, int(per_repo_cap))
+        submission = _Submission(
+            repo_slug=repo_slug,
+            issue_number=int(issue_number),
+            fn=fn,
+            family=family,
+            cap_exempt=cap_exempt,
+            per_repo_cap=(
+                self._per_repo_cap
+                if per_repo_cap is None
+                else max(1, int(per_repo_cap))
+            ),
+        )
         # The whole reserve → executor.submit → add_done_callback
         # sequence runs under `self._lock`. Without this, a worker
         # can complete between `executor.submit` returning and
@@ -231,85 +258,12 @@ class IssueScheduler:
         # firing of `add_done_callback` for an already-done future
         # (very-fast worker) can reacquire it in `_on_worker_done`.
         with self._lock:
-            if self._closed:
-                log.info(
-                    "scheduler skip repo=%s issue=#%s reason=closed",
-                    repo_slug, issue_number,
-                )
+            skip_reason = self._skip_reason_locked(submission)
+            if skip_reason is not None:
+                self._log_skip_locked(submission, skip_reason)
                 return False
-            if key in self._active or key in self._tracked:
-                # Common and expected when a long-running worker straddles
-                # ticks. DEBUG keeps a normal busy repo from spamming the
-                # operator log; the rarer skip reasons below stay at INFO.
-                # `_tracked` is checked alongside `_active` so a fanout
-                # submit cannot slip in for an issue the family bucket
-                # is currently processing inside `track_active`.
-                log.debug(
-                    "scheduler skip repo=%s issue=#%s reason=duplicate_active",
-                    repo_slug, issue_number,
-                )
-                return False
-            if not cap_exempt and len(self._active) >= self._global_cap:
-                log.info(
-                    "scheduler skip repo=%s issue=#%s reason=global_cap "
-                    "(active=%d cap=%d)",
-                    repo_slug, issue_number,
-                    len(self._active), self._global_cap,
-                )
-                return False
-            if (
-                not cap_exempt
-                and self._per_repo_active.get(repo_slug, 0) >= cap
-            ):
-                log.info(
-                    "scheduler skip repo=%s issue=#%s reason=per_repo_cap "
-                    "(active=%d cap=%d)",
-                    repo_slug, issue_number,
-                    self._per_repo_active.get(repo_slug, 0), cap,
-                )
-                return False
-            if family and repo_slug in self._family_active_repos:
-                # The family-slot skip is the regression the issue #326 fix
-                # targets: a stale child sitting at backlog/blocked used to
-                # take this slot and starve the parent umbrella. The
-                # dispatch layer now folds family work into one bucket
-                # task, but the skip is still possible across ticks while
-                # the previous tick's bucket is still draining -- worth
-                # surfacing in the log so operators can correlate
-                # "umbrella not advancing" with "family bucket still busy".
-                log.info(
-                    "scheduler skip repo=%s issue=#%s reason=family_slot_held",
-                    repo_slug, issue_number,
-                )
-                return False
-            if cap_exempt:
-                self._tracked.add(key)
-            else:
-                self._active.add(key)
-                self._per_repo_active[repo_slug] += 1
-            if family:
-                self._family_active_repos.add(repo_slug)
-            executor = (
-                self._exempt_executor if cap_exempt else self._executor
-            )
-            try:
-                future = executor.submit(fn)
-            except RuntimeError:
-                # Executor was shut down between the closed-check
-                # above and the submit call (the executor and the
-                # `_closed` flag are not the same gate). Roll back the
-                # reservation so the next tick can retry without a
-                # phantom in-flight marker.
-                self._release_slot_locked(
-                    key, repo_slug, family=family, cap_exempt=cap_exempt,
-                )
-                return False
-            future.add_done_callback(
-                lambda fut, _key=key, _slug=repo_slug, _family=family,
-                _exempt=cap_exempt:
-                self._on_worker_done(fut, _key, _slug, _family, _exempt)
-            )
-        return True
+            self._reserve_slot_locked(submission)
+            return self._start_worker_locked(submission)
 
     def reap(self) -> int:
         """Drain completed futures, log any worker exception. Nonblocking.
@@ -360,40 +314,125 @@ class IssueScheduler:
 
     # -- internals ---------------------------------------------------
 
-    def _release_slot_locked(
-        self,
-        key: tuple[str, int],
-        repo_slug: str,
-        *,
-        family: bool,
-        cap_exempt: bool = False,
-    ) -> None:
-        """Drop the in-flight markers for ``key``. Caller holds ``self._lock``.
+    def _cap_skip_reason_locked(
+        self, submission: _Submission,
+    ) -> Optional[str]:
+        """Return the first active cap reached by a counted submission."""
+        if len(self._active) >= self._global_cap:
+            return "global_cap"
+        repo_active = self._per_repo_active.get(submission.repo_slug, 0)
+        if repo_active >= submission.per_repo_cap:
+            return "per_repo_cap"
+        return None
 
-        ``cap_exempt`` mirrors the value passed at submit time: an
+    def _skip_reason_locked(
+        self, submission: _Submission,
+    ) -> Optional[str]:
+        """Return the first reservation gate that rejects a submission."""
+        if self._closed:
+            return "closed"
+        if submission.key in self._active or submission.key in self._tracked:
+            return "duplicate_active"
+        if not submission.cap_exempt:
+            cap_reason = self._cap_skip_reason_locked(submission)
+            if cap_reason is not None:
+                return cap_reason
+        if (
+            submission.family
+            and submission.repo_slug in self._family_active_repos
+        ):
+            return "family_slot_held"
+        return None
+
+    def _log_skip_locked(
+        self, submission: _Submission, reason: str,
+    ) -> None:
+        """Log a rejected submission with cap context where applicable."""
+        if reason == "duplicate_active":
+            # Duplicate work is expected when a worker straddles ticks; other
+            # skip reasons remain operator-visible at INFO.
+            log.debug(
+                "scheduler skip repo=%s issue=#%s reason=duplicate_active",
+                submission.repo_slug, submission.issue_number,
+            )
+            return
+        if reason == "global_cap":
+            log.info(
+                "scheduler skip repo=%s issue=#%s reason=global_cap "
+                "(active=%d cap=%d)",
+                submission.repo_slug, submission.issue_number,
+                len(self._active), self._global_cap,
+            )
+            return
+        if reason == "per_repo_cap":
+            log.info(
+                "scheduler skip repo=%s issue=#%s reason=per_repo_cap "
+                "(active=%d cap=%d)",
+                submission.repo_slug, submission.issue_number,
+                self._per_repo_active.get(submission.repo_slug, 0),
+                submission.per_repo_cap,
+            )
+            return
+        log.info(
+            "scheduler skip repo=%s issue=#%s reason=%s",
+            submission.repo_slug, submission.issue_number, reason,
+        )
+
+    def _reserve_slot_locked(self, submission: _Submission) -> None:
+        """Claim the issue, cap counters, and optional family mutex."""
+        if submission.cap_exempt:
+            self._tracked.add(submission.key)
+        else:
+            self._active.add(submission.key)
+            self._per_repo_active[submission.repo_slug] += 1
+        if submission.family:
+            self._family_active_repos.add(submission.repo_slug)
+
+    def _start_worker_locked(self, submission: _Submission) -> bool:
+        """Submit reserved work and install its atomic release callback."""
+        executor = (
+            self._exempt_executor
+            if submission.cap_exempt
+            else self._executor
+        )
+        try:
+            future = executor.submit(submission.fn)
+        except RuntimeError:
+            # Executor shutdown and the `_closed` flag are distinct gates; a
+            # failed submit must release its reservation for a later retry.
+            self._release_slot_locked(submission)
+            return False
+        future.add_done_callback(
+            lambda completed_future: self._on_worker_done(
+                completed_future, submission,
+            )
+        )
+        return True
+
+    def _release_slot_locked(
+        self, submission: _Submission,
+    ) -> None:
+        """Drop a submission's markers. Caller holds ``self._lock``.
+
+        ``submission.cap_exempt`` mirrors the value passed at submit time: an
         exempt submit lives in ``_tracked`` instead of ``_active`` /
         ``_per_repo_active``, so the release path symmetric to it
         clears that single set and leaves the cap counters alone.
         """
-        if cap_exempt:
-            self._tracked.discard(key)
+        if submission.cap_exempt:
+            self._tracked.discard(submission.key)
         else:
-            self._active.discard(key)
-            count = self._per_repo_active.get(repo_slug, 0)
+            self._active.discard(submission.key)
+            count = self._per_repo_active.get(submission.repo_slug, 0)
             if count <= 1:
-                self._per_repo_active.pop(repo_slug, None)
+                self._per_repo_active.pop(submission.repo_slug, None)
             else:
-                self._per_repo_active[repo_slug] = count - 1
-        if family:
-            self._family_active_repos.discard(repo_slug)
+                self._per_repo_active[submission.repo_slug] = count - 1
+        if submission.family:
+            self._family_active_repos.discard(submission.repo_slug)
 
     def _on_worker_done(
-        self,
-        future: Future,
-        key: tuple[str, int],
-        repo_slug: str,
-        family: bool,
-        cap_exempt: bool = False,
+        self, future: Future, submission: _Submission,
     ) -> None:
         # Marker release and completion-queue append happen in ONE
         # critical section so the transition is atomic from `reap`'s
@@ -405,9 +444,7 @@ class IssueScheduler:
         # one lock for both steps guarantees that any reap which sees
         # the cleared marker also sees the completed future.
         with self._lock:
-            self._release_slot_locked(
-                key, repo_slug, family=family, cap_exempt=cap_exempt,
-            )
+            self._release_slot_locked(submission)
             self._completed.append(future)
 
     @contextlib.contextmanager

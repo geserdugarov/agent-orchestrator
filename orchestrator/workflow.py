@@ -729,14 +729,15 @@ def _accumulate_issue_usage(
     if usage is None:
         return
 
-    state.set("issue_agent_runs", int(state.get("issue_agent_runs") or 0) + 1)
+    agent_runs = int(state.get("issue_agent_runs") or 0)
+    state.set("issue_agent_runs", agent_runs + 1)
 
-    tokens = (
-        usage.input_tokens
-        + usage.output_tokens
-        + usage.cache_read_tokens
-        + usage.cache_write_tokens
-    )
+    tokens = sum((
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+    ))
     state.set(
         "issue_total_tokens",
         int(state.get("issue_total_tokens") or 0) + tokens,

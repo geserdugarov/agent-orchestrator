@@ -63,6 +63,16 @@ _SKILL_ROOTS = (".agents/skills", ".claude/skills")
 _SKILL_FILE = "SKILL.md"
 
 
+def _direct_skill_name(parts: list[str]) -> Optional[str]:
+    """Return the name from an exact ``<name>/SKILL.md`` suffix."""
+    if len(parts) != 2:
+        return None
+    skill_name, file_name = parts
+    if not skill_name or file_name != _SKILL_FILE:
+        return None
+    return skill_name
+
+
 def _skill_name_from_path(path: str) -> Optional[str]:
     """Return the skill name for a direct `<root>/<name>/SKILL.md` path.
 
@@ -76,9 +86,23 @@ def _skill_name_from_path(path: str) -> Optional[str]:
         if not path.startswith(prefix):
             continue
         parts = path[len(prefix):].split("/")
-        if len(parts) == 2 and parts[0] and parts[1] == _SKILL_FILE:
-            return parts[0]
+        skill_name = _direct_skill_name(parts)
+        if skill_name is not None:
+            return skill_name
     return None
+
+
+def _paths_by_skill(paths: Iterable[str]) -> dict[str, set[str]]:
+    """Group valid catalog paths by their direct skill name."""
+    paths_by_name: dict[str, set[str]] = {}
+    for raw_path in paths:
+        skill_path = raw_path.strip()
+        if not skill_path:
+            continue
+        skill_name = _skill_name_from_path(skill_path)
+        if skill_name is not None:
+            paths_by_name.setdefault(skill_name, set()).add(skill_path)
+    return paths_by_name
 
 
 def _extract_skill_catalog(
@@ -96,15 +120,7 @@ def _extract_skill_catalog(
     both roots appears once in `skills_available` while `skill_paths`
     carries both of its source paths.
     """
-    paths_by_name: dict[str, set[str]] = {}
-    for raw in paths:
-        path = raw.strip()
-        if not path:
-            continue
-        name = _skill_name_from_path(path)
-        if name is None:
-            continue
-        paths_by_name.setdefault(name, set()).add(path)
+    paths_by_name = _paths_by_skill(paths)
     skills_available = sorted(paths_by_name)
     skill_paths = {
         name: sorted(paths_by_name[name]) for name in skills_available
@@ -211,6 +227,24 @@ def _direct_skill_names(root: Path) -> list[str]:
     return sorted(names)
 
 
+def _add_skill_names(
+    seen: dict[str, None], names: Iterable[str],
+) -> None:
+    """Add names to an insertion-ordered deduplication map."""
+    for skill_name in names:
+        seen.setdefault(skill_name, None)
+
+
+def _global_codex_skill_names() -> list[str]:
+    """Collect user and built-in skill names from the global codex root."""
+    codex_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    global_root = Path(codex_home) / "skills"
+    return sorted(set(
+        _direct_skill_names(global_root)
+        + _direct_skill_names(global_root / _SYSTEM_SKILL_DIR)
+    ))
+
+
 def discover_local_skills(cwd: Path) -> tuple[str, ...]:
     """Enumerate the skill names available to a codex run rooted at `cwd`.
 
@@ -231,16 +265,8 @@ def discover_local_skills(cwd: Path) -> tuple[str, ...]:
     """
     seen: dict[str, None] = {}
     for root in _SKILL_ROOTS:
-        for name in _direct_skill_names(cwd / root):
-            seen.setdefault(name, None)
-    codex_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
-    global_root = Path(codex_home) / "skills"
-    global_names = sorted(set(
-        _direct_skill_names(global_root)
-        + _direct_skill_names(global_root / _SYSTEM_SKILL_DIR)
-    ))
-    for name in global_names:
-        seen.setdefault(name, None)
+        _add_skill_names(seen, _direct_skill_names(cwd / root))
+    _add_skill_names(seen, _global_codex_skill_names())
     return tuple(seen)
 
 

@@ -33,6 +33,7 @@ import hashlib
 from typing import Optional
 
 from github.Issue import Issue
+from github.IssueComment import IssueComment
 
 from orchestrator.comment_trust import is_trusted_author
 from orchestrator.state_machine import WorkflowLabel
@@ -45,6 +46,31 @@ from orchestrator.workflow_messages import (
     _orchestrator_ids,
     _post_issue_comment,
 )
+
+
+def _comment_body_for_hash(
+    issue_comment: IssueComment,
+    orchestrator_ids: set[int],
+    *,
+    include_bare_continue: bool,
+) -> Optional[str]:
+    """Return user-authored requirements text, or None for filtered content."""
+    body = issue_comment.body or ""
+    if PINNED_STATE_MARKER in body or _ORCH_COMMENT_MARKER in body:
+        return None
+    comment_id = getattr(issue_comment, "id", None)
+    if comment_id is not None and int(comment_id) in orchestrator_ids:
+        return None
+    user = getattr(issue_comment, "user", None)
+    if user is not None and getattr(user, "type", None) == "Bot":
+        return None
+    if not is_trusted_author(user):
+        return None
+    if include_bare_continue:
+        return body
+    if _is_bare_orchestrator_continue(issue_comment):
+        return None
+    return body
 
 
 def _compute_user_content_hash(
@@ -98,25 +124,13 @@ def _compute_user_content_hash(
     """
     parts = [issue.title or "", issue.body or ""]
     for issue_comment in issue.get_comments():
-        body = issue_comment.body or ""
-        if PINNED_STATE_MARKER in body:
-            continue
-        if _ORCH_COMMENT_MARKER in body:
-            continue
-        cid = getattr(issue_comment, "id", None)
-        if cid is not None and int(cid) in orchestrator_ids:
-            continue
-        user = getattr(issue_comment, "user", None)
-        if user is not None and getattr(user, "type", None) == "Bot":
-            continue
-        if not is_trusted_author(user):
-            continue
-        if (
-            not include_bare_continue
-            and _is_bare_orchestrator_continue(issue_comment)
-        ):
-            continue
-        parts.append(body)
+        comment_body = _comment_body_for_hash(
+            issue_comment,
+            orchestrator_ids,
+            include_bare_continue=include_bare_continue,
+        )
+        if comment_body is not None:
+            parts.append(comment_body)
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -234,6 +248,43 @@ def _mark_drift_comments_consumed(
         state.set("last_action_comment_id", latest)
 
 
+def _drift_to_decomposing_notice(orphan_children: list) -> str:
+    """Build the reroute notice, including any orphaned child numbers."""
+    if not orphan_children:
+        return (
+            ":pencil2: issue content changed; re-running decomposer "
+            "against the updated body."
+        )
+    orphan_list = ", ".join(
+        f"#{child_number}" for child_number in orphan_children
+    )
+    return (
+        ":pencil2: issue content changed; re-running decomposer "
+        "against the updated body. The previously-tracked children "
+        f"({orphan_list}) will be ORPHANED -- the orchestrator no "
+        "longer tracks them; please close any that no longer apply to "
+        "the updated requirements."
+    )
+
+
+def _reset_decomposition_for_drift(
+    state: PinnedState, new_hash: str,
+) -> None:
+    """Clear manifest/session state while retaining the locked agent spec."""
+    state.set("user_content_hash", new_hash)
+    # A fresh decomposer session must keep the pinned backend so an agent-spec
+    # configuration change cannot retarget an issue already in flight.
+    state.set("decomposer_session_id", None)
+    # Empty manifest tracking prevents half-finished decomposition recovery
+    # from treating the intentional reroute as a crashed split.
+    state.set("children", [])
+    state.set("dep_graph", {})
+    state.set("expected_children_count", None)
+    state.set("umbrella", None)
+    state.set("awaiting_human", False)
+    state.set("park_reason", None)
+
+
 def _route_drift_to_decomposing(
     gh: GitHubClient,
     issue: Issue,
@@ -255,42 +306,7 @@ def _route_drift_to_decomposing(
 
     Caller writes pinned state (`gh.write_pinned_state`) after returning.
     """
-    if orphan_children:
-        orphan_list = ", ".join(
-            f"#{child_number}" for child_number in orphan_children
-        )
-        notice = (
-            ":pencil2: issue content changed; re-running decomposer "
-            "against the updated body. The previously-tracked children "
-            f"({orphan_list}) will be ORPHANED -- the orchestrator no "
-            "longer tracks them; please close any that no longer apply to "
-            "the updated requirements."
-        )
-    else:
-        notice = (
-            ":pencil2: issue content changed; re-running decomposer "
-            "against the updated body."
-        )
+    notice = _drift_to_decomposing_notice(orphan_children)
     _post_issue_comment(gh, issue, state, notice)
-    state.set("user_content_hash", new_hash)
-    # Clear `decomposer_session_id` so the next tick spawns a FRESH
-    # decomposer session (deriving a new manifest against the updated
-    # body, not resuming the prior session with only the human's reply).
-    # Deliberately PRESERVE `decomposer_agent`: once the role's spec has
-    # been recorded on this issue it is locked for the rest of its
-    # lifecycle, even across drift events. A config flip (e.g.
-    # `DECOMPOSE_AGENT=codex -> claude`) between ticks must not retarget
-    # an in-flight issue at a different backend; `_read_decomposer_session`
-    # uses the recorded spec, so the fresh spawn picks up where the old
-    # one left off and the FullSpecPersistenceTest contract holds.
-    state.set("decomposer_session_id", None)
-    # Wipe the manifest tracking so `_handle_decomposing`'s half-finished
-    # recovery branch does not fire on the next tick (it keys on
-    # `expected_children_count` or a non-empty `children` list).
-    state.set("children", [])
-    state.set("dep_graph", {})
-    state.set("expected_children_count", None)
-    state.set("umbrella", None)
-    state.set("awaiting_human", False)
-    state.set("park_reason", None)
+    _reset_decomposition_for_drift(state, new_hash)
     gh.set_workflow_label(issue, WorkflowLabel.DECOMPOSING)
