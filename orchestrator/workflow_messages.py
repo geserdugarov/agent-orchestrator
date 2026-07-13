@@ -263,6 +263,33 @@ _SECRET_KEY_NAMES = frozenset({
 _REDACT_MIN_VALUE_LEN = 8
 
 
+def _is_secret_environment_value(key: str, value: str) -> bool:
+    """Whether an environment entry is shaped like a usable secret."""
+    if not value or len(value) < _REDACT_MIN_VALUE_LEN:
+        return False
+    upper_key = key.upper()
+    return upper_key in _SECRET_KEY_NAMES or any(
+        upper_key.endswith(suffix) for suffix in _SECRET_KEY_SUFFIXES
+    )
+
+
+def _redact_environment_secrets(text: str) -> str:
+    """Replace every secret-shaped process environment value."""
+    redacted = text
+    for key, env_value in os.environ.items():
+        if _is_secret_environment_value(key, env_value):
+            redacted = redacted.replace(env_value, "***")
+    return redacted
+
+
+def _redact_configured_github_token(text: str) -> str:
+    """Redact the PAT even when it came from a token file, not the env."""
+    token = config.GITHUB_TOKEN
+    if token and len(token) >= _REDACT_MIN_VALUE_LEN:
+        return text.replace(token, "***")
+    return text
+
+
 def _redact_secrets(text: str) -> str:
     """Replace values of secret-shaped env vars in `text` with `***`.
 
@@ -275,24 +302,13 @@ def _redact_secrets(text: str) -> str:
     """
     if not text:
         return text
-    redacted = text
-    for key, env_value in os.environ.items():
-        if not env_value or len(env_value) < _REDACT_MIN_VALUE_LEN:
-            continue
-        upper = key.upper()
-        if upper in _SECRET_KEY_NAMES or any(
-            upper.endswith(suffix) for suffix in _SECRET_KEY_SUFFIXES
-        ):
-            redacted = redacted.replace(env_value, "***")
     # GITHUB_TOKEN may have been resolved from ORCHESTRATOR_TOKEN_FILE (or
     # the default ~/.config/<repo>/token path) rather than the process env,
-    # in which case the env loop above never sees it. Without this explicit
-    # pass, a prompt-injected command that cat'd that file -- or any git/gh
-    # subprocess stderr quoting the token -- would publish it unredacted.
-    token = config.GITHUB_TOKEN
-    if token and len(token) >= _REDACT_MIN_VALUE_LEN:
-        redacted = redacted.replace(token, "***")
-    return redacted
+    # in which case the environment scan never sees it. The explicit token
+    # pass also covers git/gh stderr that quotes a file-backed credential.
+    return _redact_configured_github_token(
+        _redact_environment_secrets(text)
+    )
 
 
 def _format_stderr_diagnostics(
@@ -590,6 +606,168 @@ _MANIFEST_RE = re.compile(
 _MAX_CHILDREN = 10
 
 
+def _extract_manifest_payload(
+    last_message: str,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Extract the one final fenced manifest payload from an agent reply."""
+    if not last_message:
+        return None, None
+    # The prompt requires exactly one final fenced block. Accepting the first
+    # match would let a quoted sample manifest override the agent's answer.
+    matches = list(_MANIFEST_RE.finditer(last_message))
+    if not matches:
+        return None, None
+    if len(matches) > 1:
+        return None, (
+            f"expected exactly one orchestrator-manifest block, "
+            f"found {len(matches)}"
+        )
+    manifest_match = matches[0]
+    if last_message[manifest_match.end():].strip():
+        return None, (
+            "orchestrator-manifest must be the final block; "
+            "found content after the closing fence"
+        )
+    return manifest_match.group(1), None
+
+
+def _decode_manifest(
+    payload: str,
+) -> Tuple[Optional[dict], Optional[str]]:
+    """Decode a manifest payload and require a JSON object."""
+    try:
+        manifest = json.loads(payload)
+    except json.JSONDecodeError as error:
+        return None, f"invalid JSON: {error.msg}"
+    if not isinstance(manifest, dict):
+        return None, "manifest is not a JSON object"
+    return manifest, None
+
+
+def _split_manifest_children(
+    manifest: dict,
+) -> Tuple[Optional[list], Optional[str]]:
+    """Return the bounded, non-empty children list for a split decision."""
+    children = manifest.get("children")
+    if not isinstance(children, list) or not children:
+        return None, "split decision requires non-empty children list"
+    if len(children) > _MAX_CHILDREN:
+        return None, f"too many children ({len(children)} > {_MAX_CHILDREN})"
+    return children, None
+
+
+def _manifest_umbrella_error(manifest: dict) -> Optional[str]:
+    """Validate the optional umbrella flag without truthy coercion."""
+    umbrella = manifest.get("umbrella")
+    if umbrella is not None and not isinstance(umbrella, bool):
+        return "umbrella must be a boolean"
+    return None
+
+
+def _is_nonempty_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _manifest_child_text_error(
+    child: object, child_index: int,
+) -> Optional[str]:
+    """Validate one child object and its required text fields."""
+    if not isinstance(child, dict):
+        return f"child {child_index} is not an object"
+    if not _is_nonempty_text(child.get("title")):
+        return f"child {child_index} missing title or body"
+    if not _is_nonempty_text(child.get("body")):
+        return f"child {child_index} missing title or body"
+    return None
+
+
+def _manifest_child_dependencies(
+    child: dict, child_index: int,
+) -> Tuple[Optional[list], Optional[str]]:
+    """Normalize null dependencies and reject every other non-list shape."""
+    dependencies = child.get("depends_on")
+    if dependencies is None:
+        return [], None
+    if not isinstance(dependencies, list):
+        return None, f"child {child_index} depends_on must be a list"
+    return dependencies, None
+
+
+def _is_valid_dependency(
+    dependency_index: object,
+    *,
+    child_index: int,
+    child_count: int,
+) -> bool:
+    """Validate type, bounds, and the no-self-edge invariant."""
+    if isinstance(dependency_index, bool):
+        return False
+    if not isinstance(dependency_index, int):
+        return False
+    if dependency_index < 0 or dependency_index >= child_count:
+        return False
+    return dependency_index != child_index
+
+
+def _manifest_child_error(
+    child: object, child_index: int, child_count: int,
+) -> Optional[str]:
+    """Return the first structural error for one split child."""
+    text_error = _manifest_child_text_error(child, child_index)
+    if text_error is not None:
+        return text_error
+    dependencies, dependency_error = _manifest_child_dependencies(
+        child, child_index,
+    )
+    if dependency_error is not None:
+        return dependency_error
+    for dependency_index in dependencies or []:
+        if not _is_valid_dependency(
+            dependency_index,
+            child_index=child_index,
+            child_count=child_count,
+        ):
+            return (
+                f"child {child_index} has invalid dependency "
+                f"{dependency_index!r}"
+            )
+    return None
+
+
+def _manifest_children_error(children: list) -> Optional[str]:
+    """Validate every child and then the dependency graph as a whole."""
+    for child_index, child in enumerate(children):
+        child_error = _manifest_child_error(
+            child, child_index, len(children),
+        )
+        if child_error is not None:
+            return child_error
+    if _has_dep_cycle(children):
+        return "dependency graph has a cycle"
+    return None
+
+
+def _split_manifest_error(manifest: dict) -> Optional[str]:
+    """Return the first split-only manifest validation error."""
+    children, children_error = _split_manifest_children(manifest)
+    if children_error is not None:
+        return children_error
+    umbrella_error = _manifest_umbrella_error(manifest)
+    if umbrella_error is not None:
+        return umbrella_error
+    return _manifest_children_error(children or [])
+
+
+def _manifest_validation_error(manifest: dict) -> Optional[str]:
+    """Validate the decision and its split-only payload when applicable."""
+    decision = manifest.get("decision")
+    if decision not in ("single", "split"):
+        return "decision must be 'single' or 'split'"
+    if decision == "single":
+        return None
+    return _split_manifest_error(manifest)
+
+
 def _parse_manifest(
     last_message: str,
 ) -> Tuple[Optional[dict], Optional[str]]:
@@ -608,98 +786,15 @@ def _parse_manifest(
       * `(None, None)` -- no fenced block at all. The caller treats this as
         "agent ended without a manifest" and parks as a question.
     """
-    if not last_message:
-        return None, None
-    matches = list(_MANIFEST_RE.finditer(last_message))
-    if not matches:
-        return None, None
-    # The decompose prompt mandates "EXACTLY ONE fenced JSON block ...
-    # and nothing else after it". `re.search` would silently accept the
-    # first fence and ignore the rest, so a decomposer that quotes a
-    # sample/template manifest before its real final answer would have
-    # the orchestrator act on the sample -- creating wrong child issues
-    # or routing the parent on a stale decision. Reject multiple fences
-    # and require the accepted one to be the final block (whitespace
-    # after the closing fence only).
-    if len(matches) > 1:
-        return None, (
-            f"expected exactly one orchestrator-manifest block, "
-            f"found {len(matches)}"
-        )
-    manifest_match = matches[0]
-    if last_message[manifest_match.end():].strip():
-        return None, (
-            "orchestrator-manifest must be the final block; "
-            "found content after the closing fence"
-        )
-    try:
-        manifest = json.loads(manifest_match.group(1))
-    except json.JSONDecodeError as error:
-        return None, f"invalid JSON: {error.msg}"
-    if not isinstance(manifest, dict):
-        return None, "manifest is not a JSON object"
-    decision = manifest.get("decision")
-    if decision not in ("single", "split"):
-        return None, "decision must be 'single' or 'split'"
-    if decision == "single":
-        return manifest, None
-    children = manifest.get("children")
-    if not isinstance(children, list) or not children:
-        return None, "split decision requires non-empty children list"
-    if len(children) > _MAX_CHILDREN:
-        return None, (
-            f"too many children ({len(children)} > {_MAX_CHILDREN})"
-        )
-    # Optional umbrella flag: when true, the parent issue itself has no
-    # implementation work -- it's a tracking issue whose only purpose is
-    # to aggregate children. Reject non-bool values rather than coercing
-    # so a typo like `"umbrella": "yes"` surfaces via the standard
-    # invalid-manifest HITL loop instead of silently being treated as
-    # truthy.
-    umbrella = manifest.get("umbrella")
-    if umbrella is not None and not isinstance(umbrella, bool):
-        return None, "umbrella must be a boolean"
-    for idx, child in enumerate(children):
-        if not isinstance(child, dict):
-            return None, f"child {idx} is not an object"
-        title = child.get("title")
-        body = child.get("body")
-        # Truthiness alone is not enough: `"body": 42` is truthy but
-        # would later blow up `create_child_issue` (which calls
-        # `body.rstrip()`) AFTER `expected_children_count` is persisted,
-        # forcing the half-finished-recovery path. Reject non-string
-        # values up front so the standard "invalid manifest" HITL/resume
-        # loop handles it cleanly.
-        if (
-            not isinstance(title, str) or not title
-            or not isinstance(body, str) or not body
-        ):
-            return None, f"child {idx} missing title or body"
-        # Treat missing key and explicit JSON null as "no dependencies"
-        # (same intent), but reject any other non-list value. The
-        # earlier `child.get("depends_on") or []` collapsed every
-        # falsy scalar (0, False, "") to [] before the list-type
-        # check, so a manifest like `{"depends_on": 0}` -- a clear
-        # malformed list -- was silently accepted as no-deps and the
-        # child activated out of dependency order.
-        deps = child.get("depends_on")
-        if deps is None:
-            deps = []
-        elif not isinstance(deps, list):
-            return None, f"child {idx} depends_on must be a list"
-        for dependency_index in deps:
-            if (
-                not isinstance(dependency_index, int)
-                or isinstance(dependency_index, bool)
-                or dependency_index < 0
-                or dependency_index >= len(children)
-                or dependency_index == idx
-            ):
-                return None, (
-                    f"child {idx} has invalid dependency {dependency_index!r}"
-                )
-    if _has_dep_cycle(children):
-        return None, "dependency graph has a cycle"
+    payload, payload_error = _extract_manifest_payload(last_message)
+    if payload is None:
+        return None, payload_error
+    manifest, decode_error = _decode_manifest(payload)
+    if manifest is None:
+        return None, decode_error
+    validation_error = _manifest_validation_error(manifest)
+    if validation_error is not None:
+        return None, validation_error
     return manifest, None
 
 
@@ -735,6 +830,18 @@ def _has_dep_cycle(children: list[dict]) -> bool:
     )
 
 
+def _prompt_comment_chunk(issue_comment: object) -> Optional[str]:
+    """Format one trusted, non-state issue comment for an agent prompt."""
+    body = getattr(issue_comment, "body", None) or ""
+    if "<!--orchestrator-state" in body:
+        return None
+    user = getattr(issue_comment, "user", None)
+    if not is_trusted_author(user):
+        return None
+    login = user.login if user else "user"
+    return f"@{login}: {body}"
+
+
 def _recent_comments_text(issue: Issue, max_chars: int = 4000) -> str:
     """Conversation text fed to every agent prompt (implement, review,
     documentation, decompose, question, and the drift-resume prompt).
@@ -748,13 +855,9 @@ def _recent_comments_text(issue: Issue, max_chars: int = 4000) -> str:
     """
     chunks: list[str] = []
     for issue_comment in issue.get_comments():
-        body = issue_comment.body or ""
-        if "<!--orchestrator-state" in body:
-            continue
-        if not is_trusted_author(getattr(issue_comment, "user", None)):
-            continue
-        login = issue_comment.user.login if issue_comment.user else "user"
-        chunks.append(f"@{login}: {body}")
+        chunk = _prompt_comment_chunk(issue_comment)
+        if chunk is not None:
+            chunks.append(chunk)
     text = "\n\n".join(chunks)
     return text[-max_chars:] if len(text) > max_chars else text
 
@@ -990,6 +1093,27 @@ def _build_decompose_prompt(
     )
 
 
+def _single_manifest_text(
+    manifest: dict, field_name: str, fallback: str = "",
+) -> str:
+    """Return one stripped optional text field with a safe fallback."""
+    raw_value = manifest.get(field_name)
+    text = raw_value.strip() if isinstance(raw_value, str) else ""
+    return text or fallback
+
+
+def _single_manifest_files(manifest: dict) -> list[str]:
+    """Return non-empty string paths from optional single-decision context."""
+    raw_files = manifest.get("affected_files")
+    if not isinstance(raw_files, list):
+        return []
+    return [
+        file_path.strip()
+        for file_path in raw_files
+        if isinstance(file_path, str) and file_path.strip()
+    ]
+
+
 def _build_single_decision_comment(manifest: dict) -> str:
     """Compose the `single`-decision comment posted on the parent issue.
 
@@ -1009,27 +1133,17 @@ def _build_single_decision_comment(manifest: dict) -> str:
     non-strings / non-lists to empty rather than parking a valid single
     decision after the agent already ran.
     """
-    raw_rationale = manifest.get("rationale")
-    if not isinstance(raw_rationale, str):
-        raw_rationale = ""
-    rationale = raw_rationale.strip() or "(no rationale provided)"
+    rationale = _single_manifest_text(
+        manifest, "rationale", "(no rationale provided)",
+    )
     lines = [f":mag: decomposer says this fits one context: {rationale}"]
 
-    raw_files = manifest.get("affected_files")
-    files = (
-        [
-            file_path.strip()
-            for file_path in raw_files
-            if isinstance(file_path, str) and file_path.strip()
-        ]
-        if isinstance(raw_files, list) else []
-    )
+    files = _single_manifest_files(manifest)
     if files:
         rendered = "\n".join(f"- `{file_path}`" for file_path in files)
         lines.append(f"**Affected files:**\n{rendered}")
 
-    raw_notes = manifest.get("notes")
-    notes = raw_notes.strip() if isinstance(raw_notes, str) else ""
+    notes = _single_manifest_text(manifest, "notes")
     if notes:
         lines.append(f"**Implementation notes:**\n{notes}")
 

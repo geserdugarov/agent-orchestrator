@@ -199,6 +199,34 @@ _INTERRUPT_SOURCES: dict[WorkflowLabel, frozenset[WorkflowLabel]] = {
 }
 
 
+def _mutable_forward_transitions(
+) -> dict[Optional[WorkflowLabel], set[WorkflowLabel]]:
+    """Copy the declared forward graph into mutable target sets."""
+    return {
+        forward_source: set(forward_targets)
+        for forward_source, forward_targets in _FORWARD.items()
+    }
+
+
+def _add_interrupt_transitions(
+    allowed: dict[Optional[WorkflowLabel], set[WorkflowLabel]],
+) -> None:
+    """Fold each target's exact interrupt sources into the graph."""
+    for target, sources in _INTERRUPT_SOURCES.items():
+        for interrupt_source in sources:
+            allowed[interrupt_source].add(target)
+
+
+def _freeze_transitions(
+    allowed: dict[Optional[WorkflowLabel], set[WorkflowLabel]],
+) -> dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]]:
+    """Freeze target sets so the exported transition table is immutable."""
+    return {
+        allowed_source: frozenset(edges)
+        for allowed_source, edges in allowed.items()
+    }
+
+
 def _build_allowed() -> dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]]:
     """Compose the forward spine with the per-target interrupt sources.
 
@@ -208,17 +236,9 @@ def _build_allowed() -> dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]]:
     outgoing edges), and the entry pseudo-state (`None`) gets no interrupt
     edge -- an unlabeled issue is never terminalized directly.
     """
-    allowed: dict[Optional[WorkflowLabel], set[WorkflowLabel]] = {
-        forward_source: set(forward_targets)
-        for forward_source, forward_targets in _FORWARD.items()
-    }
-    for target, sources in _INTERRUPT_SOURCES.items():
-        for interrupt_source in sources:
-            allowed[interrupt_source].add(target)
-    return {
-        allowed_source: frozenset(edges)
-        for allowed_source, edges in allowed.items()
-    }
+    allowed = _mutable_forward_transitions()
+    _add_interrupt_transitions(allowed)
+    return _freeze_transitions(allowed)
 
 
 ALLOWED_TRANSITIONS: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = (

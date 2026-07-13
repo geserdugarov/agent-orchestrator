@@ -162,6 +162,25 @@ def _iter_new_non_pr_issues(
             yield issue
 
 
+def _issue_query_options(
+    *,
+    issue_state: str,
+    since: Optional[datetime],
+    label: Optional[Label] = None,
+) -> dict[str, Any]:
+    """Build the common open/closed issue query options."""
+    options: dict[str, Any] = {
+        "state": issue_state,
+        "sort": "updated",
+        "direction": "desc",
+    }
+    if label is not None:
+        options["labels"] = [label]
+    if since is not None:
+        options["since"] = since
+    return options
+
+
 def _write_event_record(event_record: dict) -> None:
     """Append one JSONL line to `config.EVENT_LOG_PATH` if configured.
 
@@ -220,6 +239,32 @@ class PinnedState:
         self.data[key] = state_value
 
 
+def _pinned_state_from_comment(
+    issue_comment: IssueComment,
+    *,
+    trusted_login: Optional[str],
+    issue_number: int,
+) -> Optional[PinnedState]:
+    """Parse one authenticated, state-only pinned comment candidate."""
+    body = issue_comment.body or ""
+    if PINNED_STATE_MARKER not in body:
+        return None
+    author_login = getattr(
+        getattr(issue_comment, "user", None), "login", None,
+    )
+    if trusted_login is not None and author_login != trusted_login:
+        return None
+    state_match = PINNED_STATE_BODY_RE.match(body)
+    if state_match is None:
+        return None
+    try:
+        data = json.loads(state_match.group(1))
+    except json.JSONDecodeError:
+        log.warning("issue=#%s pinned state JSON unparseable", issue_number)
+        data = {}
+    return PinnedState(comment_id=issue_comment.id, data=data)
+
+
 @dataclass(frozen=True)
 class _CheckSurfaceRead:
     """Normalized state and read outcome for one GitHub checks surface."""
@@ -274,6 +319,45 @@ def _fold_check_states(
     if "pending" in observed_states:
         return "pending"
     return "success"
+
+
+def _review_state_for_head(
+    review: Any, head_sha: str,
+) -> Optional[tuple[str, tuple[int, str]]]:
+    """Return a reviewer-keyed state record when a review applies to HEAD."""
+    if (getattr(review, "commit_id", "") or "") != head_sha:
+        return None
+    review_state = (review.state or "").upper()
+    if review_state not in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+        return None
+    reviewer_login = review.user.login if review.user else ""
+    if not reviewer_login:
+        return None
+    review_id = getattr(review, "id", 0) or 0
+    return reviewer_login, (review_id, review_state)
+
+
+def _record_latest_review(
+    latest_per_user: dict[str, tuple[int, str]],
+    candidate: tuple[str, tuple[int, str]],
+) -> None:
+    """Retain the highest-id review record for one reviewer."""
+    reviewer_login, review_record = candidate
+    previous = latest_per_user.get(reviewer_login)
+    if previous is None or review_record[0] > previous[0]:
+        latest_per_user[reviewer_login] = review_record
+
+
+def _is_actionable_review_summary(
+    review: Any, after_id: Optional[int],
+) -> bool:
+    """Whether a review summary carries unread feedback for the developer."""
+    review_state = (review.state or "").upper()
+    if review_state not in ("CHANGES_REQUESTED", "COMMENTED"):
+        return False
+    if not (review.body or "").strip():
+        return False
+    return after_id is None or review.id > after_id
 
 
 class GitHubClient:
@@ -446,15 +530,12 @@ class GitHubClient:
         """
         seen: set[int] = set()
         self._pollable_calls += 1
-
-        kwargs: dict[str, Any] = {
-            "state": "open",
-            "sort": "updated",
-            "direction": "desc",
-        }
-        if since is not None:
-            kwargs["since"] = since
-        yield from _iter_new_non_pr_issues(self.repo.get_issues(**kwargs), seen)
+        yield from _iter_new_non_pr_issues(
+            self.repo.get_issues(
+                **_issue_query_options(issue_state="open", since=since)
+            ),
+            seen,
+        )
 
         # The closed-issue recovery sweep below issues one GET per non-terminal
         # label, per repo. That fixed cost -- paid every tick regardless of how
@@ -487,16 +568,15 @@ class GitHubClient:
             label_obj = self._cached_label(label_name)
             if label_obj is None:
                 continue
-            closed_kwargs: dict[str, Any] = {
-                "state": "closed",
-                "labels": [label_obj],
-                "sort": "updated",
-                "direction": "desc",
-            }
-            if since is not None:
-                closed_kwargs["since"] = since
             yield from _iter_new_non_pr_issues(
-                self.repo.get_issues(**closed_kwargs), seen
+                self.repo.get_issues(
+                    **_issue_query_options(
+                        issue_state="closed",
+                        since=since,
+                        label=label_obj,
+                    )
+                ),
+                seen,
             )
 
     @staticmethod
@@ -637,25 +717,13 @@ class GitHubClient:
         # still holds.
         trusted_login = getattr(self, "_bot_login", None)
         for issue_comment in issue.get_comments():
-            body = issue_comment.body or ""
-            if PINNED_STATE_MARKER not in body:
-                continue
-            if trusted_login is not None:
-                author = getattr(
-                    getattr(issue_comment, "user", None), "login", None,
-                )
-                if author != trusted_login:
-                    continue
-            state_match = PINNED_STATE_BODY_RE.match(body)
-            if state_match:
-                try:
-                    return PinnedState(
-                        comment_id=issue_comment.id,
-                        data=json.loads(state_match.group(1)),
-                    )
-                except json.JSONDecodeError:
-                    log.warning("issue=#%s pinned state JSON unparseable", issue.number)
-                    return PinnedState(comment_id=issue_comment.id, data={})
+            pinned_state = _pinned_state_from_comment(
+                issue_comment,
+                trusted_login=trusted_login,
+                issue_number=issue.number,
+            )
+            if pinned_state is not None:
+                return pinned_state
         return PinnedState()
 
     def write_pinned_state(self, issue: Issue, state: PinnedState) -> PinnedState:
@@ -842,18 +910,9 @@ class GitHubClient:
             return []
         latest_per_user: dict[str, tuple[int, str]] = {}
         for review in pr.get_reviews():
-            if (getattr(review, "commit_id", "") or "") != head_sha:
-                continue
-            state = (review.state or "").upper()
-            if state not in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
-                continue
-            login = review.user.login if review.user else ""
-            if not login:
-                continue
-            sub_id = getattr(review, "id", 0) or 0
-            prev = latest_per_user.get(login)
-            if prev is None or sub_id > prev[0]:
-                latest_per_user[login] = (sub_id, state)
+            candidate = _review_state_for_head(review, head_sha)
+            if candidate is not None:
+                _record_latest_review(latest_per_user, candidate)
         return [
             review_state
             for _, review_state in latest_per_user.values()
@@ -980,16 +1039,11 @@ class GitHubClient:
         inline comments only blocks the ready-ping via
         `pr_has_changes_requested` without ever reaching the dev agent.
         """
-        out: list = []
-        for candidate_review in pr.get_reviews():
-            state = (candidate_review.state or "").upper()
-            if state not in ("CHANGES_REQUESTED", "COMMENTED"):
-                continue
-            body = (candidate_review.body or "").strip()
-            if not body:
-                continue
-            if after_id is None or candidate_review.id > after_id:
-                out.append(candidate_review)
+        out = [
+            candidate_review
+            for candidate_review in pr.get_reviews()
+            if _is_actionable_review_summary(candidate_review, after_id)
+        ]
         out.sort(key=lambda review_summary: review_summary.id)
         return out
 

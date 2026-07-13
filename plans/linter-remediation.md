@@ -41,7 +41,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
-| 3 | Remaining production complexity | 4/6 | [ ] |
+| 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
@@ -260,7 +260,7 @@ Apply this sequence in every package:
 
 ### Package 3.5 — GitHub, scheduling, state, and shared workflow helpers
 
-- [ ] Simplify `github.py`, `scheduler.py`, `skill_catalog.py`, `state_machine.py`, `workflow_drift.py`,
+- [x] Simplify `github.py`, `scheduler.py`, `skill_catalog.py`, `state_machine.py`, `workflow_drift.py`,
   `workflow_messages.py`, and non-facade logic still present in `workflow.py`.
 
 ### Package 3.6 — Stage handlers
@@ -441,6 +441,17 @@ unexplained remainder and no production correctness or formatting findings.
 Use this register only when a finding cannot be removed safely. Do not add an entry until a concrete refactor has been
 considered.
 
+### Issue scheduler submission API
+
+- File and symbol: `orchestrator/scheduler.py: IssueScheduler.submit`
+- Rule: `WPS211`
+- Reason: The documented submission API accepts the issue identity and callback plus three independent keyword-only
+  scheduling controls. Replacing those controls with an options object would break workflow dispatch callers and the
+  direct scheduler API used throughout its regression suite while making the common call sites less explicit. The
+  implementation immediately groups the values in `_Submission` and delegates reservation, logging, and dispatch.
+- Protected by: `orchestrator/workflow.py`, `tests/test_scheduler.py`, and `tests/test_workflow_scheduler_routing.py`.
+- Reviewed: [x]
+
 ### Agent-exit analytics context
 
 - File and symbol: `orchestrator/analytics/__init__.py: record_agent_exit`
@@ -556,6 +567,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-12 | 3.2 | Complete | Target WPS; Ruff/diff; full suite | Not committed | Package 3.3 |
 | 2026-07-13 | 3.3 | Complete | Target WPS; 360 focused; full gate | Not committed | Package 3.4 |
 | 2026-07-13 | 3.4 | Complete | WPS (3 retained); 221 focused; full gate | Not committed | Package 3.5 |
+| 2026-07-13 | 3.5 | Complete | WPS (1 retained); 217 focused; Ruff/diff; 2100 passed, 3 skipped | Not committed | Package 3.6 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -565,5 +577,8 @@ Package 3.2 retained two reviewed `WPS211` compatibility findings. All 246 focus
 Package 3.4 retained three reviewed `WPS211` compatibility findings. All 221 focused tests and 2,100 full tests
 passed; 3 live-Postgres tests were skipped because `ANALYTICS_TEST_DB_URL` was unset.
 
-Packages 2.8, 3.2, 3.3, and 3.4 ran `tests/` because root collection was blocked by the unreadable ignored database
-volume.
+Package 3.5 retained one reviewed `WPS211` compatibility finding. All 217 focused tests and 2,100 full tests passed;
+3 live-Postgres tests were skipped because `ANALYTICS_TEST_DB_URL` was unset.
+
+Packages 2.8, 3.2, 3.3, 3.4, and 3.5 ran `tests/` because root collection was blocked by the unreadable ignored
+database volume.
