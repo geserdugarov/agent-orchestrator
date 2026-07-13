@@ -35,7 +35,14 @@ import logging
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import (
+    Any,
+    Callable,
+    Optional,
+    Sequence,
+    TypedDict,
+    Unpack,
+)
 
 from orchestrator import analytics
 
@@ -413,6 +420,29 @@ class FilterOptions:
 
 
 @dataclass(frozen=True)
+class RunFilterOptions:
+    """Raw optional constraints accepted by `filter_runs`."""
+
+    repo: Optional[str] = None
+    backends: Optional[Sequence[str]] = None
+    agent_roles: Optional[Sequence[str]] = None
+    stages: Optional[Sequence[str]] = None
+    issue: Optional[int] = None
+    query: Optional[str] = None
+    exclude_fixtures: bool = False
+
+
+class _RunFilterOptionFields(TypedDict, total=False):
+    repo: Optional[str]
+    backends: Optional[Sequence[str]]
+    agent_roles: Optional[Sequence[str]]
+    stages: Optional[Sequence[str]]
+    issue: Optional[int]
+    query: Optional[str]
+    exclude_fixtures: bool
+
+
+@dataclass(frozen=True)
 class _RunFilters:
     """Normalized constraints for one trajectory-filtering pass."""
 
@@ -618,6 +648,28 @@ def parse_record(obj: Any, *, seq: int) -> Optional[TrajectoryRun]:
     )
 
 
+def _parse_trajectory_line(
+    line: str, *, seq: int,
+) -> Optional[TrajectoryRun]:
+    if not line.strip():
+        return None
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return parse_record(record, seq=seq)
+
+
+def _read_trajectory_file(path: Path) -> list[TrajectoryRun]:
+    runs: list[TrajectoryRun] = []
+    with path.open("r", encoding="utf-8") as trajectory_file:
+        for seq, line in enumerate(trajectory_file):
+            run = _parse_trajectory_line(line, seq=seq)
+            if run is not None:
+                runs.append(run)
+    return runs
+
+
 def read_trajectories(path: Optional[Path] = None) -> list[TrajectoryRun]:
     """Read every `agent_trajectory` record, newest first.
 
@@ -633,27 +685,15 @@ def read_trajectories(path: Optional[Path] = None) -> list[TrajectoryRun]:
     with the original file order as a stable tie-breaker so two records
     sharing a second-precision timestamp keep their append order.
     """
-    if path is None:
-        path = resolve_log_path()
-    if path is None:
+    log_path = path if path is not None else resolve_log_path()
+    if log_path is None:
         return []
-    runs: list[TrajectoryRun] = []
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            for seq, line in enumerate(fh):
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                run = parse_record(obj, seq=seq)
-                if run is not None:
-                    runs.append(run)
+        runs = _read_trajectory_file(log_path)
     except FileNotFoundError:
         return []
-    except OSError as e:
-        log.warning("could not read trajectory log %s: %s", path, e)
+    except OSError as error:
+        log.warning("could not read trajectory log %s: %s", log_path, error)
         return []
     # Sort newest-first; `-seq` keeps the most recently appended record
     # ahead of an equal-timestamp predecessor while staying a total order.
@@ -670,7 +710,12 @@ def _distinct_sorted(
     value -- a run that omitted that field -- is dropped so the sidebar never
     offers a blank choice, and the result is sorted for a stable dropdown.
     """
-    return tuple(sorted({value for value in (key(r) for r in runs) if value}))
+    values: set[str] = set()
+    for run in runs:
+        value = key(run)
+        if value:
+            values.add(value)
+    return tuple(sorted(values))
 
 
 def filter_options(runs: Sequence[TrajectoryRun]) -> FilterOptions:
@@ -727,6 +772,29 @@ def _normalize_filter_query(query: Optional[str]) -> Optional[str]:
     return normalized_query or None
 
 
+def _resolve_run_filter_options(
+    options: Optional[RunFilterOptions],
+    option_fields: _RunFilterOptionFields,
+) -> RunFilterOptions:
+    if options is not None and option_fields:
+        raise TypeError("pass either options or keyword option fields, not both")
+    if options is not None:
+        return options
+    return RunFilterOptions(**option_fields)
+
+
+def _normalize_run_filters(options: RunFilterOptions) -> _RunFilters:
+    return _RunFilters(
+        repo=options.repo,
+        backends=_normalize_filter_values(options.backends),
+        agent_roles=_normalize_filter_values(options.agent_roles),
+        stages=_normalize_filter_values(options.stages),
+        issue=options.issue,
+        query=_normalize_filter_query(options.query),
+        exclude_fixtures=options.exclude_fixtures,
+    )
+
+
 def _matches_scalar_filters(
     run: TrajectoryRun,
     run_filters: _RunFilters,
@@ -772,14 +840,8 @@ def _matches_run_filters(
 
 def filter_runs(
     runs: Sequence[TrajectoryRun],
-    *,
-    repo: Optional[str] = None,
-    backends: Optional[Sequence[str]] = None,
-    agent_roles: Optional[Sequence[str]] = None,
-    stages: Optional[Sequence[str]] = None,
-    issue: Optional[int] = None,
-    query: Optional[str] = None,
-    exclude_fixtures: bool = False,
+    options: Optional[RunFilterOptions] = None,
+    **option_fields: Unpack[_RunFilterOptionFields],
 ) -> list[TrajectoryRun]:
     """Return the subset of `runs` matching every supplied filter.
 
@@ -792,14 +854,8 @@ def filter_runs(
     drops the synthetic test-suite records `TrajectoryRun.is_fixture`
     flags. Relative order is preserved.
     """
-    run_filters = _RunFilters(
-        repo=repo,
-        backends=_normalize_filter_values(backends),
-        agent_roles=_normalize_filter_values(agent_roles),
-        stages=_normalize_filter_values(stages),
-        issue=issue,
-        query=_normalize_filter_query(query),
-        exclude_fixtures=exclude_fixtures,
+    run_filters = _normalize_run_filters(
+        _resolve_run_filter_options(options, option_fields)
     )
     return [run for run in runs if _matches_run_filters(run, run_filters)]
 

@@ -41,7 +41,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 |---|---|---:|---:|
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
-| 3 | Remaining production complexity | 2/6 | [ ] |
+| 3 | Remaining production complexity | 3/6 | [ ] |
 | 4 | Remaining production style and structure | 0/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
@@ -249,8 +249,8 @@ Apply this sequence in every package:
 
 ### Package 3.3 — Agent, usage, configuration, and trajectory code
 
-- [ ] Simplify `agents.py`, `usage.py`, `main.py`, `config.py`, and `trajectory_reader.py`.
-- [ ] Preserve provider payload compatibility and subprocess-cleanup behavior.
+- [x] Simplify `agents.py`, `usage.py`, `main.py`, `config.py`, and `trajectory_reader.py`.
+- [x] Preserve provider payload compatibility and subprocess-cleanup behavior.
 
 ### Package 3.4 — Git and worktree infrastructure
 
@@ -525,10 +525,11 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-12 | 2.8 | Complete | WPS210/WPS231, 10 focused; Ruff/diff; 2099 passed, 3 skipped | None | Package 3.1 |
 | 2026-07-12 | 3.1 | Complete | Target WPS; focused; Ruff/diff; full suite | Not committed | Package 3.2 |
 | 2026-07-12 | 3.2 | Complete | Target WPS; Ruff/diff; full suite | Not committed | Package 3.3 |
+| 2026-07-13 | 3.3 | Complete | Target WPS; 360 focused; Ruff/diff; 2100 passed, 3 skipped | Not committed | Package 3.4 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
 Package 3.2 retained two reviewed `WPS211` compatibility findings. All 246 focused tests and 2,100 full tests passed;
 3 live-Postgres tests were skipped because `ANALYTICS_TEST_DB_URL` was unset.
 
-Packages 2.8 and 3.2 ran `tests/` because root collection was blocked by the unreadable ignored database volume.
+Packages 2.8, 3.2, and 3.3 ran `tests/` because root collection was blocked by the unreadable ignored database volume.

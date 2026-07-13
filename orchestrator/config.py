@@ -18,6 +18,7 @@ import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,6 +33,16 @@ _SECRET_KEYS = frozenset({
     "GITHUB_ENTERPRISE_TOKEN",
     "GIT_TOKEN",
 })
+_DOTENV_TRUE_VALUES = frozenset({"1", "true", "on", "yes"})
+
+
+def _has_matched_outer_quotes(value: str) -> bool:
+    if len(value) < 2:
+        return False
+    quote = value[0]
+    if quote not in ('"', "'"):
+        return False
+    return value[-1] == quote
 
 
 def _strip_dotenv_quotes(value: str) -> str:
@@ -50,37 +61,54 @@ def _strip_dotenv_quotes(value: str) -> str:
     anything else is returned verbatim so quoted segments inside the
     value survive untouched.
     """
-    v = value.strip()
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
-        return v[1:-1]
-    return v
+    stripped_value = value.strip()
+    if _has_matched_outer_quotes(stripped_value):
+        return stripped_value[1:-1]
+    return stripped_value
+
+
+def _dotenv_loading_disabled() -> bool:
+    setting = os.environ.get("ORCHESTRATOR_SKIP_DOTENV", "")
+    return setting.strip().lower() in _DOTENV_TRUE_VALUES
+
+
+def _parse_dotenv_entry(raw_line: str) -> Optional[tuple[str, str]]:
+    line = raw_line.strip()
+    if not line or line.startswith("#"):
+        return None
+    key, _, value = line.partition("=")
+    return key.strip(), _strip_dotenv_quotes(value)
+
+
+def _warn_ignored_dotenv_secret(key: str, env_path: Path) -> None:
+    print(
+        f"orchestrator: ignoring {key} in {env_path}; the implementer "
+        f"agent can read this file. Move the token to "
+        f"~/.config/<owner>/<repo>/token (path derived from REPO) "
+        f"or export {key} before launching.",
+        file=sys.stderr,
+    )
+
+
+def _load_dotenv_entry(raw_line: str, env_path: Path) -> None:
+    entry = _parse_dotenv_entry(raw_line)
+    if entry is None:
+        return
+    key, value = entry
+    if key in _SECRET_KEYS:
+        _warn_ignored_dotenv_secret(key, env_path)
+        return
+    os.environ.setdefault(key, value)
 
 
 def _load_dotenv() -> None:
-    if os.environ.get("ORCHESTRATOR_SKIP_DOTENV", "").strip().lower() in (
-        "1", "true", "on", "yes",
-    ):
+    if _dotenv_loading_disabled():
         return
     env_path = REPO_ROOT / ".env"
     if not env_path.exists():
         return
-    for raw in env_path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = _strip_dotenv_quotes(value)
-        if key in _SECRET_KEYS:
-            print(
-                f"orchestrator: ignoring {key} in {env_path}; the implementer "
-                f"agent can read this file. Move the token to "
-                f"~/.config/<owner>/<repo>/token (path derived from REPO) "
-                f"or export {key} before launching.",
-                file=sys.stderr,
-            )
-            continue
-        os.environ.setdefault(key, value)
+    for raw_line in env_path.read_text().splitlines():
+        _load_dotenv_entry(raw_line, env_path)
 
 
 def _resolve_github_token(repo: str) -> str:

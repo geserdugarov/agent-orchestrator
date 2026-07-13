@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Optional
 
 from orchestrator import agents, analytics, config, workflow
@@ -218,46 +219,45 @@ def _self_modifying_merge_happened(start_sha: str) -> bool:
     return any(line.startswith("orchestrator/") for line in diff.splitlines())
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    p = argparse.ArgumentParser(description="Agent orchestrator polling loop.")
-    p.add_argument("--once", action="store_true", help="Run a single tick and exit.")
-    p.add_argument("--log-level", default="INFO")
-    args = p.parse_args(argv)
+@dataclass(frozen=True)
+class _MainOptions:
+    once: bool
+    log_level: str
 
-    _configure_logging(args.log_level)
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
 
-    # `default_repo_specs()` returns one element for legacy single-repo
-    # deployments and N elements when `REPOS` is configured. Connecting and
-    # ensuring labels happens once per spec at startup; the polling loop
-    # then fans `workflow.tick(gh, spec)` out across the precomputed
-    # client list every tick.
-    specs = config.default_repo_specs()
+def _parse_main_options(argv: Optional[list[str]]) -> _MainOptions:
+    parser = argparse.ArgumentParser(
+        description="Agent orchestrator polling loop."
+    )
+    parser.add_argument(
+        "--once", action="store_true", help="Run a single tick and exit."
+    )
+    parser.add_argument("--log-level", default="INFO")
+    parsed = parser.parse_args(argv)
+    return _MainOptions(once=parsed.once, log_level=parsed.log_level)
+
+
+def _connect_clients() -> list[tuple[config.RepoSpec, GitHubClient]]:
+    """Connect once per configured repository and ensure workflow labels."""
     clients: list[tuple[config.RepoSpec, GitHubClient]] = []
-    for spec in specs:
+    for spec in config.default_repo_specs():
         gh = GitHubClient(repo_spec=spec)
         log.info("connected: repo=%s", spec.slug)
         gh.ensure_workflow_labels()
         clients.append((spec, gh))
+    return clients
 
-    # One `IssueScheduler` is built once at startup and reused across every
-    # tick: it owns the cross-repo in-flight cap
-    # (`MAX_PARALLEL_ISSUES_GLOBAL`), the default per-repo cap
-    # (`MAX_PARALLEL_ISSUES_PER_REPO`, overridable per spec via
-    # `parallel_limit`), the duplicate-active-issue skip, and the
-    # family-aware mutex. The polling tick submits per-issue work to
-    # this scheduler and returns immediately; worker threads run on the
-    # scheduler's internal executor. Replaces the older
-    # `BoundedSemaphore` cross-repo gate -- the scheduler's `global_cap`
-    # is the authoritative bound. Shut down in the `finally` below so
-    # in-flight workers complete cleanly (and any late failures are
-    # logged) regardless of how the loop exits.
-    scheduler = IssueScheduler(
+
+def _create_scheduler() -> IssueScheduler:
+    """Build the process-wide scheduler shared by every polling tick."""
+    return IssueScheduler(
         global_cap=config.MAX_PARALLEL_ISSUES_GLOBAL,
         per_repo_cap=config.MAX_PARALLEL_ISSUES_PER_REPO,
         thread_name_prefix="orch-issue",
     )
+
+
+def _activate_scheduler(scheduler: IssueScheduler) -> None:
     # Publish the scheduler to `_shutdown` BEFORE the first tick runs so
     # a signal that arrives during tick 1 can close the submit path
     # immediately instead of waiting for `_run_tick` to return. The
@@ -269,51 +269,76 @@ def main(argv: Optional[list[str]] = None) -> int:
     global active_scheduler
     active_scheduler = scheduler
 
-    try:
-        if args.once:
-            _run_tick(clients, scheduler)
-        else:
-            own_sha = _own_head_sha()
-            log.info("own HEAD=%s", own_sha)
 
-            while _running:
-                if own_sha and _self_modifying_merge_happened(own_sha):
-                    log.info("self-modifying merge detected; exiting for restart")
-                    return 0
-                _run_tick(clients, scheduler)
-                for _ in range(config.POLL_INTERVAL):
-                    if not _running:
-                        break
-                    time.sleep(1)
-    finally:
-        # `wait=True` so any in-flight worker (e.g. a `--once` invocation
-        # that just submitted long-running handlers) finishes before the
-        # process returns. Without this, `--once` could exit while
-        # workers were still executing and the executor's daemon threads
-        # would be torn down mid-handler; the polling loop case is the
-        # same property under SIGTERM/SIGINT shutdown. Safe to call even
-        # when `_shutdown` already ran a `wait=False` shutdown -- the
-        # scheduler's `shutdown` is documented as repeatable, the second
-        # call still waits for in-flight workers to exit, and the
-        # trailing reap drains any completion that landed in between.
-        if _received_signal is not None:
-            # Signal-initiated stop runs under systemd's `TimeoutStopSec`.
-            # Kill in-flight agent subprocesses up front so their worker
-            # threads unwind now instead of holding the drain below for up
-            # to `AGENT_TIMEOUT` -- this is what makes the common
-            # "restart while an agent is running" case exit in seconds
-            # rather than timing out into a SIGKILL. Idempotent with the
-            # watchdog's own sweep.
-            agents.terminate_all_running()
-        scheduler.shutdown(wait=True)
-        active_scheduler = None
-        # Release the watchdog: the drain is done, so a clean exit must not
-        # be pre-empted by a force-exit.
-        _shutdown_complete.set()
+def _wait_for_next_tick() -> None:
+    for _elapsed_second in range(config.POLL_INTERVAL):
+        if not _running:
+            return
+        time.sleep(1)
 
+
+def _run_polling_loop(
+    clients: list[tuple[config.RepoSpec, GitHubClient]],
+    scheduler: IssueScheduler,
+) -> Optional[int]:
+    own_sha = _own_head_sha()
+    log.info("own HEAD=%s", own_sha)
+    while _running:
+        if own_sha and _self_modifying_merge_happened(own_sha):
+            log.info("self-modifying merge detected; exiting for restart")
+            return 0
+        _run_tick(clients, scheduler)
+        _wait_for_next_tick()
+    return None
+
+
+def _drive_main_loop(
+    options: _MainOptions,
+    clients: list[tuple[config.RepoSpec, GitHubClient]],
+    scheduler: IssueScheduler,
+) -> Optional[int]:
+    if options.once:
+        _run_tick(clients, scheduler)
+        return None
+    return _run_polling_loop(clients, scheduler)
+
+
+def _drain_scheduler(scheduler: IssueScheduler) -> None:
+    """Stop agent groups when signaled, then wait for every worker."""
+    global active_scheduler
+    if _received_signal is not None:
+        # Worker threads cannot drain while their agent subprocess is still
+        # allowed to run up to `AGENT_TIMEOUT`.
+        agents.terminate_all_running()
+    # Repeatable after `_shutdown`'s `wait=False` close; this call owns the
+    # final worker wait and completion reap.
+    scheduler.shutdown(wait=True)
+    active_scheduler = None
+    _shutdown_complete.set()
+
+
+def _signal_exit_code() -> int:
     if _received_signal is not None:
         return 128 + _received_signal
     return 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    options = _parse_main_options(argv)
+    _configure_logging(options.log_level)
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+    clients = _connect_clients()
+    scheduler = _create_scheduler()
+    _activate_scheduler(scheduler)
+    restart_exit_code: Optional[int] = None
+    try:
+        restart_exit_code = _drive_main_loop(options, clients, scheduler)
+    finally:
+        _drain_scheduler(scheduler)
+    if restart_exit_code is not None:
+        return restart_exit_code
+    return _signal_exit_code()
 
 
 def _tick_one_repo(
