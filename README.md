@@ -154,6 +154,18 @@ is the terminal signal. See
 [`docs/workflow.md#question-stage--read-only-qa-on-the-question-label`][qa-lifecycle]
 for the full lifecycle and the read-only-violation park reasons.
 
+## Running an issue in quick-run mode
+
+Apply the `quick_run` control label to an open issue to trade the automated review passes for speed. The orchestrator
+still decomposes the issue, spawns the dev agent, and opens a PR, but a clean implementation routes straight from
+`implementing` to `in_review`, skipping the automated reviewer (`validating`) and final-docs (`documenting`) passes.
+Unlike `backlog` / `paused`, the label does not pause processing — it stays attached and only reshapes the flow. The
+orchestrator stays manual-merge-only and still routes fresh PR feedback to the fix loop, so you review and merge exactly
+as you would for an ordinary issue: a mergeable quick-run PR with no requested changes earns the same one-shot HITL
+ready ping. A `quick_run` parent that the orchestrator splits into child issues propagates the label to every child, so
+the whole subtree runs accelerated. See [`docs/state-machine.md`](docs/state-machine.md) for the full fast-path
+semantics.
+
 ## Observability
 
 The workflow state lives on GitHub, but local logs explain what happened between label transitions.
