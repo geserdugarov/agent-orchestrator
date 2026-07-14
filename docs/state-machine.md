@@ -523,7 +523,10 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
        runs only as the final-docs handoff after approval). A `quick_run` issue instead seeds the in_review handoff
        watermarks (`_seed_in_review_pr_watermarks`, the same seed the reviewer-approval handoff uses, so the
        orchestrator's own comments are ignored without swallowing concurrent human feedback) and sets label `in_review`,
-       skipping `validating` + `documenting`. Both paths persist `pr_number` / `branch` and reset `review_round=0` and
+       skipping `validating` + `documenting`. Because the reviewer, the `VERIFY_COMMANDS` gate, and the approval-time
+       squash all live inside the skipped `validating` stage, none run on this fast path, so the quick-run PR reaches
+       `in_review` carrying the dev's commit series unsquashed. (A later feedback bounce through `fixing` → `validating`
+       restores all three.) Both paths persist `pr_number` / `branch` and reset `review_round=0` and
        `retry_count=0` via `_reset_implementing_counters`.
      - new commits + dirty files → `_on_dirty_worktree`: park; refuse to publish a partial branch.
      - no new commits → `_on_question`: post the agent's last message as a HITL question, park.
