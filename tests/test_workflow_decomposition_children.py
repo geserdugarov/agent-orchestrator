@@ -32,3 +32,21 @@ class CreateChildIssueAlwaysUsesParentRepoTest(unittest.TestCase):
         # Parent link prepended via the helper (not by the caller) so the
         # workflow code can hand the agent's raw body straight in.
         self.assertIn("Parent: #42", kwargs["body"])
+
+    def test_passes_propagated_quick_run_through_to_create_issue(self) -> None:
+        # A split parent carrying `quick_run` seeds each child with both
+        # `blocked` and the modifier in a single create; the guard accepts the
+        # modifier and both labels reach `repo.create_issue`.
+        from unittest.mock import MagicMock
+        from orchestrator.github import GitHubClient
+
+        client = GitHubClient.__new__(GitHubClient)
+        client.repo = MagicMock()
+
+        client.create_child_issue(
+            title="A", body="do A", parent_number=42,
+            labels=["blocked", "quick_run"],
+        )
+
+        kwargs = client.repo.create_issue.call_args.kwargs
+        self.assertEqual(kwargs["labels"], ["blocked", "quick_run"])

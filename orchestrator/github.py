@@ -31,6 +31,7 @@ from orchestrator import analytics, config
 from orchestrator.state_machine import (
     ControlLabel,
     WorkflowLabel,
+    coerce_child_issue_label,
     coerce_workflow_label,
     guard_transition,
 )
@@ -697,11 +698,12 @@ class GitHubClient:
         `Parent: #<n>` line keeps the parent open until every child
         resolves and `_handle_blocked` flips the parent to `ready`.
         """
-        # Typo guard for this direct workflow-label write path (bypasses
-        # `set_workflow_label`): every label here is an orchestrator-authored
-        # workflow label, so coerce each so a typo fails loudly instead of
-        # creating a child with an invisible label.
-        validated = [coerce_workflow_label(lbl) for lbl in labels]
+        # Typo guard for this direct label write path (bypasses
+        # `set_workflow_label`): each label is an orchestrator-authored
+        # workflow label -- or the `quick_run` modifier propagated from a
+        # split parent -- so coerce each and let a typo fail loudly instead
+        # of creating a child with an invisible literal label.
+        validated = [coerce_child_issue_label(lbl) for lbl in labels]
         full_body = f"{(body or '').rstrip()}\n\nParent: #{parent_number}"
         return self.repo.create_issue(title=title, body=full_body, labels=validated)
 

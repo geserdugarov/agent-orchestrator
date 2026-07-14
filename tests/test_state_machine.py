@@ -15,6 +15,7 @@ from orchestrator.state_machine import (
     IllegalTransition,
     WorkflowLabel,
     _DETOUR_TO_RESOLVING,
+    coerce_child_issue_label,
     coerce_workflow_label,
     guard_transition,
     is_allowed_transition,
@@ -94,6 +95,33 @@ class CoerceWorkflowLabelTest(unittest.TestCase):
         msg = str(ctx.exception)
         self.assertIn("validatign", msg)
         self.assertIn("valid workflow label", msg)
+
+
+class CoerceChildIssueLabelTest(unittest.TestCase):
+    """`create_child_issue` writes labels directly (bypassing
+    `set_workflow_label`), so its guard widens the workflow-label set by
+    exactly the modifiers a child is born with -- `quick_run`, which a split
+    parent propagates -- while still rejecting typos and every control label
+    that is never seeded at creation."""
+
+    def test_accepts_workflow_label(self) -> None:
+        self.assertIs(coerce_child_issue_label("blocked"), WorkflowLabel.BLOCKED)
+
+    def test_accepts_quick_run_modifier(self) -> None:
+        self.assertIs(
+            coerce_child_issue_label("quick_run"), ControlLabel.QUICK_RUN
+        )
+
+    def test_rejects_typo_and_non_creatable_control_labels(self) -> None:
+        # A misspelled workflow label and control labels never seeded at child
+        # creation both raise; the widening is exactly `quick_run`.
+        for value in ("blokced", "backlog", "paused", "community_contribution"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as ctx:
+                    coerce_child_issue_label(value)
+                msg = str(ctx.exception)
+                self.assertIn(value, msg)
+                self.assertIn("child-issue label", msg)
 
 
 class LabelWriteTypoGuardTest(unittest.TestCase):
