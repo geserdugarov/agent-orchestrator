@@ -6,7 +6,10 @@
 -> in_review -> done|rejected.
 After the implementer commits and the PR opens, `_on_commits` relabels
 straight to `validating` -- the docs pass only runs as the final-docs
-handoff after the reviewer approves, not as a pre-review hop. Validating
+handoff after the reviewer approves, not as a pre-review hop. The one
+exception is a `quick_run`-labeled issue, which `_on_commits` routes
+straight to `in_review` (seeding the in_review handoff watermarks), skipping
+both the reviewer and docs passes. Validating
 then runs a fresh reviewer session; on CHANGES_REQUESTED the handler
 relabels to `fixing` BEFORE spawning the dev so the dev-fix subphase
 is observably labeled `fixing` rather than `validating`. After the
@@ -243,6 +246,9 @@ from orchestrator.stages.validating import _latest_pr_comment_ids as _latest_pr_
 from orchestrator.stages.validating import (
     _post_user_content_change_result as _post_user_content_change_result,
 )
+from orchestrator.stages.validating import (
+    _seed_in_review_pr_watermarks as _seed_in_review_pr_watermarks,
+)
 from orchestrator.stages.validating import _stranded_fix_unpushed as _stranded_fix_unpushed
 from orchestrator.stages.validating import (
     _try_recover_validating_transient_park as _try_recover_validating_transient_park,
@@ -386,6 +392,7 @@ __all__ = [
     "_run_verify_commands",
     "_sanitize_branch_segment",
     "_sanitize_slug",
+    "_seed_in_review_pr_watermarks",
     "_squash_and_force_push",
     "_stderr_log_tail",
     "_stranded_fix_unpushed",

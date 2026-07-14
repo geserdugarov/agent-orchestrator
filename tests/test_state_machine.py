@@ -260,6 +260,7 @@ class IsAllowedTransitionTest(unittest.TestCase):
             (None, WorkflowLabel.DECOMPOSING),
             (None, WorkflowLabel.IMPLEMENTING),
             (WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING),
+            (WorkflowLabel.IMPLEMENTING, WorkflowLabel.IN_REVIEW),  # quick_run fast path
             (WorkflowLabel.VALIDATING, WorkflowLabel.DOCUMENTING),
             (WorkflowLabel.VALIDATING, WorkflowLabel.FIXING),
             (WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW),
