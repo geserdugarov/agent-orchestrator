@@ -665,3 +665,15 @@ When each setting's change takes effect:
   label after the run returns, before any post-agent side effect, and discards the result rather than pushing, opening a
   PR, relabeling, advancing watermarks, or posting comments, so the committed work stays on the branch and republishes
   once the label is removed.
+- `community_contribution` — Applied automatically (not by an operator) by the per-tick open-PR sweep when
+  `ALLOWED_ISSUE_AUTHORS` is set: any open PR whose author is outside the allowlist is labeled and `HITL_HANDLE` is
+  @-mentioned once per PR so a human reviews the community-submitted work. Bot authors (Dependabot, Renovate, CI bots)
+  are skipped. With the allowlist empty (the default), the sweep is a no-op.
+- `quick_run` — Apply to an issue to run it in an accelerated mode. Unlike `backlog` / `paused` it does not pause
+  processing: it stays attached and modifies the normal workflow. A clean developer result in `implementing` routes the
+  issue straight to `in_review`, skipping the reviewer (`validating`) and final-docs (`documenting`) passes; because
+  that skip leaves no reviewer-approved final-docs marker, the `in_review` mergeability gate also exempts a quick-run
+  head from the approval markers, so a mergeable quick-run head with no standing `CHANGES_REQUESTED` still earns the
+  ready ping. Manual-merge and PR-feedback handling are unchanged — humans still drive the merge and fresh feedback
+  still routes to `fixing`. A `quick_run` parent that decomposes propagates the label to every child at creation, so the
+  accelerated mode survives the split.
