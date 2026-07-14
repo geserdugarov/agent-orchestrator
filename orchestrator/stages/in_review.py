@@ -16,8 +16,10 @@ debounce timestamp accessor (`_comment_created_at`).
 The handler is permanently manual-merge-only: humans drive the merge.
 Agent-approved + documented PR heads (or formally GitHub-approved
 heads) that are mergeable and carry no standing human CHANGES_REQUESTED
-get a one-shot HITL ping per head SHA; unmergeable PRs park awaiting
-human attention; external merges/closes terminate the issue. The
+get a one-shot HITL ping per head SHA; a `quick_run` issue is exempt
+from the approval markers and earns the ping on any mergeable head with
+no standing CHANGES_REQUESTED; unmergeable PRs park awaiting human
+attention; external merges/closes terminate the issue. The
 orchestrator never calls `gh.merge_pr` from here, never routes to
 `resolving_conflict` from a mergeability gate, and never emits
 `merge_attempt` / orchestrator-initiated `pr_merged` events.
@@ -45,8 +47,10 @@ from orchestrator.comment_trust import filter_trusted
 from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import (
+    QUICK_RUN_LABEL,
     GitHubClient,
     PinnedState,
+    issue_has_label,
 )
 
 
@@ -569,7 +573,10 @@ def _handle_mergeable_gate(
     here to `resolving_conflict` and never calls `gh.merge_pr`. A mergeable PR
     earns a one-shot HITL ping per head SHA when either the agent-approved
     final-docs handoff covers that head OR GitHub carries a real APPROVED
-    review on that head, and no standing CHANGES_REQUESTED veto exists.
+    review on that head, and no standing CHANGES_REQUESTED veto exists. A
+    `quick_run`-labeled issue is exempt from the approval markers (its fast
+    path never runs `validating`/`documenting`), so a mergeable quick-run PR
+    with no standing CHANGES_REQUESTED earns the ping directly.
     """
     from orchestrator import workflow as _wf
 
@@ -591,8 +598,9 @@ def _handle_mergeable_gate(
     # mergeable: humans drive the merge. The ping advertises the PR as "ready
     # for review/merge", so it must only fire for a head the orchestrator has
     # reviewer-approved and documented (or one a human/bot formally approved in
-    # GitHub) AND carries no standing human veto; otherwise we would be
-    # inviting a manual merge over a stale or rejected commit.
+    # GitHub, or a quick_run head exempt from those markers -- see below) AND
+    # carries no standing human veto; otherwise we would be inviting a manual
+    # merge over a stale or rejected commit.
     head_sha = pr.head.sha
     if gh.pr_has_changes_requested(pr, head_sha=head_sha):
         return
@@ -602,12 +610,24 @@ def _handle_mergeable_gate(
     # validating/documenting before it can ping again. A real GitHub APPROVED
     # review on the current head remains a valid fallback for manually-driven
     # review flows.
-    final_docs_ready = _final_docs_handoff_completed_for_head(state, head_sha)
-    github_approved = (
-        False if final_docs_ready else gh.pr_is_approved(pr, head_sha=head_sha)
-    )
-    if not (final_docs_ready or github_approved):
-        return
+    #
+    # `quick_run` is an explicit exemption from both approval markers: the fast
+    # path routes straight from implementing to in_review, skipping the
+    # reviewer (`validating`) and docs (`documenting`) passes, so it never
+    # records a final-docs marker or earns an orchestrator APPROVED review. A
+    # clean quick run should still get the ready ping, so bypass the approval
+    # gate for it -- the mergeable-head and no-CHANGES_REQUESTED guards above
+    # still apply.
+    if not issue_has_label(issue, QUICK_RUN_LABEL):
+        final_docs_ready = _final_docs_handoff_completed_for_head(
+            state, head_sha,
+        )
+        github_approved = (
+            False if final_docs_ready
+            else gh.pr_is_approved(pr, head_sha=head_sha)
+        )
+        if not (final_docs_ready or github_approved):
+            return
     # Ping HITL handles once per head SHA so the human knows the PR is ready.
     # De-duplication is keyed on `ready_ping_sha` (the head we pinged for); a
     # new commit pushed onto the branch shifts pr.head.sha and re-pings, while
@@ -649,7 +669,9 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     mergeable PR whose current head completed the reviewer-approved
     final-docs handoff (or carries a real GitHub APPROVED review), with
     no standing human CHANGES_REQUESTED on that head, earns a one-shot
-    HITL ping per head SHA so the human knows the PR is ready; an
+    HITL ping per head SHA so the human knows the PR is ready; a
+    `quick_run` issue skips the approval markers entirely and earns the
+    ping on any mergeable head with no standing CHANGES_REQUESTED. An
     unmergeable PR parks awaiting human attention (no `resolving_conflict`
     route from this stage).
 
