@@ -12,7 +12,9 @@ post-resume disposition for a user-content-change dev resume
 recovery (`_try_recover_validating_transient_park` plus its
 `_VALIDATING_TRANSIENT_PARK_REASONS` set), and the validating->in_review
 handoff watermark seeding (`_seed_watermark_past_self`,
-`_latest_pr_comment_ids`).
+`_latest_pr_comment_ids`, and the per-PR seed
+`_seed_in_review_pr_watermarks` shared with implementing's `quick_run`
+handoff).
 
 `_handle_validating` itself is a thin dispatcher over stage-private
 sub-handlers -- terminal-finalization guards
@@ -22,9 +24,11 @@ sub-handlers -- terminal-finalization guards
 (`_finalize_validating_approval` with its in_review handoff seeding
 `_seed_in_review_handoff_watermarks` + the pure `_ratchet_watermark`,
 `_park_reviewer_no_verdict`, `_handle_validating_changes_requested`), and
-the pure verify-failure formatter `_verify_failure_detail`. None of these
-are re-exported: they are internal to this module and reached directly, not
-through the facade.
+the pure verify-failure formatter `_verify_failure_detail`. These stay
+internal to this module and are reached directly, not through the facade --
+the one exception is `_seed_in_review_pr_watermarks`, the per-PR
+watermark seed re-exported so implementing's `quick_run` fast path seeds the
+in_review watermarks with the same logic.
 
 ALL workflow-owned helpers (`_park_awaiting_human`, `_run_agent_tracked`,
 `_now_iso`, the worktree plumbing, the drift / manifest / messaging
@@ -1195,17 +1199,35 @@ def _seed_in_review_handoff_watermarks(
                 "issue=#%s could not post squash notice to "
                 "PR #%s", issue.number, pr_number,
             )
+    _seed_in_review_pr_watermarks(gh, issue, state, pr)
+
+
+def _seed_in_review_pr_watermarks(
+    gh: GitHubClient, issue: Issue, state: PinnedState, pr,
+) -> None:
+    """Seed the three in_review comment watermarks past the leading run of
+    orchestrator-authored comments on `pr`'s surfaces.
+
+    Shared by validating's reviewer-approval handoff
+    (`_seed_in_review_handoff_watermarks`) and implementing's `quick_run` fast
+    path so `_handle_in_review` does not replay the orchestrator's own automated
+    comments (pickup ping, "PR opened", approval, squash notice) as fresh PR
+    feedback once the debounce expires. Concurrent human feedback posted during
+    the prior stage is preserved: `_latest_pr_comment_ids` stops the seed walk
+    at the first unread non-orchestrator comment, and `_ratchet_watermark` never
+    regresses a watermark a prior in_review tick already advanced.
+
+    Inline review comments and review summaries live in namespaces the
+    orchestrator never posts on, so `_latest_pr_comment_ids` returns None for
+    the inline surface and there is no seeded summary value; `_ratchet_watermark`
+    defaults each to 0 so the in_review legacy migration treats them as already
+    seeded and does NOT advance past human feedback submitted on those surfaces.
+    """
     issue_wm, review_wm = _latest_pr_comment_ids(gh, issue, pr, state)
     state.set(
         "pr_last_comment_id",
         _ratchet_watermark(state.get("pr_last_comment_id"), issue_wm),
     )
-    # Inline review comments and review summaries live in namespaces the
-    # orchestrator never posts on, so `_latest_pr_comment_ids` returns None for
-    # the inline surface and there is no seeded summary value; `_ratchet_watermark`
-    # defaults each to 0 so the in_review legacy migration treats them as
-    # already seeded and does NOT advance past human feedback submitted on those
-    # surfaces during validate.
     state.set(
         "pr_last_review_comment_id",
         _ratchet_watermark(state.get("pr_last_review_comment_id"), review_wm),

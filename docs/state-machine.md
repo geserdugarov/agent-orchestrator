@@ -53,7 +53,9 @@ Four non-workflow **control labels** modify behavior without occupying the workf
   empty (the default), the sweep is a no-op.
 - `quick_run` is registered as a control label (created by repository bootstrap via `CONTROL_LABEL_SPECS`) but is
   deliberately **not** a hard skip: unlike `backlog` / `paused` it stays attached and modifies the normal workflow
-  rather than pausing it, so the orchestrator keeps processing the issue while the label is present.
+  rather than pausing it, so the orchestrator keeps processing the issue while the label is present. Its effect: when a
+  clean developer result opens/reuses the PR in `implementing`, a `quick_run` issue routes straight to `in_review`,
+  bypassing the reviewer (`validating`) and docs (`documenting`) passes an ordinary issue takes.
 
 ### Typed states and the transition guard
 
@@ -81,7 +83,8 @@ edges declared per-target. Operator relabels via the GitHub UI bypass both guard
 - `ready` — The issue is decomposed and has no unresolved blockers.
 - `blocked` — The issue is waiting on child issues or dependency edges.
 - `umbrella` — Parent issue with no implementation of its own; closes to `done` when all children resolve.
-- `implementing` — The dev agent is producing commits in a per-issue worktree.
+- `implementing` — The dev agent is producing commits in a per-issue worktree. A clean result advances to `validating`,
+  or straight to `in_review` when the issue carries the `quick_run` control label.
 - `documenting` — The single docs pass on the existing PR worktree, reached only via the final-docs handoff in
   `_handle_validating`'s approval branch (after verify + squash). Advances to `in_review` after a pushed docs commit OR
   an explicit `DOCS: NO_CHANGE` verdict.
@@ -514,11 +517,16 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
        `_terminate_process_group` (SIGKILLs surviving descendants after the leader exits) so a build grandchild cannot
        keep committing into the worktree after the timeout is recorded.
      - new commits + clean tree → `_on_commits`: push branch, open PR (or reuse an existing open one), comment
-       `:sparkles: PR opened: #N`, set label `validating` (the docs pass runs only as the final-docs handoff after
-       approval), reset `review_round=0` and `retry_count=0`.
+       `:sparkles: PR opened: #N`, then route by control label. An ordinary issue sets label `validating` (the docs pass
+       runs only as the final-docs handoff after approval). A `quick_run` issue instead seeds the in_review handoff
+       watermarks (`_seed_in_review_pr_watermarks`, the same seed the reviewer-approval handoff uses, so the
+       orchestrator's own comments are ignored without swallowing concurrent human feedback) and sets label `in_review`,
+       skipping `validating` + `documenting`. Both paths persist `pr_number` / `branch` and reset `review_round=0` and
+       `retry_count=0` via `_reset_implementing_counters`.
      - new commits + dirty files → `_on_dirty_worktree`: park; refuse to publish a partial branch.
      - no new commits → `_on_question`: post the agent's last message as a HITL question, park.
-- **Output**: pushed branch + open PR + label moved to `validating`, OR a HITL park.
+- **Output**: pushed branch + open PR + label moved to `validating` (or `in_review` for a `quick_run` issue), OR a HITL
+  park.
 
 ### `_handle_documenting` (label `documenting`)
 - **Trigger**: each tick while the label is `documenting`. Set only by the **final-docs handoff** in
