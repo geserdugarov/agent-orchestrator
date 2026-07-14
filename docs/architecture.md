@@ -115,7 +115,8 @@ each make per-tick handlers skip the issue entirely (`backlog` is a "not yet" ho
 an in-flight one), `community_contribution` is applied by the per-tick open-PR sweep to PRs from non-bot authors
 outside `ALLOWED_ISSUE_AUTHORS` so a human reviews them, and `quick_run` is a registered control label that is
 deliberately not a hard skip — it coexists with the workflow and modifies it rather than pausing, so per-tick handlers
-keep processing an issue that carries it.
+keep processing an issue that carries it. A `quick_run` parent that decomposes propagates the label to every child at
+creation, so the accelerated mode survives the split.
 
 Label names are part of the public contract because live GitHub issues already carry them. For the meaning of each
 label, the control-label semantics, and the per-stage transitions they trigger, see

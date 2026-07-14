@@ -50,7 +50,12 @@ from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import filter_trusted
 from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
-from orchestrator.github import GitHubClient, PinnedState
+from orchestrator.github import (
+    QUICK_RUN_LABEL,
+    GitHubClient,
+    PinnedState,
+    issue_has_label,
+)
 
 
 @dataclass
@@ -630,6 +635,22 @@ def _seed_created_child(
     return True
 
 
+def _child_initial_labels(issue: Issue) -> list[str]:
+    """Labels every split child is born with.
+
+    Always the initial `blocked` workflow label; plus `quick_run` when the
+    parent carries it, so a split parent's accelerated-run modifier propagates
+    to the whole child subtree at creation (in the single `create_child_issue`
+    write, atomically with `blocked`) rather than being lost at the split
+    boundary. Later workflow relabels preserve it -- `set_workflow_label` swaps
+    only the workflow label and keeps every control label.
+    """
+    labels: list[str] = [WorkflowLabel.BLOCKED]
+    if issue_has_label(issue, QUICK_RUN_LABEL):
+        labels.append(QUICK_RUN_LABEL)
+    return labels
+
+
 def _create_planned_child(
     gh: GitHubClient,
     issue: Issue,
@@ -643,7 +664,7 @@ def _create_planned_child(
             title=child["title"],
             body=child["body"],
             parent_number=issue.number,
-            labels=[WorkflowLabel.BLOCKED],
+            labels=_child_initial_labels(issue),
         )
     except Exception:
         _park_child_create_failure(gh, issue, state, idx, child)
