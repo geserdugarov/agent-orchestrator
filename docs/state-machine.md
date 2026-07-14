@@ -934,6 +934,11 @@ because session state lives in pinned state, not in the worktree.
                 ──► documenting (final-docs handoff)
                 ──► in_review ──► done | rejected
 
+   quick_run fast path (control label present):
+     implementing ──► in_review directly on a clean dev result
+       (skips validating + documenting; seeds the in_review
+        handoff watermarks; persists pr/branch; resets counters)
+
    Decompose:
      decision='single' ─► label=ready  (parent itself implements)
      decision='split'  ─► create children, parent=blocked
