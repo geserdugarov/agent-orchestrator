@@ -30,7 +30,9 @@ orchestrator never merges from in_review: humans drive the merge. A
 mergeable PR whose current head completed the reviewer-approved
 final-docs handoff (or carries a real GitHub APPROVED review) and has
 no standing CHANGES_REQUESTED earns a one-shot HITL ping per head SHA;
-an unmergeable PR parks awaiting human attention. Other labels are
+a `quick_run` issue is exempt from those approval markers and earns the
+ping on any mergeable head with no standing CHANGES_REQUESTED; an
+unmergeable PR parks awaiting human attention. Other labels are
 observed and logged as not-yet-implemented.
 """
 from __future__ import annotations

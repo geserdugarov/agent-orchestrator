@@ -336,7 +336,8 @@ error.
 The orchestrator is permanently manual-merge-only: humans click Merge. `_handle_in_review` routes fresh PR feedback to
 `fixing`, pings the HITL handles once per head SHA when the PR is mergeable and the current head completed the
 reviewer-approved final-docs handoff (or carries a real GitHub APPROVED review), and parks awaiting human attention for
-an unmergeable PR.
+an unmergeable PR. A `quick_run` issue is exempt from those approval markers: its fast path skips `validating` and
+`documenting`, so a mergeable quick-run head with no standing `CHANGES_REQUESTED` earns the ready ping directly.
 
 - `IN_REVIEW_DEBOUNCE_SECONDS` — default `600`. quiet window the `fixing` stage honours before resuming the dev on PR
   feedback. Newer comments arriving while already labeled `fixing` reset the window. `_handle_in_review` itself routes
