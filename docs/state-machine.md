@@ -20,7 +20,7 @@ An issue should have at most one workflow label at a time. Non-workflow labels s
 preserved; the orchestrator only swaps labels from its own workflow set. Label names are part of the public contract
 because live GitHub issues carry them.
 
-Three non-workflow **control labels** modify behavior without occupying the workflow slot:
+Four non-workflow **control labels** modify behavior without occupying the workflow slot:
 
 - `backlog` makes the orchestrator skip the issue: the per-tick dispatcher filters it out before the family/fanout split
   (so a parked, workflow-label-less issue cannot fold into the cap-counted family bucket and starve other work under
@@ -51,6 +51,9 @@ Three non-workflow **control labels** modify behavior without occupying the work
   (Dependabot, Renovate, CI bots) are skipped via GitHub's `user.type == "Bot"` flag — they open PRs structurally and
   are not community contributions. The orchestrator does not otherwise drive these PRs. With `ALLOWED_ISSUE_AUTHORS`
   empty (the default), the sweep is a no-op.
+- `quick_run` is registered as a control label (created by repository bootstrap via `CONTROL_LABEL_SPECS`) but is
+  deliberately **not** a hard skip: unlike `backlog` / `paused` it stays attached and modifies the normal workflow
+  rather than pausing it, so the orchestrator keeps processing the issue while the label is present.
 
 ### Typed states and the transition guard
 
