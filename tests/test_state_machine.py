@@ -63,6 +63,7 @@ class WorkflowLabelEnumTest(unittest.TestCase):
         self.assertEqual(
             ControlLabel.COMMUNITY_CONTRIBUTION, "community_contribution",
         )
+        self.assertEqual(ControlLabel.QUICK_RUN, "quick_run")
         for label in ControlLabel:
             self.assertNotIn(label, github.WORKFLOW_LABELS)
 
@@ -71,6 +72,11 @@ class WorkflowLabelEnumTest(unittest.TestCase):
             {spec[0] for spec in github.CONTROL_LABEL_SPECS},
             set(ControlLabel),
         )
+        # `quick_run` is registered for bootstrap alongside the hard-skip
+        # labels but modifies the workflow instead of pausing it, so it must
+        # stay out of the hard-skip set.
+        self.assertIn(github.QUICK_RUN_LABEL, {spec[0] for spec in github.CONTROL_LABEL_SPECS})
+        self.assertNotIn(github.QUICK_RUN_LABEL, github.HARD_SKIP_CONTROL_LABELS)
 
 
 class CoerceWorkflowLabelTest(unittest.TestCase):

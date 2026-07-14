@@ -11,11 +11,11 @@ give them one authoritative definition, IDE/refactor support, and a
 membership set the typo guard can validate against.
 
 `ControlLabel` holds operator-applied *modifiers* (`backlog`, `paused`,
-`community_contribution`) that coexist with a workflow label or PR and
-pause/redirect processing without being workflow states themselves -- an
-issue is `implementing` + `backlog` at once. They are deliberately NOT
-workflow states and never flow through `set_workflow_label` or the
-transition table.
+`community_contribution`, `quick_run`) that coexist with a workflow label or
+PR and pause/redirect/modify processing without being workflow states
+themselves -- an issue is `implementing` + `backlog` at once. They are
+deliberately NOT workflow states and never flow through `set_workflow_label`
+or the transition table.
 
 The transition table and guard live in this module too; `github.set_workflow_label`
 is the single chokepoint that calls them.
@@ -59,11 +59,16 @@ class ControlLabel(StrEnum):
     the issue entirely while either is present. They differ only in intent:
     `backlog` is a "not yet" hold on a fresh issue, `paused` an operator
     pause on an in-flight one.
+
+    `quick_run` is deliberately NOT a hard skip: it stays attached and
+    modifies the normal workflow rather than pausing it, so the orchestrator
+    keeps processing the issue while the label is present.
     """
 
     BACKLOG = "backlog"
     PAUSED = "paused"
     COMMUNITY_CONTRIBUTION = "community_contribution"
+    QUICK_RUN = "quick_run"
 
 
 def coerce_workflow_label(value: str) -> WorkflowLabel:

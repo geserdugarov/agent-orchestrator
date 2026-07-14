@@ -21,6 +21,7 @@ from orchestrator import workflow
 from orchestrator.github import (
     BACKLOG_LABEL,
     PAUSED_LABEL,
+    QUICK_RUN_LABEL,
     hard_skip_control_label,
 )
 
@@ -76,9 +77,13 @@ class HardSkipControlLabelTest(unittest.TestCase):
     log line names the operator's actual label."""
 
     def test_returns_none_without_a_hard_skip_label(self) -> None:
-        issue = make_issue(760, label="implementing")
-        issue.labels.append(FakeLabel("community_contribution"))
-        self.assertIsNone(hard_skip_control_label(issue))
+        # `community_contribution` and `quick_run` are control labels that are
+        # not hard skips: they coexist with the workflow without parking it.
+        for label in ("community_contribution", QUICK_RUN_LABEL):
+            with self.subTest(label=label):
+                issue = make_issue(760, label="implementing")
+                issue.labels.append(FakeLabel(label))
+                self.assertIsNone(hard_skip_control_label(issue))
 
     def test_reports_the_present_hard_skip_label(self) -> None:
         for label in (BACKLOG_LABEL, PAUSED_LABEL):
