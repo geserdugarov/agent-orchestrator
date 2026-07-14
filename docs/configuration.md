@@ -481,8 +481,8 @@ dependency.
 - `python -m orchestrator.main --once` — single tick then exit. Useful for tests and debugging.
 - `python -m orchestrator.main --log-level DEBUG` — verbose logs.
 
-On first start the orchestrator creates the workflow labels and the `backlog` / `paused` / `community_contribution`
-control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
+On first start the orchestrator creates the workflow labels and the `backlog` / `paused` / `community_contribution` /
+`quick_run` control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
 
 ## Running under systemd (user service)
 
