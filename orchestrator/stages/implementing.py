@@ -1744,6 +1744,20 @@ def _on_commits(
         _advance_to_validating(gh, issue, state, pr, branch)
 
 
+def _mark_agent_silent_park(state: PinnedState) -> None:
+    """Flag a retryable `agent_silent` park and advance the silent-park streak.
+
+    Shared by the session-limit and empty-output parks: both are retryable
+    `agent_silent` failures, not real questions. `_resume_dev_with_text` reads
+    the streak (via `_dev_session_retirement_reason`) to rotate a poisoned
+    session to a fresh spawn once it reaches `_SILENT_PARKS_BEFORE_FRESH_SESSION`.
+    """
+    count = int(state.get("silent_park_count") or 0)
+    state.set("awaiting_human", True)
+    state.set("park_reason", "agent_silent")
+    state.set("silent_park_count", count + 1)
+
+
 def _park_session_limit(
     gh: GitHubClient, issue: Issue, state: PinnedState, raw: str
 ) -> str:
@@ -1771,9 +1785,7 @@ def _park_session_limit(
         "stopped; retry with `/orchestrator continue` once it "
         f"resets:\n\n{quoted}",
     )
-    state.set("awaiting_human", True)
-    state.set("park_reason", "agent_silent")
-    state.set("silent_park_count", int(state.get("silent_park_count") or 0) + 1)
+    _mark_agent_silent_park(state)
     return "agent_session_limit"
 
 
@@ -1827,9 +1839,7 @@ def _park_silent_failure(
         issue.number, agent_result.exit_code, agent_result.timed_out,
         _wf._stderr_log_tail(agent_result),
     )
-    state.set("awaiting_human", True)
-    state.set("park_reason", "agent_silent")
-    state.set("silent_park_count", int(state.get("silent_park_count") or 0) + 1)
+    _mark_agent_silent_park(state)
     return "agent_silent"
 
 
