@@ -407,17 +407,15 @@ class SchedulerWiringTest(unittest.TestCase):
     def test_signal_closes_active_submit_path(
         self,
     ) -> None:
-        # Regression for issue #316 review feedback: `_running=False`
-        # alone only stops the next tick boundary. A `workflow.tick`
-        # that is still iterating its eligible-issue list when SIGINT/
-        # SIGTERM fires used to keep landing fresh `scheduler.submit`
-        # calls for the remainder of the dispatch loop after the user
-        # already asked to stop -- the in-flight set kept growing
-        # post-signal and the finally-block `shutdown(wait=True)` had
-        # to wait on workers the signal handler should have refused
-        # to enqueue. The fix routes `_shutdown` through
-        # `scheduler.shutdown(wait=False)` so the submit path is
-        # closed IMMEDIATELY, mid-tick.
+        # `_shutdown` closes the scheduler's submit path immediately via
+        # `scheduler.shutdown(wait=False)` when a signal fires. `running=False`
+        # alone only stops at the next tick boundary, so a `workflow.tick`
+        # still iterating its eligible-issue list would otherwise keep landing
+        # fresh `scheduler.submit` calls for the rest of the dispatch loop and
+        # grow the in-flight set after the user asked to stop. With the submit
+        # path closed mid-tick, those late submits are refused and the
+        # finally-block `shutdown(wait=True)` only waits on workers that
+        # already started.
         with _reload_main({
             "REPO": "owner/legacy",
             "TARGET_REPO_ROOT": "/tmp",
@@ -468,7 +466,7 @@ class SchedulerWiringTest(unittest.TestCase):
         # Same invariant as above but where both repos are already
         # iterating concurrently when the signal fires. The cross-repo
         # barrier ensures alpha and beta are BOTH past their
-        # `_tick_one`-level `_running` short-circuit before the signal
+        # `_tick_one`-level `running` short-circuit before the signal
         # lands, so beta's post-signal `scheduler.submit` is the
         # observable canary: with the fix it returns False; without the
         # fix the scheduler still accepts work on the fan-out executor
@@ -642,7 +640,7 @@ class SignalHandlingTest(unittest.TestCase):
             self.assertEqual(rc, 128 + signal.SIGINT)
 
     def test_shutdown_flag_preempts_single_repo_tick(self) -> None:
-        # The single-repo path stays in-thread and checks `_running`
+        # The single-repo path stays in-thread and checks `running`
         # before invoking `workflow.tick`. A shutdown that already
         # arrived (e.g. between poll iterations) must therefore skip
         # the tick entirely instead of running one more before the
@@ -663,9 +661,9 @@ class SignalHandlingTest(unittest.TestCase):
                 return client
 
             # Pre-set the shutdown flag so the `--once` tick observes
-            # `_running=False` immediately when `_run_tick` is entered.
-            main_mod._running = False
-            main_mod._received_signal = signal.SIGINT
+            # `running=False` immediately when `_run_tick` is entered.
+            main_mod.running = False
+            main_mod.received_signal = signal.SIGINT
 
             with patch.object(main_mod, "GitHubClient", side_effect=fake_client), \
                  patch.object(main_mod.workflow, "tick", side_effect=fake_tick):

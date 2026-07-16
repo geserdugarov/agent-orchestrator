@@ -655,14 +655,14 @@ def fmt_money(value: float) -> str:
     """Compact dollar formatter matching the standalone mock (`$1.2K`,
     `$3.4M`). Used by KPIs, axis tick labels, and per-bar value labels.
     """
-    n = float(value or 0.0)
-    if n >= 1_000_000:
-        return f"${n / 1_000_000:.2f}M"
-    if n >= 1_000:
-        return f"${n / 1_000:.1f}K"
-    if n < 10:
-        return f"${n:.2f}"
-    return f"${n:.0f}"
+    dollars = float(value or 0.0)
+    if dollars >= 1_000_000:
+        return f"${dollars / 1_000_000:.2f}M"
+    if dollars >= 1_000:
+        return f"${dollars / 1_000:.1f}K"
+    if dollars < 10:
+        return f"${dollars:.2f}"
+    return f"${dollars:.0f}"
 
 
 def fmt_money_exact(value: float) -> str:
@@ -672,16 +672,16 @@ def fmt_money_exact(value: float) -> str:
 
 def fmt_tokens(value: float) -> str:
     """Compact token-count formatter (`1.2K`, `3.4M`, `1.2B`)."""
-    n = float(value or 0.0)
-    if n >= 1_000_000_000:
-        decimals = 0 if n >= 10_000_000_000 else 2
-        return f"{n / 1_000_000_000:.{decimals}f}B"
-    if n >= 1_000_000:
-        decimals = 0 if n >= 10_000_000 else 1
-        return f"{n / 1_000_000:.{decimals}f}M"
-    if n >= 1_000:
-        return f"{n / 1_000:.0f}K"
-    return str(int(round(n)))
+    tokens = float(value or 0.0)
+    if tokens >= 1_000_000_000:
+        decimals = 0 if tokens >= 10_000_000_000 else 2
+        return f"{tokens / 1_000_000_000:.{decimals}f}B"
+    if tokens >= 1_000_000:
+        decimals = 0 if tokens >= 10_000_000 else 1
+        return f"{tokens / 1_000_000:.{decimals}f}M"
+    if tokens >= 1_000:
+        return f"{tokens / 1_000:.0f}K"
+    return str(int(round(tokens)))
 
 
 def fmt_num(value: float) -> str:

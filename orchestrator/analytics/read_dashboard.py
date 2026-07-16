@@ -44,7 +44,7 @@ from orchestrator.analytics.read_models import (
 )
 
 
-def _as_skill_names(value: Any) -> list[str]:
+def _as_skill_names(raw: Any) -> list[str]:
     """Coerce a JSONB skill-name array column into a list of strings.
 
     psycopg adapts a `jsonb` array to a Python list, so the common path
@@ -54,22 +54,22 @@ def _as_skill_names(value: Any) -> list[str]:
     element collapses to an empty list / is skipped so a malformed
     `extras` blob never raises mid-read.
     """
-    if value is None:
+    if raw is None:
         return []
-    if isinstance(value, str):
+    if isinstance(raw, str):
         try:
-            value = json.loads(value)
+            raw = json.loads(raw)
         except (ValueError, TypeError):
             return []
-    if not isinstance(value, (list, tuple)):
+    if not isinstance(raw, (list, tuple)):
         return []
-    return [s for s in value if isinstance(s, str)]
+    return [name for name in raw if isinstance(name, str)]
 
 
-def _label_or_unknown(value: Any) -> str:
-    if value is None:
+def _label_or_unknown(raw: Any) -> str:
+    if raw is None:
         return "unknown"
-    return str(value)
+    return str(raw)
 
 
 def _row_label(row: Sequence[Any], index: int) -> str:
@@ -101,10 +101,10 @@ def _row_value(row: Sequence[Any], index: int, default: Any = 0) -> Any:
     return row[index]
 
 
-def _day_value(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.date()
-    return value
+def _day_value(day: Any) -> Any:
+    if isinstance(day, datetime):
+        return day.date()
+    return day
 
 
 _AGENT_CACHE_TOKENS_SQL = (
@@ -194,12 +194,12 @@ def _review_round_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[ReviewRoundBucketRow]:
-    where, params = _build_view_window_where(filters)
+    where, bindings = _build_view_window_where(filters)
     where = _append_where_condition(
         where,
         "agent_role IN ('developer', 'reviewer')",
     )
-    rows = query.select(_review_round_sql(where), params)
+    rows = query.select(_review_round_sql(where), bindings)
     return [_review_round_from_row(row) for row in rows]
 
 
@@ -279,9 +279,9 @@ def _skill_trigger_rate_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[SkillTriggerRateRow]:
-    where, params = _build_window_where(filters.without_events())
+    where, bindings = _build_window_where(filters.without_events())
     clause = _append_where_condition(where, "event = 'agent_exit'")
-    rows = query.select(_skill_trigger_rate_sql(clause), params)
+    rows = query.select(_skill_trigger_rate_sql(clause), bindings)
     return [_skill_trigger_rate_from_row(row) for row in rows]
 
 
@@ -335,12 +335,12 @@ def _skill_catalog_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[tuple]:
-    where, params = _build_window_where(filters.catalog_scope())
+    where, bindings = _build_window_where(filters.catalog_scope())
     clause = _append_where_condition(where, "event = 'repo_skill_catalog'")
     return query.select(
         "SELECT repo, extras -> 'skills_available' AS skills_available "
         f"FROM analytics_events{clause}",
-        params,
+        bindings,
     )
 
 
@@ -359,7 +359,7 @@ def _skill_run_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[tuple]:
-    where, params = _build_window_where(filters.without_events())
+    where, bindings = _build_window_where(filters.without_events())
     clause = _append_where_condition(where, "event = 'agent_exit'")
     return query.select(
         "SELECT repo, "
@@ -367,7 +367,7 @@ def _skill_run_rows(
         "COALESCE(backend, 'unknown') AS backend_label, "
         "extras -> 'skills_triggered' AS skills_triggered "
         f"FROM analytics_events{clause}",
-        params,
+        bindings,
     )
 
 
@@ -518,7 +518,7 @@ def _cost_coverage_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[CostCoverageRow]:
-    where, params = _build_view_window_where(filters)
+    where, bindings = _build_view_window_where(filters)
     rows = query.select(
         "SELECT "
         "COALESCE(cost_source, 'unknown') AS source_label, "
@@ -531,7 +531,7 @@ def _cost_coverage_rows(
         f"FROM analytics_agent_runs{where} "
         "GROUP BY source_label "
         "ORDER BY runs DESC, source_label ASC",
-        params,
+        bindings,
     )
     return [_cost_coverage_from_row(row) for row in rows]
 
@@ -589,7 +589,7 @@ def _backend_daily_token_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[BackendDailyTokensRow]:
-    where, params = _build_view_window_where(filters)
+    where, bindings = _build_view_window_where(filters)
     rows = query.select(
         "SELECT "
         "date_trunc('day', ts)::date AS day, "
@@ -602,7 +602,7 @@ def _backend_daily_token_rows(
         f"FROM analytics_agent_runs{where} "
         "GROUP BY day, backend_label "
         "ORDER BY day ASC, backend_label ASC",
-        params,
+        bindings,
     )
     return [_backend_daily_tokens_from_row(row) for row in rows]
 
@@ -661,7 +661,7 @@ def _hourly_heatmap_rows(
     filters: _WindowFilters,
     tz_offset_hours: int,
 ) -> list[HourlyHeatmapPoint]:
-    where, params = _build_window_where(filters)
+    where, bindings = _build_window_where(filters)
     offset = int(tz_offset_hours)
     rows = query.select(
         "SELECT "
@@ -678,7 +678,7 @@ def _hourly_heatmap_rows(
         f"FROM analytics_events{where} "
         "GROUP BY weekday, hour "
         "ORDER BY weekday ASC, hour ASC",
-        [offset, offset, *params],
+        [offset, offset, *bindings],
     )
     return [_hourly_heatmap_from_row(row) for row in rows]
 

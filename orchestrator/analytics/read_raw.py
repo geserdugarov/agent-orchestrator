@@ -67,10 +67,10 @@ def _bool_or_none(raw: Any) -> Optional[bool]:
     return bool(raw)
 
 
-def _empty_filter_selected(values: Optional[Sequence[str]]) -> bool:
-    if values is None:
+def _empty_filter_selected(selection: Optional[Sequence[str]]) -> bool:
+    if selection is None:
         return False
-    return len(values) == 0
+    return len(selection) == 0
 
 
 def _filter_options_sql() -> str:
@@ -91,8 +91,8 @@ def _filter_options_from_rows(rows: Sequence[tuple]) -> FilterOptions:
         dimension = row[0]
         if dimension in buckets:
             buckets[dimension].append(row[1])
-    for values in buckets.values():
-        values.sort()
+    for option_names in buckets.values():
+        option_names.sort()
     return FilterOptions(
         repos=tuple(buckets["repo"]),
         events=tuple(buckets["event"]),
@@ -161,12 +161,12 @@ def _event_breakdown_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[EventBreakdown]:
-    where, params = _build_window_where(filters)
+    where, bindings = _build_window_where(filters)
     rows = query.select(
         "SELECT event, COUNT(*) AS c "
         f"FROM analytics_events{where} "
         "GROUP BY event ORDER BY c DESC, event ASC",
-        params,
+        bindings,
     )
     return [
         EventBreakdown(event=event, count=int(count))
@@ -234,17 +234,17 @@ def _recent_agent_exit_rows(
         return []
     if _empty_filter_selected(filters.stages):
         return []
-    where, params = _build_window_where(filters.without_events())
+    where, bindings = _build_window_where(filters.without_events())
     where = _prepend_where_condition(where, "event = %s")
-    params.insert(0, "agent_exit")
-    params.append(int(limit))
+    bindings.insert(0, "agent_exit")
+    bindings.append(int(limit))
     rows = query.select(
         "SELECT ts, repo, issue, stage, agent_role, backend, "
         "duration_s, exit_code, timed_out, review_round, retry_count, "
         "input_tokens, output_tokens, cost_usd, cost_source "
         f"FROM analytics_events{where} "
         "ORDER BY ts DESC LIMIT %s",
-        params,
+        bindings,
     )
     return [_agent_exit_from_row(row) for row in rows]
 
@@ -359,10 +359,10 @@ def _issue_summary_rows(
     limit: int,
     sort_by: str,
 ) -> list[IssueSummaryRow]:
-    where, params = _build_window_where(filters)
+    where, bindings = _build_window_where(filters)
     rows = query.select(
         _issues_sql(where, sort_by),
-        [*params, int(limit)],
+        [*bindings, int(limit)],
     )
     return [_issue_summary_from_row(row) for row in rows]
 
@@ -457,14 +457,14 @@ def _issue_event_rows(
     repo: str,
     issue: int,
 ) -> list[IssueEventRow]:
-    where, params = _build_window_where(filters)
+    where, bindings = _build_window_where(filters)
     where = _prepend_where_condition(where, "repo = %s AND issue = %s")
     rows = query.select(
         "SELECT ts, event, stage, duration_s, result, "
         "agent_role, backend, exit_code, cost_usd "
         f"FROM analytics_events{where} "
         "ORDER BY ts ASC, id ASC",
-        [repo, int(issue), *params],
+        [repo, int(issue), *bindings],
     )
     return [_issue_event_from_row(row) for row in rows]
 

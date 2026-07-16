@@ -263,9 +263,9 @@ _SECRET_KEY_NAMES = frozenset({
 _REDACT_MIN_VALUE_LEN = 8
 
 
-def _is_secret_environment_value(key: str, value: str) -> bool:
+def _is_secret_environment_value(key: str, env_value: str) -> bool:
     """Whether an environment entry is shaped like a usable secret."""
-    if not value or len(value) < _REDACT_MIN_VALUE_LEN:
+    if not env_value or len(env_value) < _REDACT_MIN_VALUE_LEN:
         return False
     upper_key = key.upper()
     return upper_key in _SECRET_KEY_NAMES or any(
@@ -664,8 +664,8 @@ def _manifest_umbrella_error(manifest: dict) -> Optional[str]:
     return None
 
 
-def _is_nonempty_text(value: object) -> bool:
-    return isinstance(value, str) and bool(value)
+def _is_nonempty_text(text_value: object) -> bool:
+    return isinstance(text_value, str) and bool(text_value)
 
 
 def _manifest_child_text_error(

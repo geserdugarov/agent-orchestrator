@@ -179,16 +179,16 @@ def _row_value(row: Sequence[Any], index: int, default: Any = 0) -> Any:
     return row[index]
 
 
-def _day_value(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.date()
-    return value
+def _day_value(day: Any) -> Any:
+    if isinstance(day, datetime):
+        return day.date()
+    return day
 
 
-def _float_or_none(value: Any) -> Optional[float]:
-    if value is None:
+def _float_or_none(raw: Any) -> Optional[float]:
+    if raw is None:
         return None
-    return float(value)
+    return float(raw)
 
 
 def get_summary(
@@ -295,8 +295,8 @@ def _kpi_prev_summary(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> Summary:
-    where, params = _build_rollup_window_where(filters)
-    rows = query.select(_kpi_prev_sql(where), params)
+    where, bindings = _build_rollup_window_where(filters)
+    rows = query.select(_kpi_prev_sql(where), bindings)
     if not rows:
         return Summary()
     row = rows[0]
@@ -327,7 +327,7 @@ def _time_series_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[TimeSeriesPoint]:
-    where, params = _build_rollup_window_where(filters)
+    where, bindings = _build_rollup_window_where(filters)
     rows = query.select(
         "SELECT day, event, "
         "COALESCE(SUM(event_count), 0) AS c, "
@@ -341,7 +341,7 @@ def _time_series_rows(
         f"FROM {_DAILY_ROLLUP_VIEW}{where} "
         "GROUP BY day, event "
         "ORDER BY day ASC, event ASC",
-        params,
+        bindings,
     )
     return [_time_series_from_row(row) for row in rows]
 
@@ -439,9 +439,9 @@ def _stage_breakdown_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[StageBreakdown]:
-    where, params = _build_rollup_window_where(filters)
+    where, bindings = _build_rollup_window_where(filters)
     clause = _append_where_condition(where, "stage IS NOT NULL")
-    rows = query.select(_stage_breakdown_sql(clause), params)
+    rows = query.select(_stage_breakdown_sql(clause), bindings)
     return [_stage_breakdown_from_row(row) for row in rows]
 
 
@@ -520,9 +520,9 @@ def _backend_efficiency_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[BackendEfficiencyRow]:
-    where, params = _build_rollup_window_where(filters.without_events())
+    where, bindings = _build_rollup_window_where(filters.without_events())
     clause = _append_where_condition(where, "event = 'agent_exit'")
-    rows = query.select(_backend_efficiency_sql(clause), params)
+    rows = query.select(_backend_efficiency_sql(clause), bindings)
     return [_backend_efficiency_from_row(row) for row in rows]
 
 
@@ -572,7 +572,7 @@ def _repo_breakdown_rows(
     query: _ReadQuery,
     filters: _WindowFilters,
 ) -> list[RepoBreakdownRow]:
-    where, params = _build_rollup_window_where(filters)
+    where, bindings = _build_rollup_window_where(filters)
     rows = query.select(
         "SELECT repo, "
         "COUNT(DISTINCT issue) AS repo_issues, "
@@ -584,7 +584,7 @@ def _repo_breakdown_rows(
         f"FROM {_DAILY_ROLLUP_VIEW}{where} "
         "GROUP BY repo "
         "ORDER BY repo_events DESC, repo ASC",
-        params,
+        bindings,
     )
     return [
         RepoBreakdownRow(
@@ -671,9 +671,9 @@ def _throughput_rows(
     if not active_stages:
         return []
     scoped_filters = replace(filters, events=None, stages=active_stages)
-    where, params = _build_rollup_window_where(scoped_filters)
+    where, bindings = _build_rollup_window_where(scoped_filters)
     where = _prepend_where_condition(where, "event = %s")
-    params.insert(0, "stage_enter")
+    bindings.insert(0, "stage_enter")
     rows = query.select(
         "SELECT day, "
         "COALESCE(SUM(CASE WHEN stage = 'done' "
@@ -683,7 +683,7 @@ def _throughput_rows(
         f"FROM {_DAILY_ROLLUP_VIEW}{where} "
         "GROUP BY day "
         "ORDER BY day ASC",
-        params,
+        bindings,
     )
     return [_throughput_from_row(row) for row in rows]
 

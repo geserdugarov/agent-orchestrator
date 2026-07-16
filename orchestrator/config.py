@@ -36,16 +36,16 @@ _SECRET_KEYS = frozenset({
 _DOTENV_TRUE_VALUES = frozenset({"1", "true", "on", "yes"})
 
 
-def _has_matched_outer_quotes(value: str) -> bool:
-    if len(value) < 2:
+def _has_matched_outer_quotes(dotenv_value: str) -> bool:
+    if len(dotenv_value) < 2:
         return False
-    quote = value[0]
+    quote = dotenv_value[0]
     if quote not in ('"', "'"):
         return False
-    return value[-1] == quote
+    return dotenv_value[-1] == quote
 
 
-def _strip_dotenv_quotes(value: str) -> str:
+def _strip_dotenv_quotes(dotenv_value: str) -> str:
     """Strip a single matched outer quote pair off a dotenv value.
 
     The legacy form (`value.strip('"').strip("'")`) stripped quote
@@ -61,7 +61,7 @@ def _strip_dotenv_quotes(value: str) -> str:
     anything else is returned verbatim so quoted segments inside the
     value survive untouched.
     """
-    stripped_value = value.strip()
+    stripped_value = dotenv_value.strip()
     if _has_matched_outer_quotes(stripped_value):
         return stripped_value[1:-1]
     return stripped_value
@@ -76,8 +76,8 @@ def _parse_dotenv_entry(raw_line: str) -> Optional[tuple[str, str]]:
     line = raw_line.strip()
     if not line or line.startswith("#"):
         return None
-    key, _, value = line.partition("=")
-    return key.strip(), _strip_dotenv_quotes(value)
+    key, _, raw_value = line.partition("=")
+    return key.strip(), _strip_dotenv_quotes(raw_value)
 
 
 def _warn_ignored_dotenv_secret(key: str, env_path: Path) -> None:
@@ -94,11 +94,11 @@ def _load_dotenv_entry(raw_line: str, env_path: Path) -> None:
     entry = _parse_dotenv_entry(raw_line)
     if entry is None:
         return
-    key, value = entry
+    key, entry_value = entry
     if key in _SECRET_KEYS:
         _warn_ignored_dotenv_secret(key, env_path)
         return
-    os.environ.setdefault(key, value)
+    os.environ.setdefault(key, entry_value)
 
 
 def _load_dotenv() -> None:
@@ -127,9 +127,9 @@ def _resolve_github_token(repo: str) -> str:
         return token_file.read_text().strip()
     except FileNotFoundError:
         return ""
-    except OSError as e:
+    except OSError as err:
         print(
-            f"orchestrator: could not read token file {token_file}: {e}",
+            f"orchestrator: could not read token file {token_file}: {err}",
             file=sys.stderr,
         )
         return ""
@@ -142,11 +142,11 @@ def _parse_hitl_handles(raw: str) -> tuple[str, ...]:
     handles: list[str] = []
     seen: set[str] = set()
     for part in raw.split(","):
-        handle = part.strip().lstrip("@").strip()
-        if not handle or handle in seen:
+        hitl_handle = part.strip().lstrip("@").strip()
+        if not hitl_handle or hitl_handle in seen:
             continue
-        handles.append(handle)
-        seen.add(handle)
+        handles.append(hitl_handle)
+        seen.add(hitl_handle)
     return tuple(handles)
 
 
@@ -242,7 +242,7 @@ HITL_HANDLES: tuple[str, ...] = (
     or ("geserdugarov",)
 )
 HITL_HANDLE: str = ",".join(HITL_HANDLES)
-HITL_MENTIONS: str = " ".join(f"@{handle}" for handle in HITL_HANDLES)
+HITL_MENTIONS: str = " ".join(f"@{hitl_handle}" for hitl_handle in HITL_HANDLES)
 # Comma-separated GitHub logins whose unlabeled issues the orchestrator is
 # willing to auto-pick-up. Empty (the default) disables the allowlist and
 # preserves the legacy "anyone can trigger" behavior. Set this on a public
@@ -265,7 +265,7 @@ CODEX_BIN: str = os.environ.get("CODEX_BIN", "codex")
 CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", "claude")
 
 
-def _parse_agent_spec(name: str, value: str) -> tuple[str, tuple[str, ...]]:
+def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
     """Parse a shell-like backend spec into (backend, extra_args).
 
     Accepts a bare backend (`claude`) or a backend with backend-CLI args
@@ -280,29 +280,29 @@ def _parse_agent_spec(name: str, value: str) -> tuple[str, tuple[str, ...]]:
     backend value (`"codex"` / `"claude"`) round-trips cleanly to
     `(backend, ())` and a full spec with args round-trips to its tokens.
     """
-    raw = (value or "").strip()
+    raw = (spec or "").strip()
     if not raw:
         raise SystemExit(
-            f"orchestrator: {name}={value!r} is empty; expected 'codex' "
+            f"orchestrator: {name}={spec!r} is empty; expected 'codex' "
             "or 'claude' (optionally followed by CLI args)"
         )
     try:
         tokens = shlex.split(raw)
-    except ValueError as e:
+    except ValueError as err:
         raise SystemExit(
-            f"orchestrator: {name}={value!r} is not a valid shell-like "
-            f"command spec ({e}); expected 'codex' or 'claude' "
+            f"orchestrator: {name}={spec!r} is not a valid shell-like "
+            f"command spec ({err}); expected 'codex' or 'claude' "
             "(optionally followed by CLI args)"
         )
     if not tokens:
         raise SystemExit(
-            f"orchestrator: {name}={value!r} parses to no tokens; expected "
+            f"orchestrator: {name}={spec!r} parses to no tokens; expected "
             "'codex' or 'claude' (optionally followed by CLI args)"
         )
     backend = tokens[0].lower()
     if backend not in ("codex", "claude"):
         raise SystemExit(
-            f"orchestrator: {name}={value!r} first token {tokens[0]!r} is "
+            f"orchestrator: {name}={spec!r} first token {tokens[0]!r} is "
             "invalid; expected 'codex' or 'claude'"
         )
     return backend, tuple(tokens[1:])
@@ -378,11 +378,11 @@ def _parse_positive_int(name: str, raw: str, default: int) -> int:
     silently degrade the orchestrator to e.g. "process zero issues at a
     time" without surfacing the misconfiguration.
     """
-    value = (raw or "").strip()
-    if not value:
+    stripped = (raw or "").strip()
+    if not stripped:
         return default
     try:
-        parsed = int(value)
+        parsed = int(stripped)
     except ValueError:
         raise SystemExit(
             f"orchestrator: {name}={raw!r} is not a valid integer; "
@@ -425,13 +425,13 @@ def _parse_transition_guard(raw: str) -> str:
     flip to `enforce` once the warn logs are clean. An invalid value
     aborts at import so a typo can't silently disable the guard.
     """
-    value = (raw or "").strip().lower() or "warn"
-    if value not in ("off", "warn", "enforce"):
+    mode = (raw or "").strip().lower() or "warn"
+    if mode not in ("off", "warn", "enforce"):
         raise SystemExit(
             f"orchestrator: WORKFLOW_TRANSITION_GUARD={raw!r} is invalid; "
             "expected one of: off, warn, enforce"
         )
-    return value
+    return mode
 
 
 WORKFLOW_TRANSITION_GUARD: str = _parse_transition_guard(

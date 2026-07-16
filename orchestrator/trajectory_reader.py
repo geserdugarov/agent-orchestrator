@@ -253,7 +253,7 @@ class TrajectoryRun:
     def tool_calls(self) -> int:
         # Only `tool_call` steps count -- `assistant_message` /
         # `user_message` turns on newer records must not inflate the tally.
-        return sum(1 for s in self.steps if s.is_call)
+        return sum(1 for step in self.steps if step.is_call)
 
     @property
     def step_count(self) -> int:
@@ -302,7 +302,11 @@ class TrajectoryRun:
         # it works on this frozen dataclass); turns with no index are skipped
         # and a duplicate index keeps the last, mirroring the sink's
         # last-record-per-id discipline.
-        return {t.turn: t for t in self.turns if t.turn is not None}
+        return {
+            turn_usage.turn: turn_usage
+            for turn_usage in self.turns
+            if turn_usage.turn is not None
+        }
 
     def usage_for_turn(self, turn: Optional[int]) -> Optional[TurnUsageView]:
         """The per-turn usage for a 0-based `turn` index, or `None`.
@@ -336,14 +340,14 @@ class TrajectoryRun:
             entries.append(
                 TimelineEntry(kind=TIMELINE_PROMPT, content=self.user_input)
             )
-        for s in self.steps:
+        for step in self.steps:
             entries.append(
                 TimelineEntry(
-                    kind=s.kind,
-                    content=s.content,
-                    name=s.name,
-                    tool_id=s.tool_id,
-                    turn=s.turn,
+                    kind=step.kind,
+                    content=step.content,
+                    name=step.name,
+                    tool_id=step.tool_id,
+                    turn=step.turn,
                 )
             )
         if self.output:
@@ -377,7 +381,8 @@ class TrajectoryRun:
         if self.session_id.startswith(_FIXTURE_SESSION_PREFIX):
             return True
         if self.steps and all(
-            s.is_call and s.name == _FIXTURE_SKILL_TOOL for s in self.steps
+            step.is_call and step.name == _FIXTURE_SKILL_TOOL
+            for step in self.steps
         ):
             return True
         return False
@@ -485,21 +490,21 @@ def log_unconfigured_message() -> Optional[str]:
     return None
 
 
-def _coerce_int(value: Any) -> Optional[int]:
+def _coerce_int(raw: Any) -> Optional[int]:
     """Best-effort int coercion; `None` on anything non-numeric."""
-    if isinstance(value, bool):  # bool is an int subclass -- reject it
+    if isinstance(raw, bool):  # bool is an int subclass -- reject it
         return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
         try:
-            return int(value.strip())
+            return int(raw.strip())
         except ValueError:
             return None
     return None
 
 
-def _coerce_float(value: Any) -> Optional[float]:
+def _coerce_float(raw: Any) -> Optional[float]:
     """Best-effort float coercion; `None` on anything non-numeric.
 
     Used for `cost_usd`, which the sink stores as a float or omits (`null`)
@@ -507,36 +512,36 @@ def _coerce_float(value: Any) -> Optional[float]:
     non-numeric string yields `None`, so a hand-edited line never crashes the
     reader nor coerces an absent cost to `0.0`.
     """
-    if isinstance(value, bool):
+    if isinstance(raw, bool):
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
         try:
-            return float(value.strip())
+            return float(raw.strip())
         except ValueError:
             return None
     return None
 
 
-def _coerce_str(value: Any) -> str:
+def _coerce_str(raw: Any) -> str:
     """Normalise a possibly-absent scalar to a plain string."""
-    if value is None:
+    if raw is None:
         return ""
-    if isinstance(value, str):
-        return value
-    return str(value)
+    if isinstance(raw, str):
+        return raw
+    return str(raw)
 
 
-def _coerce_str_tuple(value: Any) -> tuple[str, ...]:
+def _coerce_str_tuple(raw: Any) -> tuple[str, ...]:
     """Normalise a record's list-of-names field to a string tuple."""
-    if not isinstance(value, list):
+    if not isinstance(raw, list):
         return ()
-    return tuple(_coerce_str(v) for v in value if v is not None)
+    return tuple(_coerce_str(name) for name in raw if name is not None)
 
 
-def _as_list(value: Any) -> list:
-    """Return `value` when it is a list, else `[]`.
+def _as_list(raw: Any) -> list:
+    """Return `raw` when it is a list, else `[]`.
 
     Guards the array-shaped record fields (`steps`, `turns`) before the
     parser iterates them: a hand-edited record carrying a scalar there
@@ -544,7 +549,7 @@ def _as_list(value: Any) -> list:
     same never-crash contract `_coerce_str_tuple` already gives the
     names fields.
     """
-    return value if isinstance(value, list) else []
+    return raw if isinstance(raw, list) else []
 
 
 def _parse_step(raw: Any) -> Optional[TrajectoryStepView]:
@@ -616,12 +621,16 @@ def parse_record(obj: Any, *, seq: int) -> Optional[TrajectoryRun]:
         return None
     steps = tuple(
         step
-        for step in (_parse_step(s) for s in _as_list(obj.get("steps")))
+        for step in (
+            _parse_step(raw_step) for raw_step in _as_list(obj.get("steps"))
+        )
         if step is not None
     )
     turns = tuple(
         turn
-        for turn in (_parse_turn(t) for t in _as_list(obj.get("turns")))
+        for turn in (
+            _parse_turn(raw_turn) for raw_turn in _as_list(obj.get("turns"))
+        )
         if turn is not None
     )
     return TrajectoryRun(
@@ -697,7 +706,7 @@ def read_trajectories(path: Optional[Path] = None) -> list[TrajectoryRun]:
         return []
     # Sort newest-first; `-seq` keeps the most recently appended record
     # ahead of an equal-timestamp predecessor while staying a total order.
-    runs.sort(key=lambda r: (r.ts, r.seq), reverse=True)
+    runs.sort(key=lambda run: (run.ts, run.seq), reverse=True)
     return runs
 
 
@@ -710,12 +719,12 @@ def _distinct_sorted(
     value -- a run that omitted that field -- is dropped so the sidebar never
     offers a blank choice, and the result is sorted for a stable dropdown.
     """
-    values: set[str] = set()
+    collected: set[str] = set()
     for run in runs:
-        value = key(run)
-        if value:
-            values.add(value)
-    return tuple(sorted(values))
+        field = key(run)
+        if field:
+            collected.add(field)
+    return tuple(sorted(collected))
 
 
 def filter_options(runs: Sequence[TrajectoryRun]) -> FilterOptions:
@@ -725,10 +734,10 @@ def filter_options(runs: Sequence[TrajectoryRun]) -> FilterOptions:
     blank choice for a record that omitted (e.g.) its stage.
     """
     return FilterOptions(
-        repos=_distinct_sorted(runs, lambda r: r.repo),
-        backends=_distinct_sorted(runs, lambda r: r.backend),
-        agent_roles=_distinct_sorted(runs, lambda r: r.agent_role),
-        stages=_distinct_sorted(runs, lambda r: r.stage),
+        repos=_distinct_sorted(runs, lambda run: run.repo),
+        backends=_distinct_sorted(runs, lambda run: run.backend),
+        agent_roles=_distinct_sorted(runs, lambda run: run.agent_role),
+        stages=_distinct_sorted(runs, lambda run: run.stage),
     )
 
 
@@ -754,7 +763,7 @@ def _matches_query(run: TrajectoryRun, needle: str) -> bool:
     for step in run.steps:
         haystacks.append(step.name)
         haystacks.append(step.content)
-    return any(needle in h.lower() for h in haystacks if h)
+    return any(needle in text.lower() for text in haystacks if text)
 
 
 def _normalize_filter_values(
@@ -870,11 +879,11 @@ def summarize(runs: Sequence[TrajectoryRun]) -> TrajectorySummary:
     """
     return TrajectorySummary(
         total_runs=len(runs),
-        distinct_issues=len({(r.repo, r.issue) for r in runs}),
-        distinct_repos=len({r.repo for r in runs if r.repo}),
-        total_tool_calls=sum(r.tool_calls for r in runs),
-        truncated_runs=sum(1 for r in runs if r.truncated),
+        distinct_issues=len({(run.repo, run.issue) for run in runs}),
+        distinct_repos=len({run.repo for run in runs if run.repo}),
+        total_tool_calls=sum(run.tool_calls for run in runs),
+        truncated_runs=sum(1 for run in runs if run.truncated),
         total_cost_usd=sum(
-            r.cost_usd for r in runs if r.cost_usd is not None
+            run.cost_usd for run in runs if run.cost_usd is not None
         ),
     )

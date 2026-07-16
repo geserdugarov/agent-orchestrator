@@ -30,7 +30,7 @@ from typing import Any, Iterable, List, Optional, TypeVar
 
 from orchestrator import config
 
-_T = TypeVar("_T")
+_CommentT = TypeVar("_CommentT")
 
 
 def _allowed_logins(allowed: Optional[Iterable[str]]) -> set[str]:
@@ -41,7 +41,7 @@ def _allowed_logins(allowed: Optional[Iterable[str]]) -> set[str]:
     """
     if allowed is None:
         allowed = config.ALLOWED_ISSUE_AUTHORS
-    return {h.lower() for h in allowed if h}
+    return {login.lower() for login in allowed if login}
 
 
 def is_trusted_author(
@@ -67,8 +67,8 @@ def is_trusted_author(
 
 
 def filter_trusted(
-    comments: Iterable[_T], *, allowed: Optional[Iterable[str]] = None
-) -> List[_T]:
+    comments: Iterable[_CommentT], *, allowed: Optional[Iterable[str]] = None
+) -> List[_CommentT]:
     """Keep only comments whose author is trusted (see `is_trusted_author`).
 
     Each item is any object exposing a `.user` attribute. Input order is
@@ -80,6 +80,6 @@ def filter_trusted(
     if not allowed_lower:
         return list(comments)
     return [
-        c for c in comments
-        if is_trusted_author(getattr(c, "user", None), allowed=allowed_lower)
+        comment for comment in comments
+        if is_trusted_author(getattr(comment, "user", None), allowed=allowed_lower)
     ]

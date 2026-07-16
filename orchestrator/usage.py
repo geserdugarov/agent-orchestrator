@@ -130,9 +130,9 @@ _CLAUDE_RATES: tuple[tuple[re.Pattern[str], dict[str, float]], ...] = (
 def _claude_rates(model: str) -> Optional[dict[str, float]]:
     if not model or model == "unknown":
         return None
-    m = model.lower()
+    lowered = model.lower()
     for pat, rates in _CLAUDE_RATES:
-        if pat.search(m):
+        if pat.search(lowered):
             return rates
     return None
 
@@ -220,9 +220,9 @@ _CODEX_RATES: tuple[tuple[str, dict[str, Optional[float]]], ...] = (
 def _codex_rates(model: str) -> Optional[dict[str, Optional[float]]]:
     if not model or model == "unknown":
         return None
-    m = model.lower()
+    lowered = model.lower()
     for prefix, rates in _CODEX_RATES:
-        if m.startswith(prefix):
+        if lowered.startswith(prefix):
             return rates
     return None
 
@@ -244,57 +244,57 @@ def _iter_events(stdout: str) -> list[dict[str, Any]]:
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            decoded = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict):
-            events.append(obj)
+        if isinstance(decoded, dict):
+            events.append(decoded)
     return events
 
 
-def _num(value: Any) -> int:
-    """Coerce a usage-field value to a non-negative int.
+def _num(raw_count: Any) -> int:
+    """Coerce a usage-field count to a non-negative int.
 
     Both backends sometimes report counts as floats or strings; the shell
     reference uses ``tonumber?`` for the same reason. Anything we cannot
     coerce becomes 0 rather than blowing up the whole parse.
     """
     number = 0
-    if isinstance(value, bool):
-        number = int(value)
-    elif isinstance(value, (int, float)):
-        number = int(value)
-    elif isinstance(value, str):
+    if isinstance(raw_count, bool):
+        number = int(raw_count)
+    elif isinstance(raw_count, (int, float)):
+        number = int(raw_count)
+    elif isinstance(raw_count, str):
         try:
-            number = int(float(value))
+            number = int(float(raw_count))
         except ValueError:
             pass
     return number
 
 
-def _walk_objects(value: Any) -> Iterable[dict[str, Any]]:
-    """Yield every dict reachable from ``value`` (depth-first).
+def _walk_objects(node: Any) -> Iterable[dict[str, Any]]:
+    """Yield every dict reachable from ``node`` (depth-first).
 
     Codex buries ``total_cost_usd`` and model fields at varied nesting; this
     matches the ``.. | objects`` recursion in the shell reference without
     forcing the parser to enumerate every known path.
     """
-    if isinstance(value, dict):
-        yield value
-        for v in value.values():
-            yield from _walk_objects(v)
-    elif isinstance(value, list):
-        for v in value:
-            yield from _walk_objects(v)
+    if isinstance(node, dict):
+        yield node
+        for child in node.values():
+            yield from _walk_objects(child)
+    elif isinstance(node, list):
+        for child in node:
+            yield from _walk_objects(child)
 
 
-def _coerce_reported_cost(value: Any) -> Optional[float]:
-    if isinstance(value, (int, float)):
-        return float(value)
-    if not isinstance(value, str):
+def _coerce_reported_cost(raw_cost: Any) -> Optional[float]:
+    if isinstance(raw_cost, (int, float)):
+        return float(raw_cost)
+    if not isinstance(raw_cost, str):
         return None
     try:
-        return float(value)
+        return float(raw_cost)
     except ValueError:
         return None
 
@@ -319,9 +319,9 @@ def _find_last_reported_cost(events: list[dict[str, Any]]) -> Optional[float]:
 
 def _dedup_models(models: Iterable[str]) -> tuple[str, ...]:
     seen: dict[str, None] = {}
-    for m in models:
-        if m and m != "unknown" and m not in seen:
-            seen[m] = None
+    for model in models:
+        if model and model != "unknown" and model not in seen:
+            seen[model] = None
     return tuple(seen)
 
 
@@ -359,15 +359,15 @@ def _nested_value(payload: dict[str, Any], path: _ModelPath) -> Any:
     return current
 
 
-def _known_model(value: Any) -> Optional[str]:
-    if isinstance(value, str) and value and value != "unknown":
-        return value
+def _known_model(candidate: Any) -> Optional[str]:
+    if isinstance(candidate, str) and candidate and candidate != "unknown":
+        return candidate
     return None
 
 
-def _nonempty_string(value: Any) -> Optional[str]:
-    if isinstance(value, str) and value:
-        return value
+def _nonempty_string(candidate: Any) -> Optional[str]:
+    if isinstance(candidate, str) and candidate:
+        return candidate
     return None
 
 
@@ -385,9 +385,9 @@ def _first_string_at_paths(
     event: dict[str, Any], paths: tuple[_ModelPath, ...],
 ) -> Optional[str]:
     for path in paths:
-        value = _nonempty_string(_nested_value(event, path))
-        if value is not None:
-            return value
+        text = _nonempty_string(_nested_value(event, path))
+        if text is not None:
+            return text
     return None
 
 
@@ -538,8 +538,8 @@ class _ClaudeUsageAggregate:
         )
         if model not in self.model_order:
             self.model_order.append(model)
-        for key, value in record.items():
-            bucket[key] += value
+        for key, count in record.items():
+            bucket[key] += count
 
     def apply_tokens(self, metrics: UsageMetrics) -> None:
         for bucket in self.per_model.values():
@@ -834,10 +834,10 @@ def _reported_codex_turn_count(
 ) -> Optional[int]:
     reported: Optional[int] = None
     for event in events:
-        for obj in _walk_objects(event):
-            value = obj.get("num_turns")
-            if isinstance(value, (int, float)):
-                reported = int(value)
+        for payload in _walk_objects(event):
+            turns_value = payload.get("num_turns")
+            if isinstance(turns_value, (int, float)):
+                reported = int(turns_value)
     return reported
 
 
@@ -1023,12 +1023,12 @@ def _claude_init_field(
     return None
 
 
-def _ordered_unique_names(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list):
+def _ordered_unique_names(raw_names: Any) -> tuple[str, ...]:
+    if not isinstance(raw_names, list):
         return ()
     ordered_names: list[str] = []
     seen_names: set[str] = set()
-    for name in value:
+    for name in raw_names:
         if not isinstance(name, str):
             continue
         if not name or name in seen_names:
@@ -1099,10 +1099,10 @@ class _ClaudeSkillCollector:
         message = event.get("message")
         if not isinstance(message, dict):
             return
-        content = message.get("content")
-        if not isinstance(content, list):
+        blocks = message.get("content")
+        if not isinstance(blocks, list):
             return
-        for block in content:
+        for block in blocks:
             self._add_block(block)
 
     def _add_block(self, block: Any) -> None:
@@ -1175,16 +1175,16 @@ class _CodexSkillCollector:
     anonymous: list[str] = field(default_factory=list)
 
     def add_event(self, event: dict[str, Any]) -> None:
-        item = event.get("item")
-        if not isinstance(item, dict) or item.get("type") != "command_execution":
+        stream_item = event.get("item")
+        if not isinstance(stream_item, dict) or stream_item.get("type") != "command_execution":
             return
-        command = item.get("command")
+        command = stream_item.get("command")
         if not isinstance(command, str):
             return
         names = _CODEX_SKILL_PATH_RE.findall(command)
         if not names:
             return
-        item_id = item.get("id")
+        item_id = stream_item.get("id")
         if isinstance(item_id, str) and item_id:
             if item_id not in self.by_id:
                 self.id_order.append(item_id)
@@ -1342,9 +1342,9 @@ class AgentTrajectory:
                 "trigger_counts": dict(self.skills.trigger_counts),
                 "available": list(self.skills.available),
             },
-            "steps": [s.to_dict() for s in self.steps],
+            "steps": [step.to_dict() for step in self.steps],
             "final_output": self.final_output,
-            "turns": [t.to_dict() for t in self.turns],
+            "turns": [turn_usage.to_dict() for turn_usage in self.turns],
         }
 
 
@@ -1373,9 +1373,9 @@ def _claude_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
     for ev in events:
         if ev.get("type") != "result":
             continue
-        value = ev.get("result")
-        if isinstance(value, str):
-            final = value
+        result_text = ev.get("result")
+        if isinstance(result_text, str):
+            final = result_text
     return final
 
 
@@ -1400,7 +1400,7 @@ def _claude_turn_key(idx: int, event: dict[str, Any]) -> str:
 
 
 def _claude_assistant_steps(
-    content: list[Any], turn: Optional[int], seen_calls: set[str],
+    blocks: list[Any], turn: Optional[int], seen_calls: set[str],
 ) -> list[TrajectoryStep]:
     """Steps from one assistant frame's content: ``text`` + ``tool_use`` blocks.
 
@@ -1412,7 +1412,7 @@ def _claude_assistant_steps(
     rides along verbatim (no redaction here).
     """
     steps: list[TrajectoryStep] = []
-    for block in content:
+    for block in blocks:
         step = _claude_assistant_step(block, turn, seen_calls)
         if step is not None:
             steps.append(step)
@@ -1462,7 +1462,7 @@ def _claude_tool_call_step(
 
 
 def _claude_user_steps(
-    content: list[Any], seen_results: set[str],
+    blocks: list[Any], seen_results: set[str],
 ) -> list[TrajectoryStep]:
     """Steps from one user frame's content: ``text`` + ``tool_result`` blocks.
 
@@ -1473,7 +1473,7 @@ def _claude_user_steps(
     rides along verbatim (no redaction here).
     """
     steps: list[TrajectoryStep] = []
-    for block in content:
+    for block in blocks:
         step = _claude_user_step(block, seen_results)
         if step is not None:
             steps.append(step)
@@ -1521,15 +1521,15 @@ class _ClaudeTrajectoryBuilder:
         if not isinstance(message, dict):
             return
         turn = self._turn(idx, event) if event_type == "assistant" else None
-        content = message.get("content")
-        if not isinstance(content, list):
+        blocks = message.get("content")
+        if not isinstance(blocks, list):
             return
         if event_type == "assistant":
             self.steps.extend(
-                _claude_assistant_steps(content, turn, self.seen_calls)
+                _claude_assistant_steps(blocks, turn, self.seen_calls)
             )
         else:
-            self.steps.extend(_claude_user_steps(content, self.seen_results))
+            self.steps.extend(_claude_user_steps(blocks, self.seen_results))
 
     def _turn(self, idx: int, event: dict[str, Any]) -> int:
         return self.turn_index.setdefault(
@@ -1595,7 +1595,7 @@ class _ClaudeTurnUsageBuilder:
     def build(self) -> tuple[TurnUsage, ...]:
         return tuple(
             _turn_usage_from_row(row)
-            for row in sorted(self.by_key.values(), key=lambda item: item[0])
+            for row in sorted(self.by_key.values(), key=lambda usage_row: usage_row[0])
         )
 
 
@@ -1669,10 +1669,10 @@ def _codex_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
     """
     final: Optional[str] = None
     for ev in events:
-        item = ev.get("item")
-        if not isinstance(item, dict) or item.get("type") != "agent_message":
+        stream_item = ev.get("item")
+        if not isinstance(stream_item, dict) or stream_item.get("type") != "agent_message":
             continue
-        text = item.get("text")
+        text = stream_item.get("text")
         if isinstance(text, str):
             final = text
     return final
@@ -1711,31 +1711,31 @@ class _CodexTrajectoryBuilder:
     anonymous: list[TrajectoryStep] = field(default_factory=list)
 
     def add_event(self, event: dict[str, Any]) -> None:
-        item = event.get("item")
-        if not isinstance(item, dict):
+        stream_item = event.get("item")
+        if not isinstance(stream_item, dict):
             return
-        item_id = self._item_id(item)
-        if item.get("type") == "command_execution":
-            self._add_command(item, item_id)
-        elif item.get("type") == "agent_message":
-            self._add_message(item, item_id)
+        item_id = self._item_id(stream_item)
+        if stream_item.get("type") == "command_execution":
+            self._add_command(stream_item, item_id)
+        elif stream_item.get("type") == "agent_message":
+            self._add_message(stream_item, item_id)
 
-    def _item_id(self, item: dict[str, Any]) -> str:
-        raw_id = item.get("id")
+    def _item_id(self, stream_item: dict[str, Any]) -> str:
+        raw_id = stream_item.get("id")
         item_id = raw_id if isinstance(raw_id, str) and raw_id else ""
         if item_id and item_id not in self.seen:
             self.seen.add(item_id)
             self.order.append(item_id)
         return item_id
 
-    def _add_command(self, item: dict[str, Any], item_id: str) -> None:
-        command = item.get("command")
-        has_output = "aggregated_output" in item
+    def _add_command(self, stream_item: dict[str, Any], item_id: str) -> None:
+        command = stream_item.get("command")
+        has_output = "aggregated_output" in stream_item
         if item_id:
             if isinstance(command, str):
                 self.commands[item_id] = command
             if has_output:
-                self.outputs[item_id] = item.get("aggregated_output")
+                self.outputs[item_id] = stream_item.get("aggregated_output")
             return
         if isinstance(command, str):
             self.anonymous.append(TrajectoryStep(
@@ -1743,11 +1743,11 @@ class _CodexTrajectoryBuilder:
             ))
         if has_output:
             self.anonymous.append(TrajectoryStep(
-                kind="tool_result", content=item.get("aggregated_output"),
+                kind="tool_result", content=stream_item.get("aggregated_output"),
             ))
 
-    def _add_message(self, item: dict[str, Any], item_id: str) -> None:
-        message = item.get("text")
+    def _add_message(self, stream_item: dict[str, Any], item_id: str) -> None:
+        message = stream_item.get("text")
         if not isinstance(message, str) or not message:
             return
         if item_id:

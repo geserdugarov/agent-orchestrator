@@ -88,6 +88,12 @@ class ParseRecordTest(unittest.TestCase):
         self.assertIsNone(tr.parse_record("nope", seq=0))
         self.assertIsNone(tr.parse_record(["a", "b"], seq=0))
 
+    def test_accepts_obj_keyword(self) -> None:
+        # `obj` is the public keyword; callers may pass the record by name.
+        run = tr.parse_record(obj=_record(issue=7), seq=0)
+        assert run is not None
+        self.assertEqual(run.issue, 7)
+
     def test_foreign_event_returns_none(self) -> None:
         self.assertIsNone(
             tr.parse_record(_record(event="agent_exit"), seq=0)

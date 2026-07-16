@@ -42,7 +42,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
-| 4 | Remaining production style and structure | 0/5 | [ ] |
+| 4 | Remaining production style and structure | 1/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
@@ -280,9 +280,9 @@ Goal: clear the production findings that are not covered by the complexity stage
 
 ### Package 4.1 — Names
 
-- [ ] Resolve production `WPS110`, `WPS111`, `WPS114`, `WPS115`, `WPS117`, and `WPS122` findings.
-- [ ] Use domain names rather than mechanically lengthening identifiers.
-- [ ] Update keyword callers and patch targets when a parameter or helper is renamed.
+- [x] Resolve production `WPS110`, `WPS111`, `WPS114`, `WPS115`, `WPS117`, and `WPS122` findings.
+- [x] Use domain names rather than mechanically lengthening identifiers.
+- [x] Update keyword callers and patch targets when a parameter or helper is renamed.
 
 ### Package 4.2 — Literals and repeated expressions
 
@@ -541,6 +541,107 @@ considered.
 - Protected by: `orchestrator.worktrees.__all__`, the base-sync tests, and conflict event-emission tests.
 - Reviewed: [x]
 
+### Pinned-state payload attribute
+
+- File and symbol: `orchestrator/github.py: PinnedState.data`
+- Rule: `WPS110`
+- Reason: `data` is the parsed pinned-state dict on the `PinnedState` model. It is constructed by keyword
+  (`PinnedState(data=...)`), serialized directly (`json.dumps(state.data, sort_keys=True)`), and read as `.data`
+  across the workflow, stage handlers, and tests. Renaming it is a migration of a live pinned-state contract, not a
+  local cleanup; the `.get` / `.set` accessors already keep most callers off the attribute.
+- Protected by: `orchestrator/github.py`, `orchestrator/workflow.py`, `orchestrator/stages/`, and `tests/`.
+- Reviewed: [x]
+
+### Trajectory step content field
+
+- File and symbol: `orchestrator/usage.py: TrajectoryStep.content`
+- Rule: `WPS110`
+- Reason: `content` is the serialized field name emitted by `AgentTrajectory.to_dict()` (the `"content"` key) and read
+  back as `.content` by the trajectory reader, dashboard, and analytics. The field mirrors its persisted key, so a
+  rename would either desync the two or migrate the serialized trajectory schema.
+- Protected by: `orchestrator/trajectory_reader.py`, `orchestrator/trajectory_dashboard.py`,
+  `orchestrator/analytics/__init__.py`, and `tests/test_trajectory_reader.py`.
+- Reviewed: [x]
+
+### Analytics event-recording result inputs
+
+- File and symbols: `orchestrator/analytics/__init__.py`: `record_stage_evaluation` and `record_agent_exit` (the
+  `result` parameter).
+- Rule: `WPS110`
+- Reason: `result` is part of the public keyword contract of these `analytics.__all__` recorders; workflow code calls
+  them as `record_stage_evaluation(result=...)` / `record_agent_exit(result=...)`. Renaming the parameter would break
+  the established keyword call sites the same way a request object would (see the sibling `WPS211` entries).
+- Protected by: `orchestrator.analytics.__all__`, `orchestrator/workflow.py`, and `tests/test_analytics.py`.
+- Reviewed: [x]
+
+### Issue-event row result field
+
+- File and symbol: `orchestrator/analytics/read_models.py: IssueEventRow.result`
+- Rule: `WPS110`
+- Reason: `result` is a field of the frozen public `IssueEventRow` read model exported through
+  `orchestrator.analytics.read.__all__` and consumed as `ev.result` by the dashboard. Renaming it changes the public
+  read-model shape.
+- Protected by: `orchestrator.analytics.read.__all__`, `orchestrator/dashboard.py`, and the analytics read tests.
+- Reviewed: [x]
+
+### Dashboard preset identifiers
+
+- File and symbols: `orchestrator/dashboard_state.py` and `orchestrator/dashboard.py`: `PRESET_3D` and `PRESET_7D`.
+- Rule: `WPS114`
+- Reason: The `3D` / `7D` suffixes name the 3-day and 7-day dashboard windows and are part of the historical
+  `orchestrator.dashboard` export surface (`__all__`), reached by tests as `dashboard.PRESET_3D` /
+  `dashboard.PRESET_7D`. Any spelling that satisfies `WPS114` renames a public export.
+- Protected by: `orchestrator.dashboard.__all__` and `tests/test_dashboard.py`.
+- Reviewed: [x]
+
+### Public formatter and query-parser inputs
+
+- File and symbols: `orchestrator/dashboard_theme.py` (`fmt_money`, `fmt_money_exact`, `fmt_tokens`, `fmt_num`:
+  `value`), `orchestrator/dashboard_charts.py` (`cost_horizontal_bars`: `items`), and
+  `orchestrator/dashboard_html.py` (`parse_skill_matrix_sort`: `params`).
+- Rule: `WPS110`
+- Reason: These are public dashboard functions whose parameter name is a keyword-call contract -- a caller may pass
+  `fmt_money(value=...)`, `cost_horizontal_bars(items=...)`, or `parse_skill_matrix_sort(params=...)`. Renaming the
+  parameter turns a previously valid keyword call into a `TypeError`; only internal locals were renamed.
+- Protected by: `tests/test_dashboard_theme.py`, `tests/test_dashboard_charts.py`, and `tests/test_dashboard.py`,
+  which each assert the keyword call.
+- Reviewed: [x]
+
+### Dashboard HTML export helpers
+
+- File and symbols: `orchestrator/dashboard_html.py`: `_delta_pill` (the `value` parameter) and `_sparkline_svg` (the
+  `values`, `w`, and `h` parameters).
+- Rule: `WPS110` (`value`, `values`) and `WPS111` (`w`, `h`)
+- Reason: Both helpers are re-exported through `orchestrator.dashboard.__all__`, so despite the leading underscore
+  their parameter names are a historical keyword contract -- `dashboard._delta_pill(value=...)` and
+  `dashboard._sparkline_svg(values=..., w=..., h=...)` must keep working. Renaming a parameter turns a previously
+  valid facade keyword call into a `TypeError`; only the `cls` -> `css_class` body local in `_delta_pill` was renamed.
+- Protected by: `orchestrator.dashboard.__all__` and `tests/test_dashboard.py`, which assert the facade keyword calls.
+- Reviewed: [x]
+
+### Workflow-label coercion inputs
+
+- File and symbols: `orchestrator/state_machine.py`: `coerce_workflow_label` and `coerce_child_issue_label` (the
+  `value` parameter).
+- Rule: `WPS110`
+- Reason: Both are public typo guards called across the workflow, the GitHub client, and tests; `value` is their
+  keyword-call contract, so renaming it would break `coerce_workflow_label(value=...)` callers.
+- Protected by: `orchestrator/github.py`, `orchestrator/state_machine.py`, and `tests/test_state_machine.py`, which
+  asserts the keyword call.
+- Reviewed: [x]
+
+### Trajectory view content fields and record parser
+
+- File and symbols: `orchestrator/trajectory_reader.py`: `TrajectoryStepView.content` and `TimelineEntry.content`
+  (fields) plus `parse_record` (the `obj` parameter).
+- Rule: `WPS110`
+- Reason: `content` is the public view-model field constructed and read as `.content` by the trajectory dashboard and
+  tests (mirroring the serialized `"content"` key); `obj` is `parse_record`'s keyword-call contract. Renaming either
+  breaks construction, attribute access, or a keyword call. Only internal locals (e.g. the step loop var) were renamed.
+- Protected by: `orchestrator/trajectory_dashboard.py`, `tests/test_trajectory_reader.py`, and
+  `tests/test_trajectory_dashboard.py`.
+- Reviewed: [x]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -576,6 +677,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-16 | 3.6/validating | Complete | Target WPS; 129 focused; full gate | Not committed | `in_review.py` |
 | 2026-07-16 | 3.6/in_review | Complete | Target WPS; 68 focused; full gate | Not committed | `conflicts.py` |
 | 2026-07-16 | 3.6/conflicts | Complete | Target WPS; 70 focused; full gate | Not committed | Start Package 4.1 |
+| 2026-07-16 | 4.1 | Complete | Target WPS; 24 remainders; full gate 2118 passed | Not committed | Start Package 4.2 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -665,3 +767,23 @@ WPS finding was introduced (the `WPS237` f-string trap was avoided by binding `s
 command ordering, locks, and emitted events were all preserved, so the 70 focused conflicts tests passed unchanged and
 no Stage 3 finding was retained. All 70 focused conflicts tests and 2,082 full tests passed (32 skipped for the
 optional dashboard and live-Postgres dependencies), completing Package 3.6.
+
+Package 4.1 resolved the production naming findings for `WPS110`, `WPS111`, `WPS114`, `WPS115`, `WPS117`, and `WPS122`
+across all 26 affected modules, cutting the six-rule production count from 253 to 24 documented remainders. Renames used
+domain terms drawn from the surrounding code (e.g. the config dotenv/agent-spec helpers, the `comment_trust`
+`_CommentT` type var and login/comment loop vars, the analytics filter `bindings` and `_day`/`raw` fields, the
+usage/trajectory parse helpers, and the dashboard chart locals). `WPS115` was cleared by moving `github.py`'s
+`_RECORDED_EVENTS_CAP` to module scope; `WPS117` by renaming the `dashboard_html` `cls` locals to `css_class`; `WPS122`
+by dropping the `dashboard_charts` `_ = rows` stub, renaming `main.py`'s `_running` / `_received_signal` process globals
+(matching the underscore-free `active_scheduler`), and collapsing the poll-loop counter to a bare `_`. To keep public
+keyword contracts intact, parameters of public functions were left at their original names -- `fmt_money(value)`,
+`cost_horizontal_bars(items)`, `parse_skill_matrix_sort(params)`, `coerce_workflow_label(value)` /
+`coerce_child_issue_label(value)`, `parse_record(obj)`, and the `dashboard.__all__` HTML helpers
+`_delta_pill(value)` / `_sparkline_svg(values, w, h)` -- and the public `TrajectoryStepView.content` /
+`TimelineEntry.content` view fields were preserved, with focused keyword-call tests added to lock those contracts.
+All 24 documented `WPS110` / `WPS111` / `WPS114` remainders are public/keyword or serialized surfaces (also
+`PinnedState.data`, `usage` `TrajectoryStep.content`, the analytics `record_*` `result` inputs,
+`IssueEventRow.result`, and the `PRESET_3D` / `PRESET_7D` dashboard-export identifiers) and are recorded in the
+accepted-remainder register. No public contract,
+pinned-state key, watermark, comment marker, event shape, or compatibility re-export changed; the full gate passed with
+2,118 tests and 3 live-Postgres skips (the optional dashboard group installed so the plotly chart tests ran).

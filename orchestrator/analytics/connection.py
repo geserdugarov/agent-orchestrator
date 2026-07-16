@@ -43,17 +43,17 @@ def _default_connect(db_url: str) -> Any:
     """
     try:
         import psycopg
-    except ImportError as e:
+    except ImportError as error:
         raise AnalyticsReadError(
             "psycopg is required for analytics.read; "
             "run `uv sync --locked` to install it"
-        ) from e
+        ) from error
     try:
         return psycopg.connect(db_url)
-    except Exception as e:
+    except Exception as error:
         raise AnalyticsReadError(
-            f"could not connect to analytics database: {e}"
-        ) from e
+            f"could not connect to analytics database: {error}"
+        ) from error
 
 
 def _default_persistent_connect(db_url: str) -> Any:
@@ -73,17 +73,17 @@ def _default_persistent_connect(db_url: str) -> Any:
     """
     try:
         import psycopg
-    except ImportError as e:
+    except ImportError as error:
         raise AnalyticsReadError(
             "psycopg is required for analytics.read; "
             "run `uv sync --locked` to install it"
-        ) from e
+        ) from error
     try:
         return psycopg.connect(db_url, autocommit=True)
-    except Exception as e:
+    except Exception as error:
         raise AnalyticsReadError(
-            f"could not connect to analytics database: {e}"
-        ) from e
+            f"could not connect to analytics database: {error}"
+        ) from error
 
 
 _thread_local = threading.local()

@@ -118,7 +118,7 @@ class _DocumentingRun:
     commit still pushes it.
     """
     worktree: Any
-    result: AgentResult
+    agent_result: AgentResult
     before_sha: str
     recovered: bool
     paused: bool
@@ -945,7 +945,7 @@ def _dispose_documenting_outcome(
     """
     from orchestrator import workflow as _wf
 
-    if run.result.timed_out:
+    if run.agent_result.timed_out:
         _park_documenting(
             ctx,
             f"{config.HITL_MENTIONS} agent timed out after "
@@ -965,7 +965,7 @@ def _dispose_documenting_outcome(
     # `DOCS: NO_CHANGE`, asked a question, or produced nothing) cannot slip past.
     dirty = _wf._worktree_dirty_files(wt)
     if dirty:
-        _park_documenting_dirty(ctx, run.result, dirty)
+        _park_documenting_dirty(ctx, run.agent_result, dirty)
         return
 
     if after_sha and after_sha != run.before_sha:
@@ -974,7 +974,7 @@ def _dispose_documenting_outcome(
         )
         return
 
-    _dispose_documenting_clean(ctx, wt, run.ahead, after_sha, run.result)
+    _dispose_documenting_clean(ctx, wt, run.ahead, after_sha, run.agent_result)
 
 
 def _refuse_parked_continue_command(
@@ -1044,7 +1044,7 @@ def _drive_documenting_pass(ctx: _DocumentingContext):
     # fresh-docs spawn can land here). Ignore it and return WITHOUT writing
     # pinned state -- the pre-spawn `docs_checked_sha` / watermark mutations
     # are discarded so the next process re-runs the docs pass.
-    if _wf._ignore_if_interrupted(ctx.issue, run.result):
+    if _wf._ignore_if_interrupted(ctx.issue, run.agent_result):
         return None
 
     # Live pause applied while the docs agent ran: honor the decision the

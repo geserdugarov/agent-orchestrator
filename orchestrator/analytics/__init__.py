@@ -272,9 +272,9 @@ def build_record(
     }
     if stage is not None:
         rec["stage"] = stage
-    for k, v in extras.items():
-        if v is not None:
-            rec[k] = v
+    for key, field_value in extras.items():
+        if field_value is not None:
+            rec[key] = field_value
     return rec
 
 
@@ -306,8 +306,8 @@ def _append_jsonl_record(
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(serialized)
-    except OSError as e:
-        log.warning("could not write record to %s: %s", path, e)
+    except OSError as error:
+        log.warning("could not write record to %s: %s", path, error)
 
 
 def append_record(record: dict) -> None:
@@ -713,8 +713,8 @@ class _TrajectoryHeadline:
     @property
     def serialized_size(self) -> int:
         text_size = sum(
-            len(value or "")
-            for value in (self.user_input, self.system_prompt, self.output)
+            len(text_field or "")
+            for text_field in (self.user_input, self.system_prompt, self.output)
         )
         return text_size + len(json.dumps(self.run_usage, default=str))
 
@@ -726,8 +726,8 @@ class _TrajectoryBudget:
     used: int
     truncated: bool = False
 
-    def include(self, value: Any) -> bool:
-        self.used += len(json.dumps(value, default=str))
+    def include(self, field_value: Any) -> bool:
+        self.used += len(json.dumps(field_value, default=str))
         if self.used <= _TRAJECTORY_RECORD_BUDGET:
             return True
         self.truncated = True
@@ -744,7 +744,7 @@ def _truncate_head_tail(text: str, head: int, tail: int) -> str:
     return f"{text[:head]}\n...[{elided} chars elided]...\n{text[-tail:]}"
 
 
-def _redact_tree(value: Any, redact) -> Any:
+def _redact_tree(node: Any, redact) -> Any:
     """Recursively redact every string leaf of a tool payload.
 
     Applied before JSON serialization so a multiline / control-character
@@ -757,16 +757,16 @@ def _redact_tree(value: Any, redact) -> Any:
     agent-sourced content. Non-string scalars (numbers, bools, `None`) are
     returned as-is.
     """
-    if isinstance(value, str):
-        return redact(value)
-    if isinstance(value, dict):
-        return {k: _redact_tree(v, redact) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_tree(v, redact) for v in value]
-    return value
+    if isinstance(node, str):
+        return redact(node)
+    if isinstance(node, dict):
+        return {key: _redact_tree(child, redact) for key, child in node.items()}
+    if isinstance(node, list):
+        return [_redact_tree(child, redact) for child in node]
+    return node
 
 
-def _redact_and_truncate(value: Any, redact) -> Optional[str]:
+def _redact_and_truncate(field_value: Any, redact) -> Optional[str]:
     """Redact then per-field head/tail truncate one trajectory value.
 
     String leaves are redacted with `_redact_secrets` BEFORE any JSON
@@ -781,17 +781,17 @@ def _redact_and_truncate(value: Any, redact) -> Optional[str]:
     halves. Empty / `None` content yields `None` so `build_record` drops the
     field rather than storing an empty string.
     """
-    if value is None:
+    if field_value is None:
         return None
-    if isinstance(value, str):
-        text = redact(value)
+    if isinstance(field_value, str):
+        text = redact(field_value)
     else:
         try:
             text = json.dumps(
-                _redact_tree(value, redact), sort_keys=True, default=str,
+                _redact_tree(field_value, redact), sort_keys=True, default=str,
             )
         except (TypeError, ValueError):
-            text = str(_redact_tree(value, redact))
+            text = str(_redact_tree(field_value, redact))
         text = redact(text)
     if not text:
         return None
@@ -1062,8 +1062,8 @@ def _probe_exists(path: Path) -> bool:
     """
     try:
         return path.exists()
-    except OSError as e:
-        log.warning("could not probe %s for prune: %s", path, e)
+    except OSError as error:
+        log.warning("could not probe %s for prune: %s", path, error)
         return False
 
 
@@ -1125,8 +1125,8 @@ def _read_kept_records(
         with path.open("r", encoding="utf-8") as fh:
             for raw_line in fh:
                 scan.add(raw_line, cutoff)
-    except OSError as e:
-        log.warning("could not read file %s for prune: %s", path, e)
+    except OSError as error:
+        log.warning("could not read file %s for prune: %s", path, error)
         return None
     return scan.kept, scan.removed
 
@@ -1208,16 +1208,18 @@ def _prune_jsonl_records(
         # otherwise let `path.open` raise an unhandled FileNotFoundError.
         if not _probe_exists(path):
             return 0
-        result = _read_kept_records(path, cutoff)
-        if result is None:
+        kept_removed = _read_kept_records(path, cutoff)
+        if kept_removed is None:
             return 0
-        kept, removed = result
+        kept, removed = kept_removed
         if removed == 0:
             return 0
         try:
             _atomic_rewrite(path, kept)
-        except OSError as e:
-            log.warning("could not rewrite file %s after prune: %s", path, e)
+        except OSError as error:
+            log.warning(
+                "could not rewrite file %s after prune: %s", path, error
+            )
             return 0
         return removed
 

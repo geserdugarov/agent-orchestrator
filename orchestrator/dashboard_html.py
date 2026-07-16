@@ -62,8 +62,8 @@ def _table_css(table_class: str, *, extra_rules: str = "") -> str:
 def _table_head_html(columns: Sequence[tuple[str, bool]]) -> str:
     cells = []
     for label, right in columns:
-        cls = ' class="r"' if right else ""
-        cells.append(f"<th{cls}>{html.escape(label)}</th>")
+        css_class = ' class="r"' if right else ""
+        cells.append(f"<th{css_class}>{html.escape(label)}</th>")
     return "<thead><tr>" + "".join(cells) + "</tr></thead>"
 
 
@@ -79,18 +79,18 @@ def _table_html(
     )
 
 
-def _relative_width_pct(value: float, maximum: float) -> float:
-    return (value / maximum * 100.0) if maximum > 0 else 0.0
+def _relative_width_pct(magnitude: float, maximum: float) -> float:
+    return (magnitude / maximum * 100.0) if maximum > 0 else 0.0
 
 
 def _short_repo_name(repo: str) -> str:
     return repo.split("/")[-1] if "/" in repo else repo
 
 
-def _sparkline_y(value: float, *, lo: float, span: float, pad: int, h: int) -> float:
-    normalized_value = (value - lo) / span
-    drawable_height = h - pad * 2
-    return pad + (1 - normalized_value) * drawable_height
+def _sparkline_y(sample: float, *, lo: float, span: float, pad: int, height: int) -> float:
+    normalized = (sample - lo) / span
+    drawable_height = height - pad * 2
+    return pad + (1 - normalized) * drawable_height
 
 
 def _int_or_zero(raw: object) -> int:
@@ -132,41 +132,41 @@ def _sparkline_step(width: int, padding: int, value_count: int) -> float:
     return drawable_width / intervals
 
 
-def _sparkline_layout(values: Sequence[float], *, width: int, height: int) -> _SparklineLayout:
-    low = min(values)
+def _sparkline_layout(series: Sequence[float], *, width: int, height: int) -> _SparklineLayout:
+    low = min(series)
     padding = 2
     return _SparklineLayout(
         low=low,
-        span=max(max(values) - low, 1e-9),
+        span=max(max(series) - low, 1e-9),
         padding=padding,
         height=height,
-        step=_sparkline_step(width, padding, len(values)),
+        step=_sparkline_step(width, padding, len(series)),
     )
 
 
-def _sparkline_point(index: int, value: float, layout: _SparklineLayout) -> tuple[float, float]:
+def _sparkline_point(index: int, sample: float, layout: _SparklineLayout) -> tuple[float, float]:
     return (
         layout.padding + index * layout.step,
         _sparkline_y(
-            value,
+            sample,
             lo=layout.low,
             span=layout.span,
             pad=layout.padding,
-            h=layout.height,
+            height=layout.height,
         ),
     )
 
 
 def _sparkline_points(
-    values: Sequence[float], *, width: int, height: int,
+    series: Sequence[float], *, width: int, height: int,
 ) -> list[tuple[float, float]]:
-    numbers = [float(value or 0) for value in values]
+    numbers = [float(sample or 0) for sample in series]
     if not numbers or max(numbers) == min(numbers) == 0:
         return []
     layout = _sparkline_layout(numbers, width=width, height=height)
     return [
-        _sparkline_point(index, value, layout)
-        for index, value in enumerate(numbers)
+        _sparkline_point(index, sample, layout)
+        for index, sample in enumerate(numbers)
     ]
 
 
@@ -242,12 +242,12 @@ def _delta_pill(value: Optional[float], *, invert: bool = False) -> str:
         return ""
     pct_str = f"{abs(value) * 100:.1f}%"
     if value > 0:
-        cls = "down" if invert else "up"
+        css_class = "down" if invert else "up"
         arrow = "▲"
     else:
-        cls = "up" if invert else "down"
+        css_class = "up" if invert else "down"
         arrow = "▼"
-    return f'<span class="orch-delta {cls}">{arrow} {pct_str}</span>'
+    return f'<span class="orch-delta {css_class}">{arrow} {pct_str}</span>'
 
 
 def _topbar_html(
@@ -310,24 +310,24 @@ def _kpi_strip_html(kpis: Sequence[dict]) -> str:
     optionally `spark` (list of floats) and `spark_color`.
     """
     cells = []
-    for k in kpis:
+    for kpi in kpis:
         delta_html = _delta_pill(
-            k.get("delta"), invert=k.get("invert", False)
+            kpi.get("delta"), invert=kpi.get("invert", False)
         )
         spark_html = ""
-        if k.get("spark") is not None:
+        if kpi.get("spark") is not None:
             spark_html = _sparkline_svg(
-                k["spark"], color=k.get("spark_color", "#5b54e0")
+                kpi["spark"], color=kpi.get("spark_color", "#5b54e0")
             )
         cells.append(
             '<div class="orch-kpi">'
             '<div class="kpi-top">'
-            f'<span class="kpi-label">{html.escape(k["label"])}</span>'
+            f'<span class="kpi-label">{html.escape(kpi["label"])}</span>'
             f'{delta_html}'
             '</div>'
-            f'<div class="kpi-value">{html.escape(str(k["value"]))}</div>'
+            f'<div class="kpi-value">{html.escape(str(kpi["value"]))}</div>'
             '<div class="kpi-foot">'
-            f'<span>{html.escape(str(k.get("sub", "")))}</span>'
+            f'<span>{html.escape(str(kpi.get("sub", "")))}</span>'
             f'{spark_html}'
             '</div></div>'
         )
@@ -439,7 +439,7 @@ def _issues_table_html(rows: Sequence[IssueSummaryRow]) -> str:
     -- the issues table is the only consumer.
     """
     max_cost = max(
-        (float(r.total_cost_usd or 0.0) for r in rows),
+        (float(row.total_cost_usd or 0.0) for row in rows),
         default=0.0,
     ) or 1.0
     css = _table_css("orch-issues", extra_rules=_ISSUES_TABLE_EXTRA_CSS)
@@ -515,7 +515,7 @@ def _skill_triggers_html(rows: Sequence[SkillTriggerRateRow]) -> str:
     local CSS sits inline next to the table -- the skill panel is its
     only consumer -- and reuses the shared `var(--orch-*)` theme tokens.
     """
-    max_rate = max((r.rate for r in rows), default=0.0) or 1.0
+    max_rate = max((row.rate for row in rows), default=0.0) or 1.0
     css = _table_css(
         "orch-skills", extra_rules=_SKILL_TRIGGERS_EXTRA_CSS
     )
@@ -702,8 +702,8 @@ def _skill_matrix_header_html(active_key: Optional[str], descending: bool) -> st
     return "<thead><tr>" + "".join(cells) + "</tr></thead>"
 
 
-def _muted_zero_html(value: str) -> str:
-    return f'<span class="orch-skillmatrix-zero">{value}</span>'
+def _muted_zero_html(text: str) -> str:
+    return f'<span class="orch-skillmatrix-zero">{text}</span>'
 
 
 @dataclass(frozen=True)
@@ -856,12 +856,12 @@ def _insights_html(
         "error": "✕", "warning": "!", "info": "›", "success": "✓",
     }
     rows = []
-    for b in banners:
-        icon = icon_for.get(b.severity, "›")
+    for banner in banners:
+        icon = icon_for.get(banner.severity, "›")
         rows.append(
-            f'<div class="orch-insight {html.escape(b.severity)}">'
+            f'<div class="orch-insight {html.escape(banner.severity)}">'
             f'<span class="icon">{icon}</span>'
-            f'<span>{html.escape(b.message)}</span>'
+            f'<span>{html.escape(banner.message)}</span>'
             '</div>'
         )
     return '<div class="orch-insights">' + "".join(rows) + '</div>'
@@ -983,7 +983,7 @@ def _cost_source_color(
 
 @dataclass(frozen=True)
 class _CoverageSegment:
-    bar: str
+    bar_html: str
     legend: str
 
 
@@ -997,7 +997,7 @@ def _coverage_segment(
     pct = weight / total * 100
     color = _cost_source_color(row.cost_source, cost_sources, theme)
     return _CoverageSegment(
-        bar=(
+        bar_html=(
             f'<span style="width:{pct:.1f}%;background:{color}" '
             f'title="{html.escape(row.cost_source)}"></span>'
         ),
@@ -1044,7 +1044,7 @@ def _cost_coverage_bar_html(
         '<div class="orch-cov-title">'
         'Cost attribution coverage</div>'
         f'<div class="orch-cov-bar">'
-        f'{"".join(segment.bar for segment in segments)}</div>'
+        f'{"".join(segment.bar_html for segment in segments)}</div>'
         f'<div class="orch-cov-legend">'
         f'{"".join(segment.legend for segment in segments)}</div>'
     )
@@ -1064,10 +1064,10 @@ def _reliability_tiles_html(
     tiles_html = "".join(
         f'<div class="orch-rel-tile {tone}">'
         f'<div class="orch-rel-value">'
-        f'{html.escape(v if isinstance(v, str) else fmt_num(v))}'
+        f'{html.escape(tile_value if isinstance(tile_value, str) else fmt_num(tile_value))}'
         f'</div>'
         f'<div class="orch-rel-label">{html.escape(lbl)}</div>'
         '</div>'
-        for v, lbl, tone in tiles
+        for tile_value, lbl, tone in tiles
     )
     return f'<div class="orch-rel-tiles">{tiles_html}</div>'
