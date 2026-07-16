@@ -571,6 +571,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-13 | 3.5 | Complete | WPS (1 retained); 217 focused; full gate | Not committed | Package 3.6 |
 | 2026-07-13 | 3.6/decomposition | Complete | Target WPS; 104 focused; full gate | Not committed | `implementing.py` |
 | 2026-07-15 | 3.6/implementing | Complete | Target WPS; 148 focused; full gate | Not committed | `validating.py` |
+| 2026-07-16 | 3.6/fixing | Complete | Target WPS; 90 focused; full gate | Not committed | `validating.py` |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -586,9 +587,15 @@ Package 3.5 retained one reviewed `WPS211` compatibility finding. All 217 focuse
 Packages 2.8, 3.2, 3.3, 3.4, and 3.5 ran `tests/` because root collection was blocked by the unreadable ignored
 database volume.
 
-Package 3.6 handler progress: `decomposition.py` and `implementing.py` are clear of the Stage 3 complexity rules;
-`validating.py`, `in_review.py`, `documenting.py`, `fixing.py`, and `conflicts.py` remain. The `implementing.py` pass
-cleared its two remaining `WPS221` findings — the shared `silent_park_count` increment in `_park_session_limit` and
-`_park_silent_failure` — by routing both through the new `_mark_agent_silent_park` persistence helper; no Stage 3
-finding was retained. All 148 focused implementing tests and 2,082 full tests passed (32 skipped for the optional
+Package 3.6 handler progress: `decomposition.py`, `implementing.py`, and `fixing.py` are clear of the Stage 3
+complexity rules; `validating.py`, `in_review.py`, `documenting.py`, and `conflicts.py` remain. The `implementing.py`
+pass cleared its two remaining `WPS221` findings — the shared `silent_park_count` increment in `_park_session_limit`
+and `_park_silent_failure` — by routing both through the new `_mark_agent_silent_park` persistence helper; no Stage 3
+finding was retained. The `fixing.py` pass cleared all six over-limit functions (the `WPS210` local-variable, `WPS211`
+argument, `WPS213` expression, `WPS231` cognitive-complexity findings, and the `WPS232` module-average) by threading
+the per-tick handles through a new `_FixingContext` dataclass and extracting decision-free feedback-rescan, resume,
+ACK, drift-classification, and batch-reconstruction helpers; the public `_handle_fixing`,
+`_reconstruct_pending_fix_batch`, `_pending_fix_id_set`, and `_clear_pending_fix_bookmarks` signatures plus all
+pinned-state, label, watermark, and event behavior were preserved, so the 90 focused fixing tests passed unchanged and
+no Stage 3 finding was retained. All 90 focused fixing tests and 2,082 full tests passed (32 skipped for the optional
 dashboard and live-Postgres dependencies).
