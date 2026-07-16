@@ -573,6 +573,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-15 | 3.6/implementing | Complete | Target WPS; 148 focused; full gate | Not committed | `validating.py` |
 | 2026-07-16 | 3.6/fixing | Complete | Target WPS; 90 focused; full gate | Not committed | `validating.py` |
 | 2026-07-16 | 3.6/documenting | Complete | Target WPS; 62 focused; full gate | Not committed | `validating.py` |
+| 2026-07-16 | 3.6/validating | Complete | Target WPS; 129 focused; full gate | Not committed | `in_review.py` |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -588,8 +589,9 @@ Package 3.5 retained one reviewed `WPS211` compatibility finding. All 217 focuse
 Packages 2.8, 3.2, 3.3, 3.4, and 3.5 ran `tests/` because root collection was blocked by the unreadable ignored
 database volume.
 
-Package 3.6 handler progress: `decomposition.py`, `implementing.py`, `fixing.py`, and `documenting.py` are clear of
-the Stage 3 complexity rules; `validating.py`, `in_review.py`, and `conflicts.py` remain. The `implementing.py`
+Package 3.6 handler progress: `decomposition.py`, `implementing.py`, `fixing.py`, `documenting.py`, and
+`validating.py` are clear of the Stage 3 complexity rules; `in_review.py` and `conflicts.py` remain. The
+`implementing.py`
 pass cleared its two remaining `WPS221` findings — the shared `silent_park_count` increment in `_park_session_limit`
 and `_park_silent_failure` — by routing both through the new `_mark_agent_silent_park` persistence helper; no Stage 3
 finding was retained. The `fixing.py` pass cleared all six over-limit functions (the `WPS210` local-variable, `WPS211`
@@ -611,3 +613,13 @@ park/watermark/notice, and disposition helpers. The public `_handle_documenting`
 label, watermark, comment, and event behavior were preserved, so the 62 focused documenting tests passed unchanged and
 no Stage 3 finding was retained. All 62 focused documenting tests and 2,082 full tests passed (32 skipped for the
 optional dashboard and live-Postgres dependencies).
+
+The `validating.py` pass cleared its sole remaining `WPS221` finding — the `review_round` increment in
+`_bump_review_round`, whose single-line `state.set("review_round", int(state.get("review_round") or 0) + 1)`
+read-modify-write tripped the Jones-complexity limit — by binding the read to a `current_round` local before the
+`state.set`, mirroring `implementing.py`'s `_mark_agent_silent_park`. The stage-private decomposition that already sits
+under the Stage 3 limits (reviewer freshness, verify/squash ordering, verdict routing, transient-park recovery,
+in_review handoff watermarks, and the fixing/documenting handoffs) was untouched, so no helper moved and no
+`workflow.py` alias or late-bound `_wf` call changed; the 129 focused validating tests passed unchanged and no Stage 3
+finding was retained. All 129 focused validating tests and 2,082 full tests passed (32 skipped for the optional
+dashboard and live-Postgres dependencies).
