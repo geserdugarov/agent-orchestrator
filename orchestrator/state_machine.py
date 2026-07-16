@@ -86,7 +86,7 @@ def coerce_workflow_label(value: str) -> WorkflowLabel:
     try:
         return WorkflowLabel(value)
     except ValueError:
-        valid = ", ".join(repr(str(m)) for m in WorkflowLabel)
+        valid = ", ".join(repr(str(member)) for member in WorkflowLabel)
         raise ValueError(
             f"{value!r} is not a valid workflow label; expected one of: {valid}"
         ) from None
@@ -124,7 +124,7 @@ def coerce_child_issue_label(value: str) -> str:
         return coerce_workflow_label(value)
     except ValueError:
         accepted = (*WorkflowLabel, *_CREATABLE_CONTROL_LABELS)
-        valid = ", ".join(repr(str(m)) for m in accepted)
+        valid = ", ".join(repr(str(member)) for member in accepted)
         raise ValueError(
             f"{value!r} is not a valid child-issue label; "
             f"expected one of: {valid}"
@@ -327,7 +327,7 @@ def guard_transition(
     if mode == "off" or is_allowed_transition(current, new):
         return
     allowed = ", ".join(
-        sorted(str(s) for s in ALLOWED_TRANSITIONS.get(current, frozenset()))
+        sorted(str(state) for state in ALLOWED_TRANSITIONS.get(current, frozenset()))
     )
     detail = (
         f"illegal workflow transition "

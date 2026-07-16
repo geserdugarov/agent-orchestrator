@@ -28,8 +28,8 @@ from orchestrator.scheduler import IssueScheduler
 
 log = logging.getLogger("orchestrator")
 
-_running = True
-_received_signal: Optional[int] = None
+running = True
+received_signal: Optional[int] = None
 active_scheduler: Optional[IssueScheduler] = None
 # Set once `main`'s shutdown drain has finished. The shutdown watchdog waits
 # on this with a timeout so it only force-exits when the drain genuinely
@@ -40,13 +40,13 @@ _shutdown_complete = threading.Event()
 
 def _shutdown(signum, _frame) -> None:
     """Stop after the current tick, and re-arm the kernel default handler so a
-    second Ctrl+C kills the process immediately. Recording `_received_signal`
+    second Ctrl+C kills the process immediately. Recording `received_signal`
     lets `main()` return `128 + signum`, which `run.sh` keys on to skip the
     restart loop -- otherwise a graceful SIGINT exit (code 0) is
     indistinguishable from a self-modifying-merge restart.
 
     Also calls `scheduler.shutdown(wait=False)` so the scheduler's submit
-    path is closed BEFORE the in-progress tick returns. `_running=False`
+    path is closed BEFORE the in-progress tick returns. `running=False`
     alone only stops the next tick boundary -- an iterating
     `workflow.tick` would otherwise keep calling `scheduler.submit` for
     the remainder of its dispatch loop after the signal already fired,
@@ -58,12 +58,12 @@ def _shutdown(signum, _frame) -> None:
     blocks on the executor + runs the trailing reap, so failures from
     the workers that DID start are still logged.
     """
-    global _running, _received_signal
-    if _received_signal is not None:
+    global running, received_signal
+    if received_signal is not None:
         return
-    _received_signal = signum
+    received_signal = signum
     log.info("signal %s received; will stop after this tick", signum)
-    _running = False
+    running = False
     sched = active_scheduler
     if sched is not None:
         try:
@@ -176,12 +176,12 @@ def _configure_logging(level: str) -> None:
                 encoding="utf-8",
             )
         )
-    except OSError as e:
+    except OSError as err:
         # Don't refuse to start just because the log dir is unwritable;
         # stderr alone keeps the loop usable. Surface the reason once.
         logging.basicConfig(level=level, format=fmt, handlers=handlers)
         logging.getLogger("orchestrator").warning(
-            "file logging disabled: %s (%s)", config.LOG_DIR, e
+            "file logging disabled: %s (%s)", config.LOG_DIR, err
         )
         return
     logging.basicConfig(level=level, format=fmt, handlers=handlers)
@@ -197,8 +197,8 @@ def _git(*args: str) -> subprocess.CompletedProcess:
 
 
 def _own_head_sha() -> Optional[str]:
-    r = _git("rev-parse", "HEAD")
-    return r.stdout.strip() if r.returncode == 0 else None
+    head_rev = _git("rev-parse", "HEAD")
+    return head_rev.stdout.strip() if head_rev.returncode == 0 else None
 
 
 def _self_modifying_merge_happened(start_sha: str) -> bool:
@@ -262,8 +262,8 @@ def _activate_scheduler(scheduler: IssueScheduler) -> None:
     # a signal that arrives during tick 1 can close the submit path
     # immediately instead of waiting for `_run_tick` to return. The
     # signal handlers themselves were registered earlier; until this
-    # assignment lands an early signal still sets `_received_signal` and
-    # `_running=False` but cannot close the scheduler -- that window is
+    # assignment lands an early signal still sets `received_signal` and
+    # `running=False` but cannot close the scheduler -- that window is
     # the brief gap between scheduler construction and this line and is
     # acceptable because no tick has dispatched anything yet.
     global active_scheduler
@@ -271,8 +271,8 @@ def _activate_scheduler(scheduler: IssueScheduler) -> None:
 
 
 def _wait_for_next_tick() -> None:
-    for _elapsed_second in range(config.POLL_INTERVAL):
-        if not _running:
+    for _ in range(config.POLL_INTERVAL):
+        if not running:
             return
         time.sleep(1)
 
@@ -283,7 +283,7 @@ def _run_polling_loop(
 ) -> Optional[int]:
     own_sha = _own_head_sha()
     log.info("own HEAD=%s", own_sha)
-    while _running:
+    while running:
         if own_sha and _self_modifying_merge_happened(own_sha):
             log.info("self-modifying merge detected; exiting for restart")
             return 0
@@ -306,7 +306,7 @@ def _drive_main_loop(
 def _drain_scheduler(scheduler: IssueScheduler) -> None:
     """Stop agent groups when signaled, then wait for every worker."""
     global active_scheduler
-    if _received_signal is not None:
+    if received_signal is not None:
         # Worker threads cannot drain while their agent subprocess is still
         # allowed to run up to `AGENT_TIMEOUT`.
         agents.terminate_all_running()
@@ -318,8 +318,8 @@ def _drain_scheduler(scheduler: IssueScheduler) -> None:
 
 
 def _signal_exit_code() -> int:
-    if _received_signal is not None:
-        return 128 + _received_signal
+    if received_signal is not None:
+        return 128 + received_signal
     return 0
 
 
@@ -346,14 +346,14 @@ def _tick_one_repo(
 ) -> None:
     """Drive one repo's `workflow.tick`, isolating shutdown and failures.
 
-    Re-checks `_running` first so a signal that arrived between submission
+    Re-checks `running` first so a signal that arrived between submission
     and this call actually starting still skips the tick instead of forcing
     the user to wait through a slow `workflow.tick` after they hit Ctrl+C. A
     per-repo exception is caught and logged so one failing repo cannot stop
     the others from advancing this tick. Shared by the single-repo in-thread
     path and every multi-repo fan-out worker.
     """
-    if not _running:
+    if not running:
         log.info(
             "repo=%s shutdown requested before tick start; skipping",
             spec.slug,

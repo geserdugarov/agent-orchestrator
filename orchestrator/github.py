@@ -268,11 +268,11 @@ def _pinned_state_from_comment(
     if state_match is None:
         return None
     try:
-        data = json.loads(state_match.group(1))
+        parsed_state = json.loads(state_match.group(1))
     except json.JSONDecodeError:
         log.warning("issue=#%s pinned state JSON unparseable", issue_number)
-        data = {}
-    return PinnedState(comment_id=issue_comment.id, data=data)
+        parsed_state = {}
+    return PinnedState(comment_id=issue_comment.id, data=parsed_state)
 
 
 @dataclass(frozen=True)
@@ -368,6 +368,11 @@ def _is_actionable_review_summary(
     if not (review.body or "").strip():
         return False
     return after_id is None or review.id > after_id
+
+
+# Cap on the in-memory `recorded_events` tail so a long-running process
+# cannot grow it unbounded; the JSONL sink keeps the full history.
+_RECORDED_EVENTS_CAP = 500
 
 
 class GitHubClient:
@@ -620,8 +625,6 @@ class GitHubClient:
         if new is not None:
             self._emit_stage_enter(issue, new)
 
-    _RECORDED_EVENTS_CAP = 500
-
     def emit_event(
         self,
         event: str,
@@ -648,8 +651,8 @@ class GitHubClient:
             **extras,
         )
         self.recorded_events.append(record)
-        if len(self.recorded_events) > self._RECORDED_EVENTS_CAP:
-            self.recorded_events = self.recorded_events[-self._RECORDED_EVENTS_CAP:]
+        if len(self.recorded_events) > _RECORDED_EVENTS_CAP:
+            self.recorded_events = self.recorded_events[-_RECORDED_EVENTS_CAP:]
         _write_event_record(record)
 
     def _emit_stage_enter(self, issue: Issue, stage: str) -> None:

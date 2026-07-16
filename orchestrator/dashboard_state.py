@@ -196,14 +196,14 @@ def parse_issue_number(raw: str) -> Optional[int]:
     """Lenient `#123` / `123` parser for the drill-down input."""
     if not raw:
         return None
-    s = raw.strip().lstrip("#").strip()
-    if not s:
+    cleaned = raw.strip().lstrip("#").strip()
+    if not cleaned:
         return None
     try:
-        n = int(s)
+        number = int(cleaned)
     except ValueError:
         return None
-    return n if n > 0 else None
+    return number if number > 0 else None
 
 
 def db_unconfigured_message() -> Optional[str]:

@@ -193,15 +193,15 @@ def _parse_ts(raw: Any) -> Optional[datetime]:
     return dt
 
 
-def _required_text(value: Any) -> Optional[str]:
-    if not isinstance(value, str) or not value:
+def _required_text(raw: Any) -> Optional[str]:
+    if not isinstance(raw, str) or not raw:
         return None
-    return value
+    return raw
 
 
-def _issue_number(value: Any) -> Optional[int]:
+def _issue_number(raw: Any) -> Optional[int]:
     try:
-        return int(value)
+        return int(raw)
     except (TypeError, ValueError):
         return None
 
@@ -225,13 +225,13 @@ def _required_columns(record: dict) -> Optional[dict[str, Any]]:
 
 def _extra_columns(record: dict, columns: dict[str, Any]) -> dict[str, Any]:
     extras: dict[str, Any] = {}
-    for key, value in record.items():
+    for key, field_value in record.items():
         if key in _REQUIRED_KEYS:
             continue
         if key in _PROMOTED_COLUMNS:
-            columns[key] = value
+            columns[key] = field_value
         else:
-            extras[key] = value
+            extras[key] = field_value
     return extras
 
 
@@ -286,17 +286,17 @@ def _row_values(
     provenance: _RowProvenance,
     json_adapter: Callable[[Any], Any],
 ) -> tuple:
-    values: list[Any] = []
+    cells: list[Any] = []
     for col in _PROMOTED_COLUMNS:
-        value = columns.get(col)
-        if col in _JSONB_COLUMNS and value is not None:
-            value = json_adapter(value)
-        values.append(value)
-    values.append(json_adapter(extras) if extras else None)
-    values.append(provenance.source_path)
-    values.append(provenance.source_line)
-    values.append(provenance.content_hash)
-    return tuple(values)
+        cell = columns.get(col)
+        if col in _JSONB_COLUMNS and cell is not None:
+            cell = json_adapter(cell)
+        cells.append(cell)
+    cells.append(json_adapter(extras) if extras else None)
+    cells.append(provenance.source_path)
+    cells.append(provenance.source_line)
+    cells.append(provenance.content_hash)
+    return tuple(cells)
 
 
 # libpq accepts credentials in the URL query string as well as the
@@ -324,8 +324,8 @@ def _redacted_query(query: str) -> str:
         return query
     pairs = parse_qsl(query, keep_blank_values=True)
     redacted_pairs = [
-        (key, "***" if key.lower() in _REDACTED_QUERY_PARAMS else value)
-        for key, value in pairs
+        (key, "***" if key.lower() in _REDACTED_QUERY_PARAMS else param_value)
+        for key, param_value in pairs
     ]
     if redacted_pairs == pairs:
         return query
@@ -371,15 +371,15 @@ def _default_connect(db_url: str) -> Any:
     """
     try:
         import psycopg
-    except ImportError as e:
+    except ImportError as error:
         raise RuntimeError(
             "psycopg is required for analytics_sync; "
             "run `uv sync --locked` to install it"
-        ) from e
+        ) from error
     return psycopg.connect(db_url)
 
 
-def _default_json_adapter(value: Any) -> Any:
+def _default_json_adapter(payload: Any) -> Any:
     """Adapt dict / list to the psycopg JSON wrapper when available.
 
     Falls back to passing the raw Python object through; psycopg v3's
@@ -390,8 +390,8 @@ def _default_json_adapter(value: Any) -> Any:
     try:
         from psycopg.types.json import Json
     except ImportError:
-        return value
-    return Json(value)
+        return payload
+    return Json(payload)
 
 
 def _rollback_quietly(conn: Any, message: str) -> None:
@@ -764,7 +764,7 @@ class _SyncRun:
         conn.commit()
         _refresh_daily_rollup(conn)
 
-    def result(self) -> SyncResult:
+    def finalize(self) -> SyncResult:
         duration_s = round(time.monotonic() - self.start, 3)
         log.info(
             "analytics_sync: completed in %.3fs (inserted=%d duplicate=%d "
@@ -795,7 +795,7 @@ class _SyncRun:
             raise
         finally:
             _close_quietly(conn)
-        return self.result()
+        return self.finalize()
 
 
 def sync_jsonl_to_postgres(
@@ -864,8 +864,8 @@ def _configure_cli_logging(level: str) -> None:
     # and a process-wide flip would surprise them).
     formatter.converter = time.gmtime
 
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
 
     root = logging.getLogger()
     root.setLevel(level)
@@ -874,9 +874,9 @@ def _configure_cli_logging(level: str) -> None:
     # `python -m`) actually picks up the new formatter rather than
     # silently no-op'ing the way `basicConfig` does once the root
     # already has a handler.
-    for h in list(root.handlers):
-        root.removeHandler(h)
-    root.addHandler(handler)
+    for prior_handler in list(root.handlers):
+        root.removeHandler(prior_handler)
+    root.addHandler(stream_handler)
 
 
 def _cli_parser() -> argparse.ArgumentParser:
@@ -911,15 +911,17 @@ def _cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _print_cli_result(result: SyncResult, cli_start: float) -> None:
+def _print_cli_result(sync_result: SyncResult, cli_start: float) -> None:
     """Print the UTC summary retained even when structured logs are hidden."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    duration_s = result.duration_s or round(time.monotonic() - cli_start, 3)
+    duration_s = sync_result.duration_s or round(
+        time.monotonic() - cli_start, 3
+    )
     print(
-        f"{timestamp} analytics_sync: inserted={result.inserted} "
-        f"duplicate={result.skipped_duplicate} "
-        f"malformed={result.skipped_malformed} "
-        f"total_lines={result.total_lines} "
+        f"{timestamp} analytics_sync: inserted={sync_result.inserted} "
+        f"duplicate={sync_result.skipped_duplicate} "
+        f"malformed={sync_result.skipped_malformed} "
+        f"total_lines={sync_result.total_lines} "
         f"duration_s={duration_s:.3f}"
     )
 
@@ -927,7 +929,7 @@ def _print_cli_result(result: SyncResult, cli_start: float) -> None:
 def _run_cli(args: argparse.Namespace) -> int:
     cli_start = time.monotonic()
     try:
-        result = sync_jsonl_to_postgres(
+        sync_result = sync_jsonl_to_postgres(
             log_path=args.log_path,
             db_url=args.db_url,
         )
@@ -937,7 +939,7 @@ def _run_cli(args: argparse.Namespace) -> int:
             time.monotonic() - cli_start,
         )
         return 1
-    _print_cli_result(result, cli_start)
+    _print_cli_result(sync_result, cli_start)
     return 0
 
 

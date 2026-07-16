@@ -52,20 +52,20 @@ class _ReadQuery:
     def select(
         self,
         sql: str,
-        params: Sequence[Any] = (),
+        bindings: Sequence[Any] = (),
     ) -> list[tuple]:
         """Execute one SELECT through the resolved connection path."""
         return _query(
             self.connect_fn,
             self.db_url,
             sql,
-            params,
+            bindings,
             conn=self.conn,
         )
 
 
 def _execute_select(
-    conn: Any, sql: str, params: Sequence[Any],
+    conn: Any, sql: str, bindings: Sequence[Any],
 ) -> list[tuple]:
     """Run one SELECT on `conn` and return every row as a tuple.
 
@@ -75,10 +75,10 @@ def _execute_select(
     """
     try:
         with conn.cursor() as cur:
-            cur.execute(sql, tuple(params))
+            cur.execute(sql, tuple(bindings))
             rows = cur.fetchall()
-    except Exception as e:
-        raise AnalyticsReadError(f"analytics query failed: {e}") from e
+    except Exception as error:
+        raise AnalyticsReadError(f"analytics query failed: {error}") from error
     return list(rows or [])
 
 
@@ -97,17 +97,17 @@ def _connect_for_read(
         return connect_fn(db_url)
     except AnalyticsReadError:
         raise
-    except Exception as e:
+    except Exception as error:
         raise AnalyticsReadError(
-            f"could not connect to analytics database: {e}"
-        ) from e
+            f"could not connect to analytics database: {error}"
+        ) from error
 
 
 def _query(
     connect_fn: Callable[[str], Any],
     db_url: Optional[str],
     sql: str,
-    params: Sequence[Any] = (),
+    bindings: Sequence[Any] = (),
     *,
     conn: Any = None,
 ) -> list[tuple]:
@@ -125,9 +125,9 @@ def _query(
     or the fetch.
     """
     if conn is not None:
-        return _execute_select(conn, sql, params)
+        return _execute_select(conn, sql, bindings)
     opened = _connect_for_read(connect_fn, db_url)
     try:
-        return _execute_select(opened, sql, params)
+        return _execute_select(opened, sql, bindings)
     finally:
         _close_quietly(opened)

@@ -104,11 +104,11 @@ def compute_insights(
                 )
             )
     if cost_coverage_rows:
-        total_runs = sum(r.runs for r in cost_coverage_rows)
+        total_runs = sum(row.runs for row in cost_coverage_rows)
         unpriced = sum(
-            r.runs
-            for r in cost_coverage_rows
-            if r.cost_source in UNPRICED_COST_SOURCES
+            row.runs
+            for row in cost_coverage_rows
+            if row.cost_source in UNPRICED_COST_SOURCES
         )
         if total_runs > 0:
             ratio = unpriced / total_runs
@@ -200,11 +200,11 @@ def rework_totals(
     when the row predates the `total_cost_usd` column.
     """
     total = sum(
-        float(getattr(r, "total_cost_usd", 0.0) or 0.0) for r in rows
+        float(getattr(row, "total_cost_usd", 0.0) or 0.0) for row in rows
     )
     rework = sum(
-        float(getattr(r, "total_cost_usd", 0.0) or 0.0)
-        for r in rows
-        if r.bucket in REWORK_BUCKETS
+        float(getattr(row, "total_cost_usd", 0.0) or 0.0)
+        for row in rows
+        if row.bucket in REWORK_BUCKETS
     )
     return total, rework

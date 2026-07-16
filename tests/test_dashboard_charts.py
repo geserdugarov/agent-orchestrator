@@ -139,6 +139,13 @@ class CostHorizontalBarsTest(unittest.TestCase):
         self.assertIn("beta", y_labels[-1])
         self.assertIn("gamma", y_labels[-2])
 
+    def test_accepts_items_keyword(self) -> None:
+        # `items` is the public keyword; callers may pass the rows by name.
+        fig = dashboard_charts.cost_horizontal_bars(
+            items=[("alpha", "1 run", 5.0, "#111")],
+        )
+        self.assertIsNotNone(fig)
+
     def test_value_labels_render_with_money_shorthand(self) -> None:
         items = [("repo", "10 events", 12_345.0, "#abc")]
         fig = dashboard_charts.cost_horizontal_bars(items)

@@ -152,6 +152,13 @@ class FormattersTest(unittest.TestCase):
         self.assertEqual(theme.fmt_num(1234567), "1,234,567")
         self.assertEqual(theme.fmt_num(0), "0")
 
+    def test_formatters_accept_value_keyword(self) -> None:
+        # `value` is the public keyword every formatter exposes.
+        self.assertEqual(theme.fmt_money(value=42), "$42")
+        self.assertEqual(theme.fmt_money_exact(value=0), "$0")
+        self.assertEqual(theme.fmt_tokens(value=999), "999")
+        self.assertEqual(theme.fmt_num(value=0), "0")
+
 
 class PageCssTest(unittest.TestCase):
     """`PAGE_CSS` is a single string injected verbatim through

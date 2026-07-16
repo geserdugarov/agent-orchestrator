@@ -273,7 +273,7 @@ def _topbar_html(total_runs: int, shown_runs: int) -> str:
     )
 
 
-def _fmt_cost_usd(value: float, *, decimals: int = 2) -> str:
+def _fmt_cost_usd(amount: float, *, decimals: int = 2) -> str:
     """Exact dollar figure for a usage cost.
 
     The dashboard's compact `theme.fmt_money` drops the cents on any figure
@@ -282,13 +282,13 @@ def _fmt_cost_usd(value: float, *, decimals: int = 2) -> str:
     Per-turn estimates pass `decimals=4` so a sub-cent turn is not floored
     to `$0.00`.
     """
-    return f"${value:,.{decimals}f}"
+    return f"${amount:,.{decimals}f}"
 
 
 @dataclass(frozen=True)
 class _TrajectoryKpi:
     label: str
-    value: str
+    figure: str
     foot: str = ""
 
 
@@ -323,7 +323,7 @@ def _trajectory_kpi_html(kpi: _TrajectoryKpi) -> str:
         '<div class="orch-kpi">'
         f'<div class="kpi-top"><span class="kpi-label">'
         f'{html.escape(kpi.label)}</span></div>'
-        f'<div class="kpi-value">{html.escape(kpi.value)}</div>'
+        f'<div class="kpi-value">{html.escape(kpi.figure)}</div>'
         f'{foot_html}'
         '</div>'
     )
@@ -342,7 +342,7 @@ def _kpi_strip_html(summary: trajectory_reader.TrajectorySummary) -> str:
 
 def _meta_html(run: TrajectoryRun) -> str:
     """Per-run metadata grid. Only non-empty fields render a tile."""
-    items: list[tuple[str, str]] = [
+    fields: list[tuple[str, str]] = [
         ("Repo", run.repo),
         ("Issue", f"#{run.issue}" if run.issue else ""),
         ("Stage", run.stage),
@@ -361,11 +361,11 @@ def _meta_html(run: TrajectoryRun) -> str:
     ]
     cells = [
         '<div class="orch-traj-meta-item">'
-        f'<div class="k">{html.escape(k)}</div>'
-        f'<div class="v">{html.escape(v)}</div>'
+        f'<div class="k">{html.escape(label)}</div>'
+        f'<div class="v">{html.escape(cell)}</div>'
         '</div>'
-        for k, v in items
-        if v
+        for label, cell in fields
+        if cell
     ]
     return f'<div class="orch-traj-meta">{"".join(cells)}</div>'
 
@@ -375,7 +375,8 @@ def _labeled_chips_html(label: str, names: Sequence[str]) -> str:
     if not names:
         return ""
     chips = "".join(
-        f'<span class="orch-traj-chip">{html.escape(n)}</span>' for n in names
+        f'<span class="orch-traj-chip">{html.escape(name)}</span>'
+        for name in names
     )
     return (
         '<div class="orch-traj-chips">'
@@ -413,7 +414,7 @@ def _runs_table_html(runs: Sequence[TrajectoryRun]) -> str:
         "Issue", "Repo", "Stage", "Role", "Backend",
         "Round", "Steps", "Tool calls", "Recorded",
     )
-    head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+    head = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
     rows = (_run_table_row_html(run) for run in runs)
     return (
         '<table class="orch-traj-table">'

@@ -96,6 +96,12 @@ class CoerceWorkflowLabelTest(unittest.TestCase):
         self.assertIn("validatign", msg)
         self.assertIn("valid workflow label", msg)
 
+    def test_accepts_value_keyword(self) -> None:
+        # `value` is the public keyword; callers may pass the label by name.
+        self.assertIs(
+            coerce_workflow_label(value="validating"), WorkflowLabel.VALIDATING
+        )
+
 
 class CoerceChildIssueLabelTest(unittest.TestCase):
     """`create_child_issue` writes labels directly (bypassing
@@ -122,6 +128,12 @@ class CoerceChildIssueLabelTest(unittest.TestCase):
                 msg = str(ctx.exception)
                 self.assertIn(value, msg)
                 self.assertIn("child-issue label", msg)
+
+    def test_accepts_value_keyword(self) -> None:
+        # `value` is the public keyword; callers may pass the label by name.
+        self.assertIs(
+            coerce_child_issue_label(value="blocked"), WorkflowLabel.BLOCKED
+        )
 
 
 class LabelWriteTypoGuardTest(unittest.TestCase):

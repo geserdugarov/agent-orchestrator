@@ -45,44 +45,44 @@ class _WhereBuilder:
     """Accumulate one parameterized SQL predicate and its values."""
 
     conditions: list[str] = field(default_factory=list)
-    params: list[Any] = field(default_factory=list)
+    bindings: list[Any] = field(default_factory=list)
 
     def add_scalar(
         self,
         column: str,
-        value: Any,
+        operand: Any,
         *,
         operator: str = "=",
     ) -> None:
-        if value is None:
+        if operand is None:
             return
         self.conditions.append(f"{column} {operator} %s")
-        self.params.append(value)
+        self.bindings.append(operand)
 
     def add_selection(
         self,
         column: str,
-        values: Optional[Sequence[str]],
+        selection: Optional[Sequence[str]],
     ) -> None:
-        if values is None:
+        if selection is None:
             return
-        if not values:
+        if not selection:
             self.conditions.append("FALSE")
             return
-        placeholders = ", ".join(["%s"] * len(values))
+        placeholders = ", ".join(["%s"] * len(selection))
         self.conditions.append(f"{column} IN ({placeholders})")
-        self.params.extend(values)
+        self.bindings.extend(selection)
 
     def render(self) -> tuple[str, list[Any]]:
         if not self.conditions:
-            return "", self.params
-        return " WHERE " + " AND ".join(self.conditions), self.params
+            return "", self.bindings
+        return " WHERE " + " AND ".join(self.conditions), self.bindings
 
 
-def _day_bound(value: Optional[datetime]) -> Any:
-    if isinstance(value, datetime):
-        return value.date()
-    return value
+def _day_bound(bound: Optional[datetime]) -> Any:
+    if isinstance(bound, datetime):
+        return bound.date()
+    return bound
 
 
 def _build_where(

@@ -145,17 +145,17 @@ def _list_skill_tree(spec: RepoSpec) -> Optional[list[str]]:
         )
         return None
     base_ref = f"{spec.remote_name}/{spec.base_branch}"
-    r = _git(
+    ls_tree = _git(
         "ls-tree", "-r", "--name-only", base_ref, *_SKILL_ROOTS,
         cwd=spec.target_root,
     )
-    if r.returncode != 0:
+    if ls_tree.returncode != 0:
         log.debug(
             "repo=%s skill catalog: ls-tree of %s failed: %s; skipping",
-            spec.slug, base_ref, (r.stderr or "").strip(),
+            spec.slug, base_ref, (ls_tree.stderr or "").strip(),
         )
         return None
-    return [line for line in (r.stdout or "").splitlines() if line.strip()]
+    return [line for line in (ls_tree.stdout or "").splitlines() if line.strip()]
 
 
 def _emit_repo_skill_catalog(spec: RepoSpec) -> None:

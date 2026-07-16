@@ -383,14 +383,14 @@ class _DashboardPage:
 
 @dataclass(frozen=True)
 class _DashboardKpis:
-    items: Sequence[dict[str, Any]]
+    tiles: Sequence[dict[str, Any]]
     resolved: int
     rejected: int
 
 
 @dataclass(frozen=True)
 class _LoadedDashboard:
-    results: dict[str, Any]
+    read_results: dict[str, Any]
     kpis: _DashboardKpis
 
 
@@ -580,9 +580,9 @@ def _render_dashboard_insights(
 def _render_first_wave(
     modules: _DashboardModules,
     page: _DashboardPage,
-    results: dict[str, Any],
+    read_results: dict[str, Any],
 ) -> Optional[_DashboardKpis]:
-    summary = results["summary"]
+    summary = read_results["summary"]
     _render_topbar_and_meta(modules, page, summary)
     if summary.total_events == 0:
         _render_empty_window(modules, page)
@@ -590,15 +590,15 @@ def _render_first_wave(
     _render_dashboard_insights(
         modules,
         summary,
-        results["cost_coverage_rows"],
+        read_results["cost_coverage_rows"],
     )
     kpi_values = _build_kpi_strip_data(_KpiInputs(
         theme=modules.theme,
         summary=summary,
-        prev_summary=results["prev_summary"],
-        ts_points=results["ts_points"],
-        throughput_rows=results["throughput_rows"],
-        review_round_rows=results["review_round_rows"],
+        prev_summary=read_results["prev_summary"],
+        ts_points=read_results["ts_points"],
+        throughput_rows=read_results["throughput_rows"],
+        review_round_rows=read_results["review_round_rows"],
         days_in_window=page.controls.filters.days,
     ))
     modules.st.markdown(
@@ -613,15 +613,15 @@ def _load_dashboard_data(
     page: _DashboardPage,
 ) -> Optional[_LoadedDashboard]:
     with modules.st.spinner(LOADING_INDICATOR_MESSAGE):
-        results = _dispatch_reads(
+        read_results = _dispatch_reads(
             page.reads.first_wave,
             st=modules.st,
             parallel=page.reads.parallel,
         )
-        kpis = _render_first_wave(modules, page, results)
+        kpis = _render_first_wave(modules, page, read_results)
         if kpis is None:
             return None
-        results.update(_dispatch_reads(
+        read_results.update(_dispatch_reads(
             page.reads.second_wave,
             st=modules.st,
             parallel=page.reads.parallel,
@@ -631,7 +631,7 @@ def _load_dashboard_data(
         reads=page.reads.total_reads,
         parallel=page.reads.parallel,
     )
-    return _LoadedDashboard(results=results, kpis=kpis)
+    return _LoadedDashboard(read_results=read_results, kpis=kpis)
 
 
 def _render_chart_widgets(
@@ -642,28 +642,28 @@ def _render_chart_widgets(
     _render_hero_usage(
         st=modules.st,
         dashboard_charts=modules.charts,
-        ts_points=loaded.results["ts_points"],
-        backend_daily_rows=loaded.results["backend_daily_rows"],
+        ts_points=loaded.read_results["ts_points"],
+        backend_daily_rows=loaded.read_results["backend_daily_rows"],
     )
     _render_stage_review_bars(
         st=modules.st,
         dashboard_charts=modules.charts,
-        stage_rows=loaded.results["stage_rows"],
-        review_round_rows=loaded.results["review_round_rows"],
+        stage_rows=loaded.read_results["stage_rows"],
+        review_round_rows=loaded.read_results["review_round_rows"],
     )
     _render_issues_and_backends(
         st=modules.st,
         theme=modules.theme,
-        issues_rows=loaded.results["issues_rows"],
-        backend_rows=loaded.results["backend_rows"],
-        cost_coverage_rows=loaded.results["cost_coverage_rows"],
+        issues_rows=loaded.read_results["issues_rows"],
+        backend_rows=loaded.read_results["backend_rows"],
+        cost_coverage_rows=loaded.read_results["cost_coverage_rows"],
     )
     _render_repo_and_reliability(
         modules,
         _ReliabilityPanelData(
-            repos=loaded.results["repo_rows"],
-            summary=loaded.results["summary"],
-            throughput=loaded.results["throughput_rows"],
+            repos=loaded.read_results["repo_rows"],
+            summary=loaded.read_results["summary"],
+            throughput=loaded.read_results["throughput_rows"],
             window=page.controls.filters.window,
             resolved=loaded.kpis.resolved,
             rejected=loaded.kpis.rejected,
@@ -672,7 +672,7 @@ def _render_chart_widgets(
     _render_activity_heatmap(
         st=modules.st,
         dashboard_charts=modules.charts,
-        heatmap_rows=loaded.results["heatmap_rows"],
+        heatmap_rows=loaded.read_results["heatmap_rows"],
         tz_offset_choice=page.controls.timezone_offset,
     )
 
@@ -684,20 +684,20 @@ def _render_remaining_widgets(
 ) -> None:
     _render_skill_triggers(
         st=modules.st,
-        skill_rows=loaded.results["skill_rows"],
-        skill_matrix_rows=loaded.results["skill_matrix_rows"],
+        skill_rows=loaded.read_results["skill_rows"],
+        skill_matrix_rows=loaded.read_results["skill_matrix_rows"],
     )
     _render_recent_runs(
         st=modules.st,
         pd=modules.pd,
-        agent_exits=loaded.results["agent_exits"],
+        agent_exits=loaded.read_results["agent_exits"],
         tz_offset_choice=page.controls.timezone_offset,
     )
     _render_drilldown_view(modules, page.controls.filters)
     _render_dashboard_footer(
         modules,
         page.controls.filters,
-        loaded.results["summary"],
+        loaded.read_results["summary"],
     )
 
 
@@ -780,10 +780,10 @@ def _read_static_metadata(*, st: Any):
 
     try:
         return read_data_extent(), read_filter_options()
-    except analytics_read.AnalyticsReadError as e:
+    except analytics_read.AnalyticsReadError as error:
         st.error(
             "Could not load analytics filter options: "
-            f"{e}. Verify `ANALYTICS_DB_URL` and that the Postgres "
+            f"{error}. Verify `ANALYTICS_DB_URL` and that the Postgres "
             "service is reachable, then reload."
         )
         st.stop()
@@ -1006,9 +1006,9 @@ def _dispatch_reads(readers, *, st: Any, parallel: bool):
     """
     try:
         return _fan_out_reads(readers, parallel=parallel)
-    except analytics_read.AnalyticsReadError as e:
+    except analytics_read.AnalyticsReadError as error:
         st.error(
-            f"Analytics query failed: {e}. The dashboard cannot render "
+            f"Analytics query failed: {error}. The dashboard cannot render "
             "without database access; check Postgres connectivity and "
             "reload."
         )
@@ -1623,7 +1623,7 @@ def _render_issues_and_backends(
 
 def _render_repo_and_reliability(
     modules: _DashboardModules,
-    data: _ReliabilityPanelData,
+    panel: _ReliabilityPanelData,
 ) -> None:
     """Render the per-repo cost bars + reliability / throughput column.
 
@@ -1644,7 +1644,7 @@ def _render_repo_and_reliability(
                 unsafe_allow_html=True,
             )
             modules.st.plotly_chart(
-                modules.charts.cost_by_repo(data.repos),
+                modules.charts.cost_by_repo(panel.repos),
                 use_container_width=True,
                 config=PLOTLY_CONFIG,
             )
@@ -1658,9 +1658,9 @@ def _render_repo_and_reliability(
                 unsafe_allow_html=True,
             )
             raw_tiles = reliability_tile_data(
-                data.summary,
-                resolved=data.resolved,
-                rejected=data.rejected,
+                panel.summary,
+                resolved=panel.resolved,
+                rejected=panel.rejected,
             )
             modules.st.markdown(
                 _reliability_tiles_html(
@@ -1671,10 +1671,10 @@ def _render_repo_and_reliability(
             )
             modules.st.plotly_chart(
                 modules.charts.done_per_day_bars(
-                    data.throughput,
-                    window_start=data.window.start.date(),
+                    panel.throughput,
+                    window_start=panel.window.start.date(),
                     window_end=(
-                        data.window.end - timedelta(days=1)
+                        panel.window.end - timedelta(days=1)
                     ).date(),
                     title=None,
                 ),
@@ -1818,23 +1818,23 @@ def _render_recent_runs(
             ts_offset = timedelta(hours=int(tz_offset_choice))
             df_exits = pd.DataFrame([
                 {
-                    "ts": shift_ts(r.ts, ts_offset),
-                    "repo": r.repo,
-                    "issue": r.issue,
-                    "stage": r.stage,
-                    "agent": r.agent_role,
-                    "backend": r.backend,
-                    "duration (s)": r.duration_s,
-                    "exit": r.exit_code,
-                    "timed out": r.timed_out,
-                    "round": r.review_round,
-                    "retry": r.retry_count,
-                    "input tokens": r.input_tokens,
-                    "output tokens": r.output_tokens,
-                    "cost (USD)": r.cost_usd,
-                    "cost source": r.cost_source,
+                    "ts": shift_ts(exit_row.ts, ts_offset),
+                    "repo": exit_row.repo,
+                    "issue": exit_row.issue,
+                    "stage": exit_row.stage,
+                    "agent": exit_row.agent_role,
+                    "backend": exit_row.backend,
+                    "duration (s)": exit_row.duration_s,
+                    "exit": exit_row.exit_code,
+                    "timed out": exit_row.timed_out,
+                    "round": exit_row.review_round,
+                    "retry": exit_row.retry_count,
+                    "input tokens": exit_row.input_tokens,
+                    "output tokens": exit_row.output_tokens,
+                    "cost (USD)": exit_row.cost_usd,
+                    "cost source": exit_row.cost_source,
                 }
-                for r in agent_exits
+                for exit_row in agent_exits
             ])
             st.dataframe(df_exits, use_container_width=True)
         else:
@@ -1873,8 +1873,8 @@ def _render_drilldown_view(
             events=_filter_list(filters.events),
             stages=_filter_list(filters.stages),
         )
-    except analytics_read.AnalyticsReadError as e:
-        modules.st.error(f"Issue drill-down failed: {e}")
+    except analytics_read.AnalyticsReadError as error:
+        modules.st.error(f"Issue drill-down failed: {error}")
         return
     if trace:
         modules.st.dataframe(
