@@ -398,7 +398,8 @@ def _post_user_content_change_result(
 
 
 def _bump_review_round(state: PinnedState) -> None:
-    state.set("review_round", int(state.get("review_round") or 0) + 1)
+    current_round = int(state.get("review_round") or 0)
+    state.set("review_round", current_round + 1)
 
 
 def _recover_failed_push(
