@@ -53,8 +53,9 @@ class AwaitingHumanParkStaysParkedTest(
             dev_agent="claude", dev_session_id="dev-sess",
             awaiting_human=True,
             park_reason=park_reason,
-            # Watermarks past everything visible -- mirrors what
-            # _bump_in_review_watermarks set when the original park ran.
+            # Every scan watermark sits past everything visible, so the
+            # fresh-feedback scan surfaces nothing and the parked-tick guard
+            # keeps the issue parked -- the post-park state a real tick leaves.
             pr_last_comment_id=10_000,
             pr_last_review_comment_id=10_000,
             pr_last_review_summary_id=10_000,
