@@ -266,10 +266,10 @@ Apply this sequence in every package:
 ### Package 3.6 — Stage handlers
 
 - [x] Simplify `orchestrator/stages/decomposition.py`.
-- [ ] Simplify the remaining handlers under `orchestrator/stages/` one stage at a time.
-- [ ] Keep cross-module calls late-bound through `from .. import workflow as _wf`.
-- [ ] Keep stage-private helpers private and explicitly alias every facade re-export.
-- [ ] Update the matching focused stage tests and documentation pointers after helper moves.
+- [x] Simplify the remaining handlers under `orchestrator/stages/` one stage at a time.
+- [x] Keep cross-module calls late-bound through `from .. import workflow as _wf`.
+- [x] Keep stage-private helpers private and explicitly alias every facade re-export.
+- [x] Update the matching focused stage tests and documentation pointers after helper moves.
 
 Completion gate: no production function remains above the selected complexity limits unless recorded in the
 accepted-remainder register with a concrete contract or readability reason.
@@ -575,6 +575,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-16 | 3.6/documenting | Complete | Target WPS; 62 focused; full gate | Not committed | `validating.py` |
 | 2026-07-16 | 3.6/validating | Complete | Target WPS; 129 focused; full gate | Not committed | `in_review.py` |
 | 2026-07-16 | 3.6/in_review | Complete | Target WPS; 68 focused; full gate | Not committed | `conflicts.py` |
+| 2026-07-16 | 3.6/conflicts | Complete | Target WPS; 70 focused; full gate | Not committed | Start Package 4.1 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -591,7 +592,8 @@ Packages 2.8, 3.2, 3.3, 3.4, and 3.5 ran `tests/` because root collection was bl
 database volume.
 
 Package 3.6 handler progress: `decomposition.py`, `implementing.py`, `fixing.py`, `documenting.py`,
-`validating.py`, and `in_review.py` are clear of the Stage 3 complexity rules; `conflicts.py` remains. The
+`validating.py`, `in_review.py`, and `conflicts.py` are clear of the Stage 3 complexity rules; Package 3.6 is
+complete. The
 `implementing.py`
 pass cleared its two remaining `WPS221` findings — the shared `silent_park_count` increment in `_park_session_limit`
 and `_park_silent_failure` — by routing both through the new `_mark_agent_silent_park` persistence helper; no Stage 3
@@ -641,3 +643,25 @@ stays late-bound through `from .. import workflow as _wf`, every extracted helpe
 finding was introduced (the `WPS110` names raised during extraction were renamed to domain terms). The 68 focused
 in_review tests passed unchanged and no Stage 3 finding was retained. All 68 focused in_review tests and 2,082 full
 tests passed (32 skipped for the optional dashboard and live-Postgres dependencies).
+
+The `conflicts.py` pass cleared all over-limit findings (the `WPS211` argument findings across
+`_emit_conflict_round_incremented`, `_resume_on_user_content_change`, `_guard_diverged_worktree`,
+`_push_recovered_commits`, `_publish_clean_rebase`, `_resolve_conflicts_with_agent`,
+`_post_conflict_resolution_result`, and `_finalize_conflict_resolution`, plus the `WPS210` local-variable, `WPS213`
+expression, and `WPS231` cognitive-complexity findings in `_handle_resolving_conflict`,
+`_resume_on_user_content_change`, and `_resume_awaiting_human`) by threading the per-tick handles through a new
+`_ConflictContext` dataclass and bundling the step outcomes into three more frozen records — `_WorktreeSync` (worktree
+measured ahead/behind its remote branch), `_DivergeDecision` (the diverged-worktree guard's park-or-publish verdict),
+and `_ConflictResumeRun` (one dev resume's outputs). `_handle_resolving_conflict` split into `_drive_conflict_rebase`,
+`_prepare_conflict_worktree`, and `_rebase_and_dispose`, and the shared park / pushed-round / resume tails moved into
+decision-free helpers (`_park_conflict`, `_park_conflict_missing_pr_number`, `_park_diverged_worktree`,
+`_fetch_pr_branch`, `_fetch_base_ref`, `_ensure_conflict_worktree`, `_still_behind_base`, `_merge_result`,
+`_awaiting_human_followup`, `_run_conflict_resume`, `_hand_resolved_round_to_validating`, and
+`_flip_base_up_to_date`). The re-exported `_handle_resolving_conflict` signature plus the directly-referenced
+`_pr_head_orchestrator_produced` / `_already_rebased_onto_base` probe signatures were preserved; every cross-module
+call stays late-bound through `from .. import workflow as _wf`, every extracted helper stays stage-private, and no new
+WPS finding was introduced (the `WPS237` f-string trap was avoided by binding `spec` locals rather than double-dotting
+`ctx.spec`). Authenticated fetches, dirty/diverged worktree parking, rebase recovery, publish guards, resume behavior,
+command ordering, locks, and emitted events were all preserved, so the 70 focused conflicts tests passed unchanged and
+no Stage 3 finding was retained. All 70 focused conflicts tests and 2,082 full tests passed (32 skipped for the
+optional dashboard and live-Postgres dependencies), completing Package 3.6.
