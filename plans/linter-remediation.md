@@ -574,6 +574,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-16 | 3.6/fixing | Complete | Target WPS; 90 focused; full gate | Not committed | `validating.py` |
 | 2026-07-16 | 3.6/documenting | Complete | Target WPS; 62 focused; full gate | Not committed | `validating.py` |
 | 2026-07-16 | 3.6/validating | Complete | Target WPS; 129 focused; full gate | Not committed | `in_review.py` |
+| 2026-07-16 | 3.6/in_review | Complete | Target WPS; 68 focused; full gate | Not committed | `conflicts.py` |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -589,8 +590,8 @@ Package 3.5 retained one reviewed `WPS211` compatibility finding. All 217 focuse
 Packages 2.8, 3.2, 3.3, 3.4, and 3.5 ran `tests/` because root collection was blocked by the unreadable ignored
 database volume.
 
-Package 3.6 handler progress: `decomposition.py`, `implementing.py`, `fixing.py`, `documenting.py`, and
-`validating.py` are clear of the Stage 3 complexity rules; `in_review.py` and `conflicts.py` remain. The
+Package 3.6 handler progress: `decomposition.py`, `implementing.py`, `fixing.py`, `documenting.py`,
+`validating.py`, and `in_review.py` are clear of the Stage 3 complexity rules; `conflicts.py` remains. The
 `implementing.py`
 pass cleared its two remaining `WPS221` findings — the shared `silent_park_count` increment in `_park_session_limit`
 and `_park_silent_failure` — by routing both through the new `_mark_agent_silent_park` persistence helper; no Stage 3
@@ -623,3 +624,20 @@ in_review handoff watermarks, and the fixing/documenting handoffs) was untouched
 `workflow.py` alias or late-bound `_wf` call changed; the 129 focused validating tests passed unchanged and no Stage 3
 finding was retained. All 129 focused validating tests and 2,082 full tests passed (32 skipped for the optional
 dashboard and live-Postgres dependencies).
+
+The `in_review.py` pass cleared all nine over-limit findings (the `WPS210` local-variable, `WPS211` argument, and
+`WPS213` expression findings across `_bump_in_review_watermarks`, `_scan_fresh_pr_feedback`,
+`_route_feedback_to_fixing`, `_handle_user_content_drift`, and `_handle_in_review`) by threading the per-tick handles
+through a new `_InReviewContext` dataclass, bundling the drift dev-resume outcome into a new `_DriftResume` dataclass,
+and extracting decision-free helpers: `_fresh_issue_space` (merged issue/PR-conversation surface),
+`_record_pending_fix_bookmarks` (per-surface fixing bookmarks), `_head_is_approved` (approval-gate probe), the drift
+steps `_drift_unread_pr_conv` / `_drift_worktree` / `_resume_dev_for_drift` / `_dispose_drift_result`, and the handler
+splits `_consume_fresh_feedback` and `_park_missing_pr_number`. `_bump_in_review_watermarks` dropped its unused
+`review_space_new` / `review_summary_new` parameters (no caller passed them and their blocks were no-ops — the
+`fixing` handler owns advancing the review-surface watermarks). The re-exported `_handle_in_review` /
+`_comment_created_at` signatures plus all pinned-state, label, watermark, comment, and event behavior were preserved;
+every cross-module call
+stays late-bound through `from .. import workflow as _wf`, every extracted helper stays stage-private, and no new WPS
+finding was introduced (the `WPS110` names raised during extraction were renamed to domain terms). The 68 focused
+in_review tests passed unchanged and no Stage 3 finding was retained. All 68 focused in_review tests and 2,082 full
+tests passed (32 skipped for the optional dashboard and live-Postgres dependencies).

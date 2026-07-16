@@ -2,16 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """In-review stage handler and its PR-side primitives.
 
-Owns `_handle_in_review` plus the in_review-private helpers: the
-fresh-feedback scan and its filter / watermark primitives
-(`_scan_fresh_pr_feedback`, `_drop_orchestrator_comments`,
-`_issue_side_watermark`), the fixing-route / drift / mergeability
-sub-handlers (`_route_feedback_to_fixing`, `_handle_user_content_drift`,
-`_build_drift_resume_prompt`, `_handle_mergeable_gate`), the parked-tick
-guard (`_stay_parked`), the first-tick watermark migration
-(`_seed_legacy_in_review_watermarks` / `_seed_missing_watermark`), the
-cross-namespace watermark ratchet (`_bump_in_review_watermarks`), and the
-debounce timestamp accessor (`_comment_created_at`).
+Owns `_handle_in_review` and the per-tick `_InReviewContext` bundle threaded
+through its sub-handlers: the fresh-feedback consumer (`_consume_fresh_feedback`,
+`_scan_fresh_pr_feedback`, `_fresh_issue_space`) and its filter / watermark
+primitives (`_drop_orchestrator_comments`, `_issue_side_watermark`,
+`_bump_in_review_watermarks`), the fixing-route recorder
+(`_route_feedback_to_fixing`, `_record_pending_fix_bookmarks`), the
+user-content-drift path (`_handle_user_content_drift` and its
+`_drift_unread_pr_conv` / `_drift_worktree` / `_resume_dev_for_drift` /
+`_dispose_drift_result` steps around the `_DriftResume` bundle, plus
+`_build_drift_resume_prompt`), the manual-merge mergeability gate
+(`_handle_mergeable_gate`, `_head_is_approved`,
+`_final_docs_handoff_completed_for_head`), the missing-PR park
+(`_park_missing_pr_number`), the parked-tick guard (`_stay_parked`), the
+first-tick watermark migration (`_seed_legacy_in_review_watermarks` /
+`_seed_missing_watermark`), and the debounce timestamp accessor
+(`_comment_created_at`).
 
 The handler is permanently manual-merge-only: humans drive the merge.
 Agent-approved + documented PR heads (or formally GitHub-approved
@@ -37,8 +43,9 @@ doing so would bind a stable reference that test patches against
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from github.Issue import Issue
 
@@ -52,6 +59,34 @@ from orchestrator.github import (
     PinnedState,
     issue_has_label,
 )
+
+
+@dataclass(frozen=True)
+class _InReviewContext:
+    """The per-tick `in_review` invocation handles, bundled so the fresh-feedback
+    scan, fixing-route, drift, and mergeability sub-handlers thread them as a
+    single value instead of five/six positional arguments (mirrors fixing's
+    `_FixingContext`). `pr` is the live PR fetched this tick; `pr_number` is the
+    pinned PR number `_handle_in_review` already validated as present.
+    """
+    gh: GitHubClient
+    spec: RepoSpec
+    issue: Issue
+    state: PinnedState
+    pr: Any
+    pr_number: Any
+
+
+@dataclass(frozen=True)
+class _DriftResume:
+    """Outcome of the drift dev-resume: the (possibly recreated) worktree, the
+    agent result, whether an operator paused mid-run, and the pre-resume HEAD
+    used to tell a pushed fix from a no-commit ack.
+    """
+    worktree: Any
+    dev_result: Any
+    paused: bool
+    before_sha: Any
 
 
 def _comment_created_at(comment) -> Optional[datetime]:
@@ -74,57 +109,39 @@ def _comment_created_at(comment) -> Optional[datetime]:
 
 
 def _bump_in_review_watermarks(
-    gh: GitHubClient,
-    issue: Issue,
-    state: PinnedState,
-    *,
-    issue_space_new: Optional[list] = None,
-    review_space_new: Optional[list] = None,
-    review_summary_new: Optional[list] = None,
+    ctx: _InReviewContext, *, issue_space_new: Optional[list] = None,
 ) -> None:
-    """Push the in_review watermarks past anything we've seen so far AND past
-    any park comment we just wrote on the issue thread.
+    """Push the in_review issue-side watermark (`pr_last_comment_id`) past
+    everything seen so far AND past any park comment just written on the issue
+    thread.
 
-    Without this, a park-and-write at in_review (unmergeable PR, failed
-    dev fix) leaves `pr_last_comment_id` lagging behind the orchestrator
-    park message it just posted; the next tick scans the issue thread
-    from the older watermark and routes the orchestrator's own HITL ping
-    as fresh PR feedback to `fixing`. The ratchet is one-way (only ever
-    increases) so callers can pass just-consumed comments or omit them
-    and let `latest_comment_id` carry it.
+    Without this, a park-and-write at in_review (unmergeable PR, failed dev fix)
+    leaves `pr_last_comment_id` lagging behind the orchestrator park message it
+    just posted; the next tick scans the issue thread from the older watermark
+    and routes the orchestrator's own HITL ping as fresh PR feedback to
+    `fixing`. The ratchet is one-way (only ever increases), so callers pass
+    just-consumed comments or omit them and let `latest_comment_id` carry it.
+
+    Only the issue-side watermark moves here. The inline-review and
+    review-summary watermarks belong to the `fixing` handler, which advances
+    them when it consumes that feedback; in_review never consumes review-surface
+    comments itself (it routes them to `fixing`), so there is nothing to ratchet
+    past on those surfaces.
     """
     candidates: list[int] = []
-    cur_issue_wm = state.get("pr_last_comment_id")
+    cur_issue_wm = ctx.state.get("pr_last_comment_id")
     if isinstance(cur_issue_wm, int):
         candidates.append(cur_issue_wm)
-    last_action = state.get("last_action_comment_id")
+    last_action = ctx.state.get("last_action_comment_id")
     if isinstance(last_action, int):
         candidates.append(last_action)
-    latest = gh.latest_comment_id(issue)
+    latest = ctx.gh.latest_comment_id(ctx.issue)
     if isinstance(latest, int):
         candidates.append(latest)
     if issue_space_new:
         candidates.extend(comment.id for comment in issue_space_new)
     if candidates:
-        state.set("pr_last_comment_id", max(candidates))
-
-    review_candidates: list[int] = []
-    cur_review_wm = state.get("pr_last_review_comment_id")
-    if isinstance(cur_review_wm, int):
-        review_candidates.append(cur_review_wm)
-    if review_space_new:
-        review_candidates.extend(comment.id for comment in review_space_new)
-    if review_candidates:
-        state.set("pr_last_review_comment_id", max(review_candidates))
-
-    summary_candidates: list[int] = []
-    cur_summary_wm = state.get("pr_last_review_summary_id")
-    if isinstance(cur_summary_wm, int):
-        summary_candidates.append(cur_summary_wm)
-    if review_summary_new:
-        summary_candidates.extend(review.id for review in review_summary_new)
-    if summary_candidates:
-        state.set("pr_last_review_summary_id", max(summary_candidates))
+        ctx.state.set("pr_last_comment_id", max(candidates))
 
 
 def _seed_missing_watermark(state: PinnedState, key: str, fetch) -> bool:
@@ -151,7 +168,7 @@ def _seed_missing_watermark(state: PinnedState, key: str, fetch) -> bool:
 
 
 def _seed_legacy_in_review_watermarks(
-    gh: GitHubClient, issue: Issue, pr, state: PinnedState
+    gh: GitHubClient, issue: Issue, pr, state: PinnedState,
 ) -> None:
     """First-tick migration: seed any missing in_review watermark past every
     comment currently visible on its surface, and record the seed in pinned
@@ -253,49 +270,54 @@ def _issue_side_watermark(state: PinnedState) -> Optional[int]:
     return issue_wm
 
 
-def _scan_fresh_pr_feedback(
-    gh: GitHubClient, issue: Issue, pr, state: PinnedState
-):
+def _fresh_issue_space(ctx: _InReviewContext, orchestrator_ids) -> list:
+    """Merge fresh issue-thread and PR-conversation feedback -- one shared
+    IssueComment id namespace -- into a single stream: drop orchestrator
+    comments, drop untrusted authors, sort ascending by id. Filtering untrusted
+    authors here keeps an outsider's issue / PR comment from bookmarking a
+    pending fix or steering the `in_review` -> `fixing` route.
+    """
+    issue_wm = _issue_side_watermark(ctx.state)
+    new_issue_side = _drop_orchestrator_comments(
+        ctx.gh.comments_after(ctx.issue, issue_wm), orchestrator_ids,
+    )
+    new_pr_conv = _drop_orchestrator_comments(
+        ctx.gh.pr_conversation_comments_after(ctx.pr, issue_wm), orchestrator_ids,
+    )
+    return filter_trusted(sorted(
+        list(new_issue_side) + list(new_pr_conv),
+        key=lambda comment: comment.id,
+    ))
+
+
+def _scan_fresh_pr_feedback(ctx: _InReviewContext):
     """Collect fresh, human-authored feedback across the four in_review
     surfaces (issue thread, PR conversation, inline review, review summary).
 
     Returns `(issue_space_new, review_space_new, review_summary_new)`, each
     already sorted ascending by id. The issue-thread and PR-conversation
     streams share one id namespace and are merged into `issue_space_new`.
-    Untrusted authors are dropped from every surface (see `filter_trusted`)
-    so outsider feedback cannot bookmark a pending fix or route to `fixing`.
+    Untrusted authors are dropped from every surface (see `filter_trusted`) so
+    outsider feedback cannot bookmark a pending fix or route to `fixing`; the
+    orchestrator marker/id filtering is layered underneath it. An empty
+    allowlist trusts everyone, so the default deployment is unchanged.
     """
     from orchestrator import workflow as _wf
 
-    issue_wm = _issue_side_watermark(state)
-    review_wm = state.get("pr_last_review_comment_id")
-    review_summary_wm = state.get("pr_last_review_summary_id")
-    orchestrator_ids = _wf._orchestrator_ids(state)
-    new_issue_side = _drop_orchestrator_comments(
-        gh.comments_after(issue, issue_wm), orchestrator_ids,
-    )
-    new_pr_conv = _drop_orchestrator_comments(
-        gh.pr_conversation_comments_after(pr, issue_wm), orchestrator_ids,
-    )
-    new_pr_inline = list(gh.pr_inline_comments_after(pr, review_wm))
-    new_pr_reviews = list(gh.pr_reviews_after(pr, review_summary_wm))
-    # Drop untrusted authors on every surface before their feedback can set a
-    # pending-fix bookmark or route `in_review` -> `fixing`: with
-    # `ALLOWED_ISSUE_AUTHORS` set an outsider's issue / PR / review comment
-    # must not steer the dev fix-loop. The orchestrator marker/id filtering
-    # (above) is preserved; this is the login gate layered on top of it. An
-    # empty allowlist trusts everyone, so the default deployment is unchanged.
-    issue_space_new = filter_trusted(sorted(
-        list(new_issue_side) + list(new_pr_conv),
-        key=lambda comment: comment.id,
-    ))
+    orchestrator_ids = _wf._orchestrator_ids(ctx.state)
+    issue_space_new = _fresh_issue_space(ctx, orchestrator_ids)
     review_space_new = filter_trusted(sorted(
-        new_pr_inline,
+        ctx.gh.pr_inline_comments_after(
+            ctx.pr, ctx.state.get("pr_last_review_comment_id"),
+        ),
         key=lambda comment: comment.id,
     ))
-    review_summary_new = filter_trusted(
-        sorted(new_pr_reviews, key=lambda review: review.id)
-    )
+    review_summary_new = filter_trusted(sorted(
+        ctx.gh.pr_reviews_after(
+            ctx.pr, ctx.state.get("pr_last_review_summary_id"),
+        ),
+        key=lambda review: review.id,
+    ))
     return issue_space_new, review_space_new, review_summary_new
 
 
@@ -325,97 +347,86 @@ def _stay_parked(state: PinnedState, new_comments: list) -> bool:
     )
 
 
-def _route_feedback_to_fixing(
-    gh: GitHubClient,
-    issue: Issue,
+def _record_pending_fix_bookmarks(
     state: PinnedState,
+    issue_space_new: list,
+    review_space_new: list,
+    review_summary_new: list,
+) -> None:
+    """Bookmark the fresh-feedback batch for the fixing handler: per surface,
+    the max id (the existing pinned-state contract and the conservative
+    reconstruction bound for issues parked before the id lists existed) plus the
+    full id list, so a later fixing tick reconstructs the EXACT triggering batch
+    even after the in_review watermarks advance past it -- the max id alone
+    loses the batch's lower members once a rescan can no longer reach them.
+    `_reconstruct_pending_fix_batch` prefers the id lists. Each list is already
+    sorted ascending by id (sorted at scan time).
+
+    These are bookmarks, not watermarks: they are deliberately NOT bumped past
+    the batch, because the fixing handler re-reads these same comments to build
+    its dev-resume prompt and consuming them now would lose the triggering
+    feedback.
+    """
+    for max_key, ids_key, batch in (
+        ("pending_fix_issue_max_id", "pending_fix_issue_ids", issue_space_new),
+        ("pending_fix_review_max_id", "pending_fix_review_ids", review_space_new),
+        (
+            "pending_fix_review_summary_max_id",
+            "pending_fix_review_summary_ids",
+            review_summary_new,
+        ),
+    ):
+        if batch:
+            state.set(max_key, max(feedback.id for feedback in batch))
+            state.set(ids_key, [feedback.id for feedback in batch])
+
+
+def _route_feedback_to_fixing(
+    ctx: _InReviewContext,
     issue_space_new: list,
     review_space_new: list,
     review_summary_new: list,
 ) -> None:
     """Hand fresh PR feedback off to the `fixing` stage instead of silently
     waiting through the debounce window or spawning the dev agent here.
-    Recording the per-namespace high ids in pinned state gives the fixing
-    handler a bookmark of what triggered the route so it can resume the dev
-    session, push a fix, and flip back to `validating` for re-review -- all
-    without `_handle_in_review` having to keep the comment-debounce /
-    dev-resume machinery in its own body.
+    Recording the per-namespace ids in pinned state (see
+    `_record_pending_fix_bookmarks`) gives the fixing handler a bookmark of what
+    triggered the route so it can resume the dev session, push a fix, and flip
+    back to `validating` -- all without `_handle_in_review` keeping the
+    comment-debounce / dev-resume machinery in its own body.
 
     Deliberately NOT honoring the debounce window before the flip: with the
-    route to `fixing`, the dev is no longer spawned from this handler at all
-    -- the fixing stage owns debouncing before its own spawn, so flipping
-    immediately is the right contract (the issue's `fixing` label surfaces the
+    route to `fixing`, the dev is no longer spawned from this handler at all --
+    the fixing stage owns debouncing before its own spawn, so flipping
+    immediately is the right contract (the `fixing` label surfaces the
     transition to the operator straight away, and any concurrent additional
     comments are seen by the fixing handler on its next tick).
 
-    Watermarks are deliberately NOT bumped here: the fixing handler needs to
-    read these same comments to build its dev-resume prompt, so consuming them
-    now would lose the triggering feedback. The `pending_fix_*_max_id` keys are
-    bookmarks (a hint for the future handler / for observability), not
-    watermarks.
-
-    Alongside the max ids, persist the full per-surface id lists so a later
-    fixing tick can reconstruct the EXACT triggering batch even after the
-    in_review watermarks have advanced past it -- the max id alone loses the
-    batch's lower members once a rescan can no longer reach them.
-    `_reconstruct_pending_fix_batch` prefers the id lists; the max_id keys stay
-    for the existing pinned-state contract and as the conservative
-    reconstruction bound for issues parked before the lists were recorded. Each
-    list is already sorted ascending by id (sorted at scan time).
+    Refresh `user_content_hash` so the user-content drift detection does NOT
+    fire on the next tick for the same comment changes just consumed via the
+    fixing route: the hash covers title + body + human issue-thread comments, so
+    any issue-thread comment in `issue_space_new` shifts it; leaving the old
+    hash would have the drift path resume the dev and bounce to `validating` the
+    moment a human relabels the issue back to `in_review`, undoing the route.
     """
     from orchestrator import workflow as _wf
 
+    state = ctx.state
     state.set("pending_fix_at", _wf._now_iso())
-    if issue_space_new:
-        state.set(
-            "pending_fix_issue_max_id",
-            max(comment.id for comment in issue_space_new),
-        )
-        state.set(
-            "pending_fix_issue_ids",
-            [comment.id for comment in issue_space_new],
-        )
-    if review_space_new:
-        state.set(
-            "pending_fix_review_max_id",
-            max(comment.id for comment in review_space_new),
-        )
-        state.set(
-            "pending_fix_review_ids",
-            [comment.id for comment in review_space_new],
-        )
-    if review_summary_new:
-        state.set(
-            "pending_fix_review_summary_max_id",
-            max(review.id for review in review_summary_new),
-        )
-        state.set(
-            "pending_fix_review_summary_ids",
-            [review.id for review in review_summary_new],
-        )
-    # Update `user_content_hash` so the user-content drift detection does NOT
-    # fire on the next tick for the same comment changes we just consumed via
-    # the fixing route. The hash covers title + body + human issue-thread
-    # comments, so any issue-thread comment in `issue_space_new` shifts the
-    # hash; leaving the old hash in pinned state would have the drift path
-    # resume the dev and bounce back to `validating` the moment a human
-    # relabels the issue back to `in_review`, undoing the fixing route.
-    # `_compute_user_content_hash` is a pure read of the current issue state,
-    # so reading it here is cheap and self-contained -- the bookmark and the
-    # hash both advance atomically with the label flip.
+    _record_pending_fix_bookmarks(
+        state, issue_space_new, review_space_new, review_summary_new,
+    )
     state.set(
         "user_content_hash",
-        _wf._compute_user_content_hash(
-            issue, _wf._orchestrator_ids(state),
-        ),
+        _wf._compute_user_content_hash(ctx.issue, _wf._orchestrator_ids(state)),
     )
-    # If we were parked awaiting human, the comment that triggered this route
-    # is the human signal -- clear the park flags so the fixing handler is not
+    # If we were parked awaiting human, the comment that triggered this route is
+    # the human signal -- clear the park flags so the fixing handler is not
     # greeted with stale awaiting_human state.
     state.set("awaiting_human", False)
     state.set("park_reason", None)
-    gh.set_workflow_label(issue, WorkflowLabel.FIXING)
-    gh.write_pinned_state(issue, state)
+    ctx.gh.set_workflow_label(ctx.issue, WorkflowLabel.FIXING)
+    ctx.gh.write_pinned_state(ctx.issue, state)
 
 
 def _build_drift_resume_prompt(issue: Issue, unread_pr_conv: list) -> str:
@@ -440,134 +451,156 @@ def _build_drift_resume_prompt(issue: Issue, unread_pr_conv: list) -> str:
     return _wf._build_user_content_change_prompt(issue, comments_text)
 
 
-def _handle_user_content_drift(
-    gh: GitHubClient,
-    spec: RepoSpec,
-    issue: Issue,
-    state: PinnedState,
-    pr,
-    pr_number,
-) -> bool:
+def _drift_unread_pr_conv(ctx: _InReviewContext) -> list:
+    """Capture unread PR-conversation comments BEFORE the drift notice and the
+    later watermark bump.
+
+    The issue thread and PR conversation share the IssueComment id space, so
+    `_bump_in_review_watermarks` (driven by issue-thread ids only) can leap past
+    a PR-conversation comment whose id falls between the prior
+    `pr_last_comment_id` and the new issue-thread max -- the dev would never see
+    it. Capturing those comments here and quoting them in the followup prompt is
+    what stops a concurrent PR comment from being silently dropped. Orchestrator
+    id / marker filtering mirrors the regular in_review comment scan.
+    """
+    from orchestrator import workflow as _wf
+
+    issue_wm = _issue_side_watermark(ctx.state)
+    orchestrator_ids = _wf._orchestrator_ids(ctx.state)
+    return _drop_orchestrator_comments(
+        ctx.gh.pr_conversation_comments_after(ctx.pr, issue_wm), orchestrator_ids,
+    )
+
+
+def _drift_worktree(ctx: _InReviewContext):
+    """Resolve the PR worktree for the drift resume, recreating it on the
+    resolved branch if the path is gone.
+    """
+    from orchestrator import workflow as _wf
+
+    wt = _wf._worktree_path(ctx.spec, ctx.issue.number)
+    if not wt.exists():
+        wt = _wf._ensure_worktree(
+            ctx.spec, ctx.issue.number,
+            branch=_wf._resolve_branch_name(ctx.state, ctx.spec, ctx.issue.number),
+        )
+    return wt
+
+
+def _resume_dev_for_drift(
+    ctx: _InReviewContext, unread_pr_conv: list,
+) -> _DriftResume:
+    """Notify both surfaces, mark the issue-thread drift comments consumed,
+    resolve the worktree, and resume the locked dev session with the updated
+    body plus the unread PR conversation. Captures the pre-resume HEAD so the
+    disposition can tell a pushed fix from a no-commit ack.
+
+    The dev sees the full issue thread via `_recent_comments_text` in the resume
+    prompt, so marking the issue-thread comments consumed here keeps both a
+    later validating->in_review handoff and the in_review watermark check from
+    replaying them as fresh feedback. Untrusted authors are filtered out of the
+    quoted PR-conversation block; the watermark bump still consumes the raw
+    `unread_pr_conv` so an outsider comment is not re-scanned next tick.
+    """
+    from orchestrator import workflow as _wf
+
+    _wf._post_pr_comment(
+        ctx.gh, int(ctx.pr_number), ctx.state,
+        ":pencil2: issue body changed; resuming dev session.",
+    )
+    _wf._mark_drift_comments_consumed(ctx.gh, ctx.issue, ctx.state)
+    wt = _drift_worktree(ctx)
+    before_sha = _wf._head_sha(wt)
+    wt, dev_result, paused = _wf._resume_dev_with_text(
+        ctx.gh, ctx.spec, ctx.issue, ctx.state,
+        _build_drift_resume_prompt(ctx.issue, filter_trusted(unread_pr_conv)),
+        pause_guard=True,
+    )
+    ctx.state.set("last_agent_action_at", _wf._now_iso())
+    return _DriftResume(
+        worktree=wt, dev_result=dev_result, paused=paused, before_sha=before_sha,
+    )
+
+
+def _dispose_drift_result(
+    ctx: _InReviewContext, unread_pr_conv: list, resume: _DriftResume,
+) -> None:
+    """Post the dev result (a no-commit reply is an ack, not a park), ratchet
+    the in_review issue-side watermark past everything consumed this tick, and
+    on either outcome (pushed fix or ack) bounce DIRECTLY back to `validating`
+    with `review_round` reset.
+
+    The drift invalidated the prior validation either way: the reviewer approved
+    against the OLD requirements, so `review_round` must reset before the issue
+    can earn a fresh approval. Docs do not run here; the single docs pass is
+    deferred to the final-docs handoff after reviewer approval. Passing
+    `unread_pr_conv` to the bump includes PR-conversation ids ABOVE the
+    issue-thread max in the candidate set; without it a PR comment with id
+    higher than every issue-thread id would survive the bump and re-fire as
+    fresh feedback.
+    """
+    from orchestrator import workflow as _wf
+
+    outcome = _wf._post_user_content_change_result(
+        ctx.gh, ctx.spec, ctx.issue, ctx.state,
+        resume.worktree, resume.dev_result, resume.before_sha,
+    )
+    _bump_in_review_watermarks(ctx, issue_space_new=unread_pr_conv)
+    if outcome in ("pushed", "ack"):
+        ctx.state.set("review_round", 0)
+        ctx.gh.set_workflow_label(ctx.issue, WorkflowLabel.VALIDATING)
+    ctx.gh.write_pinned_state(ctx.issue, ctx.state)
+
+
+def _handle_user_content_drift(ctx: _InReviewContext) -> bool:
     """Resume the dev when a human edited the issue title / body after the PR
     opened (no fresh comment surface triggered the fixing route).
 
     Returns True when drift was detected and handled (the caller must return),
     False when there is no drift (the caller falls through to the mergeability
-    gate). Notify on both surfaces, resume the dev session on its locked
-    backend with the new body, and on either outcome (pushed fix or no-commit
-    ACK) bounce DIRECTLY back to `validating` so the reviewer re-evaluates
-    against the updated body. Docs do not run on the drift exit: the single
-    docs pass is deferred to the final-docs handoff after reviewer approval.
+    gate).
     """
     from orchestrator import workflow as _wf
 
-    new_hash = _wf._detect_user_content_change(gh, issue, state)
+    new_hash = _wf._detect_user_content_change(ctx.gh, ctx.issue, ctx.state)
     if new_hash is None:
         return False
-    state.set("user_content_hash", new_hash)
-    # Gather unread PR-conversation comments BEFORE posting the orchestrator's
-    # drift notice. The issue thread and PR conversation share the
-    # IssueComment id space, so the subsequent `_bump_in_review_watermarks`
-    # bump (driven by `latest_comment_id(issue)` and `last_action_comment_id`,
-    # both of which only reflect the ISSUE thread) can leap past a
-    # PR-conversation comment whose id falls between the prior
-    # `pr_last_comment_id` and the new issue-thread max -- the dev would never
-    # see it. Capturing those PR comments here and quoting them in the followup
-    # prompt is what stops a concurrent PR comment from being silently dropped
-    # by the watermark bump. Filtering by orchestrator id / marker mirrors the
-    # regular in_review comment-driven scan.
-    issue_wm = _issue_side_watermark(state)
-    orchestrator_ids = _wf._orchestrator_ids(state)
-    unread_pr_conv = _drop_orchestrator_comments(
-        gh.pr_conversation_comments_after(pr, issue_wm), orchestrator_ids,
-    )
-    _wf._post_pr_comment(
-        gh, int(pr_number), state,
-        ":pencil2: issue body changed; resuming dev session.",
-    )
-    # Mark every issue-thread comment as consumed AND bump the in_review
-    # watermarks past anything posted on this tick. The dev sees the full
-    # thread via `_recent_comments_text` in the resume prompt, so a later
-    # validating->in_review handoff (after the "pushed" branch bounces
-    # straight to `validating`, validating re-runs, and the reviewer approves)
-    # and the in_review's own watermark check must not replay these comments as
-    # fresh feedback.
-    _wf._mark_drift_comments_consumed(gh, issue, state)
-    wt = _wf._worktree_path(spec, issue.number)
-    if not wt.exists():
-        wt = _wf._ensure_worktree(
-            spec, issue.number,
-            branch=_wf._resolve_branch_name(state, spec, issue.number),
-        )
-    before_sha = _wf._head_sha(wt)
-    # Filter untrusted authors out of the PR-conversation block quoted in the
-    # drift-resume prompt (the issue-thread text `_build_drift_resume_prompt`
-    # pulls from `_recent_comments_text` is already allowlist-filtered). The
-    # watermark bump below still consumes the raw `unread_pr_conv` so an
-    # outsider comment is not re-scanned as fresh feedback next tick.
-    followup = _build_drift_resume_prompt(
-        issue, filter_trusted(unread_pr_conv),
-    )
-    wt, dev_result, paused = _wf._resume_dev_with_text(
-        gh, spec, issue, state, followup, pause_guard=True,
-    )
-    state.set("last_agent_action_at", _wf._now_iso())
-    # Shutdown-sweep-killed resume: bail WITHOUT writing pinned state so the
-    # consumption staged above (refreshed `user_content_hash`, consumed drift
-    # comments via `_mark_drift_comments_consumed`, `last_agent_action_at`, and
-    # the `awaiting_human` clear inside `_resume_dev_with_text`) is discarded
-    # and the next process re-detects the body change. Must precede
-    # `_post_user_content_change_result` and the watermark bump below so
-    # neither parses partial `last_message` nor persists the consumption.
-    if _wf._ignore_if_interrupted(issue, dev_result):
+    ctx.state.set("user_content_hash", new_hash)
+    unread_pr_conv = _drift_unread_pr_conv(ctx)
+    resume = _resume_dev_for_drift(ctx, unread_pr_conv)
+    # Interrupted (shutdown sweep) or live-paused (operator added `paused` /
+    # `backlog` mid-run) resume: bail WITHOUT writing pinned state so everything
+    # staged above -- refreshed `user_content_hash`, consumed drift comments,
+    # `last_agent_action_at`, the `awaiting_human` clear inside
+    # `_resume_dev_with_text` -- is discarded and the next process re-detects the
+    # body change and leaves any committed work on the branch. Must precede
+    # `_dispose_drift_result` so it neither parses a partial reply nor persists
+    # the consumption.
+    if _wf._ignore_if_interrupted(ctx.issue, resume.dev_result):
         return True
-    # Live pause applied mid-run: an operator added `paused` (or `backlog`)
-    # while this drift resume was in flight. Honor the helper's decision and
-    # return before `_post_user_content_change_result`, the watermark bump, or
-    # any relabel / pinned-state write -- the refreshed hash and consumed
-    # comments staged above are discarded, so the drift stays unconsumed and
-    # the committed work stays on the branch until the label is removed.
-    if paused:
+    if resume.paused:
         return True
-    # The user-content-change result handler treats a no-commit reply as an ack
-    # rather than parking on it; a harmless clarification edit (the dev
-    # confirms the PR already satisfies it) must not stall the issue with an
-    # "agent needs your input" park.
-    outcome = _wf._post_user_content_change_result(
-        gh, spec, issue, state, wt, dev_result, before_sha,
-    )
-    # Always bump in_review watermarks past the orchestrator's notice and any
-    # comments we just consumed, regardless of outcome. The next tick will be
-    # in `validating` on either successful outcome ("pushed" or "ack"); if the
-    # reviewer later approves and bounces back to in_review,
-    # `_seed_watermark_past_self` would otherwise stop at the original human
-    # comment and trigger a duplicate resume. Passing `unread_pr_conv` ensures
-    # PR-conversation ids ABOVE the issue-thread max are also included in the
-    # candidate set; without it, a PR comment with id higher than every
-    # issue-thread id would survive past the bump and re-fire as fresh feedback.
-    _bump_in_review_watermarks(
-        gh, issue, state, issue_space_new=unread_pr_conv,
-    )
-    if outcome in ("pushed", "ack"):
-        # The drift invalidated the prior validation either way: the reviewer
-        # agent approved against the OLD requirements, so `review_round` must
-        # reset before the issue can earn a fresh approval. Both outcomes
-        # bounce DIRECTLY back to `validating` so the reviewer re-evaluates
-        # against the updated body; docs do not run here (the single docs pass
-        # is deferred to the final-docs handoff after reviewer approval).
-        state.set("review_round", 0)
-        gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
-    gh.write_pinned_state(issue, state)
+    _dispose_drift_result(ctx, unread_pr_conv, resume)
     return True
 
 
-def _handle_mergeable_gate(
-    gh: GitHubClient,
-    issue: Issue,
-    state: PinnedState,
-    pr,
-    pr_number,
-) -> None:
+def _head_is_approved(ctx: _InReviewContext, head_sha: str) -> bool:
+    """True when `head_sha` earned the reviewer-approved final-docs handoff or
+    carries a real GitHub APPROVED review.
+
+    The final-docs pass records the exact head it checked after reviewer
+    approval; if a later push changes the PR head, the docs marker no longer
+    matches and the issue must bounce back through validating/documenting before
+    it can ping again. A real GitHub APPROVED review on the current head is the
+    fallback for manually-driven review flows -- probed only when the final-docs
+    marker did not already qualify the head, to avoid a redundant API call.
+    """
+    if _final_docs_handoff_completed_for_head(ctx.state, head_sha):
+        return True
+    return ctx.gh.pr_is_approved(ctx.pr, head_sha=head_sha)
+
+
+def _handle_mergeable_gate(ctx: _InReviewContext) -> None:
     """Manual-merge-only mergeability gate. An unmergeable PR parks awaiting
     human regardless of approval state -- the orchestrator never routes from
     here to `resolving_conflict` and never calls `gh.merge_pr`. A mergeable PR
@@ -580,54 +613,42 @@ def _handle_mergeable_gate(
     """
     from orchestrator import workflow as _wf
 
-    mergeable = gh.pr_is_mergeable(pr)
+    pr = ctx.pr
+    pr_number = ctx.pr_number
+    mergeable = ctx.gh.pr_is_mergeable(pr)
     if mergeable is None:
         return  # GitHub still computing; try next tick
     if not mergeable:
         _wf._park_awaiting_human(
-            gh, issue, state,
+            ctx.gh, ctx.issue, ctx.state,
             f"{config.HITL_MENTIONS} PR #{pr_number} is not mergeable "
             "(branch protection, conflicts, or out-of-date base); "
             "manual merge needed.",
             reason="unmergeable",
         )
-        state.set("park_reason", "unmergeable")
-        _bump_in_review_watermarks(gh, issue, state)
-        gh.write_pinned_state(issue, state)
+        ctx.state.set("park_reason", "unmergeable")
+        _bump_in_review_watermarks(ctx)
+        ctx.gh.write_pinned_state(ctx.issue, ctx.state)
         return
     # mergeable: humans drive the merge. The ping advertises the PR as "ready
     # for review/merge", so it must only fire for a head the orchestrator has
     # reviewer-approved and documented (or one a human/bot formally approved in
-    # GitHub, or a quick_run head exempt from those markers -- see below) AND
-    # carries no standing human veto; otherwise we would be inviting a manual
-    # merge over a stale or rejected commit.
+    # GitHub, or a quick_run head exempt from those markers) AND carrying no
+    # standing human veto; otherwise we would invite a manual merge over a stale
+    # or rejected commit.
     head_sha = pr.head.sha
-    if gh.pr_has_changes_requested(pr, head_sha=head_sha):
+    if ctx.gh.pr_has_changes_requested(pr, head_sha=head_sha):
         return
-    # Approval gate: the final-docs pass records the exact head it checked
-    # after reviewer approval. If a later push changes the PR head, the docs
-    # marker no longer matches and the issue must bounce back through
-    # validating/documenting before it can ping again. A real GitHub APPROVED
-    # review on the current head remains a valid fallback for manually-driven
-    # review flows.
-    #
-    # `quick_run` is an explicit exemption from both approval markers: the fast
-    # path routes straight from implementing to in_review, skipping the
-    # reviewer (`validating`) and docs (`documenting`) passes, so it never
-    # records a final-docs marker or earns an orchestrator APPROVED review. A
-    # clean quick run should still get the ready ping, so bypass the approval
-    # gate for it -- the mergeable-head and no-CHANGES_REQUESTED guards above
-    # still apply.
-    if not issue_has_label(issue, QUICK_RUN_LABEL):
-        final_docs_ready = _final_docs_handoff_completed_for_head(
-            state, head_sha,
-        )
-        github_approved = (
-            False if final_docs_ready
-            else gh.pr_is_approved(pr, head_sha=head_sha)
-        )
-        if not (final_docs_ready or github_approved):
-            return
+    # `quick_run` is an explicit exemption from the approval markers: the fast
+    # path routes straight from implementing to in_review, skipping the reviewer
+    # (`validating`) and docs (`documenting`) passes, so it never records a
+    # final-docs marker or earns an orchestrator APPROVED review. A clean quick
+    # run should still get the ready ping, so bypass the approval gate for it --
+    # the mergeable-head and no-CHANGES_REQUESTED guards above still apply.
+    if not issue_has_label(ctx.issue, QUICK_RUN_LABEL) and not _head_is_approved(
+        ctx, head_sha,
+    ):
+        return
     # Ping HITL handles once per head SHA so the human knows the PR is ready.
     # De-duplication is keyed on `ready_ping_sha` (the head we pinged for); a
     # new commit pushed onto the branch shifts pr.head.sha and re-pings, while
@@ -642,17 +663,67 @@ def _handle_mergeable_gate(
     # would silently swallow it -- the next tick's `comments_after` would skip
     # it and the dev would never see the feedback. The ping is recorded in
     # `orchestrator_comment_ids` by `_post_issue_comment`, so the next tick's
-    # id-set filter excludes it from `new_issue_side` without needing the
-    # watermark to move; a concurrent human comment naturally surfaces below the
-    # unchanged watermark.
-    if state.get("ready_ping_sha") != head_sha:
+    # id-set filter excludes it without needing the watermark to move; a
+    # concurrent human comment naturally surfaces below the unchanged watermark.
+    if ctx.state.get("ready_ping_sha") != head_sha:
         _wf._post_issue_comment(
-            gh, issue, state,
+            ctx.gh, ctx.issue, ctx.state,
             f":bell: {config.HITL_MENTIONS} PR #{pr_number} is ready "
             "for review/merge.",
         )
-        state.set("ready_ping_sha", head_sha)
-        gh.write_pinned_state(issue, state)
+        ctx.state.set("ready_ping_sha", head_sha)
+        ctx.gh.write_pinned_state(ctx.issue, ctx.state)
+
+
+def _consume_fresh_feedback(ctx: _InReviewContext) -> bool:
+    """Scan the four in_review surfaces and either stay silently parked or route
+    fresh human feedback to `fixing`.
+
+    Returns True when the tick is fully handled here (stayed parked or routed to
+    `fixing`); False when no fresh feedback exists and the caller should fall
+    through to the drift / mergeability gates.
+
+    The scan runs FIRST -- BEFORE the user-content drift check -- because
+    `user_content_hash` covers title + body + every human issue-thread comment,
+    so without this ordering a normal issue-thread review comment would also
+    flip the hash and the drift path would resume the dev + bounce to
+    `validating` instead of recording `pending_fix_*` and flipping to `fixing`,
+    violating the documented in_review -> fixing contract for issue-thread
+    feedback.
+    """
+    _seed_legacy_in_review_watermarks(ctx.gh, ctx.issue, ctx.pr, ctx.state)
+    issue_space_new, review_space_new, review_summary_new = (
+        _scan_fresh_pr_feedback(ctx)
+    )
+    new_comments = issue_space_new + review_space_new + review_summary_new
+    if _stay_parked(ctx.state, new_comments):
+        return True
+    if not new_comments:
+        return False
+    _route_feedback_to_fixing(
+        ctx, issue_space_new, review_space_new, review_summary_new,
+    )
+    return True
+
+
+def _park_missing_pr_number(
+    gh: GitHubClient, issue: Issue, state: PinnedState,
+) -> None:
+    """Park a manually-relabeled in_review issue that has no pinned `pr_number`.
+    We don't infer the PR -- park once and let the human relabel back.
+    """
+    from orchestrator import workflow as _wf
+
+    if state.get("awaiting_human"):
+        return
+    _wf._park_awaiting_human(
+        gh, issue, state,
+        f"{config.HITL_MENTIONS} `in_review` without a pinned `pr_number`; "
+        "manual relabeling suspected. Set the workflow label back to "
+        "`validating` (or `implementing`) after fixing.",
+        reason="missing_pr_number",
+    )
+    gh.write_pinned_state(issue, state)
 
 
 def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
@@ -688,21 +759,13 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     pr_number = state.get("pr_number")
 
     if pr_number is None:
-        # Manual relabel from outside the validating path. We don't try to
-        # infer the PR -- park once and let the human relabel back.
-        if state.get("awaiting_human"):
-            return
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} `in_review` without a pinned `pr_number`; "
-            "manual relabeling suspected. Set the workflow label back to "
-            "`validating` (or `implementing`) after fixing.",
-            reason="missing_pr_number",
-        )
-        gh.write_pinned_state(issue, state)
+        # Manual relabel from outside the validating path.
+        _park_missing_pr_number(gh, issue, state)
         return
 
-    pr = gh.get_pr(int(pr_number))
+    ctx = _InReviewContext(
+        gh, spec, issue, state, gh.get_pr(int(pr_number)), pr_number,
+    )
 
     # Drain the shared PR/issue terminal arcs (merged PR -> `done`,
     # closed PR -> `rejected`, open PR + manually-closed issue ->
@@ -720,38 +783,14 @@ def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # worktree, local branch, and remote branch manually for the
     # "close issue first, then close PR" ordering.
     if _wf._drain_review_pr_terminals(
-        gh, spec, issue, state, pr, stage="in_review",
+        gh, spec, issue, state, ctx.pr, stage="in_review",
     ):
         return
 
-    # Fresh PR feedback scan runs FIRST -- BEFORE the user-content drift
-    # check below. `user_content_hash` covers title + body + every human
-    # issue-thread comment, so without this ordering a normal fresh
-    # issue-thread review comment would also flip the hash and the drift
-    # path would resume the dev + bounce to `validating` instead of
-    # recording `pending_fix_*` and flipping to `fixing`. That violates the
-    # documented in_review -> fixing contract for issue-thread feedback.
-    # Reorder so issue-thread / PR-conversation / inline-review /
-    # review-summary feedback always routes to `fixing`, and the drift
-    # check only fires for true title/body edits that the feedback scan
-    # cannot represent.
-    _seed_legacy_in_review_watermarks(gh, issue, pr, state)
-    issue_space_new, review_space_new, review_summary_new = (
-        _scan_fresh_pr_feedback(gh, issue, pr, state)
-    )
-    new_comments = issue_space_new + review_space_new + review_summary_new
-
-    if _stay_parked(state, new_comments):
+    if _consume_fresh_feedback(ctx):
         return
 
-    if new_comments:
-        _route_feedback_to_fixing(
-            gh, issue, state,
-            issue_space_new, review_space_new, review_summary_new,
-        )
+    if _handle_user_content_drift(ctx):
         return
 
-    if _handle_user_content_drift(gh, spec, issue, state, pr, pr_number):
-        return
-
-    _handle_mergeable_gate(gh, issue, state, pr, pr_number)
+    _handle_mergeable_gate(ctx)
