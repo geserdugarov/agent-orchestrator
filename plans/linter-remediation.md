@@ -572,6 +572,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-13 | 3.6/decomposition | Complete | Target WPS; 104 focused; full gate | Not committed | `implementing.py` |
 | 2026-07-15 | 3.6/implementing | Complete | Target WPS; 148 focused; full gate | Not committed | `validating.py` |
 | 2026-07-16 | 3.6/fixing | Complete | Target WPS; 90 focused; full gate | Not committed | `validating.py` |
+| 2026-07-16 | 3.6/documenting | Complete | Target WPS; 62 focused; full gate | Not committed | `validating.py` |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -587,8 +588,8 @@ Package 3.5 retained one reviewed `WPS211` compatibility finding. All 217 focuse
 Packages 2.8, 3.2, 3.3, 3.4, and 3.5 ran `tests/` because root collection was blocked by the unreadable ignored
 database volume.
 
-Package 3.6 handler progress: `decomposition.py`, `implementing.py`, and `fixing.py` are clear of the Stage 3
-complexity rules; `validating.py`, `in_review.py`, `documenting.py`, and `conflicts.py` remain. The `implementing.py`
+Package 3.6 handler progress: `decomposition.py`, `implementing.py`, `fixing.py`, and `documenting.py` are clear of
+the Stage 3 complexity rules; `validating.py`, `in_review.py`, and `conflicts.py` remain. The `implementing.py`
 pass cleared its two remaining `WPS221` findings — the shared `silent_park_count` increment in `_park_session_limit`
 and `_park_silent_failure` — by routing both through the new `_mark_agent_silent_park` persistence helper; no Stage 3
 finding was retained. The `fixing.py` pass cleared all six over-limit functions (the `WPS210` local-variable, `WPS211`
@@ -599,3 +600,14 @@ ACK, drift-classification, and batch-reconstruction helpers; the public `_handle
 pinned-state, label, watermark, and event behavior were preserved, so the 90 focused fixing tests passed unchanged and
 no Stage 3 finding was retained. All 90 focused fixing tests and 2,082 full tests passed (32 skipped for the optional
 dashboard and live-Postgres dependencies).
+
+The `documenting.py` pass cleared every over-limit function (the `WPS210` local-variable, `WPS211` argument, `WPS213`
+expression, and `WPS231` cognitive-complexity findings across the drift-unwind, worktree-prep, docs-run, and
+disposition helpers) by threading the per-tick handles plus the resolved branch and pinned `pr_number` through a new
+`_DocumentingContext` dataclass, bundling the docs-run outcome into a new `_DocumentingRun` dataclass (so the router no
+longer unpacks a five-value tuple), and extracting decision-free drift fetch/probe/reset, drift-announce/unwind-seed,
+per-shape run (`_resume_documenting_dev`, `_recovered_documenting_run`, `_fresh_documenting_run`),
+park/watermark/notice, and disposition helpers. The public `_handle_documenting` signature plus all pinned-state,
+label, watermark, comment, and event behavior were preserved, so the 62 focused documenting tests passed unchanged and
+no Stage 3 finding was retained. All 62 focused documenting tests and 2,082 full tests passed (32 skipped for the
+optional dashboard and live-Postgres dependencies).
