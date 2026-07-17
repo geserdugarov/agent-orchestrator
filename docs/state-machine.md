@@ -904,14 +904,15 @@ can fire.
   1. **Terminal close.** If the issue is closed, stamp `question_closed_at`, set label `done`, write pinned state, tear
      down the per-issue worktree + local branch via `_cleanup_question_worktree`. Do NOT spawn the agent.
   2. **Awaiting-human resume.** If `awaiting_human`, scan for new comments past `last_action_comment_id`. No new
-     comments → return (the `finally` block still tears down any worktree from a prior safe tick). New comments →
-     advance the watermark BEFORE spawning, then resume the locked session via `_build_question_followup_prompt`.
+     comments → return (the `_question_run_cleanup` context manager still tears down any worktree from a prior safe
+     tick). New comments → advance the watermark BEFORE spawning, then resume the locked session via
+     `_build_question_followup_prompt`.
   3. **Fresh spawn.** Ensure the per-issue worktree, resolve the question spec via `_read_question_session` (falls back
      to the decomposer's spec on the first-ever spawn), persist `question_agent` BEFORE invoking `run_agent`, build the
      read-only `_build_question_prompt`, spawn, and persist `question_session_id`. A mid-run `paused` / `backlog`
      re-check (`_paused_during_agent_run`) right after the run returns short-circuits the resume and fresh spawn alike
-     BEFORE the usage fold, park, or pinned-state write, so the next tick re-runs from durable state (the `finally`
-     still disposes the worktree per `keep_worktree`).
+     BEFORE the usage fold, park, or pinned-state write, so the next tick re-runs from durable state (the
+     `_question_run_cleanup` context manager still disposes the worktree per `keep_worktree`).
   4. Branch on result:
      - `timed_out` → `_park_question` with `question_timeout`. **Keep** the worktree for operator inspection.
      - new commits → `_park_question` with `question_commits`. **Keep** the worktree: this stage is read-only.
@@ -920,8 +921,8 @@ can fire.
      - clean answer → post the agent's quoted message to the issue (pinging `HITL_MENTIONS`), park with
        `question_answer`, tear the worktree down.
 
-  The `finally` block runs `_cleanup_question_worktree` unless one of the three unsafe-park branches set
-  `keep_worktree=True`.
+  The `_question_run_cleanup` context manager runs `_cleanup_question_worktree` unless one of the three unsafe-park
+  branches set `keep_worktree=True`.
 - **Cross-stage interaction (relabel to `implementing`).** `_handle_implementing` carries an explicit guard: when it
   inherits `awaiting_human=True` + a `park_reason` starting with `question_`, it inspects the worktree AND the local
   branch. A clean worktree + clean branch drops the question-stage park flags, ratchets `last_action_comment_id` past
