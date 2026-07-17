@@ -869,6 +869,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-17 | 4.3 | Complete | Target WPS; 6 remainders; full gate 2121 passed | Not committed | Start Package 4.4 |
 | 2026-07-17 | 4.4 | Complete | Target WPS; 5 remainders; full gate 2124 passed | Not committed | Start Package 4.5 |
 | 2026-07-17 | 4.5/usage-metrics | Complete | Target WPS; 21 fixed, 2 deferred; full gate | Not committed | 4.5 rest |
+| 2026-07-17 | 4.5/usage-skills | Complete | Target WPS; WPS202 36->25; full gate | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1080,3 +1081,26 @@ compatibility test pins the re-export identity and each symbol's module of recor
 module-layout note. Ruff is clean and the full suite passed 2,096 tests (33 skipped for the optional dashboard / live
 Postgres; the same `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact accounts for the one otherwise-green
 failure). Package 4.5 is not complete -- its remaining module-structure findings are untouched.
+
+Package 4.5 continued with the `usage-skills` slice: the `SkillTriggers` dataclass and the claude / codex offered-skill
+parsing and skill collectors reached through `parse_agent_skills` (`parse_claude_skills` / `parse_codex_skills` plus
+`_collect`, `_claude_skill_name`, `_claude_offered_skills`, the `_ClaudeSkillCollector` / `_CodexSkillCollector`
+collectors, and the `_CODEX_SKILL_PATH_RE` heuristic) moved out of `usage.py` into a focused private
+`orchestrator/_usage_skills.py`. `orchestrator.usage` re-exports exactly that public surface (`SkillTriggers` /
+`parse_agent_skills` / `parse_claude_skills` / `parse_codex_skills`) so `analytics` keeps importing from the same site,
+and it reuses the private module's offered-set init-frame helpers (`_claude_init_field` / `_ordered_unique_names`) and
+shared skill/trajectory JSONL vocabulary (`_CONTENT_KEY` / `_COMMAND_EXECUTION`) for its sibling trajectory classifier
+-- which stays in `usage.py` -- so the init-frame parsing stays defined once. The re-export follows the same hub
+convention as the `usage-metrics` slice (absolute `from orchestrator._usage_skills import ...`, grouped at eight names
+per statement, public names aliased `as`), so the split introduced no new `WPS300` local-import or `WPS235`
+too-many-names category; the new module's only WPS finding is the accepted `WPS202` module-member count (11 > 7, the
+same cohesive-parser magnitude `_usage_metrics` carries), and the move cut `usage.py`'s `WPS202` count from 36 to 25.
+The skill section carried no per-member target findings, so this slice fixes none beyond the member-count reduction; the
+two deferred trajectory findings (`WPS234` `_ClaudeTurnUsageBuilder.by_key`, `WPS338` `_CodexTrajectoryBuilder`) and a
+`WPS110` `content` still sit in the trajectory extractor that stays in `usage.py`. `SkillTriggers` shape, first-seen
+ordering, per-name deduplication / counts, malformed-event handling, the names-only Privacy contract, and every
+analytics consumer were preserved; the `test_usage.py` compatibility test now pins the skill re-export identity and each
+symbol's module of record alongside the usage-metric one, and `docs/observability.md`'s module-layout note gained the
+`_usage_skills` split. Ruff is clean and the full suite passed 2,097 tests (33 skipped for the optional dashboard / live
+Postgres; the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not
+complete -- its remaining module-structure findings are untouched.
