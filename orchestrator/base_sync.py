@@ -294,6 +294,18 @@ _PR_REFRESH_DETOUR_LABELS = frozenset(
     },
 )
 
+# Pinned-state keys and park-reason values this refresh path reads and writes.
+_PARK_REASON = "park_reason"
+_AWAITING_HUMAN = "awaiting_human"
+_REVIEW_ROUND = "review_round"
+_CONFLICT_ROUND = "conflict_round"
+_PENDING_PUSH_SHA = "pending_auto_base_rebase_push_sha"
+_REASON_AUTO_BASE_REBASE_FAILED = "auto_base_rebase_failed"
+_REASON_AUTO_BASE_REBASE_PUSH_FAILED = "auto_base_rebase_push_failed"
+
+# Longest error-text snippet embedded in an operator park comment.
+_ERROR_SNIPPET_LEN = 120
+
 
 # Park reasons owned by `_sync_pr_worktree_to_base`. When the refresh
 # parks an issue with one of these, no stage handler knows how to
@@ -308,9 +320,9 @@ _PR_REFRESH_DETOUR_LABELS = frozenset(
 # the refresh deliberately leaves those parks alone.
 _AUTO_REBASE_PARK_REASONS = frozenset(
     {
-        "auto_base_rebase_failed",
+        _REASON_AUTO_BASE_REBASE_FAILED,
         "auto_base_rebase_dirty",
-        "auto_base_rebase_push_failed",
+        _REASON_AUTO_BASE_REBASE_PUSH_FAILED,
     },
 )
 
@@ -397,7 +409,7 @@ def _park_auto_rebase_failure(
         f"which is not in _AUTO_REBASE_PARK_REASONS"
     )
     _wf._park_awaiting_human(gh, issue, state, message, reason=reason)
-    state.set("park_reason", reason)
+    state.set(_PARK_REASON, reason)
     gh.write_pinned_state(issue, state)
 
 
@@ -447,7 +459,7 @@ def _reset_clear_and_park(
                 "the reset failed: %s",
                 context.issue.number, (cleaned.stderr or "").strip(),
             )
-    context.state.set("pending_auto_base_rebase_push_sha", None)
+    context.state.set(_PENDING_PUSH_SHA, None)
     _park_auto_rebase_failure(
         context.gh,
         context.issue,
@@ -465,10 +477,10 @@ def _prepare_recovered_rebase_state(
         context.state.set(
             "last_action_comment_id", context.unparking_consumed_max,
         )
-        context.state.set("awaiting_human", False)
-        context.state.set("park_reason", None)
-    context.state.set("pending_auto_base_rebase_push_sha", None)
-    context.state.set("review_round", 0)
+        context.state.set(_AWAITING_HUMAN, False)
+        context.state.set(_PARK_REASON, None)
+    context.state.set(_PENDING_PUSH_SHA, None)
+    context.state.set(_REVIEW_ROUND, 0)
 
 
 def _post_recovered_rebase_notice(
@@ -570,7 +582,7 @@ def _abort_recovery_unverified(
             "problem is fixed and the orchestrator will re-"
             "attempt the auto rebase on the next polling tick."
         ),
-        reason="auto_base_rebase_push_failed",
+        reason=_REASON_AUTO_BASE_REBASE_PUSH_FAILED,
     )
     return True
 
@@ -579,7 +591,7 @@ def _clear_ineligible_recovery(
     context: _AutoRebaseRecoveryContext,
 ) -> bool:
     """Clear an interrupted-rebase anchor after an operator relabel."""
-    context.state.set("pending_auto_base_rebase_push_sha", None)
+    context.state.set(_PENDING_PUSH_SHA, None)
     context.gh.write_pinned_state(context.issue, context.state)
     log.info(
         "issue=#%d auto-rebase recovery: label %r is no longer in "
@@ -617,7 +629,7 @@ def _fetch_recovery_snapshot(
             context,
             f"the fetch of `{context.spec.remote_name}/{branch}` "
             "needed to verify the recovered SHA against the remote PR "
-            f"head failed (`{fetch_error[:120]}`).",
+            f"head failed (`{fetch_error[:_ERROR_SNIPPET_LEN]}`).",
         )
         return None
     return _AutoRebaseRecoverySnapshot(
@@ -630,7 +642,7 @@ def _clear_unchanged_recovery(
     context: _AutoRebaseRecoveryContext,
 ) -> bool:
     """Clear an anchor when HEAD never moved beyond the pre-rebase SHA."""
-    context.state.set("pending_auto_base_rebase_push_sha", None)
+    context.state.set(_PENDING_PUSH_SHA, None)
     context.gh.write_pinned_state(context.issue, context.state)
     log.info(
         "issue=#%d auto-rebase recovery: local HEAD matches pre-"
@@ -663,7 +675,7 @@ def _read_remote_recovery_head(
         _abort_recovery_unverified(
             context,
             f"`git rev-parse {remote_ref}` failed after the fetch "
-            f"(`{remote_error[:120]}`), so the remote PR head SHA "
+            f"(`{remote_error[:_ERROR_SNIPPET_LEN]}`), so the remote PR head SHA "
             "needed for the equality check could not be read.",
         )
         return None
@@ -815,7 +827,7 @@ def _park_diverged_recovery(
             "Investigate the remote PR head and reply on this issue "
             "with anything once the divergence is reconciled."
         ),
-        reason="auto_base_rebase_push_failed",
+        reason=_REASON_AUTO_BASE_REBASE_PUSH_FAILED,
     )
     return True
 
@@ -863,7 +875,7 @@ def _park_failed_recovery_push(
             "the remote PR branch was updated out-of-band; investigate "
             "and reply on this issue with anything to retry."
         ),
-        reason="auto_base_rebase_push_failed",
+        reason=_REASON_AUTO_BASE_REBASE_PUSH_FAILED,
     )
     return True
 
@@ -1110,10 +1122,10 @@ def _auto_rebase_retry_decision(
     context: _AutoRebaseContext,
 ) -> _AutoRebaseDecision:
     """Keep stage-owned parks intact and recognize a trusted retry reply."""
-    if not context.state.get("awaiting_human"):
+    if not context.state.get(_AWAITING_HUMAN):
         return _AutoRebaseDecision(should_continue=True)
 
-    park_reason = context.state.get("park_reason")
+    park_reason = context.state.get(_PARK_REASON)
     if park_reason not in _AUTO_REBASE_PARK_REASONS:
         log.debug(
             "issue=#%d behind %s/%s by %d but awaiting_human=True "
@@ -1177,7 +1189,7 @@ def _open_auto_rebase_pr(
     if pr_status == "open":
         return pr
     if context.pending_pre_rebase_sha:
-        context.state.set("pending_auto_base_rebase_push_sha", None)
+        context.state.set(_PENDING_PUSH_SHA, None)
         context.gh.write_pinned_state(context.issue, context.state)
         log.info(
             "issue=#%d PR #%d is %s and a recovery anchor was "
@@ -1215,7 +1227,7 @@ def _auto_rebase_recovery_decision(
         unparking_consumed_max=consumed_comment_id,
     ):
         return _AutoRebaseDecision(should_continue=False)
-    if not context.state.get("awaiting_human"):
+    if not context.state.get(_AWAITING_HUMAN):
         consumed_comment_id = None
     return _AutoRebaseDecision(True, consumed_comment_id)
 
@@ -1253,7 +1265,7 @@ def _park_unreadable_pre_rebase_head(context: _AutoRebaseContext) -> None:
             "rebase was skipped. Inspect the worktree's git state "
             "and reply on this issue with anything to retry."
         ),
-        reason="auto_base_rebase_failed",
+        reason=_REASON_AUTO_BASE_REBASE_FAILED,
     )
 
 
@@ -1265,9 +1277,9 @@ def _record_auto_rebase_attempt(
     """Persist the recovery anchor and any retry unpark before git runs."""
     if consumed_comment_id is not None:
         context.state.set("last_action_comment_id", consumed_comment_id)
-        context.state.set("awaiting_human", False)
-        context.state.set("park_reason", None)
-    context.state.set("pending_auto_base_rebase_push_sha", before_sha)
+        context.state.set(_AWAITING_HUMAN, False)
+        context.state.set(_PARK_REASON, None)
+    context.state.set(_PENDING_PUSH_SHA, before_sha)
     context.gh.write_pinned_state(context.issue, context.state)
 
 
@@ -1284,7 +1296,7 @@ def _handle_failed_auto_rebase(
             context.issue.number,
             (abort.stderr or "").strip(),
         )
-    context.state.set("pending_auto_base_rebase_push_sha", None)
+    context.state.set(_PENDING_PUSH_SHA, None)
     if conflicted_files:
         _route_pr_worktree_to_resolving_conflict(
             context.gh,
@@ -1321,7 +1333,7 @@ def _handle_failed_auto_rebase(
             "underlying problem is fixed; the next polling tick will "
             "re-attempt the auto rebase."
         ),
-        reason="auto_base_rebase_failed",
+        reason=_REASON_AUTO_BASE_REBASE_FAILED,
     )
 
 
@@ -1369,7 +1381,7 @@ def _park_unreadable_post_rebase_head(
             "worktree's git state and reply on this issue with "
             "anything to retry."
         ),
-        reason="auto_base_rebase_failed",
+        reason=_REASON_AUTO_BASE_REBASE_FAILED,
     )
 
 
@@ -1383,7 +1395,7 @@ def _finish_noop_auto_rebase(context: _AutoRebaseContext) -> None:
         context.spec.remote_name,
         context.spec.base_branch,
     )
-    context.state.set("pending_auto_base_rebase_push_sha", None)
+    context.state.set(_PENDING_PUSH_SHA, None)
     context.gh.write_pinned_state(context.issue, context.state)
 
 
@@ -1442,7 +1454,7 @@ def _park_failed_auto_rebase_push(
             "the branch is ready for the orchestrator to re-attempt "
             "the auto-rebase on the next polling tick."
         ),
-        reason="auto_base_rebase_push_failed",
+        reason=_REASON_AUTO_BASE_REBASE_PUSH_FAILED,
     )
     log.warning(
         "issue=#%d auto base rebase pushed nothing (lease rejection "
@@ -1490,7 +1502,7 @@ def _emit_auto_rebase_event(
         pr_number=context.pr_number,
         sha=after_sha,
         method="auto_clean_rebase",
-        review_round=int(context.state.get("review_round") or 0),
+        review_round=int(context.state.get(_REVIEW_ROUND) or 0),
         retry_count=context.state.get("retry_count"),
     )
 
@@ -1502,8 +1514,8 @@ def _finalize_auto_rebase(
 ) -> None:
     """Publish the notice, audit event, validating route, and pinned state."""
     _post_auto_rebase_notice(context, after_sha)
-    context.state.set("pending_auto_base_rebase_push_sha", None)
-    context.state.set("review_round", 0)
+    context.state.set(_PENDING_PUSH_SHA, None)
+    context.state.set(_REVIEW_ROUND, 0)
     log.info(
         "issue=#%d auto base rebase pushed %s/%s -> %s; routing %r -> "
         "validating",
@@ -1649,7 +1661,7 @@ def _sync_pr_worktree_to_base(
         behind=behind,
         label=gh.workflow_label(issue),
         pending_pre_rebase_sha=state.get(
-            "pending_auto_base_rebase_push_sha"
+            _PENDING_PUSH_SHA
         ),
     )
     if not _auto_rebase_label_is_eligible(context):
@@ -1712,8 +1724,8 @@ def _route_pr_worktree_to_resolving_conflict(
     # Match `_handle_in_review`'s seeding: only initialize `conflict_round`
     # when absent, so a re-entry preserves the cap counter and a
     # perpetually-stuck PR can't ping-pong between handlers indefinitely.
-    if state.get("conflict_round") is None:
-        state.set("conflict_round", 0)
+    if state.get(_CONFLICT_ROUND) is None:
+        state.set(_CONFLICT_ROUND, 0)
 
     try:
         _post_pr_comment(
@@ -1738,14 +1750,14 @@ def _route_pr_worktree_to_resolving_conflict(
         len(conflicted_files), label,
     )
     gh.emit_event(
-        "conflict_round",
+        _CONFLICT_ROUND,
         issue_number=issue.number,
         stage=label,
         pr_number=pr_number,
         sha=pr_head_sha or None,
         action="entered",
-        conflict_round=int(state.get("conflict_round") or 0),
-        review_round=int(state.get("review_round") or 0),
+        conflict_round=int(state.get(_CONFLICT_ROUND) or 0),
+        review_round=int(state.get(_REVIEW_ROUND) or 0),
         retry_count=state.get("retry_count"),
     )
     gh.set_workflow_label(issue, WorkflowLabel.RESOLVING_CONFLICT)

@@ -163,10 +163,33 @@ class _DevResumeOptions:
         return cls(**fields)
 
 
+# Pinned-state keys and park-reason / stage-name values this handler reads.
+_DEV_AGENT = "dev_agent"
+_DEV_SESSION_ID = "dev_session_id"
+_CODEX_SESSION_ID = "codex_session_id"
+_SILENT_PARK_COUNT = "silent_park_count"
+_DEV_RESUME_COUNT = "dev_resume_count"
+_RETRY_WINDOW_START = "retry_window_start"
+_RETRY_COUNT = "retry_count"
+_AWAITING_HUMAN = "awaiting_human"
+_LAST_ACTION_COMMENT_ID = "last_action_comment_id"
+_AGENT_TIMEOUT = "agent_timeout"
+_PARK_REASON = "park_reason"
+_PRE_IMPLEMENT_SHA = "pre_implement_sha"
+_BRANCH = "branch"
+_IMPLEMENTING_STAGE = "implementing"
+_REASON_STUCK = "stuck"
+
+
+def _as_blockquote(text: str) -> str:
+    """Render `text` as a Markdown blockquote (each line prefixed with `> `)."""
+    return "> " + text.replace("\n", "\n> ")
+
+
 def _stored_dev_session(state: PinnedState, stored) -> tuple:
     stored_spec = str(stored)
-    backend, args = config._parse_agent_spec("dev_agent", stored_spec)
-    session_id = state.get("dev_session_id")
+    backend, args = config._parse_agent_spec(_DEV_AGENT, stored_spec)
+    session_id = state.get(_DEV_SESSION_ID)
     return (
         stored_spec,
         backend,
@@ -206,10 +229,10 @@ def _read_dev_session(
         config's `(DEV_AGENT_SPEC, DEV_AGENT, DEV_AGENT_ARGS, None)`
         for the imminent fresh spawn to use AND persist.
     """
-    stored = state.get("dev_agent")
+    stored = state.get(_DEV_AGENT)
     if stored:
         return _stored_dev_session(state, stored)
-    legacy = state.get("codex_session_id")
+    legacy = state.get(_CODEX_SESSION_ID)
     if legacy is not None:
         return "codex", "codex", (), str(legacy)
     return (
@@ -308,14 +331,14 @@ def _drop_poisoned_dev_session(state: PinnedState) -> None:
     Clearing the legacy field too leaves no trace of the dropped
     session anywhere.
     """
-    if not state.get("dev_agent") and state.get("codex_session_id") is not None:
-        state.set("dev_agent", "codex")
-    state.set("dev_session_id", None)
-    state.set("codex_session_id", None)
-    state.set("silent_park_count", 0)
+    if not state.get(_DEV_AGENT) and state.get(_CODEX_SESSION_ID) is not None:
+        state.set(_DEV_AGENT, "codex")
+    state.set(_DEV_SESSION_ID, None)
+    state.set(_CODEX_SESSION_ID, None)
+    state.set(_SILENT_PARK_COUNT, 0)
     # The resume budget is per-session; clearing the session resets it so the
     # fresh spawn that follows starts its own count from zero.
-    state.set("dev_resume_count", 0)
+    state.set(_DEV_RESUME_COUNT, 0)
 
 
 def _check_and_increment_retry_budget(
@@ -323,7 +346,7 @@ def _check_and_increment_retry_budget(
     issue: Issue,
     state: PinnedState,
     *,
-    stage: str = "implementing",
+    stage: str = _IMPLEMENTING_STAGE,
 ) -> bool:
     """Gate fresh agent spawns by a per-issue 24h retry cap.
 
@@ -349,7 +372,7 @@ def _check_and_increment_retry_budget(
         return True
 
     now = datetime.now(timezone.utc)
-    window_start_raw = state.get("retry_window_start")
+    window_start_raw = state.get(_RETRY_WINDOW_START)
     window_start: Optional[datetime] = None
     if window_start_raw:
         try:
@@ -359,11 +382,11 @@ def _check_and_increment_retry_budget(
 
     if window_start is None or now - window_start > timedelta(hours=24):
         # Window absent/corrupt/expired: open a new one.
-        state.set("retry_window_start", _wf._now_iso())
-        state.set("retry_count", 0)
-        window_start_raw = state.get("retry_window_start")
+        state.set(_RETRY_WINDOW_START, _wf._now_iso())
+        state.set(_RETRY_COUNT, 0)
+        window_start_raw = state.get(_RETRY_WINDOW_START)
 
-    count = int(state.get("retry_count") or 0)
+    count = int(state.get(_RETRY_COUNT) or 0)
     if count >= cap:
         _wf._park_awaiting_human(
             gh, issue, state,
@@ -374,7 +397,7 @@ def _check_and_increment_retry_budget(
         )
         return False
 
-    state.set("retry_count", count + 1)
+    state.set(_RETRY_COUNT, count + 1)
     return True
 
 
@@ -408,8 +431,8 @@ def _resolve_dev_session_for_resume(
     from orchestrator import workflow as _wf
 
     session = _DevSession(*_read_dev_session(state))
-    silent_count = int(state.get("silent_park_count") or 0)
-    resume_count = int(state.get("dev_resume_count") or 0)
+    silent_count = int(state.get(_SILENT_PARK_COUNT) or 0)
+    resume_count = int(state.get(_DEV_RESUME_COUNT) or 0)
     retirement_reason = _dev_session_retirement_reason(
         session.session_id, resume_count, silent_count,
     )
@@ -493,11 +516,11 @@ def _persist_dev_session_after_run(
     """
     if fresh_spawn:
         if agent_result.session_id:
-            state.set("dev_session_id", agent_result.session_id)
-            state.set("dev_resume_count", 0)
+            state.set(_DEV_SESSION_ID, agent_result.session_id)
+            state.set(_DEV_RESUME_COUNT, 0)
     else:
-        state.set("dev_resume_count", resume_count + 1)
-    state.set("awaiting_human", False)
+        state.set(_DEV_RESUME_COUNT, resume_count + 1)
+    state.set(_AWAITING_HUMAN, False)
 
 
 @dataclass(frozen=True)
@@ -536,7 +559,7 @@ class _DevResumeContext:
             options=options,
             worktree=worktree,
             plan=plan,
-            stage=gh.workflow_label(issue) or "implementing",
+            stage=gh.workflow_label(issue) or _IMPLEMENTING_STAGE,
         )
 
     def _run_attempt(
@@ -565,7 +588,7 @@ class _DevResumeContext:
             resume_session_id=session_id,
             extra_args=session.extra_args,
             review_round=self.state.get("review_round", 0),
-            retry_count=self.state.get("retry_count"),
+            retry_count=self.state.get(_RETRY_COUNT),
         )
         _wf._accumulate_issue_usage(self.state, agent_result.usage)
         paused = (
@@ -727,12 +750,12 @@ def _resume_developer_on_human_reply(
     trailing a trusted one is left unconsumed rather than persisted as the
     watermark; an all-untrusted batch is treated as "no new reply".
     """
-    last_action_id = state.get("last_action_comment_id")
+    last_action_id = state.get(_LAST_ACTION_COMMENT_ID)
     new_comments = filter_trusted(gh.comments_after(issue, last_action_id))
     if not new_comments:
         return None
     consumed_max = max(comment.id for comment in new_comments)
-    state.set("last_action_comment_id", consumed_max)
+    state.set(_LAST_ACTION_COMMENT_ID, consumed_max)
     from orchestrator import workflow as _wf
 
     followup = "\n\n".join(
@@ -788,10 +811,10 @@ def _park_agent_timeout(
         gh, issue, state,
         f"{config.HITL_MENTIONS} agent timed out after "
         f"{config.AGENT_TIMEOUT}s, manual intervention needed.",
-        reason="agent_timeout",
+        reason=_AGENT_TIMEOUT,
     )
-    state.set("park_reason", "agent_timeout")
-    state.set("pre_implement_sha", before_sha or "")
+    state.set(_PARK_REASON, _AGENT_TIMEOUT)
+    state.set(_PRE_IMPLEMENT_SHA, before_sha or "")
 
 
 def _try_recover_implementing_timeout_park(
@@ -824,26 +847,26 @@ def _try_recover_implementing_timeout_park(
     wt = _wf._worktree_path(spec, issue.number)
     if not wt.exists():
         # Worktree reaped: the local commit is gone, nothing to publish.
-        return "stuck"
+        return _REASON_STUCK
     if _wf._worktree_dirty_files(wt):
         # A descendant left uncommitted edits; pushing would publish an
         # incomplete branch. Stay parked for human inspection.
-        return "stuck"
-    pre_sha = state.get("pre_implement_sha")
+        return _REASON_STUCK
+    pre_sha = state.get(_PRE_IMPLEMENT_SHA)
     if not isinstance(pre_sha, str):
         # The timeout-tagging path always persists this; a missing watermark
         # is foreign state we cannot reason about, so stay parked rather than
         # risk publishing a branch we cannot vouch for.
-        return "stuck"
+        return _REASON_STUCK
     now_sha = _wf._head_sha(wt)
     if not now_sha or now_sha == pre_sha:
         # The timeout produced no new commit; stay parked for a human reply.
-        return "stuck"
+        return _REASON_STUCK
     # A clean commit advanced past the pre-timeout SHA. Clear the park flags
     # and publish it through the normal commit path.
-    state.set("awaiting_human", False)
-    state.set("park_reason", None)
-    state.set("pre_implement_sha", None)
+    state.set(_AWAITING_HUMAN, False)
+    state.set(_PARK_REASON, None)
+    state.set(_PRE_IMPLEMENT_SHA, None)
     _, _, _, dev_sid = _read_dev_session(state)
     agent_result = AgentResult(
         session_id=dev_sid,
@@ -899,9 +922,9 @@ def _handle_stale_question_park(
     watermark seed cannot replay it as fresh PR feedback) before the caller
     falls through to the fresh-spawn path.
     """
-    park_reason = state.get("park_reason")
+    park_reason = state.get(_PARK_REASON)
     if not (
-        state.get("awaiting_human")
+        state.get(_AWAITING_HUMAN)
         and isinstance(park_reason, str)
         and park_reason.startswith("question_")
     ):
@@ -973,19 +996,19 @@ def _park_unsafe_question_relabel(
         "before re-relabeling so the dev agent starts from a clean base.",
         reason="question_unsafe_relabel",
     )
-    state.set("park_reason", "question_unsafe_relabel")
+    state.set(_PARK_REASON, "question_unsafe_relabel")
 
 
 def _clear_stale_question_park(
     gh: GitHubClient, issue: Issue, state: PinnedState,
 ) -> None:
-    state.set("awaiting_human", False)
-    state.set("park_reason", None)
+    state.set(_AWAITING_HUMAN, False)
+    state.set(_PARK_REASON, None)
     latest = gh.latest_comment_id(issue)
     if isinstance(latest, int):
-        prior = state.get("last_action_comment_id")
+        prior = state.get(_LAST_ACTION_COMMENT_ID)
         if not isinstance(prior, int) or latest > prior:
-            state.set("last_action_comment_id", latest)
+            state.set(_LAST_ACTION_COMMENT_ID, latest)
 
 
 def _retry_parked_dev_session(
@@ -1012,7 +1035,7 @@ def _retry_parked_dev_session(
     from orchestrator import workflow as _wf
 
     state.set(
-        "last_action_comment_id",
+        _LAST_ACTION_COMMENT_ID,
         max(comment.id for comment in new_comments),
     )
     wt = _wf._worktree_path(spec, issue.number)
@@ -1027,7 +1050,7 @@ def _retry_parked_dev_session(
         gh, spec, issue, state, followup, pause_guard=True,
     )
     state.set("last_agent_action_at", _wf._now_iso())
-    state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
+    state.set(_BRANCH, _wf._resolve_branch_name(state, spec, issue.number))
     # A shutdown-killed or live-paused resume leaves durable state untouched so
     # the next process re-detects and re-runs the retry (mirrors the drift and
     # fresh-spawn dispositions).
@@ -1088,14 +1111,14 @@ def _parked_continue_decision(
 ) -> Optional[_ParkedContinueDecision]:
     from orchestrator import workflow as _wf
 
-    if not state.get("awaiting_human"):
+    if not state.get(_AWAITING_HUMAN):
         return None
-    park_reason = state.get("park_reason")
+    park_reason = state.get(_PARK_REASON)
     # Refresh-time auto-rebase parks own their operator retry comment.
     if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
         return None
     comments = filter_trusted(
-        gh.comments_after(issue, state.get("last_action_comment_id"))
+        gh.comments_after(issue, state.get(_LAST_ACTION_COMMENT_ID))
     )
     if not comments:
         return None
@@ -1132,7 +1155,7 @@ def _handle_user_content_drift(
     do with the new body instead.
     """
     state.set("user_content_hash", new_hash)
-    if state.get("dev_agent") or state.get("codex_session_id"):
+    if state.get(_DEV_AGENT) or state.get(_CODEX_SESSION_ID):
         _resume_dev_on_implementing_drift(gh, spec, issue, state)
         return True
     return _handle_pre_session_drift(gh, spec, issue, state)
@@ -1184,13 +1207,13 @@ def _post_implementing_drift_ack(
 ) -> None:
     from orchestrator import workflow as _wf
 
-    quoted = "> " + reason.replace("\n", "\n> ")
+    quoted = _as_blockquote(reason)
     _wf._post_issue_comment(
         gh, issue, state,
         ":speech_balloon: dev session reports the existing "
         f"work satisfies the edit:\n\n{quoted}",
     )
-    state.set("silent_park_count", 0)
+    state.set(_SILENT_PARK_COUNT, 0)
 
 
 def _dispose_implementing_drift(
@@ -1238,7 +1261,7 @@ def _resume_dev_on_implementing_drift(
     _wf._mark_drift_comments_consumed(gh, issue, state)
     drift = _run_implementing_drift_resume(gh, spec, issue, state)
     state.set("last_agent_action_at", _wf._now_iso())
-    state.set("branch", _wf._resolve_branch_name(state, spec, issue.number))
+    state.set(_BRANCH, _wf._resolve_branch_name(state, spec, issue.number))
     _dispose_implementing_drift(gh, spec, issue, state, drift)
 
 
@@ -1261,25 +1284,25 @@ def _handle_pre_session_drift(
         )
         gh.write_pinned_state(issue, state)
         return True
-    if state.get("awaiting_human"):
+    if state.get(_AWAITING_HUMAN):
         _wf._post_issue_comment(
             gh, issue, state,
             ":pencil2: issue content changed; clearing the park and "
             "spawning a fresh dev run against the updated requirements.",
         )
         _wf._mark_drift_comments_consumed(gh, issue, state)
-        state.set("awaiting_human", False)
-        state.set("park_reason", None)
+        state.set(_AWAITING_HUMAN, False)
+        state.set(_PARK_REASON, None)
     return False
 
 
 def _recover_quiet_implementer_timeout(
     gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
-    if state.get("park_reason") != "agent_timeout":
+    if state.get(_PARK_REASON) != _AGENT_TIMEOUT:
         return False
     comments = filter_trusted(
-        gh.comments_after(issue, state.get("last_action_comment_id"))
+        gh.comments_after(issue, state.get(_LAST_ACTION_COMMENT_ID))
     )
     if comments:
         return False
@@ -1330,12 +1353,12 @@ def _spawn_implementer(
         gh.write_pinned_state(issue, state)
         return None
     session = _DevSession(*_read_dev_session(state))
-    state.set("dev_agent", session.spec)
+    state.set(_DEV_AGENT, session.spec)
     agent_result = _wf._run_agent_tracked(
         gh,
         issue.number,
         agent_role="developer",
-        stage="implementing",
+        stage=_IMPLEMENTING_STAGE,
         backend=session.backend,
         prompt=_wf._build_implement_prompt(
             spec,
@@ -1347,12 +1370,12 @@ def _spawn_implementer(
         agent_spec=session.spec,
         extra_args=session.extra_args,
         review_round=state.get("review_round", 0),
-        retry_count=state.get("retry_count"),
+        retry_count=state.get(_RETRY_COUNT),
     )
     _wf._accumulate_issue_usage(state, agent_result.usage)
     if agent_result.session_id:
-        state.set("dev_session_id", agent_result.session_id)
-        state.set("dev_resume_count", 0)
+        state.set(_DEV_SESSION_ID, agent_result.session_id)
+        state.set(_DEV_RESUME_COUNT, 0)
     return agent_result, _wf._paused_during_agent_run(gh, issue)
 
 
@@ -1401,13 +1424,13 @@ def _prepare_dev_run(
     """
     from orchestrator import workflow as _wf
 
-    if state.get("awaiting_human"):
+    if state.get(_AWAITING_HUMAN):
         prepared = _prepare_awaiting_dev_run(gh, spec, issue, state)
     else:
         prepared = _prepare_active_dev_run(gh, spec, issue, state)
     if prepared is not None:
         state.set(
-            "branch", _wf._resolve_branch_name(state, spec, issue.number),
+            _BRANCH, _wf._resolve_branch_name(state, spec, issue.number),
         )
     return prepared
 
@@ -1636,11 +1659,11 @@ def _reuse_or_open_pr(
     gh.emit_event(
         "pr_opened",
         issue_number=issue.number,
-        stage="implementing",
+        stage=_IMPLEMENTING_STAGE,
         pr_number=pr.number,
         branch=work.branch,
         sha=getattr(pr.head, "sha", None) or None,
-        retry_count=state.get("retry_count"),
+        retry_count=state.get(_RETRY_COUNT),
     )
     return pr
 
@@ -1663,7 +1686,7 @@ def _advance_to_validating(
     # fallback in `_resolve_branch_name` would then misroute every downstream
     # tick to `orchestrator/issue-<n>` while the live PR is on the
     # slug-namespaced branch this push just published.
-    state.set("branch", branch)
+    state.set(_BRANCH, branch)
     _reset_implementing_counters(state)
     gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
 
@@ -1686,7 +1709,7 @@ def _advance_quick_run_to_in_review(
     from orchestrator import workflow as _wf
 
     state.set("pr_number", pr.number)
-    state.set("branch", branch)
+    state.set(_BRANCH, branch)
     _wf._seed_in_review_pr_watermarks(gh, issue, state, pr)
     _reset_implementing_counters(state)
     gh.set_workflow_label(issue, WorkflowLabel.IN_REVIEW)
@@ -1699,18 +1722,18 @@ def _reset_implementing_counters(state: PinnedState) -> None:
     # Issue moved forward; reset the implementing retry budget so any future
     # bounce back into implementing (e.g. validating -> implementing in a
     # later stage) starts with a fresh window.
-    state.set("retry_count", 0)
-    state.set("retry_window_start", None)
+    state.set(_RETRY_COUNT, 0)
+    state.set(_RETRY_WINDOW_START, None)
     # The session just produced commits, so it isn't poisoned -- reset the
     # silent-park streak so a future blip doesn't tip an otherwise-healthy
     # session past the fresh-session threshold.
-    state.set("silent_park_count", 0)
+    state.set(_SILENT_PARK_COUNT, 0)
     # The commit shipped, so any agent-timeout park watermark is spent -- clear
     # it (and the stale reason) so it cannot linger into `validating` or
     # mis-fire the next-tick timeout recovery on a later implementing hop.
-    if state.get("park_reason") == "agent_timeout":
-        state.set("park_reason", None)
-    state.set("pre_implement_sha", None)
+    if state.get(_PARK_REASON) == _AGENT_TIMEOUT:
+        state.set(_PARK_REASON, None)
+    state.set(_PRE_IMPLEMENT_SHA, None)
 
 
 def _on_commits(
@@ -1752,10 +1775,10 @@ def _mark_agent_silent_park(state: PinnedState) -> None:
     the streak (via `_dev_session_retirement_reason`) to rotate a poisoned
     session to a fresh spawn once it reaches `_SILENT_PARKS_BEFORE_FRESH_SESSION`.
     """
-    count = int(state.get("silent_park_count") or 0)
-    state.set("awaiting_human", True)
-    state.set("park_reason", "agent_silent")
-    state.set("silent_park_count", count + 1)
+    count = int(state.get(_SILENT_PARK_COUNT) or 0)
+    state.set(_AWAITING_HUMAN, True)
+    state.set(_PARK_REASON, "agent_silent")
+    state.set(_SILENT_PARK_COUNT, count + 1)
 
 
 def _park_session_limit(
@@ -1778,7 +1801,7 @@ def _park_session_limit(
     """
     from orchestrator import workflow as _wf
 
-    quoted = "> " + raw.replace("\n", "\n> ")
+    quoted = _as_blockquote(raw)
     _wf._post_issue_comment(
         gh, issue, state,
         f"{config.HITL_MENTIONS} agent hit a session/usage limit and "
@@ -1795,18 +1818,18 @@ def _park_real_question(
     """Park a genuine agent clarification question awaiting a human reply."""
     from orchestrator import workflow as _wf
 
-    quoted = "> " + raw.replace("\n", "\n> ")
+    quoted = _as_blockquote(raw)
     _wf._post_issue_comment(
         gh, issue, state,
         f"{config.HITL_MENTIONS} agent needs your input to proceed:\n\n{quoted}",
     )
-    state.set("awaiting_human", True)
+    state.set(_AWAITING_HUMAN, True)
     # Real question parks are not transient: they need a human reply before the
     # in_review ready-ping gates should run again. Clear any stale
     # `park_reason` left behind by a prior in_review unmergeable park, and reset
     # the silent-park streak.
-    state.set("park_reason", None)
-    state.set("silent_park_count", 0)
+    state.set(_PARK_REASON, None)
+    state.set(_SILENT_PARK_COUNT, 0)
     return "agent_question"
 
 
@@ -1858,7 +1881,7 @@ def _on_question(
         park_reason = _park_silent_failure(gh, issue, state, agent_result)
     latest = gh.latest_comment_id(issue)
     if latest is not None:
-        state.set("last_action_comment_id", latest)
+        state.set(_LAST_ACTION_COMMENT_ID, latest)
     gh.emit_event(
         "park_awaiting_human",
         issue_number=issue.number,
@@ -1886,14 +1909,14 @@ def _on_dirty_worktree(
     _wf._post_issue_comment(
         gh, issue, state, _dirty_worktree_message(agent_result, dirty),
     )
-    state.set("awaiting_human", True)
+    state.set(_AWAITING_HUMAN, True)
     # Mirror `_on_question`: this needs human input, so stale transient state
     # must not auto-recover over it.
-    state.set("park_reason", None)
-    state.set("silent_park_count", 0)
+    state.set(_PARK_REASON, None)
+    state.set(_SILENT_PARK_COUNT, 0)
     latest = gh.latest_comment_id(issue)
     if latest is not None:
-        state.set("last_action_comment_id", latest)
+        state.set(_LAST_ACTION_COMMENT_ID, latest)
     gh.emit_event(
         "park_awaiting_human",
         issue_number=issue.number,
@@ -1913,7 +1936,7 @@ def _dirty_worktree_message(
     last_msg = agent_result.last_message.strip()
     tail = ""
     if last_msg:
-        quoted = "> " + last_msg.replace("\n", "\n> ")
+        quoted = _as_blockquote(last_msg)
         tail = f"\n\n_Last agent message:_\n\n{quoted}"
     return (
         f"{config.HITL_MENTIONS} agent committed but left {len(dirty)} "

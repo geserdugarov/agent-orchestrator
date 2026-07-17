@@ -47,6 +47,10 @@ from orchestrator.workflow_messages import (
     _post_issue_comment,
 )
 
+# Pinned-state key holding the hash of the user-authored requirements text the
+# last dev run consumed; drift detection compares it against the live hash.
+_USER_CONTENT_HASH = "user_content_hash"
+
 
 def _comment_body_for_hash(
     issue_comment: IssueComment,
@@ -161,9 +165,9 @@ def _detect_user_content_change(
     """
     orchestrator_ids = _orchestrator_ids(state)
     current = _compute_user_content_hash(issue, orchestrator_ids)
-    prior = state.get("user_content_hash")
+    prior = state.get(_USER_CONTENT_HASH)
     if not isinstance(prior, str):
-        state.set("user_content_hash", current)
+        state.set(_USER_CONTENT_HASH, current)
         gh.write_pinned_state(issue, state)
         return None
     if current == prior:
@@ -172,7 +176,7 @@ def _detect_user_content_change(
         issue, orchestrator_ids, include_bare_continue=True,
     )
     if legacy == prior:
-        state.set("user_content_hash", current)
+        state.set(_USER_CONTENT_HASH, current)
         gh.write_pinned_state(issue, state)
         return None
     return current
@@ -271,7 +275,7 @@ def _reset_decomposition_for_drift(
     state: PinnedState, new_hash: str,
 ) -> None:
     """Clear manifest/session state while retaining the locked agent spec."""
-    state.set("user_content_hash", new_hash)
+    state.set(_USER_CONTENT_HASH, new_hash)
     # A fresh decomposer session must keep the pinned backend so an agent-spec
     # configuration change cannot retarget an issue already in flight.
     state.set("decomposer_session_id", None)

@@ -67,8 +67,14 @@ log = logging.getLogger(__name__)
 # Disable git's /dev/tty fallback prompts in any subprocess we spawn.
 _GIT_NO_PROMPT_ENV = {"GIT_TERMINAL_PROMPT": "0"}
 
+_GIT = "git"
+_FETCH = "fetch"
+# Owner-only rwx: the askpass script echoes the token to stdout, so no
+# group/other read access.
+_ASKPASS_MODE = 0o700
+
 _AUTHED_GIT_PREFIX = (
-    "git",
+    _GIT,
     "-c", "core.hooksPath=/dev/null",
     "-c", "credential.helper=",
     "-c", "core.fsmonitor=",
@@ -128,7 +134,7 @@ def _git_auth_session(
     with tempfile.TemporaryDirectory(prefix="orch-askpass-") as temp_dir:
         askpass = Path(temp_dir) / "askpass.sh"
         askpass.write_text('#!/bin/sh\nprintf %s "$GIT_TOKEN"\n')
-        askpass.chmod(0o700)
+        askpass.chmod(_ASKPASS_MODE)
         yield _GitAuthSession(
             token=token,
             auth_url=f"https://x-access-token@github.com/{spec.slug}.git",
@@ -141,7 +147,7 @@ def _git_auth_session(
 def _failed_fetch(stderr: str) -> subprocess.CompletedProcess:
     """Return the stable failure shape shared by authenticated fetches."""
     return subprocess.CompletedProcess(
-        args=["git", "fetch"], returncode=1, stdout="", stderr=stderr,
+        args=[_GIT, _FETCH], returncode=1, stdout="", stderr=stderr,
     )
 
 
@@ -196,7 +202,7 @@ def _target_root_lock(target_root: Path) -> threading.RLock:
 
 def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", *args],
+        [_GIT, *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,
@@ -225,7 +231,7 @@ def _git_hardened(*args: str, cwd: Path) -> subprocess.CompletedProcess:
     and env vars take precedence over config.
     """
     git_prefix = [
-        "git",
+        _GIT,
         "-c", "core.hooksPath=/dev/null",
         "-c", "credential.helper=",
         "-c", "core.fsmonitor=",
@@ -288,7 +294,7 @@ def _unsafe_local_transport_config(cwd: Path) -> str:
     while the result is non-empty.
     """
     probe = subprocess.run(
-        ["git", "config", "--get-regexp", _UNSAFE_TRANSPORT_CONFIG_RE],
+        [_GIT, "config", "--get-regexp", _UNSAFE_TRANSPORT_CONFIG_RE],
         cwd=str(cwd), capture_output=True, text=True,
         env={
             **os.environ,
@@ -356,7 +362,7 @@ def _authed_fetch(
     # Mirrors `_push_branch`'s per-spec token resolution; without this,
     # `_handle_resolving_conflict` would fail conflict resolution for any
     # repo other than the legacy `REPO` (or use the wrong token).
-    token = _resolved_git_token(spec, "fetch")
+    token = _resolved_git_token(spec, _FETCH)
     if not token:
         return _failed_fetch("GITHUB_TOKEN missing")
     unsafe = _unsafe_local_transport_config(cwd)
@@ -375,7 +381,7 @@ def _authed_fetch(
             return subprocess.run(
                 [
                     *_AUTHED_GIT_PREFIX,
-                    "fetch", "--quiet", auth_session.auth_url, refspec,
+                    _FETCH, "--quiet", auth_session.auth_url, refspec,
                 ],
                 cwd=str(cwd),
                 capture_output=True,
@@ -434,7 +440,7 @@ def _authed_target_fetch(
     holding it -- the worktree creators -- re-enters cleanly) for the
     same `.git/config.lock` reason described on `_ensure_worktree`.
     """
-    token = _resolved_git_token(spec, "fetch")
+    token = _resolved_git_token(spec, _FETCH)
     if not token:
         return _failed_fetch("GITHUB_TOKEN missing")
     unsafe = _unsafe_local_transport_config(spec.target_root)
@@ -454,7 +460,7 @@ def _authed_target_fetch(
             return subprocess.run(
                 [
                     *_AUTHED_GIT_PREFIX,
-                    "fetch", "--quiet", auth_session.auth_url, refspec,
+                    _FETCH, "--quiet", auth_session.auth_url, refspec,
                 ],
                 cwd=str(spec.target_root),
                 capture_output=True,

@@ -107,6 +107,10 @@ def _arm_shutdown_watchdog(signum: int) -> None:
 # so the reserve covers one full sweep of a child that ignores SIGTERM.
 _TERMINATE_SWEEP_RESERVE_CAP_SECONDS = 5.0
 
+# Shell convention for a process killed by a signal: exit code 128 + signal
+# number. `run.sh` reads this to distinguish a signalled stop from a clean one.
+_SIGNAL_EXIT_BASE = 128
+
 
 def _shutdown_terminate_grace() -> float:
     """Slice of `SHUTDOWN_GRACE_SECONDS` reserved for the forced terminate sweep.
@@ -133,7 +137,7 @@ def _run_shutdown_watchdog(signum: int) -> None:
     # INSIDE the ceiling -- total signal->exit stays within
     # `SHUTDOWN_GRACE_SECONDS` even when an agent ignores SIGTERM.
     drain_budget = max(
-        0.0, config.SHUTDOWN_GRACE_SECONDS - _shutdown_terminate_grace()
+        0, config.SHUTDOWN_GRACE_SECONDS - _shutdown_terminate_grace()
     )
     if _shutdown_complete.wait(timeout=drain_budget):
         return
@@ -157,7 +161,7 @@ def _force_exit(signum: int) -> None:
     try:
         agents.terminate_all_running(grace=_shutdown_terminate_grace())
     finally:
-        os._exit(128 + signum)
+        os._exit(_SIGNAL_EXIT_BASE + signum)
 
 
 def _configure_logging(level: str) -> None:
@@ -319,7 +323,7 @@ def _drain_scheduler(scheduler: IssueScheduler) -> None:
 
 def _signal_exit_code() -> int:
     if received_signal is not None:
-        return 128 + received_signal
+        return _SIGNAL_EXIT_BASE + received_signal
     return 0
 
 

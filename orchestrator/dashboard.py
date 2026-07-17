@@ -312,6 +312,11 @@ EMPTY_WINDOW_MESSAGE = (
 )
 
 
+# Data-table sizing (px): per-row height plus fixed header/padding base.
+_TABLE_ROW_HEIGHT = 40
+_TABLE_BASE_HEIGHT = 80
+
+
 def main() -> None:
     """Run the Streamlit analytics page with lazily loaded dependencies."""
     import streamlit as st
@@ -1295,7 +1300,7 @@ def _daily_point_totals(
     totals: dict[date, list[float]] = {}
     for point in ts_points:
         daily = totals.setdefault(point.day, [0.0, 0.0])
-        daily[0] += float(point.cost_usd or 0.0)
+        daily[0] += float(point.cost_usd or 0)
         daily[1] += _time_series_total_tokens(point)
     return totals
 
@@ -1353,9 +1358,9 @@ def _kpi_totals(inputs: _KpiInputs) -> _KpiTotals:
     throughput = _throughput_totals(inputs.throughput_rows)
     review_costs = rework_totals(inputs.review_round_rows)
     return _KpiTotals(
-        cost=float(inputs.summary.total_cost_usd or 0.0),
+        cost=float(inputs.summary.total_cost_usd or 0),
         tokens=_summary_total_tokens(inputs.summary),
-        previous_cost=float(inputs.prev_summary.total_cost_usd or 0.0),
+        previous_cost=float(inputs.prev_summary.total_cost_usd or 0),
         previous_tokens=_summary_total_tokens(inputs.prev_summary),
         resolved=throughput[0],
         rejected=throughput[1],
@@ -1435,7 +1440,7 @@ def _backend_tokens_by_day(
     for row in backend_daily_rows:
         by_backend = backend_by_day.setdefault(row.day, {})
         by_backend[row.backend] = (
-            by_backend.get(row.backend, 0.0)
+            by_backend.get(row.backend, 0)
             + float(row.total_tokens or 0)
         )
     return backend_by_day
@@ -1555,7 +1560,7 @@ def _render_stage_review_bars(
 
 def _paired_bars_height(stage_rows: Sequence[Any], review_rows: Sequence[Any]) -> int:
     row_count = max(len(stage_rows), len(review_rows), 1)
-    return 40 * row_count + 80
+    return _TABLE_ROW_HEIGHT * row_count + _TABLE_BASE_HEIGHT
 
 
 def _render_issues_and_backends(

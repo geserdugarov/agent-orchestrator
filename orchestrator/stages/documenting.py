@@ -90,6 +90,12 @@ from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import GitHubClient, PinnedState
 
 
+# Pinned-state keys this stage reads and writes.
+_PARK_REASON = "park_reason"
+_AWAITING_HUMAN = "awaiting_human"
+_LAST_ACTION_COMMENT_ID = "last_action_comment_id"
+
+
 @dataclass(frozen=True)
 class _DocumentingContext:
     """The per-tick `documenting` invocation handles plus the resolved
@@ -141,7 +147,7 @@ def _park_documenting(
     _wf._park_awaiting_human(
         ctx.gh, ctx.issue, ctx.state, message, reason=reason,
     )
-    ctx.state.set("park_reason", reason)
+    ctx.state.set(_PARK_REASON, reason)
     ctx.gh.write_pinned_state(ctx.issue, ctx.state)
 
 
@@ -269,7 +275,7 @@ def _park_documenting_without_pr(
     """
     from orchestrator import workflow as _wf
 
-    if state.get("awaiting_human"):
+    if state.get(_AWAITING_HUMAN):
         return
     _wf._park_awaiting_human(
         gh, issue, state,
@@ -496,8 +502,8 @@ def _begin_documenting_drift_unwind(ctx: _DocumentingContext) -> None:
     """
     state = ctx.state
     state.set("docs_drift_unwind_pending", True)
-    state.set("awaiting_human", False)
-    state.set("park_reason", None)
+    state.set(_AWAITING_HUMAN, False)
+    state.set(_PARK_REASON, None)
     state.set("review_round", 0)
 
 
@@ -530,8 +536,8 @@ def _reconcile_documenting_drift(ctx: _DocumentingContext) -> bool:
     # park comment every tick. Only a trusted reply is the "retry the unwind"
     # signal -- with `ALLOWED_ISSUE_AUTHORS` set an outsider comment must not
     # fall through to the reconcile-retry below.
-    if pending_unwind and not fresh_drift and ctx.state.get("awaiting_human"):
-        last_action_id = ctx.state.get("last_action_comment_id")
+    if pending_unwind and not fresh_drift and ctx.state.get(_AWAITING_HUMAN):
+        last_action_id = ctx.state.get(_LAST_ACTION_COMMENT_ID)
         if not filter_trusted(ctx.gh.comments_after(ctx.issue, last_action_id)):
             return True
     if not (fresh_drift or pending_unwind):
@@ -571,15 +577,15 @@ def _documenting_parked_no_input(
     """
     from orchestrator import workflow as _wf
 
-    if not state.get("awaiting_human"):
+    if not state.get(_AWAITING_HUMAN):
         return False
     # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to the
     # `_sync_pr_worktree_to_base` retry loop -- the operator's new comment
     # is the "retry the rebase" signal, NOT a documenting-stage trigger.
     # Stay silent so the refresh keeps ownership of the comment.
-    if state.get("park_reason") in _wf._AUTO_REBASE_PARK_REASONS:
+    if state.get(_PARK_REASON) in _wf._AUTO_REBASE_PARK_REASONS:
         return True
-    last_action_id = state.get("last_action_comment_id")
+    last_action_id = state.get(_LAST_ACTION_COMMENT_ID)
     # Only a trusted reply wakes a parked docs pass: with `ALLOWED_ISSUE_AUTHORS`
     # set an outsider comment must read as silence so the park survives instead
     # of falling through to the docs resume in `_run_documenting_dev`.
@@ -681,12 +687,12 @@ def _resume_documenting_dev(ctx: _DocumentingContext, wt, ahead: int):
     # consumed, so an outsider reply trailing a trusted one is left unconsumed;
     # an all-untrusted batch reads as "no new reply".
     new_comments = filter_trusted(
-        ctx.gh.comments_after(ctx.issue, ctx.state.get("last_action_comment_id")),
+        ctx.gh.comments_after(ctx.issue, ctx.state.get(_LAST_ACTION_COMMENT_ID)),
     )
     if not new_comments:
         return None
     ctx.state.set(
-        "last_action_comment_id", max(comment.id for comment in new_comments),
+        _LAST_ACTION_COMMENT_ID, max(comment.id for comment in new_comments),
     )
     # Anchor `before_sha` from the just-fetched PR worktree BEFORE the resume
     # so the post-spawn check sees a real difference if (and only if) the
@@ -779,7 +785,7 @@ def _run_documenting_dev(ctx: _DocumentingContext, wt, ahead: int):
     Returns a `_DocumentingRun`, or None when an awaiting-human resume finds
     no new comments and the tick should end without disposition.
     """
-    if ctx.state.get("awaiting_human"):
+    if ctx.state.get(_AWAITING_HUMAN):
         return _resume_documenting_dev(ctx, wt, ahead)
     if ahead > 0:
         return _recovered_documenting_run(ctx, wt, ahead)
@@ -999,13 +1005,13 @@ def _refuse_parked_continue_command(
     """
     from orchestrator import workflow as _wf
 
-    if not state.get("awaiting_human"):
+    if not state.get(_AWAITING_HUMAN):
         return False
-    park_reason = state.get("park_reason")
+    park_reason = state.get(_PARK_REASON)
     if park_reason in _wf._AUTO_REBASE_PARK_REASONS:
         return False
     new_comments = filter_trusted(
-        gh.comments_after(issue, state.get("last_action_comment_id"))
+        gh.comments_after(issue, state.get(_LAST_ACTION_COMMENT_ID))
     )
     if not new_comments:
         return False

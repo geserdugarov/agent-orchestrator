@@ -101,6 +101,11 @@ def _row_value(row: Sequence[Any], index: int, default: Any = 0) -> Any:
     return row[index]
 
 
+def _cost_cell(row: Sequence[Any], index: int) -> float:
+    """Read a nullable USD cost column as a float, treating null/missing as zero."""
+    return float(_row_value(row, index) or 0)
+
+
 def _day_value(day: Any) -> Any:
     if isinstance(day, datetime):
         return day.date()
@@ -178,15 +183,15 @@ def _review_round_from_row(row: Sequence[Any]) -> ReviewRoundBucketRow:
         bucket=str(row[0]),
         runs=int(row[1] or 0),
         failed=int(row[2] or 0),
-        total_cost_usd=float(_row_value(row, 3, 0.0) or 0.0),
+        total_cost_usd=_cost_cell(row, 3),
         developer_runs=int(_row_value(row, 4) or 0),
         reviewer_runs=int(_row_value(row, 5) or 0),
-        developer_cost_usd=float(_row_value(row, 6, 0.0) or 0.0),
-        reviewer_cost_usd=float(_row_value(row, 7, 0.0) or 0.0),
-        developer_cache_cost_usd=float(_row_value(row, 8, 0.0) or 0.0),
-        developer_no_cache_cost_usd=float(_row_value(row, 9, 0.0) or 0.0),
-        reviewer_cache_cost_usd=float(_row_value(row, 10, 0.0) or 0.0),
-        reviewer_no_cache_cost_usd=float(_row_value(row, 11, 0.0) or 0.0),
+        developer_cost_usd=_cost_cell(row, 6),
+        reviewer_cost_usd=_cost_cell(row, 7),
+        developer_cache_cost_usd=_cost_cell(row, 8),
+        developer_no_cache_cost_usd=_cost_cell(row, 9),
+        reviewer_cache_cost_usd=_cost_cell(row, 10),
+        reviewer_no_cache_cost_usd=_cost_cell(row, 11),
     )
 
 

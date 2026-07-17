@@ -50,6 +50,42 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
 
+# Claude/Codex usage-JSONL protocol field names, message-type and backend
+# values, and cost-config keys this parser reads.
+_TYPE = "type"
+_MESSAGE = "message"
+_USAGE = "usage"
+_CONTENT_KEY = "content"
+_TEXT = "text"
+_ID = "id"
+_MODEL = "model"
+_INPUT = "input"
+_OUTPUT = "output"
+_INPUT_TOKENS = "input_tokens"
+_OUTPUT_TOKENS = "output_tokens"
+_CACHED = "cached"
+_CACHED_TOKENS = "cached_tokens"
+_CACHE_READ = "cache_read"
+_CACHE_WRITE_FIVE_MIN = "cache_write_5m"
+_CACHE_WRITE_ONE_HOUR = "cache_write_1h"
+_TOTAL_TOKEN_USAGE = "total_token_usage"
+_PAYLOAD = "payload"
+_INFO_KEY = "info"
+_ITEM_KEY = "item"
+_RESULT_KEY = "result"
+_TOOL_RESULT = "tool_result"
+_COMMAND_EXECUTION = "command_execution"
+_ASSISTANT = "assistant"
+_UNKNOWN = "unknown"
+_CLAUDE = "claude"
+_CODEX = "codex"
+_LONG_CONTEXT_THRESHOLD = "long_context_threshold"
+_LONG_CONTEXT_INPUT_MULT = "long_context_input_mult"
+_LONG_CONTEXT_OUTPUT_MULT = "long_context_output_mult"
+# Model rates are quoted in USD per 1,000,000 tokens.
+_TOKENS_PER_MILLION = 1_000_000
+
+
 @dataclass
 class UsageMetrics:
     """Structured usage extracted from one agent run's JSONL stdout.
@@ -82,9 +118,9 @@ class UsageMetrics:
             "backend": self.backend,
             "models": list(self.models),
             "turns": self.turns,
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "cached_tokens": self.cached_tokens,
+            _INPUT_TOKENS: self.input_tokens,
+            _OUTPUT_TOKENS: self.output_tokens,
+            _CACHED_TOKENS: self.cached_tokens,
             "cache_read_tokens": self.cache_read_tokens,
             "cache_write_tokens": self.cache_write_tokens,
             "cost_usd": self.cost_usd,
@@ -101,34 +137,34 @@ class UsageMetrics:
 _CLAUDE_RATES: tuple[tuple[re.Pattern[str], dict[str, float]], ...] = (
     (
         re.compile(r"opus.*4([._-]?[567]|\.[567])"),
-        {"input": 5, "cache_write_5m": 6.25, "cache_write_1h": 10,
-         "cache_read": 0.50, "output": 25},
+        {_INPUT: 5, _CACHE_WRITE_FIVE_MIN: 6.25, _CACHE_WRITE_ONE_HOUR: 10,
+         _CACHE_READ: 0.50, _OUTPUT: 25},
     ),
     (
         re.compile(r"opus.*4"),
-        {"input": 15, "cache_write_5m": 18.75, "cache_write_1h": 30,
-         "cache_read": 1.50, "output": 75},
+        {_INPUT: 15, _CACHE_WRITE_FIVE_MIN: 18.75, _CACHE_WRITE_ONE_HOUR: 30,
+         _CACHE_READ: 1.50, _OUTPUT: 75},
     ),
     (
         re.compile(r"sonnet"),
-        {"input": 3, "cache_write_5m": 3.75, "cache_write_1h": 6,
-         "cache_read": 0.30, "output": 15},
+        {_INPUT: 3, _CACHE_WRITE_FIVE_MIN: 3.75, _CACHE_WRITE_ONE_HOUR: 6,
+         _CACHE_READ: 0.30, _OUTPUT: 15},
     ),
     (
         re.compile(r"haiku.*3([._-]?5|\.5)"),
-        {"input": 0.80, "cache_write_5m": 1, "cache_write_1h": 1.60,
-         "cache_read": 0.08, "output": 4},
+        {_INPUT: 0.80, _CACHE_WRITE_FIVE_MIN: 1, _CACHE_WRITE_ONE_HOUR: 1.60,
+         _CACHE_READ: 0.08, _OUTPUT: 4},
     ),
     (
         re.compile(r"haiku"),
-        {"input": 1, "cache_write_5m": 1.25, "cache_write_1h": 2,
-         "cache_read": 0.10, "output": 5},
+        {_INPUT: 1, _CACHE_WRITE_FIVE_MIN: 1.25, _CACHE_WRITE_ONE_HOUR: 2,
+         _CACHE_READ: 0.10, _OUTPUT: 5},
     ),
 )
 
 
 def _claude_rates(model: str) -> Optional[dict[str, float]]:
-    if not model or model == "unknown":
+    if not model or model == _UNKNOWN:
         return None
     lowered = model.lower()
     for pat, rates in _CLAUDE_RATES:
@@ -154,12 +190,12 @@ def _claude_estimate_cost(
     if rates is None:
         return None
     return (
-        bucket["input"] * rates["input"]
-        + bucket["cache_write_5m"] * rates["cache_write_5m"]
-        + bucket["cache_write_1h"] * rates["cache_write_1h"]
-        + bucket["cache_read"] * rates["cache_read"]
-        + bucket["output"] * rates["output"]
-    ) / 1_000_000
+        bucket[_INPUT] * rates[_INPUT]
+        + bucket[_CACHE_WRITE_FIVE_MIN] * rates[_CACHE_WRITE_FIVE_MIN]
+        + bucket[_CACHE_WRITE_ONE_HOUR] * rates[_CACHE_WRITE_ONE_HOUR]
+        + bucket[_CACHE_READ] * rates[_CACHE_READ]
+        + bucket[_OUTPUT] * rates[_OUTPUT]
+    ) / _TOKENS_PER_MILLION
 
 
 # OpenAI rates are USD per 1M tokens for input / cached / output. ``cached``
@@ -180,45 +216,45 @@ _CODEX_RATES: tuple[tuple[str, dict[str, Optional[float]]], ...] = (
     # tiering today -- the official `gpt-5.5-pro` page lists flat
     # `$30 / $180` with no >272K multiplier and no cached discount,
     # so it stays flat-priced (see the negative-guard test).
-    ("gpt-5.5-pro",        {"input": 30,   "cached": None,  "output": 180}),
-    ("gpt-5.5",            {"input": 5,    "cached": 0.50,  "output": 30,
-                            "long_context_threshold": 272_000,
-                            "long_context_input_mult": 2.0,
-                            "long_context_output_mult": 1.5}),
-    ("gpt-5.4-pro",        {"input": 30,   "cached": None,  "output": 180,
-                            "long_context_threshold": 272_000,
-                            "long_context_input_mult": 2.0,
-                            "long_context_output_mult": 1.5}),
-    ("gpt-5.4-mini",       {"input": 0.75, "cached": 0.075, "output": 4.50}),
-    ("gpt-5.4-nano",       {"input": 0.20, "cached": 0.02,  "output": 1.25}),
-    ("gpt-5.4",            {"input": 2.50, "cached": 0.25,  "output": 15,
-                            "long_context_threshold": 272_000,
-                            "long_context_input_mult": 2.0,
-                            "long_context_output_mult": 1.5}),
-    ("gpt-5.3-codex",      {"input": 1.75, "cached": 0.175, "output": 14}),
-    ("gpt-5.3",            {"input": 1.75, "cached": 0.175, "output": 14}),
+    ("gpt-5.5-pro",        {_INPUT: 30,   _CACHED: None,  _OUTPUT: 180}),
+    ("gpt-5.5",            {_INPUT: 5,    _CACHED: 0.50,  _OUTPUT: 30,
+                            _LONG_CONTEXT_THRESHOLD: 272_000,
+                            _LONG_CONTEXT_INPUT_MULT: 2.0,
+                            _LONG_CONTEXT_OUTPUT_MULT: 1.5}),
+    ("gpt-5.4-pro",        {_INPUT: 30,   _CACHED: None,  _OUTPUT: 180,
+                            _LONG_CONTEXT_THRESHOLD: 272_000,
+                            _LONG_CONTEXT_INPUT_MULT: 2.0,
+                            _LONG_CONTEXT_OUTPUT_MULT: 1.5}),
+    ("gpt-5.4-mini",       {_INPUT: 0.75, _CACHED: 0.075, _OUTPUT: 4.50}),
+    ("gpt-5.4-nano",       {_INPUT: 0.20, _CACHED: 0.02,  _OUTPUT: 1.25}),
+    ("gpt-5.4",            {_INPUT: 2.50, _CACHED: 0.25,  _OUTPUT: 15,
+                            _LONG_CONTEXT_THRESHOLD: 272_000,
+                            _LONG_CONTEXT_INPUT_MULT: 2.0,
+                            _LONG_CONTEXT_OUTPUT_MULT: 1.5}),
+    ("gpt-5.3-codex",      {_INPUT: 1.75, _CACHED: 0.175, _OUTPUT: 14}),
+    ("gpt-5.3",            {_INPUT: 1.75, _CACHED: 0.175, _OUTPUT: 14}),
     # `*-pro` SKUs publish their own input / output rates and no
     # cached discount; explicit entries before the base prefix keep
     # prefix-match from falling through to the cheaper standard
     # family (which would silently undercount) and the `cached=None`
     # keeps cache-using pro runs at `unknown-price` rather than
     # billing them at the standard input rate.
-    ("gpt-5.2-pro",        {"input": 21,   "cached": None,  "output": 168}),
-    ("gpt-5.2",            {"input": 1.75, "cached": 0.175, "output": 14}),
-    ("gpt-5.1-codex-mini", {"input": 0.25, "cached": 0.025, "output": 2}),
-    ("gpt-5.1-codex",      {"input": 1.25, "cached": 0.125, "output": 10}),
-    ("gpt-5.1",            {"input": 1.25, "cached": 0.125, "output": 10}),
-    ("gpt-5-pro",          {"input": 15,   "cached": None,  "output": 120}),
-    ("gpt-5-mini",         {"input": 0.25, "cached": 0.025, "output": 2}),
-    ("gpt-5-nano",         {"input": 0.05, "cached": 0.005, "output": 0.40}),
-    ("gpt-5-codex",        {"input": 1.25, "cached": 0.125, "output": 10}),
-    ("gpt-5",              {"input": 1.25, "cached": 0.125, "output": 10}),
-    ("codex-mini-latest",  {"input": 1.50, "cached": 0.375, "output": 6}),
+    ("gpt-5.2-pro",        {_INPUT: 21,   _CACHED: None,  _OUTPUT: 168}),
+    ("gpt-5.2",            {_INPUT: 1.75, _CACHED: 0.175, _OUTPUT: 14}),
+    ("gpt-5.1-codex-mini", {_INPUT: 0.25, _CACHED: 0.025, _OUTPUT: 2}),
+    ("gpt-5.1-codex",      {_INPUT: 1.25, _CACHED: 0.125, _OUTPUT: 10}),
+    ("gpt-5.1",            {_INPUT: 1.25, _CACHED: 0.125, _OUTPUT: 10}),
+    ("gpt-5-pro",          {_INPUT: 15,   _CACHED: None,  _OUTPUT: 120}),
+    ("gpt-5-mini",         {_INPUT: 0.25, _CACHED: 0.025, _OUTPUT: 2}),
+    ("gpt-5-nano",         {_INPUT: 0.05, _CACHED: 0.005, _OUTPUT: 0.40}),
+    ("gpt-5-codex",        {_INPUT: 1.25, _CACHED: 0.125, _OUTPUT: 10}),
+    ("gpt-5",              {_INPUT: 1.25, _CACHED: 0.125, _OUTPUT: 10}),
+    ("codex-mini-latest",  {_INPUT: 1.50, _CACHED: 0.375, _OUTPUT: 6}),
 )
 
 
 def _codex_rates(model: str) -> Optional[dict[str, Optional[float]]]:
-    if not model or model == "unknown":
+    if not model or model == _UNKNOWN:
         return None
     lowered = model.lower()
     for prefix, rates in _CODEX_RATES:
@@ -320,7 +356,7 @@ def _find_last_reported_cost(events: list[dict[str, Any]]) -> Optional[float]:
 def _dedup_models(models: Iterable[str]) -> tuple[str, ...]:
     seen: dict[str, None] = {}
     for model in models:
-        if model and model != "unknown" and model not in seen:
+        if model and model != _UNKNOWN and model not in seen:
             seen[model] = None
     return tuple(seen)
 
@@ -360,7 +396,7 @@ def _nested_value(payload: dict[str, Any], path: _ModelPath) -> Any:
 
 
 def _known_model(candidate: Any) -> Optional[str]:
-    if isinstance(candidate, str) and candidate and candidate != "unknown":
+    if isinstance(candidate, str) and candidate and candidate != _UNKNOWN:
         return candidate
     return None
 
@@ -394,15 +430,15 @@ def _first_string_at_paths(
 # --- claude parser ----------------------------------------------------------
 
 _CLAUDE_MODEL_PATHS: tuple[_ModelPath, ...] = (
-    ("message", "model"),
-    ("event", "message", "model"),
-    ("model",),
-    ("response", "model"),
+    (_MESSAGE, _MODEL),
+    ("event", _MESSAGE, _MODEL),
+    (_MODEL,),
+    ("response", _MODEL),
 )
 
 
 def _claude_model_name(event: dict[str, Any]) -> str:
-    return _first_string_at_paths(event, _CLAUDE_MODEL_PATHS) or "unknown"
+    return _first_string_at_paths(event, _CLAUDE_MODEL_PATHS) or _UNKNOWN
 
 
 def _claude_usage_record(usage: dict[str, Any]) -> dict[str, int]:
@@ -430,18 +466,18 @@ def _claude_usage_record(usage: dict[str, Any]) -> dict[str, int]:
             or usage.get("ephemeral_1h_input_tokens")
         )
     return {
-        "input": _num(
-            usage.get("input_tokens") or usage.get("prompt_tokens")
+        _INPUT: _num(
+            usage.get(_INPUT_TOKENS) or usage.get("prompt_tokens")
         ),
-        "cache_write_5m": cw5,
-        "cache_write_1h": cw1,
-        "cache_read": _num(
+        _CACHE_WRITE_FIVE_MIN: cw5,
+        _CACHE_WRITE_ONE_HOUR: cw1,
+        _CACHE_READ: _num(
             usage.get("cache_read_input_tokens")
             or usage.get("cached_input_tokens")
             or usage.get("cache_read_tokens")
         ),
-        "output": _num(
-            usage.get("output_tokens") or usage.get("completion_tokens")
+        _OUTPUT: _num(
+            usage.get(_OUTPUT_TOKENS) or usage.get("completion_tokens")
         ),
     }
 
@@ -452,15 +488,15 @@ _ClaudeUsageRow = tuple[int, str, dict[str, int]]
 def _claude_assistant_usage_row(
     idx: int, event: dict[str, Any],
 ) -> Optional[tuple[str, _ClaudeUsageRow]]:
-    if event.get("type") != "assistant":
+    if event.get(_TYPE) != _ASSISTANT:
         return None
-    message = event.get("message")
+    message = event.get(_MESSAGE)
     if not isinstance(message, dict):
         return None
-    usage = message.get("usage")
+    usage = message.get(_USAGE)
     if not isinstance(usage, dict):
         return None
-    message_id = message.get("id") or event.get("request_id") or str(idx)
+    message_id = message.get(_ID) or event.get("request_id") or str(idx)
     return (
         str(message_id),
         (idx, _claude_model_name(event), _claude_usage_record(usage)),
@@ -470,9 +506,9 @@ def _claude_assistant_usage_row(
 def _claude_result_usage_row(
     idx: int, event: dict[str, Any],
 ) -> Optional[_ClaudeUsageRow]:
-    if event.get("type") != "result":
+    if event.get(_TYPE) != _RESULT_KEY:
         return None
-    usage = event.get("usage")
+    usage = event.get(_USAGE)
     if not isinstance(usage, dict):
         return None
     return idx, _claude_model_name(event), _claude_usage_record(usage)
@@ -533,8 +569,8 @@ class _ClaudeUsageAggregate:
     def add(self, model: str, record: dict[str, int]) -> None:
         bucket = self.per_model.setdefault(
             model,
-            {"input": 0, "cache_write_5m": 0, "cache_write_1h": 0,
-             "cache_read": 0, "output": 0},
+            {_INPUT: 0, _CACHE_WRITE_FIVE_MIN: 0, _CACHE_WRITE_ONE_HOUR: 0,
+             _CACHE_READ: 0, _OUTPUT: 0},
         )
         if model not in self.model_order:
             self.model_order.append(model)
@@ -543,11 +579,11 @@ class _ClaudeUsageAggregate:
 
     def apply_tokens(self, metrics: UsageMetrics) -> None:
         for bucket in self.per_model.values():
-            metrics.input_tokens += bucket["input"]
-            metrics.output_tokens += bucket["output"]
-            metrics.cache_read_tokens += bucket["cache_read"]
+            metrics.input_tokens += bucket[_INPUT]
+            metrics.output_tokens += bucket[_OUTPUT]
+            metrics.cache_read_tokens += bucket[_CACHE_READ]
             metrics.cache_write_tokens += (
-                bucket["cache_write_5m"] + bucket["cache_write_1h"]
+                bucket[_CACHE_WRITE_FIVE_MIN] + bucket[_CACHE_WRITE_ONE_HOUR]
             )
         metrics.models = _dedup_models(self.model_order)
 
@@ -598,7 +634,7 @@ def _claude_turn_count(
     """
     num_turns: Optional[int] = None
     for ev in events:
-        if ev.get("type") == "result":
+        if ev.get(_TYPE) == _RESULT_KEY:
             nt = ev.get("num_turns")
             if isinstance(nt, (int, float)):
                 num_turns = int(nt)
@@ -617,7 +653,7 @@ def parse_claude_usage(stdout: str) -> UsageMetrics:
     ``type:"result"`` frame's ``usage`` block.
     """
     events = _iter_events(stdout)
-    metrics = UsageMetrics(backend="claude")
+    metrics = UsageMetrics(backend=_CLAUDE)
 
     records = _claude_usage_records(events)
     aggregate = _claude_aggregate_by_model(records)
@@ -636,16 +672,16 @@ def parse_claude_usage(stdout: str) -> UsageMetrics:
 # --- codex parser -----------------------------------------------------------
 
 _CODEX_USAGE_PATHS: tuple[tuple[str, ...], ...] = (
-    ("usage",),
+    (_USAGE,),
     ("token_usage",),
-    ("total_token_usage",),
-    ("info", "total_token_usage"),
-    ("info", "usage"),
-    ("payload", "usage"),
-    ("payload", "token_usage"),
-    ("payload", "total_token_usage"),
-    ("payload", "info", "total_token_usage"),
-    ("payload", "info", "usage"),
+    (_TOTAL_TOKEN_USAGE,),
+    (_INFO_KEY, _TOTAL_TOKEN_USAGE),
+    (_INFO_KEY, _USAGE),
+    (_PAYLOAD, _USAGE),
+    (_PAYLOAD, "token_usage"),
+    (_PAYLOAD, _TOTAL_TOKEN_USAGE),
+    (_PAYLOAD, _INFO_KEY, _TOTAL_TOKEN_USAGE),
+    (_PAYLOAD, _INFO_KEY, _USAGE),
 )
 
 
@@ -663,15 +699,15 @@ def _codex_usage_block(event: dict[str, Any]) -> Optional[dict[str, Any]]:
 
 
 _CODEX_MODEL_PATHS: tuple[_ModelPath, ...] = (
-    ("model",),
-    ("response", "model"),
-    ("item", "model"),
-    ("event", "model"),
-    ("payload", "model"),
-    ("payload", "settings", "model"),
-    ("payload", "collaboration_mode", "settings", "model"),
-    ("info", "model"),
-    ("payload", "info", "model"),
+    (_MODEL,),
+    ("response", _MODEL),
+    (_ITEM_KEY, _MODEL),
+    ("event", _MODEL),
+    (_PAYLOAD, _MODEL),
+    (_PAYLOAD, "settings", _MODEL),
+    (_PAYLOAD, "collaboration_mode", "settings", _MODEL),
+    (_INFO_KEY, _MODEL),
+    (_PAYLOAD, _INFO_KEY, _MODEL),
 )
 
 
@@ -681,36 +717,36 @@ def _codex_model_name(
     event_model = _first_model_at_paths(event, _CODEX_MODEL_PATHS)
     if event_model is not None:
         return event_model
-    usage_model = _known_model(usage.get("model")) if usage else None
-    return usage_model or "unknown"
+    usage_model = _known_model(usage.get(_MODEL)) if usage else None
+    return usage_model or _UNKNOWN
 
 
 def _codex_usage_record(usage: dict[str, Any]) -> dict[str, int]:
     input_tokens = _num(
-        usage.get("input_tokens")
+        usage.get(_INPUT_TOKENS)
         or usage.get("prompt_tokens")
         or usage.get("total_input_tokens")
     )
     cached = _num(
         usage.get("cached_input_tokens")
-        or usage.get("cached_tokens")
+        or usage.get(_CACHED_TOKENS)
         or (
-            usage.get("input_tokens_details", {}).get("cached_tokens")
+            usage.get("input_tokens_details", {}).get(_CACHED_TOKENS)
             if isinstance(usage.get("input_tokens_details"), dict)
             else None
         )
         or (
-            usage.get("prompt_tokens_details", {}).get("cached_tokens")
+            usage.get("prompt_tokens_details", {}).get(_CACHED_TOKENS)
             if isinstance(usage.get("prompt_tokens_details"), dict)
             else None
         )
     )
     output_tokens = _num(
-        usage.get("output_tokens")
+        usage.get(_OUTPUT_TOKENS)
         or usage.get("completion_tokens")
         or usage.get("total_output_tokens")
     )
-    return {"input": input_tokens, "cached": cached, "output": output_tokens}
+    return {_INPUT: input_tokens, _CACHED: cached, _OUTPUT: output_tokens}
 
 
 _TURN_COMPLETE_RE = re.compile(r"turn[_ -]?complete|turncomplete", re.IGNORECASE)
@@ -731,7 +767,7 @@ def _codex_usage_events(
         if usage is None:
             continue
         rec = _codex_usage_record(usage)
-        if (rec["input"] + rec["cached"] + rec["output"]) == 0:
+        if (rec[_INPUT] + rec[_CACHED] + rec[_OUTPUT]) == 0:
             continue
         model = _codex_model_name(ev, usage)
         usage_events.append((model, rec))
@@ -764,7 +800,7 @@ def _last_stream_model(
     last_model: Optional[str] = None
     for event in events:
         for payload in _walk_objects(event):
-            model = _known_model(payload.get("model"))
+            model = _known_model(payload.get(_MODEL))
             if model is not None:
                 last_model = model
     return last_model
@@ -780,7 +816,7 @@ def _codex_estimate_cost(
     cached rate for (billing those at the input rate would overcharge).
     """
     rates = _codex_rates(model)
-    if rates is None or (usage["input"] + usage["output"]) <= 0:
+    if rates is None or (usage[_INPUT] + usage[_OUTPUT]) <= 0:
         return None
     return _CodexPrice(rates, usage).estimate()
 
@@ -793,12 +829,12 @@ class _CodexPrice:
     usage: dict[str, int]
 
     def _multipliers(self) -> tuple[float, float]:
-        threshold = self.rates.get("long_context_threshold")
-        if threshold is None or self.usage["input"] <= threshold:
+        threshold = self.rates.get(_LONG_CONTEXT_THRESHOLD)
+        if threshold is None or self.usage[_INPUT] <= threshold:
             return 1.0, 1.0
         return (
-            self.rates.get("long_context_input_mult") or 1.0,
-            self.rates.get("long_context_output_mult") or 1.0,
+            self.rates.get(_LONG_CONTEXT_INPUT_MULT) or 1.0,
+            self.rates.get(_LONG_CONTEXT_OUTPUT_MULT) or 1.0,
         )
 
     def estimate(self) -> Optional[float]:
@@ -808,23 +844,23 @@ class _CodexPrice:
             return None
         return (
             input_cost
-            + self.usage["output"] * self.rates["output"] * output_mult
-        ) / 1_000_000
+            + self.usage[_OUTPUT] * self.rates[_OUTPUT] * output_mult
+        ) / _TOKENS_PER_MILLION
 
     def _input_cost(self, multiplier: float) -> Optional[float]:
         # Codex reports cached input as a subset of total input. Price only
         # the uncached remainder at the full input rate; an unpublished cached
         # rate makes the estimate unknown instead of silently overcharging.
-        cached = self.usage["cached"]
-        cached_rate = self.rates["cached"]
+        cached = self.usage[_CACHED]
+        cached_rate = self.rates[_CACHED]
         if cached > 0 and cached_rate is None:
             return None
-        uncached = max(self.usage["input"] - cached, 0)
+        uncached = max(self.usage[_INPUT] - cached, 0)
         effective_cached_rate = (
-            cached_rate if cached_rate is not None else self.rates["input"]
+            cached_rate if cached_rate is not None else self.rates[_INPUT]
         )
         return (
-            uncached * self.rates["input"]
+            uncached * self.rates[_INPUT]
             + cached * effective_cached_rate
         ) * multiplier
 
@@ -844,8 +880,8 @@ def _reported_codex_turn_count(
 def _completed_codex_turn_count(events: list[dict[str, Any]]) -> Optional[int]:
     count = sum(
         1 for event in events
-        if isinstance(event.get("type"), str)
-        and _TURN_COMPLETE_RE.search(event["type"])
+        if isinstance(event.get(_TYPE), str)
+        and _TURN_COMPLETE_RE.search(event[_TYPE])
     )
     return count or None
 
@@ -855,7 +891,7 @@ def _last_codex_usage(
 ) -> tuple[str, dict[str, int]]:
     if usage_events:
         return usage_events[-1]
-    return "unknown", {"input": 0, "cached": 0, "output": 0}
+    return _UNKNOWN, {_INPUT: 0, _CACHED: 0, _OUTPUT: 0}
 
 
 @dataclass(frozen=True)
@@ -883,14 +919,14 @@ class _CodexUsageSummary:
         )
 
     def apply(self, metrics: UsageMetrics) -> None:
-        metrics.input_tokens = self.usage["input"]
-        metrics.cached_tokens = self.usage["cached"]
-        metrics.output_tokens = self.usage["output"]
+        metrics.input_tokens = self.usage[_INPUT]
+        metrics.cached_tokens = self.usage[_CACHED]
+        metrics.output_tokens = self.usage[_OUTPUT]
         if self.model is not None:
             metrics.models = (self.model,)
         selected_cost = _select_cost(
             _find_last_reported_cost(self.events),
-            _codex_estimate_cost(self.model or "unknown", self.usage),
+            _codex_estimate_cost(self.model or _UNKNOWN, self.usage),
             bool(self.usage_events),
         )
         metrics.cost_usd = selected_cost[0]
@@ -916,7 +952,7 @@ def parse_codex_usage(
     total rather than summing per-event deltas. We do the same here.
     """
     events = _iter_events(stdout)
-    metrics = UsageMetrics(backend="codex")
+    metrics = UsageMetrics(backend=_CODEX)
     _CodexUsageSummary.build(events, fallback_model).apply(metrics)
     return metrics
 
@@ -932,9 +968,9 @@ def parse_agent_usage(
     Mirrors ``agents.run_agent``'s contract so callers can pass through the
     same backend string they used to spawn the agent.
     """
-    if backend == "claude":
+    if backend == _CLAUDE:
         return parse_claude_usage(stdout)
-    if backend == "codex":
+    if backend == _CODEX:
         return parse_codex_usage(stdout, fallback_model=fallback_model)
     raise ValueError(
         f"unknown agent backend {backend!r}; expected 'claude' or 'codex'"
@@ -1000,9 +1036,9 @@ def _claude_skill_name(block: Any) -> Optional[str]:
     """
     if not isinstance(block, dict):
         return None
-    if block.get("type") != "tool_use" or block.get("name") != "Skill":
+    if block.get(_TYPE) != "tool_use" or block.get("name") != "Skill":
         return None
-    inp = block.get("input")
+    inp = block.get(_INPUT)
     if not isinstance(inp, dict):
         return None
     skill = inp.get("skill")
@@ -1015,7 +1051,7 @@ def _claude_init_field(
     events: Iterable[dict[str, Any]], field_name: str,
 ) -> Any:
     for event in events:
-        if event.get("type") != "system":
+        if event.get(_TYPE) != "system":
             continue
         if event.get("subtype") != "init":
             continue
@@ -1094,12 +1130,12 @@ class _ClaudeSkillCollector:
     seen_ids: set[str] = field(default_factory=set)
 
     def add_event(self, event: dict[str, Any]) -> None:
-        if event.get("type") != "assistant":
+        if event.get(_TYPE) != _ASSISTANT:
             return
-        message = event.get("message")
+        message = event.get(_MESSAGE)
         if not isinstance(message, dict):
             return
-        blocks = message.get("content")
+        blocks = message.get(_CONTENT_KEY)
         if not isinstance(blocks, list):
             return
         for block in blocks:
@@ -1109,7 +1145,7 @@ class _ClaudeSkillCollector:
         name = _claude_skill_name(block)
         if name is None:
             return
-        block_id = block.get("id")
+        block_id = block.get(_ID)
         if isinstance(block_id, str) and block_id:
             if block_id in self.seen_ids:
                 return
@@ -1175,8 +1211,8 @@ class _CodexSkillCollector:
     anonymous: list[str] = field(default_factory=list)
 
     def add_event(self, event: dict[str, Any]) -> None:
-        stream_item = event.get("item")
-        if not isinstance(stream_item, dict) or stream_item.get("type") != "command_execution":
+        stream_item = event.get(_ITEM_KEY)
+        if not isinstance(stream_item, dict) or stream_item.get(_TYPE) != _COMMAND_EXECUTION:
             return
         command = stream_item.get("command")
         if not isinstance(command, str):
@@ -1184,7 +1220,7 @@ class _CodexSkillCollector:
         names = _CODEX_SKILL_PATH_RE.findall(command)
         if not names:
             return
-        item_id = stream_item.get("id")
+        item_id = stream_item.get(_ID)
         if isinstance(item_id, str) and item_id:
             if item_id not in self.by_id:
                 self.id_order.append(item_id)
@@ -1205,9 +1241,9 @@ def parse_agent_skills(backend: str, stdout: str) -> SkillTriggers:
     Mirrors ``parse_agent_usage``'s dispatch contract so callers can reuse the
     same backend string they spawned the agent with.
     """
-    if backend == "claude":
+    if backend == _CLAUDE:
         return parse_claude_skills(stdout)
-    if backend == "codex":
+    if backend == _CODEX:
         return parse_codex_skills(stdout)
     raise ValueError(
         f"unknown agent backend {backend!r}; expected 'claude' or 'codex'"
@@ -1254,7 +1290,7 @@ class TrajectoryStep:
             "name": self.name,
             "tool_id": self.tool_id,
             "turn": self.turn,
-            "content": self.content,
+            _CONTENT_KEY: self.content,
         }
 
 
@@ -1286,9 +1322,9 @@ class TurnUsage:
     def to_dict(self) -> dict[str, Any]:
         return {
             "turn": self.turn,
-            "model": self.model,
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
+            _MODEL: self.model,
+            _INPUT_TOKENS: self.input_tokens,
+            _OUTPUT_TOKENS: self.output_tokens,
             "cache_read_tokens": self.cache_read_tokens,
             "cache_write_tokens": self.cache_write_tokens,
             "cost_usd": self.cost_usd,
@@ -1371,9 +1407,9 @@ def _claude_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
     """
     final: Optional[str] = None
     for ev in events:
-        if ev.get("type") != "result":
+        if ev.get(_TYPE) != _RESULT_KEY:
             continue
-        result_text = ev.get("result")
+        result_text = ev.get(_RESULT_KEY)
         if isinstance(result_text, str):
             final = result_text
     return final
@@ -1389,8 +1425,8 @@ def _claude_turn_key(idx: int, event: dict[str, Any]) -> str:
     in ``_claude_trajectory_steps`` and ``_claude_turn_usage`` so a step's
     ``turn`` index and its ``TurnUsage`` always agree.
     """
-    msg = event.get("message")
-    mid = msg.get("id") if isinstance(msg, dict) else None
+    msg = event.get(_MESSAGE)
+    mid = msg.get(_ID) if isinstance(msg, dict) else None
     if isinstance(mid, str) and mid:
         return mid
     rid = event.get("request_id")
@@ -1424,9 +1460,9 @@ def _claude_assistant_step(
 ) -> Optional[TrajectoryStep]:
     if not isinstance(block, dict):
         return None
-    if block.get("type") == "text":
+    if block.get(_TYPE) == _TEXT:
         return _claude_message_step(block, "assistant_message", turn=turn)
-    if block.get("type") == "tool_use":
+    if block.get(_TYPE) == "tool_use":
         return _claude_tool_call_step(block, turn, seen_calls)
     return None
 
@@ -1434,7 +1470,7 @@ def _claude_assistant_step(
 def _claude_message_step(
     block: dict[str, Any], kind: str, *, turn: Optional[int] = None,
 ) -> Optional[TrajectoryStep]:
-    message = block.get("text")
+    message = block.get(_TEXT)
     if not isinstance(message, str) or not message:
         return None
     return TrajectoryStep(kind=kind, turn=turn, content=message)
@@ -1446,7 +1482,7 @@ def _claude_tool_call_step(
     name = block.get("name")
     if not isinstance(name, str) or not name:
         return None
-    block_id = block.get("id")
+    block_id = block.get(_ID)
     tool_id = block_id if isinstance(block_id, str) and block_id else ""
     if tool_id in seen_calls:
         return None
@@ -1457,7 +1493,7 @@ def _claude_tool_call_step(
         name=name,
         tool_id=tool_id,
         turn=turn,
-        content=block.get("input"),
+        content=block.get(_INPUT),
     )
 
 
@@ -1485,9 +1521,9 @@ def _claude_user_step(
 ) -> Optional[TrajectoryStep]:
     if not isinstance(block, dict):
         return None
-    if block.get("type") == "text":
+    if block.get(_TYPE) == _TEXT:
         return _claude_message_step(block, "user_message")
-    if block.get("type") == "tool_result":
+    if block.get(_TYPE) == _TOOL_RESULT:
         return _claude_tool_result_step(block, seen_results)
     return None
 
@@ -1502,7 +1538,7 @@ def _claude_tool_result_step(
     if tool_id:
         seen_results.add(tool_id)
     return TrajectoryStep(
-        kind="tool_result", tool_id=tool_id, content=block.get("content"),
+        kind=_TOOL_RESULT, tool_id=tool_id, content=block.get(_CONTENT_KEY),
     )
 
 
@@ -1514,17 +1550,17 @@ class _ClaudeTrajectoryBuilder:
     turn_index: dict[str, int] = field(default_factory=dict)
 
     def add_event(self, idx: int, event: dict[str, Any]) -> None:
-        event_type = event.get("type")
-        if event_type not in ("assistant", "user"):
+        event_type = event.get(_TYPE)
+        if event_type not in (_ASSISTANT, "user"):
             return
-        message = event.get("message")
+        message = event.get(_MESSAGE)
         if not isinstance(message, dict):
             return
-        turn = self._turn(idx, event) if event_type == "assistant" else None
-        blocks = message.get("content")
+        turn = self._turn(idx, event) if event_type == _ASSISTANT else None
+        blocks = message.get(_CONTENT_KEY)
         if not isinstance(blocks, list):
             return
-        if event_type == "assistant":
+        if event_type == _ASSISTANT:
             self.steps.extend(
                 _claude_assistant_steps(blocks, turn, self.seen_calls)
             )
@@ -1579,14 +1615,14 @@ class _ClaudeTurnUsageBuilder:
     )
 
     def add_event(self, idx: int, event: dict[str, Any]) -> None:
-        if event.get("type") != "assistant":
+        if event.get(_TYPE) != _ASSISTANT:
             return
-        message = event.get("message")
+        message = event.get(_MESSAGE)
         if not isinstance(message, dict):
             return
         key = _claude_turn_key(idx, event)
         turn = self.turn_index.setdefault(key, len(self.turn_index))
-        usage = message.get("usage")
+        usage = message.get(_USAGE)
         if isinstance(usage, dict):
             self.by_key[key] = (
                 turn, _claude_model_name(event), _claude_usage_record(usage),
@@ -1607,10 +1643,10 @@ def _turn_usage_from_row(
     return TurnUsage(
         turn=turn,
         model=model,
-        input_tokens=record["input"],
-        output_tokens=record["output"],
-        cache_read_tokens=record["cache_read"],
-        cache_write_tokens=record["cache_write_5m"] + record["cache_write_1h"],
+        input_tokens=record[_INPUT],
+        output_tokens=record[_OUTPUT],
+        cache_read_tokens=record[_CACHE_READ],
+        cache_write_tokens=record[_CACHE_WRITE_FIVE_MIN] + record[_CACHE_WRITE_ONE_HOUR],
         cost_usd=cost,
         cost_source="estimated" if cost is not None else "unknown-price",
     )
@@ -1649,7 +1685,7 @@ def parse_claude_trajectory(stdout: str) -> AgentTrajectory:
     """
     events = _iter_events(stdout)
     return AgentTrajectory(
-        backend="claude",
+        backend=_CLAUDE,
         tools=_claude_offered_tools(events),
         skills=parse_claude_skills(stdout),
         steps=_claude_trajectory_steps(events),
@@ -1669,10 +1705,10 @@ def _codex_final_output(events: Iterable[dict[str, Any]]) -> Optional[str]:
     """
     final: Optional[str] = None
     for ev in events:
-        stream_item = ev.get("item")
-        if not isinstance(stream_item, dict) or stream_item.get("type") != "agent_message":
+        stream_item = ev.get(_ITEM_KEY)
+        if not isinstance(stream_item, dict) or stream_item.get(_TYPE) != "agent_message":
             continue
-        text = stream_item.get("text")
+        text = stream_item.get(_TEXT)
         if isinstance(text, str):
             final = text
     return final
@@ -1711,17 +1747,17 @@ class _CodexTrajectoryBuilder:
     anonymous: list[TrajectoryStep] = field(default_factory=list)
 
     def add_event(self, event: dict[str, Any]) -> None:
-        stream_item = event.get("item")
+        stream_item = event.get(_ITEM_KEY)
         if not isinstance(stream_item, dict):
             return
         item_id = self._item_id(stream_item)
-        if stream_item.get("type") == "command_execution":
+        if stream_item.get(_TYPE) == _COMMAND_EXECUTION:
             self._add_command(stream_item, item_id)
-        elif stream_item.get("type") == "agent_message":
+        elif stream_item.get(_TYPE) == "agent_message":
             self._add_message(stream_item, item_id)
 
     def _item_id(self, stream_item: dict[str, Any]) -> str:
-        raw_id = stream_item.get("id")
+        raw_id = stream_item.get(_ID)
         item_id = raw_id if isinstance(raw_id, str) and raw_id else ""
         if item_id and item_id not in self.seen:
             self.seen.add(item_id)
@@ -1739,15 +1775,15 @@ class _CodexTrajectoryBuilder:
             return
         if isinstance(command, str):
             self.anonymous.append(TrajectoryStep(
-                kind="tool_call", name="command_execution", content=command,
+                kind="tool_call", name=_COMMAND_EXECUTION, content=command,
             ))
         if has_output:
             self.anonymous.append(TrajectoryStep(
-                kind="tool_result", content=stream_item.get("aggregated_output"),
+                kind=_TOOL_RESULT, content=stream_item.get("aggregated_output"),
             ))
 
     def _add_message(self, stream_item: dict[str, Any], item_id: str) -> None:
-        message = stream_item.get("text")
+        message = stream_item.get(_TEXT)
         if not isinstance(message, str) or not message:
             return
         if item_id:
@@ -1786,13 +1822,13 @@ def _codex_assemble_steps(
         if iid in commands:
             steps.append(TrajectoryStep(
                 kind="tool_call",
-                name="command_execution",
+                name=_COMMAND_EXECUTION,
                 tool_id=iid,
                 content=commands[iid],
             ))
         if iid in outputs:
             steps.append(TrajectoryStep(
-                kind="tool_result",
+                kind=_TOOL_RESULT,
                 tool_id=iid,
                 content=outputs[iid],
             ))
@@ -1822,7 +1858,7 @@ def parse_codex_trajectory(stdout: str) -> AgentTrajectory:
     """
     events = _iter_events(stdout)
     return AgentTrajectory(
-        backend="codex",
+        backend=_CODEX,
         skills=parse_codex_skills(stdout),
         steps=_codex_trajectory_steps(events),
         final_output=_codex_final_output(events),
@@ -1835,9 +1871,9 @@ def parse_agent_trajectory(backend: str, stdout: str) -> AgentTrajectory:
     Mirrors ``parse_agent_usage`` / ``parse_agent_skills`` dispatch so callers
     reuse the same backend string they spawned the agent with.
     """
-    if backend == "claude":
+    if backend == _CLAUDE:
         return parse_claude_trajectory(stdout)
-    if backend == "codex":
+    if backend == _CODEX:
         return parse_codex_trajectory(stdout)
     raise ValueError(
         f"unknown agent backend {backend!r}; expected 'claude' or 'codex'"

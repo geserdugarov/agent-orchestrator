@@ -61,6 +61,10 @@ from orchestrator.github import (
 )
 
 
+# Pinned-state key tracking the newest PR comment already folded into state.
+_PR_LAST_COMMENT_ID = "pr_last_comment_id"
+
+
 @dataclass(frozen=True)
 class _InReviewContext:
     """The per-tick `in_review` invocation handles, bundled so the fresh-feedback
@@ -129,7 +133,7 @@ def _bump_in_review_watermarks(
     past on those surfaces.
     """
     candidates: list[int] = []
-    cur_issue_wm = ctx.state.get("pr_last_comment_id")
+    cur_issue_wm = ctx.state.get(_PR_LAST_COMMENT_ID)
     if isinstance(cur_issue_wm, int):
         candidates.append(cur_issue_wm)
     last_action = ctx.state.get("last_action_comment_id")
@@ -141,7 +145,7 @@ def _bump_in_review_watermarks(
     if issue_space_new:
         candidates.extend(comment.id for comment in issue_space_new)
     if candidates:
-        ctx.state.set("pr_last_comment_id", max(candidates))
+        ctx.state.set(_PR_LAST_COMMENT_ID, max(candidates))
 
 
 def _seed_missing_watermark(state: PinnedState, key: str, fetch) -> bool:
@@ -196,7 +200,7 @@ def _seed_legacy_in_review_watermarks(
     # feedback route would silently swallow that first review.
     seeded = False
     if (
-        state.get("pr_last_comment_id") is None
+        state.get(_PR_LAST_COMMENT_ID) is None
         and state.get("last_action_comment_id") is None
     ):
         candidates: list[int] = []
@@ -206,7 +210,7 @@ def _seed_legacy_in_review_watermarks(
         pr_conv = list(gh.pr_conversation_comments_after(pr, None))
         if pr_conv:
             candidates.append(max(comment.id for comment in pr_conv))
-        state.set("pr_last_comment_id", max(candidates) if candidates else 0)
+        state.set(_PR_LAST_COMMENT_ID, max(candidates) if candidates else 0)
         seeded = True
 
     if _seed_missing_watermark(
@@ -264,7 +268,7 @@ def _issue_side_watermark(state: PinnedState) -> Optional[int]:
     implementing / validating; that human comment would then never surface as
     fresh PR feedback. Treat 0 as a valid "scan from the beginning" watermark.
     """
-    issue_wm = state.get("pr_last_comment_id")
+    issue_wm = state.get(_PR_LAST_COMMENT_ID)
     if issue_wm is None:
         issue_wm = state.get("last_action_comment_id")
     return issue_wm

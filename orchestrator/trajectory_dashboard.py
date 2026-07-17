@@ -239,6 +239,10 @@ EXTRA_CSS = f"""
 _USAGE_SEP = '<span class="orch-traj-usage-sep">·</span>'
 
 
+# Column / filter label for the repository slug.
+_REPO_LABEL = "Repo"
+
+
 def _card_header_html(title: str, sub: str) -> str:
     """Card title + subtitle, reusing the dashboard's `.orch-card-*` styles."""
     return (
@@ -343,7 +347,7 @@ def _kpi_strip_html(summary: trajectory_reader.TrajectorySummary) -> str:
 def _meta_html(run: TrajectoryRun) -> str:
     """Per-run metadata grid. Only non-empty fields render a tile."""
     fields: list[tuple[str, str]] = [
-        ("Repo", run.repo),
+        (_REPO_LABEL, run.repo),
         ("Issue", f"#{run.issue}" if run.issue else ""),
         ("Stage", run.stage),
         ("Agent role", run.agent_role),
@@ -411,7 +415,7 @@ def _run_table_row_html(run: TrajectoryRun) -> str:
 def _runs_table_html(runs: Sequence[TrajectoryRun]) -> str:
     """Compact overview table of the (already-sliced) run list."""
     headers = (
-        "Issue", "Repo", "Stage", "Role", "Backend",
+        "Issue", _REPO_LABEL, "Stage", "Role", "Backend",
         "Round", "Steps", "Tool calls", "Recorded",
     )
     head = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
@@ -820,7 +824,7 @@ def _render_trajectory_sidebar(
 ) -> _TrajectoryFilters:
     with st.sidebar:
         st.header("Filters")
-        repo_choice = st.selectbox("Repo", ("All", *options.repos), index=0)
+        repo_choice = st.selectbox(_REPO_LABEL, ("All", *options.repos), index=0)
         categorical = _render_categorical_filters(st, options)
         text_filters = _render_text_filters(st)
         hide_fixtures = st.checkbox(
@@ -900,7 +904,7 @@ def _render_run_list(
 
 def _pick_repo(st: Any, shown: Sequence[TrajectoryRun]) -> str:
     repos = sorted({run.repo for run in shown})
-    return st.selectbox("Repo", repos)
+    return st.selectbox(_REPO_LABEL, repos)
 
 
 def _pick_issue(
