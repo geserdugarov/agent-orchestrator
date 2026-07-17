@@ -868,6 +868,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-17 | 4.2 | Complete | Target WPS; 78 remainders; full gate 2120 passed | Not committed | Start Package 4.3 |
 | 2026-07-17 | 4.3 | Complete | Target WPS; 6 remainders; full gate 2121 passed | Not committed | Start Package 4.4 |
 | 2026-07-17 | 4.4 | Complete | Target WPS; 5 remainders; full gate 2124 passed | Not committed | Start Package 4.5 |
+| 2026-07-17 | 4.5/usage-metrics | Complete | Target WPS; 21 fixed, 2 deferred; full gate | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1054,3 +1055,28 @@ changed, and the whole-tree `--select=WPS` diff introduced no new category (`WPS
 now-unneeded `pass`); the full gate passed with 2,124 tests and 3 live-Postgres skips (the optional dashboard group
 installed so the plotly chart tests ran). The `test_workflow_list_pollable` default-cadence test fails only when
 `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` is exported in the shell -- an environment artifact, not a diff regression.
+
+Package 4.5 opened with the `usage-metrics` slice: the `UsageMetrics` dataclass and the claude / codex token, model,
+turn, pricing, and cost parsing reached through `parse_agent_usage` (`parse_claude_usage` / `parse_codex_usage` plus
+their price tables, event iterator, token decoders, model-path resolution, and turn counting) moved out of the
+1,891-line `usage.py` into a focused private `orchestrator/_usage_metrics.py`. `orchestrator.usage` re-exports exactly
+that public surface (`UsageMetrics` / `parse_agent_usage` / `parse_claude_usage` / `parse_codex_usage`) so `agents`,
+`workflow`, and `analytics` keep importing from the same site, and it reuses the private module's shared event iterator,
+token decoders, and `_claude_estimate_cost` price path for its sibling skill-trigger and trajectory extractors -- which
+stay in `usage.py` -- so the resilience contract and cost precedence stay defined once. The re-export follows the
+`worktrees.py` hub convention (absolute `from orchestrator._usage_metrics import ...`, grouped at eight names per
+statement) so the split introduced no new `WPS300` local-import or `WPS235` too-many-names category, and the module
+split cut the peak `WPS202` member count from 81 to 45 (`_usage_metrics`) + 36 (`usage`). The move resolved the 21
+in-slice target findings: `WPS234` (7 -- the `_CLAUDE_RATES` / `_CODEX_RATES` row tables, the `_codex_rates` return,
+and the four codex usage-event annotations, each lifted to a named alias `_TokenBucket` / `_ClaudeRateRow` /
+`_CodexRateRow` / `_CodexUsageEvent`), `WPS338` (1 -- `_CodexPrice` reordered so the public `estimate` precedes the
+private `_multipliers` / `_input_cost`), `WPS339` (12 -- the meaningless trailing zeros in the price literals, e.g.
+`0.50` -> `0.5`, values unchanged), and `WPS420` (1 -- `_num`'s `except ValueError: pass` rewritten as
+`contextlib.suppress(ValueError)`). The two remaining `WPS234` (`_ClaudeTurnUsageBuilder.by_key`) and `WPS338`
+(`_CodexTrajectoryBuilder`) findings sit in the trajectory extractor that stays in `usage.py`; they are deferred to a
+later Package 4.5 trajectory slice rather than fixed across the module boundary. Dataclass shapes, cost precedence,
+pricing values, model fallback behavior, and every existing caller were preserved; a focused `test_usage.py`
+compatibility test pins the re-export identity and each symbol's module of record, and `docs/observability.md` gained a
+module-layout note. Ruff is clean and the full suite passed 2,096 tests (33 skipped for the optional dashboard / live
+Postgres; the same `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact accounts for the one otherwise-green
+failure). Package 4.5 is not complete -- its remaining module-structure findings are untouched.

@@ -1049,6 +1049,13 @@ backend, distinct model(s), turn count, input / output / cached / cache-read / c
 a `cost_source` tag of `reported` / `estimated` / `unknown-price` / `no-usage`. No external dependency: the parser is
 jq-free.
 
+**Module layout.** The usage-metric parsing — the `UsageMetrics` dataclass and the claude / codex token, model, turn,
+pricing, and cost parsing reached through `parse_agent_usage` (`parse_claude_usage` / `parse_codex_usage`) — lives in
+the private `orchestrator/_usage_metrics.py`. `orchestrator.usage` re-exports exactly that public surface so it stays
+the stable import site for callers (`agents`, `workflow`, `analytics`), and it hosts the sibling skill-trigger and
+trajectory extractors, which reuse the private module's shared event iterator, token decoders, and price path so the
+resilience contract and cost precedence stay defined once.
+
 **Two parsers, one dispatcher.** `parse_claude_usage(stdout)` consumes claude `--output-format stream-json` events,
 groups assistant frames by `message.id` so the final-frame usage wins (claude streams partial counts on intermediate
 frames), and sums per-model. `parse_codex_usage(stdout, fallback_model=None)` consumes codex `--json` events and treats
