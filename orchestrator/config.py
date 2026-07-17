@@ -34,6 +34,8 @@ _SECRET_KEYS = frozenset({
     "GIT_TOKEN",
 })
 _DOTENV_TRUE_VALUES = frozenset({"1", "true", "on", "yes"})
+# Default value for boolean env knobs that ship enabled.
+_DEFAULT_ENABLED = "on"
 
 
 def _has_matched_outer_quotes(dotenv_value: str) -> bool:
@@ -261,8 +263,9 @@ HITL_MENTIONS: str = " ".join(f"@{hitl_handle}" for hitl_handle in HITL_HANDLES)
 ALLOWED_ISSUE_AUTHORS: tuple[str, ...] = _parse_hitl_handles(
     os.environ.get("ALLOWED_ISSUE_AUTHORS", "")
 )
+_CLAUDE = "claude"
 CODEX_BIN: str = os.environ.get("CODEX_BIN", "codex")
-CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", "claude")
+CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", _CLAUDE)
 
 
 def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
@@ -300,7 +303,7 @@ def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
             "'codex' or 'claude' (optionally followed by CLI args)"
         )
     backend = tokens[0].lower()
-    if backend not in ("codex", "claude"):
+    if backend not in ("codex", _CLAUDE):
         raise SystemExit(
             f"orchestrator: {name}={spec!r} first token {tokens[0]!r} is "
             "invalid; expected 'codex' or 'claude'"
@@ -318,7 +321,7 @@ def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
 # change what backend+args run on an in-flight issue (the stored spec is
 # re-parsed on every resume; current config is only consulted for fresh
 # spawns).
-DEV_AGENT_SPEC: str = os.environ.get("DEV_AGENT", "claude")
+DEV_AGENT_SPEC: str = os.environ.get("DEV_AGENT", _CLAUDE)
 DEV_AGENT, DEV_AGENT_ARGS = _parse_agent_spec("DEV_AGENT", DEV_AGENT_SPEC)
 REVIEW_AGENT_SPEC: str = os.environ.get("REVIEW_AGENT", "codex")
 REVIEW_AGENT, REVIEW_AGENT_ARGS = _parse_agent_spec(
@@ -328,7 +331,7 @@ REVIEW_AGENT, REVIEW_AGENT_ARGS = _parse_agent_spec(
 # issue and produces a structured manifest. Parsed at import time even when
 # DECOMPOSE=off so flipping the kill switch back on does not introduce a
 # fresh "that env var was always invalid" failure.
-DECOMPOSE_AGENT_SPEC: str = os.environ.get("DECOMPOSE_AGENT", "claude")
+DECOMPOSE_AGENT_SPEC: str = os.environ.get("DECOMPOSE_AGENT", _CLAUDE)
 DECOMPOSE_AGENT, DECOMPOSE_AGENT_ARGS = _parse_agent_spec(
     "DECOMPOSE_AGENT", DECOMPOSE_AGENT_SPEC
 )
@@ -694,8 +697,8 @@ IN_REVIEW_DEBOUNCE_SECONDS: int = int(
 # legacy "no label -> implementing" pickup, no children, no manifest. The
 # rollout safety valve so the user can disable decomposition if manifest
 # output proves unreliable, without redeploying old binaries.
-DECOMPOSE: bool = os.environ.get("DECOMPOSE", "on").strip().lower() in (
-    "1", "true", "on", "yes",
+DECOMPOSE: bool = (
+    os.environ.get("DECOMPOSE", _DEFAULT_ENABLED).strip().lower() in _DOTENV_TRUE_VALUES
 )
 
 # After the reviewer agent emits VERDICT: APPROVED, squash the dev's commits
@@ -705,8 +708,8 @@ DECOMPOSE: bool = os.environ.get("DECOMPOSE", "on").strip().lower() in (
 # as-is" behavior; useful if a workflow downstream (changelog generation,
 # bisect tooling) depends on the per-step commit history.
 SQUASH_ON_APPROVAL: bool = os.environ.get(
-    "SQUASH_ON_APPROVAL", "on"
-).strip().lower() in ("1", "true", "on", "yes")
+    "SQUASH_ON_APPROVAL", _DEFAULT_ENABLED
+).strip().lower() in _DOTENV_TRUE_VALUES
 
 # Whether working agents are told about the *other* repos this orchestrator
 # tracks (slug, local `target_root`, base branch) for cross-repo reference.
@@ -718,8 +721,8 @@ SQUASH_ON_APPROVAL: bool = os.environ.get(
 # URLs), and write-containment is unchanged, so default-on-when-multi-repo is
 # the right posture; the kill switch keeps it reversible.
 EXPOSE_TRACKED_REPOS: bool = os.environ.get(
-    "EXPOSE_TRACKED_REPOS", "on"
-).strip().lower() in ("1", "true", "on", "yes")
+    "EXPOSE_TRACKED_REPOS", _DEFAULT_ENABLED
+).strip().lower() in _DOTENV_TRUE_VALUES
 
 
 def _parse_verify_commands(raw: str) -> tuple[str, ...]:

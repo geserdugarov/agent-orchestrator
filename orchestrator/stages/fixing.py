@@ -161,6 +161,14 @@ from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import GitHubClient, PinnedState
 
 
+# Pinned-state keys this stage reads and writes.
+_AWAITING_HUMAN = "awaiting_human"
+_PENDING_FIX_AT = "pending_fix_at"
+_PARK_REASON = "park_reason"
+_REVIEW_ROUND = "review_round"
+_CONFLICT_ROUND = "conflict_round"
+
+
 @dataclass(frozen=True)
 class _FixingFeedback:
     issue_space: list
@@ -260,7 +268,7 @@ def _fixing_preflight(gh: GitHubClient, spec: RepoSpec, issue: Issue, state):
         # holds the PR before routing). Reaching here means a manual
         # relabel from outside that route -- park once and surface to a
         # human; the dev-resume path needs the PR to push a fix.
-        if state.get("awaiting_human"):
+        if state.get(_AWAITING_HUMAN):
             return None
         _wf._park_awaiting_human(
             gh, issue, state,
@@ -416,7 +424,7 @@ def _dispatch_validating_recovery(
     """
     from orchestrator import workflow as _wf
 
-    validating_routed = ctx.state.get("pending_fix_at") is None
+    validating_routed = ctx.state.get(_PENDING_FIX_AT) is None
     if (
         feedback.all_items
         or park_reason not in _wf._VALIDATING_TRANSIENT_PARK_REASONS
@@ -448,8 +456,8 @@ def _dispatch_validating_recovery(
     # branch ONLY fires when `pending_fix_at` was already None, so the clear is
     # a no-op in normal flow, but a stale bookmark from an earlier route would
     # otherwise mis-flag the next reviewer round.
-    ctx.state.set("awaiting_human", False)
-    ctx.state.set("park_reason", None)
+    ctx.state.set(_AWAITING_HUMAN, False)
+    ctx.state.set(_PARK_REASON, None)
     _clear_pending_fix_bookmarks(ctx.state)
     ctx.gh.set_workflow_label(ctx.issue, WorkflowLabel.VALIDATING)
     ctx.gh.write_pinned_state(ctx.issue, ctx.state)
@@ -471,7 +479,7 @@ def _dispatch_parked_fixing(
     """
     from orchestrator import workflow as _wf
 
-    park_reason = ctx.state.get("park_reason")
+    park_reason = ctx.state.get(_PARK_REASON)
     # The refresh-time `_AUTO_REBASE_PARK_REASONS` parks belong to the
     # `_sync_pr_worktree_to_base` retry loop -- the operator's new comment is
     # the "retry the rebase" signal, NOT fresh PR feedback for the dev
@@ -509,8 +517,8 @@ def _dispatch_parked_fixing(
         # explicitly marks its no-commit reply with `ACK:`).
         return _ParkedFixingDecision(stop=True)
 
-    ctx.state.set("awaiting_human", False)
-    ctx.state.set("park_reason", None)
+    ctx.state.set(_AWAITING_HUMAN, False)
+    ctx.state.set(_PARK_REASON, None)
     return _ParkedFixingDecision(stop=False)
 
 
@@ -561,10 +569,10 @@ def _apply_fix_review_round(state, pending_fix_at_was_set: bool) -> None:
         MAX_REVIEW_ROUNDS accounting honest.
     """
     if pending_fix_at_was_set:
-        state.set("review_round", 0)
+        state.set(_REVIEW_ROUND, 0)
     else:
-        round_n = int(state.get("review_round") or 0)
-        state.set("review_round", round_n + 1)
+        round_n = int(state.get(_REVIEW_ROUND) or 0)
+        state.set(_REVIEW_ROUND, round_n + 1)
 
 
 def _run_fixing_resume(
@@ -687,7 +695,7 @@ def _resume_fixing_and_dispatch_result(
     # `pending_fix_at` is untouched between the tick's capture point and here
     # (no reachable path clears it in between), and the pushed-fix tail clears
     # the bookmarks only after this read.
-    pending_fix_at_was_set = ctx.state.get("pending_fix_at") is not None
+    pending_fix_at_was_set = ctx.state.get(_PENDING_FIX_AT) is not None
 
     # On an accepted `/orchestrator continue`, resume on the PRESERVED batch
     # (plus any new feedback that came with the command), not the command
@@ -814,7 +822,7 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     # content, and without that guard a single poisoned tick would loop on
     # every poll, spamming the same dev-resume prompt.
     replay_batch: Optional[list] = None
-    if state.get("awaiting_human"):
+    if state.get(_AWAITING_HUMAN):
         parked = _dispatch_parked_fixing(
             _FixingContext(gh, spec, issue, state, pr), feedback,
         )
@@ -931,20 +939,20 @@ def _route_parked_fixing_to_conflict(
     pr_number = int(ctx.state.get("pr_number"))
     # Seed `conflict_round` only when absent so a re-entry preserves the cap
     # counter (mirrors `_route_pr_worktree_to_resolving_conflict`).
-    if ctx.state.get("conflict_round") is None:
-        ctx.state.set("conflict_round", 0)
-    ctx.state.set("awaiting_human", False)
-    ctx.state.set("park_reason", None)
+    if ctx.state.get(_CONFLICT_ROUND) is None:
+        ctx.state.set(_CONFLICT_ROUND, 0)
+    ctx.state.set(_AWAITING_HUMAN, False)
+    ctx.state.set(_PARK_REASON, None)
     _post_fixing_conflict_notice(ctx, pr_number, drift_reason)
     ctx.gh.emit_event(
-        "conflict_round",
+        _CONFLICT_ROUND,
         issue_number=ctx.issue.number,
         stage="fixing",
         pr_number=pr_number,
         sha=getattr(getattr(ctx.pr, "head", None), "sha", None) or None,
         action="entered",
-        conflict_round=int(ctx.state.get("conflict_round") or 0),
-        review_round=int(ctx.state.get("review_round") or 0),
+        conflict_round=int(ctx.state.get(_CONFLICT_ROUND) or 0),
+        review_round=int(ctx.state.get(_REVIEW_ROUND) or 0),
         retry_count=ctx.state.get("retry_count"),
     )
     _wf.log.info(
@@ -992,7 +1000,7 @@ def _reconcile_parked_fixing(ctx: _FixingContext) -> bool:
 
 
 def _clear_pending_fix_bookmarks(state) -> None:
-    state.set("pending_fix_at", None)
+    state.set(_PENDING_FIX_AT, None)
     state.set("pending_fix_issue_max_id", None)
     state.set("pending_fix_review_max_id", None)
     state.set("pending_fix_review_summary_max_id", None)
@@ -1154,7 +1162,7 @@ def _reconstruct_pending_fix_batch(gh, issue, pr, state) -> list:
         + _reconstruct_review_comments(gh, pr, state)
         + _reconstruct_review_summaries(gh, pr, state)
     )
-    if state.get("pending_fix_at") is None:
+    if state.get(_PENDING_FIX_AT) is None:
         anchor = _reviewer_anchor_comment(gh, pr, state)
         if anchor is not None and all(
             feedback_item.id != anchor.id for feedback_item in trusted_batch
@@ -1243,15 +1251,15 @@ def _handle_continue_command(
     """
     from orchestrator import workflow as _wf
 
-    park_reason = ctx.state.get("park_reason")
+    park_reason = ctx.state.get(_PARK_REASON)
     batch = (
         _reconstruct_pending_fix_batch(ctx.gh, ctx.issue, ctx.pr, ctx.state)
         if park_reason in _wf._CONTINUE_PARK_REASONS else []
     )
     if batch:
         _wf._drop_poisoned_dev_session(ctx.state)
-        ctx.state.set("awaiting_human", False)
-        ctx.state.set("park_reason", None)
+        ctx.state.set(_AWAITING_HUMAN, False)
+        ctx.state.set(_PARK_REASON, None)
         _wf.log.info(
             "issue=#%s /orchestrator continue: replaying %d preserved feedback "
             "item(s) on a fresh dev session (park_reason=%s)",

@@ -52,6 +52,19 @@ PINNED_STATE_BODY_RE = re.compile(
 )
 PINNED_STATE_TEMPLATE = "<!--orchestrator-state {payload}-->"
 
+# GitHub REST status codes the client special-cases: a 403 on check-runs is a
+# token-scope problem to surface; a 404 means the resource is already gone.
+_HTTP_FORBIDDEN = 403
+_HTTP_NOT_FOUND = 404
+
+# Values of the shared check-state model emitted and compared by the
+# `_normalize_*` / `_fold_check_states` helpers.
+_CHECK_STATE_FAILURE = "failure"
+_CHECK_STATE_PENDING = "pending"
+# GitHub review and issue/PR states the client keys behavior on.
+_REVIEW_CHANGES_REQUESTED = "CHANGES_REQUESTED"
+_ISSUE_STATE_OPEN = "open"
+
 # (name, hex color, description) for each workflow label. Order roughly
 # tracks the happy-path lifecycle (implementing -> validating ->
 # documenting -> in_review) but is otherwise only the order in which
@@ -284,7 +297,7 @@ class _CheckSurfaceRead:
 
 
 _FAILED_CHECK_RUN_CONCLUSIONS = frozenset(
-    {"failure", "timed_out", "action_required", "cancelled"}
+    {_CHECK_STATE_FAILURE, "timed_out", "action_required", "cancelled"}
 )
 _SUCCESSFUL_CHECK_RUN_CONCLUSIONS = frozenset(
     {"success", "neutral", "skipped"}
@@ -294,9 +307,9 @@ _SUCCESSFUL_CHECK_RUN_CONCLUSIONS = frozenset(
 def _normalize_combined_status(combined_status: Any) -> Optional[str]:
     """Convert a legacy combined status into the shared check-state model."""
     status = combined_status.state
-    if not status or (status == "pending" and not combined_status.total_count):
+    if not status or (status == _CHECK_STATE_PENDING and not combined_status.total_count):
         return None
-    return "failure" if status == "error" else status
+    return _CHECK_STATE_FAILURE if status == "error" else status
 
 
 def _normalize_check_runs(check_runs: Iterable[Any]) -> Optional[str]:
@@ -305,12 +318,12 @@ def _normalize_check_runs(check_runs: Iterable[Any]) -> Optional[str]:
     if not conclusions:
         return None
     if None in conclusions:
-        return "pending"
+        return _CHECK_STATE_PENDING
     if conclusions & _FAILED_CHECK_RUN_CONCLUSIONS:
-        return "failure"
+        return _CHECK_STATE_FAILURE
     if conclusions <= _SUCCESSFUL_CHECK_RUN_CONCLUSIONS:
         return "success"
-    return "failure"
+    return _CHECK_STATE_FAILURE
 
 
 def _fold_check_states(
@@ -321,13 +334,13 @@ def _fold_check_states(
     """Fold normalized surfaces using failure-before-pending priority."""
     observed_states = [state for state in states if state]
     if observed_states and read_failed:
-        observed_states.append("pending")
+        observed_states.append(_CHECK_STATE_PENDING)
     if not observed_states:
         return "none"
-    if "failure" in observed_states:
-        return "failure"
-    if "pending" in observed_states:
-        return "pending"
+    if _CHECK_STATE_FAILURE in observed_states:
+        return _CHECK_STATE_FAILURE
+    if _CHECK_STATE_PENDING in observed_states:
+        return _CHECK_STATE_PENDING
     return "success"
 
 
@@ -338,7 +351,7 @@ def _review_state_for_head(
     if (getattr(review, "commit_id", "") or "") != head_sha:
         return None
     review_state = (review.state or "").upper()
-    if review_state not in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+    if review_state not in ("APPROVED", _REVIEW_CHANGES_REQUESTED, "DISMISSED"):
         return None
     reviewer_login = review.user.login if review.user else ""
     if not reviewer_login:
@@ -363,7 +376,7 @@ def _is_actionable_review_summary(
 ) -> bool:
     """Whether a review summary carries unread feedback for the developer."""
     review_state = (review.state or "").upper()
-    if review_state not in ("CHANGES_REQUESTED", "COMMENTED"):
+    if review_state not in (_REVIEW_CHANGES_REQUESTED, "COMMENTED"):
         return False
     if not (review.body or "").strip():
         return False
@@ -547,7 +560,7 @@ class GitHubClient:
         self._pollable_calls += 1
         yield from _iter_new_non_pr_issues(
             self.repo.get_issues(
-                **_issue_query_options(issue_state="open", since=since)
+                **_issue_query_options(issue_state=_ISSUE_STATE_OPEN, since=since)
             ),
             seen,
         )
@@ -790,7 +803,7 @@ class GitHubClient:
         a duplicate create_pull would 422 and trap the issue in implementing.
         """
         head = f"{self.repo.owner.login}:{branch}"
-        for pr in self.repo.get_pulls(state="open", head=head, base=base):
+        for pr in self.repo.get_pulls(state=_ISSUE_STATE_OPEN, head=head, base=base):
             return pr
         return None
 
@@ -802,7 +815,7 @@ class GitHubClient:
         from PyGithub propagate; the caller (the sweep) catches them so a
         single bad enumeration cannot break the polling tick.
         """
-        for pr in self.repo.get_pulls(state="open"):
+        for pr in self.repo.get_pulls(state=_ISSUE_STATE_OPEN):
             yield pr
 
     @staticmethod
@@ -827,7 +840,7 @@ class GitHubClient:
             return "merged"
         if pr.state == "closed":
             return "closed"
-        return "open"
+        return _ISSUE_STATE_OPEN
 
     @staticmethod
     def pr_is_mergeable(pr: PullRequest) -> Optional[bool]:
@@ -894,7 +907,7 @@ class GitHubClient:
             # `pr_combined_check_state` at 'none' despite the PR actually
             # being green; surface the remediation prominently so an
             # operator can fix the scope.
-            if error.status == 403:
+            if error.status == _HTTP_FORBIDDEN:
                 log.error(
                     "could not read check-runs for %s (HTTP 403). The "
                     "orchestrator PAT needs 'Checks: read' to evaluate "
@@ -941,7 +954,7 @@ class GitHubClient:
         the in_review ready-for-merge ping.
         """
         return any(
-            review_state == "CHANGES_REQUESTED"
+            review_state == _REVIEW_CHANGES_REQUESTED
             for review_state in cls._latest_review_states_for_head(
                 pr, head_sha=head_sha,
             )
@@ -955,7 +968,7 @@ class GitHubClient:
         states = cls._latest_review_states_for_head(pr, head_sha=head_sha)
         if not states:
             return False
-        if any(review_state == "CHANGES_REQUESTED" for review_state in states):
+        if any(review_state == _REVIEW_CHANGES_REQUESTED for review_state in states):
             return False
         return any(review_state == "APPROVED" for review_state in states)
 
@@ -972,7 +985,7 @@ class GitHubClient:
             self.repo.get_git_ref(f"heads/{branch}").delete()
             return True
         except GithubException as error:
-            if error.status == 404:
+            if error.status == _HTTP_NOT_FOUND:
                 return True
             log.warning(
                 "could not delete remote branch %r (HTTP %s): %s",

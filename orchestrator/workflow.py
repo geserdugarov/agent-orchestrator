@@ -474,6 +474,16 @@ _CAP_EXEMPT_FAMILY_LABELS = frozenset({
     "blocked", "umbrella",
 })
 
+# Shared log template for a per-issue handler that raised; the tick loop logs it
+# with the repo slug and issue tag before moving on to the next issue.
+_PROCESSING_FAILED_LOG = "repo=%s issue=#%s processing failed"
+
+# GitHub issue/PR state attribute and its two values, as the dispatcher reads
+# them off both PyGithub objects and the in-memory fake.
+_STATE_ATTR = "state"
+_ISSUE_STATE_OPEN = "open"
+_ISSUE_STATE_CLOSED = "closed"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -755,7 +765,7 @@ def _accumulate_issue_usage(
     if usage.cost_usd is not None:
         state.set(
             "issue_total_cost_usd",
-            float(state.get("issue_total_cost_usd") or 0.0) + usage.cost_usd,
+            float(state.get("issue_total_cost_usd") or 0) + usage.cost_usd,
         )
 
     prior_sources = state.get("issue_cost_sources")
@@ -791,7 +801,7 @@ def _format_issue_usage_verdict(state: PinnedState) -> Optional[str]:
     if "unknown-price" in sources:
         cost = "unknown"
     else:
-        cost = f"${float(state.get('issue_total_cost_usd') or 0.0):.2f}"
+        cost = f"${float(state.get('issue_total_cost_usd') or 0):.2f}"
         if "estimated" in sources:
             cost = f"{cost} (est.)"
     return (
@@ -1072,7 +1082,7 @@ def _run_sequential_tick(
                 _process_issue(gh, spec, issue)
         except Exception:
             log.exception(
-                "repo=%s issue=#%s processing failed",
+                _PROCESSING_FAILED_LOG,
                 spec.slug, issue.number,
             )
 
@@ -1101,7 +1111,7 @@ def _drain_family_bucket(
             )
         except Exception:
             log.exception(
-                "repo=%s issue=#%s processing failed",
+                _PROCESSING_FAILED_LOG,
                 spec.slug, issue_number,
             )
 
@@ -1166,7 +1176,7 @@ def _drain_parallel_futures(
                 )
             else:
                 log.exception(
-                    "repo=%s issue=#%s processing failed", spec.slug, tag,
+                    _PROCESSING_FAILED_LOG, spec.slug, tag,
                 )
 
 
@@ -1311,7 +1321,7 @@ def _issue_is_closed(issue) -> bool:
     (``"open"`` / ``"closed"``) and the in-memory fake's ``closed`` bool.
     """
     return bool(getattr(issue, "closed", False)) or (
-        getattr(issue, "state", "open") == "closed"
+        getattr(issue, _STATE_ATTR, _ISSUE_STATE_OPEN) == _ISSUE_STATE_CLOSED
     )
 
 
@@ -1359,7 +1369,7 @@ def _drain_scheduler_family_bucket(
                 _refetch_and_process(gh, spec, issue_number)
         except Exception:
             log.exception(
-                "repo=%s issue=#%s processing failed",
+                _PROCESSING_FAILED_LOG,
                 spec.slug, issue_number,
             )
 
@@ -1864,7 +1874,7 @@ def _close_terminal_issue(
     context: _ReviewTerminalContext, error_message: str,
 ) -> None:
     try:
-        context.issue.edit(state="closed")
+        context.issue.edit(state=_ISSUE_STATE_CLOSED)
     except Exception:
         log.exception(
             "issue=#%s %s", context.issue.number, error_message,
@@ -1905,7 +1915,7 @@ def _finalize_merged_pr(
     )
     if (
         not close_if_open_only
-        or getattr(context.issue, "state", "open") != "closed"
+        or getattr(context.issue, _STATE_ATTR, _ISSUE_STATE_OPEN) != _ISSUE_STATE_CLOSED
     ):
         _close_terminal_issue(context, close_error)
     _cleanup_review_terminal(context)
@@ -1944,10 +1954,10 @@ def _drain_review_terminal(context: _ReviewTerminalContext) -> bool:
     if pr_status == "merged":
         _finalize_merged_pr(context, close_error="could not close after merge")
         return True
-    if pr_status == "closed":
+    if pr_status == _ISSUE_STATE_CLOSED:
         _finalize_rejected_pr(context)
         return True
-    if getattr(context.issue, "state", "open") == "closed":
+    if getattr(context.issue, _STATE_ATTR, _ISSUE_STATE_OPEN) == _ISSUE_STATE_CLOSED:
         _finalize_closed_issue_with_open_pr(context)
         return True
     return False
@@ -2066,7 +2076,7 @@ def _finalize_if_issue_closed(
     through normal dev / docs / reviewer work). Returns False only
     when the issue is still open and the handler should proceed.
     """
-    if getattr(issue, "state", "open") != "closed":
+    if getattr(issue, _STATE_ATTR, _ISSUE_STATE_OPEN) != _ISSUE_STATE_CLOSED:
         return False
     linked_pr = _closed_issue_pr(gh, issue, state)
     if linked_pr.defer:
@@ -2075,6 +2085,6 @@ def _finalize_if_issue_closed(
         gh, spec, issue, state, linked_pr.pr, gh.workflow_label(issue),
     )
     _finalize_closed_issue_with_open_pr(context)
-    if linked_pr.pr is not None and gh.pr_state(linked_pr.pr) == "closed":
+    if linked_pr.pr is not None and gh.pr_state(linked_pr.pr) == _ISSUE_STATE_CLOSED:
         _emit_closed_pr_rejection(context)
     return True

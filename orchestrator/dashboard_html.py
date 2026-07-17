@@ -36,6 +36,13 @@ from orchestrator.analytics.read import (
 from orchestrator.dashboard_kpis import InsightBanner
 
 
+_UNKNOWN = "unknown"
+# Smallest positive span used to avoid a zero-division in sparkline scaling.
+_EPSILON = 1e-9
+# Tokens per million, for per-million cost ratios.
+_MILLION = 1_000_000
+
+
 def _table_css(table_class: str, *, extra_rules: str = "") -> str:
     """Return the shared inline CSS block for compact dashboard tables."""
     return f"""
@@ -137,7 +144,7 @@ def _sparkline_layout(series: Sequence[float], *, width: int, height: int) -> _S
     padding = 2
     return _SparklineLayout(
         low=low,
-        span=max(max(series) - low, 1e-9),
+        span=max(max(series) - low, _EPSILON),
         padding=padding,
         height=height,
         step=_sparkline_step(width, padding, len(series)),
@@ -391,7 +398,7 @@ def _issue_row_view(row: IssueSummaryRow, max_cost: float) -> _IssueRowView:
     return _IssueRowView(
         short_repo=_short_repo_name(row.repo),
         cost_text=_money_or_dash(row.total_cost_usd),
-        bar_pct=_relative_width_pct(float(row.total_cost_usd or 0.0), max_cost),
+        bar_pct=_relative_width_pct(float(row.total_cost_usd or 0), max_cost),
         review_rounds=_int_or_zero(row.max_review_round),
         retries=_int_or_zero(row.max_retry_count),
         failed=int(row.failed_agent_runs or 0),
@@ -439,8 +446,8 @@ def _issues_table_html(rows: Sequence[IssueSummaryRow]) -> str:
     -- the issues table is the only consumer.
     """
     max_cost = max(
-        (float(row.total_cost_usd or 0.0) for row in rows),
-        default=0.0,
+        (float(row.total_cost_usd or 0) for row in rows),
+        default=0,
     ) or 1.0
     css = _table_css("orch-issues", extra_rules=_ISSUES_TABLE_EXTRA_CSS)
     body = [
@@ -479,8 +486,8 @@ _SKILL_TRIGGERS_EXTRA_CSS = """
 def _skill_trigger_row_html(
     row: SkillTriggerRateRow, *, max_rate: float
 ) -> str:
-    role = row.agent_role or "unknown"
-    backend = row.backend or "unknown"
+    role = row.agent_role or _UNKNOWN
+    backend = row.backend or _UNKNOWN
     rate_pct = row.rate * 100.0
     bar_pct = _relative_width_pct(row.rate, max_rate)
     return (
@@ -515,7 +522,7 @@ def _skill_triggers_html(rows: Sequence[SkillTriggerRateRow]) -> str:
     local CSS sits inline next to the table -- the skill panel is its
     only consumer -- and reuses the shared `var(--orch-*)` theme tokens.
     """
-    max_rate = max((row.rate for row in rows), default=0.0) or 1.0
+    max_rate = max((row.rate for row in rows), default=0) or 1.0
     css = _table_css(
         "orch-skills", extra_rules=_SKILL_TRIGGERS_EXTRA_CSS
     )
@@ -726,10 +733,10 @@ def _skill_matrix_row_view(row: SkillTriggerMatrixRow) -> _SkillMatrixRowView:
         skill_runs_html = str(skill_runs)
         rate_html = f"{row.rate * 100.0:.0f}%"
     return _SkillMatrixRowView(
-        repo=row.repo or "unknown",
-        role=row.agent_role or "unknown",
-        backend=row.backend or "unknown",
-        skill=row.skill or "unknown",
+        repo=row.repo or _UNKNOWN,
+        role=row.agent_role or _UNKNOWN,
+        backend=row.backend or _UNKNOWN,
+        skill=row.skill or _UNKNOWN,
         runs=int(row.runs),
         skill_runs_html=skill_runs_html,
         rate_html=rate_html,
@@ -955,7 +962,7 @@ def _backend_efficiency_metrics(
     cache_input_total = cache_read + int(row.total_input_tokens or 0)
     return _BackendEfficiencyMetrics(
         tokens=tokens,
-        cost_per_million=_safe_ratio(row.total_cost_usd, tokens / 1_000_000),
+        cost_per_million=_safe_ratio(row.total_cost_usd, tokens / _MILLION),
         cost_per_run=_safe_ratio(row.total_cost_usd, row.runs),
         cache_hit_pct=_safe_ratio(cache_read, cache_input_total) * 100,
     )

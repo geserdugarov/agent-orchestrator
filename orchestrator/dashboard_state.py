@@ -54,7 +54,9 @@ DEFAULT_PRESET = PRESET_7D
 # display time (recent-runs table). Range -12 .. +14 covers every
 # IANA-style fixed offset in use; default `+7` matches the
 # operator's home timezone.
-TZ_OFFSET_OPTIONS: tuple[int, ...] = tuple(range(-12, 15))
+_MIN_UTC_OFFSET = -12
+_MAX_UTC_OFFSET = 14
+TZ_OFFSET_OPTIONS: tuple[int, ...] = tuple(range(_MIN_UTC_OFFSET, _MAX_UTC_OFFSET + 1))
 DEFAULT_TZ_OFFSET_HOURS = 7
 
 # Parallel read fan-out for `main()`'s 14 independent widget reads.

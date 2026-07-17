@@ -179,6 +179,11 @@ def _row_value(row: Sequence[Any], index: int, default: Any = 0) -> Any:
     return row[index]
 
 
+def _cost_cell(row: Sequence[Any], index: int) -> float:
+    """Read a nullable USD cost column as a float, treating null/missing as zero."""
+    return float(_row_value(row, index) or 0)
+
+
 def _day_value(day: Any) -> Any:
     if isinstance(day, datetime):
         return day.date()
@@ -301,7 +306,7 @@ def _kpi_prev_summary(
         return Summary()
     row = rows[0]
     return Summary(
-        total_cost_usd=float(row[0] or 0.0),
+        total_cost_usd=_cost_cell(row, 0),
         total_input_tokens=int(row[1] or 0),
         total_output_tokens=int(row[2] or 0),
         total_cache_read_tokens=int(row[3] or 0),
@@ -315,7 +320,7 @@ def _time_series_from_row(row: Sequence[Any]) -> TimeSeriesPoint:
         day=_day_value(row[0]),
         event=row[1],
         count=int(row[2]),
-        cost_usd=float(_row_value(row, 3, 0.0) or 0.0),
+        cost_usd=_cost_cell(row, 3),
         input_tokens=int(_row_value(row, 4) or 0),
         output_tokens=int(_row_value(row, 5) or 0),
         cache_read_tokens=int(_row_value(row, 6) or 0),
@@ -426,12 +431,12 @@ def _stage_breakdown_from_row(row: Sequence[Any]) -> StageBreakdown:
         stage=row[0],
         count=int(row[1]),
         avg_duration_s=_float_or_none(row[2]),
-        total_cost_usd=float(_row_value(row, 3, 0.0) or 0.0),
+        total_cost_usd=_cost_cell(row, 3),
         total_input_tokens=int(_row_value(row, 4) or 0),
         total_output_tokens=int(_row_value(row, 5) or 0),
         runs=int(_row_value(row, 6) or 0),
-        cache_cost_usd=float(_row_value(row, 7, 0.0) or 0.0),
-        no_cache_cost_usd=float(_row_value(row, 8, 0.0) or 0.0),
+        cache_cost_usd=_cost_cell(row, 7),
+        no_cache_cost_usd=_cost_cell(row, 8),
     )
 
 
@@ -508,7 +513,7 @@ def _backend_efficiency_from_row(
         runs=int(row[1] or 0),
         failed=int(row[2] or 0),
         avg_duration_s=_float_or_none(row[3]),
-        total_cost_usd=float(row[4] or 0.0),
+        total_cost_usd=_cost_cell(row, 4),
         total_input_tokens=int(row[5] or 0),
         total_output_tokens=int(row[6] or 0),
         total_cache_read_tokens=int(_row_value(row, 7) or 0),
@@ -592,7 +597,7 @@ def _repo_breakdown_rows(
             issues=int(row[1] or 0),
             events=int(row[2] or 0),
             agent_exits=int(row[3] or 0),
-            total_cost_usd=float(row[4] or 0.0),
+            total_cost_usd=_cost_cell(row, 4),
         )
         for row in rows
     ]

@@ -311,6 +311,19 @@ def _redact_secrets(text: str) -> str:
     )
 
 
+_SECTION_SEP = "\n\n"
+_VERDICT_UNKNOWN = "unknown"
+_NO_BODY = "(no body)"
+_NO_PRIOR_COMMENTS = "(no prior comments)"
+# Cap on changed-file paths listed in a handoff message before eliding the rest.
+_MAX_FILES_SHOWN = 20
+
+
+def _as_blockquote(text: str) -> str:
+    """Render `text` as a Markdown blockquote (each line prefixed with `> `)."""
+    return "> " + text.replace("\n", "\n> ")
+
+
 def _format_stderr_diagnostics(
     agent_result: AgentResult, label: str = "Agent",
 ) -> str:
@@ -332,7 +345,7 @@ def _format_stderr_diagnostics(
         return ""
     if len(tail) > _STDERR_TAIL_BUDGET:
         tail = tail[-_STDERR_TAIL_BUDGET:]
-    quoted = "> " + tail.replace("\n", "\n> ")
+    quoted = _as_blockquote(tail)
     return (
         f"\n\n_{label} stderr (last 1KB):_\n\n{quoted}\n\n"
         f"_{label} exit code:_ {agent_result.exit_code}"
@@ -373,10 +386,10 @@ def _parse_review_verdict(last_message: str) -> Tuple[str, str]:
     the changes-requested case.
     """
     if not last_message:
-        return "unknown", ""
+        return _VERDICT_UNKNOWN, ""
     matches = list(_VERDICT_RE.finditer(last_message))
     if not matches:
-        return "unknown", last_message
+        return _VERDICT_UNKNOWN, last_message
     last = matches[-1]
     word = last.group(1).upper()
     verdict = "approved" if word == "APPROVED" else "changes_requested"
@@ -431,10 +444,10 @@ def _parse_documentation_verdict(last_message: str) -> Tuple[str, str]:
     here -- this parser only resolves the no-commit branch.
     """
     if not last_message:
-        return "unknown", ""
+        return _VERDICT_UNKNOWN, ""
     match = _DOC_VERDICT_RE.search(last_message)
     if match is None:
-        return "unknown", last_message
+        return _VERDICT_UNKNOWN, last_message
     body = last_message[: match.start()].rstrip()
     return "no_change", body
 
@@ -858,7 +871,7 @@ def _recent_comments_text(issue: Issue, max_chars: int = 4000) -> str:
         chunk = _prompt_comment_chunk(issue_comment)
         if chunk is not None:
             chunks.append(chunk)
-    text = "\n\n".join(chunks)
+    text = _SECTION_SEP.join(chunks)
     return text[-max_chars:] if len(text) > max_chars else text
 
 
@@ -868,8 +881,8 @@ def _build_implement_prompt(
     comments_text: str,
     specs: list[RepoSpec],
 ) -> str:
-    body = issue.body or "(no body)"
-    convo = comments_text or "(no prior comments)"
+    body = issue.body or _NO_BODY
+    convo = comments_text or _NO_PRIOR_COMMENTS
     tracked = _build_tracked_repos_context(spec, specs)
     tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
@@ -905,8 +918,8 @@ def _build_fresh_respawn_preamble(
     The caller appends the stage-specific instruction (fix feedback, drift,
     conflict, ...) after this block.
     """
-    body = issue.body or "(no body)"
-    convo = comments_text or "(no prior comments)"
+    body = issue.body or _NO_BODY
+    convo = comments_text or _NO_PRIOR_COMMENTS
     tracked = _build_tracked_repos_context(spec, specs)
     tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
@@ -932,8 +945,8 @@ def _build_review_prompt(
     specs: list[RepoSpec],
     dev_backend: str = "agent",
 ) -> str:
-    body = issue.body or "(no body)"
-    convo = comments_text or "(no prior comments)"
+    body = issue.body or _NO_BODY
+    convo = comments_text or _NO_PRIOR_COMMENTS
     base_ref = f"{spec.remote_name}/{spec.base_branch}"
     tracked = _build_tracked_repos_context(spec, specs)
     tracked_block = f"{tracked}\n\n" if tracked else ""
@@ -973,8 +986,8 @@ def _build_documentation_prompt(
     reviewer. No separate backend env var is introduced for this stage;
     the stage handler invokes the existing dev backend on the PR worktree.
     """
-    body = issue.body or "(no body)"
-    convo = comments_text or "(no prior comments)"
+    body = issue.body or _NO_BODY
+    convo = comments_text or _NO_PRIOR_COMMENTS
     base_ref = f"{spec.remote_name}/{spec.base_branch}"
     tracked = _build_tracked_repos_context(spec, specs)
     tracked_block = f"{tracked}\n\n" if tracked else ""
@@ -1016,7 +1029,7 @@ def _build_documentation_prompt(
 
 def _build_fix_prompt(review_feedback: str) -> str:
     feedback = review_feedback.strip() or "(reviewer left no detail)"
-    quoted = "> " + feedback.replace("\n", "\n> ")
+    quoted = _as_blockquote(feedback)
     return (
         "An automated reviewer requested changes on your implementation. Address each item "
         "below, then COMMIT the fix in your current worktree. Do NOT push -- the orchestrator "
@@ -1036,8 +1049,8 @@ def _build_decompose_prompt(
     comments_text: str,
     specs: list[RepoSpec],
 ) -> str:
-    body = issue.body or "(no body)"
-    convo = comments_text or "(no prior comments)"
+    body = issue.body or _NO_BODY
+    convo = comments_text or _NO_PRIOR_COMMENTS
     tracked = _build_tracked_repos_context(spec, specs)
     tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
@@ -1147,13 +1160,13 @@ def _build_single_decision_comment(manifest: dict) -> str:
     if notes:
         lines.append(f"**Implementation notes:**\n{notes}")
 
-    return "\n\n".join(lines)
+    return _SECTION_SEP.join(lines)
 
 
 def _build_conflict_resolution_prompt(
     base_ref: str, files: list[str]
 ) -> str:
-    shown = files[:20]
+    shown = files[:_MAX_FILES_SHOWN]
     files_md = "\n".join(f"- `{file_path}`" for file_path in shown)
     if len(files) > len(shown):
         files_md += f"\n- ... ({len(files) - len(shown)} more)"
@@ -1197,8 +1210,8 @@ def _build_question_prompt(
     framing defers write permission to the surrounding prompt, which
     grants none here).
     """
-    body = issue.body or "(no body)"
-    convo = comments_text or "(no prior comments)"
+    body = issue.body or _NO_BODY
+    convo = comments_text or _NO_PRIOR_COMMENTS
     tracked = _build_tracked_repos_context(spec, specs)
     tracked_block = f"{tracked}\n\n" if tracked else ""
     return (
@@ -1229,12 +1242,12 @@ def _build_question_followup_prompt(comments: list) -> str:
     contract so a multi-tick conversation cannot drift into the agent
     deciding to "just implement the fix".
     """
-    body = "\n\n".join(
+    body = _SECTION_SEP.join(
         f"@{comment.user.login if comment.user else 'user'}: "
         f"{comment.body or ''}"
         for comment in comments
     )
-    quoted = "> " + body.replace("\n", "\n> ")
+    quoted = _as_blockquote(body)
     return (
         "The human replied on the issue thread. Continue the discussion "
         "and answer their reply.\n\n"
@@ -1253,12 +1266,12 @@ def _build_pr_comment_followup(comments: list) -> str:
     short preamble is needed to frame the request -- otherwise a comment like
     "rename foo to bar" reads as freeform chatter without context.
     """
-    body = "\n\n".join(
+    body = _SECTION_SEP.join(
         f"@{comment.user.login if comment.user else 'user'}: "
         f"{comment.body or ''}"
         for comment in comments
     )
-    quoted = "> " + body.replace("\n", "\n> ")
+    quoted = _as_blockquote(body)
     return (
         "New comments arrived on the open PR for this issue. Address each item, "
         "then COMMIT the fix in your current worktree. Do NOT push -- the "

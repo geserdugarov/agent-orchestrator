@@ -142,6 +142,9 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
+# Case-insensitive values that switch an analytics path setting off.
+_DISABLED_SENTINELS = ("off", "disabled", "none")
+
 
 def _parse_log_path() -> Optional[Path]:
     """Resolve `ANALYTICS_LOG_PATH` from the environment.
@@ -156,7 +159,7 @@ def _parse_log_path() -> Optional[Path]:
     if raw is None:
         return config.LOG_DIR / "analytics.jsonl"
     stripped = raw.strip()
-    if not stripped or stripped.lower() in ("off", "disabled", "none"):
+    if not stripped or stripped.lower() in _DISABLED_SENTINELS:
         return None
     return Path(stripped)
 
@@ -184,7 +187,7 @@ def _parse_db_url() -> Optional[str]:
     together with parallel spellings.
     """
     raw = os.environ.get("ANALYTICS_DB_URL", "").strip()
-    if not raw or raw.lower() in ("off", "disabled", "none"):
+    if not raw or raw.lower() in _DISABLED_SENTINELS:
         return None
     return raw
 
@@ -222,7 +225,7 @@ def _parse_trajectory_log_path() -> Optional[Path]:
     if raw is None:
         return None
     stripped = raw.strip()
-    if not stripped or stripped.lower() in ("off", "disabled", "none"):
+    if not stripped or stripped.lower() in _DISABLED_SENTINELS:
         return None
     return Path(stripped)
 

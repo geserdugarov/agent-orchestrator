@@ -72,11 +72,19 @@ _BATCH_SIZE = 500
 # in `extras` JSONB so a JSONL record from a newer orchestrator version
 # never loses fields. Kept here (not in `orchestrator/analytics/`) because
 # it is a database-shape concern, not a record-build concern.
+# Required JSONL/DB record field names, shared by the promoted-column list, the
+# required-key guard, and the per-record extraction.
+_COL_TS = "ts"
+_COL_REPO = "repo"
+_COL_ISSUE = "issue"
+_COL_EVENT = "event"
+
+
 _PROMOTED_COLUMNS = (
-    "ts",
-    "repo",
-    "issue",
-    "event",
+    _COL_TS,
+    _COL_REPO,
+    _COL_ISSUE,
+    _COL_EVENT,
     "stage",
     "duration_s",
     "result",
@@ -105,7 +113,7 @@ _PROMOTED_COLUMNS = (
 # `json_adapter` to the sync if needed.
 _JSONB_COLUMNS = ("models", "extras")
 
-_REQUIRED_KEYS = ("ts", "repo", "issue", "event")
+_REQUIRED_KEYS = (_COL_TS, _COL_REPO, _COL_ISSUE, _COL_EVENT)
 
 # Name of the daily-rollup materialized view defined in
 # `analytics-db/init/01-schema.sql`. Kept here as a constant so the
@@ -209,10 +217,10 @@ def _issue_number(raw: Any) -> Optional[int]:
 def _required_columns(record: dict) -> Optional[dict[str, Any]]:
     if any(key not in record for key in _REQUIRED_KEYS):
         return None
-    timestamp = _parse_ts(record.get("ts"))
-    repo = _required_text(record.get("repo"))
-    issue = _issue_number(record.get("issue"))
-    event = _required_text(record.get("event"))
+    timestamp = _parse_ts(record.get(_COL_TS))
+    repo = _required_text(record.get(_COL_REPO))
+    issue = _issue_number(record.get(_COL_ISSUE))
+    event = _required_text(record.get(_COL_EVENT))
     if timestamp is None or repo is None or issue is None or event is None:
         return None
     return {

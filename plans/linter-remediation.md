@@ -42,7 +42,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
-| 4 | Remaining production style and structure | 1/5 | [ ] |
+| 4 | Remaining production style and structure | 2/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
@@ -286,9 +286,9 @@ Goal: clear the production findings that are not covered by the complexity stage
 
 ### Package 4.2 — Literals and repeated expressions
 
-- [ ] Resolve production `WPS204`, `WPS226`, `WPS358`, and `WPS432` findings.
-- [ ] Create constants only for real concepts such as statuses, limits, timeouts, field names, and protocol values.
-- [ ] Keep constants close to their consumers unless they form a shared public contract.
+- [x] Resolve production `WPS204`, `WPS226`, `WPS358`, and `WPS432` findings.
+- [x] Create constants only for real concepts such as statuses, limits, timeouts, field names, and protocol values.
+- [x] Keep constants close to their consumers unless they form a shared public contract.
 
 ### Package 4.3 — Strings and formatting
 
@@ -642,6 +642,120 @@ considered.
   `tests/test_trajectory_dashboard.py`.
 - Reviewed: [x]
 
+### Float-zero numeric defaults and rate floors
+
+- File and symbols: `orchestrator/analytics/read_models.py` (the `*_cost_usd` frozen-dataclass field
+  defaults and the two `skill_trigger_rate` `else 0.0` returns), `orchestrator/analytics/sync.py`
+  (`duration_s` field default), `orchestrator/dashboard_charts.py` (`_empty_token_bucket` band seeds),
+  `orchestrator/dashboard.py` (`_topbar_html(spend_in_range=0.0)`, the `[0.0, 0.0]` daily
+  cost/token accumulator, and the rework-share `else 0.0`), `orchestrator/dashboard_html.py`
+  (`_relative_width_pct` / `_safe_ratio` zero returns), `orchestrator/dashboard_kpis.py` (the
+  success-rate `else 0.0`), and `orchestrator/trajectory_reader.py` (`total_cost_usd` default).
+- Rule: `WPS358`
+- Reason: Each is a genuine float zero -- a typed `float` field/keyword default, an accumulator seed,
+  or a rate/ratio floor. The literal cannot be dropped without either `float(0)` / `float()` (a
+  linter dodge that reads worse than `0.0`) or a `_ZERO = 0.0` constant whose own definition
+  re-triggers `WPS358`. Every place a value is coerced was rewritten to `float(x or 0)`, so only the
+  irreducible zeros remain.
+- Protected by: `tests/test_analytics_read_*.py`, `tests/test_analytics_read_cost_cell.py`,
+  `tests/test_dashboard*.py`, and `tests/test_trajectory_reader.py`.
+- Reviewed: [ ]
+
+### Terminal state writes and inherent per-branch repetition
+
+- File and symbols: `gh.write_pinned_state(issue, state)` in `orchestrator/stages/decomposition.py`,
+  `orchestrator/stages/implementing.py`, and `orchestrator/stages/validating.py`;
+  `context.gh.write_pinned_state(context.issue, context.state)` and
+  `context.state.set(_PENDING_PUSH_SHA, None)` in `orchestrator/base_sync.py`;
+  `_wf._resolve_branch_name(state, spec, issue.number)` in `orchestrator/stages/implementing.py`;
+  `st.container(border=True)` in `orchestrator/dashboard.py`; `str(wt)` in
+  `orchestrator/worktree_lifecycle.py`; and `row[0]` / `row[1]` in
+  `orchestrator/analytics/read_dashboard.py` / `orchestrator/analytics/read_rollup.py`.
+- Rule: `WPS204`
+- Reason: These are void terminal calls (persist the pinned state, open a Streamlit container) or
+  trivial value expressions that each independent branch -- or each single-column row mapper --
+  issues exactly once. Wrapping a repeated call in a helper produces the SAME repeated call
+  expression and still trips `WPS204`; there is no single scope to hoist a `row[0]` / `str(wt)`
+  intermediate into. The stateless-persist design (write pinned state before every branch return) is
+  the source of the repetition.
+- Protected by: the stage-handler suites (`tests/test_workflow_<stage>.py` family),
+  `tests/test_workflow_base_sync_unit.py`, `tests/test_analytics_read_*.py`, and the dashboard tests.
+- Reviewed: [ ]
+
+### Positional row/column indices
+
+- File and symbols: `row[11]`..`row[14]` in `orchestrator/analytics/read_raw.py` and `row[11]` in
+  `orchestrator/analytics/read_dashboard.py`.
+- Rule: `WPS432`
+- Reason: These are DB column indices that position-match the `SELECT` list of the query feeding each
+  row mapper. wemake flags only the indices above its 0--10 allowlist, so naming a lone index in an
+  otherwise-literal positional sequence (`row[8]`, `row[9]`, `row[10]`, `row[11]`, ...) fragments the
+  column layout instead of clarifying it.
+- Protected by: `tests/test_analytics_read_tables.py` and `tests/test_analytics_read_breakdowns.py`.
+- Reviewed: [ ]
+
+### Axis-step ladder and one-off chart heights
+
+- File and symbols: `orchestrator/dashboard_charts.py`: the `2.5` rung of the nice-number tick ladder
+  in `_nice_axis_max`, and the one-off empty-state heights `330` and `150`.
+- Rule: `WPS432`
+- Reason: `2.5` is one step of the standard `1 / 2 / 2.5 / 5 / 10` "nice tick" ladder, whose literal
+  rungs read as the algorithm; wemake flags only `2.5` (the rest fall inside its allowlist). `330` and
+  `150` are empty-state chart heights used once each, where a named constant used a single time adds
+  no clarity. The reused default height was named `_DEFAULT_CHART_HEIGHT`.
+- Protected by: `tests/test_dashboard_charts.py`.
+- Reviewed: [ ]
+
+### Git CLI subcommand and flag tokens
+
+- File and symbols: the `-c` config-override flag in `orchestrator/git_plumbing.py` and the
+  `worktree` / `add` / `remove` / `--force` / `rev-parse` / `--verify` tokens in
+  `orchestrator/worktree_lifecycle.py`.
+- Rule: `WPS226`
+- Reason: These are git argument tokens assembled into command-argument lists. A literal
+  `["git", "worktree", "remove", "--force", str(wt)]` reads as the exact `git worktree remove --force`
+  invocation; a constant per token (or a `_C = "-c"`) obscures the command without adding meaning. The
+  `git` executable name and the `fetch` operation, which do carry meaning, were named.
+- Protected by: `tests/test_workflow_*worktree*.py` and the conflict/base-sync git suites.
+- Reviewed: [ ]
+
+### Plotly layout and trace dict keys
+
+- File and symbols: `orchestrator/dashboard_charts.py`: the plotly configuration keys `height`,
+  `paper`, `color`, `size`, `margin`, `text`, `yaxis`, and the single-character margin/size keys `t`,
+  `h`, `y`.
+- Rule: `WPS226`
+- Reason: These are plotly's own layout/trace dictionary vocabulary. Naming them -- especially the
+  single-character `t` / `h` / `y` -- forces a reader to dereference a constant to recover the plotly
+  attribute it stands for, which is less clear than the literal API key.
+- Protected by: `tests/test_dashboard_charts.py`.
+- Reviewed: [ ]
+
+### Dashboard KPI-tile and stack-mode dict keys
+
+- File and symbols: `orchestrator/dashboard.py`: the KPI-tile dict keys `label`, `value`, `delta`,
+  `sub`, `spark`; the `summary` read-result key; and the `type` / `backend` stack-mode option values.
+- Rule: `WPS226`
+- Reason: The KPI-tile keys are the contract between the KPI builder in `dashboard.py` and the HTML
+  renderer in `dashboard_html.py`; they read clearest as the same literal keys at both ends, and
+  `value` additionally cannot become a constant without tripping `WPS110` (a blacklisted generic
+  name). `type` / `backend` are the two stack-mode radio option values.
+- Protected by: `tests/test_dashboard.py`.
+- Reviewed: [ ]
+
+### Categorical chart palette hues
+
+- File and symbols: `orchestrator/dashboard_theme.py`: the hex hues `#e0913a`, `#d9534a`, and
+  `#5b6cf0`.
+- Rule: `WPS226`
+- Reason: These three hues are reused across independent categorical color maps (token bands,
+  backends, review-round buckets, workflow statuses, labels). The hex at each map entry documents the
+  exact rendered color; a shared constant would either be a meaningless hue name or -- because two of
+  the hues coincide with the semantic `WARNING` / `DANGER` delta colors -- wrongly couple unrelated
+  concerns.
+- Protected by: `tests/test_dashboard_theme.py` and `tests/test_dashboard_charts.py`.
+- Reviewed: [ ]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -678,6 +792,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-16 | 3.6/in_review | Complete | Target WPS; 68 focused; full gate | Not committed | `conflicts.py` |
 | 2026-07-16 | 3.6/conflicts | Complete | Target WPS; 70 focused; full gate | Not committed | Start Package 4.1 |
 | 2026-07-16 | 4.1 | Complete | Target WPS; 24 remainders; full gate 2118 passed | Not committed | Start Package 4.2 |
+| 2026-07-17 | 4.2 | Complete | Target WPS; 78 remainders; full gate 2120 passed | Not committed | Start Package 4.3 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -787,3 +902,25 @@ All 24 documented `WPS110` / `WPS111` / `WPS114` remainders are public/keyword o
 accepted-remainder register. No public contract,
 pinned-state key, watermark, comment marker, event shape, or compatibility re-export changed; the full gate passed with
 2,118 tests and 3 live-Postgres skips (the optional dashboard group installed so the plotly chart tests ran).
+
+Package 4.2 resolved the production literal and repetition findings for `WPS204`, `WPS226`, `WPS358`, and `WPS432`,
+cutting the four-rule production count from 318 to 78 documented remainders. `WPS226` was cleared by naming genuine
+repeated concepts as module-local constants that hold the exact same string -- pinned-state keys and park-reason /
+handler-outcome values in the stage handlers and `base_sync`, GitHub check/review/issue-state values in `github.py`,
+the Claude/Codex usage-JSONL protocol field names in `usage.py`, the record field names in `analytics/sync.py`, and
+the dotenv/backend tokens in `config.py` -- plus two small helper extractions (`_as_blockquote` for the repeated
+`"> " + text.replace(...)` blockquote, shared by `workflow_messages` and `implementing`). `WPS358` was cleared
+wherever a value is coerced by rewriting `float(x or 0.0)` to the behavior-identical `float(x or 0)` (and a
+`_cost_cell` helper for the repeated `float(_row_value(...) or 0.0)` DB-column reads in the analytics readers, with a
+focused equivalence test), plus `max(..., default=0)` clamps and `== 0` comparisons. `WPS432` was cleared by naming
+domain values -- HTTP status codes, the signal-exit base, unit scales (`_MILLION` / `_BILLION`), SHA/snippet lengths,
+the hex parse base, chart heights, and the UTC-offset range bounds. The 78 retained findings are documented in the
+accepted-remainder register in eight grouped entries: irreducible float zeros (typed defaults, accumulator seeds, and
+rate floors), terminal per-branch state writes and single-use value expressions (`WPS204`, where a helper would be the
+same repeated call), positional DB row/column indices, the nice-number axis ladder and one-off empty-state heights,
+git CLI argument tokens, plotly layout dict keys, the KPI-tile / stack-mode dict keys (`value` also blocks on
+`WPS110`), and the categorical chart palette hues. No public contract, pinned-state key, watermark, comment marker,
+event shape, or compatibility re-export changed, and no new WPS category was introduced in any touched file; the full
+gate passed with 2,120 tests and 3 live-Postgres skips (the `test_workflow_list_pollable` default-tick assertion fails
+only when `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` is exported in the shell -- an environment artifact reproducible on
+`origin/main`, not a diff regression).

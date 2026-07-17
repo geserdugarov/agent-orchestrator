@@ -80,6 +80,15 @@ MONO_FONT_FAMILY = (
 FONT_SIZE = 13
 TITLE_FONT_SIZE = 15
 
+# Plotly layout dict key repeated across axis/legend/font configs.
+_COLOR_KEY = "color"
+# Chart top-margin (px): taller when a title is drawn, compact when not.
+_MARGIN_TOP = 32
+_MARGIN_TOP_COMPACT = 16
+# Decimal scales the compact money/token formatters divide by.
+_MILLION = 1_000_000
+_BILLION = 1_000_000_000
+
 # Token-type segments for the hero spend & token usage chart. The
 # three hues are tuned to read against the cool gray page background
 # and stack in the order Input / Output / Cache from bottom to top.
@@ -223,9 +232,9 @@ def base_layout(title: Optional[str] = None) -> dict[str, Any]:
         "font": {
             "family": FONT_FAMILY,
             "size": FONT_SIZE,
-            "color": TEXT,
+            _COLOR_KEY: TEXT,
         },
-        "margin": {"l": 56, "r": 24, "t": 32 if title else 16, "b": 40},
+        "margin": {"l": 56, "r": 24, "t": _MARGIN_TOP if title else _MARGIN_TOP_COMPACT, "b": 40},
         "legend": {
             "bgcolor": CARD_BG,
             "bordercolor": GRID,
@@ -235,13 +244,13 @@ def base_layout(title: Optional[str] = None) -> dict[str, Any]:
             "gridcolor": GRID,
             "linecolor": GRID,
             "zerolinecolor": GRID,
-            "tickfont": {"color": MUTED_TEXT},
+            "tickfont": {_COLOR_KEY: MUTED_TEXT},
         },
         "yaxis": {
             "gridcolor": GRID,
             "linecolor": GRID,
             "zerolinecolor": GRID,
-            "tickfont": {"color": MUTED_TEXT},
+            "tickfont": {_COLOR_KEY: MUTED_TEXT},
         },
     }
     if title:
@@ -250,7 +259,7 @@ def base_layout(title: Optional[str] = None) -> dict[str, Any]:
             "font": {
                 "family": FONT_FAMILY,
                 "size": TITLE_FONT_SIZE,
-                "color": TEXT,
+                _COLOR_KEY: TEXT,
             },
         }
     return layout
@@ -655,9 +664,9 @@ def fmt_money(value: float) -> str:
     """Compact dollar formatter matching the standalone mock (`$1.2K`,
     `$3.4M`). Used by KPIs, axis tick labels, and per-bar value labels.
     """
-    dollars = float(value or 0.0)
-    if dollars >= 1_000_000:
-        return f"${dollars / 1_000_000:.2f}M"
+    dollars = float(value or 0)
+    if dollars >= _MILLION:
+        return f"${dollars / _MILLION:.2f}M"
     if dollars >= 1_000:
         return f"${dollars / 1_000:.1f}K"
     if dollars < 10:
@@ -667,18 +676,18 @@ def fmt_money(value: float) -> str:
 
 def fmt_money_exact(value: float) -> str:
     """Whole-dollar formatter with thousands separators (`$12,345`)."""
-    return "$" + f"{round(float(value or 0.0)):,}"
+    return "$" + f"{round(float(value or 0)):,}"
 
 
 def fmt_tokens(value: float) -> str:
     """Compact token-count formatter (`1.2K`, `3.4M`, `1.2B`)."""
-    tokens = float(value or 0.0)
-    if tokens >= 1_000_000_000:
-        decimals = 0 if tokens >= 10_000_000_000 else 2
-        return f"{tokens / 1_000_000_000:.{decimals}f}B"
-    if tokens >= 1_000_000:
-        decimals = 0 if tokens >= 10_000_000 else 1
-        return f"{tokens / 1_000_000:.{decimals}f}M"
+    tokens = float(value or 0)
+    if tokens >= _BILLION:
+        decimals = 0 if tokens >= 10 * _BILLION else 2
+        return f"{tokens / _BILLION:.{decimals}f}B"
+    if tokens >= _MILLION:
+        decimals = 0 if tokens >= 10 * _MILLION else 1
+        return f"{tokens / _MILLION:.{decimals}f}M"
     if tokens >= 1_000:
         return f"{tokens / 1_000:.0f}K"
     return str(int(round(tokens)))
@@ -686,4 +695,4 @@ def fmt_tokens(value: float) -> str:
 
 def fmt_num(value: float) -> str:
     """Integer with thousands separators."""
-    return f"{int(round(float(value or 0.0))):,}"
+    return f"{int(round(float(value or 0))):,}"

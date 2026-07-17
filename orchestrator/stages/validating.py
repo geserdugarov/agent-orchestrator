@@ -164,8 +164,26 @@ def _parse_add_review_rounds(
 #
 # Reasons that need human content (a question, a dirty worktree, a verdict
 # the agent could not produce) stay parked until a comment arrives.
+# Pinned-state keys, park-reason values, and handler-outcome tokens this stage
+# reads and writes.
+_PARK_REASON = "park_reason"
+_PRE_DEV_FIX_SHA = "pre_dev_fix_sha"
+_REVIEW_ROUND = "review_round"
+_REASON_PUSH_FAILED = "push_failed"
+_REASON_AGENT_TIMEOUT = "agent_timeout"
+_REASON_REVIEWER_TIMEOUT = "reviewer_timeout"
+_REASON_REVIEWER_FAILED = "reviewer_failed"
+_REASON_REVIEW_CAP = "review_cap"
+_OUTCOME_PARKED = "parked"
+_OUTCOME_PUSHED = "pushed"
+_OUTCOME_STUCK = "stuck"
+_OUTCOME_RETURN = "return"
+# Characters of a commit SHA shown in operator-facing verify diagnostics.
+_SHORT_SHA_LEN = 12
+
+
 _VALIDATING_TRANSIENT_PARK_REASONS = frozenset(
-    {"push_failed", "agent_timeout", "reviewer_timeout", "reviewer_failed"}
+    {_REASON_PUSH_FAILED, _REASON_AGENT_TIMEOUT, _REASON_REVIEWER_TIMEOUT, _REASON_REVIEWER_FAILED}
 )
 
 
@@ -211,10 +229,10 @@ def _park_dev_fix_timeout(
         gh, issue, state,
         f"{config.HITL_MENTIONS} agent timed out after {config.AGENT_TIMEOUT}s, "
         "manual intervention needed.",
-        reason="agent_timeout",
+        reason=_REASON_AGENT_TIMEOUT,
     )
-    state.set("park_reason", "agent_timeout")
-    state.set("pre_dev_fix_sha", before_sha or "")
+    state.set(_PARK_REASON, _REASON_AGENT_TIMEOUT)
+    state.set(_PRE_DEV_FIX_SHA, before_sha or "")
 
 
 def _dev_fix_is_publishable(
@@ -252,9 +270,9 @@ def _publish_dev_fix(
     _wf._park_awaiting_human(
         gh, issue, state,
         f"{config.HITL_MENTIONS} git push failed; see orchestrator logs.",
-        reason="push_failed",
+        reason=_REASON_PUSH_FAILED,
     )
-    state.set("park_reason", "push_failed")
+    state.set(_PARK_REASON, _REASON_PUSH_FAILED)
     return False
 
 
@@ -330,10 +348,10 @@ def _dispose_user_content_change_result(
     from orchestrator import workflow as _wf
 
     if run.agent_result.interrupted:
-        return "parked"
+        return _OUTCOME_PARKED
     if run.agent_result.timed_out:
         _park_dev_fix_timeout(gh, issue, state, run.before_sha)
-        return "parked"
+        return _OUTCOME_PARKED
     if not _dev_fix_is_publishable(spec, issue, state, run):
         ack_reason = _wf._drift_ack_reason(
             run.agent_result.last_message or "",
@@ -342,10 +360,10 @@ def _dispose_user_content_change_result(
             _post_drift_ack(gh, issue, state, ack_reason)
             return "ack"
         _wf._on_question(gh, issue, state, run.agent_result)
-        return "parked"
+        return _OUTCOME_PARKED
     return (
-        "pushed" if _publish_dev_fix(gh, spec, issue, state, run)
-        else "parked"
+        _OUTCOME_PUSHED if _publish_dev_fix(gh, spec, issue, state, run)
+        else _OUTCOME_PARKED
     )
 
 
@@ -398,8 +416,8 @@ def _post_user_content_change_result(
 
 
 def _bump_review_round(state: PinnedState) -> None:
-    current_round = int(state.get("review_round") or 0)
-    state.set("review_round", current_round + 1)
+    current_round = int(state.get(_REVIEW_ROUND) or 0)
+    state.set(_REVIEW_ROUND, current_round + 1)
 
 
 def _recover_failed_push(
@@ -409,12 +427,12 @@ def _recover_failed_push(
 
     worktree = _wf._worktree_path(spec, issue.number)
     if not worktree.exists():
-        return "stuck"
+        return _OUTCOME_STUCK
     branch = _wf._resolve_branch_name(state, spec, issue.number)
     if not _wf._push_branch(spec, worktree, branch):
-        return "stuck"
+        return _OUTCOME_STUCK
     _bump_review_round(state)
-    return "pushed"
+    return _OUTCOME_PUSHED
 
 
 def _recover_timed_out_fix(
@@ -424,20 +442,20 @@ def _recover_timed_out_fix(
 
     worktree = _wf._worktree_path(spec, issue.number)
     if not worktree.exists() or _wf._worktree_dirty_files(worktree):
-        return "stuck"
-    before_sha = state.get("pre_dev_fix_sha")
+        return _OUTCOME_STUCK
+    before_sha = state.get(_PRE_DEV_FIX_SHA)
     if not isinstance(before_sha, str):
-        return "stuck"
+        return _OUTCOME_STUCK
     current_sha = _wf._head_sha(worktree)
     if not current_sha or current_sha == before_sha:
-        state.set("pre_dev_fix_sha", None)
+        state.set(_PRE_DEV_FIX_SHA, None)
         return "cleared"
     branch = _wf._resolve_branch_name(state, spec, issue.number)
     if not _wf._push_branch(spec, worktree, branch):
-        return "stuck"
-    state.set("pre_dev_fix_sha", None)
+        return _OUTCOME_STUCK
+    state.set(_PRE_DEV_FIX_SHA, None)
     _bump_review_round(state)
-    return "pushed"
+    return _OUTCOME_PUSHED
 
 
 def _try_recover_validating_transient_park(
@@ -469,14 +487,14 @@ def _try_recover_validating_transient_park(
     Callers should not mutate the round themselves; this is the only
     write path while the park flags are still set.
     """
-    park_reason = state.get("park_reason")
-    if park_reason == "push_failed":
+    park_reason = state.get(_PARK_REASON)
+    if park_reason == _REASON_PUSH_FAILED:
         return _recover_failed_push(spec, issue, state)
-    if park_reason in ("reviewer_timeout", "reviewer_failed"):
+    if park_reason in (_REASON_REVIEWER_TIMEOUT, _REASON_REVIEWER_FAILED):
         return "cleared"
-    if park_reason == "agent_timeout":
+    if park_reason == _REASON_AGENT_TIMEOUT:
         return _recover_timed_out_fix(spec, issue, state)
-    return "stuck"
+    return _OUTCOME_STUCK
 
 
 def _watermark_comment_pairs(
@@ -685,8 +703,8 @@ def _verify_failure_detail(verify) -> str:
             files += f", … (+{len(verify.dirty_files) - 10} more)"
         return f"`{verify.command}` left the worktree dirty: {files}"
     if verify.status == "head_changed":
-        before = (verify.head_before or "")[:12] or "(no HEAD)"
-        after = (verify.head_after or "")[:12] or "(no HEAD)"
+        before = (verify.head_before or "")[:_SHORT_SHA_LEN] or "(no HEAD)"
+        after = (verify.head_after or "")[:_SHORT_SHA_LEN] or "(no HEAD)"
         return (
             f"`{verify.command}` moved HEAD ({before} -> {after}); "
             "verify commands must not commit"
@@ -732,7 +750,7 @@ def _park_verify_failure(
         message += f"\n\n_Verify output (tail):_\n\n{quoted}"
 
     _wf._park_awaiting_human(gh, issue, state, message, reason=reason)
-    state.set("park_reason", reason)
+    state.set(_PARK_REASON, reason)
 
 
 def _ratchet_watermark(prev, seeded):
@@ -809,8 +827,8 @@ def _run_validating_drift(
 def _defer_validating_drift(state: PinnedState) -> bool:
     return bool(
         state.get("awaiting_human")
-        and state.get("park_reason")
-        in ("reviewer_timeout", "reviewer_failed", "review_cap")
+        and state.get(_PARK_REASON)
+        in (_REASON_REVIEWER_TIMEOUT, _REASON_REVIEWER_FAILED, _REASON_REVIEW_CAP)
     )
 
 
@@ -832,7 +850,7 @@ def _finish_validating_drift(
     )
     if run.agent_result.interrupted:
         return
-    if outcome == "pushed":
+    if outcome == _OUTCOME_PUSHED:
         _bump_review_round(state)
     gh.write_pinned_state(issue, state)
 
@@ -922,7 +940,7 @@ class _AwaitingValidation:
             spec,
             issue,
             state,
-            state.get("park_reason"),
+            state.get(_PARK_REASON),
             filter_trusted(
                 gh.comments_after(issue, state.get("last_action_comment_id")),
             ),
@@ -930,7 +948,7 @@ class _AwaitingValidation:
 
     def clear_park(self) -> None:
         self.state.set("awaiting_human", False)
-        self.state.set("park_reason", None)
+        self.state.set(_PARK_REASON, None)
 
     def consume_comments(self) -> None:
         self.state.set(
@@ -944,13 +962,13 @@ def _review_cap_awaiting_action(
 ) -> Optional[str]:
     from orchestrator import workflow as _wf
 
-    if context.park_reason != "review_cap":
+    if context.park_reason != _REASON_REVIEW_CAP:
         return None
     if not context.comments:
-        return "return"
+        return _OUTCOME_RETURN
     command = _parse_add_review_rounds(context.comments)
     if command is None:
-        return "return"
+        return _OUTCOME_RETURN
     context.consume_comments()
     additional_rounds, error = command
     if error is not None:
@@ -961,9 +979,9 @@ def _review_cap_awaiting_action(
             f":warning: `/orchestrator add-review-rounds` ignored: {error}.",
         )
         context.gh.write_pinned_state(context.issue, context.state)
-        return "return"
+        return _OUTCOME_RETURN
     new_round = max(0, config.MAX_REVIEW_ROUNDS - additional_rounds)
-    context.state.set("review_round", new_round)
+    context.state.set(_REVIEW_ROUND, new_round)
     context.clear_park()
     _wf._post_issue_comment(
         context.gh,
@@ -988,17 +1006,17 @@ def _transient_awaiting_action(
     recovery = _try_recover_validating_transient_park(
         context.spec, context.issue, context.state,
     )
-    if recovery != "stuck":
+    if recovery != _OUTCOME_STUCK:
         context.clear_park()
         context.gh.write_pinned_state(context.issue, context.state)
-    return "return"
+    return _OUTCOME_RETURN
 
 
 def _reviewer_retry_awaiting_action(
     context: _AwaitingValidation,
 ) -> Optional[str]:
     if not context.comments or context.park_reason not in (
-        "reviewer_timeout", "reviewer_failed",
+        _REASON_REVIEWER_TIMEOUT, _REASON_REVIEWER_FAILED,
     ):
         return None
     context.consume_comments()
@@ -1070,13 +1088,13 @@ def _resume_validating_awaiting_dev(context: _AwaitingValidation) -> str:
     if continue_action == "refuse":
         _wf._refuse_parked_continue(context.gh, context.issue, context.state)
         context.gh.write_pinned_state(context.issue, context.state)
-        return "return"
+        return _OUTCOME_RETURN
     attempt = _run_awaiting_dev(context, continue_action)
     if attempt is None:
-        return "return"
+        return _OUTCOME_RETURN
     context.state.set("last_agent_action_at", _wf._now_iso())
     if attempt.paused:
-        return "return"
+        return _OUTCOME_RETURN
     pushed = _handle_dev_fix_result(
         context.gh,
         context.spec,
@@ -1089,10 +1107,10 @@ def _resume_validating_awaiting_dev(context: _AwaitingValidation) -> str:
     if not pushed:
         if not attempt.run.agent_result.interrupted:
             context.gh.write_pinned_state(context.issue, context.state)
-        return "return"
+        return _OUTCOME_RETURN
     _bump_review_round(context.state)
     context.gh.write_pinned_state(context.issue, context.state)
-    return "return"
+    return _OUTCOME_RETURN
 
 
 def _handle_validating_awaiting_human(
@@ -1134,7 +1152,7 @@ def _handle_validating_awaiting_human(
     # input it has no context for and silently drop the retry
     # intent.
     if context.park_reason in _wf._AUTO_REBASE_PARK_REASONS:
-        return "return"
+        return _OUTCOME_RETURN
     # `/orchestrator add-review-rounds N` operator command. Only honored
     # on a `review_cap` park: the cap has consumed every review round and
     # plain resuming the dev would re-park on the same cap next tick (the
@@ -1392,10 +1410,10 @@ def _park_reviewer_no_verdict(
         f"{config.HITL_MENTIONS} reviewer did not emit a VERDICT line; "
         f"manual adjudication needed.\n\n_Last reviewer message:_\n\n"
         f"{quoted}{diag}",
-        reason="reviewer_failed" if silent_crash else "reviewer_no_verdict",
+        reason=_REASON_REVIEWER_FAILED if silent_crash else "reviewer_no_verdict",
     )
     if silent_crash:
-        state.set("park_reason", "reviewer_failed")
+        state.set(_PARK_REASON, _REASON_REVIEWER_FAILED)
     _wf.log.warning(
         "issue=#%s reviewer emitted no VERDICT; exit_code=%d "
         "timed_out=%s stderr_tail=%r",
@@ -1469,7 +1487,7 @@ def _finish_requested_fix(
         if not attempt.run.agent_result.interrupted:
             context.gh.write_pinned_state(context.issue, context.state)
         return
-    context.state.set("review_round", context.decision.run.round_n + 1)
+    context.state.set(_REVIEW_ROUND, context.decision.run.round_n + 1)
     context.state.set("pending_fix_reviewer_comment_id", None)
     context.gh.set_workflow_label(context.issue, WorkflowLabel.VALIDATING)
     context.gh.write_pinned_state(context.issue, context.state)
@@ -1530,12 +1548,12 @@ def _park_review_cap(
         "more rounds without losing the PR/worktree, reply with "
         "`/orchestrator add-review-rounds N` "
         "(N = additional rounds, e.g. `1`).",
-        reason="review_cap",
+        reason=_REASON_REVIEW_CAP,
     )
     # `_park_awaiting_human` clears `park_reason` by contract; the
     # awaiting-human branch needs this transient reason to route the
     # operator's `/orchestrator add-review-rounds` command.
-    state.set("park_reason", "review_cap")
+    state.set(_PARK_REASON, _REASON_REVIEW_CAP)
     gh.write_pinned_state(issue, state)
 
 
@@ -1548,7 +1566,7 @@ def _run_reviewer_round(
 ) -> Optional[_ReviewerRun]:
     from orchestrator import workflow as _wf
 
-    round_n = int(state.get("review_round") or 0)
+    round_n = int(state.get(_REVIEW_ROUND) or 0)
     if round_n >= config.MAX_REVIEW_ROUNDS:
         _park_review_cap(gh, issue, state, round_n)
         return None
@@ -1631,12 +1649,12 @@ def _dispatch_reviewer_result(
             gh, issue, state,
             f"{config.HITL_MENTIONS} reviewer timed out after "
             f"{config.REVIEW_TIMEOUT}s; manual intervention needed.",
-            reason="reviewer_timeout",
+            reason=_REASON_REVIEWER_TIMEOUT,
         )
         # Tag as transient so the next tick re-spawns the reviewer instead
         # of waiting for a human comment that the timeout itself does not
         # produce.
-        state.set("park_reason", "reviewer_timeout")
+        state.set(_PARK_REASON, _REASON_REVIEWER_TIMEOUT)
         gh.write_pinned_state(issue, state)
         return
 
@@ -1700,7 +1718,7 @@ def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     if state.get("awaiting_human"):
         if _handle_validating_awaiting_human(
             gh, spec, issue, state
-        ) == "return":
+        ) == _OUTCOME_RETURN:
             return
 
     reviewer_run = _run_reviewer_round(gh, spec, issue, state, pr_number)

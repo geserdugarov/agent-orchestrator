@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -56,6 +57,11 @@ log = logging.getLogger(__name__)
 # anything else is replaced with `_`. A leading `.` is also escaped so the
 # per-repo subdir is never a hidden directory.
 _SLUG_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]")
+# Character every filesystem-unsafe slug byte (and an empty slug) collapses
+# to when building a worktree path segment.
+_SAFE_CHAR = "_"
+# Hex length of the short SHA-1 digest used for lossy ref rewrites.
+_SLUG_DIGEST_LEN = 16
 
 
 def _sanitize_slug(slug: str) -> str:
@@ -67,11 +73,11 @@ def _sanitize_slug(slug: str) -> str:
     is never a dotfile-hidden directory. An empty/all-stripped input
     falls back to `_` rather than collapsing into the bare WORKTREES_DIR.
     """
-    cleaned = _SLUG_SAFE_RE.sub("_", (slug or "").replace("/", "__"))
+    cleaned = _SLUG_SAFE_RE.sub(_SAFE_CHAR, (slug or "").replace("/", "__"))
     if not cleaned:
-        return "_"
+        return _SAFE_CHAR
     if cleaned.startswith("."):
-        cleaned = "_" + cleaned
+        cleaned = _SAFE_CHAR + cleaned
     return cleaned
 
 
@@ -79,7 +85,7 @@ def _slug_digest(slug: str) -> str:
     """Return the short content digest used for lossy ref rewrites."""
     encoded_slug = (slug or "").encode("utf-8")
     slug_hash = hashlib.sha1(encoded_slug)
-    return slug_hash.hexdigest()[:16]
+    return slug_hash.hexdigest()[:_SLUG_DIGEST_LEN]
 
 
 def _sanitize_branch_segment(slug: str) -> str:
@@ -130,22 +136,22 @@ def _sanitize_branch_segment(slug: str) -> str:
     # `..` anywhere is forbidden. Collapse any run of dots to a single
     # `_` so a segment cannot smuggle the sequence past the trailing-
     # dot / `.lock` checks below.
-    sanitized_segment = re.sub(r"\.{2,}", "_", sanitized_segment)
+    sanitized_segment = re.sub(r"\.{2,}", _SAFE_CHAR, sanitized_segment)
     # `.lock` suffix on a component is reserved by git.
     if sanitized_segment.endswith(".lock"):
         sanitized_segment = sanitized_segment[: -len(".lock")] + "_lock"
     # Trailing `.` on a component is rejected. Loop so any
     # follow-on dot revealed by the trim is also handled.
     while sanitized_segment.endswith("."):
-        sanitized_segment = sanitized_segment[:-1] + "_"
+        sanitized_segment = sanitized_segment[:-1] + _SAFE_CHAR
     # Defensive fallbacks: the substitutions above could in principle
     # produce an empty / leading-dot string (e.g. an input of `.` or
     # `..` collapses far enough that the leading-dot escape from
     # `_sanitize_slug` no longer covers the result).
     if not sanitized_segment:
-        sanitized_segment = "_"
+        sanitized_segment = _SAFE_CHAR
     if sanitized_segment.startswith("."):
-        sanitized_segment = "_" + sanitized_segment
+        sanitized_segment = _SAFE_CHAR + sanitized_segment
     if sanitized_segment == sanitized_path:
         return sanitized_segment
     # Ref-only rewrites changed the filesystem form. Append a
@@ -386,6 +392,11 @@ def _ensure_pr_worktree(
         return wt
 
 
+def _commit_count_from_stdout(count_result: subprocess.CompletedProcess) -> int:
+    """Parse a `git rev-list --count` result, treating empty output as zero."""
+    return int((count_result.stdout or "0").strip() or "0")
+
+
 def _has_new_commits(spec: RepoSpec, worktree: Path) -> bool:
     commit_count_result = _git(
         "rev-list", "--count",
@@ -394,7 +405,7 @@ def _has_new_commits(spec: RepoSpec, worktree: Path) -> bool:
     )
     if commit_count_result.returncode != 0:
         return False
-    return int((commit_count_result.stdout or "0").strip() or "0") > 0
+    return _commit_count_from_stdout(commit_count_result) > 0
 
 
 # The decomposer needs a working directory to run `git ls-files` / `wc -l`
@@ -562,7 +573,7 @@ def _branch_commit_count(
     if commit_count_result.returncode != 0:
         return 0
     try:
-        return int((commit_count_result.stdout or "0").strip() or "0")
+        return _commit_count_from_stdout(commit_count_result)
     except ValueError:
         return 0
 

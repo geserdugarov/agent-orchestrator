@@ -167,7 +167,7 @@ def terminate_all_running(grace: float = 5.0) -> int:
             pass
     deadline = time.monotonic() + grace
     for proc in procs:
-        remaining = max(0.0, deadline - time.monotonic())
+        remaining = max(0, deadline - time.monotonic())
         _sigkill_unless_group_gone(proc, remaining)
     return len(procs)
 

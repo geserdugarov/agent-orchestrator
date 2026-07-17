@@ -61,6 +61,11 @@ from orchestrator.github import (
 )
 
 
+# Pinned-state round counters this stage reads and writes.
+_CONFLICT_ROUND = "conflict_round"
+_REVIEW_ROUND = "review_round"
+
+
 @dataclass(frozen=True)
 class _ConflictContext:
     """The per-tick `resolving_conflict` handles, bundled so the rebase-loop
@@ -132,7 +137,7 @@ def _emit_conflict_round_incremented(
     can attribute rounds without re-reading the surrounding code.
     """
     ctx.gh.emit_event(
-        "conflict_round",
+        _CONFLICT_ROUND,
         issue_number=ctx.issue.number,
         stage="resolving_conflict",
         pr_number=int(pr_number),
@@ -140,7 +145,7 @@ def _emit_conflict_round_incremented(
         action="incremented",
         conflict_round=int(new_round),
         outcome=outcome,
-        review_round=int(ctx.state.get("review_round") or 0),
+        review_round=int(ctx.state.get(_REVIEW_ROUND) or 0),
         retry_count=ctx.state.get("retry_count"),
     )
 
@@ -165,8 +170,8 @@ def _hand_resolved_round_to_validating(
     """
     from orchestrator import workflow as _wf
 
-    ctx.state.set("review_round", 0)
-    ctx.state.set("conflict_round", conflict_round + 1)
+    ctx.state.set(_REVIEW_ROUND, 0)
+    ctx.state.set(_CONFLICT_ROUND, conflict_round + 1)
     ctx.state.set("last_conflict_resolved_at", _wf._now_iso())
     _emit_conflict_round_incremented(
         ctx,
@@ -248,7 +253,7 @@ def _already_rebased_onto_base(spec: RepoSpec, wt: Path) -> bool:
     if base_distance_result.returncode != 0:
         return False
     try:
-        return int((base_distance_result.stdout or "0").strip() or "0") == 0
+        return int((base_distance_result.stdout or "").strip() or 0) == 0
     except ValueError:
         return False
 
@@ -355,7 +360,7 @@ def _drive_conflict_rebase(ctx: _ConflictContext, pr, pr_number) -> None:
     comment, as the park messages invite). The cap parks awaiting human once
     `MAX_CONFLICT_ROUNDS` rounds have failed.
     """
-    conflict_round = int(ctx.state.get("conflict_round") or 0)
+    conflict_round = int(ctx.state.get(_CONFLICT_ROUND) or 0)
 
     if ctx.state.get("awaiting_human"):
         _resume_awaiting_human(ctx, conflict_round)
@@ -502,7 +507,7 @@ def _rebase_and_dispose(
         method="base_rebase",
         result=_merge_result(succeeded, conflicted_files),
         conflict_round=conflict_round,
-        review_round=int(ctx.state.get("review_round") or 0),
+        review_round=int(ctx.state.get(_REVIEW_ROUND) or 0),
         retry_count=ctx.state.get("retry_count"),
     )
 
@@ -591,7 +596,7 @@ def _resume_on_user_content_change(
         # Pushed branch diff -> hand straight back to validating; the single
         # docs pass runs after final reviewer approval.
         _hand_resolved_round_to_validating(
-            ctx, int(ctx.state.get("conflict_round") or 0), pr_number,
+            ctx, int(ctx.state.get(_CONFLICT_ROUND) or 0), pr_number,
             outcome="drift_resolved", sha=_wf._head_sha(run.worktree),
         )
         return
@@ -861,7 +866,7 @@ def _still_behind_base(wt: Path, base_ref: str) -> int:
     if behind_base_r.returncode != 0:
         return 1
     try:
-        return int((behind_base_r.stdout or "0").strip() or "0")
+        return int((behind_base_r.stdout or "").strip() or 0)
     except ValueError:
         return 1
 
@@ -946,8 +951,8 @@ def _flip_base_up_to_date(
         "issue=#%d resolving_conflict: branch already up-to-date with %s/%s",
         ctx.issue.number, ctx.spec.remote_name, ctx.spec.base_branch,
     )
-    ctx.state.set("review_round", 0)
-    ctx.state.set("conflict_round", conflict_round + 1)
+    ctx.state.set(_REVIEW_ROUND, 0)
+    ctx.state.set(_CONFLICT_ROUND, conflict_round + 1)
     _emit_conflict_round_incremented(
         ctx,
         pr_number=int(pr_number),

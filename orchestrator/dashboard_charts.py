@@ -96,6 +96,25 @@ _REVIEW_ROUND_LABELS = {
 _REVIEW_ROUND_ORDER = ("0", "1", "2", "3", "4", "5", "6+", "unknown")
 
 
+# Token-usage band identifiers, shared by the daily accumulators and the
+# stacked-area series builders.
+_INPUT = "input"
+_OUTPUT = "output"
+_CACHE = "cache"
+_COST = "cost"
+# Default rendered chart height in px when a caller does not override it.
+_DEFAULT_CHART_HEIGHT = 120
+# Lightening ratio applied to a series color for its cache sub-band.
+_CACHE_LIGHTEN = 0.45
+# Base for parsing a "#rrggbb" hex color component.
+_HEX_BASE = 16
+
+
+def _empty_token_bucket() -> dict[str, float]:
+    """A fresh per-day accumulator with every token/cost band zeroed."""
+    return {_INPUT: 0.0, _OUTPUT: 0.0, _CACHE: 0.0, _COST: 0.0}
+
+
 def _empty_figure(message: str, *, height: int) -> go.Figure:
     """Return a placeholder figure with a centered annotation.
 
@@ -322,18 +341,18 @@ def _roll_up_time_series(
     for point in points:
         bucket = daily.setdefault(
             point.day,
-            {"input": 0.0, "output": 0.0, "cache": 0.0, "cost": 0.0},
+            _empty_token_bucket(),
         )
-        bucket["input"] += float(point.input_tokens or 0)
-        bucket["output"] += float(point.output_tokens or 0)
+        bucket[_INPUT] += float(point.input_tokens or 0)
+        bucket[_OUTPUT] += float(point.output_tokens or 0)
         # Total cache band: cache_read + cache_write -- matching the
         # standalone mock's `r.cr + r.cw` accounting. `cached_tokens`
         # (the cumulative cached count) is deliberately excluded so
         # we do not double-count the same prompt slices.
-        bucket["cache"] += float(
+        bucket[_CACHE] += float(
             (point.cache_read_tokens or 0) + (point.cache_write_tokens or 0)
         )
-        bucket["cost"] += float(point.cost_usd or 0.0)
+        bucket[_COST] += float(point.cost_usd or 0)
     return daily
 
 
@@ -344,7 +363,7 @@ def _ensure_backend_days(
     for day in backend_rows_by_day:
         daily.setdefault(
             day,
-            {"input": 0.0, "output": 0.0, "cache": 0.0, "cost": 0.0},
+            _empty_token_bucket(),
         )
 
 
@@ -371,7 +390,7 @@ def _usage_stack_totals(
 
 
 def _daily_token_total(bucket: dict[str, float]) -> float:
-    return sum(bucket[token_type] for token_type in ("input", "output", "cache"))
+    return sum(bucket[token_type] for token_type in (_INPUT, _OUTPUT, _CACHE))
 
 
 @dataclass(frozen=True)
@@ -429,9 +448,9 @@ def _add_token_type_usage_traces(
     usage: _UsageChartData,
 ) -> None:
     for band, label in (
-        ("input", "Input"),
-        ("output", "Output"),
-        ("cache", "Cache"),
+        (_INPUT, "Input"),
+        (_OUTPUT, "Output"),
+        (_CACHE, "Cache"),
     ):
         _add_token_stack_trace(
             fig,
@@ -458,7 +477,7 @@ def _add_usage_cost_trace(fig: go.Figure, usage: _UsageChartData) -> None:
     fig.add_trace(
         go.Scatter(
             x=_date_axis(usage.days),
-            y=[usage.daily[day]["cost"] for day in usage.days],
+            y=[usage.daily[day][_COST] for day in usage.days],
             name="Cost",
             mode="lines+markers",
             line={"color": theme.INK, "width": 2},
@@ -480,10 +499,10 @@ def _usage_axis_ranges(
         backend_rows_by_day=backend_rows_by_day,
         mode=mode,
     )
-    token_max = max(stack_totals, default=0.0)
+    token_max = max(stack_totals, default=0)
     cost_max = max(
-        (usage.daily[day]["cost"] for day in usage.days),
-        default=0.0,
+        (usage.daily[day][_COST] for day in usage.days),
+        default=0,
     )
     return _UsageAxisRanges(
         token_top=_nice_axis_max(token_max, _USAGE_GRID_STEPS),
@@ -614,13 +633,13 @@ def _horizontal_bars_data(
     return _reverse_horizontal_bars(_HorizontalBars(
         labels=[row[0] for row in ordered],
         subs=[row[1] for row in ordered],
-        costs=[float(row[2] or 0.0) for row in ordered],
+        costs=[float(row[2] or 0) for row in ordered],
         colors=[row[3] or accent or theme.ACCENT for row in ordered],
     ))
 
 
 def _cost_item_sort_key(row: tuple[str, str, float, str]) -> float:
-    cost = float(row[2] or 0.0)
+    cost = float(row[2] or 0)
     return -cost
 
 
@@ -654,7 +673,7 @@ def cost_horizontal_bars(
         # snapping to Plotly's 450px default.
         return _empty_figure(
             "No data matches the current filters.",
-            height=height or 120,
+            height=height or _DEFAULT_CHART_HEIGHT,
         )
     bars = _horizontal_bars_data(items, accent, preserve_order)
     fig = go.Figure(
@@ -698,10 +717,10 @@ class _StageCostBars:
 
 
 def _stage_no_cache_cost(row: StageBreakdown) -> float:
-    no_cache = float(row.no_cache_cost_usd or 0.0)
-    cache = float(row.cache_cost_usd or 0.0)
-    total = float(row.total_cost_usd or 0.0)
-    if no_cache == 0.0 and cache == 0.0 and total > 0.0:
+    no_cache = float(row.no_cache_cost_usd or 0)
+    cache = float(row.cache_cost_usd or 0)
+    total = float(row.total_cost_usd or 0)
+    if no_cache == 0 and cache == 0 and total > 0:
         return total
     return no_cache
 
@@ -721,7 +740,7 @@ def _reverse_stage_cost_bars(bars: _StageCostBars) -> _StageCostBars:
 
 def _stage_cost_bars(rows: Sequence[StageBreakdown]) -> _StageCostBars:
     ordered = sorted(
-        rows, key=lambda row: -float(row.total_cost_usd or 0.0),
+        rows, key=lambda row: -float(row.total_cost_usd or 0),
     )
     colors = [
         theme.color_for(row.stage, explicit=theme.STAGE_COLORS)
@@ -731,10 +750,10 @@ def _stage_cost_bars(rows: Sequence[StageBreakdown]) -> _StageCostBars:
         labels=[row.stage for row in ordered],
         subs=[f"{int(row.runs or 0):,} runs" for row in ordered],
         no_cache=[_stage_no_cache_cost(row) for row in ordered],
-        cache=[float(row.cache_cost_usd or 0.0) for row in ordered],
-        totals=[float(row.total_cost_usd or 0.0) for row in ordered],
+        cache=[float(row.cache_cost_usd or 0) for row in ordered],
+        totals=[float(row.total_cost_usd or 0) for row in ordered],
         colors=colors,
-        cache_colors=[_lighten_hex(color, 0.45) for color in colors],
+        cache_colors=[_lighten_hex(color, _CACHE_LIGHTEN) for color in colors],
     ))
 
 
@@ -764,7 +783,7 @@ def cost_by_stage(
     if not rows:
         return _empty_figure(
             "No stage data matches the current filters.",
-            height=height or 120,
+            height=height or _DEFAULT_CHART_HEIGHT,
         )
     bars = _stage_cost_bars(rows)
     y_ticks = _two_line_y_ticks(bars.labels, bars.subs)
@@ -819,9 +838,9 @@ def _lighten_hex(hex_color: str, alpha: float) -> str:
     only emits 6-hex strings.
     """
     hex_digits = hex_color.lstrip("#")
-    red = int(hex_digits[:2], 16)
-    green = int(hex_digits[2:4], 16)
-    blue = int(hex_digits[4:6], 16)
+    red = int(hex_digits[:2], _HEX_BASE)
+    green = int(hex_digits[2:4], _HEX_BASE)
+    blue = int(hex_digits[4:6], _HEX_BASE)
     return f"rgba({red},{green},{blue},{alpha:.2f})"
 
 
@@ -838,14 +857,14 @@ class _ReviewCostBars:
 
 
 def _developer_cost_total(row: ReviewRoundBucketRow) -> float:
-    no_cache = float(row.developer_no_cache_cost_usd or 0.0)
-    cache = float(row.developer_cache_cost_usd or 0.0)
+    no_cache = float(row.developer_no_cache_cost_usd or 0)
+    cache = float(row.developer_cache_cost_usd or 0)
     return no_cache + cache
 
 
 def _reviewer_cost_total(row: ReviewRoundBucketRow) -> float:
-    no_cache = float(row.reviewer_no_cache_cost_usd or 0.0)
-    cache = float(row.reviewer_cache_cost_usd or 0.0)
+    no_cache = float(row.reviewer_no_cache_cost_usd or 0)
+    cache = float(row.reviewer_cache_cost_usd or 0)
     return no_cache + cache
 
 
@@ -882,16 +901,16 @@ def _review_cost_bars(
             for row in ordered
         ],
         developer_no_cache=[
-            float(row.developer_no_cache_cost_usd or 0.0) for row in ordered
+            float(row.developer_no_cache_cost_usd or 0) for row in ordered
         ],
         developer_cache=[
-            float(row.developer_cache_cost_usd or 0.0) for row in ordered
+            float(row.developer_cache_cost_usd or 0) for row in ordered
         ],
         reviewer_no_cache=[
-            float(row.reviewer_no_cache_cost_usd or 0.0) for row in ordered
+            float(row.reviewer_no_cache_cost_usd or 0) for row in ordered
         ],
         reviewer_cache=[
-            float(row.reviewer_cache_cost_usd or 0.0) for row in ordered
+            float(row.reviewer_cache_cost_usd or 0) for row in ordered
         ],
         developer_totals=[_developer_cost_total(row) for row in ordered],
         reviewer_totals=[_reviewer_cost_total(row) for row in ordered],
@@ -904,8 +923,8 @@ def _review_cost_traces(
 ) -> tuple[_CostBarTrace, ...]:
     developer_color = theme.AGENT_ROLE_COLORS["developer"]
     reviewer_color = theme.AGENT_ROLE_COLORS["reviewer"]
-    developer_cache_color = _lighten_hex(developer_color, 0.45)
-    reviewer_cache_color = _lighten_hex(reviewer_color, 0.45)
+    developer_cache_color = _lighten_hex(developer_color, _CACHE_LIGHTEN)
+    reviewer_cache_color = _lighten_hex(reviewer_color, _CACHE_LIGHTEN)
     return (
         _CostBarTrace(
             name="Review (no cache)",
@@ -967,13 +986,13 @@ def cost_by_review_round(
     if not rows:
         return _empty_figure(
             "No `agent_exit` rows match the current filters.",
-            height=height or 120,
+            height=height or _DEFAULT_CHART_HEIGHT,
         )
     bars = _review_cost_bars(rows)
     if bars is None:
         return _empty_figure(
             "No development or review runs match the current filters.",
-            height=height or 120,
+            height=height or _DEFAULT_CHART_HEIGHT,
         )
     y_ticks = _two_line_y_ticks(bars.labels, bars.subs)
     fig = go.Figure()
@@ -1022,7 +1041,7 @@ def cost_by_repo(rows: Sequence[RepoBreakdownRow]) -> go.Figure:
     """
     if not rows:
         return _empty_figure(
-            "No repos match the current filters.", height=120,
+            "No repos match the current filters.", height=_DEFAULT_CHART_HEIGHT,
         )
     bar_rows = []
     for row in rows:
@@ -1030,7 +1049,7 @@ def cost_by_repo(rows: Sequence[RepoBreakdownRow]) -> go.Figure:
             (
                 _repo_short_name(row.repo),
                 f"{int(row.agent_exits):,} runs",
-                float(row.total_cost_usd or 0.0),
+                float(row.total_cost_usd or 0),
                 theme.ACCENT,
             )
         )
@@ -1099,7 +1118,7 @@ def hour_weekday_heatmap(
             x=[f"{hour:02d}" for hour in range(_HOURS_PER_DAY)],
             y=list(_WEEKDAY_LABELS),
             colorscale=[
-                [0.0, theme.CARD_BG],
+                [0, theme.CARD_BG],
                 [0.05, "#eae8fb"],
                 [1.0, theme.ACCENT],
             ],

@@ -200,10 +200,10 @@ def rework_totals(
     when the row predates the `total_cost_usd` column.
     """
     total = sum(
-        float(getattr(row, "total_cost_usd", 0.0) or 0.0) for row in rows
+        float(getattr(row, "total_cost_usd", 0) or 0) for row in rows
     )
     rework = sum(
-        float(getattr(row, "total_cost_usd", 0.0) or 0.0)
+        float(getattr(row, "total_cost_usd", 0) or 0)
         for row in rows
         if row.bucket in REWORK_BUCKETS
     )
