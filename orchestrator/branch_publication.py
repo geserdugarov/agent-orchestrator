@@ -294,6 +294,14 @@ def _rewrite_squash(
     return True, new_sha, len(plan.subjects), None
 
 
+def _parse_ahead_behind(parts: list[str]) -> Tuple[int, int]:
+    """Parse a two-field `rev-list --left-right --count` line into
+    `(ahead, behind)`, letting a non-integer field raise `ValueError`."""
+    behind = int(parts[0])
+    ahead = int(parts[1])
+    return (ahead, behind)
+
+
 def _branch_ahead_behind(
     spec: RepoSpec, worktree: Path, branch: str
 ) -> Tuple[int, int]:
@@ -322,11 +330,9 @@ def _branch_ahead_behind(
     if len(parts) != 2:
         return (0, 0)
     try:
-        behind = int(parts[0])
-        ahead = int(parts[1])
+        return _parse_ahead_behind(parts)
     except ValueError:
         return (0, 0)
-    return (ahead, behind)
 
 
 def _first_commit_subject(spec: RepoSpec, worktree: Path) -> str:

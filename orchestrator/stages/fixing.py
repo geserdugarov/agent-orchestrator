@@ -210,6 +210,29 @@ class _FixingResumeRun:
     after_sha: Optional[str]
 
 
+def _park_fixing_without_pr(gh: GitHubClient, issue: Issue, state) -> None:
+    """Park a `fixing` issue that carries no pinned `pr_number`.
+
+    `fixing` is only ever entered with a recorded PR (in_review holds the PR
+    before routing), so reaching here means a manual relabel from outside that
+    route. Park once and surface to a human -- the dev-resume path needs the
+    PR to push a fix. A no-op when the issue is already awaiting human input.
+    """
+    from orchestrator import workflow as _wf
+
+    if state.get(_AWAITING_HUMAN):
+        return
+    _wf._park_awaiting_human(
+        gh, issue, state,
+        f"{config.HITL_MENTIONS} `fixing` without a pinned "
+        "`pr_number`; manual relabeling suspected. Set the workflow "
+        "label back to `in_review` (or `validating`) after attaching "
+        "a PR.",
+        reason="missing_pr_number",
+    )
+    gh.write_pinned_state(issue, state)
+
+
 def _fixing_preflight(gh: GitHubClient, spec: RepoSpec, issue: Issue, state):
     """Fetch the PR and run the pre-rescan guards shared with
     `_handle_in_review`: PR-state terminals, a closed issue with no
@@ -264,21 +287,7 @@ def _fixing_preflight(gh: GitHubClient, spec: RepoSpec, issue: Issue, state):
         return None
 
     if pr_number is None:
-        # `fixing` is only ever entered with a recorded PR (in_review
-        # holds the PR before routing). Reaching here means a manual
-        # relabel from outside that route -- park once and surface to a
-        # human; the dev-resume path needs the PR to push a fix.
-        if state.get(_AWAITING_HUMAN):
-            return None
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} `fixing` without a pinned "
-            "`pr_number`; manual relabeling suspected. Set the workflow "
-            "label back to `in_review` (or `validating`) after attaching "
-            "a PR.",
-            reason="missing_pr_number",
-        )
-        gh.write_pinned_state(issue, state)
+        _park_fixing_without_pr(gh, issue, state)
         return None
 
     # `pr_number` was set but `gh.get_pr` raised above. The exception is
@@ -702,7 +711,7 @@ def _resume_fixing_and_dispatch_result(
     # text -- the whole point of the command is to not lose the review
     # feedback the parked session never addressed.
     followup = _wf._build_pr_comment_followup(
-        replay_batch if replay_batch is not None else feedback.all_items
+        feedback.all_items if replay_batch is None else replay_batch
     )
     run = _run_fixing_resume(ctx, followup)
 

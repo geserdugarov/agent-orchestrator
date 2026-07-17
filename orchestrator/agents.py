@@ -188,7 +188,7 @@ _PRIORITY_KEYS = ("session_id", "conversation_id", "thread_id", "session", "id")
 # `_AGENT_SECRET_BARE_NAMES`) are stripped separately by `_filter_agent_env`
 # below; the provider auth keys codex/claude actually need to talk to their
 # model are preserved by `_AGENT_PROVIDER_AUTH_ALLOWLIST`.
-_FORBIDDEN_AGENT_ENV = frozenset({
+_FORBIDDEN_AGENT_ENV = frozenset((
     "GITHUB_TOKEN",
     "GH_TOKEN",
     "GITHUB_PAT",
@@ -196,7 +196,7 @@ _FORBIDDEN_AGENT_ENV = frozenset({
     "GITHUB_ENTERPRISE_TOKEN",
     "GIT_TOKEN",
     "GH_HOST",
-})
+))
 
 # Write-credential locators that aren't secret-shaped but let a subprocess
 # use the operator's loaded auth to push or authenticate as them. None of
@@ -215,12 +215,12 @@ _FORBIDDEN_AGENT_ENV = frozenset({
 # The orchestrator's own push path (`worktrees._push_branch`) constructs
 # `GIT_ASKPASS` in the env it hands to subprocess.run, so stripping the
 # operator's copy here does not break it.
-_AGENT_WRITE_CREDENTIAL_LOCATORS = frozenset({
+_AGENT_WRITE_CREDENTIAL_LOCATORS = frozenset((
     "SSH_AUTH_SOCK",
     "SSH_ASKPASS",
     "GIT_ASKPASS",
     "GIT_SSH_COMMAND",
-})
+))
 
 # Production-secret-shaped variables that should NOT be inherited by agent /
 # verify subprocesses, even though they are not GitHub-specific. Two
@@ -256,10 +256,10 @@ _AGENT_SECRET_SUFFIXES = (
     "_TOKEN_FILE", "_KEY_FILE", "_SECRET_FILE", "_PASSWORD_FILE",
     "_CREDENTIAL_FILE", "_CREDENTIALS", "_CREDENTIALS_FILE",
 )
-_AGENT_SECRET_BARE_NAMES = frozenset({
+_AGENT_SECRET_BARE_NAMES = frozenset((
     "TOKEN", "KEY", "SECRET", "PASSWORD", "PAT", "CREDENTIAL",
     "TOKEN_FILE", "CREDENTIALS", "CREDENTIALS_FILE",
-})
+))
 
 # Provider-auth keys the agent needs to talk to its OWN model. The shape-based
 # filter would otherwise strip these (they all end in `_KEY` / `_TOKEN`), so we
@@ -267,12 +267,12 @@ _AGENT_SECRET_BARE_NAMES = frozenset({
 # usage of the two supported backends; advanced deployments (Bedrock, Vertex,
 # a self-hosted proxy with a custom env var) need to extend this set
 # explicitly rather than have it loosened via a shape match.
-_AGENT_PROVIDER_AUTH_ALLOWLIST = frozenset({
+_AGENT_PROVIDER_AUTH_ALLOWLIST = frozenset((
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "OPENAI_API_KEY",
-})
+))
 
 
 def _is_secret_shaped(name: str) -> bool:
@@ -355,7 +355,7 @@ def _filter_agent_env(
 # Classifying them as `interrupted` keeps stage handlers from treating a
 # half-finished run as a normal non-zero failure and from publishing a partial
 # last message as the agent's considered final answer.
-_INTERRUPTED_RETURNCODES = frozenset({-signal.SIGTERM, -signal.SIGKILL})
+_INTERRUPTED_RETURNCODES = frozenset((-signal.SIGTERM, -signal.SIGKILL))
 
 
 @dataclass
@@ -509,7 +509,7 @@ def _run_subprocess(
             # the kill; `("", "")` if that drain itself wedges.
             _terminate_process_group(proc)
             drained = _communicate_bounded(proc, 10)
-            stdout, stderr = drained if drained is not None else ("", "")
+            stdout, stderr = ("", "") if drained is None else drained
             return _SubprocessResult(stdout, stderr, -1, True, False)
         # A child killed by SIGTERM/SIGKILL exits with a negative code; the
         # most common cause is the shutdown sweep reaching this group while we
@@ -560,10 +560,7 @@ def _codex_last_message_file() -> Iterator[Path]:
     try:
         yield path
     finally:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
+        path.unlink(missing_ok=True)
 
 
 def _read_last_message(path: Path) -> str:

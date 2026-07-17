@@ -555,13 +555,12 @@ def _render_topbar_and_meta(
         ),
         unsafe_allow_html=True,
     )
+    filters = page.controls.filters
     page.controls.meta_slot.markdown(
         _filter_meta_html(
-            from_d=page.controls.filters.window.start.date(),
-            to_d=(
-                page.controls.filters.window.end - timedelta(days=1)
-            ).date(),
-            days=page.controls.filters.days,
+            from_d=filters.window.start.date(),
+            to_d=(filters.window.end - timedelta(days=1)).date(),
+            days=filters.days,
             runs=summary.total_agent_runs,
             fmt_num=modules.theme.fmt_num,
         ),

@@ -594,7 +594,7 @@ _SKILL_MATRIX_COLUMNS = (
 # Numeric columns default a first click to descending (largest first is
 # the interesting end for run / rate counts); text columns default to
 # ascending (A→Z). Re-clicking the active column flips its direction.
-_SKILL_MATRIX_NUMERIC_KEYS = frozenset({"runs", "skill_runs", "rate"})
+_SKILL_MATRIX_NUMERIC_KEYS = frozenset(("runs", "skill_runs", "rate"))
 
 _SKILL_MATRIX_SORT_KEYS: dict[str, Callable[[SkillTriggerMatrixRow], object]] = {
     column.key: column.sort_value for column in _SKILL_MATRIX_COLUMNS

@@ -955,6 +955,23 @@ def _agent_trajectory(
     return replace(trajectory, **changes)
 
 
+def _persist_trajectory_record(
+    context: _AgentExitContext,
+    metrics: usage.UsageMetrics,
+    codex_catalog: _CodexCatalog,
+) -> None:
+    """Build and append the denormalized trajectory record.
+
+    `_redact_secrets` is imported at call time to avoid a
+    `github` -> `analytics` -> `workflow_messages` -> `github` import cycle.
+    """
+    from orchestrator.workflow_messages import _redact_secrets
+    trajectory = _agent_trajectory(context, codex_catalog)
+    append_trajectory_record(
+        _build_trajectory_record(context, trajectory, metrics, _redact_secrets)
+    )
+
+
 def _maybe_record_trajectory(
     context: _AgentExitContext,
     metrics: usage.UsageMetrics,
@@ -987,11 +1004,7 @@ def _maybe_record_trajectory(
     if TRAJECTORY_LOG_PATH is None:
         return
     try:
-        from orchestrator.workflow_messages import _redact_secrets
-        trajectory = _agent_trajectory(context, codex_catalog)
-        append_trajectory_record(
-            _build_trajectory_record(context, trajectory, metrics, _redact_secrets)
-        )
+        _persist_trajectory_record(context, metrics, codex_catalog)
     except Exception:
         log.exception(
             "issue=#%d analytics: trajectory record(%s) failed; "
@@ -1149,6 +1162,15 @@ def _unlink_quietly(path: str) -> None:
         pass
 
 
+def _flush_fd_and_replace(
+    tmp_fd: int, tmp_path: str, path: Path, lines: list[str],
+) -> None:
+    """Write `lines` through `tmp_fd`, then atomically replace `path`."""
+    with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+        fh.writelines(lines)
+    os.replace(tmp_path, str(path))
+
+
 def _atomic_rewrite(path: Path, lines: list[str]) -> None:
     """Replace `path`'s contents with `lines` via a temp file + `os.replace`.
 
@@ -1164,12 +1186,41 @@ def _atomic_rewrite(path: Path, lines: list[str]) -> None:
         suffix=".tmp",
     )
     try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-            fh.writelines(lines)
-        os.replace(tmp_path, str(path))
+        _flush_fd_and_replace(tmp_fd, tmp_path, path, lines)
     except OSError:
         _unlink_quietly(tmp_path)
         raise
+
+
+def _rewrite_pruned_file(
+    path: Path, cutoff: datetime, lock: threading.Lock,
+) -> int:
+    """Under `lock`, drop records older than `cutoff` and return the count.
+
+    The lock is held across the read + rewrite so a concurrent append cannot
+    land on the soon-unlinked inode; every filesystem touch downgrades OSError
+    to a logged no-op.
+    """
+    with lock:
+        # Re-check existence under the lock: a concurrent operator `rm`
+        # between the pre-lock probe and acquiring the lock would
+        # otherwise let `path.open` raise an unhandled FileNotFoundError.
+        if not _probe_exists(path):
+            return 0
+        kept_removed = _read_kept_records(path, cutoff)
+        if kept_removed is None:
+            return 0
+        kept, removed = kept_removed
+        if removed == 0:
+            return 0
+        try:
+            _atomic_rewrite(path, kept)
+        except OSError as error:
+            log.warning(
+                "could not rewrite file %s after prune: %s", path, error
+            )
+            return 0
+        return removed
 
 
 def _prune_jsonl_records(
@@ -1197,36 +1248,14 @@ def _prune_jsonl_records(
     downgrades OSError to a logged no-op, so a misconfigured path (e.g.
     ENAMETOOLONG) never escapes to the per-tick caller.
     """
-    if path is None:
-        return 0
-    if days <= 0:
+    if path is None or days <= 0:
         return 0
     # Pre-lock probe for the fast zero-cost no-op path on a disabled sink.
     if not _probe_exists(path):
         return 0
 
     cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=days)
-
-    with lock:
-        # Re-check existence under the lock: a concurrent operator `rm`
-        # between the pre-lock probe above and acquiring the lock would
-        # otherwise let `path.open` raise an unhandled FileNotFoundError.
-        if not _probe_exists(path):
-            return 0
-        kept_removed = _read_kept_records(path, cutoff)
-        if kept_removed is None:
-            return 0
-        kept, removed = kept_removed
-        if removed == 0:
-            return 0
-        try:
-            _atomic_rewrite(path, kept)
-        except OSError as error:
-            log.warning(
-                "could not rewrite file %s after prune: %s", path, error
-            )
-            return 0
-        return removed
+    return _rewrite_pruned_file(path, cutoff, lock)
 
 
 def append_trajectory_record(record: dict) -> None:

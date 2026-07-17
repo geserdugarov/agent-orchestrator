@@ -25,15 +25,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Keys whose values must never be loaded from REPO_ROOT/.env. The agent has
 # read access to that file via the orchestrator checkout; secrets belong in
 # process env or in a file outside REPO_ROOT.
-_SECRET_KEYS = frozenset({
+_SECRET_KEYS = frozenset((
     "GITHUB_TOKEN",
     "GH_TOKEN",
     "GITHUB_PAT",
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
     "GIT_TOKEN",
-})
-_DOTENV_TRUE_VALUES = frozenset({"1", "true", "on", "yes"})
+))
+_DOTENV_TRUE_VALUES = frozenset(("1", "true", "on", "yes"))
 # Default value for boolean env knobs that ship enabled.
 _DEFAULT_ENABLED = "on"
 
@@ -268,21 +268,10 @@ CODEX_BIN: str = os.environ.get("CODEX_BIN", "codex")
 CLAUDE_BIN: str = os.environ.get("CLAUDE_BIN", _CLAUDE)
 
 
-def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
-    """Parse a shell-like backend spec into (backend, extra_args).
-
-    Accepts a bare backend (`claude`) or a backend with backend-CLI args
-    (`codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`). Tokens are
-    split with `shlex` so quoting works the same way an operator would
-    type the command in a shell. The first token must be `codex` or
-    `claude`; anything else aborts at import so a typo cannot silently
-    fall back to a default backend on next restart.
-
-    The same parser is reused at runtime by `workflow.py` to re-parse a
-    spec that was previously persisted to pinned state, so a legacy bare-
-    backend value (`"codex"` / `"claude"`) round-trips cleanly to
-    `(backend, ())` and a full spec with args round-trips to its tokens.
-    """
+def _agent_spec_tokens(name: str, spec: str) -> list[str]:
+    """Shell-split a backend spec into tokens, aborting on an empty or
+    unparseable value (the same import-time validation `_parse_agent_spec`
+    relies on)."""
     raw = (spec or "").strip()
     if not raw:
         raise SystemExit(
@@ -302,6 +291,25 @@ def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
             f"orchestrator: {name}={spec!r} parses to no tokens; expected "
             "'codex' or 'claude' (optionally followed by CLI args)"
         )
+    return tokens
+
+
+def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
+    """Parse a shell-like backend spec into (backend, extra_args).
+
+    Accepts a bare backend (`claude`) or a backend with backend-CLI args
+    (`codex -m gpt-5.5 -c 'model_reasoning_effort="xhigh"'`). Tokens are
+    split with `shlex` so quoting works the same way an operator would
+    type the command in a shell. The first token must be `codex` or
+    `claude`; anything else aborts at import so a typo cannot silently
+    fall back to a default backend on next restart.
+
+    The same parser is reused at runtime by `workflow.py` to re-parse a
+    spec that was previously persisted to pinned state, so a legacy bare-
+    backend value (`"codex"` / `"claude"`) round-trips cleanly to
+    `(backend, ())` and a full spec with args round-trips to its tokens.
+    """
+    tokens = _agent_spec_tokens(name, spec)
     backend = tokens[0].lower()
     if backend not in ("codex", _CLAUDE):
         raise SystemExit(

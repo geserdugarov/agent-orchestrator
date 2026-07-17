@@ -204,6 +204,13 @@ def _issue_query_options(
     return options
 
 
+def _append_event_line(path, event_record: dict) -> None:
+    """Create the parent directory and append one JSONL event line."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"{json.dumps(event_record, sort_keys=True)}\n")
+
+
 def _write_event_record(event_record: dict) -> None:
     """Append one JSONL line to `config.EVENT_LOG_PATH` if configured.
 
@@ -216,9 +223,7 @@ def _write_event_record(event_record: dict) -> None:
     if path is None:
         return
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(f"{json.dumps(event_record, sort_keys=True)}\n")
+        _append_event_line(path, event_record)
     except OSError as error:
         log.warning("could not write event log %s: %s", path, error)
 
@@ -297,10 +302,10 @@ class _CheckSurfaceRead:
 
 
 _FAILED_CHECK_RUN_CONCLUSIONS = frozenset(
-    {_CHECK_STATE_FAILURE, "timed_out", "action_required", "cancelled"}
+    (_CHECK_STATE_FAILURE, "timed_out", "action_required", "cancelled")
 )
 _SUCCESSFUL_CHECK_RUN_CONCLUSIONS = frozenset(
-    {"success", "neutral", "skipped"}
+    ("success", "neutral", "skipped")
 )
 
 
@@ -400,10 +405,10 @@ class GitHubClient:
         # `repo_spec` wins when both are passed -- the multi-repo caller in
         # main.py threads a spec; legacy callers (and tests) still use the
         # `repo_slug` shortcut against the single-repo default.
-        if repo_spec is not None:
-            slug = repo_spec.slug
-        else:
+        if repo_spec is None:
             slug = repo_slug or config.REPO
+        else:
+            slug = repo_spec.slug
         # Resolve per-slug at construction time rather than reusing the
         # cached `config.GITHUB_TOKEN` (which was looked up once for
         # `config.REPO`), so a multi-repo deployment with one token file
@@ -439,7 +444,7 @@ class GitHubClient:
         # `_for_worker_thread` threads the value into per-worker clones so the
         # parallel path adds no `GET /user` call per worker.
         self._bot_login = (
-            bot_login if bot_login is not None else self._gh.get_user().login
+            self._gh.get_user().login if bot_login is None else bot_login
         )
         # In-memory tail of recently-emitted stage-transition events. Capped
         # so a long-running process can't grow this list unbounded; the file
@@ -805,9 +810,12 @@ class GitHubClient:
         """
         owner_login = self.repo.owner.login
         head = f"{owner_login}:{branch}"
-        for pr in self.repo.get_pulls(state=_ISSUE_STATE_OPEN, head=head, base=base):
-            return pr
-        return None
+        return next(
+            iter(self.repo.get_pulls(
+                state=_ISSUE_STATE_OPEN, head=head, base=base,
+            )),
+            None,
+        )
 
     def iter_open_prs(self) -> Iterable[PullRequest]:
         """Yield every open PR on the repo, regardless of head branch.
@@ -900,8 +908,9 @@ class GitHubClient:
     def _read_check_runs(self, head_sha: str) -> _CheckSurfaceRead:
         """Read and normalize the check-runs surface."""
         try:
-            check_runs = self.repo.get_commit(head_sha).get_check_runs()
-            return _CheckSurfaceRead(state=_normalize_check_runs(check_runs))
+            return _CheckSurfaceRead(state=_normalize_check_runs(
+                self.repo.get_commit(head_sha).get_check_runs(),
+            ))
         except GithubException as error:
             # 403 here almost always means the fine-grained PAT is missing
             # 'Checks: read'. For Actions-only PRs (no commit statuses,
@@ -985,7 +994,6 @@ class GitHubClient:
         """
         try:
             self.repo.get_git_ref(f"heads/{branch}").delete()
-            return True
         except GithubException as error:
             if error.status == _HTTP_NOT_FOUND:
                 return True
@@ -994,6 +1002,7 @@ class GitHubClient:
                 branch, error.status, error.data,
             )
             return False
+        return True
 
     def merge_pr(
         self, pr: PullRequest, *, sha: str, method: str = "squash"
@@ -1005,13 +1014,13 @@ class GitHubClient:
         """
         try:
             pr.merge(sha=sha, merge_method=method)
-            return True
         except GithubException as error:
             log.warning(
                 "merge failed for PR #%s (HTTP %s): %s",
                 pr.number, error.status, error.data,
             )
             return False
+        return True
 
     def pr_conversation_comments_after(
         self, pr: PullRequest, after_id: Optional[int]
@@ -1101,7 +1110,6 @@ class GitHubClient:
                 continue
             try:
                 self.repo.create_label(name=name, color=color, description=description)
-                log.info("created label %r", name)
             except GithubException as error:
                 log.error(
                     "could not create label %r (HTTP %s). "
@@ -1111,3 +1119,4 @@ class GitHubClient:
                     name, error.status,
                 )
                 return
+            log.info("created label %r", name)

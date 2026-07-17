@@ -77,6 +77,9 @@ _TOOL_RESULT = "tool_result"
 _COMMAND_EXECUTION = "command_execution"
 _ASSISTANT = "assistant"
 _UNKNOWN = "unknown"
+# Distinguishes an absent per-id entry from one whose recorded value is None
+# (a codex item can carry `aggregated_output: null`).
+_MISSING = object()
 _CLAUDE = "claude"
 _CODEX = "codex"
 _LONG_CONTEXT_THRESHOLD = "long_context_threshold"
@@ -450,21 +453,22 @@ def _claude_usage_record(usage: dict[str, Any]) -> dict[str, int]:
     matching what the shell helper does -- mixing them would double-count.
     """
     flat = usage.get("cache_creation_input_tokens")
-    if flat is not None:
-        cw5 = _num(flat)
-        cw1 = 0
-    else:
+    if flat is None:
         cc = usage.get("cache_creation") if isinstance(
             usage.get("cache_creation"), dict
         ) else None
+        cc_map = cc or {}
         cw5 = _num(
-            (cc.get("ephemeral_5m_input_tokens") if cc else None)
+            cc_map.get("ephemeral_5m_input_tokens")
             or usage.get("ephemeral_5m_input_tokens")
         )
         cw1 = _num(
-            (cc.get("ephemeral_1h_input_tokens") if cc else None)
+            cc_map.get("ephemeral_1h_input_tokens")
             or usage.get("ephemeral_1h_input_tokens")
         )
+    else:
+        cw5 = _num(flat)
+        cw1 = 0
     return {
         _INPUT: _num(
             usage.get(_INPUT_TOKENS) or usage.get("prompt_tokens")
@@ -721,6 +725,15 @@ def _codex_model_name(
     return usage_model or _UNKNOWN
 
 
+def _nested_usage_field(
+    usage: dict[str, Any], outer_key: str, inner_key: str,
+) -> Any:
+    """Return `usage[outer_key][inner_key]` when the outer value is a dict,
+    else None (a non-dict outer value has no nested field to read)."""
+    outer = usage.get(outer_key)
+    return outer.get(inner_key) if isinstance(outer, dict) else None
+
+
 def _codex_usage_record(usage: dict[str, Any]) -> dict[str, int]:
     input_tokens = _num(
         usage.get(_INPUT_TOKENS)
@@ -730,15 +743,9 @@ def _codex_usage_record(usage: dict[str, Any]) -> dict[str, int]:
     cached = _num(
         usage.get("cached_input_tokens")
         or usage.get(_CACHED_TOKENS)
-        or (
-            usage.get("input_tokens_details", {}).get(_CACHED_TOKENS)
-            if isinstance(usage.get("input_tokens_details"), dict)
-            else None
-        )
-        or (
-            usage.get("prompt_tokens_details", {}).get(_CACHED_TOKENS)
-            if isinstance(usage.get("prompt_tokens_details"), dict)
-            else None
+        or _nested_usage_field(usage, "input_tokens_details", _CACHED_TOKENS)
+        or _nested_usage_field(
+            usage, "prompt_tokens_details", _CACHED_TOKENS,
         )
     )
     output_tokens = _num(
@@ -857,7 +864,7 @@ class _CodexPrice:
             return None
         uncached = max(self.usage[_INPUT] - cached, 0)
         effective_cached_rate = (
-            cached_rate if cached_rate is not None else self.rates[_INPUT]
+            self.rates[_INPUT] if cached_rate is None else cached_rate
         )
         return (
             uncached * self.rates[_INPUT]
@@ -1648,7 +1655,7 @@ def _turn_usage_from_row(
         cache_read_tokens=record[_CACHE_READ],
         cache_write_tokens=record[_CACHE_WRITE_FIVE_MIN] + record[_CACHE_WRITE_ONE_HOUR],
         cost_usd=cost,
-        cost_source="estimated" if cost is not None else "unknown-price",
+        cost_source="unknown-price" if cost is None else "estimated",
     )
 
 
@@ -1819,23 +1826,26 @@ def _codex_assemble_steps(
     """
     steps: list[TrajectoryStep] = []
     for iid in order:
-        if iid in commands:
+        command = commands.get(iid, _MISSING)
+        if command is not _MISSING:
             steps.append(TrajectoryStep(
                 kind="tool_call",
                 name=_COMMAND_EXECUTION,
                 tool_id=iid,
-                content=commands[iid],
+                content=command,
             ))
-        if iid in outputs:
+        output = outputs.get(iid, _MISSING)
+        if output is not _MISSING:
             steps.append(TrajectoryStep(
                 kind=_TOOL_RESULT,
                 tool_id=iid,
-                content=outputs[iid],
+                content=output,
             ))
-        if iid in messages:
+        message = messages.get(iid, _MISSING)
+        if message is not _MISSING:
             steps.append(TrajectoryStep(
                 kind="assistant_message",
-                content=messages[iid],
+                content=message,
             ))
     steps.extend(anon)
     return tuple(steps)

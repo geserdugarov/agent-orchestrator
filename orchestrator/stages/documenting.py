@@ -1067,25 +1067,33 @@ def _drive_documenting_pass(ctx: _DocumentingContext):
     return run
 
 
+def _documenting_preconditions_handled(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    pr_number,
+) -> bool:
+    """Run the pre-context guards; True when the tick is already resolved.
+
+    Covers PR-state terminals, a `documenting` label with no pinned
+    `pr_number`, and an operator `/orchestrator continue` refused on a park
+    that needs real guidance. A bare continue does not shift
+    `user_content_hash`, so the retryable resume later reruns the docs prompt
+    without a spurious drift notice. See `_refuse_parked_continue_command`.
+    """
+    if _finalize_documenting_terminal(gh, spec, issue, state):
+        return True
+    if pr_number is None:
+        _park_documenting_without_pr(gh, issue, state)
+        return True
+    return _refuse_parked_continue_command(gh, issue, state)
+
+
 def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")
 
-    if _finalize_documenting_terminal(gh, spec, issue, state):
-        return
-
-    if pr_number is None:
-        _park_documenting_without_pr(gh, issue, state)
-        return
-
-    # Operator `/orchestrator continue` on a park that needs real guidance:
-    # refuse before the drift / resume paths. Retryable session-failure parks
-    # and command-plus-guidance comments fall through -- a bare continue does
-    # not shift `user_content_hash`, so the retryable resume reruns the docs
-    # prompt without a spurious drift notice. See `_refuse_parked_continue_command`.
-    if _refuse_parked_continue_command(gh, issue, state):
+    if _documenting_preconditions_handled(gh, spec, issue, state, pr_number):
         return
 
     ctx = _DocumentingContext(

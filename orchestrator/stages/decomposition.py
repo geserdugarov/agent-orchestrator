@@ -132,7 +132,7 @@ def _read_decomposer_session(
         spec = str(stored)
         backend, args = config._parse_agent_spec("decomposer_agent", spec)
         sid = state.get("decomposer_session_id")
-        return spec, backend, args, str(sid) if sid is not None else None
+        return spec, backend, args, None if sid is None else str(sid)
     return (
         config.DECOMPOSE_AGENT_SPEC,
         config.DECOMPOSE_AGENT,
@@ -290,21 +290,31 @@ def _park_incomplete_decomposition(
     gh.write_pinned_state(issue, state)
 
 
+def _seed_orphan_child_state(
+    gh: GitHubClient, issue: Issue, child_number,
+) -> None:
+    """Backfill `parent_number` (and creation stamp / unpark) on an orphan
+    child so the parent's dependency walk can find it again."""
+    from orchestrator import workflow as _wf
+
+    child_issue = gh.get_issue(int(child_number))
+    child_state = gh.read_pinned_state(child_issue)
+    if not child_state.get(_PARENT_NUMBER):
+        child_state.set(_PARENT_NUMBER, issue.number)
+        if not child_state.get(_CREATED_AT):
+            child_state.set(_CREATED_AT, _wf._now_iso())
+        child_state.set(_AWAITING_HUMAN, False)
+        child_state.set(_PARK_REASON, None)
+        gh.write_pinned_state(child_issue, child_state)
+
+
 def _repair_recovered_child(
     gh: GitHubClient, issue: Issue, state: PinnedState, child_number,
 ) -> bool:
     from orchestrator import workflow as _wf
 
     try:
-        child_issue = gh.get_issue(int(child_number))
-        child_state = gh.read_pinned_state(child_issue)
-        if not child_state.get(_PARENT_NUMBER):
-            child_state.set(_PARENT_NUMBER, issue.number)
-            if not child_state.get(_CREATED_AT):
-                child_state.set(_CREATED_AT, _wf._now_iso())
-            child_state.set(_AWAITING_HUMAN, False)
-            child_state.set(_PARK_REASON, None)
-            gh.write_pinned_state(child_issue, child_state)
+        _seed_orphan_child_state(gh, issue, child_number)
     except Exception:
         _wf.log.exception(
             "issue=#%s could not repair orphan child #%s during "
@@ -515,16 +525,7 @@ def _park_unparsed_manifest(
     from orchestrator import workflow as _wf
 
     last_msg = decomposer_result.last_message or ""
-    if error is not None:
-        quoted = _wf._as_blockquote(last_msg.strip())
-        _wf._park_awaiting_human(
-            gh, issue, state,
-            f"{config.HITL_MENTIONS} decomposer manifest invalid "
-            f"({error}); manual adjudication needed.\n\n"
-            f"_Last decomposer message:_\n\n{quoted}",
-            reason="decomposer_invalid_manifest",
-        )
-    else:
+    if error is None:
         stripped = last_msg.strip()
         raw = stripped or "(decomposer produced no final message)"
         quoted = _wf._as_blockquote(raw)
@@ -541,7 +542,7 @@ def _park_unparsed_manifest(
             gh, issue, state,
             f"{config.HITL_MENTIONS} decomposer needs your input to "
             f"proceed:\n\n{quoted}{diag}",
-            reason="decomposer_silent" if not stripped else "decomposer_question",
+            reason="decomposer_question" if stripped else "decomposer_silent",
         )
         if not stripped:
             _wf.log.warning(
@@ -552,6 +553,15 @@ def _park_unparsed_manifest(
                 decomposer_result.timed_out,
                 _wf._stderr_log_tail(decomposer_result),
             )
+    else:
+        quoted = _wf._as_blockquote(last_msg.strip())
+        _wf._park_awaiting_human(
+            gh, issue, state,
+            f"{config.HITL_MENTIONS} decomposer manifest invalid "
+            f"({error}); manual adjudication needed.\n\n"
+            f"_Last decomposer message:_\n\n{quoted}",
+            reason="decomposer_invalid_manifest",
+        )
     gh.write_pinned_state(issue, state)
 
 
@@ -621,6 +631,19 @@ def _persist_created_child(
     gh.write_pinned_state(issue, state)
 
 
+def _write_child_pinned_state(
+    gh: GitHubClient, new_issue: Issue, parent_number: int,
+) -> None:
+    """Write a freshly-created child's initial pinned state (parent link and
+    creation stamp)."""
+    from orchestrator import workflow as _wf
+
+    child_state = PinnedState()
+    child_state.set(_PARENT_NUMBER, parent_number)
+    child_state.set(_CREATED_AT, _wf._now_iso())
+    gh.write_pinned_state(new_issue, child_state)
+
+
 def _seed_created_child(
     gh: GitHubClient,
     issue: Issue,
@@ -631,10 +654,7 @@ def _seed_created_child(
     from orchestrator import workflow as _wf
 
     try:
-        child_state = PinnedState()
-        child_state.set(_PARENT_NUMBER, issue.number)
-        child_state.set(_CREATED_AT, _wf._now_iso())
-        gh.write_pinned_state(new_issue, child_state)
+        _write_child_pinned_state(gh, new_issue, issue.number)
     except Exception:
         _wf.log.exception(
             "issue=#%s could not seed pinned state on child #%d",
@@ -717,7 +737,7 @@ def _create_child_issues(
     """
     plan = _SplitPlan.start(children_manifest, is_umbrella)
     _prepare_split_plan(gh, issue, state, plan)
-    for idx in range(len(children_manifest)):
+    for idx, _child in enumerate(children_manifest):
         if not _create_planned_child(gh, issue, state, plan, idx):
             return None
     return plan
@@ -776,8 +796,7 @@ def _activate_initial_split_children(
         if str(idx) in plan.dep_graph:
             continue
         try:
-            child_issue = gh.get_issue(child_number)
-            gh.set_workflow_label(child_issue, WorkflowLabel.READY)
+            gh.set_workflow_label(gh.get_issue(child_number), WorkflowLabel.READY)
         except Exception:
             _wf.log.exception(
                 "issue=#%s could not flip child #%d to ready; the parent's "

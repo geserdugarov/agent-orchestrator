@@ -42,7 +42,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
-| 4 | Remaining production style and structure | 3/5 | [ ] |
+| 4 | Remaining production style and structure | 4/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
@@ -298,10 +298,10 @@ Goal: clear the production findings that are not covered by the complexity stage
 
 ### Package 4.4 — Control flow and expression shape
 
-- [ ] Resolve production negated-condition, nested-try, implicit-`.get()`, tuple-shape, deep-nesting, and long-try
+- [x] Resolve production negated-condition, nested-try, implicit-`.get()`, tuple-shape, deep-nesting, and long-try
   findings.
-- [ ] Do not alter cleanup guarantees or exception boundaries solely to flatten code.
-- [ ] Add branch-level tests when a rewrite changes evaluation order.
+- [x] Do not alter cleanup guarantees or exception boundaries solely to flatten code.
+- [x] Add branch-level tests when a rewrite changes evaluation order.
 
 ### Package 4.5 — Module and import structure
 
@@ -775,6 +775,60 @@ considered.
   `tests/test_dashboard_theme.py`, and `tests/test_trajectory_dashboard.py`.
 - Reviewed: [ ]
 
+### Hashable dashboard cache key
+
+- File and symbol: `orchestrator/dashboard_state.py: cache_key`
+- Rule: `WPS227`
+- Reason: `cache_key` returns the six window-scoped filter fields (`start`, `end`, `repo`, `events`,
+  `stages`, `issue`) as one hashable value used directly as a memoization key by the cached readers,
+  and it is part of the historical `orchestrator.dashboard` export surface (`__all__`). `WPS227`'s
+  suggested fixes do not apply: a list is unhashable, and `tests/test_dashboard.py` asserts the return
+  equals a plain six-tuple and is `hash()`-able. The sibling internal sort key
+  (`read_dashboard._skill_matrix_order_key`) was converted to a list because it is only ever a
+  `sorted(key=...)` argument; this one cannot be.
+- Protected by: `orchestrator.dashboard.__all__` and `tests/test_dashboard.py`.
+- Reviewed: [ ]
+
+### Decompose-handler cleanup guarantee
+
+- File and symbol: `orchestrator/stages/decomposition.py: _handle_decomposing`
+- Rule: `WPS229` and `WPS501`
+- Reason: The `try` / `finally` guarantees the decompose worktree is cleaned up unless the completed
+  run marked it keep-on-inspection. `run_plan` is rebound by `_prepare_decomposer_run` and then mutated
+  in place by `_process_decomposer_run` (which sets `keep_worktree=True` before its own park/persist can
+  raise), and the `finally` must observe that final `run_plan` even when `_process_decomposer_run`
+  raises mid-run. Collapsing the two-statement `try` body to one loses the post-`_prepare` binding on
+  the `_process` failure path, and relocating the identical `finally` into a decorated context manager
+  would only dodge `WPS501` without changing behavior or clarity -- exactly the "alter cleanup
+  guarantees solely to flatten code" the package forbids.
+- Protected by: `tests/test_workflow_decomposition_*.py`.
+- Reviewed: [ ]
+
+### Force-exit shutdown finally
+
+- File and symbol: `orchestrator/main.py: _shutdown`
+- Rule: `WPS501`
+- Reason: The `finally: os._exit(...)` guarantees the process exits even if
+  `agents.terminate_all_running` raises, including a `BaseException` such as a nested signal. There is
+  no resource to manage and therefore no `with`-statement equivalent; rewriting it as `try` / `except
+  Exception` plus an unconditional `os._exit` would silently change the `BaseException` force-exit
+  semantics. The clean resource-cleanup try/finally blocks (analytics read connection, question-run
+  worktree teardown, scheduler drain) were converted to context managers instead.
+- Protected by: `tests/test_main.py`.
+- Reviewed: [ ]
+
+### Nice-number axis-tick float comparison
+
+- File and symbol: `orchestrator/dashboard_charts.py: _nice_axis_max`
+- Rule: `WPS459`
+- Reason: The `norm <= 2.5` rung buckets a normalized magnitude against the standard
+  `1 / 2 / 2.5 / 5 / 10` "nice tick" ladder (the same `2.5` rung already recorded as a `WPS432`
+  remainder). `2.5` is exactly representable in binary floating point, so the representation-error
+  concern `WPS459` targets does not arise, and rewriting the `<=` comparison to dodge the float literal
+  (e.g. scaling by two to `2 * norm <= 5`) would obscure the ladder without changing the result.
+- Protected by: `tests/test_dashboard_charts.py`.
+- Reviewed: [ ]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -813,6 +867,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-16 | 4.1 | Complete | Target WPS; 24 remainders; full gate 2118 passed | Not committed | Start Package 4.2 |
 | 2026-07-17 | 4.2 | Complete | Target WPS; 78 remainders; full gate 2120 passed | Not committed | Start Package 4.3 |
 | 2026-07-17 | 4.3 | Complete | Target WPS; 6 remainders; full gate 2121 passed | Not committed | Start Package 4.4 |
+| 2026-07-17 | 4.4 | Complete | Target WPS; 5 remainders; full gate 2124 passed | Not committed | Start Package 4.5 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -971,3 +1026,31 @@ that reads worse. No operator-visible message, prompt, SQL, persisted content, p
 marker, event shape, or compatibility re-export changed, and no new WPS category was introduced in any touched file; a
 focused `_quote_comment_line` keyword/fallback test was added and the full gate passed with 2,121 tests and 3
 live-Postgres skips (the optional dashboard group installed so the plotly chart tests ran).
+
+Package 4.4 resolved the production control-flow and expression-shape findings, cutting the sixteen-rule production
+count from 127 to 5 documented remainders. Fully cleared: `WPS527` (38 `frozenset({...})` set-literal args rewritten as
+tuple args, single-element cases keeping a trailing comma), `WPS504` (32 negated conditions -- 29 `is not None` / `not`
+ternaries inverted to their positive form and 3 `if`/`else` statements with swapped branches, each provably
+evaluation-order-identical since a ternary only evaluates the selected branch), `WPS229` (20 of 21 long `try` bodies
+reduced to a single statement by extracting the protected body into a one-statement helper, combining protected calls,
+or moving only a trivial non-raising tail out -- every step that can raise stays inside the guard so cleanup boundaries
+are preserved), `WPS212` (7 over-limit return counts split at natural
+boundaries: `_prune_jsonl_records`, `_recover_pending_auto_base_rebase_context`, `_sync_pr_worktree_to_base`,
+`_handle_documenting`, `_fixing_preflight`, `_assess_question_outcome`, `_comment_body_for_hash`), `WPS509` (5 nested
+ternaries lifted to `(cc or {}).get(...)`, a shared `_nested_usage_field` helper, and a bound local), `WPS529` (4
+implicit `.get()` uses -- the codex step assembler uses a module `_MISSING` sentinel so a present-but-null
+`aggregated_output` still emits its result step, pinned by a new `test_usage.py` regression test), `WPS435` (4 list
+multiplications rewritten as comprehensions / generators), `WPS335` (2 `for ... in (genexpr)` loops rewritten with
+`map()`), and one each of `WPS505` (nested `try` replaced by `Path.unlink(missing_ok=True)`), `WPS518` (`range(len())`
+-> `enumerate`), `WPS328` (first-or-`None` loop -> `next(iter(...), None)`), `WPS238` (four-`raise` spec parser split
+into a tokenizer helper), and `WPS219` (a five-deep `page.controls.filters.window.start` chain bound to a `filters`
+local). Three clean resource-cleanup `try` / `finally` blocks (`WPS501`: the analytics read connection, the
+question-run worktree teardown, and the main-loop scheduler drain) were converted to `@contextmanager` helpers. The 5
+retained findings are recorded in the accepted-remainder register: the hashable public `cache_key` tuple (`WPS227`),
+the decompose-handler cleanup guarantee whose `run_plan` is rebound then mutated mid-run (`WPS229` + `WPS501`), the
+force-exit `os._exit` shutdown `finally` (`WPS501`), and the exactly-representable `2.5` nice-tick float comparison
+(`WPS459`). No public contract, pinned-state key, watermark, comment marker, event shape, or compatibility re-export
+changed, and the whole-tree `--select=WPS` diff introduced no new category (`WPS420` even dropped by one from removing a
+now-unneeded `pass`); the full gate passed with 2,124 tests and 3 live-Postgres skips (the optional dashboard group
+installed so the plotly chart tests ran). The `test_workflow_list_pollable` default-cadence test fails only when
+`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` is exported in the shell -- an environment artifact, not a diff regression.

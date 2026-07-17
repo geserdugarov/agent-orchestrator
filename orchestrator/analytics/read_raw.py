@@ -89,8 +89,9 @@ def _filter_options_from_rows(rows: Sequence[tuple]) -> FilterOptions:
         if not row or row[1] is None:
             continue
         dimension = row[0]
-        if dimension in buckets:
-            buckets[dimension].append(row[1])
+        bucket = buckets.get(dimension)
+        if bucket is not None:
+            bucket.append(row[1])
     for option_names in buckets.values():
         option_names.sort()
     return FilterOptions(
@@ -297,7 +298,7 @@ def get_recent_agent_exits(
 SORT_BY_LAST_SEEN = "last_seen"
 SORT_BY_COST = "cost"
 _ISSUE_SORT_BY_OPTIONS: frozenset[str] = frozenset(
-    {SORT_BY_LAST_SEEN, SORT_BY_COST}
+    (SORT_BY_LAST_SEEN, SORT_BY_COST)
 )
 
 

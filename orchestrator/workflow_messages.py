@@ -253,10 +253,10 @@ _STDERR_TAIL_BUDGET = 1024
 # enumerating every variant, plus a small bare-name set (some build
 # systems set unprefixed `TOKEN` / `PASSWORD`).
 _SECRET_KEY_SUFFIXES = ("_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PAT", "_CREDENTIAL")
-_SECRET_KEY_NAMES = frozenset({
+_SECRET_KEY_NAMES = frozenset((
     "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT",
     "TOKEN", "KEY", "SECRET", "PASSWORD", "PAT", "CREDENTIAL",
-})
+))
 # Short values produce too many false-positive replacements (a 4-char dev
 # key masks incidental substrings like "true"/"main") for too little
 # protection. Real provider keys are well above this floor.
@@ -489,7 +489,7 @@ def _drift_ack_reason(last_message: str) -> Optional[str]:
 # question or a dirty worktree (both `park_reason=None`), a stuck push, a
 # missing PR -- needs the human's actual guidance, so the command is refused
 # there. Shared by the `fixing`, `implementing`, and `documenting` stages.
-_CONTINUE_PARK_REASONS = frozenset({"agent_silent", "agent_timeout"})
+_CONTINUE_PARK_REASONS = frozenset(("agent_silent", "agent_timeout"))
 
 # `/orchestrator continue` operator command, matched as an EXACT LINE
 # (anchored to line boundaries, mirrors `_ADD_REVIEW_ROUNDS_RE` in
@@ -836,7 +836,7 @@ def _dep_cycle_visit(
 
 def _has_dep_cycle(children: list[dict]) -> bool:
     """DFS for back-edges in the children dep graph (white/gray/black)."""
-    color = [0] * len(children)  # 0=unvisited, 1=on-stack, 2=finished
+    color = [0 for _ in children]  # 0=unvisited, 1=on-stack, 2=finished
     return any(
         color[child_index] == 0
         and _dep_cycle_visit(child_index, children, color)

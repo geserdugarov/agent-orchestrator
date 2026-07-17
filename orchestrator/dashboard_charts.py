@@ -1072,7 +1072,9 @@ def _heatmap_matrix(
     points: Sequence[HourlyHeatmapPoint],
 ) -> list[list[int]]:
     weekdays = len(_WEEKDAY_LABELS)
-    matrix = [[0] * _HOURS_PER_DAY for _ in range(weekdays)]
+    matrix = [
+        [0 for _ in range(_HOURS_PER_DAY)] for _ in range(weekdays)
+    ]
     for point in points:
         if _valid_heatmap_point(point, weekdays):
             matrix[int(point.weekday)][int(point.hour)] = int(

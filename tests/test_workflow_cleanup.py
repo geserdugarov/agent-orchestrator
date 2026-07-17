@@ -170,6 +170,48 @@ class CleanupTerminalBranchTest(unittest.TestCase):
         self.assertEqual(gh.deleted_remote_branches, [self.BRANCH])
 
 
+class CleanupDecomposeWorktreeTest(unittest.TestCase):
+    """`_cleanup_decompose_worktree` runs from `_handle_decomposing`'s
+    `finally`, so it must never raise -- a cleanup failure would mask the
+    handler's original error. Every step, including resolving the worktree
+    path, rides the best-effort guard.
+    """
+
+    ISSUE_NUMBER = 77
+
+    def test_swallows_path_resolution_failure(self) -> None:
+        # Path resolution rides inside the best-effort guard: a raise here
+        # (e.g. a malformed spec) must be logged, not propagated, or it
+        # would mask the decomposing handler's real failure.
+        with patch.object(
+            worktree_lifecycle, "_decompose_worktree_path",
+            side_effect=RuntimeError("bad spec"),
+        ):
+            # Must NOT raise.
+            worktree_lifecycle._cleanup_decompose_worktree(
+                _TEST_SPEC, self.ISSUE_NUMBER,
+            )
+
+    def test_swallows_git_removal_failure(self) -> None:
+        # A raising `_git` (missing binary, OSError) during the removal is
+        # absorbed the same way, so a cleanup hiccup never escapes.
+        from unittest.mock import MagicMock
+        wt_path = MagicMock()
+        wt_path.exists.return_value = True
+        wt_path.__str__ = lambda self: "/tmp/decompose-77"
+
+        with patch.object(
+            worktree_lifecycle, "_decompose_worktree_path",
+            return_value=wt_path,
+        ), patch.object(
+            worktree_lifecycle, "_git", side_effect=OSError("git not found"),
+        ):
+            # Must NOT raise even though the git removal throws.
+            worktree_lifecycle._cleanup_decompose_worktree(
+                _TEST_SPEC, self.ISSUE_NUMBER,
+            )
+
+
 class DeleteRemoteBranchTest(unittest.TestCase):
     """`GitHubClient.delete_remote_branch` is idempotent against a 404
     because the repo's "auto-delete head branches" setting may have

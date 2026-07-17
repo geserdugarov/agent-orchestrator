@@ -27,14 +27,14 @@ DEFAULT_EXPENSIVE_LIMIT = 8
 # Insight thresholds.
 FAILURE_RATE_BANNER_THRESHOLD = 0.10
 UNPRICED_COVERAGE_THRESHOLD = 0.10
-UNPRICED_COST_SOURCES: frozenset[str] = frozenset({"unknown-price", "unknown"})
+UNPRICED_COST_SOURCES: frozenset[str] = frozenset(("unknown-price", "unknown"))
 # Bucket strings the review-round breakdown emits whose runs are
 # "rework" (i.e. happened after the initial pass). Used to compute the
 # rework share KPI. `get_review_round_breakdown` keeps rounds 3, 4 and
 # 5 separate (only 6+ is grouped), so every post-initial round is
 # listed explicitly here.
 REWORK_BUCKETS: frozenset[str] = frozenset(
-    {"1", "2", "3", "4", "5", "6+"}
+    ("1", "2", "3", "4", "5", "6+")
 )
 
 
