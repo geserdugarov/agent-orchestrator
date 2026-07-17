@@ -53,6 +53,24 @@ from orchestrator.workflow_messages import (
 _USER_CONTENT_HASH = "user_content_hash"
 
 
+def _is_hidden_comment(
+    issue_comment: IssueComment, orchestrator_ids: set[int],
+) -> bool:
+    """True for comments that never count as user-authored requirements:
+    orchestrator markers, orchestrator-authored IDs, bots, and untrusted
+    authors."""
+    body = issue_comment.body or ""
+    if PINNED_STATE_MARKER in body or _ORCH_COMMENT_MARKER in body:
+        return True
+    comment_id = getattr(issue_comment, "id", None)
+    if comment_id is not None and int(comment_id) in orchestrator_ids:
+        return True
+    user = getattr(issue_comment, "user", None)
+    if user is not None and getattr(user, "type", None) == "Bot":
+        return True
+    return not is_trusted_author(user)
+
+
 def _comment_body_for_hash(
     issue_comment: IssueComment,
     orchestrator_ids: set[int],
@@ -60,17 +78,9 @@ def _comment_body_for_hash(
     include_bare_continue: bool,
 ) -> Optional[str]:
     """Return user-authored requirements text, or None for filtered content."""
+    if _is_hidden_comment(issue_comment, orchestrator_ids):
+        return None
     body = issue_comment.body or ""
-    if PINNED_STATE_MARKER in body or _ORCH_COMMENT_MARKER in body:
-        return None
-    comment_id = getattr(issue_comment, "id", None)
-    if comment_id is not None and int(comment_id) in orchestrator_ids:
-        return None
-    user = getattr(issue_comment, "user", None)
-    if user is not None and getattr(user, "type", None) == "Bot":
-        return None
-    if not is_trusted_author(user):
-        return None
     if include_bare_continue:
         return body
     if _is_bare_orchestrator_continue(issue_comment):

@@ -201,7 +201,7 @@ def _drain_verify_output(proc: subprocess.Popen) -> tuple[str, str]:
     if drained is None:
         proc.kill()
         drained = _communicate_bounded(proc, 5)
-    return drained if drained is not None else ("", "")
+    return ("", "") if drained is None else drained
 
 
 def _spawn_verify_command(

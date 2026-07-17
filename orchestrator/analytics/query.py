@@ -12,6 +12,7 @@ catch regardless of which step failed.
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Sequence
 
@@ -103,6 +104,17 @@ def _connect_for_read(
         ) from error
 
 
+@contextlib.contextmanager
+def _read_connection(connect_fn: Callable[[str], Any], db_url: Optional[str]):
+    """Open a fresh read connection and close it (best-effort) on exit, so a
+    query that raises mid-stream never leaks the descriptor."""
+    opened = _connect_for_read(connect_fn, db_url)
+    try:
+        yield opened
+    finally:
+        _close_quietly(opened)
+
+
 def _query(
     connect_fn: Callable[[str], Any],
     db_url: Optional[str],
@@ -126,8 +138,5 @@ def _query(
     """
     if conn is not None:
         return _execute_select(conn, sql, bindings)
-    opened = _connect_for_read(connect_fn, db_url)
-    try:
+    with _read_connection(connect_fn, db_url) as opened:
         return _execute_select(opened, sql, bindings)
-    finally:
-        _close_quietly(opened)

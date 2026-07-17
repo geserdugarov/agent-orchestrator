@@ -31,6 +31,7 @@ fan-out concurrency is preserved.
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -146,7 +147,7 @@ def _read_question_session(
             backend=backend,
             extra_args=args,
             session_id=(
-                str(session_id) if session_id is not None else None
+                None if session_id is None else str(session_id)
             ),
         )
     return _QuestionSession(
@@ -376,6 +377,20 @@ def _assess_question_outcome(
     if question_result.timed_out:
         return _QuestionOutcome(_QUESTION_TIMEOUT, True)
 
+    return _assess_question_worktree(run, question_result)
+
+
+def _assess_question_worktree(
+    run: _QuestionRun, question_result: AgentResult,
+) -> _QuestionOutcome:
+    """Classify a completed, non-timeout run from its worktree and answer.
+
+    Read-only violations (new commits / dirty tree) take precedence over
+    interruption so a killed run that changed the tree still leaves an
+    inspection target for the operator.
+    """
+    from orchestrator import workflow as _wf
+
     worktree = _wf._worktree_path(run.spec, run.issue.number)
     if _wf._has_new_commits(run.spec, worktree):
         return _QuestionOutcome(_QUESTION_COMMITS, True)
@@ -386,8 +401,6 @@ def _assess_question_outcome(
             _QUESTION_DIRTY, True, dirty_files=dirty_files,
         )
 
-    # Read-only violations take precedence over interruption so a killed run
-    # that changed the tree still leaves an inspection target for the operator.
     if _wf._ignore_if_interrupted(run.issue, question_result):
         return _QuestionOutcome(None, run.keep_worktree)
 
@@ -513,13 +526,21 @@ def _cleanup_question_run(run: _QuestionRun) -> None:
     )
 
 
+@contextlib.contextmanager
+def _question_run_cleanup(run: _QuestionRun):
+    """Tear down the question worktree once the run finishes, even on error
+    (unless the run marked its tree keep-on-inspection)."""
+    try:
+        yield
+    finally:
+        _cleanup_question_run(run)
+
+
 def _handle_question(
     gh: GitHubClient, spec: config.RepoSpec, issue: Issue,
 ) -> None:
     run = _QuestionRun.start(gh, spec, issue)
     if _finalize_closed_question(run):
         return
-    try:
+    with _question_run_cleanup(run):
         _process_question_run(run)
-    finally:
-        _cleanup_question_run(run)

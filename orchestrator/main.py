@@ -10,6 +10,7 @@ own source files, so the wrapper script can pick up the new code.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import logging.handlers
 import os
@@ -164,6 +165,17 @@ def _force_exit(signum: int) -> None:
         os._exit(_SIGNAL_EXIT_BASE + signum)
 
 
+def _rotating_file_handler() -> logging.Handler:
+    """Build the rotating file handler, creating `config.LOG_DIR` first."""
+    config.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    return logging.handlers.RotatingFileHandler(
+        config.LOG_DIR / "orchestrator.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+
+
 def _configure_logging(level: str) -> None:
     # stderr stays for live tailing in `run.sh`'s terminal; the file handler
     # is what survives terminal close. RotatingFileHandler caps disk use
@@ -171,15 +183,7 @@ def _configure_logging(level: str) -> None:
     fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     try:
-        config.LOG_DIR.mkdir(parents=True, exist_ok=True)
-        handlers.append(
-            logging.handlers.RotatingFileHandler(
-                config.LOG_DIR / "orchestrator.log",
-                maxBytes=10 * 1024 * 1024,
-                backupCount=5,
-                encoding="utf-8",
-            )
-        )
+        handlers.append(_rotating_file_handler())
     except OSError as err:
         # Don't refuse to start just because the log dir is unwritable;
         # stderr alone keeps the loop usable. Surface the reason once.
@@ -327,6 +331,16 @@ def _signal_exit_code() -> int:
     return 0
 
 
+@contextlib.contextmanager
+def _scheduler_drained(scheduler: IssueScheduler):
+    """Guarantee the scheduler is drained once the wrapped block exits, even
+    if the main loop raises."""
+    try:
+        yield
+    finally:
+        _drain_scheduler(scheduler)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     options = _parse_main_options(argv)
     _configure_logging(options.log_level)
@@ -336,10 +350,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     scheduler = _create_scheduler()
     _activate_scheduler(scheduler)
     restart_exit_code: Optional[int] = None
-    try:
+    with _scheduler_drained(scheduler):
         restart_exit_code = _drive_main_loop(options, clients, scheduler)
-    finally:
-        _drain_scheduler(scheduler)
     if restart_exit_code is not None:
         return restart_exit_code
     return _signal_exit_code()

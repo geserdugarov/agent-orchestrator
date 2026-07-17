@@ -69,7 +69,7 @@ DEFAULT_TZ_OFFSET_HOURS = 7
 # change without per-render env reads.
 PARALLEL_READS_ENV = "DASHBOARD_PARALLEL_READS"
 PARALLEL_READS_MAX_WORKERS = 8
-_TRUTHY = frozenset({"1", "true", "on", "yes"})
+_TRUTHY = frozenset(("1", "true", "on", "yes"))
 
 
 def _parse_parallel_reads_flag() -> bool:
@@ -293,6 +293,6 @@ def cache_key(
     issue: Optional[int],
 ) -> tuple:
     """Hashable cache key for the dashboard's window-scoped reads."""
-    events_t = tuple(events) if events is not None else None
-    stages_t = tuple(stages) if stages is not None else None
+    events_t = None if events is None else tuple(events)
+    stages_t = None if stages is None else tuple(stages)
     return (window.start, window.end, repo, events_t, stages_t, issue)

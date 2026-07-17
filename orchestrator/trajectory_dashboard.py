@@ -355,11 +355,11 @@ def _meta_html(run: TrajectoryRun) -> str:
         ("Backend", run.backend),
         (
             "Review round",
-            str(run.review_round) if run.review_round is not None else "",
+            "" if run.review_round is None else str(run.review_round),
         ),
         (
             "Retry count",
-            str(run.retry_count) if run.retry_count is not None else "",
+            "" if run.retry_count is None else str(run.retry_count),
         ),
         ("Session", run.session_id),
         ("Recorded", run.ts),

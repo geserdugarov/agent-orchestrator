@@ -69,7 +69,7 @@ class _WhereBuilder:
         if not selection:
             self.conditions.append("FALSE")
             return
-        placeholders = ", ".join(["%s"] * len(selection))
+        placeholders = ", ".join("%s" for _ in selection)
         self.conditions.append(f"{column} IN ({placeholders})")
         self.bindings.extend(selection)
 
@@ -101,7 +101,7 @@ def _build_where(
     builder.add_scalar("repo", filters.repo)
     builder.add_scalar(
         "issue",
-        int(filters.issue) if filters.issue is not None else None,
+        None if filters.issue is None else int(filters.issue),
     )
     builder.add_selection("event", filters.events)
     builder.add_selection("stage", filters.stages)

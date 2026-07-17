@@ -270,7 +270,7 @@ def _build_insert_sql() -> str:
         "source_line",
         "content_hash",
     )
-    placeholders = ", ".join(["%s"] * len(columns))
+    placeholders = ", ".join("%s" for _ in columns)
     column_list = ", ".join(columns)
     return (
         f"INSERT INTO analytics_events ({column_list}) "
@@ -315,7 +315,7 @@ def _row_values(
 # case-insensitive per the libpq docs, so the membership check below
 # lowercases the key before comparing.
 _REDACTED_QUERY_PARAMS = frozenset(
-    {"user", "password", "passfile", "sslpassword"}
+    ("user", "password", "passfile", "sslpassword")
 )
 
 
@@ -428,6 +428,23 @@ def _close_quietly(conn: Any) -> None:
         log.exception("analytics_sync: connection close failed")
 
 
+def _execute_rollup_refresh(conn: Any) -> None:
+    """Run the non-concurrent rollup refresh and log its timing."""
+    sql = f"REFRESH MATERIALIZED VIEW {_DAILY_ROLLUP_VIEW}"
+    refresh_start = time.monotonic()
+    log.info(
+        "analytics_sync: refreshing materialized view %s",
+        _DAILY_ROLLUP_VIEW,
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    conn.commit()
+    log.info(
+        "analytics_sync: refreshed %s in %.3fs",
+        _DAILY_ROLLUP_VIEW, time.monotonic() - refresh_start,
+    )
+
+
 def _refresh_daily_rollup(conn: Any) -> None:
     """Refresh the daily rollup materialized view after a successful sync.
 
@@ -448,20 +465,8 @@ def _refresh_daily_rollup(conn: Any) -> None:
     log makes the refresh failure visible and the next sync's
     refresh recovers the rollup once the underlying issue is fixed.
     """
-    sql = f"REFRESH MATERIALIZED VIEW {_DAILY_ROLLUP_VIEW}"
-    refresh_start = time.monotonic()
     try:
-        log.info(
-            "analytics_sync: refreshing materialized view %s",
-            _DAILY_ROLLUP_VIEW,
-        )
-        with conn.cursor() as cur:
-            cur.execute(sql)
-        conn.commit()
-        log.info(
-            "analytics_sync: refreshed %s in %.3fs",
-            _DAILY_ROLLUP_VIEW, time.monotonic() - refresh_start,
-        )
+        _execute_rollup_refresh(conn)
     except Exception:
         log.exception(
             "analytics_sync: refresh of %s failed; sync still committed",
@@ -692,11 +697,11 @@ class _SyncRequest:
     ) -> _SyncRequest:
         return cls(
             log_path=(
-                log_path
-                if log_path is not None
-                else _analytics.ANALYTICS_LOG_PATH
+                _analytics.ANALYTICS_LOG_PATH
+                if log_path is None
+                else log_path
             ),
-            db_url=db_url if db_url is not None else _analytics.ANALYTICS_DB_URL,
+            db_url=_analytics.ANALYTICS_DB_URL if db_url is None else db_url,
             connect_fn=connect or _default_connect,
             json_adapter=json_adapter or _default_json_adapter,
         )
@@ -796,14 +801,17 @@ class _SyncRun:
     def execute(self) -> SyncResult:
         conn = self.connect()
         try:
-            _ingest_records(conn, self.ingest_context())
-            self.commit(conn)
+            self._ingest_and_commit(conn)
         except Exception:
             _rollback_quietly(conn, "analytics_sync: rollback failed")
             raise
         finally:
             _close_quietly(conn)
         return self.finalize()
+
+    def _ingest_and_commit(self, conn: Any) -> None:
+        _ingest_records(conn, self.ingest_context())
+        self.commit(conn)
 
 
 def sync_jsonl_to_postgres(

@@ -83,16 +83,17 @@ def _skill_matrix_order_key(
     *,
     counts: dict[tuple[str, str, str, str], int],
     cohort_runs: dict[tuple[str, str, str], int],
-) -> tuple:
+) -> list:
+    """Lexicographic sort key: most-run cohorts first, then name order."""
     repo, role, backend, skill = key
-    return (
+    return [
         -counts.get(key, 0),
         -cohort_runs.get((repo, role, backend), 0),
         repo,
         role,
         backend,
         skill,
-    )
+    ]
 
 
 def _row_value(row: Sequence[Any], index: int, default: Any = 0) -> Any:
@@ -412,7 +413,7 @@ class _SkillMatrixCounts:
                 keys.add((*cohort, skill))
         return keys
 
-    def order_key(self, key: _SkillMatrixKey) -> tuple:
+    def order_key(self, key: _SkillMatrixKey) -> list:
         return _skill_matrix_order_key(
             key,
             counts=self.skill_runs,

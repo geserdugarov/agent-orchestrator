@@ -278,7 +278,7 @@ class TrajectoryRun:
         sum to it); `None` when `run_usage` is absent or its cost was
         `no-usage` / `unknown-price`.
         """
-        return self.run_usage.cost_usd if self.run_usage is not None else None
+        return None if self.run_usage is None else self.run_usage.cost_usd
 
     @property
     def cost_source(self) -> str:
@@ -287,12 +287,12 @@ class TrajectoryRun:
         Empty string on a pre-usage record so the viewer can print it
         unguarded.
         """
-        return self.run_usage.cost_source if self.run_usage is not None else ""
+        return "" if self.run_usage is None else self.run_usage.cost_source
 
     @property
     def total_tokens(self) -> int:
         """Run-total tokens across all buckets, 0 on a pre-usage record."""
-        return self.run_usage.total_tokens if self.run_usage is not None else 0
+        return 0 if self.run_usage is None else self.run_usage.total_tokens
 
     @cached_property
     def _turn_map(self) -> dict[int, TurnUsageView]:
@@ -399,9 +399,9 @@ class TrajectoryRun:
         role = self.agent_role or "—"
         backend = self.backend or "—"
         round_suffix = (
-            f" · round {self.review_round}"
-            if self.review_round is not None
-            else ""
+            ""
+            if self.review_round is None
+            else f" · round {self.review_round}"
         )
         return f"{stage}/{role} · {backend}{round_suffix} · {self.ts}"
 
@@ -621,16 +621,12 @@ def parse_record(obj: Any, *, seq: int) -> Optional[TrajectoryRun]:
         return None
     steps = tuple(
         step
-        for step in (
-            _parse_step(raw_step) for raw_step in _as_list(obj.get("steps"))
-        )
+        for step in map(_parse_step, _as_list(obj.get("steps")))
         if step is not None
     )
     turns = tuple(
         turn
-        for turn in (
-            _parse_turn(raw_turn) for raw_turn in _as_list(obj.get("turns"))
-        )
+        for turn in map(_parse_turn, _as_list(obj.get("turns")))
         if turn is not None
     )
     return TrajectoryRun(
@@ -694,7 +690,7 @@ def read_trajectories(path: Optional[Path] = None) -> list[TrajectoryRun]:
     with the original file order as a stable tie-breaker so two records
     sharing a second-precision timestamp keep their append order.
     """
-    log_path = path if path is not None else resolve_log_path()
+    log_path = resolve_log_path() if path is None else path
     if log_path is None:
         return []
     try:

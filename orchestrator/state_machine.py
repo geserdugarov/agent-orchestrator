@@ -98,7 +98,7 @@ def coerce_workflow_label(value: str) -> WorkflowLabel:
 # survives decomposition. `backlog` / `paused` / `community_contribution` are
 # operator- or PR-applied and are never seeded at child creation.
 _CREATABLE_CONTROL_LABELS: frozenset[ControlLabel] = frozenset(
-    {ControlLabel.QUICK_RUN}
+    (ControlLabel.QUICK_RUN,)
 )
 
 
@@ -145,10 +145,10 @@ class IllegalTransition(Exception):
 # `tests/test_state_machine.py` asserts it stays equal to
 # `base_sync._PR_REFRESH_DETOUR_LABELS` so the two cannot drift apart.
 _DETOUR_TO_RESOLVING: frozenset[WorkflowLabel] = frozenset(
-    {
+    (
         WorkflowLabel.VALIDATING, WorkflowLabel.DOCUMENTING,
         WorkflowLabel.IN_REVIEW, WorkflowLabel.FIXING,
-    }
+    )
 )
 
 # Forward ("spine") + drift edges, keyed by source. ``None`` is the entry
@@ -162,42 +162,42 @@ _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
     # to implementing. It never enters `question` (operator-applied only) and
     # is never born `blocked` via this path -- children are created `blocked`
     # directly, bypassing the transition guard.
-    None: frozenset({WorkflowLabel.DECOMPOSING, WorkflowLabel.IMPLEMENTING}),
+    None: frozenset((WorkflowLabel.DECOMPOSING, WorkflowLabel.IMPLEMENTING)),
     WorkflowLabel.DECOMPOSING: frozenset(
-        {
+        (
             WorkflowLabel.READY, WorkflowLabel.IMPLEMENTING,
             WorkflowLabel.BLOCKED, WorkflowLabel.UMBRELLA,
-        }
+        )
     ),
     # `-> decomposing` on each of ready/blocked/umbrella is the user-content
     # drift re-route (`_route_drift_to_decomposing`).
     WorkflowLabel.READY: frozenset(
-        {WorkflowLabel.IMPLEMENTING, WorkflowLabel.DECOMPOSING}
+        (WorkflowLabel.IMPLEMENTING, WorkflowLabel.DECOMPOSING)
     ),
     WorkflowLabel.BLOCKED: frozenset(
-        {WorkflowLabel.READY, WorkflowLabel.DECOMPOSING}
+        (WorkflowLabel.READY, WorkflowLabel.DECOMPOSING)
     ),
     WorkflowLabel.UMBRELLA: frozenset(
-        {WorkflowLabel.DONE, WorkflowLabel.DECOMPOSING}
+        (WorkflowLabel.DONE, WorkflowLabel.DECOMPOSING)
     ),
     # `-> in_review` is the `quick_run` fast path: a clean developer result on
     # a `quick_run`-labeled issue publishes its PR and routes straight to
     # `in_review`, bypassing the reviewer (`validating`) and docs
     # (`documenting`) passes. An ordinary issue takes `-> validating`.
     WorkflowLabel.IMPLEMENTING: frozenset(
-        {WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW}
+        (WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW)
     ),
     WorkflowLabel.VALIDATING: frozenset(
-        {WorkflowLabel.DOCUMENTING, WorkflowLabel.FIXING}
+        (WorkflowLabel.DOCUMENTING, WorkflowLabel.FIXING)
     ),
     WorkflowLabel.DOCUMENTING: frozenset(
-        {WorkflowLabel.IN_REVIEW, WorkflowLabel.VALIDATING}
+        (WorkflowLabel.IN_REVIEW, WorkflowLabel.VALIDATING)
     ),
     WorkflowLabel.IN_REVIEW: frozenset(
-        {WorkflowLabel.FIXING, WorkflowLabel.VALIDATING}
+        (WorkflowLabel.FIXING, WorkflowLabel.VALIDATING)
     ),
     WorkflowLabel.FIXING: frozenset(
-        {
+        (
             WorkflowLabel.VALIDATING,
             # The worktree-drift dead-lock breaker hands a stuck
             # validating-route transient park to `resolving_conflict`
@@ -207,10 +207,10 @@ _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
             # explicitly marked its no-commit reply with `ACK: <reason>`
             # straight to `in_review` without parking.
             WorkflowLabel.IN_REVIEW,
-        }
+        )
     ),
-    WorkflowLabel.RESOLVING_CONFLICT: frozenset({WorkflowLabel.VALIDATING}),
-    WorkflowLabel.QUESTION: frozenset({WorkflowLabel.DONE}),
+    WorkflowLabel.RESOLVING_CONFLICT: frozenset((WorkflowLabel.VALIDATING,)),
+    WorkflowLabel.QUESTION: frozenset((WorkflowLabel.DONE,)),
     WorkflowLabel.DONE: frozenset(),
     WorkflowLabel.REJECTED: frozenset(),
 }
@@ -233,18 +233,18 @@ _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
 #  * -> resolving_conflict : the per-tick base-sync conflict detour.
 _INTERRUPT_SOURCES: dict[WorkflowLabel, frozenset[WorkflowLabel]] = {
     WorkflowLabel.DONE: frozenset(
-        {
+        (
             WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
             WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW,
             WorkflowLabel.FIXING, WorkflowLabel.RESOLVING_CONFLICT,
-        }
+        )
     ),
     WorkflowLabel.REJECTED: frozenset(
-        {
+        (
             WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING,
             WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW,
             WorkflowLabel.FIXING, WorkflowLabel.RESOLVING_CONFLICT,
-        }
+        )
     ),
     WorkflowLabel.RESOLVING_CONFLICT: _DETOUR_TO_RESOLVING,
 }
@@ -329,7 +329,7 @@ def guard_transition(
     allowed = ", ".join(
         sorted(str(state) for state in ALLOWED_TRANSITIONS.get(current, frozenset()))
     )
-    current_label = str(current) if current is not None else None
+    current_label = None if current is None else str(current)
     allowed_text = allowed or "(none -- terminal state)"
     detail = (
         f"illegal workflow transition "

@@ -158,6 +158,25 @@ def _list_skill_tree(spec: RepoSpec) -> Optional[list[str]]:
     return [line for line in (ls_tree.stdout or "").splitlines() if line.strip()]
 
 
+def _collect_and_record_catalog(spec: RepoSpec) -> None:
+    """Enumerate the target repo's skills and append one analytics record."""
+    paths = _list_skill_tree(spec)
+    if paths is None:
+        return
+    skills_available, skill_paths = _extract_skill_catalog(paths)
+    analytics.record_repo_skill_catalog(
+        repo=spec.slug,
+        base_branch=spec.base_branch,
+        remote_name=spec.remote_name,
+        skills_available=skills_available,
+        skill_paths=skill_paths or None,
+    )
+    log.debug(
+        "repo=%s skill catalog: recorded %d skill(s)",
+        spec.slug, len(skills_available),
+    )
+
+
 def _emit_repo_skill_catalog(spec: RepoSpec) -> None:
     """Collect the target repo's skill catalog and append one record.
 
@@ -171,21 +190,7 @@ def _emit_repo_skill_catalog(spec: RepoSpec) -> None:
     workflow state.
     """
     try:
-        paths = _list_skill_tree(spec)
-        if paths is None:
-            return
-        skills_available, skill_paths = _extract_skill_catalog(paths)
-        analytics.record_repo_skill_catalog(
-            repo=spec.slug,
-            base_branch=spec.base_branch,
-            remote_name=spec.remote_name,
-            skills_available=skills_available,
-            skill_paths=skill_paths or None,
-        )
-        log.debug(
-            "repo=%s skill catalog: recorded %d skill(s)",
-            spec.slug, len(skills_available),
-        )
+        _collect_and_record_catalog(spec)
     except Exception:
         log.exception(
             "repo=%s skill catalog collection failed; continuing", spec.slug,

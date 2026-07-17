@@ -288,10 +288,10 @@ def _refresh_base_and_worktrees(
 # either no PR yet (pre-PR path applies instead) or terminal
 # (done/rejected, nothing to refresh).
 _PR_REFRESH_DETOUR_LABELS = frozenset(
-    {
+    (
         WorkflowLabel.VALIDATING, WorkflowLabel.DOCUMENTING,
         WorkflowLabel.IN_REVIEW, WorkflowLabel.FIXING,
-    },
+    ),
 )
 
 # Pinned-state keys and park-reason values this refresh path reads and writes.
@@ -319,11 +319,11 @@ _ERROR_SNIPPET_LEN = 120
 # in this set: they are handled by the respective stage handlers, and
 # the refresh deliberately leaves those parks alone.
 _AUTO_REBASE_PARK_REASONS = frozenset(
-    {
+    (
         _REASON_AUTO_BASE_REBASE_FAILED,
         "auto_base_rebase_dirty",
         _REASON_AUTO_BASE_REBASE_PUSH_FAILED,
-    },
+    ),
 )
 
 
@@ -935,6 +935,13 @@ def _recover_pending_auto_base_rebase_context(
     ):
         return _clear_unchanged_recovery(context)
 
+    return _route_recovery_snapshot(context, snapshot)
+
+
+def _route_recovery_snapshot(
+    context: _AutoRebaseRecoveryContext, snapshot: _AutoRebaseRecoverySnapshot,
+) -> bool:
+    """Route a changed-head recovery from its completed local/remote compare."""
     snapshot = _complete_recovery_snapshot(context, snapshot)
     if snapshot is None:
         return True
@@ -1699,9 +1706,14 @@ def _sync_pr_worktree_to_base(
     if pr is None:
         return
 
-    recovery = _auto_rebase_recovery_decision(
-        context, retry.consumed_comment_id,
-    )
+    _publish_auto_rebase_from_pr(context, pr, retry.consumed_comment_id)
+
+
+def _publish_auto_rebase_from_pr(
+    context: _AutoRebaseContext, pr: PullRequest, consumed_comment_id: Optional[int],
+) -> None:
+    """Complete the recovery / rebase / publish phase for an opened PR."""
+    recovery = _auto_rebase_recovery_decision(context, consumed_comment_id)
     if not recovery.should_continue:
         return
     if not _normal_auto_rebase_can_start(context):

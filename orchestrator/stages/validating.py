@@ -183,7 +183,7 @@ _SHORT_SHA_LEN = 12
 
 
 _VALIDATING_TRANSIENT_PARK_REASONS = frozenset(
-    {_REASON_PUSH_FAILED, _REASON_AGENT_TIMEOUT, _REASON_REVIEWER_TIMEOUT, _REASON_REVIEWER_FAILED}
+    (_REASON_PUSH_FAILED, _REASON_AGENT_TIMEOUT, _REASON_REVIEWER_TIMEOUT, _REASON_REVIEWER_FAILED)
 )
 
 
@@ -710,7 +710,7 @@ def _verify_failure_detail(verify) -> str:
             f"`{verify.command}` moved HEAD ({before} -> {after}); "
             "verify commands must not commit"
         )
-    exit_display = verify.exit_code if verify.exit_code is not None else "?"
+    exit_display = "?" if verify.exit_code is None else verify.exit_code
     return (
         f"`{verify.command}` exited with code "
         f"{exit_display}"
@@ -769,7 +769,7 @@ def _ratchet_watermark(prev, seeded):
     """
     if isinstance(prev, int):
         return prev if seeded is None else max(seeded, prev)
-    return seeded if seeded is not None else 0
+    return 0 if seeded is None else seeded
 
 
 def _finalize_validating_terminal(
@@ -1403,9 +1403,9 @@ def _park_reviewer_no_verdict(
         not (review.last_message or "").strip() and review.exit_code != 0
     )
     diag = (
-        _wf._format_stderr_diagnostics(review, "Reviewer")
-        if not (review.last_message or "").strip()
-        else ""
+        ""
+        if (review.last_message or "").strip()
+        else _wf._format_stderr_diagnostics(review, "Reviewer")
     )
     _wf._park_awaiting_human(
         gh, issue, state,
@@ -1671,8 +1671,8 @@ def _dispatch_reviewer_result(
         verdict=verdict,
         review_round=reviewer_run.round_n,
         pr_number=(
-            int(reviewer_run.pr_number)
-            if reviewer_run.pr_number is not None else None
+            None if reviewer_run.pr_number is None
+            else int(reviewer_run.pr_number)
         ),
         session_id=review.session_id,
     )

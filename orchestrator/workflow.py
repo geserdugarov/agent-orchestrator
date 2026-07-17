@@ -459,9 +459,9 @@ log = logging.getLogger(__name__)
 # `resolving_conflict`, `question`) only read and write their own
 # per-issue state + worktree, so they stay eligible for
 # unconditional parallel fan-out.
-_FAMILY_AWARE_LABELS = frozenset({
+_FAMILY_AWARE_LABELS = frozenset((
     WorkflowLabel.DECOMPOSING, WorkflowLabel.BLOCKED, WorkflowLabel.UMBRELLA,
-})
+))
 
 # Family-aware labels whose stage handler is a pure GitHub label / dep-graph
 # walk -- no agent spawn, no worktree mutation (`_handle_blocked`,
@@ -474,9 +474,9 @@ _FAMILY_AWARE_LABELS = frozenset({
 # blocks. `decomposing` is excluded (it spawns the decomposer agent), as is
 # the unlabeled-pickup case (`None`, routed through `_handle_pickup`, which
 # can spawn an agent too): a bucket containing either stays cap-counted.
-_CAP_EXEMPT_FAMILY_LABELS = frozenset({
+_CAP_EXEMPT_FAMILY_LABELS = frozenset((
     "blocked", "umbrella",
-})
+))
 
 # Shared log template for a per-issue handler that raised; the tick loop logs it
 # with the repo slug and issue tag before moving on to the next issue.
@@ -871,6 +871,15 @@ def _label_community_contribution(
     )
 
 
+def _sweep_pr_contribution(
+    gh: GitHubClient, spec: RepoSpec, pr, allowed_lower: set,
+) -> None:
+    """Label one open PR when its author is an outside community contributor."""
+    contribution = _community_contribution_for_pr(gh, pr, allowed_lower)
+    if contribution is not None:
+        _label_community_contribution(gh, spec, pr, contribution)
+
+
 def _sweep_community_contribution_prs(
     gh: GitHubClient, spec: RepoSpec
 ) -> None:
@@ -905,11 +914,7 @@ def _sweep_community_contribution_prs(
         return
     for pr in prs:
         try:
-            contribution = _community_contribution_for_pr(
-                gh, pr, allowed_lower,
-            )
-            if contribution is not None:
-                _label_community_contribution(gh, spec, pr, contribution)
+            _sweep_pr_contribution(gh, spec, pr, allowed_lower)
         except Exception:
             log.exception(
                 "repo=%s pr=#%s community-contribution sweep step failed; continuing",
@@ -958,6 +963,20 @@ class _PollablePartitionBuilder:
         )
 
 
+def _read_issue_routing(
+    gh: GitHubClient, spec: RepoSpec, issue: Issue,
+) -> tuple[bool, Optional[str]]:
+    """Return ``(skip, label)`` from the issue's control / workflow labels."""
+    skip_label = hard_skip_control_label(issue)
+    if skip_label is not None:
+        log.info(
+            "repo=%s issue=#%s has %r; skipping",
+            spec.slug, issue.number, skip_label,
+        )
+        return True, None
+    return False, gh.workflow_label(issue)
+
+
 def _classify_pollable_issue(
     gh: GitHubClient, spec: RepoSpec, issue: Issue,
 ) -> tuple[bool, Optional[str]]:
@@ -977,14 +996,7 @@ def _classify_pollable_issue(
     on the caller thread so bucketing needs no extra worker-side round-trip.
     """
     try:
-        skip_label = hard_skip_control_label(issue)
-        if skip_label is not None:
-            log.info(
-                "repo=%s issue=#%s has %r; skipping",
-                spec.slug, issue.number, skip_label,
-            )
-            return True, None
-        return False, gh.workflow_label(issue)
+        return _read_issue_routing(gh, spec, issue)
     except Exception:
         log.exception(
             "repo=%s issue=#%s label read failed; routing to family bucket "
@@ -1060,7 +1072,7 @@ def _refetch_and_process(
     """
     worker_gh = gh._for_worker_thread()
     worker_issue = worker_gh.get_issue(issue_number)
-    cm = semaphore_cm if semaphore_cm is not None else contextlib.nullcontext()
+    cm = contextlib.nullcontext() if semaphore_cm is None else semaphore_cm
     with cm:
         _process_issue(worker_gh, spec, worker_issue)
 
@@ -1130,10 +1142,8 @@ class _ParallelTickPlan:
 
     @property
     def task_count(self) -> int:
-        return (
-            (1 if self.partition.family_numbers else 0)
-            + len(self.partition.fanout_numbers)
-        )
+        family_count = 1 if self.partition.family_numbers else 0
+        return family_count + len(self.partition.fanout_numbers)
 
     def submit(self, executor) -> tuple[dict[Any, Any], object]:
         family_sentinel: object = object()
@@ -1301,7 +1311,7 @@ def tick(
     # and in-thread; `limit > 1` fans out across a bounded pool.
     limit = max(1, int(getattr(spec, "parallel_limit", 1) or 1))
     semaphore_cm = (
-        global_semaphore if global_semaphore is not None else contextlib.nullcontext()
+        contextlib.nullcontext() if global_semaphore is None else global_semaphore
     )
     if limit == 1:
         _run_sequential_tick(gh, spec, semaphore_cm)

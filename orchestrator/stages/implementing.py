@@ -195,7 +195,7 @@ def _stored_dev_session(state: PinnedState, stored) -> tuple:
         stored_spec,
         backend,
         args,
-        str(session_id) if session_id is not None else None,
+        None if session_id is None else str(session_id),
     )
 
 

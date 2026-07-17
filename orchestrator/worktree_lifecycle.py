@@ -456,12 +456,24 @@ def _ensure_decompose_worktree(spec: RepoSpec, issue_number: int) -> Path:
         return wt
 
 
+def _run_decompose_worktree_removal(spec: RepoSpec, issue_number: int) -> None:
+    """Force-remove the decomposer worktree under the parent lock if present."""
+    wt = _decompose_worktree_path(spec, issue_number)
+    if wt.exists():
+        with _target_root_lock(spec.target_root):
+            _git(
+                "worktree", "remove", "--force", str(wt),
+                cwd=spec.target_root,
+            )
+
+
 def _cleanup_decompose_worktree(spec: RepoSpec, issue_number: int) -> None:
     """Remove the decomposer's worktree if it exists.
 
     Called at every `_handle_decomposing` exit except the dirty/commits
-    park (where the operator may want to inspect before resuming). Failures
-    are logged but never raised -- cleanup must not mask the real exit.
+    park (where the operator may want to inspect before resuming). Every
+    step -- including path resolution -- rides the best-effort guard so a
+    failure is logged but never raised: cleanup must not mask the real exit.
 
     Serialized by the per-target_root lock because `worktree remove`
     rewrites the parent clone's `.git/config` and its `worktrees/<name>/`
@@ -470,13 +482,7 @@ def _cleanup_decompose_worktree(spec: RepoSpec, issue_number: int) -> None:
     `.git/config.lock`.
     """
     try:
-        wt = _decompose_worktree_path(spec, issue_number)
-        if wt.exists():
-            with _target_root_lock(spec.target_root):
-                _git(
-                    "worktree", "remove", "--force", str(wt),
-                    cwd=spec.target_root,
-                )
+        _run_decompose_worktree_removal(spec, issue_number)
     except Exception:
         log.exception(
             "issue=#%d failed to clean up decomposer worktree", issue_number,
@@ -579,29 +585,62 @@ def _branch_commit_count(
         return 0
 
 
+def _run_issue_worktree_removal(
+    spec: RepoSpec, issue_number: int, log_prefix: str,
+) -> None:
+    """Force-remove one issue worktree under the parent lock, logging a
+    non-zero git result."""
+    worktree = _worktree_path(spec, issue_number)
+    if not worktree.exists():
+        return
+    with _target_root_lock(spec.target_root):
+        remove_result = _git(
+            "worktree", "remove", "--force", str(worktree),
+            cwd=spec.target_root,
+        )
+    if remove_result.returncode != 0:
+        log.warning(
+            "issue=#%d %sworktree remove failed: %s",
+            issue_number,
+            log_prefix,
+            (remove_result.stderr or "").strip(),
+        )
+
+
 def _remove_issue_worktree(
     spec: RepoSpec, issue_number: int, *, log_prefix: str = "",
 ) -> None:
     """Best-effort removal of one issue worktree under the parent lock."""
     try:
-        worktree = _worktree_path(spec, issue_number)
-        if not worktree.exists():
-            return
-        with _target_root_lock(spec.target_root):
-            remove_result = _git(
-                "worktree", "remove", "--force", str(worktree),
-                cwd=spec.target_root,
-            )
-        if remove_result.returncode != 0:
-            log.warning(
-                "issue=#%d %sworktree remove failed: %s",
-                issue_number,
-                log_prefix,
-                (remove_result.stderr or "").strip(),
-            )
+        _run_issue_worktree_removal(spec, issue_number, log_prefix)
     except Exception:
         log.exception(
             "issue=#%d %sworktree remove raised", issue_number, log_prefix,
+        )
+
+
+def _run_local_branch_deletion(
+    spec: RepoSpec, issue_number: int, branch: str, log_prefix: str,
+) -> None:
+    """Delete one local issue branch under the parent lock (no-op when the
+    branch is absent), logging a non-zero git result."""
+    with _target_root_lock(spec.target_root):
+        have_local = _git(
+            "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
+            cwd=spec.target_root,
+        ).returncode == 0
+        if not have_local:
+            return
+        delete_result = _git(
+            "branch", "-D", branch, cwd=spec.target_root,
+        )
+    if delete_result.returncode != 0:
+        log.warning(
+            "issue=#%d %slocal branch %r delete failed: %s",
+            issue_number,
+            log_prefix,
+            branch,
+            (delete_result.stderr or "").strip(),
         )
 
 
@@ -614,24 +653,7 @@ def _delete_local_issue_branch(
 ) -> None:
     """Best-effort deletion of one local issue branch under the parent lock."""
     try:
-        with _target_root_lock(spec.target_root):
-            have_local = _git(
-                "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
-                cwd=spec.target_root,
-            ).returncode == 0
-            if not have_local:
-                return
-            delete_result = _git(
-                "branch", "-D", branch, cwd=spec.target_root,
-            )
-        if delete_result.returncode != 0:
-            log.warning(
-                "issue=#%d %slocal branch %r delete failed: %s",
-                issue_number,
-                log_prefix,
-                branch,
-                (delete_result.stderr or "").strip(),
-            )
+        _run_local_branch_deletion(spec, issue_number, branch, log_prefix)
     except Exception:
         log.exception(
             "issue=#%d %slocal branch %r delete raised",

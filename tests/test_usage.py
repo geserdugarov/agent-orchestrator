@@ -1624,6 +1624,21 @@ class CodexTrajectoryTest(unittest.TestCase):
         self.assertEqual(trajectory.steps[0].kind, "tool_call")
         self.assertEqual(trajectory.steps[0].tool_id, "item_1")
 
+    def test_null_aggregated_output_still_emits_result(self) -> None:
+        # A completed command whose ``aggregated_output`` is present but null
+        # still emits a tool_result step (content None): the recorded-output
+        # decision is membership, not truthiness, so a null result is kept.
+        stdout = _jsonl(
+            _codex_cmd("item_1", "/bin/bash -lc 'true'",
+                       status="completed", aggregated_output=None),
+        )
+        trajectory = parse_codex_trajectory(stdout)
+        self.assertEqual(
+            [step.kind for step in trajectory.steps],
+            ["tool_call", "tool_result"],
+        )
+        self.assertIsNone(trajectory.steps[1].content)
+
     def test_missing_fields_yield_empty_sections(self) -> None:
         stdout = _jsonl(
             {"type": "thread.started"},
