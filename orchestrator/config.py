@@ -18,7 +18,7 @@ import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -36,6 +36,27 @@ _SECRET_KEYS = frozenset((
 _DOTENV_TRUE_VALUES = frozenset(("1", "true", "on", "yes"))
 # Default value for boolean env knobs that ship enabled.
 _DEFAULT_ENABLED = "on"
+
+
+def _config_error(message: str) -> NoReturn:
+    """Abort import when the configuration is invalid.
+
+    Every invalid-config path funnels through here so a typo in the
+    deployment env stops the process -- on stderr, with exit code 1 --
+    before the first GitHub call. `sys.exit(str)` makes `str(exc)` the
+    message, which the import-time validation tests assert on.
+    """
+    sys.exit(message)
+
+
+def _config_warning(message: str) -> None:
+    """Emit a non-fatal configuration diagnostic to stderr.
+
+    Warnings (an ignored .env secret, an unreadable token file, a missing
+    REPOS target_root) surface the problem but let the process continue,
+    so they go to stderr rather than aborting like `_config_error`.
+    """
+    sys.stderr.write(f"{message}\n")
 
 
 def _has_matched_outer_quotes(dotenv_value: str) -> bool:
@@ -83,12 +104,11 @@ def _parse_dotenv_entry(raw_line: str) -> Optional[tuple[str, str]]:
 
 
 def _warn_ignored_dotenv_secret(key: str, env_path: Path) -> None:
-    print(
+    _config_warning(
         f"orchestrator: ignoring {key} in {env_path}; the implementer "
         f"agent can read this file. Move the token to "
         f"~/.config/<owner>/<repo>/token (path derived from REPO) "
-        f"or export {key} before launching.",
-        file=sys.stderr,
+        f"or export {key} before launching."
     )
 
 
@@ -130,9 +150,8 @@ def _resolve_github_token(repo: str) -> str:
     except FileNotFoundError:
         return ""
     except OSError as err:
-        print(
-            f"orchestrator: could not read token file {token_file}: {err}",
-            file=sys.stderr,
+        _config_warning(
+            f"orchestrator: could not read token file {token_file}: {err}"
         )
         return ""
 
@@ -274,20 +293,20 @@ def _agent_spec_tokens(name: str, spec: str) -> list[str]:
     relies on)."""
     raw = (spec or "").strip()
     if not raw:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: {name}={spec!r} is empty; expected 'codex' "
             "or 'claude' (optionally followed by CLI args)"
         )
     try:
         tokens = shlex.split(raw)
     except ValueError as err:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: {name}={spec!r} is not a valid shell-like "
             f"command spec ({err}); expected 'codex' or 'claude' "
             "(optionally followed by CLI args)"
         )
     if not tokens:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: {name}={spec!r} parses to no tokens; expected "
             "'codex' or 'claude' (optionally followed by CLI args)"
         )
@@ -312,7 +331,7 @@ def _parse_agent_spec(name: str, spec: str) -> tuple[str, tuple[str, ...]]:
     tokens = _agent_spec_tokens(name, spec)
     backend = tokens[0].lower()
     if backend not in ("codex", _CLAUDE):
-        raise SystemExit(
+        _config_error(
             f"orchestrator: {name}={spec!r} first token {tokens[0]!r} is "
             "invalid; expected 'codex' or 'claude'"
         )
@@ -395,12 +414,12 @@ def _parse_positive_int(name: str, raw: str, default: int) -> int:
     try:
         parsed = int(stripped)
     except ValueError:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: {name}={raw!r} is not a valid integer; "
             "expected a positive integer (>= 1)"
         )
     if parsed < 1:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: {name}={raw!r} must be >= 1 "
             "(zero or negative would block all work)"
         )
@@ -438,7 +457,7 @@ def _parse_transition_guard(raw: str) -> str:
     """
     mode = (raw or "").strip().lower() or "warn"
     if mode not in ("off", "warn", "enforce"):
-        raise SystemExit(
+        _config_error(
             f"orchestrator: WORKFLOW_TRANSITION_GUARD={raw!r} is invalid; "
             "expected one of: off, warn, enforce"
         )
@@ -511,7 +530,7 @@ def _parse_repo_remote_name(entry_no: int, parts: tuple[str, ...]) -> str:
         return "origin"
     remote_name = parts[3]
     if not remote_name:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: REPOS entry #{entry_no} has empty "
             "remote_name (omit the trailing '|' to default to 'origin')"
         )
@@ -529,17 +548,17 @@ def _validate_repo_required_fields(
     # A substring check also accepts empty or extra path components.
     slug_components = slug.split("/")
     if len(slug_components) != 2 or not all(slug_components):
-        raise SystemExit(
+        _config_error(
             f"orchestrator: REPOS entry #{entry_no} has invalid "
             f"owner/name {slug!r}; expected exactly 'owner/name' "
             "with non-empty owner and name"
         )
     if not target_root:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: REPOS entry #{entry_no} has empty target_root"
         )
     if not base_branch:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: REPOS entry #{entry_no} has empty base_branch"
         )
 
@@ -548,7 +567,7 @@ def _parse_repo_entry(entry_no: int, line: str) -> _RepoEnvEntry:
     """Parse and validate the fields of one REPOS entry."""
     parts = tuple(part.strip() for part in line.split("|"))
     if len(parts) not in (3, 4, 5):
-        raise SystemExit(
+        _config_error(
             f"orchestrator: REPOS entry #{entry_no} is malformed "
             f"(expected 'owner/name|target_root|base_branch' "
             f"with optional '|remote_name' and '|parallel_limit'): "
@@ -575,7 +594,7 @@ def _parse_repo_entry(entry_no: int, line: str) -> _RepoEnvEntry:
 def _record_repo_slug(entry: _RepoEnvEntry, seen: set[str]) -> None:
     """Reject duplicate repository slugs and record a unique one."""
     if entry.slug in seen:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: REPOS lists duplicate slug {entry.slug!r}; "
             "each repo can appear only once"
         )
@@ -587,7 +606,7 @@ def _parse_repo_parallel_limit(entry: _RepoEnvEntry) -> int:
     if entry.parallel_limit_raw is None:
         return MAX_PARALLEL_ISSUES_PER_REPO
     if not entry.parallel_limit_raw:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: REPOS entry #{entry.entry_no} has empty "
             "parallel_limit (omit the trailing '|' to default to "
             f"MAX_PARALLEL_ISSUES_PER_REPO={MAX_PARALLEL_ISSUES_PER_REPO})"
@@ -595,13 +614,13 @@ def _parse_repo_parallel_limit(entry: _RepoEnvEntry) -> int:
     try:
         parallel_limit = int(entry.parallel_limit_raw)
     except ValueError:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: REPOS entry #{entry.entry_no} parallel_limit "
             f"{entry.parallel_limit_raw!r} is not a valid integer; expected "
             "a positive integer (>= 1)"
         )
     if parallel_limit < 1:
-        raise SystemExit(
+        _config_error(
             f"orchestrator: REPOS entry #{entry.entry_no} parallel_limit "
             f"{entry.parallel_limit_raw!r} must be >= 1 (zero or negative "
             "would block all work for this repo)"
@@ -614,10 +633,9 @@ def _repo_spec_from_env_entry(entry: _RepoEnvEntry) -> RepoSpec:
     parallel_limit = _parse_repo_parallel_limit(entry)
     target_path = Path(entry.target_root)
     if not target_path.exists():
-        print(
+        _config_warning(
             f"orchestrator: REPOS entry {entry.slug!r} target_root "
-            f"{target_path} does not exist; worktree creation will fail",
-            file=sys.stderr,
+            f"{target_path} does not exist; worktree creation will fail"
         )
     return RepoSpec(
         slug=entry.slug,
@@ -653,7 +671,7 @@ def _parse_repos_env(raw: str) -> list[RepoSpec]:
         _record_repo_slug(entry, seen)
         specs.append(_repo_spec_from_env_entry(entry))
     if not specs:
-        raise SystemExit(
+        _config_error(
             "orchestrator: REPOS is set but contains no valid entries; "
             "either unset it or provide at least one "
             "'owner/name|target_root|base_branch' entry"
