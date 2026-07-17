@@ -871,6 +871,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-17 | 4.5/usage-metrics | Complete | Target WPS; 21 fixed, 2 deferred; full gate | Not committed | 4.5 rest |
 | 2026-07-17 | 4.5/usage-skills | Complete | Target WPS; WPS202 36->25; full gate | Not committed | 4.5 rest |
 | 2026-07-17 | 4.5/usage-trajectory | Complete | Target WPS; 2 deferred fixed; full gate | Not committed | 4.5 rest |
+| 2026-07-18 | 4.5/config-diagnostics | Complete | WPS363 17->0, WPS421 3->0; full gate | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1136,3 +1137,17 @@ re-export identity and each symbol's module of record alongside the metric and s
 passed 2,097 tests (33 skipped for the optional dashboard / live Postgres; the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`
 shell-export artifact is unset for the run). Package 4.5 is not complete -- its remaining module-structure findings are
 untouched.
+
+The `config-diagnostics` slice cleared all 20 configuration failure-path findings in `config.py` -- the 17 `WPS363`
+`raise SystemExit` sites and the 3 `WPS421` direct-`print` sites -- by routing every one through two new module
+helpers: `_config_error(message)` aborts import via `sys.exit(message)` (so `str(exc)` is still the message and the
+exit code is still 1, which the import-time validation tests assert on) and `_config_warning(message)` writes the
+diagnostic to `sys.stderr`. Exact messages, exit codes, the stderr-not-stdout stream, import-time validation, the
+dotenv secret / token-file / missing-target warnings, and all parser edge cases were preserved, so every existing
+`test_config.py` case passed unchanged; a new `ConfigDiagnosticsTest` pins the two helpers' message / exit-code /
+stream contract at the producer level and the missing-target case now also asserts stdout stays empty. The two new
+helpers nudge `config.py`'s `WPS202` member count (25 -> 27); both are cohesive configuration-diagnostics functions
+that move together in any later module split, and that member-count finding is left for the rest of Package 4.5. Ruff
+is clean and the full suite passed 2,099 tests (33 skipped for the optional dashboard / live Postgres; the
+`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not complete -- its
+remaining module-structure findings are untouched.

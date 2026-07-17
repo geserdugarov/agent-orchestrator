@@ -787,12 +787,14 @@ class MultiRepoConfigTest(unittest.TestCase):
         self.assertIn("no valid entries", str(cm.exception))
 
     def test_missing_target_warns_but_loads(self) -> None:
-        # Captures the stderr warning to confirm "warn loudly" semantics.
+        # Confirms "warn loudly" semantics: the diagnostic lands on stderr,
+        # never stdout, and does not abort the load.
         import io
-        from contextlib import redirect_stderr
+        from contextlib import redirect_stderr, redirect_stdout
 
         captured_stderr = io.StringIO()
-        with redirect_stderr(captured_stderr):
+        captured_stdout = io.StringIO()
+        with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr):
             config = self._load_config(
                 {"REPOS": "alpha/one|/this/path/does/not/exist|main"}
             )
@@ -800,6 +802,7 @@ class MultiRepoConfigTest(unittest.TestCase):
         self.assertEqual(len(specs), 1)
         self.assertIn("does not exist", captured_stderr.getvalue())
         self.assertIn("alpha/one", captured_stderr.getvalue())
+        self.assertEqual(captured_stdout.getvalue(), "")
 
 
 class ParallelLimitsConfigTest(unittest.TestCase):
@@ -972,6 +975,38 @@ class ParallelLimitsConfigTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 self._load_config({"REPOS": f"alpha/one|{td}|main|origin|"})
             self.assertIn("parallel_limit", str(cm.exception))
+
+
+class ConfigDiagnosticsTest(unittest.TestCase):
+    """Configuration failures and warnings funnel through two helpers:
+    `_config_error` aborts import (SystemExit carrying the message, exit
+    code 1) and `_config_warning` emits a non-fatal line to stderr without
+    touching stdout. Every import-time validation and dotenv warning path
+    routes through these, so the message, exit code, and stream are pinned
+    here at the producer level.
+    """
+
+    def test_config_error_aborts_with_message_and_exit_code(self) -> None:
+        from orchestrator.config import _config_error
+
+        with self.assertRaises(SystemExit) as cm:
+            _config_error("orchestrator: bad config")
+        # `str(exc)` is what the import-time validation tests assert on; a
+        # string code exits the process with status 1.
+        self.assertEqual(str(cm.exception), "orchestrator: bad config")
+        self.assertEqual(cm.exception.code, "orchestrator: bad config")
+
+    def test_config_warning_writes_to_stderr_only(self) -> None:
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from orchestrator.config import _config_warning
+
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            _config_warning("orchestrator: heads up")
+        self.assertEqual(err.getvalue(), "orchestrator: heads up\n")
+        self.assertEqual(out.getvalue(), "")
 
 
 if __name__ == "__main__":
