@@ -721,11 +721,13 @@ def _render_dashboard_footer(
     summary: Summary,
 ) -> None:
     end_date = (filters.window.end - timedelta(days=1)).date()
+    window_start = filters.window.start.date().isoformat()
+    agent_runs = modules.theme.fmt_num(summary.total_agent_runs)
     modules.st.markdown(
         '<div class="orch-foot">'
-        f'Real data · window {filters.window.start.date().isoformat()} → '
+        f'Real data · window {window_start} → '
         f'{end_date.isoformat()} · '
-        f'{modules.theme.fmt_num(summary.total_agent_runs)} agent runs'
+        f'{agent_runs} agent runs'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -1369,6 +1371,58 @@ def _kpi_totals(inputs: _KpiInputs) -> _KpiTotals:
     )
 
 
+def _cost_per_resolved(totals: _KpiTotals) -> str:
+    if totals.resolved <= 0:
+        return "—"
+    avg_cost = totals.cost / totals.resolved
+    return f"${avg_cost:,.2f}"
+
+
+def _kpi_strip_entries(
+    inputs: _KpiInputs,
+    totals: _KpiTotals,
+    daily: _DailyKpiSeries,
+    rework_share: float,
+) -> list[dict[str, Any]]:
+    daily_cost = inputs.theme.fmt_money(totals.cost / inputs.days_in_window)
+    daily_tokens = inputs.theme.fmt_tokens(totals.tokens / inputs.days_in_window)
+    rework_pct = rework_share * 100
+    rework_cost = inputs.theme.fmt_money_exact(totals.rework_cost)
+    return [
+        {
+            "label": "Total spend",
+            "value": inputs.theme.fmt_money_exact(totals.cost),
+            "delta": kpi_delta(totals.cost, totals.previous_cost),
+            "sub": f"{daily_cost}/day",
+            "spark": daily.cost,
+            "spark_color": inputs.theme.ACCENT,
+        },
+        {
+            "label": "Total tokens",
+            "value": inputs.theme.fmt_tokens(totals.tokens),
+            "delta": kpi_delta(totals.tokens, totals.previous_tokens),
+            "sub": f"{daily_tokens}/day",
+            "spark": daily.tokens,
+            "spark_color": inputs.theme.TOKEN_TYPE_COLORS["Input"],
+        },
+        {
+            "label": "Cost / resolved issue",
+            "value": _cost_per_resolved(totals),
+            "delta": None,
+            "sub": f"{totals.resolved} resolved · {totals.rejected} rejected",
+            "spark": daily.done,
+            "spark_color": inputs.theme.TOKEN_TYPE_COLORS["Cache"],
+        },
+        {
+            "label": "Rework share",
+            "value": f"{rework_pct:.0f}%",
+            "delta": None,
+            "sub": f"{rework_cost} in review rounds >= 1",
+            "spark": None,
+        },
+    ]
+
+
 def _build_kpi_strip_data(
     inputs: _KpiInputs,
 ) -> tuple[list[dict[str, Any]], int, int]:
@@ -1383,53 +1437,7 @@ def _build_kpi_strip_data(
         ts_points=inputs.ts_points,
         throughput_rows=inputs.throughput_rows,
     )
-    cost_per_resolved = (
-        f"${totals.cost / totals.resolved:,.2f}"
-        if totals.resolved > 0
-        else "—"
-    )
-    kpis = [
-        {
-            "label": "Total spend",
-            "value": inputs.theme.fmt_money_exact(totals.cost),
-            "delta": kpi_delta(totals.cost, totals.previous_cost),
-            "sub": (
-                f"{inputs.theme.fmt_money(totals.cost / inputs.days_in_window)}"
-                "/day"
-            ),
-            "spark": daily.cost,
-            "spark_color": inputs.theme.ACCENT,
-        },
-        {
-            "label": "Total tokens",
-            "value": inputs.theme.fmt_tokens(totals.tokens),
-            "delta": kpi_delta(totals.tokens, totals.previous_tokens),
-            "sub": (
-                f"{inputs.theme.fmt_tokens(totals.tokens / inputs.days_in_window)}"
-                "/day"
-            ),
-            "spark": daily.tokens,
-            "spark_color": inputs.theme.TOKEN_TYPE_COLORS["Input"],
-        },
-        {
-            "label": "Cost / resolved issue",
-            "value": cost_per_resolved,
-            "delta": None,
-            "sub": f"{totals.resolved} resolved · {totals.rejected} rejected",
-            "spark": daily.done,
-            "spark_color": inputs.theme.TOKEN_TYPE_COLORS["Cache"],
-        },
-        {
-            "label": "Rework share",
-            "value": f"{rework_share * 100:.0f}%",
-            "delta": None,
-            "sub": (
-                f"{inputs.theme.fmt_money_exact(totals.rework_cost)} in review "
-                "rounds >= 1"
-            ),
-            "spark": None,
-        },
-    ]
+    kpis = _kpi_strip_entries(inputs, totals, daily, rework_share)
     return kpis, totals.resolved, totals.rejected
 
 

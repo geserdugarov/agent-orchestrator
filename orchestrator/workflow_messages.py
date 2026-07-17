@@ -321,7 +321,8 @@ _MAX_FILES_SHOWN = 20
 
 def _as_blockquote(text: str) -> str:
     """Render `text` as a Markdown blockquote (each line prefixed with `> `)."""
-    return "> " + text.replace("\n", "\n> ")
+    prefixed = text.replace("\n", "\n> ")
+    return f"> {prefixed}"
 
 
 def _format_stderr_diagnostics(
@@ -843,6 +844,18 @@ def _has_dep_cycle(children: list[dict]) -> bool:
     )
 
 
+def _quote_comment_line(comment: object, label: str = "") -> str:
+    """Quote one already-selected comment as `@author[label]: body`.
+
+    Shared by the resume/followup prompt builders and the stage handlers that
+    fold fresh issue or PR comments into an agent prompt; `label` inserts a
+    surface tag (e.g. ` (PR comment)`) after the author.
+    """
+    author = comment.user.login if comment.user else "user"
+    body = comment.body or ""
+    return f"@{author}{label}: {body}"
+
+
 def _prompt_comment_chunk(issue_comment: object) -> Optional[str]:
     """Format one trusted, non-state issue comment for an agent prompt."""
     body = getattr(issue_comment, "body", None) or ""
@@ -1169,7 +1182,8 @@ def _build_conflict_resolution_prompt(
     shown = files[:_MAX_FILES_SHOWN]
     files_md = "\n".join(f"- `{file_path}`" for file_path in shown)
     if len(files) > len(shown):
-        files_md += f"\n- ... ({len(files) - len(shown)} more)"
+        elided = len(files) - len(shown)
+        files_md = f"{files_md}\n- ... ({elided} more)"
     return (
         f"`git rebase {base_ref}` left {len(files)} conflicted "
         "file(s) in your worktree. Resolve each conflict and complete the "
@@ -1243,9 +1257,7 @@ def _build_question_followup_prompt(comments: list) -> str:
     deciding to "just implement the fix".
     """
     body = _SECTION_SEP.join(
-        f"@{comment.user.login if comment.user else 'user'}: "
-        f"{comment.body or ''}"
-        for comment in comments
+        _quote_comment_line(comment) for comment in comments
     )
     quoted = _as_blockquote(body)
     return (
@@ -1267,9 +1279,7 @@ def _build_pr_comment_followup(comments: list) -> str:
     "rename foo to bar" reads as freeform chatter without context.
     """
     body = _SECTION_SEP.join(
-        f"@{comment.user.login if comment.user else 'user'}: "
-        f"{comment.body or ''}"
-        for comment in comments
+        _quote_comment_line(comment) for comment in comments
     )
     quoted = _as_blockquote(body)
     return (

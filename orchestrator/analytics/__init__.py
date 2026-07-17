@@ -303,7 +303,7 @@ def _append_jsonl_record(
     """
     if path is None:
         return
-    serialized = json.dumps(record, sort_keys=True) + "\n"
+    serialized = f"{json.dumps(record, sort_keys=True)}\n"
     try:
         with lock:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -744,7 +744,9 @@ def _truncate_head_tail(text: str, head: int, tail: int) -> str:
     if len(text) <= head + tail:
         return text
     elided = len(text) - head - tail
-    return f"{text[:head]}\n...[{elided} chars elided]...\n{text[-tail:]}"
+    head_text = text[:head]
+    tail_text = text[-tail:]
+    return f"{head_text}\n...[{elided} chars elided]...\n{tail_text}"
 
 
 def _redact_tree(node: Any, redact) -> Any:
@@ -1091,7 +1093,7 @@ def _prune_timestamp(raw_line: str) -> Optional[datetime]:
 def _normalized_jsonl_line(raw_line: str) -> str:
     if raw_line.endswith("\n"):
         return raw_line
-    return raw_line + "\n"
+    return f"{raw_line}\n"
 
 
 @dataclass
@@ -1158,7 +1160,7 @@ def _atomic_rewrite(path: Path, lines: list[str]) -> None:
     """
     tmp_fd, tmp_path = tempfile.mkstemp(
         dir=str(path.parent),
-        prefix=path.name + ".prune.",
+        prefix=f"{path.name}.prune.",
         suffix=".tmp",
     )
     try:

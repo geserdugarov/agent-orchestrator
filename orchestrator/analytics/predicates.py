@@ -76,7 +76,8 @@ class _WhereBuilder:
     def render(self) -> tuple[str, list[Any]]:
         if not self.conditions:
             return "", self.bindings
-        return " WHERE " + " AND ".join(self.conditions), self.bindings
+        where_clause = " AND ".join(self.conditions)
+        return f" WHERE {where_clause}", self.bindings
 
 
 def _day_bound(bound: Optional[datetime]) -> Any:

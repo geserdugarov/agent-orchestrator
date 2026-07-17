@@ -567,6 +567,7 @@ def _abort_recovery_unverified(
     context: _AutoRebaseRecoveryContext, detail: str,
 ) -> bool:
     """Restore the recovery anchor when the remote state cannot be verified."""
+    pre_rebase_short = context.pending_pre_rebase_sha[:8]
     _reset_clear_and_park(
         context,
         context.pending_pre_rebase_sha,
@@ -574,7 +575,7 @@ def _abort_recovery_unverified(
             f"{config.HITL_MENTIONS} crash recovery for PR "
             f"#{context.pr_number} could not safely finalize: {detail} "
             f"Local HEAD has been reset to the pre-rebase SHA "
-            f"`{context.pending_pre_rebase_sha[:8]}` so the worktree "
+            f"`{pre_rebase_short}` so the worktree "
             "matches the (last-known) remote PR head -- the "
             "issue is parked so the same-tick stage handlers do "
             "NOT run against a SHA the PR may not carry. Reply "
@@ -606,13 +607,14 @@ def _fetch_recovery_snapshot(
     context: _AutoRebaseRecoveryContext,
 ) -> Optional[_AutoRebaseRecoverySnapshot]:
     """Fetch the PR branch and capture the local recovery head."""
+    spec = context.spec
     branch = _resolve_branch_name(
-        context.state, context.spec, context.issue.number,
+        context.state, spec, context.issue.number,
     )
     fetch_result = _authed_fetch(
-        context.spec,
+        spec,
         f"+refs/heads/{branch}:refs/remotes/"
-        f"{context.spec.remote_name}/{branch}",
+        f"{spec.remote_name}/{branch}",
         cwd=context.worktree,
     )
     if fetch_result.returncode != 0:
@@ -621,15 +623,16 @@ def _fetch_recovery_snapshot(
             "issue=#%d auto-rebase recovery fetch of %s/%s failed: %s; "
             "aborting recovery and parking awaiting human",
             context.issue.number,
-            context.spec.remote_name,
+            spec.remote_name,
             branch,
             fetch_error,
         )
+        error_snippet = fetch_error[:_ERROR_SNIPPET_LEN]
         _abort_recovery_unverified(
             context,
-            f"the fetch of `{context.spec.remote_name}/{branch}` "
+            f"the fetch of `{spec.remote_name}/{branch}` "
             "needed to verify the recovered SHA against the remote PR "
-            f"head failed (`{fetch_error[:_ERROR_SNIPPET_LEN]}`).",
+            f"head failed (`{error_snippet}`).",
         )
         return None
     return _AutoRebaseRecoverySnapshot(
@@ -659,7 +662,8 @@ def _read_remote_recovery_head(
     branch: str,
 ) -> Optional[str]:
     """Read the freshly fetched remote PR head or park fail-closed."""
-    remote_ref = f"refs/remotes/{context.spec.remote_name}/{branch}"
+    spec = context.spec
+    remote_ref = f"refs/remotes/{spec.remote_name}/{branch}"
     remote_head_result = _git_hardened(
         "rev-parse", remote_ref, cwd=context.worktree,
     )
@@ -672,10 +676,11 @@ def _read_remote_recovery_head(
             remote_ref,
             remote_error,
         )
+        remote_error = remote_error[:_ERROR_SNIPPET_LEN]
         _abort_recovery_unverified(
             context,
             f"`git rev-parse {remote_ref}` failed after the fetch "
-            f"(`{remote_error[:_ERROR_SNIPPET_LEN]}`), so the remote PR head SHA "
+            f"(`{remote_error}`), so the remote PR head SHA "
             "needed for the equality check could not be read.",
         )
         return None
@@ -728,9 +733,10 @@ def _already_published_recovery_notice(
     local_head: str,
 ) -> str:
     """Format the notice for a recovery push that landed before restart."""
+    short_head = local_head[:8]
     notice = (
         f":mag: Recovered an interrupted auto-rebase for PR "
-        f"#{context.pr_number}; the new head `{local_head[:8]}` was "
+        f"#{context.pr_number}; the new head `{short_head}` was "
         "already published before the orchestrator restart."
     )
     if context.behind == 0:
@@ -752,13 +758,14 @@ def _pushed_recovery_notice(
     local_head: str,
 ) -> str:
     """Format the notice for a recovery push reissued this tick."""
+    short_head = local_head[:8]
     notice = (
         f":mag: Recovered an interrupted auto-rebase for PR "
         f"#{context.pr_number}; pushed the recovered head "
-        f"`{local_head[:8]}`."
+        f"`{short_head}`."
     )
     if context.behind == 0:
-        return notice + f" Routing `{context.label}` -> `validating`."
+        return f"{notice} Routing `{context.label}` -> `validating`."
     return (
         notice
         + f" Base advanced again by {context.behind} commit(s) "
@@ -796,10 +803,12 @@ def _reject_unknown_recovery_comparison(
         snapshot.local_head[:8],
         snapshot.remote_head[:8],
     )
+    local_short = snapshot.local_head[:8]
+    remote_short = snapshot.remote_head[:8]
     return _abort_recovery_unverified(
         context,
-        f"local HEAD `{snapshot.local_head[:8]}` differs from remote "
-        f"PR head `{snapshot.remote_head[:8]}` but "
+        f"local HEAD `{local_short}` differs from remote "
+        f"PR head `{remote_short}` but "
         "`_branch_ahead_behind` returned `(0, 0)`, which means the "
         "remote-tracking ref we just fetched is unexpectedly missing "
         "-- the path the recovery would take next cannot be determined "
@@ -812,18 +821,21 @@ def _park_diverged_recovery(
     snapshot: _AutoRebaseRecoverySnapshot,
 ) -> bool:
     """Restore the anchor instead of overwriting an out-of-band PR update."""
+    spec = context.spec
+    local_short = snapshot.local_head[:8]
+    pre_rebase_short = context.pending_pre_rebase_sha[:8]
     _reset_clear_and_park(
         context,
         context.pending_pre_rebase_sha,
         message=(
             f"{config.HITL_MENTIONS} crash recovery for PR "
             f"#{context.pr_number}: local worktree "
-            f"(`{snapshot.local_head[:8]}`) is {snapshot.ahead} ahead "
+            f"(`{local_short}`) is {snapshot.ahead} ahead "
             f"and {snapshot.behind} behind remote "
-            f"`{context.spec.remote_name}/{snapshot.branch}` -- the "
+            f"`{spec.remote_name}/{snapshot.branch}` -- the "
             "remote PR branch was updated out-of-band during the "
             "interrupted auto rebase. HEAD has been reset to the pre-"
-            f"rebase SHA `{context.pending_pre_rebase_sha[:8]}`. "
+            f"rebase SHA `{pre_rebase_short}`. "
             "Investigate the remote PR head and reply on this issue "
             "with anything once the divergence is reconciled."
         ),
@@ -838,16 +850,18 @@ def _park_dirty_recovery(
     dirty_files: list[str],
 ) -> bool:
     """Reset and clean a recovered rebase that carries worktree changes."""
+    local_short = snapshot.local_head[:8]
+    pre_rebase_short = context.pending_pre_rebase_sha[:8]
     _reset_clear_and_park(
         context,
         context.pending_pre_rebase_sha,
         message=(
             f"{config.HITL_MENTIONS} crash recovery for PR "
             f"#{context.pr_number}: the rebased worktree (recovered "
-            f"from a prior tick, HEAD `{snapshot.local_head[:8]}`) "
+            f"from a prior tick, HEAD `{local_short}`) "
             f"carries {len(dirty_files)} uncommitted change(s). HEAD "
             "has been reset to the pre-rebase SHA "
-            f"`{context.pending_pre_rebase_sha[:8]}` and untracked "
+            f"`{pre_rebase_short}` and untracked "
             "files cleaned (use `git reflog` if you need the "
             "discarded edits). Investigate, then reply on this issue "
             "with anything to retry."
@@ -863,14 +877,16 @@ def _park_failed_recovery_push(
     snapshot: _AutoRebaseRecoverySnapshot,
 ) -> bool:
     """Restore the anchor after a recovered force-push fails."""
+    local_short = snapshot.local_head[:8]
+    pre_rebase_short = context.pending_pre_rebase_sha[:8]
     _reset_clear_and_park(
         context,
         context.pending_pre_rebase_sha,
         message=(
             f"{config.HITL_MENTIONS} crash recovery for PR "
             f"#{context.pr_number}: `--force-with-lease` push of the "
-            f"recovered rebase (`{snapshot.local_head[:8]}`, lease "
-            f"against `{context.pending_pre_rebase_sha[:8]}`) failed. "
+            f"recovered rebase (`{local_short}`, lease "
+            f"against `{pre_rebase_short}`) failed. "
             "HEAD has been reset to the pre-rebase SHA. Most likely "
             "the remote PR branch was updated out-of-band; investigate "
             "and reply on this issue with anything to retry."
@@ -1250,6 +1266,7 @@ def _park_unreadable_pre_rebase_head(context: _AutoRebaseContext) -> None:
         "parking awaiting human (no rebase attempted)",
         context.issue.number,
     )
+    spec = context.spec
     _park_auto_rebase_failure(
         context.gh,
         context.issue,
@@ -1257,7 +1274,7 @@ def _park_unreadable_pre_rebase_head(context: _AutoRebaseContext) -> None:
         message=(
             f"{config.HITL_MENTIONS} PR #{context.pr_number} is "
             f"{context.behind} commit(s) behind "
-            f"`{context.spec.remote_name}/{context.spec.base_branch}`, "
+            f"`{spec.remote_name}/{spec.base_branch}`, "
             "but the orchestrator could not read local `HEAD` on "
             "the per-issue worktree before attempting the auto "
             "rebase. Force-with-lease pushes and the crash-recovery "
@@ -1317,6 +1334,7 @@ def _handle_failed_auto_rebase(
         "issue comment)",
         context.issue.number,
     )
+    spec = context.spec
     _park_auto_rebase_failure(
         context.gh,
         context.issue,
@@ -1324,7 +1342,7 @@ def _handle_failed_auto_rebase(
         message=(
             f"{config.HITL_MENTIONS} PR #{context.pr_number} is "
             f"{context.behind} commit(s) behind "
-            f"`{context.spec.remote_name}/{context.spec.base_branch}` "
+            f"`{spec.remote_name}/{spec.base_branch}` "
             "and the auto rebase failed for a non-conflict reason "
             "(planted hook, smudge filter, permissions, ...). The "
             "worktree was restored to the pre-rebase SHA via "
@@ -1367,16 +1385,18 @@ def _park_unreadable_post_rebase_head(
         "resetting to pre-rebase SHA and parking awaiting human",
         context.issue.number,
     )
+    spec = context.spec
+    before_short = before_sha[:8]
     _reset_clear_and_park(
         context,
         before_sha,
         message=(
             f"{config.HITL_MENTIONS} PR #{context.pr_number} is "
             f"{context.behind} commit(s) behind "
-            f"`{context.spec.remote_name}/{context.spec.base_branch}`. "
+            f"`{spec.remote_name}/{spec.base_branch}`. "
             "The auto rebase ran but the orchestrator could not "
             "read local `HEAD` afterwards. HEAD has been reset to "
-            f"the pre-rebase SHA `{before_sha[:8]}` so the worktree "
+            f"the pre-rebase SHA `{before_short}` so the worktree "
             "still matches the remote PR head. Inspect the "
             "worktree's git state and reply on this issue with "
             "anything to retry."
@@ -1411,13 +1431,14 @@ def _park_dirty_auto_rebase(
         context.issue.number,
         len(dirty_files),
     )
+    spec = context.spec
     _reset_clear_and_park(
         context,
         before_sha,
         message=(
             f"{config.HITL_MENTIONS} PR #{context.pr_number} is "
             f"{context.behind} commit(s) behind "
-            f"`{context.spec.remote_name}/{context.spec.base_branch}` "
+            f"`{spec.remote_name}/{spec.base_branch}` "
             "and the auto rebase landed cleanly but left "
             f"{len(dirty_files)} uncommitted change(s) on the worktree. "
             "Local HEAD has been reset to the pre-rebase SHA and "
@@ -1437,16 +1458,18 @@ def _park_failed_auto_rebase_push(
     branch: str,
 ) -> None:
     """Reset and park after a force-with-lease rejection or push failure."""
+    spec = context.spec
+    before_short = (before_sha or "")[:8]
     _reset_clear_and_park(
         context,
         before_sha,
         message=(
             f"{config.HITL_MENTIONS} PR #{context.pr_number} is "
             f"{context.behind} commit(s) behind "
-            f"`{context.spec.remote_name}/{context.spec.base_branch}`; "
+            f"`{spec.remote_name}/{spec.base_branch}`; "
             "the orchestrator rebased the worktree cleanly but pushing "
             "the rewritten branch (`--force-with-lease` against "
-            f"`{(before_sha or '')[:8]}`) failed. Local HEAD has "
+            f"`{before_short}`) failed. Local HEAD has "
             "been reset to the pre-rebase SHA so the worktree still "
             "matches the remote PR head. Most likely the PR branch "
             "was updated out-of-band; investigate the remote "
@@ -1471,16 +1494,18 @@ def _post_auto_rebase_notice(
     after_sha: str,
 ) -> None:
     """Post the best-effort PR notice for a published clean rebase."""
+    spec = context.spec
+    after_short = after_sha[:8]
     try:
         _post_pr_comment(
             context.gh,
             context.pr_number,
             context.state,
             f":mag: PR was {context.behind} commit(s) behind "
-            f"`{context.spec.remote_name}/{context.spec.base_branch}`; "
+            f"`{spec.remote_name}/{spec.base_branch}`; "
             "orchestrator auto-rebased the branch and re-pushed it. "
             f"Routing `{context.label}` -> `validating` so the reviewer "
-            f"re-runs against the new head (`{after_sha[:8]}`).",
+            f"re-runs against the new head (`{after_short}`).",
         )
     except Exception:
         log.exception(

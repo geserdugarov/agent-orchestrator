@@ -444,8 +444,7 @@ def _build_drift_resume_prompt(issue: Issue, unread_pr_conv: list) -> str:
     comments_text = _wf._recent_comments_text(issue)
     if unread_pr_conv:
         pr_block = "\n\n".join(
-            f"@{comment.user.login if comment.user else 'user'} (PR comment): "
-            f"{comment.body or ''}"
+            _wf._quote_comment_line(comment, label=" (PR comment)")
             for comment in unread_pr_conv
         )
         prefix = f"{comments_text}\n\n" if comments_text else ""

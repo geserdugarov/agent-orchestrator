@@ -666,9 +666,11 @@ def fmt_money(value: float) -> str:
     """
     dollars = float(value or 0)
     if dollars >= _MILLION:
-        return f"${dollars / _MILLION:.2f}M"
+        millions = dollars / _MILLION
+        return f"${millions:.2f}M"
     if dollars >= 1_000:
-        return f"${dollars / 1_000:.1f}K"
+        thousands = dollars / 1_000
+        return f"${thousands:.1f}K"
     if dollars < 10:
         return f"${dollars:.2f}"
     return f"${dollars:.0f}"
@@ -676,7 +678,7 @@ def fmt_money(value: float) -> str:
 
 def fmt_money_exact(value: float) -> str:
     """Whole-dollar formatter with thousands separators (`$12,345`)."""
-    return "$" + f"{round(float(value or 0)):,}"
+    return f"${round(float(value or 0)):,}"
 
 
 def fmt_tokens(value: float) -> str:
@@ -684,12 +686,15 @@ def fmt_tokens(value: float) -> str:
     tokens = float(value or 0)
     if tokens >= _BILLION:
         decimals = 0 if tokens >= 10 * _BILLION else 2
-        return f"{tokens / _BILLION:.{decimals}f}B"
+        billions = tokens / _BILLION
+        return f"{billions:.{decimals}f}B"
     if tokens >= _MILLION:
         decimals = 0 if tokens >= 10 * _MILLION else 1
-        return f"{tokens / _MILLION:.{decimals}f}M"
+        millions = tokens / _MILLION
+        return f"{millions:.{decimals}f}M"
     if tokens >= 1_000:
-        return f"{tokens / 1_000:.0f}K"
+        thousands = tokens / 1_000
+        return f"{thousands:.0f}K"
     return str(int(round(tokens)))
 
 

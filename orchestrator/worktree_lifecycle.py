@@ -139,7 +139,8 @@ def _sanitize_branch_segment(slug: str) -> str:
     sanitized_segment = re.sub(r"\.{2,}", _SAFE_CHAR, sanitized_segment)
     # `.lock` suffix on a component is reserved by git.
     if sanitized_segment.endswith(".lock"):
-        sanitized_segment = sanitized_segment[: -len(".lock")] + "_lock"
+        trimmed = sanitized_segment[: -len(".lock")]
+        sanitized_segment = f"{trimmed}_lock"
     # Trailing `.` on a component is rejected. Loop so any
     # follow-on dot revealed by the trim is also handled.
     while sanitized_segment.endswith("."):

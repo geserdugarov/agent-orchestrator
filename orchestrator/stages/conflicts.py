@@ -675,7 +675,7 @@ def _awaiting_human_followup(ctx: _ConflictContext) -> Optional[str]:
     if continue_action == "retry":
         return f"{_wf._CONTINUE_RETRY_PROMPT}\n\n{_wf._FOREGROUND_ONLY_NOTE}"
     joined = "\n\n".join(
-        f"@{comment.user.login if comment.user else 'user'}: {comment.body}"
+        _wf._quote_comment_line(comment)
         for comment in new_comments
         if comment.body
     )
@@ -754,11 +754,12 @@ def _park_diverged_worktree(
     """Park a stale / diverged worktree: force-pushing the local state would
     clobber the real PR head."""
     spec = ctx.spec
+    pr_head_short = pr.head.sha[:8]
     _park_conflict(
         ctx,
         f"{config.HITL_MENTIONS} worktree on `{sync.branch}` is {sync.ahead} "
         f"ahead and {sync.behind} behind `{spec.remote_name}/{sync.branch}` "
-        f"(PR head `{pr.head.sha[:8]}`); refusing to rebase a stale "
+        f"(PR head `{pr_head_short}`); refusing to rebase a stale "
         "or diverged branch -- force-pushing the local state would "
         "clobber the real PR head. Manual intervention needed.",
         reason="diverged_branch",
@@ -1086,7 +1087,7 @@ def _park_stalled_conflict_result(
     raw = dev_result.last_message.strip()
     quoted = ""
     if raw:
-        quoted = "\n\nAgent output:\n\n> " + raw.replace("\n", "\n> ")
+        quoted = f"\n\nAgent output:\n\n{_wf._as_blockquote(raw)}"
     _park_conflict(
         ctx,
         f"{config.HITL_MENTIONS} rebase is still in progress after the "

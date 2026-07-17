@@ -144,6 +144,8 @@ from orchestrator.workflow_messages import (
 from orchestrator.workflow_messages import _parse_manifest as _parse_manifest
 from orchestrator.workflow_messages import _parse_review_verdict as _parse_review_verdict
 from orchestrator.workflow_messages import _post_pr_comment as _post_pr_comment
+from orchestrator.workflow_messages import _as_blockquote as _as_blockquote
+from orchestrator.workflow_messages import _quote_comment_line as _quote_comment_line
 from orchestrator.workflow_messages import _recent_comments_text as _recent_comments_text
 from orchestrator.workflow_messages import _redact_secrets as _redact_secrets
 from orchestrator.workflow_messages import _stderr_log_tail as _stderr_log_tail
@@ -281,6 +283,7 @@ __all__ = [
     "_STDERR_TAIL_BUDGET",
     "_VALIDATING_TRANSIENT_PARK_REASONS",
     "_accumulate_issue_usage",
+    "_as_blockquote",
     "_authed_fetch",
     "_authed_target_fetch",
     "_branch_ahead_behind",
@@ -374,6 +377,7 @@ __all__ = [
     "_pr_title_from_commit_or_issue",
     "_process_issue",
     "_push_branch",
+    "_quote_comment_line",
     "_read_decomposer_session",
     "_read_dev_session",
     "_rebase_base_into_worktree",
@@ -703,7 +707,7 @@ def _configured_model(
     the operator's quoting; only one needs to win.
     """
     flag = "-m" if backend == "codex" else "--model"
-    eq_prefix = flag + "="
+    eq_prefix = f"{flag}="
     for arg_index, arg in enumerate(extra_args):
         if arg == flag and arg_index + 1 < len(extra_args):
             model_name = extra_args[arg_index + 1].strip()
@@ -854,10 +858,11 @@ def _label_community_contribution(
 ) -> None:
     # The label is the dedup marker, so the ping must land first. A label
     # failure may repeat a ping; a comment failure must not suppress one.
+    author = contribution.author or "unknown"
     gh.pr_comment(
         pr.number,
         f"{config.HITL_MENTIONS} community contribution from "
-        f"@{contribution.author or 'unknown'} -- please review this PR.",
+        f"@{author} -- please review this PR.",
     )
     gh.add_pr_label(pr, COMMUNITY_CONTRIBUTION_LABEL)
     log.info(
@@ -1211,12 +1216,12 @@ def _run_parallel_tick(
     )
     if plan.task_count == 0:
         return
+    slug_token = spec.slug.replace("/", "__")
     # max_workers is capped at `limit` AND at the submitted-task count so a
     # quiet tick (e.g. one fan-out issue) does not spin up idle worker threads.
-    workers = min(limit, plan.task_count)
     with ThreadPoolExecutor(
-        max_workers=workers,
-        thread_name_prefix=f"orch-{spec.slug.replace('/', '__')}",
+        max_workers=min(limit, plan.task_count),
+        thread_name_prefix=f"orch-{slug_token}",
     ) as executor:
         futures, family_sentinel = plan.submit(executor)
         # `as_completed` so a slow issue does not delay logging the failures

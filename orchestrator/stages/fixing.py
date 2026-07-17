@@ -661,7 +661,7 @@ def _fixing_ack_fast_path(
         return False
     _advance_consumed_watermarks(ctx.state, feedback)
     _clear_pending_fix_bookmarks(ctx.state)
-    quoted = "> " + ack_reason.replace("\n", "\n> ")
+    quoted = _wf._as_blockquote(ack_reason)
     _wf._post_issue_comment(
         ctx.gh, ctx.issue, ctx.state,
         ":speech_balloon: dev session reports the PR feedback needs "
@@ -849,6 +849,16 @@ def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
     )
 
 
+def _stale_pr_head_reason(base_ref: str, pr_head: str, local_head: str) -> str:
+    """Explain a live PR head that lags an unpushed local rebase onto base."""
+    pr_short = pr_head[:8]
+    local_short = local_head[:8]
+    return (
+        f"already rebased onto `{base_ref}`, but the PR head "
+        f"(`{pr_short}`) is stale (local `{local_short}`)"
+    )
+
+
 def _fixing_drift_reason(
     ctx: _FixingContext, wt: Path, base_ref: str,
 ) -> Optional[str]:
@@ -894,10 +904,7 @@ def _fixing_drift_reason(
     local_head = _wf._head_sha(wt) or ""
     pr_head = getattr(getattr(ctx.pr, "head", None), "sha", None) or ""
     if local_head and pr_head and local_head != pr_head:
-        return (
-            f"already rebased onto `{base_ref}`, but the PR head "
-            f"(`{pr_head[:8]}`) is stale (local `{local_head[:8]}`)"
-        )
+        return _stale_pr_head_reason(base_ref, pr_head, local_head)
     return None  # in sync with the PR -> genuine dev question
 
 

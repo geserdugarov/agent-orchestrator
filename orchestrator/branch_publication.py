@@ -81,11 +81,12 @@ _CONVENTIONAL_TYPES = (
     "feat", "fix", "chore", "docs", "refactor",
     "test", "perf", "build", "ci", "style", "revert",
 )
+_CONVENTIONAL_TYPES_ALT = "|".join(_CONVENTIONAL_TYPES)
 
 # Conventional Commits subject: `<type>[(scope)][!]: <subject>` restricted
 # to the allowlist above.
 _CONVENTIONAL_RE = re.compile(
-    r"^(?:" + "|".join(_CONVENTIONAL_TYPES) + r")"
+    rf"^(?:{_CONVENTIONAL_TYPES_ALT})"
     r"(?:\([^)]+\))?!?:\s+\S",
 )
 
@@ -153,12 +154,12 @@ def _squash_message(
     """Build the subject-only message for a multi-commit squash."""
     first_subject = subjects[0]
     if _is_prefixed_subject(first_subject):
-        return first_subject + "\n"
+        return f"{first_subject}\n"
     fallback_prefix = _infer_subject_prefix(spec, worktree, issue)
     subject = _pr_title_from_commit_or_issue(
         issue, first_subject, fallback_prefix,
     )
-    return subject + "\n"
+    return f"{subject}\n"
 
 
 def _prepare_squash(

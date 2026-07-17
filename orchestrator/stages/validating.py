@@ -329,7 +329,7 @@ def _post_drift_ack(
 ) -> None:
     from orchestrator import workflow as _wf
 
-    quoted = "> " + reason.replace("\n", "\n> ")
+    quoted = _wf._as_blockquote(reason)
     _wf._post_issue_comment(
         gh, issue, state,
         ":speech_balloon: dev session reports the existing work "
@@ -700,7 +700,8 @@ def _verify_failure_detail(verify) -> str:
             f"`{file_path}`" for file_path in verify.dirty_files[:10]
         )
         if len(verify.dirty_files) > 10:
-            files += f", … (+{len(verify.dirty_files) - 10} more)"
+            elided = len(verify.dirty_files) - 10
+            files = f"{files}, … (+{elided} more)"
         return f"`{verify.command}` left the worktree dirty: {files}"
     if verify.status == "head_changed":
         before = (verify.head_before or "")[:_SHORT_SHA_LEN] or "(no HEAD)"
@@ -709,9 +710,10 @@ def _verify_failure_detail(verify) -> str:
             f"`{verify.command}` moved HEAD ({before} -> {after}); "
             "verify commands must not commit"
         )
+    exit_display = verify.exit_code if verify.exit_code is not None else "?"
     return (
         f"`{verify.command}` exited with code "
-        f"{verify.exit_code if verify.exit_code is not None else '?'}"
+        f"{exit_display}"
     )
 
 
@@ -746,8 +748,8 @@ def _park_verify_failure(
     # that case is the redact-before-truncate pass inside the runner.
     output = verify.output or ""
     if output.strip():
-        quoted = "> " + output.rstrip().replace("\n", "\n> ")
-        message += f"\n\n_Verify output (tail):_\n\n{quoted}"
+        quoted = _wf._as_blockquote(output.rstrip())
+        message = f"{message}\n\n_Verify output (tail):_\n\n{quoted}"
 
     _wf._park_awaiting_human(gh, issue, state, message, reason=reason)
     state.set(_PARK_REASON, reason)
@@ -1396,7 +1398,7 @@ def _park_reviewer_no_verdict(
     from orchestrator import workflow as _wf
 
     raw = (review.last_message or "").strip() or "(reviewer produced no final message)"
-    quoted = "> " + raw.replace("\n", "\n> ")
+    quoted = _wf._as_blockquote(raw)
     silent_crash = (
         not (review.last_message or "").strip() and review.exit_code != 0
     )
@@ -1429,15 +1431,17 @@ def _post_reviewer_feedback(context: _RequestedChanges) -> None:
     reviewer_run = context.decision.run
     if reviewer_run.pr_number is None:
         return
+    round_display = reviewer_run.round_n + 1
+    feedback = context.decision.feedback
     try:
         reviewer_comment = _wf._post_pr_comment(
             context.gh,
             int(reviewer_run.pr_number),
             context.state,
             f":eyes: {config.REVIEW_AGENT} review "
-            f"(round {reviewer_run.round_n + 1}/"
+            f"(round {round_display}/"
             f"{config.MAX_REVIEW_ROUNDS}) requested changes:\n\n"
-            f"{context.decision.feedback}",
+            f"{feedback}",
         )
     except Exception:
         _wf.log.exception(

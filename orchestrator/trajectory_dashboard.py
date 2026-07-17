@@ -341,7 +341,8 @@ def _kpi_strip_html(summary: trajectory_reader.TrajectorySummary) -> str:
     the foot), read entirely from the file -- no Postgres.
     """
     cells = (_trajectory_kpi_html(kpi) for kpi in _trajectory_kpis(summary))
-    return f'<div class="orch-kpis">{"".join(cells)}</div>'
+    cells_html = "".join(cells)
+    return f'<div class="orch-kpis">{cells_html}</div>'
 
 
 def _meta_html(run: TrajectoryRun) -> str:
@@ -371,7 +372,8 @@ def _meta_html(run: TrajectoryRun) -> str:
         for label, cell in fields
         if cell
     ]
-    return f'<div class="orch-traj-meta">{"".join(cells)}</div>'
+    cells_html = "".join(cells)
+    return f'<div class="orch-traj-meta">{cells_html}</div>'
 
 
 def _labeled_chips_html(label: str, names: Sequence[str]) -> str:
@@ -420,10 +422,11 @@ def _runs_table_html(runs: Sequence[TrajectoryRun]) -> str:
     )
     head = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
     rows = (_run_table_row_html(run) for run in runs)
+    rows_html = "".join(rows)
     return (
         '<table class="orch-traj-table">'
         f"<thead><tr>{head}</tr></thead>"
-        f'<tbody>{"".join(rows)}</tbody>'
+        f'<tbody>{rows_html}</tbody>'
         "</table>"
     )
 
@@ -472,9 +475,10 @@ def _timeline_entry_html(
         if entry.tool_id
         else ""
     )
+    step_num = index + 1
     return (
         '<div class="orch-traj-step">'
-        f'<span class="orch-traj-step-idx">{index + 1}</span>'
+        f'<span class="orch-traj-step-idx">{step_num}</span>'
         f'<span class="orch-traj-badge {badge_class}">'
         f'{html.escape(badge_text)}</span>'
         f'{name_html}{id_html}'
@@ -543,11 +547,11 @@ def _run_usage_html(run: TrajectoryRun) -> str:
     if run.run_usage is None:
         return ""
     chips = _run_usage_chips(run)
+    chips_html = "".join(chips)
     row = (
         '<div class="orch-traj-chips">'
         '<span class="lbl">Run usage</span>'
-        f'{"".join(chips)}'
-        '</div>'
+        f'{chips_html}</div>'
     )
     note = _run_usage_note(run)
     return f'{row}<p class="orch-traj-usage-note">{html.escape(note)}</p>'
@@ -706,9 +710,10 @@ def _render_timeline(st: Any, run: TrajectoryRun) -> None:
 
 def _render_run_card(st: Any, run: TrajectoryRun) -> None:
     st.markdown('<div class="orch-cardmark"></div>', unsafe_allow_html=True)
+    repo_label = run.repo or "unknown repo"
     st.markdown(
         _card_header_html(
-            f"Run #{run.issue} · {run.repo or 'unknown repo'}",
+            f"Run #{run.issue} · {repo_label}",
             "Ordered timeline: prompt, text turns, tool calls, output",
         ),
         unsafe_allow_html=True,
