@@ -228,9 +228,9 @@ driven from `workflow.tick` after `_refresh_base_and_worktrees` has fetched `<re
 the `SKILL.md` definitions the *target repo* carries on its base ref via `git -C <target_root> ls-tree -r --name-only
 <remote_name>/<base_branch> .agents/skills .claude/skills`, keeps only direct `<root>/<name>/SKILL.md` definitions (a
 `SKILL.md` nested deeper — e.g. `.claude/skills/.system/<name>/SKILL.md` — is ignored, matching the names-only
-trigger anchor in `usage.py`), and dedupes by skill name across the two roots while preserving every source path. The
-catalog is read from the target repo's base ref, never the orchestrator's own working tree, so dashboard-local skill
-files are not scanned.
+trigger anchor in `_usage_skills.py`), and dedupes by skill name across the two roots while preserving every
+source path. The catalog is read from the target repo's base ref, never the orchestrator's own working tree, so
+dashboard-local skill files are not scanned.
 
 Each record carries `base_branch`, `remote_name`, `skills_available` (the sorted deduped skill names), and the optional
 `skill_paths` (name → sorted source paths; dropped when empty). It is **not** issue-scoped, so its `issue` is the
@@ -1051,10 +1051,12 @@ jq-free.
 
 **Module layout.** The usage-metric parsing — the `UsageMetrics` dataclass and the claude / codex token, model, turn,
 pricing, and cost parsing reached through `parse_agent_usage` (`parse_claude_usage` / `parse_codex_usage`) — lives in
-the private `orchestrator/_usage_metrics.py`. `orchestrator.usage` re-exports exactly that public surface so it stays
-the stable import site for callers (`agents`, `workflow`, `analytics`), and it hosts the sibling skill-trigger and
-trajectory extractors, which reuse the private module's shared event iterator, token decoders, and price path so the
-resilience contract and cost precedence stay defined once.
+the private `orchestrator/_usage_metrics.py`, and the skill-trigger parsing — the `SkillTriggers` dataclass and the
+`parse_claude_skills` / `parse_codex_skills` / `parse_agent_skills` trio — lives in the private
+`orchestrator/_usage_skills.py`. `orchestrator.usage` re-exports exactly those two public surfaces so it stays the
+stable import site for callers (`agents`, `workflow`, `analytics`), and it hosts the sibling trajectory extractor,
+which reuses the private modules' shared event iterator, token decoders, price path, and offered-set init-frame helpers
+so the resilience contract and cost precedence stay defined once.
 
 **Two parsers, one dispatcher.** `parse_claude_usage(stdout)` consumes claude `--output-format stream-json` events,
 groups assistant frames by `message.id` so the final-frame usage wins (claude streams partial counts on intermediate

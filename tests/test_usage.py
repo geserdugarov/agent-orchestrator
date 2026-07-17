@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from orchestrator import _usage_metrics, usage
+from orchestrator import _usage_metrics, _usage_skills, usage
 from orchestrator.usage import (
     AgentTrajectory,
     SkillTriggers,
@@ -1752,8 +1752,9 @@ class AgentTrajectoryTest(unittest.TestCase):
 
 
 class CompatibilityReexportTest(unittest.TestCase):
-    """Pin the usage-metric parsing to its private ``_usage_metrics`` home and
-    the public ``orchestrator.usage`` re-export site existing callers import."""
+    """Pin the usage-metric and skill-trigger parsing to their private
+    ``_usage_metrics`` / ``_usage_skills`` homes and the public
+    ``orchestrator.usage`` re-export site existing callers import."""
 
     def test_usage_metric_surface_reexported_from_private_module(self):
         for name in (
@@ -1771,13 +1772,27 @@ class CompatibilityReexportTest(unittest.TestCase):
                     "orchestrator._usage_metrics",
                 )
 
-    def test_skill_and_trajectory_surface_defined_in_usage(self):
+    def test_skill_surface_reexported_from_private_module(self):
         for name in (
             "SkillTriggers",
+            "parse_agent_skills",
+            "parse_claude_skills",
+            "parse_codex_skills",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(
+                    getattr(usage, name), getattr(_usage_skills, name),
+                )
+                self.assertEqual(
+                    getattr(usage, name).__module__,
+                    "orchestrator._usage_skills",
+                )
+
+    def test_trajectory_surface_defined_in_usage(self):
+        for name in (
             "TrajectoryStep",
             "TurnUsage",
             "AgentTrajectory",
-            "parse_agent_skills",
             "parse_agent_trajectory",
         ):
             with self.subTest(name=name):
