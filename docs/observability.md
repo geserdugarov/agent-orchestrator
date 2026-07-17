@@ -1051,12 +1051,14 @@ jq-free.
 
 **Module layout.** The usage-metric parsing — the `UsageMetrics` dataclass and the claude / codex token, model, turn,
 pricing, and cost parsing reached through `parse_agent_usage` (`parse_claude_usage` / `parse_codex_usage`) — lives in
-the private `orchestrator/_usage_metrics.py`, and the skill-trigger parsing — the `SkillTriggers` dataclass and the
+the private `orchestrator/_usage_metrics.py`; the skill-trigger parsing — the `SkillTriggers` dataclass and the
 `parse_claude_skills` / `parse_codex_skills` / `parse_agent_skills` trio — lives in the private
-`orchestrator/_usage_skills.py`. `orchestrator.usage` re-exports exactly those two public surfaces so it stays the
-stable import site for callers (`agents`, `workflow`, `analytics`), and it hosts the sibling trajectory extractor,
-which reuses the private modules' shared event iterator, token decoders, price path, and offered-set init-frame helpers
-so the resilience contract and cost precedence stay defined once.
+`orchestrator/_usage_skills.py`; and the trajectory parsing — the `TrajectoryStep` / `TurnUsage` / `AgentTrajectory`
+dataclasses and the `parse_claude_trajectory` / `parse_codex_trajectory` / `parse_agent_trajectory` classifier — lives
+in the private `orchestrator/_usage_trajectory.py`. `orchestrator.usage` re-exports exactly those three public surfaces
+so it stays the stable import site for callers (`agents`, `workflow`, `analytics`). The trajectory classifier reuses the
+metric module's shared event iterator, token decoders, and price path and the skill module's offered-set init-frame
+helpers, so the resilience contract and cost precedence stay defined once.
 
 **Two parsers, one dispatcher.** `parse_claude_usage(stdout)` consumes claude `--output-format stream-json` events,
 groups assistant frames by `message.id` so the final-frame usage wins (claude streams partial counts on intermediate

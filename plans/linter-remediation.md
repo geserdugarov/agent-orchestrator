@@ -554,7 +554,7 @@ considered.
 
 ### Trajectory step content field
 
-- File and symbol: `orchestrator/usage.py: TrajectoryStep.content`
+- File and symbol: `orchestrator/_usage_trajectory.py: TrajectoryStep.content`
 - Rule: `WPS110`
 - Reason: `content` is the serialized field name emitted by `AgentTrajectory.to_dict()` (the `"content"` key) and read
   back as `.content` by the trajectory reader, dashboard, and analytics. The field mirrors its persisted key, so a
@@ -870,6 +870,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-17 | 4.4 | Complete | Target WPS; 5 remainders; full gate 2124 passed | Not committed | Start Package 4.5 |
 | 2026-07-17 | 4.5/usage-metrics | Complete | Target WPS; 21 fixed, 2 deferred; full gate | Not committed | 4.5 rest |
 | 2026-07-17 | 4.5/usage-skills | Complete | Target WPS; WPS202 36->25; full gate | Not committed | 4.5 rest |
+| 2026-07-17 | 4.5/usage-trajectory | Complete | Target WPS; 2 deferred fixed; full gate | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1104,3 +1105,34 @@ symbol's module of record alongside the usage-metric one, and `docs/observabilit
 `_usage_skills` split. Ruff is clean and the full suite passed 2,097 tests (33 skipped for the optional dashboard / live
 Postgres; the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not
 complete -- its remaining module-structure findings are untouched.
+
+Package 4.5 continued with the `usage-trajectory` slice: the `TrajectoryStep` / `TurnUsage` / `AgentTrajectory`
+dataclasses and the claude / codex trajectory classifier reached through `parse_agent_trajectory`
+(`parse_claude_trajectory` / `parse_codex_trajectory` plus the offered-tools / final-output / turn-key helpers, the
+`_ClaudeTrajectoryBuilder` / `_ClaudeTurnUsageBuilder` / `_CodexTrajectoryBuilder` builders, and the
+`_codex_assemble_steps` / `_turn_usage_from_row` assemblers) moved out of `usage.py` into a focused private
+`orchestrator/_usage_trajectory.py`. `orchestrator.usage` re-exports exactly that public surface (`TrajectoryStep` /
+`TurnUsage` / `AgentTrajectory` / `parse_agent_trajectory` / `parse_claude_trajectory` / `parse_codex_trajectory`) so
+`analytics` keeps importing from the same site, and with this last slice `usage.py` becomes a pure facade -- three
+re-export blocks over the private modules and zero module-level members of its own. The trajectory classifier reuses
+`_usage_metrics`'s shared event iterator, token decoders, `_TokenBucket` alias, and `_claude_estimate_cost` price path
+and `_usage_skills`'s init-frame helpers (`_claude_init_field` / `_ordered_unique_names`), shared skill/trajectory JSONL
+vocabulary (`_CONTENT_KEY` / `_COMMAND_EXECUTION`), and skill-trigger extractors (`SkillTriggers` /
+`parse_claude_skills` / `parse_codex_skills`) directly rather than through the facade it feeds, so the resilience
+contract and cost precedence stay defined once and no import cycle forms. The re-export follows the same hub convention
+as the earlier slices (absolute `from orchestrator._usage_trajectory import ...`, grouped names, public names aliased
+`as`), so the split introduced no new `WPS300` local-import or `WPS235` too-many-names category, and it cut `usage.py`'s
+`WPS202` member count from 25 to 0. This slice also cleared the two findings the `usage-metrics` slice deferred into the
+trajectory extractor: `WPS234` (the `_ClaudeTurnUsageBuilder.by_key` `dict[str, tuple[int, str, dict[str, int]]]`
+annotation, lifted to a named `_TurnUsageRow = tuple[int, str, _TokenBucket]` alias reused on `_turn_usage_from_row`'s
+`row` parameter) and `WPS338` (`_CodexTrajectoryBuilder` reordered so the public `build` precedes the private `_item_id`
+/ `_add_command` / `_add_message`). The new module's only remaining findings are the accepted `WPS202` member count
+(25 > 7, the same cohesive-parser magnitude `_usage_metrics` carries) and a single `WPS110` `content` -- a serialized
+`TrajectoryStep` field name that cannot be renamed without breaking the persisted trajectory schema. Serialized field
+names, event ordering, final-output selection, tool-call / result pairing, per-turn cost source, malformed-stream
+resilience, and every analytics consumer were preserved; the `test_usage.py` compatibility test now pins the trajectory
+re-export identity and each symbol's module of record alongside the metric and skill ones, and
+`docs/observability.md`'s module-layout note gained the `_usage_trajectory` split. Ruff is clean and the full suite
+passed 2,097 tests (33 skipped for the optional dashboard / live Postgres; the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`
+shell-export artifact is unset for the run). Package 4.5 is not complete -- its remaining module-structure findings are
+untouched.

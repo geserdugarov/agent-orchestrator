@@ -11,12 +11,12 @@ observation-only.
 This module is the private home of the skill-trigger parsing. Its public
 surface -- the ``SkillTriggers`` dataclass and the ``parse_claude_skills`` /
 ``parse_codex_skills`` / ``parse_agent_skills`` trio -- is re-exported from
-``orchestrator.usage`` for callers (``analytics``). ``usage`` also reuses the
-offered-set init-frame helpers (``_claude_init_field`` /
-``_ordered_unique_names``) and the shared skill/trajectory JSONL vocabulary
-(``_CONTENT_KEY`` / ``_COMMAND_EXECUTION``) defined here for its sibling
-trajectory classifier, so the init-frame parsing and resilience contract stay
-defined once.
+``orchestrator.usage`` for callers (``analytics``). The sibling
+``_usage_trajectory`` classifier reuses the offered-set init-frame helpers
+(``_claude_init_field`` / ``_ordered_unique_names``) and the shared
+skill/trajectory JSONL vocabulary (``_CONTENT_KEY`` / ``_COMMAND_EXECUTION``)
+defined here, so the init-frame parsing and resilience contract stay defined
+once.
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ from orchestrator._usage_metrics import (
 
 # Skill/trajectory JSONL protocol field and message-type values this module
 # reads on top of the shared usage vocabulary re-used from ``_usage_metrics``.
-# ``usage`` re-imports both for its sibling trajectory classifier.
+# The sibling ``_usage_trajectory`` classifier re-imports both.
 _CONTENT_KEY = "content"
 _COMMAND_EXECUTION = "command_execution"
 

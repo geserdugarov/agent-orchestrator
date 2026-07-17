@@ -26,9 +26,9 @@ still picked up.
 This module is the private home of the usage-metric parsing. Its public
 surface -- ``UsageMetrics``, ``parse_claude_usage``, ``parse_codex_usage``,
 and the ``parse_agent_usage`` dispatcher -- is re-exported from
-``orchestrator.usage`` for callers. ``usage`` also reuses the shared event
-iterator, token decoders, and price path defined here for its sibling
-skill-trigger and trajectory extractors, so the resilience contract and the
+``orchestrator.usage`` for callers. The sibling ``_usage_skills`` and
+``_usage_trajectory`` extractors reuse the shared event iterator, token
+decoders, and price path defined here, so the resilience contract and the
 cost precedence stay defined in one place.
 """
 from __future__ import annotations
