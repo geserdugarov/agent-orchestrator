@@ -166,7 +166,7 @@ def _combine_output(stdout: str, stderr: str) -> str:
     combined = stdout or ""
     if stderr:
         if combined and not combined.endswith("\n"):
-            combined += "\n"
+            combined = f"{combined}\n"
         combined += stderr
     return combined
 

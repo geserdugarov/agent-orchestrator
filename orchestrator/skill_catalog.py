@@ -82,7 +82,7 @@ def _skill_name_from_path(path: str) -> Optional[str]:
     outside the known roots is rejected.
     """
     for root in _SKILL_ROOTS:
-        prefix = root + "/"
+        prefix = f"{root}/"
         if not path.startswith(prefix):
             continue
         parts = path[len(prefix):].split("/")

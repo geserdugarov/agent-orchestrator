@@ -187,9 +187,11 @@ def _decomposer_followup(
     )
     if not comments:
         return None
+    from orchestrator import workflow as _wf
+
     state.set(_LAST_ACTION_COMMENT_ID, max(comment.id for comment in comments))
     return "\n\n".join(
-        f"@{comment.user.login if comment.user else 'user'}: {comment.body}"
+        _wf._quote_comment_line(comment)
         for comment in comments if comment.body
     )
 
@@ -236,6 +238,11 @@ def _reset_decomposing_on_drift(
     _clear_decomposition_manifest(state)
 
 
+def _issue_ref_list(numbers: list) -> str:
+    """Render issue/child numbers as a `#a, #b` comma-joined reference list."""
+    return ", ".join(f"#{number}" for number in numbers)
+
+
 def _decomposition_drift_notice(orphans: list) -> str:
     notice = (
         ":pencil2: issue content changed; re-running decomposer against "
@@ -243,7 +250,7 @@ def _decomposition_drift_notice(orphans: list) -> str:
     )
     if not orphans:
         return notice
-    orphan_list = ", ".join(f"#{number}" for number in orphans)
+    orphan_list = _issue_ref_list(orphans)
     return (
         f"{notice} The previously-tracked children ({orphan_list}) will be "
         "ORPHANED -- the orchestrator no longer tracks them; please close "
@@ -509,7 +516,7 @@ def _park_unparsed_manifest(
 
     last_msg = decomposer_result.last_message or ""
     if error is not None:
-        quoted = "> " + last_msg.strip().replace("\n", "\n> ")
+        quoted = _wf._as_blockquote(last_msg.strip())
         _wf._park_awaiting_human(
             gh, issue, state,
             f"{config.HITL_MENTIONS} decomposer manifest invalid "
@@ -520,7 +527,7 @@ def _park_unparsed_manifest(
     else:
         stripped = last_msg.strip()
         raw = stripped or "(decomposer produced no final message)"
-        quoted = "> " + raw.replace("\n", "\n> ")
+        quoted = _wf._as_blockquote(raw)
         # Only attach stderr diagnostics on the silent path -- a
         # real content question from the decomposer doesn't need
         # the operator wading through subprocess noise.
@@ -1039,10 +1046,11 @@ def _park_rejected_children(
         return False
     if state.get(_AWAITING_HUMAN):
         return True
+    rejected_refs = _issue_ref_list(rejected)
     _wf._park_awaiting_human(
         gh, issue, state,
         f"{config.HITL_MENTIONS} child issue(s) rejected: "
-        f"{', '.join(f'#{child_number}' for child_number in rejected)}; "
+        f"{rejected_refs}; "
         "decide whether to re-decompose or close.",
         reason="child_rejected",
     )
@@ -1085,11 +1093,12 @@ def _park_manually_closed_children(
         return False
     if state.get(_AWAITING_HUMAN):
         return True
+    closed_refs = _issue_ref_list(manually_closed)
     _wf._park_awaiting_human(
         gh, issue, state,
         f"{config.HITL_MENTIONS} child issue(s) closed without reaching "
         f"`done` or `rejected`: "
-        f"{', '.join(f'#{child_number}' for child_number in manually_closed)}; "
+        f"{closed_refs}; "
         "decide whether to re-decompose or close.",
         reason="child_manually_closed",
     )
@@ -1186,6 +1195,11 @@ def _activate_ready_children(
     return activation.held
 
 
+def _held_dependency_line(child_number: object, pending: list) -> str:
+    """Format one held child and the unfinished dependencies gating it."""
+    return f"#{child_number} waits on {_issue_ref_list(pending)}"
+
+
 def _log_held_children(
     issue: Issue, parent_kind: str, children: list, child_labels: dict,
     held: list,
@@ -1205,9 +1219,7 @@ def _log_held_children(
         return
     done_count = sum(1 for lbl in child_labels.values() if lbl == _DONE)
     summary = "; ".join(
-        f"#{cn} waits on "
-        f"{', '.join(f'#{dependency_number}' for dependency_number in pending)}"
-        for cn, pending in held
+        _held_dependency_line(cn, pending) for cn, pending in held
     )
     _wf.log.info(
         "issue=#%s %s parent: %d/%d children done, %d held: %s",

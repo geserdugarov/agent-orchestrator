@@ -218,7 +218,7 @@ def _write_event_record(event_record: dict) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(event_record, sort_keys=True) + "\n")
+            fh.write(f"{json.dumps(event_record, sort_keys=True)}\n")
     except OSError as error:
         log.warning("could not write event log %s: %s", path, error)
 
@@ -720,7 +720,8 @@ class GitHubClient:
         # split parent -- so coerce each and let a typo fail loudly instead
         # of creating a child with an invisible literal label.
         validated = [coerce_child_issue_label(lbl) for lbl in labels]
-        full_body = f"{(body or '').rstrip()}\n\nParent: #{parent_number}"
+        parent_body = (body or "").rstrip()
+        full_body = f"{parent_body}\n\nParent: #{parent_number}"
         return self.repo.create_issue(title=title, body=full_body, labels=validated)
 
     def read_pinned_state(self, issue: Issue) -> PinnedState:
@@ -802,7 +803,8 @@ class GitHubClient:
         Used to recover after a crash between create_pull and relabeling:
         a duplicate create_pull would 422 and trap the issue in implementing.
         """
-        head = f"{self.repo.owner.login}:{branch}"
+        owner_login = self.repo.owner.login
+        head = f"{owner_login}:{branch}"
         for pr in self.repo.get_pulls(state=_ISSUE_STATE_OPEN, head=head, base=base):
             return pr
         return None

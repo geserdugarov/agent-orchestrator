@@ -42,7 +42,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
-| 4 | Remaining production style and structure | 2/5 | [ ] |
+| 4 | Remaining production style and structure | 3/5 | [ ] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
@@ -292,9 +292,9 @@ Goal: clear the production findings that are not covered by the complexity stage
 
 ### Package 4.3 — Strings and formatting
 
-- [ ] Resolve production `WPS237`, `WPS336`, and related string-construction findings.
-- [ ] Extract message or SQL fragments only when the resulting construction is easier to read and test.
-- [ ] Preserve exact operator-visible messages and persisted content.
+- [x] Resolve production `WPS237`, `WPS336`, and related string-construction findings.
+- [x] Extract message or SQL fragments only when the resulting construction is easier to read and test.
+- [x] Preserve exact operator-visible messages and persisted content.
 
 ### Package 4.4 — Control flow and expression shape
 
@@ -756,6 +756,25 @@ considered.
 - Protected by: `tests/test_dashboard_theme.py` and `tests/test_dashboard_charts.py`.
 - Reviewed: [ ]
 
+### Numeric format-spec f-strings
+
+- File and symbols: the money `,.2f` specs in `orchestrator/dashboard.py` (`_cost_per_resolved`) and
+  `orchestrator/dashboard_html.py` (`_money_or_dash`); the zero-pad `02d` hour label in
+  `orchestrator/dashboard_charts.py` (`hour_weekday_heatmap`); and the dynamic-precision `.{decimals}f` /
+  `,.{decimals}f` specs in `orchestrator/dashboard_theme.py` (`fmt_tokens`) and
+  `orchestrator/trajectory_dashboard.py` (`_fmt_cost_usd`).
+- Rule: `WPS237`
+- Reason: `WPS237` accepts only a single simple format spec (e.g. `.2f`, `<10`, `x`, `,`); a combined
+  or nested-placeholder spec such as `,.2f`, `02d`, or `.{decimals}f` trips the rule even when the
+  interpolated value is a plain name. Each of these is an idiomatic numeric format on the lowest-level
+  dashboard formatter, and the interpolation itself was already reduced to a bound local. The spec
+  cannot be dropped without either changing the rendered money/token/hour string (forbidden -- these
+  are operator-visible) or replacing `f"{x:,.2f}"` with a `format(x, ",.2f")` / `"{0:,.2f}".format(x)`
+  call that reads worse than the f-string it dodges.
+- Protected by: `tests/test_dashboard.py`, `tests/test_dashboard_charts.py`,
+  `tests/test_dashboard_theme.py`, and `tests/test_trajectory_dashboard.py`.
+- Reviewed: [ ]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -793,6 +812,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-16 | 3.6/conflicts | Complete | Target WPS; 70 focused; full gate | Not committed | Start Package 4.1 |
 | 2026-07-16 | 4.1 | Complete | Target WPS; 24 remainders; full gate 2118 passed | Not committed | Start Package 4.2 |
 | 2026-07-17 | 4.2 | Complete | Target WPS; 78 remainders; full gate 2120 passed | Not committed | Start Package 4.3 |
+| 2026-07-17 | 4.3 | Complete | Target WPS; 6 remainders; full gate 2121 passed | Not committed | Start Package 4.4 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -924,3 +944,30 @@ event shape, or compatibility re-export changed, and no new WPS category was int
 gate passed with 2,120 tests and 3 live-Postgres skips (the `test_workflow_list_pollable` default-tick assertion fails
 only when `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` is exported in the shell -- an environment artifact reproducible on
 `origin/main`, not a diff regression).
+
+Package 4.3 resolved the production string-construction findings for `WPS237` and `WPS336`, cutting the two-rule
+production count from 118 to 6 documented remainders (`WPS237` 74 -> 6, `WPS336` 44 -> 0). `WPS336` was cleared by
+replacing every same-line explicit `+`/`+=` string concatenation with an f-string, an implicit-adjacency join into a
+bound local, or -- for the two recurring blockquote and comment-quote fragments -- a shared helper. `WPS237` from
+complex interpolation was cleared by binding the offending sub-expression to a domain-named local before the f-string:
+`spec = context.spec` / `ctx.spec` to break the `context.spec.remote_name` double-dot chains, short-SHA locals
+(`local_short`, `pre_rebase_short`, `before_short`, `pr_head_short`) for the `sha[:8]` slices, and locals for the
+arithmetic (`elided`, `round_display`), boolean-or defaults (`author`, `session_id`, `allowed_text`), ternaries
+(`current_label`, `exit_display`), and deep chains (`slug_token`, `owner_login`); the triple-nested
+`", ".join(f"#{n}" ...)` decomposition messages were flattened by hoisting the join into a `_issue_ref_list` helper.
+Two shared helpers were extracted to remove genuine duplication surfaced by the cleanup: `_quote_comment_line` (in
+`workflow_messages.py`, re-exported through `workflow.py`) folds the `@author[label]: body` formatting that the
+resume/PR-followup prompt builders and the fresh-comment stage handlers all repeated, and the already-existing
+`_as_blockquote` was re-exported so the `conflicts`, `decomposition`, `documenting`, `validating`, and `workflow_drift`
+blockquote sites reuse it instead of inlining `"> " + text.replace(...)`. Every extraction stayed under the Stage 3
+complexity limits (`_read_remote_recovery_head` reused `remote_error` for the truncated snippet, `_run_parallel_tick`
+inlined `min(...)`, `_dirty_worktree_message` inlined its single-use `quoted`, and `fixing`'s stale-head reason and
+`decomposition`'s held-dependency line moved to helpers) so no new `WPS210`/`WPS226` was introduced. The 6 retained
+`WPS237` findings are all irreducible numeric format specs in the dashboard formatters -- money `,.2f`
+(`dashboard.py`, `dashboard_html.py`), zero-pad `02d` (`dashboard_charts.py`), and dynamic-precision `.{decimals}f` /
+`,.{decimals}f` (`dashboard_theme.py`, `trajectory_dashboard.py`) -- recorded in the accepted-remainder register; each
+would otherwise require changing the rendered output or replacing an idiomatic `f"{x:,.2f}"` with a `format()` dodge
+that reads worse. No operator-visible message, prompt, SQL, persisted content, pinned-state key, watermark, comment
+marker, event shape, or compatibility re-export changed, and no new WPS category was introduced in any touched file; a
+focused `_quote_comment_line` keyword/fallback test was added and the full gate passed with 2,121 tests and 3
+live-Postgres skips (the optional dashboard group installed so the plotly chart tests ran).

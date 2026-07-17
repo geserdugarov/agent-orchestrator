@@ -846,11 +846,13 @@ def _push_docs_and_advance(
 def _documenting_no_change_note(body: str) -> str:
     """Build the `DOCS: NO_CHANGE` PR notice, quoting the agent's
     justification when it supplied one."""
+    from orchestrator import workflow as _wf
+
     justification = body.strip()
     base = ":books: documenting pass: no docs changes required."
     if not justification:
         return base
-    quoted = "> " + justification.replace("\n", "\n> ")
+    quoted = _wf._as_blockquote(justification)
     return f"{base}\n\n{quoted}"
 
 

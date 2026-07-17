@@ -42,6 +42,7 @@ from orchestrator.workflow_messages import (
     _COMMIT_STYLE_NOTE,
     _FOREGROUND_ONLY_NOTE,
     _ORCH_COMMENT_MARKER,
+    _as_blockquote,
     _is_bare_orchestrator_continue,
     _orchestrator_ids,
     _post_issue_comment,
@@ -200,7 +201,7 @@ def _build_user_content_change_prompt(
     """
     title = (issue.title or "").strip() or f"#{issue.number}"
     body = (issue.body or "").strip() or "(no body)"
-    quoted = "> " + body.replace("\n", "\n> ")
+    quoted = _as_blockquote(body)
     convo = comments_text or "(no prior comments)"
     return (
         "The human edited the issue while you were working on it. Re-read the "

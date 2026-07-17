@@ -93,13 +93,14 @@ def compute_insights(
     if summary.total_agent_runs > 0:
         rate = summary.failed_agent_runs / summary.total_agent_runs
         if rate >= FAILURE_RATE_BANNER_THRESHOLD:
+            rate *= 100
             banners.append(
                 InsightBanner(
                     severity="error",
                     message=(
                         f"{summary.failed_agent_runs} of "
                         f"{summary.total_agent_runs} agent runs failed "
-                        f"({rate * 100:.0f}%)."
+                        f"({rate:.0f}%)."
                     ),
                 )
             )
@@ -113,12 +114,13 @@ def compute_insights(
         if total_runs > 0:
             ratio = unpriced / total_runs
             if ratio >= UNPRICED_COVERAGE_THRESHOLD:
+                ratio *= 100
                 banners.append(
                     InsightBanner(
                         severity="warning",
                         message=(
                             f"{unpriced} of {total_runs} agent runs lack "
-                            f"a priced cost ({ratio * 100:.0f}%) -- check "
+                            f"a priced cost ({ratio:.0f}%) -- check "
                             "the pricing table in `orchestrator.usage` "
                             "for missing SKUs."
                         ),

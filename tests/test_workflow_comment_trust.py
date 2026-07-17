@@ -123,5 +123,25 @@ class DriftHashTrustFilterTest(unittest.TestCase):
             self.assertNotEqual(self._hash(outsider), self._hash(base))
 
 
+class QuoteCommentLineTest(unittest.TestCase):
+    """`_quote_comment_line` is the shared `@author[label]: body` formatter the
+    resume/followup prompt builders and the fresh-comment stage handlers fold
+    each already-selected comment through."""
+
+    def test_author_body_label_and_fallbacks(self) -> None:
+        cases = (
+            (FakeComment(1, "please rebase", FakeUser("alice")), "", "@alice: please rebase"),
+            (FakeComment(2, "on the PR", FakeUser("bob")), " (PR comment)",
+             "@bob (PR comment): on the PR"),
+            (FakeComment(3, "no account", None), "", "@user: no account"),
+            (FakeComment(4, None, FakeUser("carol")), "", "@carol: "),
+        )
+        for comment, label, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    workflow._quote_comment_line(comment, label), expected,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

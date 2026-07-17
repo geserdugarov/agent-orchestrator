@@ -329,10 +329,12 @@ def guard_transition(
     allowed = ", ".join(
         sorted(str(state) for state in ALLOWED_TRANSITIONS.get(current, frozenset()))
     )
+    current_label = str(current) if current is not None else None
+    allowed_text = allowed or "(none -- terminal state)"
     detail = (
         f"illegal workflow transition "
-        f"{str(current) if current is not None else None!r} -> {str(new)!r}; "
-        f"allowed from there: {allowed or '(none -- terminal state)'}"
+        f"{current_label!r} -> {str(new)!r}; "
+        f"allowed from there: {allowed_text}"
     )
     if mode == "enforce":
         raise IllegalTransition(detail)

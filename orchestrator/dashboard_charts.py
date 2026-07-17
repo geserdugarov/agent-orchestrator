@@ -298,7 +298,7 @@ def _cost_bar_trace(
         "marker_color": options.color,
         "cliponaxis": False,
         "hovertemplate": (
-            "%{y}<br>" + options.hover_label + ": $%{x:,.2f}<extra></extra>"
+            f"%{{y}}<br>{options.hover_label}: $%{{x:,.2f}}<extra></extra>"
         ),
     }
     if options.offsetgroup is not None:
@@ -328,7 +328,7 @@ def _add_token_stack_trace(
             line={"width": 0.5, "color": color},
             fillcolor=color,
             hovertemplate=(
-                "%{x}<br>" + name + ": %{y:,} tokens<extra></extra>"
+                f"%{{x}}<br>{name}: %{{y:,}} tokens<extra></extra>"
             ),
         )
     )

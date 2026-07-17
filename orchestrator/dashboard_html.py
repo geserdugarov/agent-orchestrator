@@ -71,7 +71,8 @@ def _table_head_html(columns: Sequence[tuple[str, bool]]) -> str:
     for label, right in columns:
         css_class = ' class="r"' if right else ""
         cells.append(f"<th{css_class}>{html.escape(label)}</th>")
-    return "<thead><tr>" + "".join(cells) + "</tr></thead>"
+    cells_html = "".join(cells)
+    return f"<thead><tr>{cells_html}</tr></thead>"
 
 
 def _table_html(
@@ -197,10 +198,14 @@ def _sparkline_area_path(
     padding: int,
 ) -> str:
     baseline = height - padding
-    start = f"M{points[0][0]:.1f},{baseline:.1f}"
-    line = " L" + " L".join(map(_sparkline_point_text, points))
-    end = f" L{points[-1][0]:.1f},{baseline:.1f} Z"
-    return start + line + end
+    first_x = points[0][0]
+    last_x = points[-1][0]
+    segments = " L".join(map(_sparkline_point_text, points))
+    return (
+        f"M{first_x:.1f},{baseline:.1f}"
+        f" L{segments}"
+        f" L{last_x:.1f},{baseline:.1f} Z"
+    )
 
 
 def _sparkline_svg(
@@ -247,7 +252,8 @@ def _delta_pill(value: Optional[float], *, invert: bool = False) -> str:
     """
     if value is None or value == 0:
         return ""
-    pct_str = f"{abs(value) * 100:.1f}%"
+    pct = abs(value) * 100
+    pct_str = f"{pct:.1f}%"
     if value > 0:
         css_class = "down" if invert else "up"
         arrow = "▲"
@@ -273,9 +279,11 @@ def _topbar_html(
     if extent.min_ts is None or extent.max_ts is None:
         range_label = "no data recorded yet"
     else:
+        min_date = extent.min_ts.date().isoformat()
+        max_date = extent.max_ts.date().isoformat()
         range_label = (
-            f"{extent.min_ts.date().isoformat()} → "
-            f"{extent.max_ts.date().isoformat()} available"
+            f"{min_date} → "
+            f"{max_date} available"
         )
     sub = (
         f"{html.escape(range_label)} · "
@@ -338,7 +346,8 @@ def _kpi_strip_html(kpis: Sequence[dict]) -> str:
             f'{spark_html}'
             '</div></div>'
         )
-    return '<div class="orch-kpis">' + "".join(cells) + '</div>'
+    cells_html = "".join(cells)
+    return f'<div class="orch-kpis">{cells_html}</div>'
 
 
 _ISSUES_TABLE_COLUMNS = (
@@ -706,7 +715,8 @@ def _skill_matrix_header_html(active_key: Optional[str], descending: bool) -> st
         _skill_matrix_header_cell(column, active_key, descending)
         for column in _SKILL_MATRIX_COLUMNS
     )
-    return "<thead><tr>" + "".join(cells) + "</tr></thead>"
+    cells_html = "".join(cells)
+    return f"<thead><tr>{cells_html}</tr></thead>"
 
 
 def _muted_zero_html(text: str) -> str:
@@ -731,7 +741,8 @@ def _skill_matrix_row_view(row: SkillTriggerMatrixRow) -> _SkillMatrixRowView:
         rate_html = _muted_zero_html("0%")
     else:
         skill_runs_html = str(skill_runs)
-        rate_html = f"{row.rate * 100.0:.0f}%"
+        rate_pct = row.rate * 100.0
+        rate_html = f"{rate_pct:.0f}%"
     return _SkillMatrixRowView(
         repo=row.repo or _UNKNOWN,
         role=row.agent_role or _UNKNOWN,
@@ -871,7 +882,8 @@ def _insights_html(
             f'<span>{html.escape(banner.message)}</span>'
             '</div>'
         )
-    return '<div class="orch-insights">' + "".join(rows) + '</div>'
+    rows_html = "".join(rows)
+    return f'<div class="orch-insights">{rows_html}</div>'
 
 
 def _backend_efficiency_card_html(
@@ -1045,15 +1057,16 @@ def _cost_coverage_bar_html(
     come from the caller's `dashboard_theme` handle.
     """
     weights, total = _cost_coverage_weights(rows)
-    cost_sources = [row.cost_source for row in rows]
-    segments = _coverage_segments(rows, weights, total, cost_sources, theme)
+    segments = _coverage_segments(
+        rows, weights, total, [row.cost_source for row in rows], theme
+    )
+    bars = "".join(segment.bar_html for segment in segments)
+    legends = "".join(segment.legend for segment in segments)
     return (
         '<div class="orch-cov-title">'
         'Cost attribution coverage</div>'
-        f'<div class="orch-cov-bar">'
-        f'{"".join(segment.bar_html for segment in segments)}</div>'
-        f'<div class="orch-cov-legend">'
-        f'{"".join(segment.legend for segment in segments)}</div>'
+        f'<div class="orch-cov-bar">{bars}</div>'
+        f'<div class="orch-cov-legend">{legends}</div>'
     )
 
 
