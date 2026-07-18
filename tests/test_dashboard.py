@@ -60,14 +60,17 @@ def _reload(env: dict[str, str] | None = None):
     still reads `LOG_DIR` for the JSONL default).
 
     The extracted helper modules (`dashboard_state` / `dashboard_kpis`
-    / `dashboard_html` / `dashboard_reads` / `dashboard_widgets`) are
-    popped alongside `dashboard` so the re-imported facade re-binds them
-    too -- otherwise a cached `dashboard_state` would keep its pre-patch
-    `from orchestrator import analytics` reference and its module-import
-    parse of `DASHBOARD_PARALLEL_READS`, and a cached `dashboard_reads` /
+    / `dashboard_html` / `dashboard_skill_matrix` / `dashboard_reads` /
+    `dashboard_widgets`) are popped alongside `dashboard` so the
+    re-imported facade re-binds them too -- otherwise a cached
+    `dashboard_state` would keep its pre-patch `from orchestrator import
+    analytics` reference and its module-import parse of
+    `DASHBOARD_PARALLEL_READS`, a cached `dashboard_reads` /
     `dashboard_widgets` would keep its pre-patch `from orchestrator.analytics
     import read` reference (and, for `dashboard_widgets`, its pre-patch
-    `dashboard_reads` bindings), defeating the hermetic reload.
+    `dashboard_reads` bindings), and a cached `dashboard_skill_matrix`
+    would keep its `_table_css` / `_table_html` / `_UNKNOWN` bound to the
+    discarded `dashboard_html` module, defeating the hermetic reload.
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
@@ -76,6 +79,7 @@ def _reload(env: dict[str, str] | None = None):
         sys.modules.pop("orchestrator.dashboard_state", None)
         sys.modules.pop("orchestrator.dashboard_kpis", None)
         sys.modules.pop("orchestrator.dashboard_html", None)
+        sys.modules.pop("orchestrator.dashboard_skill_matrix", None)
         sys.modules.pop("orchestrator.dashboard_reads", None)
         sys.modules.pop("orchestrator.dashboard_widgets", None)
         sys.modules.pop("orchestrator.dashboard", None)
@@ -1372,11 +1376,11 @@ class SkillMatrixSortTest(unittest.TestCase):
         )
 
     def test_sort_helper_unknown_key_is_identity(self) -> None:
-        from orchestrator import dashboard_html
+        from orchestrator import dashboard_skill_matrix
         rows = self._rows()
-        sorted_rows = dashboard_html._sort_skill_matrix_rows(rows, None, False)
+        sorted_rows = dashboard_skill_matrix._sort_skill_matrix_rows(rows, None, False)
         self.assertEqual(sorted_rows, rows)
-        sorted_rows = dashboard_html._sort_skill_matrix_rows(rows, "bogus", True)
+        sorted_rows = dashboard_skill_matrix._sort_skill_matrix_rows(rows, "bogus", True)
         self.assertEqual(sorted_rows, rows)
 
     def test_parse_matrix_sort_from_query_params(self) -> None:
@@ -2234,12 +2238,16 @@ class DashboardParallelReadsEnabledTest(unittest.TestCase):
 
 class FacadeReExportCompatibilityTest(unittest.TestCase):
     """The helper split moved the pure logic into `dashboard_state` /
-    `dashboard_kpis` / `dashboard_html`, but `orchestrator.dashboard`
+    `dashboard_kpis` / `dashboard_html` / `dashboard_skill_matrix` /
+    `dashboard_reads` / `dashboard_widgets`, but `orchestrator.dashboard`
     must keep re-exporting every name that lived on it on `origin/main`
     -- including the module-private `_parse_parallel_reads_flag` /
     `_TRUTHY` the parallel-reads knob is parsed through -- so
     `from orchestrator.dashboard import <helper>` keeps resolving
-    against the facade rather than raising `ImportError`.
+    against the facade rather than raising `ImportError`. Helpers a
+    module keeps to itself (e.g. `dashboard_skill_matrix`'s internal
+    sort / header / row functions) were never on the facade and stay
+    off it.
     """
 
     def test_parallel_read_internals_are_reexported(self) -> None:

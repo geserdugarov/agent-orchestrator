@@ -37,17 +37,17 @@ import dashboard as _dashboard`), not as module-local names, so
 `patch.object(dashboard, ...)` on any of those re-exports intercepts the
 running pipeline (mirroring the `workflow.py` stage-handler facade). The
 module-private helpers, the read primitives (`_scoped_read` / `_filter_list`),
-and the pure `dashboard_html` / `dashboard_kpis` / `dashboard_state` builders
-are called directly.
+and the pure `dashboard_html` / `dashboard_skill_matrix` / `dashboard_kpis` /
+`dashboard_state` builders are called directly.
 
 Streamlit / Plotly / pandas are never imported here: every helper that
 needs `st`, a chart builder, the theme tokens, or a DataFrame takes the
 loaded handle as a plain parameter (bundled in `_DashboardModules`, or
 passed directly). Together with the stdlib-plus-`orchestrator` imports
 below (`analytics.read`, the import-light `dashboard_state` /
-`dashboard_kpis` / `dashboard_html` / `dashboard_reads` helpers), this
-keeps the module off the polling tick's dependency footprint;
-`tests/test_dashboard.py` asserts the invariant.
+`dashboard_kpis` / `dashboard_html` / `dashboard_skill_matrix` /
+`dashboard_reads` helpers), this keeps the module off the polling
+tick's dependency footprint; `tests/test_dashboard.py` asserts the invariant.
 """
 from __future__ import annotations
 
@@ -75,9 +75,11 @@ from orchestrator.dashboard_html import (
 from orchestrator.dashboard_html import (
     _kpi_strip_html,
     _reliability_tiles_html,
-    _skill_matrix_html,
     _skill_triggers_html,
     _topbar_html,
+)
+from orchestrator.dashboard_skill_matrix import (
+    _skill_matrix_html,
     parse_skill_matrix_sort,
 )
 from orchestrator.dashboard_kpis import (
