@@ -59,11 +59,13 @@ def _reload(env: dict[str, str] | None = None):
     still reads `LOG_DIR` for the JSONL default).
 
     The extracted helper modules (`dashboard_state` / `dashboard_kpis`
-    / `dashboard_html`) are popped alongside `dashboard` so the
-    re-imported facade re-binds them too -- otherwise a cached
-    `dashboard_state` would keep its pre-patch `from orchestrator
+    / `dashboard_html` / `dashboard_reads`) are popped alongside
+    `dashboard` so the re-imported facade re-binds them too -- otherwise
+    a cached `dashboard_state` would keep its pre-patch `from orchestrator
     import analytics` reference and its module-import parse of
-    `DASHBOARD_PARALLEL_READS`, defeating the hermetic reload.
+    `DASHBOARD_PARALLEL_READS`, and a cached `dashboard_reads` would keep
+    its pre-patch `from orchestrator.analytics import read` reference,
+    defeating the hermetic reload.
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
@@ -72,6 +74,7 @@ def _reload(env: dict[str, str] | None = None):
         sys.modules.pop("orchestrator.dashboard_state", None)
         sys.modules.pop("orchestrator.dashboard_kpis", None)
         sys.modules.pop("orchestrator.dashboard_html", None)
+        sys.modules.pop("orchestrator.dashboard_reads", None)
         sys.modules.pop("orchestrator.dashboard", None)
         import orchestrator.analytics as analytics
         import orchestrator.dashboard as dashboard
@@ -1795,6 +1798,67 @@ class CacheKeyTest(unittest.TestCase):
         self.assertEqual(empty[4], ())
 
 
+class ReadOrchestrationExtractionTest(unittest.TestCase):
+    """The dashboard read orchestration -- filter-to-query adapters,
+    cached reader wrappers, reader registries, the staged parallel
+    dispatch + two-wave data load, the static-metadata load, and the
+    load-timing log -- lives in `orchestrator.dashboard_reads`, and
+    `orchestrator.dashboard` re-exports every member under its original
+    name so the historical `dashboard.<name>` surface and its test patch
+    points keep resolving to the same object.
+    """
+
+    # Every read member the extraction owns (functions + the read-plan
+    # dataclass), each of which carries a `__module__`.
+    _MOVED_READ_MEMBERS = (
+        "_filter_list",
+        "_read_filter_kwargs",
+        "_scoped_read",
+        "_read_filtered",
+        "_read_data_extent",
+        "_read_filter_options",
+        "_read_static_metadata",
+        *WIDGET_READER_WRAPPER_NAMES,
+        "_widget_task",
+        "_first_wave_readers",
+        "_second_wave_readers",
+        "_widget_readers",
+        "_build_read_keys",
+        "_dispatch_reads",
+        "_log_dashboard_load",
+        "_run_read_waves",
+        "_DashboardReadPlan",
+    )
+
+    # The cache / load constants re-exported alongside the members.
+    _FACADE_CONSTANTS = (
+        "DEFAULT_RECENT_AGENT_EXITS",
+        "STATIC_METADATA_TTL_SECONDS",
+        "LOADING_INDICATOR_MESSAGE",
+    )
+
+    def test_read_members_defined_in_reads_module(self) -> None:
+        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        reads = sys.modules["orchestrator.dashboard_reads"]
+        for name in self._MOVED_READ_MEMBERS:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    getattr(reads, name).__module__,
+                    "orchestrator.dashboard_reads",
+                )
+
+    def test_facade_reexports_share_the_reads_objects(self) -> None:
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        reads = sys.modules["orchestrator.dashboard_reads"]
+        for name in (*self._MOVED_READ_MEMBERS, *self._FACADE_CONSTANTS):
+            with self.subTest(name=name):
+                self.assertTrue(
+                    hasattr(dashboard, name),
+                    f"dashboard dropped the historical {name!r} alias",
+                )
+                self.assertIs(getattr(dashboard, name), getattr(reads, name))
+
+
 class CachedReadConnectionScopingTest(_MainSourceTest):
     """The read path reuses a thread-local analytics connection across
     the dashboard's reads instead of opening a socket per call (issue
@@ -2242,8 +2306,9 @@ class MainRenderDispatchTest(_MainSourceTest):
             ("_run_dashboard", "_read_static_metadata("),
             ("_render_dashboard", "_render_no_data("),
             ("_prepare_dashboard_page", "_widget_readers("),
-            ("_load_dashboard_data", "_dispatch_reads("),
-            ("_load_dashboard_data", "_log_dashboard_load("),
+            ("_load_dashboard_data", "_run_read_waves("),
+            ("_run_read_waves", "_dispatch_reads("),
+            ("_run_read_waves", "_log_dashboard_load("),
             ("_render_first_wave", "_render_empty_window("),
         ):
             with self.subTest(helper=helper, marker=marker):
@@ -2268,10 +2333,15 @@ class MainParallelFanOutWiringTest(_MainSourceTest):
     """
 
     def test_dispatch_wraps_fan_out_helper(self) -> None:
-        # `_fan_out_reads` is the single dispatch surface; `main`
-        # reaches it through the `_dispatch_reads` wave helper.
+        # `_fan_out_reads` is the single dispatch surface; the data load
+        # reaches it through `_run_read_waves` -> `_dispatch_reads`, and
+        # `_load_dashboard_data` delegates the whole two-wave run to
+        # `_run_read_waves`.
         self.assertIn(
-            "_dispatch_reads(", self._source_of("_load_dashboard_data"),
+            "_run_read_waves(", self._source_of("_load_dashboard_data"),
+        )
+        self.assertIn(
+            "_dispatch_reads(", self._source_of("_run_read_waves"),
         )
         self.assertIn(
             "_fan_out_reads(", self._source_of("_dispatch_reads"),
@@ -2287,9 +2357,10 @@ class MainParallelFanOutWiringTest(_MainSourceTest):
     def test_main_emits_load_timing_log(self) -> None:
         # The instrumentation line carries total wall-clock, reader
         # count, and the parallel flag so the operator can A/B with a
-        # single grep; it is emitted by `_log_dashboard_load`, which
-        # `main` calls (and clocks with `perf_counter`).
-        load_src = self._source_of("_load_dashboard_data")
+        # single grep; it is emitted by `_log_dashboard_load`, which the
+        # `_run_read_waves` data load calls (clocked from the
+        # `perf_counter` stamped in `_prepare_dashboard_page`).
+        load_src = self._source_of("_run_read_waves")
         prepare_src = self._source_of("_prepare_dashboard_page")
         self.assertIn("_log_dashboard_load(", load_src)
         self.assertIn("perf_counter()", prepare_src)
@@ -2479,7 +2550,7 @@ class StagedRenderTest(_MainSourceTest):
         return self._source_of("_second_wave_readers")
 
     def _load_source(self) -> str:
-        return self._source_of("_load_dashboard_data")
+        return self._source_of("_run_read_waves")
 
     def test_first_wave_has_only_topbar_inputs(self) -> None:
         wave = self._first_wave_source()
@@ -2501,9 +2572,9 @@ class StagedRenderTest(_MainSourceTest):
 
     def test_topbar_and_meta_render_between_waves(self) -> None:
         load_source = self._load_source()
-        first = load_source.index("page.reads.first_wave")
-        render = load_source.index("_render_first_wave(")
-        second = load_source.index("page.reads.second_wave")
+        first = load_source.index("reads.first_wave")
+        render = load_source.index("render_first_wave(")
+        second = load_source.index("reads.second_wave")
         self.assertLess(first, render)
         self.assertLess(render, second)
 
@@ -2521,10 +2592,10 @@ class StagedRenderTest(_MainSourceTest):
         )
         source = self._load_source()
         spinner = source.index(
-            "with modules.st.spinner(LOADING_INDICATOR_MESSAGE):"
+            "with st.spinner(LOADING_INDICATOR_MESSAGE):"
         )
-        first = source.index("page.reads.first_wave")
-        second = source.index("page.reads.second_wave")
+        first = source.index("reads.first_wave")
+        second = source.index("reads.second_wave")
         self.assertLess(spinner, first)
         self.assertLess(spinner, second)
 
@@ -2542,10 +2613,10 @@ class StagedRenderTest(_MainSourceTest):
 
     def test_empty_window_short_circuits_second_wave(self) -> None:
         load_source = self._load_source()
-        first_render = load_source.index("_render_first_wave(")
-        second = load_source.index("page.reads.second_wave")
+        first_render = load_source.index("render_first_wave(")
+        second = load_source.index("reads.second_wave")
         short_circuit = load_source[first_render:second]
-        self.assertIn("if kpis is None:", short_circuit)
+        self.assertIn("if first_wave is None:", short_circuit)
         self.assertIn("return None", short_circuit)
 
         first_wave_source = self._source_of("_render_first_wave")
@@ -2559,15 +2630,15 @@ class StagedRenderErrorTest(_MainSourceTest):
     """Both read waves share error handling and retain their render order."""
 
     def test_both_waves_route_through_dispatch_helper(self) -> None:
-        source = self._source_of("_load_dashboard_data")
-        self.assertIn("page.reads.first_wave", source)
-        self.assertIn("page.reads.second_wave", source)
+        source = self._source_of("_run_read_waves")
+        self.assertIn("reads.first_wave", source)
+        self.assertIn("reads.second_wave", source)
         self.assertEqual(source.count("_dispatch_reads("), 2)
 
     def test_second_wave_error_after_topbar_paints(self) -> None:
-        source = self._source_of("_load_dashboard_data")
-        first_wave_render = source.index("_render_first_wave(")
-        second_dispatch = source.index("page.reads.second_wave")
+        source = self._source_of("_run_read_waves")
+        first_wave_render = source.index("render_first_wave(")
+        second_dispatch = source.index("reads.second_wave")
         self.assertLess(first_wave_render, second_dispatch)
         self.assertIn(
             "_render_topbar_and_meta(",
