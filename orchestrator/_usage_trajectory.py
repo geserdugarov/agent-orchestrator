@@ -698,7 +698,7 @@ def parse_codex_trajectory(stdout: str) -> AgentTrajectory:
     the last ``agent_message`` is still the ``final_output``. ``tools`` and
     ``system_prompt`` stay empty / ``None`` here -- codex's stream exposes no
     offered-tools or system-prompt frame -- so a downstream writer backfills
-    ``tools`` out-of-band (see ``analytics._maybe_record_trajectory`` /
+    ``tools`` out-of-band (see ``analytics._recording._maybe_record_trajectory`` /
     ``skill_catalog.discover_codex_tools``); this stdout-only classifier does
     not. ``turns`` stays empty with every ``step.turn = None`` (codex usage
     frames are cumulative, not per-turn). Every section is empty rather than an

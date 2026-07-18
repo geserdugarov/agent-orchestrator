@@ -2109,5 +2109,64 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
             self.assertNotIn("skills_available", _read_records(a_path)[0])
 
 
+class RecordingFacadeTest(unittest.TestCase):
+    """The recording implementation lives in
+    `orchestrator.analytics._recording`; the package re-exports it as a
+    facade, each package instance carries its own `_recording`, and the
+    recorders read sink knobs / call sibling recorders back off the facade,
+    so a reference held across a `_reload` keeps dispatching to the instance
+    its own callers patched.
+    """
+
+    def test_recorders_are_defined_in_the_recording_module(self) -> None:
+        _, analytics = _reload()
+        for name in (
+            "append_record",
+            "append_trajectory_record",
+            "build_record",
+            "prune_old_records",
+            "record_agent_exit",
+            "record_repo_skill_catalog",
+            "record_stage_enter",
+            "record_stage_evaluation",
+        ):
+            with self.subTest(name=name):
+                member = getattr(analytics, name)
+                self.assertEqual(
+                    member.__module__, "orchestrator.analytics._recording",
+                )
+                self.assertIs(member, getattr(analytics._recording, name))
+
+    def test_internal_append_routes_through_the_facade(self) -> None:
+        # A recorder's internal `append_record` is late-bound through the
+        # facade, so patching `analytics.append_record` intercepts it.
+        _, analytics = _reload()
+        captured: list[dict] = []
+        with patch.object(analytics, "append_record", captured.append):
+            analytics.record_stage_enter(
+                repo="o/r", issue=1, stage="implementing",
+            )
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0]["event"], "stage_enter")
+
+    def test_reload_does_not_hijack_a_stale_facade_reference(self) -> None:
+        # A holder that imported the package before a `_reload` keeps its own
+        # instance: its recorders read the knobs patched on THAT instance, not
+        # the freshly reloaded one that now sits in `sys.modules`.
+        _, stale = _reload()
+        captured_stale: list[dict] = []
+        stale_patch = patch.object(stale, "append_record", captured_stale.append)
+        stale_patch.start()
+        self.addCleanup(stale_patch.stop)
+        _, fresh = _reload()
+        self.assertIsNot(fresh, stale)
+        captured_fresh: list[dict] = []
+        with patch.object(fresh, "append_record", captured_fresh.append):
+            fresh.record_stage_enter(repo="o/r", issue=2, stage="fixing")
+        stale.record_stage_enter(repo="o/r", issue=1, stage="implementing")
+        self.assertEqual([rec["issue"] for rec in captured_fresh], [2])
+        self.assertEqual([rec["issue"] for rec in captured_stale], [1])
+
+
 if __name__ == "__main__":
     unittest.main()
