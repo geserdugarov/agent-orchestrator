@@ -598,7 +598,7 @@ considered.
 
 - File and symbols: `orchestrator/dashboard_theme.py` (`fmt_money`, `fmt_money_exact`, `fmt_tokens`, `fmt_num`:
   `value`), `orchestrator/dashboard_charts.py` (`cost_horizontal_bars`: `items`), and
-  `orchestrator/dashboard_html.py` (`parse_skill_matrix_sort`: `params`).
+  `orchestrator/dashboard_skill_matrix.py` (`parse_skill_matrix_sort`: `params`).
 - Rule: `WPS110`
 - Reason: These are public dashboard functions whose parameter name is a keyword-call contract -- a caller may pass
   `fmt_money(value=...)`, `cost_horizontal_bars(items=...)`, or `parse_skill_matrix_sort(params=...)`. Renaming the
@@ -877,6 +877,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-18 | 4.5/analytics-retention | Complete | WPS202 39->27; leaf 13; WPS420 1->0 | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/dashboard-reads | Complete | WPS202 93->63; leaf 31; WPS234 5->1 | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/dashboard-widgets | Complete | WPS202 63->21; leaf 42; WPS234 1->0 | Not committed | 4.5 rest |
+| 2026-07-18 | 4.5/dashboard-skill-matrix | Complete | WPS202 58->44; leaf 14; full gate | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1289,3 +1290,34 @@ stay pinned to `_recording` / `_trajectories`. `docs/observability.md`'s module-
 passed 2,109 tests (33 skipped for the optional dashboard / live Postgres; the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`
 shell-export artifact is unset for the run). Package 4.5 is not complete -- its remaining module-structure findings are
 untouched.
+
+The `dashboard-skill-matrix` slice moved the per-skill trigger matrix out of `orchestrator/dashboard_html.py` into a
+focused private `orchestrator/dashboard_skill_matrix.py`: the `mtx_sort` / `mtx_dir` sort-param parser
+(`parse_skill_matrix_sort`), the sortable inline-HTML table (`_skill_matrix_html`), and their supporting column model
+(`_SkillMatrixColumn` / `_SKILL_MATRIX_COLUMNS` / `_SKILL_MATRIX_NUMERIC_KEYS` / `_SKILL_MATRIX_SORT_KEYS`), the sort
+helpers (`_sort_skill_matrix_rows` / `_default_sort_skill_matrix_rows` / `_skill_matrix_default_sort_key`), the
+clickable-header builders (`_SkillMatrixHeaderState` / `_skill_matrix_header_state` / `_skill_matrix_header_cell` /
+`_skill_matrix_header_html`), the row view (`_SkillMatrixRowView` / `_skill_matrix_row_view` /
+`_skill_matrix_row_html`), the muted offered-but-quiet zero-cell helper (`_muted_zero_html`), and the empty-state notice
+(`SKILL_MATRIX_EMPTY_MESSAGE` / `SKILL_MATRIX_SORT_PARAM` / `SKILL_MATRIX_DIR_PARAM` / `_SKILL_MATRIX_EXTRA_CSS`). The
+new module depends one-directionally on `dashboard_html` -- it imports the shared compact-table primitives (`_table_css`
+/ `_table_html`) and the `_UNKNOWN` placeholder, which stay with the sibling issues / skill-trigger tables -- so no
+import cycle forms. `orchestrator.dashboard` re-exports `_skill_matrix_html` and `parse_skill_matrix_sort` from the new
+module under their original names (the two names moved from the `dashboard_html` import block to a new
+`dashboard_skill_matrix` block), keeping `__all__` byte-for-byte, so `dashboard._skill_matrix_html` /
+`dashboard.parse_skill_matrix_sort` and the `tests/test_reexport_surface.py` inventory resolve unchanged; the only other
+consumer, `dashboard_widgets`, imports the two names from the new module too. The move dropped `dashboard_html.py`'s
+`WPS202` member count from 58 to 44 (also dropping the now-unused `Callable` and `SkillTriggerMatrixRow` imports). The
+new module retains its own `WPS202` member count (14 > 7) -- the accepted cohesive-leaf magnitude, the same class as
+`_usage_metrics` / `_retention`, and the one extra `WPS202` finding is the inherent cost of splitting one over-limit
+module into two cohesive ones. Its other two findings, the `_SKILL_MATRIX_SORT_KEYS` mutable-constant (`WPS407`) and the
+`parse_skill_matrix_sort(params)` keyword-input (`WPS110`, already in the accepted-remainder register), are pre-existing
+and travelled verbatim with the code, so tree-wide `WPS110` (17) and `WPS407` (20) counts are unchanged and the split
+introduced no new rule category. The one test that reached `dashboard_html._sort_skill_matrix_rows` directly now targets
+`dashboard_skill_matrix._sort_skill_matrix_rows`; every other test reaches the matrix through the `dashboard` facade
+unchanged. Sort-param parsing, default / column sort order, the clickable-header markup, the muted zero cells, the
+empty-state notice, and every consumer were preserved, so all 192 focused dashboard / reexport tests passed unchanged;
+`docs/observability.md`'s module-layout note names the new module. Ruff is clean and the full suite passed 2,134 tests
+(3 skipped for live Postgres; the optional dashboard group installed so the plotly chart tests ran, and the
+`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not complete -- its
+remaining module-structure findings are untouched.

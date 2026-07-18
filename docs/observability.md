@@ -883,7 +883,9 @@ widget-rendering pipeline — the two-wave data load (`_load_dashboard_data` →
 no-data states (`_render_no_data`, `_render_empty_window`), every filter / widget section (the `_render_*` helpers) plus
 the per-issue drill-down renderer, and the immutable page-state dataclasses the pipeline threads — live in
 `orchestrator/dashboard_widgets.py`. The `dashboard_state` / `dashboard_kpis` / `dashboard_html` / `dashboard_reads`
-pure helpers are each re-exported through the facade under their original names; the `dashboard_widgets` KPI / widget /
+pure helpers are each re-exported through the facade under their original names; from `dashboard_skill_matrix` only its
+two public entry points (`_skill_matrix_html` / `parse_skill_matrix_sort`) are re-exported, its internal sort / header /
+row helpers staying private. The `dashboard_widgets` KPI / widget /
 page-state members the pipeline and the dashboard tests reach through `dashboard.<name>` are re-exported (and listed in
 `__all__`) too, while the internal token / layout math helpers are not re-exported and stay private to the module. So
 `streamlit run orchestrator/dashboard.py` and the historical `orchestrator.dashboard.*` import surface (and its test
@@ -891,14 +893,16 @@ patch points) are unchanged.
 The repo-root `sys.path` shim that lets `streamlit run` resolve the absolute `orchestrator.*` imports is factored
 into the shared import-light `orchestrator/script_launch.py` helper (`ensure_repo_root_on_path`), which
 `orchestrator/trajectory_dashboard.py` also calls.
-The extracted helpers live in five import-light modules (stdlib plus `orchestrator.analytics`, so they hold
+The extracted helpers live in six import-light modules (stdlib plus `orchestrator.analytics`, so they hold
 the lazy-import invariant): `orchestrator/dashboard_state.py` (date / window math, preset and timezone vocabulary,
 stage-filter / cache-key resolution, the issue-number parser, the DB-config banner check, and the read fan-out switch),
 `orchestrator/dashboard_kpis.py` (KPI delta math, the computed insight banners, the reliability-tile triples, the
 top-cost issue ordering, and the rework-share aggregation), `orchestrator/dashboard_html.py` (the inline-HTML
-builders below), `orchestrator/dashboard_reads.py` (the read orchestration: the filter-to-query adapters, the
-cached data-extent / filter-option and per-filter widget readers, the two-wave reader registries, the staged parallel
-dispatch, the static-metadata load, the two-wave data load, and the load-timing log — where the cache keys / TTLs, read
+builders below), `orchestrator/dashboard_skill_matrix.py` (the per-skill trigger matrix: its `mtx_sort` / `mtx_dir`
+sort-param parser and the sortable inline-HTML table), `orchestrator/dashboard_reads.py` (the read orchestration: the
+filter-to-query adapters, the cached data-extent / filter-option and per-filter widget readers, the two-wave reader
+registries, the staged parallel dispatch, the static-metadata load, the two-wave data load, and the load-timing log —
+where the cache keys / TTLs, read
 ordering, parallel-read toggle, and one-banner-and-stop read-error behavior live), and
 `orchestrator/dashboard_widgets.py` (the KPI-strip preparation and the widget-rendering pipeline: the two-wave render
 passes, the empty / no-data states, the per-issue drill-down renderer, the page footer, and the page-state dataclasses).
@@ -1008,8 +1012,9 @@ per-cell token totals, Sunday-first, with a `tz_label` parameter that annotates 
 matching offset to `get_hourly_heatmap` so cells already reflect that zone), and `done_per_day_bars` (resolved-per-day
 bars with explicit `window_start` / `window_end` for zero-day backfill). The topbar, filter meta, KPI strip, insight
 banners, per-card header, sparkline / delta pill, most-expensive-issues table, backend-efficiency card, cost-source
-coverage bar, reliability-tile strip, skill-trigger-rates aggregate table, and per-skill trigger matrix are built by
-inline-HTML helpers in `orchestrator/dashboard_html.py` (re-exported through `dashboard.py`).
+coverage bar, reliability-tile strip, and skill-trigger-rates aggregate table are built by inline-HTML helpers in
+`orchestrator/dashboard_html.py`; the per-skill trigger matrix (its `mtx_sort` / `mtx_dir` sort-param parser and the
+sortable table) lives in `orchestrator/dashboard_skill_matrix.py` (both re-exported through `dashboard.py`).
 
 **Theme.** `orchestrator/dashboard_theme.py` is a plotly-free token module: palette (cool gray `#f4f5f8` page, white
 cards, indigo accent, muted ink tints), spacing tokens, the `1480px` content max-width, per-token-type / per-backend /

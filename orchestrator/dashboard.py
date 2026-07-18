@@ -34,8 +34,10 @@ file stays the Streamlit orchestration layer:
 - `orchestrator.dashboard_html` -- the inline-HTML builders for the
   topbar, filter meta, KPI strip, insight stack, per-card header,
   sparkline / delta pill, the issues / skill-trigger tables, the
-  per-skill trigger matrix, the backend-efficiency card, the
-  cost-coverage bar, and the reliability-tile strip.
+  backend-efficiency card, the cost-coverage bar, and the
+  reliability-tile strip.
+- `orchestrator.dashboard_skill_matrix` -- the sort-param parser and
+  the sortable inline-HTML table for the per-skill trigger matrix.
 - `orchestrator.dashboard_reads` -- the read-orchestration layer: the
   filter-to-query adapters, the cached data-extent / filter-option and
   per-filter widget readers, the two-wave reader registries, the staged
@@ -60,14 +62,17 @@ and delegates to the typed internal drill-down renderer.
 
 Every pure helper from `dashboard_state` / `dashboard_kpis` /
 `dashboard_html` / `dashboard_reads` is re-exported below under its
-original name, together with the `dashboard_widgets` KPI-strip / widget /
+original name; from `dashboard_skill_matrix` only its two public
+entry points (`_skill_matrix_html` and `parse_skill_matrix_sort`) are.
+Together with the `dashboard_widgets` KPI-strip / widget /
 page-state members the page pipeline and the existing dashboard tests
-reach through `orchestrator.dashboard.*`; each re-export is listed in
+reach through `orchestrator.dashboard.*`, each re-export is listed in
 `__all__` (the inventory `tests/test_reexport_surface.py` keeps honest).
 So `streamlit run orchestrator/dashboard.py`, the historical helper
 surface, and the tests keep working without touching the extracted
 modules. The purely internal `dashboard_widgets` token / layout math
-helpers are not re-exported and stay private to that module.
+helpers and the `dashboard_skill_matrix` sort / header / row helpers
+are not re-exported and stay private to their modules.
 
 Reads go through `orchestrator.analytics.read` (which already
 handles unset DB, connection errors, and lazy psycopg import) and
@@ -96,9 +101,10 @@ the dashboard's dependency footprint. The module loads without
 `streamlit` or `plotly` installed -- only `streamlit run
 orchestrator/dashboard.py` (or a direct `main()` call) materializes
 the imports. The extracted helper modules (`dashboard_state` /
-`dashboard_kpis` / `dashboard_html` / `dashboard_reads` /
-`dashboard_widgets`) are import-light (stdlib plus `orchestrator.analytics`)
-so they preserve this invariant; it is asserted by `tests/test_dashboard.py`.
+`dashboard_kpis` / `dashboard_html` / `dashboard_skill_matrix` /
+`dashboard_reads` / `dashboard_widgets`) are import-light (stdlib plus
+`orchestrator.analytics`) so they preserve this invariant; it is asserted
+by `tests/test_dashboard.py`.
 
 Run:
     uv sync --group dashboard
@@ -141,12 +147,16 @@ from orchestrator.analytics.read import (  # noqa: E402
 )
 
 # Compatibility re-exports. The pure helpers moved to the focused
-# `dashboard_state` / `dashboard_kpis` / `dashboard_html` modules; we
-# import each one back under its original name so `main()` calls them
-# as bare names, the historical `orchestrator.dashboard.*` surface
-# stays intact, and the existing tests (which reach the helpers via
-# `dashboard.<name>` and inspect `main()`'s source) keep working. The
-# redundant `as` alias marks each as an intentional re-export so ruff
+# `dashboard_state` / `dashboard_kpis` / `dashboard_html` /
+# `dashboard_skill_matrix` / `dashboard_reads` / `dashboard_widgets`
+# modules; we import each one back under its original name so `main()`
+# calls them as bare names, the historical `orchestrator.dashboard.*`
+# surface stays intact, and the existing tests (which reach the helpers
+# via `dashboard.<name>` and inspect `main()`'s source) keep working.
+# From `dashboard_skill_matrix` only its two public entry points
+# (`_skill_matrix_html` / `parse_skill_matrix_sort`) are re-exported;
+# its internal sort / header / row helpers stay private to that module.
+# The redundant `as` alias marks each as an intentional re-export so ruff
 # does not flag the unused import; the E402 suppression covers the
 # post-`sys.path` placement the script-launch fix forces.
 from orchestrator.dashboard_state import (  # noqa: E402
@@ -213,10 +223,18 @@ from orchestrator.dashboard_html import (  # noqa: E402
     _issues_table_html as _issues_table_html,
     _kpi_strip_html as _kpi_strip_html,
     _reliability_tiles_html as _reliability_tiles_html,
-    _skill_matrix_html as _skill_matrix_html,
     _skill_triggers_html as _skill_triggers_html,
     _sparkline_svg as _sparkline_svg,
     _topbar_html as _topbar_html,
+)
+
+# The per-skill trigger matrix -- its sort-param parser and the sortable
+# inline-HTML table -- lives in `orchestrator.dashboard_skill_matrix`.
+# Both members are re-exported below under their original names so the
+# page pipeline and the historical `orchestrator.dashboard.*` surface
+# keep resolving to the same objects.
+from orchestrator.dashboard_skill_matrix import (  # noqa: E402
+    _skill_matrix_html as _skill_matrix_html,
     parse_skill_matrix_sort as parse_skill_matrix_sort,
 )
 
@@ -322,8 +340,8 @@ from orchestrator.dashboard_widgets import (  # noqa: E402
 # Canonical inventory of the `orchestrator.dashboard.*` surface: the page
 # entrypoint (`main`) and its drill-down helper, and every name re-exported
 # above from `dashboard_state` / `dashboard_kpis` / `dashboard_html` /
-# `dashboard_reads` / `dashboard_widgets` (plus the `analytics` /
-# `analytics_read` module handles). Keeping the list explicit makes the
+# `dashboard_skill_matrix` / `dashboard_reads` / `dashboard_widgets` (plus
+# the `analytics` / `analytics_read` module handles). Keeping the list explicit makes the
 # compatibility surface auditable in one place and governs
 # `from orchestrator.dashboard import *`; every `X as X` re-export above
 # must appear here (`tests/test_reexport_surface.py`).
