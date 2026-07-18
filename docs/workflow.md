@@ -62,29 +62,6 @@ tears down the worktree.
 For the per-`park_reason` semantics and the implementing-side relabel guard (`question_unsafe_relabel`), see
 [`state-machine.md#_handle_question-label-question`](state-machine.md#_handle_question-label-question).
 
-### Quick-run mode — skipping the reviewer and final-docs roles on the initial pass
-
-The `quick_run` control label (operator-applied) trades the automated
-review passes for speed on the initial implement. It does not remap any role's backend — every role that runs
-keeps its configured `DEV_AGENT` / `REVIEW_AGENT` / `DECOMPOSE_AGENT` spec; the label changes which stages run, not
-what they run under. On the first clean implementer result the issue routes straight from `implementing` to
-`in_review`, so two role invocations are skipped **on that pass**:
-
-- The **reviewer** (`REVIEW_AGENT`, normally spawned fresh each round by `_handle_validating`) is not spawned — the
-  `validating` stage is bypassed.
-- The single **final-docs** pass (a dev-role invocation `_handle_documenting` makes after reviewer approval) is skipped
-  — `documenting` is bypassed.
-
-The skip applies only to that initial fast path; the post-review feedback cycle is otherwise unchanged. Fresh PR
-feedback on an `in_review` quick-run issue routes to `fixing` exactly as for an ordinary issue. Feedback that produces a
-**pushed fix** bounces back to `validating`, so the reviewer runs on the fix and its approval then runs the
-`documenting` final-docs pass before returning to `in_review`. Feedback the dev session ACKs as needing no change
-(`ACK: <reason>`) returns straight from `fixing` to `in_review`, skipping both stages — the same no-change exit an
-ordinary issue takes. The decomposer role is likewise untouched (it still runs, but the split children it creates do
-not inherit the label), and the implementer session is still spawned in `implementing`. The orchestrator stays
-manual-merge-only. For the label semantics and the transition table, see
-[`state-machine.md#workflow-labels`](state-machine.md#workflow-labels).
-
 ### Tracked-repos awareness in working-agent prompts
 
 When the orchestrator drives more than one repo (`REPOS`) and `EXPOSE_TRACKED_REPOS` is on (the default), the

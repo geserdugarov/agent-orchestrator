@@ -38,10 +38,8 @@ from orchestrator.comment_trust import filter_trusted
 from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import (
-    QUICK_RUN_LABEL,
     GitHubClient,
     PinnedState,
-    issue_has_label,
 )
 
 
@@ -834,8 +832,7 @@ def _try_recover_implementing_timeout_park(
     Returns:
       * ``"pushed"`` -- a clean commit advanced past `pre_implement_sha` and
         was published via `_on_commits` (branch pushed, PR opened/reused,
-        label -> validating, or -> in_review for a `quick_run` issue, park
-        flags cleared). Caller writes state.
+        label -> validating, park flags cleared). Caller writes state.
       * ``"stuck"`` -- nothing safely recoverable (worktree reaped, dirty
         tree, missing watermark, or HEAD unchanged). Caller stays parked.
 
@@ -1693,30 +1690,6 @@ def _advance_to_validating(
     gh.set_workflow_label(issue, WorkflowLabel.VALIDATING)
 
 
-def _advance_quick_run_to_in_review(
-    gh: GitHubClient, issue: Issue, state: PinnedState, pr, branch: str
-) -> None:
-    """Record the published PR/branch and hand a `quick_run` issue straight to
-    `in_review`, bypassing the reviewer (`validating`) and docs (`documenting`)
-    passes the ordinary path runs.
-
-    Seeds the in_review comment watermarks from the just-published PR through
-    the shared `_seed_in_review_pr_watermarks` -- the same handoff seed the
-    reviewer-approval path uses -- so `_handle_in_review` ignores the
-    orchestrator's own automated comments (pickup ping, ":sparkles: PR opened")
-    without swallowing feedback a human posted while the dev was implementing.
-    Resets the per-PR budgets like the validating handoff so a later bounce back
-    into implementing starts with a fresh window.
-    """
-    from orchestrator import workflow as _wf
-
-    state.set("pr_number", pr.number)
-    state.set(_BRANCH, branch)
-    _wf._seed_in_review_pr_watermarks(gh, issue, state, pr)
-    _reset_implementing_counters(state)
-    gh.set_workflow_label(issue, WorkflowLabel.IN_REVIEW)
-
-
 def _reset_implementing_counters(state: PinnedState) -> None:
     # Reset the review counter every time we (re-)open a PR so the validating
     # handler starts fresh on the new branch state.
@@ -1763,10 +1736,7 @@ def _on_commits(
     pr = _reuse_or_open_pr(
         gh, spec, issue, state, _PRWork(agent_result, wt, branch),
     )
-    if issue_has_label(issue, QUICK_RUN_LABEL):
-        _advance_quick_run_to_in_review(gh, issue, state, pr, branch)
-    else:
-        _advance_to_validating(gh, issue, state, pr, branch)
+    _advance_to_validating(gh, issue, state, pr, branch)
 
 
 def _mark_agent_silent_park(state: PinnedState) -> None:

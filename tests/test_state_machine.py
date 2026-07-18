@@ -272,7 +272,6 @@ class IsAllowedTransitionTest(unittest.TestCase):
             (None, WorkflowLabel.DECOMPOSING),
             (None, WorkflowLabel.IMPLEMENTING),
             (WorkflowLabel.IMPLEMENTING, WorkflowLabel.VALIDATING),
-            (WorkflowLabel.IMPLEMENTING, WorkflowLabel.IN_REVIEW),  # quick_run fast path
             (WorkflowLabel.VALIDATING, WorkflowLabel.DOCUMENTING),
             (WorkflowLabel.VALIDATING, WorkflowLabel.FIXING),
             (WorkflowLabel.DOCUMENTING, WorkflowLabel.IN_REVIEW),
@@ -287,6 +286,7 @@ class IsAllowedTransitionTest(unittest.TestCase):
     def test_illegal_edges_rejected(self) -> None:
         for cur, nxt in [
             (WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW),  # skips docs
+            (WorkflowLabel.IMPLEMENTING, WorkflowLabel.IN_REVIEW),  # no quick_run fast path
             (WorkflowLabel.IMPLEMENTING, WorkflowLabel.DOCUMENTING),
             (WorkflowLabel.READY, WorkflowLabel.VALIDATING),  # skips implementing
             (None, WorkflowLabel.DONE),  # entry not terminalizable

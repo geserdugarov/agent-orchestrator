@@ -211,10 +211,10 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNone(state.get("ready_ping_sha"))
 
     def test_quick_run_mergeable_pings_without_approval(self) -> None:
-        # A quick_run issue skips validating/documenting on the way in, so it
-        # never records a final-docs marker or earns an orchestrator APPROVED
-        # review. The approval gate is exempt for it: a mergeable head with no
-        # standing CHANGES_REQUESTED earns the one-shot ready ping directly.
+        # A quick_run head is exempt from the approval gate: a mergeable head
+        # with no standing CHANGES_REQUESTED earns the one-shot ready ping
+        # directly, even without a final-docs marker or an orchestrator
+        # APPROVED review.
         pr = self._open_pr(approved=False, mergeable=True, check_state="success")
         gh, issue = self._seed(pr=pr)
         issue.labels.append(FakeLabel(QUICK_RUN_LABEL))
