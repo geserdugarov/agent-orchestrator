@@ -876,6 +876,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-18 | 4.5/analytics-recording | Complete | WPS202 55->0; leaf 56; full gate | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/analytics-trajectories | Complete | WPS202 56->39; leaf 17; WPS342 fixed | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/analytics-retention | Complete | WPS202 39->27; leaf 13; WPS420 1->0 | Not committed | 4.5 rest |
+| 2026-07-18 | 4.5/dashboard-reads | Complete | WPS202 93->63; leaf 31; WPS234 5->1 | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 

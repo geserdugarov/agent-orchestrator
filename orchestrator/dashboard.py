@@ -36,6 +36,12 @@ file stays the Streamlit orchestration layer:
   sparkline / delta pill, the issues / skill-trigger tables, the
   per-skill trigger matrix, the backend-efficiency card, the
   cost-coverage bar, and the reliability-tile strip.
+- `orchestrator.dashboard_reads` -- the read-orchestration layer: the
+  filter-to-query adapters, the cached data-extent / filter-option and
+  per-filter widget readers, the two-wave reader registries, the staged
+  parallel dispatch, the static-metadata load, and the single load-timing
+  log. Cache keys / TTLs, read ordering, the parallel-read toggle, and the
+  `AnalyticsReadError` -> one-banner-and-stop behavior live there.
 
 `main()` is the lazy Streamlit entrypoint. The page pipeline below it
 groups the imported dashboard modules, resolved filters, read waves,
@@ -44,8 +50,9 @@ static metadata, controls, staged reads, empty states, and card sections,
 so the two-wave render order remains explicit without one oversized
 entrypoint.
 
-Every pure helper from those three modules is re-exported below under
-its original name so `streamlit run orchestrator/dashboard.py`, the
+Every pure helper from `dashboard_state` / `dashboard_kpis` /
+`dashboard_html` / `dashboard_reads` is re-exported below under its
+original name so `streamlit run orchestrator/dashboard.py`, the
 historical `orchestrator.dashboard.*` helper surface, and the existing
 dashboard tests keep working without touching the extracted modules.
 The page-pipeline helpers are module-private. `_render_drilldown` is the
@@ -88,12 +95,10 @@ Run:
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
-from functools import partial
 from time import perf_counter
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 # `streamlit run orchestrator/dashboard.py` launches this file as a
 # top-level script with only `orchestrator/` on `sys.path`, so the repo
@@ -197,6 +202,59 @@ from orchestrator.dashboard_html import (  # noqa: E402
     parse_skill_matrix_sort as parse_skill_matrix_sort,
 )
 
+# The read-orchestration layer -- filter-to-query adapters, cached reader
+# wrappers, reader registries, the staged parallel dispatch + two-wave data
+# load, the static-metadata load, and the load-timing log -- lives in
+# `orchestrator.dashboard_reads`. Every one of its members is re-exported
+# below under its original name (grouped <= 8 per statement, redundant `as`
+# alias marking the intentional re-export) so the page pipeline calls them
+# as bare names and the historical `orchestrator.dashboard.*` surface and
+# its test patch points keep resolving to the same object.
+from orchestrator.dashboard_reads import (  # noqa: E402
+    DEFAULT_RECENT_AGENT_EXITS as DEFAULT_RECENT_AGENT_EXITS,
+    LOADING_INDICATOR_MESSAGE as LOADING_INDICATOR_MESSAGE,
+    STATIC_METADATA_TTL_SECONDS as STATIC_METADATA_TTL_SECONDS,
+    _DashboardReadPlan as _DashboardReadPlan,
+)
+from orchestrator.dashboard_reads import (  # noqa: E402
+    _build_read_keys as _build_read_keys,
+    _dispatch_reads as _dispatch_reads,
+    _filter_list as _filter_list,
+    _first_wave_readers as _first_wave_readers,
+    _log_dashboard_load as _log_dashboard_load,
+    _read_filter_kwargs as _read_filter_kwargs,
+    _read_filtered as _read_filtered,
+    _run_read_waves as _run_read_waves,
+)
+from orchestrator.dashboard_reads import (  # noqa: E402
+    _read_backend_daily_tokens as _read_backend_daily_tokens,
+    _read_backend_efficiency as _read_backend_efficiency,
+    _read_cost_coverage as _read_cost_coverage,
+    _read_data_extent as _read_data_extent,
+    _read_filter_options as _read_filter_options,
+    _read_hourly_heatmap as _read_hourly_heatmap,
+    _read_prev_kpi as _read_prev_kpi,
+    _read_recent_agent_exits as _read_recent_agent_exits,
+)
+from orchestrator.dashboard_reads import (  # noqa: E402
+    _read_repo_breakdown as _read_repo_breakdown,
+    _read_review_round as _read_review_round,
+    _read_skill_trigger_matrix as _read_skill_trigger_matrix,
+    _read_skill_trigger_rates as _read_skill_trigger_rates,
+    _read_stage_breakdown as _read_stage_breakdown,
+    _read_static_metadata as _read_static_metadata,
+    _read_summary as _read_summary,
+    _read_throughput as _read_throughput,
+)
+from orchestrator.dashboard_reads import (  # noqa: E402
+    _read_time_series as _read_time_series,
+    _read_top_cost_issues as _read_top_cost_issues,
+    _scoped_read as _scoped_read,
+    _second_wave_readers as _second_wave_readers,
+    _widget_readers as _widget_readers,
+    _widget_task as _widget_task,
+)
+
 # Canonical inventory of the `orchestrator.dashboard.*` surface: the page
 # entrypoint (`main`) and its drill-down helper, the page-level constants
 # defined below, and every pure helper re-exported above from
@@ -240,24 +298,55 @@ __all__ = [
     "UNCONFIGURED_DB_MESSAGE",
     "UNPRICED_COST_SOURCES",
     "UNPRICED_COVERAGE_THRESHOLD",
+    "_DashboardReadPlan",
     "_TRUTHY",
     "_backend_efficiency_card_html",
+    "_build_read_keys",
     "_card_header_html",
     "_cost_coverage_bar_html",
     "_delta_pill",
+    "_dispatch_reads",
     "_extent_dates",
     "_fan_out_reads",
+    "_filter_list",
     "_filter_meta_html",
+    "_first_wave_readers",
     "_insights_html",
     "_issues_table_html",
     "_kpi_strip_html",
+    "_log_dashboard_load",
     "_parse_parallel_reads_flag",
+    "_read_backend_daily_tokens",
+    "_read_backend_efficiency",
+    "_read_cost_coverage",
+    "_read_data_extent",
+    "_read_filter_kwargs",
+    "_read_filter_options",
+    "_read_filtered",
+    "_read_hourly_heatmap",
+    "_read_prev_kpi",
+    "_read_recent_agent_exits",
+    "_read_repo_breakdown",
+    "_read_review_round",
+    "_read_skill_trigger_matrix",
+    "_read_skill_trigger_rates",
+    "_read_stage_breakdown",
+    "_read_static_metadata",
+    "_read_summary",
+    "_read_throughput",
+    "_read_time_series",
+    "_read_top_cost_issues",
     "_reliability_tiles_html",
     "_render_drilldown",
+    "_run_read_waves",
+    "_scoped_read",
+    "_second_wave_readers",
     "_skill_matrix_html",
     "_skill_triggers_html",
     "_sparkline_svg",
     "_topbar_html",
+    "_widget_readers",
+    "_widget_task",
     "analytics",
     "analytics_read",
     "cache_key",
@@ -279,21 +368,6 @@ __all__ = [
     "to_window",
     "top_expensive_issues",
 ]
-
-log = logging.getLogger(__name__)
-
-DEFAULT_RECENT_AGENT_EXITS = 100
-
-# TTL for the data-extent / filter-option reads (`get_data_extent`,
-# `get_filter_options`). These reads carry no filter inputs and
-# change only as `analytics.sync` ingests fresh events, so they
-# tolerate a longer TTL than the 60 s window the per-filter cached
-# wrappers use. Five minutes keeps a freshly-synced repo / event
-# value reachable within one sync cycle while collapsing the
-# topbar / sidebar round-trip on every rerun.
-STATIC_METADATA_TTL_SECONDS = 300
-
-LOADING_INDICATOR_MESSAGE = "Loading analytics…"
 
 # Plotly config passed to every `st.plotly_chart` call. Disabling
 # the modebar keeps the hover camera/zoom/pan toolbar off the cards
@@ -365,18 +439,6 @@ class _DashboardControls:
     topbar_slot: Any
     meta_slot: Any
     timezone_offset: int
-
-
-@dataclass(frozen=True)
-class _DashboardReadPlan:
-    first_wave: Sequence[tuple[str, Callable[[], Any]]]
-    second_wave: Sequence[tuple[str, Callable[[], Any]]]
-    parallel: bool
-    started_at: float
-
-    @property
-    def total_reads(self) -> int:
-        return len(self.first_wave) + len(self.second_wave)
 
 
 @dataclass(frozen=True)
@@ -616,25 +678,16 @@ def _load_dashboard_data(
     modules: _DashboardModules,
     page: _DashboardPage,
 ) -> Optional[_LoadedDashboard]:
-    with modules.st.spinner(LOADING_INDICATOR_MESSAGE):
-        read_results = _dispatch_reads(
-            page.reads.first_wave,
-            st=modules.st,
-            parallel=page.reads.parallel,
-        )
-        kpis = _render_first_wave(modules, page, read_results)
-        if kpis is None:
-            return None
-        read_results.update(_dispatch_reads(
-            page.reads.second_wave,
-            st=modules.st,
-            parallel=page.reads.parallel,
-        ))
-    _log_dashboard_load(
-        load_start=page.reads.started_at,
-        reads=page.reads.total_reads,
-        parallel=page.reads.parallel,
+    loaded = _run_read_waves(
+        page.reads,
+        st=modules.st,
+        render_first_wave=lambda read_results: _render_first_wave(
+            modules, page, read_results,
+        ),
     )
+    if loaded is None:
+        return None
+    read_results, kpis = loaded
     return _LoadedDashboard(read_results=read_results, kpis=kpis)
 
 
@@ -730,69 +783,6 @@ def _render_dashboard_footer(
         '</div>',
         unsafe_allow_html=True,
     )
-def _filter_list(values_t: Optional[Sequence[str]]) -> Optional[list[str]]:
-    """Convert a cached filter tuple back to the read model's list arg.
-
-    `cache_key` stores the event / stage multiselects as hashable
-    tuples so they can key `st.cache_data`; the `analytics.read`
-    getters take lists. Converting per read keeps the tri-state intact
-    -- `None` means "no filter", an empty selection means "show
-    nothing", and the two must stay distinct at the read layer.
-    """
-    if values_t is None:
-        return None
-    return list(values_t)
-
-
-def _scoped_read(getter: Callable[..., Any], /, **filters: Any) -> Any:
-    """Run one windowed read on the per-thread analytics connection.
-
-    Checks out the thread-local connection via `analytics_connection()`
-    and forwards it to `getter` alongside the resolved filter kwargs, so
-    every cached reader shares one open socket per render pass instead of
-    opening (and hashing) a connection per call. The cached wrappers stay
-    connection-free: `conn` is supplied here and never lands in their
-    `st.cache_data` key (a raw `psycopg.Connection` is unhashable and
-    would make every reload look like a cache miss).
-    """
-    with analytics_read.analytics_connection() as conn:
-        return getter(conn=conn, **filters)
-
-
-def _read_data_extent():
-    return _scoped_read(analytics_read.get_data_extent)
-
-
-def _read_filter_options():
-    return _scoped_read(analytics_read.get_filter_options)
-
-
-def _read_static_metadata(*, st: Any):
-    """Read the data extent + filter options through cached wrappers.
-
-    `get_data_extent` / `get_filter_options` carry no filter inputs (the
-    cache key is empty) and only change as `analytics.sync` ingests new
-    events, so both are cached under the longer `STATIC_METADATA_TTL_SECONDS`
-    (5 min) rather than the per-filter 60 s TTL -- collapsing the sidebar /
-    topbar round-trip on every rerun. Returns `(extent, options)`; a read
-    error is surfaced as one `st.error` and stops the app.
-    """
-    read_data_extent = st.cache_data(
-        show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS,
-    )(_read_data_extent)
-    read_filter_options = st.cache_data(
-        show_spinner=False, ttl=STATIC_METADATA_TTL_SECONDS,
-    )(_read_filter_options)
-
-    try:
-        return read_data_extent(), read_filter_options()
-    except analytics_read.AnalyticsReadError as error:
-        st.error(
-            "Could not load analytics filter options: "
-            f"{error}. Verify `ANALYTICS_DB_URL` and that the Postgres "
-            "service is reachable, then reload."
-        )
-        st.stop()
 
 
 def _render_no_data(*, st: Any, extent: DataExtent, theme: Any) -> None:
@@ -815,226 +805,6 @@ def _render_no_data(*, st: Any, extent: DataExtent, theme: Any) -> None:
     )
     st.info(NO_DATA_MESSAGE)
     st.stop()
-
-
-def _read_filter_kwargs(key: tuple) -> dict[str, Any]:
-    return {
-        "start": key[0],
-        "end": key[1],
-        "repo": key[2],
-        "events": _filter_list(key[3]),
-        "stages": _filter_list(key[4]),
-        "issue": key[5],
-    }
-
-
-def _read_filtered(
-    getter: Callable[..., Any],
-    key: tuple,
-    **extra_filters: Any,
-) -> Any:
-    filters = _read_filter_kwargs(key)
-    filters.update(extra_filters)
-    return _scoped_read(getter, **filters)
-
-
-def _read_summary(key: tuple):
-    return _read_filtered(analytics_read.get_summary, key)
-
-
-def _read_prev_kpi(key: tuple):
-    # Previous-window read for the KPI delta pills and cost-trend
-    # banner only. The full `get_summary` shape is never read off
-    # `prev_summary`, so a thinner reader saves a `GROUP BY` follow-up
-    # while leaving the cache key identical to `_read_summary`.
-    return _read_filtered(analytics_read.get_kpi_prev, key)
-
-
-def _read_time_series(key: tuple):
-    return _read_filtered(analytics_read.get_time_series, key)
-
-
-def _read_stage_breakdown(key: tuple):
-    return _read_filtered(analytics_read.get_stage_breakdown, key)
-
-
-def _read_recent_agent_exits(key: tuple):
-    return _read_filtered(
-        analytics_read.get_recent_agent_exits,
-        key,
-        limit=DEFAULT_RECENT_AGENT_EXITS,
-    )
-
-
-def _read_top_cost_issues(key: tuple):
-    # Ask the database for the top-cost issues directly. Reading the
-    # latest N issues by `last_seen` and re-sorting in Python silently
-    # drops older high-cost issues that fall outside the truncated set.
-    return _read_filtered(
-        analytics_read.get_issues,
-        key,
-        limit=DEFAULT_EXPENSIVE_LIMIT,
-        sort_by=analytics_read.SORT_BY_COST,
-    )
-
-
-def _read_review_round(key: tuple):
-    return _read_filtered(analytics_read.get_review_round_breakdown, key)
-
-
-def _read_backend_efficiency(key: tuple):
-    return _read_filtered(analytics_read.get_backend_efficiency, key)
-
-
-def _read_repo_breakdown(key: tuple):
-    return _read_filtered(analytics_read.get_repo_breakdown, key)
-
-
-def _read_cost_coverage(key: tuple):
-    return _read_filtered(analytics_read.get_cost_coverage, key)
-
-
-def _read_hourly_heatmap(
-    key: tuple,
-    tz_offset_hours: int,
-):
-    return _read_filtered(
-        analytics_read.get_hourly_heatmap,
-        key,
-        tz_offset_hours=tz_offset_hours,
-    )
-
-
-def _read_throughput(key: tuple):
-    return _read_filtered(analytics_read.get_throughput_breakdown, key)
-
-
-def _read_backend_daily_tokens(key: tuple):
-    return _read_filtered(analytics_read.get_backend_daily_tokens, key)
-
-
-def _read_skill_trigger_rates(key: tuple):
-    return _read_filtered(analytics_read.get_skill_trigger_rates, key)
-
-
-def _read_skill_trigger_matrix(key: tuple):
-    return _read_filtered(analytics_read.get_skill_trigger_matrix, key)
-
-
-def _widget_task(
-    st: Any,
-    name: str,
-    reader: Callable[..., Any],
-    *args: Any,
-) -> tuple[str, Callable[[], Any]]:
-    cached_reader = st.cache_data(show_spinner=False, ttl=60)(reader)
-    return name, partial(cached_reader, *args)
-
-
-def _first_wave_readers(
-    st: Any,
-    key: tuple,
-    prev_key: tuple,
-) -> list[tuple[str, Callable[[], Any]]]:
-    return [
-        _widget_task(st, "summary", _read_summary, key),
-        _widget_task(st, "prev_summary", _read_prev_kpi, prev_key),
-        _widget_task(st, "ts_points", _read_time_series, key),
-        _widget_task(st, "review_round_rows", _read_review_round, key),
-        _widget_task(st, "throughput_rows", _read_throughput, key),
-        _widget_task(st, "cost_coverage_rows", _read_cost_coverage, key),
-    ]
-
-
-def _second_wave_readers(
-    st: Any,
-    key: tuple,
-    tz_offset_choice: int,
-) -> list[tuple[str, Callable[[], Any]]]:
-    return [
-        _widget_task(st, "stage_rows", _read_stage_breakdown, key),
-        _widget_task(st, "agent_exits", _read_recent_agent_exits, key),
-        _widget_task(st, "issues_rows", _read_top_cost_issues, key),
-        _widget_task(st, "backend_rows", _read_backend_efficiency, key),
-        _widget_task(st, "repo_rows", _read_repo_breakdown, key),
-        _widget_task(
-            st,
-            "heatmap_rows",
-            _read_hourly_heatmap,
-            key,
-            int(tz_offset_choice),
-        ),
-        _widget_task(st, "backend_daily_rows", _read_backend_daily_tokens, key),
-        _widget_task(st, "skill_rows", _read_skill_trigger_rates, key),
-        _widget_task(st, "skill_matrix_rows", _read_skill_trigger_matrix, key),
-    ]
-
-
-def _widget_readers(*, st: Any, key, prev_key, tz_offset_choice: int):
-    """Define the cached per-filter read wrappers and stage them.
-
-    Returns `(first_wave_readers, second_wave_readers)` -- each a list of
-    `(name, zero-arg callable)` pairs `_fan_out_reads` dispatches.
-
-    Connection scoping: each wrapper delegates through `_read_filtered`
-    to `_scoped_read`, which checks out the thread-local connection via
-    `analytics_connection()` and forwards it to the read helper rather
-    than threading a connection through the cache key (a raw
-    `psycopg.Connection` is not hashable and would crash the wrapper, and
-    every reload would otherwise look like a cache miss). The thread-local
-    persists across reads in the same render pass, so the first cache-miss
-    pays the psycopg handshake and the rest reuse the open socket. The
-    cache key stays the filter tuple `(start, end, repo, events_t,
-    stages_t, issue)`.
-
-    Split into two staged waves so the topbar / filter meta / insight
-    banners / KPI strip can paint as soon as their inputs are available
-    instead of blocking on every widget: the first wave carries the six
-    reads those above-the-fold widgets consume, the second the nine
-    remaining widget reads. Each task is a zero-argument `partial` bound
-    to its immutable filter tuple, and worker threads only return data --
-    every `st.*` write happens on the caller's render thread between waves.
-    """
-    return (
-        _first_wave_readers(st, key, prev_key),
-        _second_wave_readers(st, key, tz_offset_choice),
-    )
-
-
-def _dispatch_reads(readers, *, st: Any, parallel: bool):
-    """Dispatch one read wave and surface a read error as one banner.
-
-    Runs the wave through `_fan_out_reads` (sequential, or across a thread
-    pool when `parallel`) and returns the name->data dict. An
-    `AnalyticsReadError` from any reader is caught, rendered as one
-    `st.error`, and stops the app -- the dashboard cannot render without
-    database access.
-    """
-    try:
-        return _fan_out_reads(readers, parallel=parallel)
-    except analytics_read.AnalyticsReadError as error:
-        st.error(
-            f"Analytics query failed: {error}. The dashboard cannot render "
-            "without database access; check Postgres connectivity and "
-            "reload."
-        )
-        st.stop()
-
-
-def _log_dashboard_load(*, load_start: float, reads: int, parallel: bool) -> None:
-    """Emit the single `dashboard.load:` INFO line for the A/B rollout.
-
-    Carries total wall-clock, the reader count (6 when the empty-window
-    short-circuit skips the second wave, else 15), and the parallel flag,
-    so the sequential / parallel paths can be A/B'd with one
-    `grep dashboard.load streamlit.log`.
-    """
-    log.info(
-        "dashboard.load: total=%.1fs reads=%d parallel=%s",
-        perf_counter() - load_start,
-        reads,
-        "true" if parallel else "false",
-    )
 
 
 def _render_empty_window(
@@ -1232,36 +1002,6 @@ def _render_date_filter_bar(
             meta_slot = st.empty()
     st.session_state.preset = preset_choice
     return to_window(*dates), meta_slot
-
-
-def _build_read_keys(
-    *,
-    window: DateWindow,
-    repo_filter: Optional[str],
-    event_filter: Optional[Sequence[str]],
-    stage_filter: Optional[Sequence[str]],
-    issue_filter: Optional[int],
-):
-    """Build the current + previous-window cache-key tuples.
-
-    Returns `(key, prev_key)`: the `(start, end, repo, events, stages,
-    issue)` tuple the fan-out reads are cached under, and the same
-    tuple shifted to the immediately-preceding equal-length window for
-    the KPI delta pills. Cached readers accept the tuple as one hashable
-    key and `_read_filter_kwargs` expands its stable field order for the
-    read model.
-    """
-    key = cache_key(
-        window, repo_filter, event_filter, stage_filter, issue_filter
-    )
-    prev_key = cache_key(
-        previous_window(window),
-        repo_filter,
-        event_filter,
-        stage_filter,
-        issue_filter,
-    )
-    return key, prev_key
 
 
 def _summary_total_tokens(summary: Summary) -> int:
