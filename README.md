@@ -154,15 +154,6 @@ is the terminal signal. See
 [`docs/workflow.md#question-stage--read-only-qa-on-the-question-label`][qa-lifecycle]
 for the full lifecycle and the read-only-violation park reasons.
 
-## The `quick_run` control label
-
-The `quick_run` control label coexists with the workflow label without pausing it. Unlike `backlog` / `paused`, it does
-not pause processing — it stays attached and the orchestrator keeps handling the issue. The label is not inherited
-across a split: when the orchestrator decomposes a `quick_run` parent, its child issues are created without it, so each
-child runs the ordinary flow unless you apply `quick_run` to it directly. The orchestrator stays manual-merge-only and
-routes fresh PR feedback to the fix loop exactly as it does for an ordinary issue. See
-[`docs/state-machine.md`](docs/state-machine.md) for the control-label semantics.
-
 ## Observability
 
 The workflow state lives on GitHub, but local logs explain what happened between label transitions.

@@ -15,7 +15,6 @@ from orchestrator.state_machine import (
     IllegalTransition,
     WorkflowLabel,
     _DETOUR_TO_RESOLVING,
-    coerce_child_issue_label,
     coerce_workflow_label,
     guard_transition,
     is_allowed_transition,
@@ -64,7 +63,6 @@ class WorkflowLabelEnumTest(unittest.TestCase):
         self.assertEqual(
             ControlLabel.COMMUNITY_CONTRIBUTION, "community_contribution",
         )
-        self.assertEqual(ControlLabel.QUICK_RUN, "quick_run")
         for label in ControlLabel:
             self.assertNotIn(label, github.WORKFLOW_LABELS)
 
@@ -73,11 +71,11 @@ class WorkflowLabelEnumTest(unittest.TestCase):
             {spec[0] for spec in github.CONTROL_LABEL_SPECS},
             set(ControlLabel),
         )
-        # `quick_run` is registered for bootstrap alongside the hard-skip
-        # labels but modifies the workflow instead of pausing it, so it must
-        # stay out of the hard-skip set.
-        self.assertIn(github.QUICK_RUN_LABEL, {spec[0] for spec in github.CONTROL_LABEL_SPECS})
-        self.assertNotIn(github.QUICK_RUN_LABEL, github.HARD_SKIP_CONTROL_LABELS)
+        # `community_contribution` is registered for bootstrap but is not a
+        # hard skip: it coexists with the workflow rather than pausing it.
+        self.assertNotIn(
+            github.COMMUNITY_CONTRIBUTION_LABEL, github.HARD_SKIP_CONTROL_LABELS
+        )
 
 
 class CoerceWorkflowLabelTest(unittest.TestCase):
@@ -100,39 +98,6 @@ class CoerceWorkflowLabelTest(unittest.TestCase):
         # `value` is the public keyword; callers may pass the label by name.
         self.assertIs(
             coerce_workflow_label(value="validating"), WorkflowLabel.VALIDATING
-        )
-
-
-class CoerceChildIssueLabelTest(unittest.TestCase):
-    """`create_child_issue` writes labels directly (bypassing
-    `set_workflow_label`), so its guard widens the workflow-label set by
-    exactly the modifiers a child is born with -- `quick_run`, which a split
-    parent propagates -- while still rejecting typos and every control label
-    that is never seeded at creation."""
-
-    def test_accepts_workflow_label(self) -> None:
-        self.assertIs(coerce_child_issue_label("blocked"), WorkflowLabel.BLOCKED)
-
-    def test_accepts_quick_run_modifier(self) -> None:
-        self.assertIs(
-            coerce_child_issue_label("quick_run"), ControlLabel.QUICK_RUN
-        )
-
-    def test_rejects_typo_and_non_creatable_control_labels(self) -> None:
-        # A misspelled workflow label and control labels never seeded at child
-        # creation both raise; the widening is exactly `quick_run`.
-        for value in ("blokced", "backlog", "paused", "community_contribution"):
-            with self.subTest(value=value):
-                with self.assertRaises(ValueError) as ctx:
-                    coerce_child_issue_label(value)
-                msg = str(ctx.exception)
-                self.assertIn(value, msg)
-                self.assertIn("child-issue label", msg)
-
-    def test_accepts_value_keyword(self) -> None:
-        # `value` is the public keyword; callers may pass the label by name.
-        self.assertIs(
-            coerce_child_issue_label(value="blocked"), WorkflowLabel.BLOCKED
         )
 
 
@@ -165,12 +130,16 @@ class LabelWriteTypoGuardTest(unittest.TestCase):
         self.assertIsInstance(result, WorkflowLabel)
         self.assertIs(result, WorkflowLabel.FIXING)
 
-    def test_create_child_issue_rejects_typo(self) -> None:
+    def test_create_child_issue_rejects_non_workflow_label(self) -> None:
+        # A child is born with a workflow label only: a misspelling and any
+        # control label (never seeded at creation) both raise here.
         gh = FakeGitHubClient()
-        with self.assertRaises(ValueError):
-            gh.create_child_issue(
-                title="t", body="b", parent_number=1, labels=["blokced"],
-            )
+        for label in ("blokced", "backlog"):
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError):
+                    gh.create_child_issue(
+                        title="t", body="b", parent_number=1, labels=[label],
+                    )
 
 
 class TransitionTableTest(unittest.TestCase):
@@ -286,7 +255,7 @@ class IsAllowedTransitionTest(unittest.TestCase):
     def test_illegal_edges_rejected(self) -> None:
         for cur, nxt in [
             (WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW),  # skips docs
-            (WorkflowLabel.IMPLEMENTING, WorkflowLabel.IN_REVIEW),  # no quick_run fast path
+            (WorkflowLabel.IMPLEMENTING, WorkflowLabel.IN_REVIEW),  # skips the reviewer path
             (WorkflowLabel.IMPLEMENTING, WorkflowLabel.DOCUMENTING),
             (WorkflowLabel.READY, WorkflowLabel.VALIDATING),  # skips implementing
             (None, WorkflowLabel.DONE),  # entry not terminalizable

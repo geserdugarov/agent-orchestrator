@@ -11,11 +11,11 @@ give them one authoritative definition, IDE/refactor support, and a
 membership set the typo guard can validate against.
 
 `ControlLabel` holds operator-applied *modifiers* (`backlog`, `paused`,
-`community_contribution`, `quick_run`) that coexist with a workflow label or
-PR and pause/redirect/modify processing without being workflow states
-themselves -- an issue is `implementing` + `backlog` at once. They are
-deliberately NOT workflow states and never flow through `set_workflow_label`
-or the transition table.
+`community_contribution`) that coexist with a workflow label or PR and
+pause/redirect processing without being workflow states themselves -- an
+issue is `implementing` + `backlog` at once. They are deliberately NOT
+workflow states and never flow through `set_workflow_label` or the
+transition table.
 
 The transition table and guard live in this module too; `github.set_workflow_label`
 is the single chokepoint that calls them.
@@ -59,27 +59,21 @@ class ControlLabel(StrEnum):
     the issue entirely while either is present. They differ only in intent:
     `backlog` is a "not yet" hold on a fresh issue, `paused` an operator
     pause on an in-flight one.
-
-    `quick_run` is deliberately NOT a hard skip: it stays attached and
-    modifies the normal workflow rather than pausing it, so the orchestrator
-    keeps processing the issue while the label is present.
     """
 
     BACKLOG = "backlog"
     PAUSED = "paused"
     COMMUNITY_CONTRIBUTION = "community_contribution"
-    QUICK_RUN = "quick_run"
 
 
 def coerce_workflow_label(value: str) -> WorkflowLabel:
     """Return the `WorkflowLabel` for ``value`` or raise ``ValueError``.
 
-    The typo guard for orchestrator-authored label writes: `set_workflow_label`
-    calls it directly, and `create_child_issue` reaches it through
-    `coerce_child_issue_label` (which first admits the propagable `quick_run`
-    modifier). A typo'd label name fails loudly instead of being applied as a
-    literal GitHub label and then silently demoted to unlabeled-pickup on the
-    next tick (a label not in `WorkflowLabel` is invisible to `workflow_label`).
+    Called at every orchestrator-authored workflow-label write
+    (`set_workflow_label`, `create_child_issue`) so a typo'd label name
+    fails loudly instead of being applied as a literal GitHub label and
+    then silently demoted to unlabeled-pickup on the next tick (a label
+    not in `WorkflowLabel` is invisible to `workflow_label`).
 
     Accepts an existing `WorkflowLabel` (idempotent) or its string value.
     """
@@ -89,45 +83,6 @@ def coerce_workflow_label(value: str) -> WorkflowLabel:
         valid = ", ".join(repr(str(member)) for member in WorkflowLabel)
         raise ValueError(
             f"{value!r} is not a valid workflow label; expected one of: {valid}"
-        ) from None
-
-
-# Control labels a freshly-created child issue may carry at birth alongside
-# its initial workflow label. `quick_run` is the only one: a split parent
-# carrying it propagates the modifier to every child so the accelerated mode
-# survives decomposition. `backlog` / `paused` / `community_contribution` are
-# operator- or PR-applied and are never seeded at child creation.
-_CREATABLE_CONTROL_LABELS: frozenset[ControlLabel] = frozenset(
-    (ControlLabel.QUICK_RUN,)
-)
-
-
-def coerce_child_issue_label(value: str) -> str:
-    """Return the validated label string for a `create_child_issue` write.
-
-    A child is born with an initial `WorkflowLabel`, and may additionally
-    carry a control label in `_CREATABLE_CONTROL_LABELS` (currently only
-    `quick_run`, propagated from a split parent). Anything that is not a
-    propagable modifier is validated as a workflow label through
-    `coerce_workflow_label` (the single typo-guard source of truth), so an
-    unknown workflow label, a misspelling, or a control label never seeded at
-    creation (`backlog` / `paused` / `community_contribution`) fails loudly
-    here instead of becoming an invisible literal GitHub label.
-    """
-    try:
-        control = ControlLabel(value)
-    except ValueError:
-        control = None
-    if control in _CREATABLE_CONTROL_LABELS:
-        return control
-    try:
-        return coerce_workflow_label(value)
-    except ValueError:
-        accepted = (*WorkflowLabel, *_CREATABLE_CONTROL_LABELS)
-        valid = ", ".join(repr(str(member)) for member in accepted)
-        raise ValueError(
-            f"{value!r} is not a valid child-issue label; "
-            f"expected one of: {valid}"
         ) from None
 
 

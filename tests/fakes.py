@@ -23,7 +23,6 @@ from orchestrator.github import (
 )
 from orchestrator.state_machine import (
     WorkflowLabel,
-    coerce_child_issue_label,
     coerce_workflow_label,
     guard_transition,
 )
@@ -364,9 +363,9 @@ class FakeGitHubClient:
         parent_number: int,
         labels: list[str],
     ) -> FakeIssue:
-        # Mirror the real client's strict typo guard on this direct label
-        # write path: workflow labels plus the propagable `quick_run` modifier.
-        validated = [coerce_child_issue_label(l) for l in labels]
+        # Mirror the real client's strict typo guard on this direct
+        # workflow-label write path.
+        validated = [coerce_workflow_label(l) for l in labels]
         full_body = f"{(body or '').rstrip()}\n\nParent: #{parent_number}"
         child = FakeIssue(
             number=next(self._next_issue_number),
