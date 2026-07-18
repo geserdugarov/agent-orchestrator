@@ -120,12 +120,9 @@ terminals `done` / `rejected`. The orchestrator also creates four non-workflow c
 each make per-tick handlers skip the issue entirely (`backlog` is a "not yet" hold on a fresh issue, `paused` freezes
 an in-flight one), `community_contribution` is applied by the per-tick open-PR sweep to PRs from non-bot authors
 outside `ALLOWED_ISSUE_AUTHORS` so a human reviews them, and `quick_run` is a registered control label that is
-deliberately not a hard skip — it coexists with the workflow and modifies it rather than pausing, so per-tick handlers
-keep processing an issue that carries it. Its effect: the `in_review` mergeability gate exempts a `quick_run` head from
-the approval markers, so a mergeable quick-run head with no standing `CHANGES_REQUESTED` earns the ready-for-review
-HITL ping without a reviewer-approved final-docs marker or an orchestrator APPROVED review. The label is not inherited
-across a split: when a `quick_run` parent decomposes, its child issues are created without it, so each child runs the
-ordinary flow unless `quick_run` is applied to it directly.
+deliberately not a hard skip — it coexists with the workflow rather than pausing, so per-tick handlers keep processing
+an issue that carries it. The label is not inherited across a split: when a `quick_run` parent decomposes, its child
+issues are created without it, so each child runs the ordinary flow unless `quick_run` is applied to it directly.
 
 Label names are part of the public contract because live GitHub issues already carry them. For the meaning of each
 label, the control-label semantics, and the per-stage transitions they trigger, see

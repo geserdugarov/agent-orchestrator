@@ -156,9 +156,8 @@ for the full lifecycle and the read-only-violation park reasons.
 
 ## The `quick_run` control label
 
-The `quick_run` control label modifies the workflow without pausing it. Unlike `backlog` / `paused`, it does not pause
-processing — it stays attached and coexists with the workflow label. A mergeable quick-run PR with no requested changes
-earns the one-shot HITL ready ping even without the orchestrator's reviewer-approval markers. The label is not inherited
+The `quick_run` control label coexists with the workflow label without pausing it. Unlike `backlog` / `paused`, it does
+not pause processing — it stays attached and the orchestrator keeps handling the issue. The label is not inherited
 across a split: when the orchestrator decomposes a `quick_run` parent, its child issues are created without it, so each
 child runs the ordinary flow unless you apply `quick_run` to it directly. The orchestrator stays manual-merge-only and
 routes fresh PR feedback to the fix loop exactly as it does for an ordinary issue. See
