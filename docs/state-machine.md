@@ -52,11 +52,8 @@ Four non-workflow **control labels** modify behavior without occupying the workf
   are not community contributions. The orchestrator does not otherwise drive these PRs. With `ALLOWED_ISSUE_AUTHORS`
   empty (the default), the sweep is a no-op.
 - `quick_run` is registered as a control label (created by repository bootstrap via `CONTROL_LABEL_SPECS`) but is
-  deliberately **not** a hard skip: unlike `backlog` / `paused` it stays attached and modifies the normal workflow
-  rather than pausing it, so the orchestrator keeps processing the issue while the label is present. Its effect: the
-  `in_review` mergeability gate exempts a `quick_run` head from the reviewer-approval markers, so a mergeable quick-run
-  head with no standing `CHANGES_REQUESTED` earns the ready-for-review HITL ping without an orchestrator APPROVED
-  review or final-docs marker.
+  deliberately **not** a hard skip: unlike `backlog` / `paused` it stays attached and coexists with the workflow label
+  rather than pausing it, so the orchestrator keeps processing the issue while the label is present.
 
 ### Typed states and the transition guard
 
@@ -94,9 +91,7 @@ edges declared per-target. Operator relabels via the GitHub UI bypass both guard
   spawn.
 - `in_review` — A PR is open and ready for human review. The orchestrator never merges from here — humans drive the
   merge. A mergeable PR whose current head completed the reviewer-approved final-docs handoff (or carries a real GitHub
-  APPROVED review), with no standing human CHANGES_REQUESTED on that head, earns a one-shot HITL ping per head SHA. A
-  `quick_run` head is exempt from the approval markers, so a mergeable quick-run head with no standing
-  CHANGES_REQUESTED earns the ping directly.
+  APPROVED review), with no standing human CHANGES_REQUESTED on that head, earns a one-shot HITL ping per head SHA.
 - `fixing` — The dev fix-loop is active. Entered on unread in-review feedback OR a `CHANGES_REQUESTED` verdict. A
   successful fix bounces directly back to `validating` so the reviewer re-approves.
 - `resolving_conflict` — The orchestrator is resolving a rebase conflict on a PR branch against `<remote>/<base>`.
@@ -697,9 +692,8 @@ so `DEV_AGENT` flips made mid-flight do not retarget the docs pass either.
        comment.
      - `True` → check `gh.pr_has_changes_requested(pr, head_sha=head_sha)` (a standing human CHANGES_REQUESTED on the
        current head vetoes the ping). The ping requires either `docs_checked_sha == pr.head.sha` with `docs_verdict` set
-       OR `gh.pr_is_approved(pr, head_sha=pr.head.sha)` (a human/bot APPROVED review on the current head). A `quick_run`
-       head is exempt from that approval gate, so the mergeable + no-CHANGES_REQUESTED guards alone qualify it for the
-       ping. When the gate passes, post a one-shot `:bell:` ping de-duplicated by `ready_ping_sha`. The ping is NOT a
+       OR `gh.pr_is_approved(pr, head_sha=pr.head.sha)` (a human/bot APPROVED review on the current head). When the
+       gate passes, post a one-shot `:bell:` ping de-duplicated by `ready_ping_sha`. The ping is NOT a
        park: `awaiting_human` stays false so subsequent ticks still react to new comments / an external merge.
        Unlike park branches, the ready ping does NOT call `_bump_in_review_watermarks` (the bump reads
        `gh.latest_comment_id(issue)`, which could
@@ -972,8 +966,7 @@ because session state lives in pinned state, not in the worktree.
                                             no docs hop)
      mergeable + final-docs-complete or ─► HITL ping (no relabel,
        GitHub-approved current head        awaiting_human stays false)
-       (or quick_run: approval markers
-       exempt) + no human CHANGES_REQUESTED
+       + no human CHANGES_REQUESTED
        + head SHA not yet pinged
      unmergeable                        ─► park (unmergeable); a
                                             subsequent human comment

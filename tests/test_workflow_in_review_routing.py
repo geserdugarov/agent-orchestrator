@@ -10,12 +10,10 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from orchestrator import config, workflow
-from orchestrator.github import QUICK_RUN_LABEL
 
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
-    FakeLabel,
     FakePR,
     FakePRRef,
     FakePRReview,
@@ -199,52 +197,6 @@ class HandleInReviewTest(unittest.TestCase, _PatchedWorkflowMixin):
                 "docs_verdict": "updated",
             },
         )
-
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(),
-        )
-
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.posted_comments, [])
-        state = gh.pinned_data(30)
-        self.assertIsNone(state.get("ready_ping_sha"))
-
-    def test_quick_run_mergeable_pings_without_approval(self) -> None:
-        # A quick_run head is exempt from the approval gate: a mergeable head
-        # with no standing CHANGES_REQUESTED earns the one-shot ready ping
-        # directly, even without a final-docs marker or an orchestrator
-        # APPROVED review.
-        pr = self._open_pr(approved=False, mergeable=True, check_state="success")
-        gh, issue = self._seed(pr=pr)
-        issue.labels.append(FakeLabel(QUICK_RUN_LABEL))
-
-        self._run(
-            lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
-            run_agent=_agent(),
-        )
-
-        self.assertEqual(gh.merge_calls, [])
-        self.assertEqual(gh.label_history, [])
-        ping_comments = [
-            body for _, body in gh.posted_comments
-            if "ready for review/merge" in body
-        ]
-        self.assertEqual(len(ping_comments), 1)
-        state = gh.pinned_data(30)
-        self.assertEqual(state.get("ready_ping_sha"), "cafe1234")
-        self.assertFalse(state.get("awaiting_human"))
-
-    def test_quick_run_changes_requested_does_not_ping(self) -> None:
-        # The quick_run approval-gate exemption does NOT relax the
-        # CHANGES_REQUESTED veto or the mergeable requirement: a standing human
-        # CHANGES_REQUESTED on the current head still blocks the ping.
-        pr = self._open_pr(
-            approved=False, mergeable=True, check_state="success",
-            changes_requested=True,
-        )
-        gh, issue = self._seed(pr=pr)
-        issue.labels.append(FakeLabel(QUICK_RUN_LABEL))
 
         self._run(
             lambda: workflow._handle_in_review(gh, _TEST_SPEC, issue),
