@@ -5,9 +5,12 @@
 The recording implementation (sink configuration, JSONL append
 primitives, and the stage / repo-skill / agent-exit recorders) lives in
 `orchestrator.analytics._recording`; the opt-in trajectory sink's
-serialization, budgeting, redaction / truncation, and append / prune
-helpers live in the sibling `orchestrator.analytics._trajectories`. This
-`__init__` re-exports both surfaces so callers keep importing from
+serialization, budgeting, redaction / truncation, and append helpers live
+in the sibling `orchestrator.analytics._trajectories`; the by-age
+retention pruning for both sinks (JSONL prune, scan models, atomic
+rewrite, retention logging, and the public prune entry points) lives in
+the sibling `orchestrator.analytics._retention`. This
+`__init__` re-exports all three surfaces so callers keep importing from
 `orchestrator.analytics` unchanged. The sibling read / sync submodules
 (`read`, `read_*`, `sync`, `connection`, `query`, `predicates`,
 `db_url`) are the Postgres-facing surfaces and are imported directly as
@@ -25,21 +28,22 @@ and callers elsewhere patch the already-imported package reference
 (`patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`, the autouse
 conftest sink-disable, `patch.object(analytics, "_TRAJECTORY_RECORD_BUDGET",
 ...)`). Binding the knobs here re-parses them on every package (re)import;
-the recorders in `_recording` (and `_trajectories`, which imports its
-`_live_settings`) read the values back off this package at call time (see
-`_recording._live_settings`), so a patched or reloaded value takes effect.
-Each package instance imports its own `_recording` / `_trajectories` (the
-eviction below), bound to that instance, so a reference held across a
-reload keeps reading the knobs its own callers patched. `ANALYTICS_DB_URL`
-is resolved the same way by `analytics.db_url._resolve_db_url`.
+the recorders in `_recording` (and `_trajectories` / `_retention`, which
+import its `_live_settings`) read the values back off this package at call
+time (see `_recording._live_settings`), so a patched or reloaded value
+takes effect. Each package instance imports its own `_recording` /
+`_trajectories` / `_retention` (the eviction below), bound to that
+instance, so a reference held across a reload keeps reading the knobs its
+own callers patched. `ANALYTICS_DB_URL` is resolved the same way by
+`analytics.db_url._resolve_db_url`.
 
 `ANALYTICS_LOG_PATH` defaults to `<config.LOG_DIR>/analytics.jsonl` and
 disables on empty / `off` / `disabled` / `none`; `TRAJECTORY_LOG_PATH`
 is opt-in and defaults *off*. Full analytics-sink semantics -- event
-kinds, record shapes, locks, fail-open persistence, retention pruning --
-are documented in `_recording`; the trajectory sink's redaction /
-truncation, budgeting, and append / prune discipline are documented in
-`_trajectories`.
+kinds, record shapes, locks, fail-open persistence -- are documented in
+`_recording`; the trajectory sink's redaction / truncation, budgeting,
+and append discipline are documented in `_trajectories`; retention
+pruning for both sinks is documented in `_retention`.
 """
 from __future__ import annotations
 
@@ -50,16 +54,18 @@ from typing import Optional
 from orchestrator import config as config, usage as usage
 from orchestrator.agents import AgentResult as AgentResult
 
-# Evict any cached `_recording` / `_trajectories` so this package instance
-# imports its own copies. `tests/test_analytics.py::_reload` pops + re-imports
-# `orchestrator.analytics` to land a patched env; a shared submodule would bind
-# its `_facade` to whichever package instance imported it last, so a stale
-# holder's recorders would read the reloaded instance's sink knobs. Per-instance
-# submodules keep each side of the reload reading the knobs its own callers
-# patched. `_trajectories` reads `_recording`'s `_live_settings`, so evict it
-# too or a stale `_trajectories` would resolve the wrong facade.
+# Evict any cached `_recording` / `_trajectories` / `_retention` so this package
+# instance imports its own copies. `tests/test_analytics.py::_reload` pops +
+# re-imports `orchestrator.analytics` to land a patched env; a shared submodule
+# would bind its `_facade` to whichever package instance imported it last, so a
+# stale holder's recorders would read the reloaded instance's sink knobs.
+# Per-instance submodules keep each side of the reload reading the knobs its own
+# callers patched. `_trajectories` and `_retention` read `_recording`'s
+# `_live_settings`, so evict them too or a stale sibling would resolve the wrong
+# facade.
 sys.modules.pop(f"{__name__}._recording", None)
 sys.modules.pop(f"{__name__}._trajectories", None)
+sys.modules.pop(f"{__name__}._retention", None)
 
 # Absolute imports (not `from ._recording`) grouped at <= 8 names per statement,
 # following the `worktrees.py` re-export-hub convention so the facade adds no
@@ -78,8 +84,6 @@ from orchestrator.analytics._recording import (  # noqa: E402
     append_record as append_record,
     log as log,
     os as os,
-    prune_old_records as prune_old_records,
-    prune_with_retention_logging as prune_with_retention_logging,
 )
 from orchestrator.analytics._recording import (  # noqa: E402
     build_record as build_record,
@@ -99,7 +103,17 @@ from orchestrator.analytics._trajectories import (  # noqa: E402
     _TRAJECTORY_FILE_LOCK as _TRAJECTORY_FILE_LOCK,
     _TRAJECTORY_RECORD_BUDGET as _TRAJECTORY_RECORD_BUDGET,
     append_trajectory_record as append_trajectory_record,
+)
+
+# By-age retention pruning for both sinks lives in `_retention` (imported after
+# `_recording` / `_trajectories`, whose `_FILE_LOCK` / `_TRAJECTORY_FILE_LOCK`
+# it shares and whose `_live_settings` it reads). The prune entry points stay
+# re-exported here so `main._run_tick` and the cron viewer keep importing them
+# from `orchestrator.analytics` unchanged.
+from orchestrator.analytics._retention import (  # noqa: E402
+    prune_old_records as prune_old_records,
     prune_trajectory_records as prune_trajectory_records,
+    prune_with_retention_logging as prune_with_retention_logging,
 )
 
 __all__ = [

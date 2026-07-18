@@ -2111,12 +2111,13 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
 
 class RecordingFacadeTest(unittest.TestCase):
     """The event-recording implementation lives in
-    `orchestrator.analytics._recording` and the opt-in trajectory sink in
-    `orchestrator.analytics._trajectories`; the package re-exports both as a
-    facade, each package instance carries its own submodules, and the
-    recorders read sink knobs / call sibling recorders back off the facade,
-    so a reference held across a `_reload` keeps dispatching to the instance
-    its own callers patched.
+    `orchestrator.analytics._recording`, the opt-in trajectory sink in
+    `orchestrator.analytics._trajectories`, and the by-age retention prune
+    entry points in `orchestrator.analytics._retention`; the package
+    re-exports all three as a facade, each package instance carries its own
+    submodules, and the recorders read sink knobs / call sibling recorders
+    back off the facade, so a reference held across a `_reload` keeps
+    dispatching to the instance its own callers patched.
     """
 
     def test_recorders_are_defined_in_the_recording_module(self) -> None:
@@ -2124,7 +2125,6 @@ class RecordingFacadeTest(unittest.TestCase):
         for name in (
             "append_record",
             "build_record",
-            "prune_old_records",
             "record_agent_exit",
             "record_repo_skill_catalog",
             "record_stage_enter",
@@ -2141,13 +2141,29 @@ class RecordingFacadeTest(unittest.TestCase):
         self,
     ) -> None:
         _, analytics = _reload()
-        for name in ("append_trajectory_record", "prune_trajectory_records"):
+        for name in ("append_trajectory_record",):
             with self.subTest(name=name):
                 member = getattr(analytics, name)
                 self.assertEqual(
                     member.__module__, "orchestrator.analytics._trajectories",
                 )
                 self.assertIs(member, getattr(analytics._trajectories, name))
+
+    def test_prune_entry_points_are_defined_in_the_retention_module(
+        self,
+    ) -> None:
+        _, analytics = _reload()
+        for name in (
+            "prune_old_records",
+            "prune_trajectory_records",
+            "prune_with_retention_logging",
+        ):
+            with self.subTest(name=name):
+                member = getattr(analytics, name)
+                self.assertEqual(
+                    member.__module__, "orchestrator.analytics._retention",
+                )
+                self.assertIs(member, getattr(analytics._retention, name))
 
     def test_internal_append_routes_through_the_facade(self) -> None:
         # A recorder's internal `append_record` is late-bound through the

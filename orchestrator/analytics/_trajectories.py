@@ -18,17 +18,18 @@ free-text field, denormalizes the `UsageMetrics` `record_agent_exit`
 already parsed for the baseline record into a `run_usage` summary (plus
 claude's per-turn `turns[]`), and appends one `agent_trajectory` record
 -- all behind its own fail-open guard so it never disturbs the baseline
-`agent_exit` usage record. `append_trajectory_record` /
-`prune_trajectory_records` share the append / prune discipline of their
-analytics counterparts in `_recording` (reopen append per record,
-`mkdir -p` parents, `OSError` downgraded to a warning, malformed lines
-preserved on prune) -- they reuse `_recording`'s `_append_jsonl_record`
-/ `_prune_jsonl_records` cores -- but hold a dedicated file lock and
-never touch `ANALYTICS_LOG_PATH`, the analytics Postgres sync, or the
-dashboard rollups: the two sinks are fully independent files. The pinned
-GitHub state on each issue is the authoritative durable state -- this
-sink is local-filesystem observability and may be truncated or deleted
-at any time without affecting workflow correctness.
+`agent_exit` usage record. `append_trajectory_record` shares the append
+discipline of its analytics counterpart in `_recording` (reopen append
+per record, `mkdir -p` parents, `OSError` downgraded to a warning) -- it
+reuses `_recording`'s `_append_jsonl_record` core -- but holds a
+dedicated `_TRAJECTORY_FILE_LOCK` and never touches `ANALYTICS_LOG_PATH`,
+the analytics Postgres sync, or the dashboard rollups: the two sinks are
+fully independent files. By-age pruning for this sink lives in
+`orchestrator.analytics._retention` (`prune_trajectory_records`, holding
+this same `_TRAJECTORY_FILE_LOCK`), alongside the analytics prune. The
+pinned GitHub state on each issue is the authoritative durable state --
+this sink is local-filesystem observability and may be truncated or
+deleted at any time without affecting workflow correctness.
 
 Settings ownership. `TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS`
 and the `_TRAJECTORY_RECORD_BUDGET` / `_TRAJECTORY_FIELD_HEAD` /
@@ -42,7 +43,6 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass, replace
-from datetime import datetime
 from typing import Any, Callable, Optional
 
 from orchestrator import usage
@@ -51,7 +51,6 @@ from orchestrator.analytics._recording import (
     _CodexCatalog as _CodexCatalog,
     _append_jsonl_record as _append_jsonl_record,
     _live_settings as _live_settings,
-    _prune_jsonl_records as _prune_jsonl_records,
     build_record as build_record,
     log as log,
 )
@@ -418,24 +417,4 @@ def append_trajectory_record(record: dict) -> None:
     """
     _append_jsonl_record(
         _live_settings().TRAJECTORY_LOG_PATH, _TRAJECTORY_FILE_LOCK, record,
-    )
-
-
-def prune_trajectory_records(*, now: Optional[datetime] = None) -> int:
-    """Remove trajectory records older than `TRAJECTORY_RETENTION_DAYS`.
-
-    Reads the `TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS` bound on
-    the `orchestrator.analytics` facade. Mirrors `prune_old_records` exactly
-    (no-op when the sink is disabled, retention is non-positive, or the
-    file is absent; malformed / unparseable lines preserved; atomic
-    temp-file + `os.replace` rewrite) but operates solely on the
-    trajectory file under `_TRAJECTORY_FILE_LOCK` -- it never touches
-    `ANALYTICS_LOG_PATH`, the analytics Postgres sync, or the dashboard
-    rollups. `now` is parameter-overridable so tests can pin the
-    comparison point.
-    """
-    settings = _live_settings()
-    return _prune_jsonl_records(
-        settings.TRAJECTORY_LOG_PATH, settings.TRAJECTORY_RETENTION_DAYS,
-        _TRAJECTORY_FILE_LOCK, now,
     )
