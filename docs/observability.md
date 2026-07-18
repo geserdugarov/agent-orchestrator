@@ -129,9 +129,10 @@ re-exports all three surfaces and binds the sink knobs as package attributes. Th
 trajectory-sink knobs `TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS`) are parsed at import by
 `orchestrator/analytics/_recording.py` and bound as attributes of the `orchestrator/analytics` package — *not* in
 `orchestrator/config.py`. They are exposed as package attributes (`analytics.ANALYTICS_LOG_PATH`, etc.) that tests patch
-directly via `patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`; the recorders in `_recording` and `_trajectories`
-read them back off the package facade at call time, so a patch or a package reload takes effect. The audit event log
-(`config.EVENT_LOG_PATH`) stays in `config` because `GitHubClient.emit_event` is a general-purpose audit surface.
+directly via `patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`; the recorders in `_recording` / `_trajectories` and
+the prune wrappers in `_retention` read them back off the package facade at call time, so a patch or a package reload
+takes effect. The audit event log (`config.EVENT_LOG_PATH`) stays in `config` because `GitHubClient.emit_event` is a
+general-purpose audit surface.
 
 **Filesystem only.** No PostgreSQL, Streamlit, or external services — the sink is one JSONL file under the project log
 area. Default path is `<LOG_DIR>/analytics.jsonl`, already covered by the `logs/` `.gitignore` rule. Set
@@ -338,9 +339,9 @@ any other value is the explicit opt-in path. `TRAJECTORY_RETENTION_DAYS` default
 after `mkdir(parents=True, exist_ok=True)`, downgrading `OSError` to a `log.warning`; `prune_trajectory_records(*,
 now=None)` removes records older than `TRAJECTORY_RETENTION_DAYS` through a temp-file + `os.replace` rewrite, preserves
 malformed / unparseable lines verbatim, and no-ops when the sink is disabled, retention is non-positive, or the file is
-absent. Both reuse the analytics append / prune core but hold a **dedicated** `threading.Lock`, so the trajectory file
-serializes its own append-vs-prune race without ever blocking against — or touching — `ANALYTICS_LOG_PATH`, the
-analytics Postgres sync, or the dashboard.
+absent. Both reuse the shared append (`_recording`) and prune (`_retention`) cores but hold a **dedicated**
+`threading.Lock`, so the trajectory file serializes its own append-vs-prune race without ever blocking against — or
+touching — `ANALYTICS_LOG_PATH`, the analytics Postgres sync, or the dashboard.
 
 **No built-in rotation.** As with the audit and analytics sinks, each append reopens the file after `mkdir`; there is no
 size cap, long-lived descriptor, or compression. `prune_trajectory_records` is **not yet wired into the polling loop**,
