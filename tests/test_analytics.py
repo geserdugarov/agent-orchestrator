@@ -2110,9 +2110,10 @@ class RecordAgentExitCodexSkillDiscoveryTest(unittest.TestCase):
 
 
 class RecordingFacadeTest(unittest.TestCase):
-    """The recording implementation lives in
-    `orchestrator.analytics._recording`; the package re-exports it as a
-    facade, each package instance carries its own `_recording`, and the
+    """The event-recording implementation lives in
+    `orchestrator.analytics._recording` and the opt-in trajectory sink in
+    `orchestrator.analytics._trajectories`; the package re-exports both as a
+    facade, each package instance carries its own submodules, and the
     recorders read sink knobs / call sibling recorders back off the facade,
     so a reference held across a `_reload` keeps dispatching to the instance
     its own callers patched.
@@ -2122,7 +2123,6 @@ class RecordingFacadeTest(unittest.TestCase):
         _, analytics = _reload()
         for name in (
             "append_record",
-            "append_trajectory_record",
             "build_record",
             "prune_old_records",
             "record_agent_exit",
@@ -2136,6 +2136,18 @@ class RecordingFacadeTest(unittest.TestCase):
                     member.__module__, "orchestrator.analytics._recording",
                 )
                 self.assertIs(member, getattr(analytics._recording, name))
+
+    def test_trajectory_recorders_are_defined_in_the_trajectories_module(
+        self,
+    ) -> None:
+        _, analytics = _reload()
+        for name in ("append_trajectory_record", "prune_trajectory_records"):
+            with self.subTest(name=name):
+                member = getattr(analytics, name)
+                self.assertEqual(
+                    member.__module__, "orchestrator.analytics._trajectories",
+                )
+                self.assertIs(member, getattr(analytics._trajectories, name))
 
     def test_internal_append_routes_through_the_facade(self) -> None:
         # A recorder's internal `append_record` is late-bound through the

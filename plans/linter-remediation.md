@@ -874,6 +874,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-18 | 4.5/config-diagnostics | Complete | WPS363 17->0, WPS421 3->0; full gate | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/repository-config | Complete | WPS202 27->18; new leaf 11; full gate | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/analytics-recording | Complete | WPS202 55->0; leaf 56; full gate | Not committed | 4.5 rest |
+| 2026-07-18 | 4.5/analytics-trajectories | Complete | WPS202 56->39; leaf 17; WPS342 fixed | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1218,3 +1219,38 @@ way, and the `_usage_trajectory.py` cross-reference now points at `analytics._re
 is clean and the full suite passed 2,107 tests (33 skipped for the optional dashboard / live Postgres; the
 `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not complete -- its
 remaining module-structure findings are untouched.
+
+The `analytics-trajectories` slice split the opt-in trajectory sink out of `orchestrator/analytics/_recording.py` into a
+focused sibling `orchestrator/analytics/_trajectories.py`: the head/tail + total-record truncation caps
+(`_TRAJECTORY_FIELD_HEAD` / `_TRAJECTORY_FIELD_TAIL` / `_TRAJECTORY_RECORD_BUDGET`), the dedicated
+`_TRAJECTORY_FILE_LOCK`, the budgeting dataclasses (`_TrajectoryHeadline` / `_TrajectoryBudget`), the redaction /
+truncation helpers (`_truncate_head_tail` / `_redact_tree` / `_redact_and_truncate`), the headline / step / turn
+builders (`_trajectory_usage` / `_trajectory_headline` / `_bounded_trajectory_turns` / `_trajectory_step` /
+`_bounded_trajectory_steps` / `_build_trajectory_record`), the codex provider-change extraction
+(`_codex_trajectory_changes` / `_agent_trajectory`), and the record producer / persistence
+(`_persist_trajectory_record` / `_maybe_record_trajectory` / `append_trajectory_record` /
+`prune_trajectory_records`). The move cut `_recording`'s `WPS202` member count from 56 to 39
+(dropping the now-unused `dataclasses.replace` import to `WPS201` 16 -> 15) and left `_trajectories` at the accepted
+cohesive magnitude (17 > 7, same class as `_usage_metrics` / `_recording`); the `WPS110` `result` params, `WPS211`
+`record_agent_exit` argument count, and `WPS420` `pass` that stay in `_recording` are pre-existing public / keyword
+remainders the flat module already carried. `_trajectories` depends one-directionally on `_recording` (absolute
+`from orchestrator.analytics._recording import ...` grouped at seven names -- `build_record`, the shared
+`_append_jsonl_record` / `_prune_jsonl_records` cores, `_live_settings`, `log`, and the `_AgentExitContext` /
+`_CodexCatalog` shapes), so it introduced no `WPS300` local-import or `WPS235` too-many-names category; `_recording`
+reaches back to the trajectory hand-off through the facade (`_live_settings()._trajectories._maybe_record_trajectory`)
+rather than a direct import, so a `_recording` instance always dispatches to the same package instance's trajectory
+recorder and the `_reload` A/B isolation is preserved. The package `__init__` now evicts `_trajectories` alongside
+`_recording` and re-exports the six trajectory names (the three caps, the lock, `append_trajectory_record`,
+`prune_trajectory_records`) from `_trajectories`, keeping `__all__` and every facade attribute byte-for-byte. The slice
+also resolved the module's one `WPS342` implicit-raw-string finding by making `_redact_tree`'s backslash-carrying
+docstring an explicit raw string (rendered text unchanged) and lifted the previously untyped `redact` callable to a
+named `_Redactor = Callable[[str], str]` alias so the six redaction signatures annotate it without a `WPS234`
+overly-complex-annotation finding. Redaction order, byte / step budgets, usage summaries, skill / tool catalog fields,
+the `agent_trajectory` JSONL schema, the dedicated lock, and fail-open persistence were all preserved, so every existing
+analytics / workflow-analytics / trajectory test passed unchanged; `RecordingFacadeTest` was split so
+`append_trajectory_record` / `prune_trajectory_records` are pinned to `_trajectories` and the rest stay pinned to
+`_recording`. `docs/observability.md`'s module-layout and settings-ownership notes name `_trajectories`, and both the
+`_usage_trajectory.py` and `docs/observability.md` writer cross-references now point at
+`analytics._trajectories._maybe_record_trajectory`. Ruff is clean and the full suite passed 2,108 tests (33 skipped for
+the optional dashboard / live Postgres; the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the
+run). Package 4.5 is not complete -- its remaining module-structure findings are untouched.
