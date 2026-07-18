@@ -875,6 +875,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-18 | 4.5/repository-config | Complete | WPS202 27->18; new leaf 11; full gate | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/analytics-recording | Complete | WPS202 55->0; leaf 56; full gate | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/analytics-trajectories | Complete | WPS202 56->39; leaf 17; WPS342 fixed | Not committed | 4.5 rest |
+| 2026-07-18 | 4.5/analytics-retention | Complete | WPS202 39->27; leaf 13; WPS420 1->0 | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1254,3 +1255,36 @@ analytics / workflow-analytics / trajectory test passed unchanged; `RecordingFac
 `analytics._trajectories._maybe_record_trajectory`. Ruff is clean and the full suite passed 2,108 tests (33 skipped for
 the optional dashboard / live Postgres; the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the
 run). Package 4.5 is not complete -- its remaining module-structure findings are untouched.
+
+The `analytics-retention` slice moved the by-age retention machinery out of `orchestrator/analytics/_recording.py` (and
+the one trajectory prune wrapper out of `orchestrator/analytics/_trajectories.py`) into a focused sibling
+`orchestrator/analytics/_retention.py`: the shared temp-file prune core (`_prune_jsonl_records`), the existence probe /
+timestamp parse / line normalizer (`_probe_exists` / `_prune_timestamp` / `_normalized_jsonl_line`), the `_PruneScan`
+kept/removed model and its `_KeptRemoved` alias, the read-and-partition step (`_read_kept_records`), the atomic-rewrite
+helpers (`_unlink_quietly` / `_flush_fd_and_replace` / `_atomic_rewrite` / `_rewrite_pruned_file`), and the three public
+prune entry points (`prune_old_records` / `prune_trajectory_records` / `prune_with_retention_logging`). `_retention`
+depends one-directionally on its siblings (absolute `from orchestrator.analytics._recording import ...` for `_FILE_LOCK`
+/ `_live_settings` / `log`, plus `from orchestrator.analytics._trajectories import _TRAJECTORY_FILE_LOCK`), so the
+analytics and trajectory prunes hold the same per-sink locks their append side holds and neither can race an
+`append_record` onto the soon-unlinked inode; `prune_with_retention_logging` still delegates through the facade
+(`_live_settings().prune_old_records()`) so `patch.object(analytics, "prune_old_records", ...)` keeps intercepting it.
+The package `__init__` now evicts `_retention` alongside `_recording` / `_trajectories` (each package instance imports
+its own copy bound to the same facade its `_live_settings` reads) and re-exports the three prune names from
+`_retention`, keeping `__all__` and every facade attribute byte-for-byte -- so `main._run_tick`, the trajectory-prune
+cron viewer, and every focused prune test keep importing them from `orchestrator.analytics` unchanged. The move cut
+`_recording`'s `WPS202` member count from 39 to 27 (dropping the now-unused `tempfile` / `timedelta` /
+`dataclasses.field` imports, `WPS201` 15 -> 14) and `_trajectories`' from 17 to 16 (dropping its `datetime` /
+`_prune_jsonl_records` imports), left `_retention` at the accepted cohesive magnitude (13 > 7, same class as
+`_recording` / `_trajectories`), and resolved the slice's one `WPS420` empty-`except` finding by rewriting
+`_unlink_quietly`'s `try / except OSError: pass` as `contextlib.suppress(OSError)`; the module already carried its
+overly-complex prune-scan annotation as the named `_KeptRemoved` alias, so no `WPS234` finding travels with it. The
+`WPS110` `result` params and `WPS211` `record_agent_exit` argument count that stay in `_recording`, and the `WPS410`
+(`__all__`) / `WPS412` (init logic) on the facade, are pre-existing public / keyword remainders. File locks,
+missing-file behavior, malformed-line retention, timestamps, fsync / `os.replace` ordering, temp-file permissions, and
+failure logging were all preserved, so every existing analytics / trajectory / main prune test passed unchanged;
+`RecordingFacadeTest` was split again so the three prune entry points are pinned to `_retention` while the recorders
+stay pinned to `_recording` / `_trajectories`. `docs/observability.md`'s module-layout note and the `_recording` /
+`_trajectories` / package docstrings now name `_retention` as the retention home. Ruff is clean and the full suite
+passed 2,109 tests (33 skipped for the optional dashboard / live Postgres; the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`
+shell-export artifact is unset for the run). Package 4.5 is not complete -- its remaining module-structure findings are
+untouched.

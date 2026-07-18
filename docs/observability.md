@@ -116,11 +116,14 @@ Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`.
 
 **Module layout.** The event-recording implementation — sink configuration, the JSONL append primitives, and the stage /
 repo-skill / agent-exit recorders — lives in `orchestrator/analytics/_recording.py`; the opt-in trajectory sink's
-serialization, redaction / truncation, budgeting, and append / prune helpers live in the sibling
-`orchestrator/analytics/_trajectories.py` (which reuses `_recording`'s append / prune cores and reads its
-`_live_settings`). `orchestrator/analytics/__init__.py` is a facade that re-exports both surfaces and binds the sink
-knobs as package attributes. The read / sync submodules (`read`, `read_*`, `sync`, `connection`, `query`,
-`predicates`, `db_url`) are the separate Postgres-facing surfaces.
+serialization, redaction / truncation, budgeting, and append helpers live in the sibling
+`orchestrator/analytics/_trajectories.py` (which reuses `_recording`'s append core and reads its `_live_settings`); the
+by-age retention pruning for both sinks — the JSONL prune, scan models, atomic temp-file rewrite, retention logging, and
+the `prune_old_records` / `prune_trajectory_records` / `prune_with_retention_logging` entry points — lives in the
+sibling `orchestrator/analytics/_retention.py` (which shares `_recording`'s `_FILE_LOCK`, `_trajectories`'
+`_TRAJECTORY_FILE_LOCK`, and both modules' `_live_settings`). `orchestrator/analytics/__init__.py` is a facade that
+re-exports all three surfaces and binds the sink knobs as package attributes. The read / sync submodules (`read`,
+`read_*`, `sync`, `connection`, `query`, `predicates`, `db_url`) are the separate Postgres-facing surfaces.
 
 **Settings ownership.** `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, and `ANALYTICS_DB_URL` (and the sibling
 trajectory-sink knobs `TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS`) are parsed at import by
