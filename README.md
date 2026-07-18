@@ -162,9 +162,9 @@ still decomposes the issue, spawns the dev agent, and opens a PR, but a clean im
 Unlike `backlog` / `paused`, the label does not pause processing — it stays attached and only reshapes the flow. The
 orchestrator stays manual-merge-only and still routes fresh PR feedback to the fix loop, so you review and merge exactly
 as you would for an ordinary issue: a mergeable quick-run PR with no requested changes earns the same one-shot HITL
-ready ping. A `quick_run` parent that the orchestrator splits into child issues propagates the label to every child, so
-the whole subtree runs accelerated. See [`docs/state-machine.md`](docs/state-machine.md) for the full fast-path
-semantics.
+ready ping. The label is not inherited across a split: when the orchestrator decomposes a `quick_run` parent, its
+child issues are created without it, so each child runs the ordinary flow unless you apply `quick_run` to it directly.
+See [`docs/state-machine.md`](docs/state-machine.md) for the full fast-path semantics.
 
 ## Observability
 

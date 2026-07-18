@@ -125,8 +125,8 @@ keep processing an issue that carries it. Its effect: a clean developer result o
 from `implementing` to `in_review`, skipping the reviewer (`validating`) and docs (`documenting`) passes. Because that
 skip leaves no final-docs approval marker, the `in_review` mergeability gate also exempts a `quick_run` head from the
 approval markers, so a mergeable quick-run head with no standing `CHANGES_REQUESTED` still earns the ready-for-review
-HITL ping. A `quick_run` parent that decomposes propagates the label to every child at creation, so the accelerated
-mode survives the split.
+HITL ping. The label is not inherited across a split: when a `quick_run` parent decomposes, its child issues are
+created without it, so each child runs the ordinary flow unless `quick_run` is applied to it directly.
 
 Label names are part of the public contract because live GitHub issues already carry them. For the meaning of each
 label, the control-label semantics, and the per-stage transitions they trigger, see

@@ -675,5 +675,5 @@ When each setting's change takes effect:
   that skip leaves no reviewer-approved final-docs marker, the `in_review` mergeability gate also exempts a quick-run
   head from the approval markers, so a mergeable quick-run head with no standing `CHANGES_REQUESTED` still earns the
   ready ping. Manual-merge and PR-feedback handling are unchanged — humans still drive the merge and fresh feedback
-  still routes to `fixing`. A `quick_run` parent that decomposes propagates the label to every child at creation, so the
-  accelerated mode survives the split.
+  still routes to `fixing`. The label is not inherited across a split: when a `quick_run` parent decomposes, its child
+  issues are created without it, so each child runs the ordinary flow unless `quick_run` is applied to it directly.
