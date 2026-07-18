@@ -1150,10 +1150,11 @@ backend's stream does not expose them (codex exposes neither); the analytics wri
 from `skill_catalog.discover_codex_tools()`. Malformed JSONL lines are skipped and a missing / renamed field
 yields an empty section rather than an exception. Unlike the skill extractor, this classifier records the **raw** stream
 payload — tool inputs, tool outputs, and the final text — verbatim: it deliberately does **not** redact, truncate,
-or write any file. Those concerns belong to its downstream writer, `analytics._maybe_record_trajectory` (called from
-`record_agent_exit`), which redacts every free-text field, applies the head/tail and total-record truncation caps, and
-appends the `agent_trajectory` record to the [trajectory sink](#trajectory-sink-trajectory_log_path) — only when
-`TRAJECTORY_LOG_PATH` is enabled and always behind its own fail-open guard.
+or write any file. Those concerns belong to its downstream writer, `analytics._recording._maybe_record_trajectory`
+(called from `record_agent_exit`), which redacts every free-text field, applies the head/tail and total-record
+truncation caps, and appends the `agent_trajectory` record to the
+[trajectory sink](#trajectory-sink-trajectory_log_path) — only when `TRAJECTORY_LOG_PATH` is enabled and always behind
+its own fail-open guard.
 
 ## Summary of "what runs when"
 
