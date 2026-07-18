@@ -874,27 +874,36 @@ or non-dashboard caller does not require the group to be installed. A regression
 asserts that loading `orchestrator.dashboard` keeps `streamlit`, `pandas`, `plotly`, and `orchestrator.dashboard_charts`
 out of `sys.modules`.
 
-**Module layout.** `orchestrator/dashboard.py` keeps the Streamlit page orchestration — `main()` is a thin orchestrator
-that delegates the static-metadata read (`_read_static_metadata`), the two-wave data load (`_run_read_waves`, which owns
-the staged `_dispatch_reads` fan-out, the between-wave short-circuit, and the `_log_dashboard_load` timing line), the
-empty / error states (`_render_no_data`, `_render_empty_window`), and every filter / widget section (the `_render_*`
-helpers) plus the per-issue drill-down to focused module-level helpers. The `dashboard_state` / `dashboard_kpis` /
-`dashboard_html` / `dashboard_reads` pure helpers are each re-exported under their original names, so
+**Module layout.** `orchestrator/dashboard.py` keeps page startup, the sidebar / date-range controls, and the
+compatibility re-exports — `main()` is a thin orchestrator that delegates the static-metadata read
+(`_read_static_metadata`) and, once the controls resolve the filters and staged read plan (`_prepare_dashboard_page`),
+hands the page to `orchestrator/dashboard_widgets.py` for the two-wave render. The KPI-strip preparation and the
+widget-rendering pipeline — the two-wave data load (`_load_dashboard_data` → `_run_read_waves`, which owns the staged
+`_dispatch_reads` fan-out, the between-wave short-circuit, and the `_log_dashboard_load` timing line), the empty /
+no-data states (`_render_no_data`, `_render_empty_window`), every filter / widget section (the `_render_*` helpers) plus
+the per-issue drill-down renderer, and the immutable page-state dataclasses the pipeline threads — live in
+`orchestrator/dashboard_widgets.py`. The `dashboard_state` / `dashboard_kpis` / `dashboard_html` / `dashboard_reads`
+pure helpers are each re-exported through the facade under their original names; the `dashboard_widgets` KPI / widget /
+page-state members the pipeline and the dashboard tests reach through `dashboard.<name>` are re-exported (and listed in
+`__all__`) too, while the internal token / layout math helpers are not re-exported and stay private to the module. So
 `streamlit run orchestrator/dashboard.py` and the historical `orchestrator.dashboard.*` import surface (and its test
 patch points) are unchanged.
 The repo-root `sys.path` shim that lets `streamlit run` resolve the absolute `orchestrator.*` imports is factored
 into the shared import-light `orchestrator/script_launch.py` helper (`ensure_repo_root_on_path`), which
 `orchestrator/trajectory_dashboard.py` also calls.
-The pure helpers live in four import-light modules (stdlib plus `orchestrator.analytics`, so they hold
+The extracted helpers live in five import-light modules (stdlib plus `orchestrator.analytics`, so they hold
 the lazy-import invariant): `orchestrator/dashboard_state.py` (date / window math, preset and timezone vocabulary,
 stage-filter / cache-key resolution, the issue-number parser, the DB-config banner check, and the read fan-out switch),
 `orchestrator/dashboard_kpis.py` (KPI delta math, the computed insight banners, the reliability-tile triples, the
 top-cost issue ordering, and the rework-share aggregation), `orchestrator/dashboard_html.py` (the inline-HTML
-builders below), and `orchestrator/dashboard_reads.py` (the read orchestration: the filter-to-query adapters, the
+builders below), `orchestrator/dashboard_reads.py` (the read orchestration: the filter-to-query adapters, the
 cached data-extent / filter-option and per-filter widget readers, the two-wave reader registries, the staged parallel
 dispatch, the static-metadata load, the two-wave data load, and the load-timing log — where the cache keys / TTLs, read
-ordering, parallel-read toggle, and one-banner-and-stop read-error behavior live). Every helper it holds is re-exported
-through `dashboard.py`, `st` is always passed in as a parameter (Streamlit is never imported there).
+ordering, parallel-read toggle, and one-banner-and-stop read-error behavior live), and
+`orchestrator/dashboard_widgets.py` (the KPI-strip preparation and the widget-rendering pipeline: the two-wave render
+passes, the empty / no-data states, the per-issue drill-down renderer, the page footer, and the page-state dataclasses).
+Streamlit is never imported in any of them — `st` (with the chart / theme / pandas handles) is always passed in as a
+parameter.
 
 ```sh
 uv sync --group dashboard                                  # install streamlit + plotly alongside the runtime + dev deps

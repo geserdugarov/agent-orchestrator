@@ -647,7 +647,7 @@ considered.
 - File and symbols: `orchestrator/analytics/read_models.py` (the `*_cost_usd` frozen-dataclass field
   defaults and the two `skill_trigger_rate` `else 0.0` returns), `orchestrator/analytics/sync.py`
   (`duration_s` field default), `orchestrator/dashboard_charts.py` (`_empty_token_bucket` band seeds),
-  `orchestrator/dashboard.py` (`_topbar_html(spend_in_range=0.0)`, the `[0.0, 0.0]` daily
+  `orchestrator/dashboard_widgets.py` (`_topbar_html(spend_in_range=0.0)`, the `[0.0, 0.0]` daily
   cost/token accumulator, and the rework-share `else 0.0`), `orchestrator/dashboard_html.py`
   (`_relative_width_pct` / `_safe_ratio` zero returns), `orchestrator/dashboard_kpis.py` (the
   success-rate `else 0.0`), and `orchestrator/trajectory_reader.py` (`total_cost_usd` default).
@@ -668,11 +668,10 @@ considered.
   `context.gh.write_pinned_state(context.issue, context.state)` and
   `context.state.set(_PENDING_PUSH_SHA, None)` in `orchestrator/base_sync.py`;
   `_wf._resolve_branch_name(state, spec, issue.number)` in `orchestrator/stages/implementing.py`;
-  `st.container(border=True)` in `orchestrator/dashboard.py`; `str(wt)` in
-  `orchestrator/worktree_lifecycle.py`; and `row[0]` / `row[1]` in
+  `str(wt)` in `orchestrator/worktree_lifecycle.py`; and `row[0]` / `row[1]` in
   `orchestrator/analytics/read_dashboard.py` / `orchestrator/analytics/read_rollup.py`.
 - Rule: `WPS204`
-- Reason: These are void terminal calls (persist the pinned state, open a Streamlit container) or
+- Reason: These are void terminal calls (persist the pinned state) or
   trivial value expressions that each independent branch -- or each single-column row mapper --
   issues exactly once. Wrapping a repeated call in a helper produces the SAME repeated call
   expression and still trips `WPS204`; there is no single scope to hoist a `row[0]` / `str(wt)`
@@ -733,11 +732,11 @@ considered.
 
 ### Dashboard KPI-tile and stack-mode dict keys
 
-- File and symbols: `orchestrator/dashboard.py`: the KPI-tile dict keys `label`, `value`, `delta`,
-  `sub`, `spark`; the `summary` read-result key; and the `type` / `backend` stack-mode option values.
+- File and symbols: `orchestrator/dashboard_widgets.py`: the KPI-tile dict keys `label`, `value`,
+  `delta`, `sub`, `spark`; and the `type` / `backend` stack-mode option values.
 - Rule: `WPS226`
-- Reason: The KPI-tile keys are the contract between the KPI builder in `dashboard.py` and the HTML
-  renderer in `dashboard_html.py`; they read clearest as the same literal keys at both ends, and
+- Reason: The KPI-tile keys are the contract between the KPI builder in `dashboard_widgets.py` and the
+  HTML renderer in `dashboard_html.py`; they read clearest as the same literal keys at both ends, and
   `value` additionally cannot become a constant without tripping `WPS110` (a blacklisted generic
   name). `type` / `backend` are the two stack-mode radio option values.
 - Protected by: `tests/test_dashboard.py`.
@@ -758,8 +757,8 @@ considered.
 
 ### Numeric format-spec f-strings
 
-- File and symbols: the money `,.2f` specs in `orchestrator/dashboard.py` (`_cost_per_resolved`) and
-  `orchestrator/dashboard_html.py` (`_money_or_dash`); the zero-pad `02d` hour label in
+- File and symbols: the money `,.2f` specs in `orchestrator/dashboard_widgets.py` (`_cost_per_resolved`)
+  and `orchestrator/dashboard_html.py` (`_money_or_dash`); the zero-pad `02d` hour label in
   `orchestrator/dashboard_charts.py` (`hour_weekday_heatmap`); and the dynamic-precision `.{decimals}f` /
   `,.{decimals}f` specs in `orchestrator/dashboard_theme.py` (`fmt_tokens`) and
   `orchestrator/trajectory_dashboard.py` (`_fmt_cost_usd`).
@@ -877,6 +876,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-18 | 4.5/analytics-trajectories | Complete | WPS202 56->39; leaf 17; WPS342 fixed | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/analytics-retention | Complete | WPS202 39->27; leaf 13; WPS420 1->0 | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/dashboard-reads | Complete | WPS202 93->63; leaf 31; WPS234 5->1 | Not committed | 4.5 rest |
+| 2026-07-18 | 4.5/dashboard-widgets | Complete | WPS202 63->21; leaf 42; WPS234 1->0 | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
