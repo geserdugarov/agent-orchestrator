@@ -336,8 +336,8 @@ error.
 The orchestrator is permanently manual-merge-only: humans click Merge. `_handle_in_review` routes fresh PR feedback to
 `fixing`, pings the HITL handles once per head SHA when the PR is mergeable and the current head completed the
 reviewer-approved final-docs handoff (or carries a real GitHub APPROVED review), and parks awaiting human attention for
-an unmergeable PR. A `quick_run` issue is exempt from those approval markers: its fast path skips `validating` and
-`documenting`, so a mergeable quick-run head with no standing `CHANGES_REQUESTED` earns the ready ping directly.
+an unmergeable PR. A `quick_run` head is exempt from those approval markers, so a mergeable quick-run head with no
+standing `CHANGES_REQUESTED` earns the ready ping directly.
 
 - `IN_REVIEW_DEBOUNCE_SECONDS` — default `600`. quiet window the `fixing` stage honours before resuming the dev on PR
   feedback. Newer comments arriving while already labeled `fixing` reset the window. `_handle_in_review` itself routes
@@ -669,11 +669,10 @@ When each setting's change takes effect:
   `ALLOWED_ISSUE_AUTHORS` is set: any open PR whose author is outside the allowlist is labeled and `HITL_HANDLE` is
   @-mentioned once per PR so a human reviews the community-submitted work. Bot authors (Dependabot, Renovate, CI bots)
   are skipped. With the allowlist empty (the default), the sweep is a no-op.
-- `quick_run` — Apply to an issue to run it in an accelerated mode. Unlike `backlog` / `paused` it does not pause
-  processing: it stays attached and modifies the normal workflow. A clean developer result in `implementing` routes the
-  issue straight to `in_review`, skipping the reviewer (`validating`) and final-docs (`documenting`) passes; because
-  that skip leaves no reviewer-approved final-docs marker, the `in_review` mergeability gate also exempts a quick-run
-  head from the approval markers, so a mergeable quick-run head with no standing `CHANGES_REQUESTED` still earns the
-  ready ping. Manual-merge and PR-feedback handling are unchanged — humans still drive the merge and fresh feedback
-  still routes to `fixing`. The label is not inherited across a split: when a `quick_run` parent decomposes, its child
-  issues are created without it, so each child runs the ordinary flow unless `quick_run` is applied to it directly.
+- `quick_run` — Apply to an issue to modify the workflow without pausing it. Unlike `backlog` / `paused` it does not
+  pause processing: it stays attached and coexists with the workflow label. The `in_review` mergeability gate exempts a
+  quick-run head from the reviewer-approval markers, so a mergeable quick-run head with no standing `CHANGES_REQUESTED`
+  earns the ready ping without a reviewer-approved final-docs marker or an orchestrator APPROVED review. Manual-merge
+  and PR-feedback handling are unchanged — humans still drive the merge and fresh feedback still routes to `fixing`. The
+  label is not inherited across a split: when a `quick_run` parent decomposes, its child issues are created without it,
+  so each child runs the ordinary flow unless `quick_run` is applied to it directly.

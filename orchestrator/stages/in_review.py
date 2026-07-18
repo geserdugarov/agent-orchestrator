@@ -610,9 +610,9 @@ def _handle_mergeable_gate(ctx: _InReviewContext) -> None:
     earns a one-shot HITL ping per head SHA when either the agent-approved
     final-docs handoff covers that head OR GitHub carries a real APPROVED
     review on that head, and no standing CHANGES_REQUESTED veto exists. A
-    `quick_run`-labeled issue is exempt from the approval markers (its fast
-    path never runs `validating`/`documenting`), so a mergeable quick-run PR
-    with no standing CHANGES_REQUESTED earns the ping directly.
+    `quick_run`-labeled issue is exempt from the approval markers, so a
+    mergeable quick-run PR with no standing CHANGES_REQUESTED earns the ping
+    directly.
     """
     from orchestrator import workflow as _wf
 
@@ -642,11 +642,9 @@ def _handle_mergeable_gate(ctx: _InReviewContext) -> None:
     head_sha = pr.head.sha
     if ctx.gh.pr_has_changes_requested(pr, head_sha=head_sha):
         return
-    # `quick_run` is an explicit exemption from the approval markers: the fast
-    # path routes straight from implementing to in_review, skipping the reviewer
-    # (`validating`) and docs (`documenting`) passes, so it never records a
-    # final-docs marker or earns an orchestrator APPROVED review. A clean quick
-    # run should still get the ready ping, so bypass the approval gate for it --
+    # `quick_run` is an explicit exemption from the approval markers: a clean
+    # quick-run PR should still earn the ready ping without a final-docs marker
+    # or an orchestrator APPROVED review, so bypass the approval gate for it --
     # the mergeable-head and no-CHANGES_REQUESTED guards above still apply.
     if not issue_has_label(ctx.issue, QUICK_RUN_LABEL) and not _head_is_approved(
         ctx, head_sha,

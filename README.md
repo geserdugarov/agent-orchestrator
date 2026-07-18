@@ -154,17 +154,15 @@ is the terminal signal. See
 [`docs/workflow.md#question-stage--read-only-qa-on-the-question-label`][qa-lifecycle]
 for the full lifecycle and the read-only-violation park reasons.
 
-## Running an issue in quick-run mode
+## The `quick_run` control label
 
-Apply the `quick_run` control label to an open issue to trade the automated review passes for speed. The orchestrator
-still decomposes the issue, spawns the dev agent, and opens a PR, but a clean implementation routes straight from
-`implementing` to `in_review`, skipping the automated reviewer (`validating`) and final-docs (`documenting`) passes.
-Unlike `backlog` / `paused`, the label does not pause processing — it stays attached and only reshapes the flow. The
-orchestrator stays manual-merge-only and still routes fresh PR feedback to the fix loop, so you review and merge exactly
-as you would for an ordinary issue: a mergeable quick-run PR with no requested changes earns the same one-shot HITL
-ready ping. The label is not inherited across a split: when the orchestrator decomposes a `quick_run` parent, its
-child issues are created without it, so each child runs the ordinary flow unless you apply `quick_run` to it directly.
-See [`docs/state-machine.md`](docs/state-machine.md) for the full fast-path semantics.
+The `quick_run` control label modifies the workflow without pausing it. Unlike `backlog` / `paused`, it does not pause
+processing — it stays attached and coexists with the workflow label. A mergeable quick-run PR with no requested changes
+earns the one-shot HITL ready ping even without the orchestrator's reviewer-approval markers. The label is not inherited
+across a split: when the orchestrator decomposes a `quick_run` parent, its child issues are created without it, so each
+child runs the ordinary flow unless you apply `quick_run` to it directly. The orchestrator stays manual-merge-only and
+routes fresh PR feedback to the fix loop exactly as it does for an ordinary issue. See
+[`docs/state-machine.md`](docs/state-machine.md) for the control-label semantics.
 
 ## Observability
 

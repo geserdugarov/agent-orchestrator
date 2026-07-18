@@ -180,12 +180,8 @@ _FORWARD: dict[Optional[WorkflowLabel], frozenset[WorkflowLabel]] = {
     WorkflowLabel.UMBRELLA: frozenset(
         (WorkflowLabel.DONE, WorkflowLabel.DECOMPOSING)
     ),
-    # `-> in_review` is the `quick_run` fast path: a clean developer result on
-    # a `quick_run`-labeled issue publishes its PR and routes straight to
-    # `in_review`, bypassing the reviewer (`validating`) and docs
-    # (`documenting`) passes. An ordinary issue takes `-> validating`.
     WorkflowLabel.IMPLEMENTING: frozenset(
-        (WorkflowLabel.VALIDATING, WorkflowLabel.IN_REVIEW)
+        (WorkflowLabel.VALIDATING,)
     ),
     WorkflowLabel.VALIDATING: frozenset(
         (WorkflowLabel.DOCUMENTING, WorkflowLabel.FIXING)
