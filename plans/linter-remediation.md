@@ -873,6 +873,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-17 | 4.5/usage-trajectory | Complete | Target WPS; 2 deferred fixed; full gate | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/config-diagnostics | Complete | WPS363 17->0, WPS421 3->0; full gate | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/repository-config | Complete | WPS202 27->18; new leaf 11; full gate | Not committed | 4.5 rest |
+| 2026-07-18 | 4.5/analytics-recording | Complete | WPS202 55->0; leaf 56; full gate | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1175,5 +1176,45 @@ wrappers' `orchestrator.config` home, and the injected-diagnostics leaf boundary
 cohesive-parser magnitude `_usage_metrics` carries), and the whole-tree `--select=WPS` diff introduced no new category.
 `docs/architecture.md`'s module map gained the `_repo_config.py` entry and the `config.py` re-export note. Ruff is clean
 and the full suite passed 2,104 tests (33 skipped for the optional dashboard / live Postgres; the
+`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not complete -- its
+remaining module-structure findings are untouched.
+
+The `analytics-recording` slice extracted the analytics event-recording surface out of the 1,291-line
+`orchestrator/analytics/__init__.py` into a focused private `orchestrator/analytics/_recording.py`: the six sink-knob
+parsers (`_parse_log_path` / `_parse_retention_days` / `_parse_db_url` / `_parse_track_skill_triggers` /
+`_parse_trajectory_log_path` / `_parse_trajectory_retention_days`), the JSONL append primitives (`build_record`,
+`_append_jsonl_record`, `append_record`, `append_trajectory_record`) and their file locks, the prune machinery
+(`prune_old_records` / `prune_trajectory_records` / `prune_with_retention_logging` and the shared temp-file rewrite
+core), the stage recorders (`record_stage_enter` / `record_stage_evaluation`), repository-skill recording
+(`record_repo_skill_catalog`), and the whole `record_agent_exit` arc including the opt-in trajectory sink (usage /
+skill / codex-catalog parsing, redaction, head/tail + total-record truncation). `orchestrator.analytics` stays a
+compatibility facade: it re-exports that public surface plus the test-visible names the flat module carried
+(`log`, `os`, `usage`, `AgentResult`, `_FILE_LOCK`, `_TRAJECTORY_FILE_LOCK`, the `_TRAJECTORY_RECORD_BUDGET` /
+`_TRAJECTORY_FIELD_HEAD` / `_TRAJECTORY_FIELD_TAIL` caps), keeps `__all__` byte-for-byte, and binds the six knobs as
+its own package attributes by calling the parsers at import -- so `patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`,
+the autouse conftest sink-disable, and `test_analytics.py`'s pop-and-reload of `orchestrator.config` +
+`orchestrator.analytics` all keep landing on the package. The recorders read those knobs -- and call their sibling
+recorders (`record_stage_enter` -> `append_record`, `prune_with_retention_logging` -> `prune_old_records`) -- back off
+the facade at call time via `_recording._live_settings`, the same late-binding `workflow.py`'s stage modules use, so a
+patched or reloaded value takes effect. To preserve the `_reload` A/B-world isolation the old in-`__init__` layout gave
+for free (a submodule shared across reloads would otherwise bind its facade reference to whichever package instance
+imported it last, hijacking stale holders such as `workflow` / the conftest / the recorder tests), the package
+`__init__` evicts any cached `_recording` before importing so each package instance gets its own copy, and `_recording`
+binds `_facade` to `sys.modules[__package__]` -- the specific instance importing it -- rather than resolving the package
+off `sys.modules` at call time. The move cut the package `__init__`'s `WPS202` member count from 55 to 0 (a facade with
+no members of its own), leaving `_recording` at the accepted cohesive-module magnitude (56 > 7, same class as
+`_usage_metrics`), and resolved the slice's two `WPS234` overly-complex-annotation findings by lifting
+`Optional[dict[str, list[str]]]` and `Optional[tuple[list[str], int]]` to the named `_SkillPaths` / `_KeptRemoved`
+aliases. The facade's re-export block uses absolute `from orchestrator.analytics._recording import ...` grouped at eight
+names per statement (the `worktrees.py` hub convention), so the split introduced no new `WPS300` local-import or
+`WPS235` too-many-names category; the facade's remaining `WPS410` (`__all__`) and `WPS412` (init logic) and
+`_recording`'s `WPS201` / `WPS211` / `WPS110` / `WPS342` / `WPS420` are pre-existing or public/keyword remainders the
+flat module already carried. Redaction, event shapes, locks, fail-open persistence, skill discovery, and database-URL
+handling were all preserved, so every existing analytics / workflow-analytics / skill-catalog / trajectory test passed
+unchanged; a new `RecordingFacadeTest` pins the recorders' module of record, the facade routing of an internal
+`append_record`, and the cross-reload isolation. `docs/observability.md` gained a module-layout note and its
+settings-ownership pointer now names `_recording.py`, `docs/configuration.md`'s parse-site pointer was updated the same
+way, and the `_usage_trajectory.py` cross-reference now points at `analytics._recording._maybe_record_trajectory`. Ruff
+is clean and the full suite passed 2,107 tests (33 skipped for the optional dashboard / live Postgres; the
 `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not complete -- its
 remaining module-structure findings are untouched.
