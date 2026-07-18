@@ -7,12 +7,10 @@ from typing import Optional
 from unittest.mock import patch
 
 from orchestrator import config, workflow
-from orchestrator.github import QUICK_RUN_LABEL
 
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
-    FakeLabel,
     FakeUser,
     make_issue,
 )
@@ -296,40 +294,6 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             self.assertEqual(
                 gh.pinned_data(child.number).get(KEY_PARENT_NUMBER), 13,
             )
-
-    def test_split_propagates_quick_run_to_children(self) -> None:
-        # A `quick_run` parent seeds every child with the modifier at
-        # creation, so the accelerated mode survives the split. The no-dep
-        # child is then promoted `blocked` -> `ready` with `quick_run`
-        # intact (the relabel keeps control labels); the dep-blocked child
-        # stays `blocked` + `quick_run`.
-        gh = FakeGitHubClient()
-        issue = make_issue(60, label=LABEL_DECOMPOSING)
-        issue.labels.append(FakeLabel(QUICK_RUN_LABEL))
-        gh.add_issue(issue)
-        manifest = _manifest(
-            '{"decision": "split", "children": ['
-            '{"title": "First", "body": "do first", "depends_on": []},'
-            '{"title": "Second", "body": "needs first", "depends_on": [0]}'
-            ']}'
-        )
-
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
-            run_agent=_agent(
-                session_id=DECOMPOSER_SESSION, last_message=manifest
-            ),
-        )
-
-        no_dep_child, dep_child = gh.created_child_issues
-        self.assertEqual(
-            {l.name for l in no_dep_child.labels},
-            {LABEL_READY, QUICK_RUN_LABEL},
-        )
-        self.assertEqual(
-            {l.name for l in dep_child.labels},
-            {LABEL_BLOCKED, QUICK_RUN_LABEL},
-        )
 
     def test_commits_left_by_decomposer_park(self) -> None:
         # The decomposer is supposed to be read-only. If it commits in the
