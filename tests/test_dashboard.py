@@ -25,6 +25,7 @@ import unittest
 from contextlib import ExitStack
 from datetime import date, datetime, timezone
 from functools import partial
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -59,13 +60,14 @@ def _reload(env: dict[str, str] | None = None):
     still reads `LOG_DIR` for the JSONL default).
 
     The extracted helper modules (`dashboard_state` / `dashboard_kpis`
-    / `dashboard_html` / `dashboard_reads`) are popped alongside
-    `dashboard` so the re-imported facade re-binds them too -- otherwise
-    a cached `dashboard_state` would keep its pre-patch `from orchestrator
-    import analytics` reference and its module-import parse of
-    `DASHBOARD_PARALLEL_READS`, and a cached `dashboard_reads` would keep
-    its pre-patch `from orchestrator.analytics import read` reference,
-    defeating the hermetic reload.
+    / `dashboard_html` / `dashboard_reads` / `dashboard_widgets`) are
+    popped alongside `dashboard` so the re-imported facade re-binds them
+    too -- otherwise a cached `dashboard_state` would keep its pre-patch
+    `from orchestrator import analytics` reference and its module-import
+    parse of `DASHBOARD_PARALLEL_READS`, and a cached `dashboard_reads` /
+    `dashboard_widgets` would keep its pre-patch `from orchestrator.analytics
+    import read` reference (and, for `dashboard_widgets`, its pre-patch
+    `dashboard_reads` bindings), defeating the hermetic reload.
     """
     with patch.dict(os.environ, _hermetic_env(env), clear=True):
         sys.modules.pop("orchestrator.config", None)
@@ -75,6 +77,7 @@ def _reload(env: dict[str, str] | None = None):
         sys.modules.pop("orchestrator.dashboard_kpis", None)
         sys.modules.pop("orchestrator.dashboard_html", None)
         sys.modules.pop("orchestrator.dashboard_reads", None)
+        sys.modules.pop("orchestrator.dashboard_widgets", None)
         sys.modules.pop("orchestrator.dashboard", None)
         import orchestrator.analytics as analytics
         import orchestrator.dashboard as dashboard
@@ -1857,6 +1860,177 @@ class ReadOrchestrationExtractionTest(unittest.TestCase):
                     f"dashboard dropped the historical {name!r} alias",
                 )
                 self.assertIs(getattr(dashboard, name), getattr(reads, name))
+
+
+class WidgetRenderingExtractionTest(unittest.TestCase):
+    """The KPI-strip preparation and the widget-rendering pipeline -- the
+    two-wave render passes, the empty / no-data states, the per-issue
+    drill-down renderer, the page footer, and the page-state dataclasses
+    the pipeline threads -- live in `orchestrator.dashboard_widgets`, and
+    `orchestrator.dashboard` re-exports the members the page pipeline and
+    these tests reach under their original names so the historical
+    `dashboard.<name>` surface keeps resolving to the same object.
+    """
+
+    # The moved page-pipeline members the facade re-exports (functions +
+    # page-state dataclasses), each of which carries a `__module__`. The
+    # purely internal token / layout math helpers are not re-exported and
+    # stay private to the widgets module.
+    _MOVED_WIDGET_MEMBERS = (
+        "_DashboardModules",
+        "_DashboardFilters",
+        "_DashboardControls",
+        "_DashboardPage",
+        "_KpiInputs",
+        "_backend_tokens_by_day",
+        "_build_kpi_strip_data",
+        "_load_dashboard_data",
+        "_render_topbar_and_meta",
+        "_render_first_wave",
+        "_render_chart_widgets",
+        "_render_remaining_widgets",
+        "_render_dashboard_widgets",
+        "_render_dashboard_footer",
+        "_render_no_data",
+        "_render_empty_window",
+        "_render_hero_usage",
+        "_render_stage_review_bars",
+        "_render_issues_and_backends",
+        "_render_repo_and_reliability",
+        "_render_activity_heatmap",
+        "_render_skill_triggers",
+        "_render_skill_matrix_expander",
+        "_render_recent_runs",
+        "_render_drilldown_view",
+    )
+
+    # The page-level constants re-exported alongside the members (in the
+    # facade `__all__`, unlike the module-private members above).
+    _FACADE_CONSTANTS = (
+        "PLOTLY_CONFIG",
+        "NO_DATA_MESSAGE",
+        "EMPTY_WINDOW_MESSAGE",
+    )
+
+    def test_widget_members_defined_in_widgets_module(self) -> None:
+        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        widgets = sys.modules["orchestrator.dashboard_widgets"]
+        for name in self._MOVED_WIDGET_MEMBERS:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    getattr(widgets, name).__module__,
+                    "orchestrator.dashboard_widgets",
+                )
+
+    def test_facade_reexports_share_the_widgets_objects(self) -> None:
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        widgets = sys.modules["orchestrator.dashboard_widgets"]
+        for name in (*self._MOVED_WIDGET_MEMBERS, *self._FACADE_CONSTANTS):
+            with self.subTest(name=name):
+                self.assertTrue(
+                    hasattr(dashboard, name),
+                    f"dashboard dropped the historical {name!r} alias",
+                )
+                self.assertIs(
+                    getattr(dashboard, name), getattr(widgets, name)
+                )
+
+
+class _NullContext:
+    """`with`-usable stand-in for `st.container(...)` / `st.columns(...)`."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _RecordingStreamlit:
+    """Minimal fake `st` that records the `config=` handed to `plotly_chart`.
+
+    Only the surface `_render_activity_heatmap` touches is implemented; every
+    other call is a no-op so the render runs without the optional Streamlit.
+    """
+
+    def __init__(self) -> None:
+        self.plotly_configs: list = []
+
+    def container(self, **kwargs):
+        return _NullContext()
+
+    def markdown(self, *args, **kwargs) -> None:
+        return None
+
+    def selectbox(self, *args, **kwargs) -> None:
+        return None
+
+    def plotly_chart(self, figure, *, config=None, **kwargs) -> None:
+        self.plotly_configs.append(config)
+
+
+class _StubCharts:
+    def hour_weekday_heatmap(self, rows, *, tz_label):
+        return object()
+
+
+class FacadePatchInterceptionTest(unittest.TestCase):
+    """The moved page-pipeline resolves its siblings, the read-wave dispatch,
+    and `PLOTLY_CONFIG` through the `orchestrator.dashboard` facade at call
+    time, so `patch.object(dashboard, ...)` intercepts the running pipeline
+    (mirroring the workflow.py stage-handler facade). Identity re-export alone
+    would not catch a stubbed rebind, so these drive the callers under a patch.
+    """
+
+    def test_patched_run_read_waves_drives_data_load(self) -> None:
+        # `_load_dashboard_data` reaches the read-wave dispatch through the
+        # facade, so a patched `dashboard._run_read_waves` supplies the data.
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        results = {"summary": object()}
+        kpis = object()
+        modules = SimpleNamespace(st=object())
+        page = SimpleNamespace(reads=object())
+        with patch.object(
+            dashboard, "_run_read_waves", return_value=(results, kpis),
+        ) as stub:
+            loaded = dashboard._load_dashboard_data(modules, page)
+        stub.assert_called_once()
+        self.assertIs(loaded.read_results, results)
+        self.assertIs(loaded.kpis, kpis)
+
+    def test_patched_widget_sections_drive_page_render(self) -> None:
+        # `_render_dashboard_widgets` reaches both wave renderers through the
+        # facade, so patched stubs run in place of the real sections.
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        calls: list[str] = []
+        with patch.object(
+            dashboard, "_render_chart_widgets",
+            side_effect=lambda *a: calls.append("chart"),
+        ), patch.object(
+            dashboard, "_render_remaining_widgets",
+            side_effect=lambda *a: calls.append("remaining"),
+        ):
+            dashboard._render_dashboard_widgets(object(), object(), object())
+        self.assertEqual(calls, ["chart", "remaining"])
+
+    def test_patched_plotly_config_reaches_chart(self) -> None:
+        # A leaf renderer reads `PLOTLY_CONFIG` through the facade and hands
+        # Plotly a plain-dict copy, so patching `dashboard.PLOTLY_CONFIG`
+        # changes the config the chart receives (never the mapping proxy,
+        # which is not JSON-serializable).
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        fake_st = _RecordingStreamlit()
+        sentinel = {"displayModeBar": True, "scrollZoom": True}
+        with patch.object(dashboard, "PLOTLY_CONFIG", sentinel):
+            dashboard._render_activity_heatmap(
+                st=fake_st,
+                dashboard_charts=_StubCharts(),
+                heatmap_rows=[],
+                tz_offset_choice=0,
+            )
+        self.assertEqual(fake_st.plotly_configs, [sentinel])
+        self.assertIsInstance(fake_st.plotly_configs[0], dict)
+        self.assertIsNot(fake_st.plotly_configs[0], sentinel)
 
 
 class CachedReadConnectionScopingTest(_MainSourceTest):
