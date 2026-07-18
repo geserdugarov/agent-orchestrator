@@ -872,6 +872,7 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-17 | 4.5/usage-skills | Complete | Target WPS; WPS202 36->25; full gate | Not committed | 4.5 rest |
 | 2026-07-17 | 4.5/usage-trajectory | Complete | Target WPS; 2 deferred fixed; full gate | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/config-diagnostics | Complete | WPS363 17->0, WPS421 3->0; full gate | Not committed | 4.5 rest |
+| 2026-07-18 | 4.5/repository-config | Complete | WPS202 27->18; new leaf 11; full gate | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1149,5 +1150,30 @@ stream contract at the producer level and the missing-target case now also asser
 helpers nudge `config.py`'s `WPS202` member count (25 -> 27); both are cohesive configuration-diagnostics functions
 that move together in any later module split, and that member-count finding is left for the rest of Package 4.5. Ruff
 is clean and the full suite passed 2,099 tests (33 skipped for the optional dashboard / live Postgres; the
+`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not complete -- its
+remaining module-structure findings are untouched.
+
+The `repository-config` slice cleared the config-diagnostics slice's deferred member-count pressure by extracting the
+repository-configuration surface into a new private `orchestrator/_repo_config.py`: the `RepoSpec` per-repo identity
+dataclass, the `_RepoEnvEntry` row model, the whole `REPOS` parser (entry tokenizing, owner/name and option validation,
+duplicate-slug detection, remote-name defaulting, per-repo `parallel_limit` parsing) reached through `parse_repos_env`,
+and the `build_repo_specs` default-spec construction that falls back to the legacy single-repo `REPO` /
+`TARGET_REPO_ROOT` / `BASE_BRANCH` / `REMOTE_NAME` / `MAX_PARALLEL_ISSUES_PER_REPO` trio when `REPOS` is unset. The new
+module is a stdlib-only leaf: the abort-on-invalid `_config_error` and warn-to-stderr `_config_warning` diagnostics stay
+in `config.py` (its single configuration-failure funnel) and are injected as `config_error` / `config_warning`
+callables, and the per-entry parallel-limit default is injected too, so `config.py` keeps importing nothing back and the
+parser stays testable in isolation. `orchestrator.config` re-exports `RepoSpec` (`from orchestrator._repo_config import
+RepoSpec as RepoSpec`) and keeps `_parse_repos_env` (a narrow wrapper that injects `MAX_PARALLEL_ISSUES_PER_REPO` and
+the two diagnostics) and `default_repo_specs` (the cached-list accessor over `_REPO_SPECS =
+_repo_config.build_repo_specs(...)`) so every keyword caller, `from orchestrator.config import RepoSpec` importer, and
+`patch.object(config, ...)` target resolves unchanged. `RepoSpec` field shape and defaults, entry ordering,
+duplicate detection, remote defaulting, parallel-limit validation, every error / warning message verbatim, the
+stderr-not-stdout stream, and import-time abort semantics were all preserved, so every existing `test_config.py` case
+passed unchanged; a new `RepositoryConfigModuleTest` pins the `RepoSpec` module of record, the two compatibility
+wrappers' `orchestrator.config` home, and the injected-diagnostics leaf boundary. The move dropped `config.py`'s
+`WPS202` member count from 27 to 18; the new module's only finding is the accepted `WPS202` (11 > 7, the same
+cohesive-parser magnitude `_usage_metrics` carries), and the whole-tree `--select=WPS` diff introduced no new category.
+`docs/architecture.md`'s module map gained the `_repo_config.py` entry and the `config.py` re-export note. Ruff is clean
+and the full suite passed 2,104 tests (33 skipped for the optional dashboard / live Postgres; the
 `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not complete -- its
 remaining module-structure findings are untouched.

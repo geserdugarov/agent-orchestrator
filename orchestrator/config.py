@@ -15,10 +15,14 @@ from __future__ import annotations
 import os
 import shlex
 import sys
-from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, Optional
+
+from orchestrator import _repo_config
+# The repository-entry model and REPOS parsing / default-spec construction live
+# in a focused private module; re-export `RepoSpec` so `orchestrator.config`
+# stays the compatibility import site for every caller and test patch target.
+from orchestrator._repo_config import RepoSpec as RepoSpec
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -469,229 +473,35 @@ WORKFLOW_TRANSITION_GUARD: str = _parse_transition_guard(
 )
 
 
-@dataclass(frozen=True)
-class RepoSpec:
-    """Per-repo identity threaded through the workflow.
-
-    Replaces the global `REPO` / `TARGET_REPO_ROOT` / `BASE_BRANCH` reads
-    inside workflow.py so a future multi-repo loop can drive several repos
-    from one orchestrator process without touching module-level state.
-
-    `remote_name` is the name of the git remote in `target_root` that points
-    at this repo on GitHub. Defaults to `origin`; override when the local
-    clone uses several remotes (e.g. a public `origin` and a private fork
-    under a different remote name) and the orchestrator should drive the
-    non-default one.
-
-    `parallel_limit` caps how many issues this repo may advance in parallel
-    on a single tick. Defaults to 1 (legacy one-at-a-time behavior); each
-    `REPOS` entry can override it via the optional fifth pipe-separated
-    field. The global `MAX_PARALLEL_ISSUES_GLOBAL` ceiling applies across
-    all repos to cap-counted handlers regardless of any one repo's
-    `parallel_limit`; no-agent family buckets (`blocked` / `umbrella`) are
-    cap-exempt by design (a parent dep-graph walk must always get its turn)
-    and are excluded from both `parallel_limit` and
-    `MAX_PARALLEL_ISSUES_GLOBAL`.
-    """
-
-    slug: str
-    target_root: Path
-    base_branch: str
-    remote_name: str = "origin"
-    parallel_limit: int = 1
-
-
-@dataclass(frozen=True)
-class _RepoEnvEntry:
-    """Required fields and raw options from one REPOS entry."""
-
-    entry_no: int
-    slug: str
-    target_root: str
-    base_branch: str
-    remote_name: str
-    parallel_limit_raw: str | None
-
-
-def _iter_repos_entries(raw: str) -> Iterator[tuple[int, str]]:
-    """Yield numbered, non-comment entries from a REPOS value."""
-    # ';' accepted in addition to '\n' so the value can be one line in .env.
-    for entry_no, raw_line in enumerate(
-        raw.replace(";", "\n").splitlines(), start=1
-    ):
-        line = raw_line.strip()
-        if line and not line.startswith("#"):
-            yield entry_no, line
-
-
-def _parse_repo_remote_name(entry_no: int, parts: tuple[str, ...]) -> str:
-    """Return the remote option, rejecting an explicitly empty value."""
-    if len(parts) == 3:
-        return "origin"
-    remote_name = parts[3]
-    if not remote_name:
-        _config_error(
-            f"orchestrator: REPOS entry #{entry_no} has empty "
-            "remote_name (omit the trailing '|' to default to 'origin')"
-        )
-    return remote_name
-
-
-def _validate_repo_required_fields(
-    entry_no: int,
-    slug: str,
-    target_root: str,
-    base_branch: str,
-) -> None:
-    """Validate the required fields of one REPOS entry."""
-    # Require exactly two non-empty components separated by a single '/'.
-    # A substring check also accepts empty or extra path components.
-    slug_components = slug.split("/")
-    if len(slug_components) != 2 or not all(slug_components):
-        _config_error(
-            f"orchestrator: REPOS entry #{entry_no} has invalid "
-            f"owner/name {slug!r}; expected exactly 'owner/name' "
-            "with non-empty owner and name"
-        )
-    if not target_root:
-        _config_error(
-            f"orchestrator: REPOS entry #{entry_no} has empty target_root"
-        )
-    if not base_branch:
-        _config_error(
-            f"orchestrator: REPOS entry #{entry_no} has empty base_branch"
-        )
-
-
-def _parse_repo_entry(entry_no: int, line: str) -> _RepoEnvEntry:
-    """Parse and validate the fields of one REPOS entry."""
-    parts = tuple(part.strip() for part in line.split("|"))
-    if len(parts) not in (3, 4, 5):
-        _config_error(
-            f"orchestrator: REPOS entry #{entry_no} is malformed "
-            f"(expected 'owner/name|target_root|base_branch' "
-            f"with optional '|remote_name' and '|parallel_limit'): "
-            f"{line!r}"
-        )
-    slug, target_root, base_branch = parts[:3]
-    remote_name = _parse_repo_remote_name(entry_no, parts)
-    _validate_repo_required_fields(
-        entry_no,
-        slug,
-        target_root,
-        base_branch,
-    )
-    return _RepoEnvEntry(
-        entry_no=entry_no,
-        slug=slug,
-        target_root=target_root,
-        base_branch=base_branch,
-        remote_name=remote_name,
-        parallel_limit_raw=parts[4] if len(parts) == 5 else None,
-    )
-
-
-def _record_repo_slug(entry: _RepoEnvEntry, seen: set[str]) -> None:
-    """Reject duplicate repository slugs and record a unique one."""
-    if entry.slug in seen:
-        _config_error(
-            f"orchestrator: REPOS lists duplicate slug {entry.slug!r}; "
-            "each repo can appear only once"
-        )
-    seen.add(entry.slug)
-
-
-def _parse_repo_parallel_limit(entry: _RepoEnvEntry) -> int:
-    """Validate one entry's optional parallel limit."""
-    if entry.parallel_limit_raw is None:
-        return MAX_PARALLEL_ISSUES_PER_REPO
-    if not entry.parallel_limit_raw:
-        _config_error(
-            f"orchestrator: REPOS entry #{entry.entry_no} has empty "
-            "parallel_limit (omit the trailing '|' to default to "
-            f"MAX_PARALLEL_ISSUES_PER_REPO={MAX_PARALLEL_ISSUES_PER_REPO})"
-        )
-    try:
-        parallel_limit = int(entry.parallel_limit_raw)
-    except ValueError:
-        _config_error(
-            f"orchestrator: REPOS entry #{entry.entry_no} parallel_limit "
-            f"{entry.parallel_limit_raw!r} is not a valid integer; expected "
-            "a positive integer (>= 1)"
-        )
-    if parallel_limit < 1:
-        _config_error(
-            f"orchestrator: REPOS entry #{entry.entry_no} parallel_limit "
-            f"{entry.parallel_limit_raw!r} must be >= 1 (zero or negative "
-            "would block all work for this repo)"
-        )
-    return parallel_limit
-
-
-def _repo_spec_from_env_entry(entry: _RepoEnvEntry) -> RepoSpec:
-    """Validate entry options and build a RepoSpec."""
-    parallel_limit = _parse_repo_parallel_limit(entry)
-    target_path = Path(entry.target_root)
-    if not target_path.exists():
-        _config_warning(
-            f"orchestrator: REPOS entry {entry.slug!r} target_root "
-            f"{target_path} does not exist; worktree creation will fail"
-        )
-    return RepoSpec(
-        slug=entry.slug,
-        target_root=target_path,
-        base_branch=entry.base_branch,
-        remote_name=entry.remote_name,
-        parallel_limit=parallel_limit,
-    )
-
-
 def _parse_repos_env(raw: str) -> list[RepoSpec]:
     """Parse the REPOS env value into a list of RepoSpecs.
 
-    Format: one entry per line,
-    ``owner/name|target_root|base_branch[|remote_name[|parallel_limit]]``.
-    The fourth (``remote_name``, defaults to ``origin``) and fifth
-    (``parallel_limit``, defaults to ``MAX_PARALLEL_ISSUES_PER_REPO``)
-    fields are optional. The fifth field is positional, so overriding
-    ``parallel_limit`` requires also writing the ``remote_name`` (use
-    ``origin`` explicitly to keep the default).
-    Blank lines and lines starting with ``#`` are skipped. ``;`` is also
-    accepted as an entry separator so the value fits on a single line in a
-    ``.env`` file (the simple parser in `_load_dotenv` cannot represent
-    multi-line values). Aborts (SystemExit) on malformed entries or
-    duplicate slugs; a missing ``target_root`` is warned to stderr but not
-    fatal so a freshly-cloned host can still start the orchestrator and
-    notice the problem on the first tick rather than at import.
+    Narrow compatibility wrapper: the entry parsing, owner/name and option
+    validation, ordering, duplicate detection, and per-repo parallel-limit
+    defaulting live in `_repo_config.parse_repos_env`; this shim injects this
+    module's `MAX_PARALLEL_ISSUES_PER_REPO` default and the abort / warn
+    diagnostics. Kept on `orchestrator.config` so existing callers and test
+    patch targets resolve `config._parse_repos_env` unchanged.
     """
-    specs: list[RepoSpec] = []
-    seen: set[str] = set()
-    for entry_no, line in _iter_repos_entries(raw):
-        entry = _parse_repo_entry(entry_no, line)
-        _record_repo_slug(entry, seen)
-        specs.append(_repo_spec_from_env_entry(entry))
-    if not specs:
-        _config_error(
-            "orchestrator: REPOS is set but contains no valid entries; "
-            "either unset it or provide at least one "
-            "'owner/name|target_root|base_branch' entry"
-        )
-    return specs
+    return _repo_config.parse_repos_env(
+        raw,
+        default_parallel_limit=MAX_PARALLEL_ISSUES_PER_REPO,
+        config_error=_config_error,
+        config_warning=_config_warning,
+    )
 
 
-_REPOS_RAW: str = os.environ.get("REPOS", "")
-_REPO_SPECS: list[RepoSpec] = (
-    _parse_repos_env(_REPOS_RAW)
-    if _REPOS_RAW.strip()
-    else [
-        RepoSpec(
-            slug=REPO,
-            target_root=TARGET_REPO_ROOT,
-            base_branch=BASE_BRANCH,
-            remote_name=REMOTE_NAME,
-            parallel_limit=MAX_PARALLEL_ISSUES_PER_REPO,
-        )
-    ]
+_REPO_SPECS: list[RepoSpec] = _repo_config.build_repo_specs(
+    os.environ.get("REPOS", ""),
+    default_spec=RepoSpec(
+        slug=REPO,
+        target_root=TARGET_REPO_ROOT,
+        base_branch=BASE_BRANCH,
+        remote_name=REMOTE_NAME,
+        parallel_limit=MAX_PARALLEL_ISSUES_PER_REPO,
+    ),
+    config_error=_config_error,
+    config_warning=_config_warning,
 )
 
 
