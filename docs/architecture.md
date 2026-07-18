@@ -39,7 +39,13 @@ call time so test patches against `workflow.<helper>` still intercept calls made
 ```
 orchestrator/
   main.py               entry point, polling loop, self-restart guard
-  config.py             env / token loading, secret handling, backend validation
+  config.py             env / token loading, secret handling, backend
+                        validation; re-exports `RepoSpec` and wraps
+                        `_parse_repos_env` / `default_repo_specs` from
+                        `_repo_config`
+  _repo_config.py       repository-entry model (`RepoSpec`) plus REPOS parsing
+                        and default-spec construction; a stdlib-only leaf
+                        (abort / warn diagnostics injected from config)
   state_machine.py      typed label vocabulary, transition table, typo guard
                         and transition guard
   github.py             PyGithub wrapper, label bootstrap, pinned-state comment

@@ -1009,5 +1009,96 @@ class ConfigDiagnosticsTest(unittest.TestCase):
         self.assertEqual(out.getvalue(), "")
 
 
+class RepositoryConfigModuleTest(unittest.TestCase):
+    """The repository-entry model and REPOS parsing / default-spec
+    construction live in the private ``orchestrator._repo_config`` leaf;
+    ``orchestrator.config`` stays the compatibility import site via a
+    ``RepoSpec`` re-export and the ``_parse_repos_env`` / ``default_repo_specs``
+    wrappers existing callers and test patches resolve.
+    """
+
+    def test_repospec_reexported_from_private_module(self) -> None:
+        import orchestrator.config as config
+        from orchestrator import _repo_config
+
+        self.assertIs(config.RepoSpec, _repo_config.RepoSpec)
+        self.assertEqual(
+            config.RepoSpec.__module__, "orchestrator._repo_config"
+        )
+
+    def test_compat_wrappers_stay_on_config(self) -> None:
+        import orchestrator.config as config
+
+        # `config._parse_repos_env` / `config.default_repo_specs` are the
+        # narrow wrappers; their module of record is `orchestrator.config`
+        # so `patch.object(config, ...)` keeps intercepting them.
+        self.assertEqual(config._parse_repos_env.__module__, "orchestrator.config")
+        self.assertEqual(
+            config.default_repo_specs.__module__, "orchestrator.config"
+        )
+
+    def test_parse_repos_env_is_a_stdlib_leaf(self) -> None:
+        # The extracted parser takes its default and diagnostics as injected
+        # callables rather than reading config module state, so it parses
+        # without importing config back.
+        from orchestrator import _repo_config
+
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        def fail(message: str):
+            errors.append(message)
+            raise SystemExit(message)
+
+        with tempfile.TemporaryDirectory() as td:
+            specs = _repo_config.parse_repos_env(
+                f"alpha/one|{td}|main|origin|4",
+                default_parallel_limit=2,
+                config_error=fail,
+                config_warning=warnings.append,
+            )
+        self.assertEqual([spec.slug for spec in specs], ["alpha/one"])
+        self.assertEqual(specs[0].parallel_limit, 4)
+        self.assertEqual((errors, warnings), ([], []))
+
+    def test_parse_repos_env_default_limit_is_injected(self) -> None:
+        # An entry that omits parallel_limit adopts the injected default,
+        # not any config-global fallback.
+        from orchestrator import _repo_config
+
+        with tempfile.TemporaryDirectory() as td:
+            specs = _repo_config.parse_repos_env(
+                f"alpha/one|{td}|main",
+                default_parallel_limit=7,
+                config_error=lambda message: (_ for _ in ()).throw(
+                    SystemExit(message)
+                ),
+                config_warning=lambda _message: None,
+            )
+        self.assertEqual(specs[0].parallel_limit, 7)
+
+    def test_build_repo_specs_falls_back_to_default_spec(self) -> None:
+        # A blank REPOS value yields exactly the injected legacy single-repo
+        # spec, without touching the parser or the diagnostics.
+        from orchestrator import _repo_config
+
+        default_spec = _repo_config.RepoSpec(
+            slug="owner/legacy",
+            target_root=Path("/tmp"),
+            base_branch="trunk",
+            remote_name="private",
+            parallel_limit=5,
+        )
+        specs = _repo_config.build_repo_specs(
+            "   ",
+            default_spec=default_spec,
+            config_error=lambda message: (_ for _ in ()).throw(
+                SystemExit(message)
+            ),
+            config_warning=lambda _message: None,
+        )
+        self.assertEqual(specs, [default_spec])
+
+
 if __name__ == "__main__":
     unittest.main()
