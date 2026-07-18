@@ -31,7 +31,6 @@ from orchestrator import analytics, config
 from orchestrator.state_machine import (
     ControlLabel,
     WorkflowLabel,
-    coerce_child_issue_label,
     coerce_workflow_label,
     guard_transition,
 )
@@ -110,10 +109,6 @@ PAUSED_LABEL = ControlLabel.PAUSED
 # HITL once per PR; it never drives the PR's lifecycle, so the label is a
 # pure "needs a human" signal rather than a workflow stage.
 COMMUNITY_CONTRIBUTION_LABEL = ControlLabel.COMMUNITY_CONTRIBUTION
-# Unlike the hard-skip labels, `quick_run` does not pause processing: it stays
-# attached and modifies the normal workflow, so it is registered here for
-# bootstrap but deliberately absent from `HARD_SKIP_CONTROL_LABELS`.
-QUICK_RUN_LABEL = ControlLabel.QUICK_RUN
 CONTROL_LABEL_SPECS: tuple[tuple[ControlLabel, str, str], ...] = (
     (
         BACKLOG_LABEL,
@@ -129,11 +124,6 @@ CONTROL_LABEL_SPECS: tuple[tuple[ControlLabel, str, str], ...] = (
         COMMUNITY_CONTRIBUTION_LABEL,
         "7057ff",
         "PR opened by an author outside ALLOWED_ISSUE_AUTHORS; human review requested",
-    ),
-    (
-        QUICK_RUN_LABEL,
-        "0e8a16",
-        "Modify the normal workflow to run in an accelerated quick-run mode; processing continues",
     ),
 )
 
@@ -719,12 +709,11 @@ class GitHubClient:
         `Parent: #<n>` line keeps the parent open until every child
         resolves and `_handle_blocked` flips the parent to `ready`.
         """
-        # Typo guard for this direct label write path (bypasses
-        # `set_workflow_label`): each label is an orchestrator-authored
-        # workflow label -- or the `quick_run` modifier propagated from a
-        # split parent -- so coerce each and let a typo fail loudly instead
-        # of creating a child with an invisible literal label.
-        validated = [coerce_child_issue_label(lbl) for lbl in labels]
+        # Typo guard for this direct workflow-label write path (bypasses
+        # `set_workflow_label`): every label here is an orchestrator-authored
+        # workflow label, so coerce each so a typo fails loudly instead of
+        # creating a child with an invisible label.
+        validated = [coerce_workflow_label(lbl) for lbl in labels]
         parent_body = (body or "").rstrip()
         full_body = f"{parent_body}\n\nParent: #{parent_number}"
         return self.repo.create_issue(title=title, body=full_body, labels=validated)

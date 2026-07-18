@@ -8,12 +8,10 @@ from __future__ import annotations
 import unittest
 
 from orchestrator import config, workflow
-from orchestrator.github import QUICK_RUN_LABEL
 
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
-    FakeLabel,
     FakeUser,
     make_issue,
 )
@@ -25,11 +23,9 @@ from tests.workflow_helpers import (
 
 
 class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def _seeded(self, label="implementing", quick_run=False):
+    def _seeded(self, label="implementing"):
         gh = FakeGitHubClient()
         issue = make_issue(1, label=label)
-        if quick_run:
-            issue.labels.append(FakeLabel(QUICK_RUN_LABEL))
         gh.add_issue(issue)
         # No prior pinned state; simulate just-after-pickup.
         return gh, issue
@@ -37,40 +33,37 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_clean_commits_open_pr_and_flip_label(self) -> None:
         # After PR open, hand off straight to `validating`; the docs pass only
         # runs as the final-docs handoff after the reviewer agent approves, not
-        # as a pre-review hop. The `quick_run` control label does not change
-        # this: there is no implementing fast path, so a quick-run issue takes
-        # the reviewer path and never routes straight to `in_review`.
-        for quick_run in (False, True):
-            with self.subTest(quick_run=quick_run):
-                gh, issue = self._seeded(quick_run=quick_run)
-                self._run(
-                    lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
-                    run_agent=_agent(session_id="sess-1", last_message="implemented"),
-                    # First call: not a recovered worktree -> codex runs.
-                    # Second call: codex produced commits -> push path.
-                    has_new_commits=[False, True],
-                    dirty_files=(),
-                    push_branch=True,
-                )
+        # as a pre-review hop. Implementing routes to the reviewer path and
+        # never straight to `in_review`.
+        gh, issue = self._seeded()
+        self._run(
+            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            run_agent=_agent(session_id="sess-1", last_message="implemented"),
+            # First call: not a recovered worktree -> codex runs.
+            # Second call: codex produced commits -> push path.
+            has_new_commits=[False, True],
+            dirty_files=(),
+            push_branch=True,
+        )
 
-                self.assertEqual(len(gh.opened_prs), 1)
-                opened = gh.opened_prs[0]
-                self.assertTrue(any(
-                    f":sparkles: PR opened: #{opened.number}" in body
-                    for _, body in gh.posted_comments
-                ))
-                self.assertIn((1, "validating"), gh.label_history)
-                self.assertNotIn((1, "in_review"), gh.label_history)
-                self.assertNotIn((1, "documenting"), gh.label_history)
-                state = gh.pinned_data(1)
-                self.assertEqual(state["pr_number"], opened.number)
-                self.assertEqual(state["branch"], "orchestrator/geserdugarov__agent-orchestrator/issue-1")
-                # First fresh dev spawn writes the new keys; the legacy field is
-                # deliberately not migrated.
-                self.assertEqual(state["dev_agent"], config.DEV_AGENT)
-                self.assertEqual(state["dev_session_id"], "sess-1")
-                self.assertNotIn("codex_session_id", state)
-                self.assertEqual(state["review_round"], 0)
+        self.assertEqual(len(gh.opened_prs), 1)
+        opened = gh.opened_prs[0]
+        self.assertTrue(any(
+            f":sparkles: PR opened: #{opened.number}" in body
+            for _, body in gh.posted_comments
+        ))
+        self.assertIn((1, "validating"), gh.label_history)
+        self.assertNotIn((1, "in_review"), gh.label_history)
+        self.assertNotIn((1, "documenting"), gh.label_history)
+        state = gh.pinned_data(1)
+        self.assertEqual(state["pr_number"], opened.number)
+        self.assertEqual(state["branch"], "orchestrator/geserdugarov__agent-orchestrator/issue-1")
+        # First fresh dev spawn writes the new keys; the legacy field is
+        # deliberately not migrated.
+        self.assertEqual(state["dev_agent"], config.DEV_AGENT)
+        self.assertEqual(state["dev_session_id"], "sess-1")
+        self.assertNotIn("codex_session_id", state)
+        self.assertEqual(state["review_round"], 0)
 
     def test_dirty_commits_park_without_push(self) -> None:
         gh, issue = self._seeded()

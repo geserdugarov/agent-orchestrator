@@ -20,7 +20,7 @@ An issue should have at most one workflow label at a time. Non-workflow labels s
 preserved; the orchestrator only swaps labels from its own workflow set. Label names are part of the public contract
 because live GitHub issues carry them.
 
-Four non-workflow **control labels** modify behavior without occupying the workflow slot:
+Three non-workflow **control labels** modify behavior without occupying the workflow slot:
 
 - `backlog` makes the orchestrator skip the issue: the per-tick dispatcher filters it out before the family/fanout split
   (so a parked, workflow-label-less issue cannot fold into the cap-counted family bucket and starve other work under
@@ -51,9 +51,6 @@ Four non-workflow **control labels** modify behavior without occupying the workf
   (Dependabot, Renovate, CI bots) are skipped via GitHub's `user.type == "Bot"` flag — they open PRs structurally and
   are not community contributions. The orchestrator does not otherwise drive these PRs. With `ALLOWED_ISSUE_AUTHORS`
   empty (the default), the sweep is a no-op.
-- `quick_run` is registered as a control label (created by repository bootstrap via `CONTROL_LABEL_SPECS`) but is
-  deliberately **not** a hard skip: unlike `backlog` / `paused` it stays attached and coexists with the workflow label
-  rather than pausing it, so the orchestrator keeps processing the issue while the label is present.
 
 ### Typed states and the transition guard
 
@@ -63,13 +60,12 @@ above. Because `StrEnum` members *are* their wire strings, GitHub labels and pin
 enum just gives the names one authoritative definition.
 
 Two guards run at `GitHubClient.set_workflow_label` (the single label-write chokepoint; `create_child_issue` bypasses
-`set_workflow_label` and shares only the typo guard for its direct write, via `coerce_child_issue_label` — the same
-strictness, which additionally tolerates a `quick_run` control label on a direct child write):
+`set_workflow_label` and shares only the typo guard for its direct write, coercing each child label through
+`coerce_workflow_label` — the same strictness):
 
 - **Typo guard (always strict).** A label name not in `WorkflowLabel` raises immediately, so a typo cannot be applied as
-  a literal label that the next tick would treat as unlabeled-pickup. `create_child_issue` additionally tolerates
-  `quick_run` (the only control label its guard admits) and still rejects every other control label; split children are
-  otherwise born with only their initial workflow label.
+  a literal label that the next tick would treat as unlabeled-pickup. `create_child_issue` coerces each birth label the
+  same way, so split children are born with only a valid workflow label and any control label is rejected.
 - **Transition guard (`WORKFLOW_TRANSITION_GUARD` = `off` / `warn` / `enforce`, default `warn`).** An illegal
   `current → new` relabel is checked against `ALLOWED_TRANSITIONS`. `warn` logs and proceeds; `enforce` raises
   `IllegalTransition`; `off` disables the check. A same-label re-set is always allowed.
@@ -414,10 +410,9 @@ The hash is re-persisted on every reaction so a single edit triggers exactly one
        `affected_files` / `notes`, built by `_build_single_decision_comment`) so the implementer inherits the
        decomposer's groundwork via `_recent_comments_text`; label `ready`, stamp `decomposed_at`.
      - `decision == "split"` → for each child call `gh.create_child_issue(...)` with label `blocked` (the child's only
-       birth label — a `quick_run` parent's modifier is not inherited across the split) and seed the child's pinned
-       state with `parent_number`; persist `children` / `dep_graph` / `umbrella` on the parent; activate no-dep children
-       by flipping `blocked` → `ready` (best-effort, since `_handle_blocked` / `_handle_umbrella` also treats no-dep
-       children as deps-satisfied).
+       birth label) and seed the child's pinned state with `parent_number`; persist `children` / `dep_graph` /
+       `umbrella` on the parent; activate no-dep children by flipping `blocked` → `ready` (best-effort, since
+       `_handle_blocked` / `_handle_umbrella` also treats no-dep children as deps-satisfied).
 - **Output**: parent → `ready` / `blocked` / `umbrella` / `implementing`, OR a HITL park.
 
 ### `_handle_ready` (label `ready` → `implementing`)

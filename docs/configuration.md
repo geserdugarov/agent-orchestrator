@@ -481,8 +481,8 @@ dependency.
 - `python -m orchestrator.main --once` — single tick then exit. Useful for tests and debugging.
 - `python -m orchestrator.main --log-level DEBUG` — verbose logs.
 
-On first start the orchestrator creates the workflow labels and the `backlog` / `paused` / `community_contribution` /
-`quick_run` control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
+On first start the orchestrator creates the workflow labels and the `backlog` / `paused` / `community_contribution`
+control labels on the repo, then begins polling open issues every `POLL_INTERVAL` seconds.
 
 ## Running under systemd (user service)
 
@@ -668,8 +668,3 @@ When each setting's change takes effect:
   `ALLOWED_ISSUE_AUTHORS` is set: any open PR whose author is outside the allowlist is labeled and `HITL_HANDLE` is
   @-mentioned once per PR so a human reviews the community-submitted work. Bot authors (Dependabot, Renovate, CI bots)
   are skipped. With the allowlist empty (the default), the sweep is a no-op.
-- `quick_run` — A control label that coexists with the workflow label without pausing it. Unlike `backlog` / `paused`
-  it does not pause processing: it stays attached and the orchestrator keeps handling the issue. Manual-merge and
-  PR-feedback handling are the ordinary flow — humans drive the merge and fresh feedback routes to `fixing`. The
-  label is not inherited across a split: when a `quick_run` parent decomposes, its child issues are created without it,
-  so each child runs the ordinary flow unless `quick_run` is applied to it directly.

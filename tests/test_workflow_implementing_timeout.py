@@ -15,12 +15,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator import config, workflow
-from orchestrator.github import QUICK_RUN_LABEL
 
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
-    FakeLabel,
     FakeUser,
     make_issue,
 )
@@ -120,11 +118,9 @@ class HandleImplementingTimeoutRecoveryTest(
 ):
     """Next-tick recovery of a commit stranded by an `agent_timeout` park."""
 
-    def _parked(self, quick_run=False, **overrides):
+    def _parked(self, **overrides):
         gh = FakeGitHubClient()
         issue = make_issue(4, label="implementing")
-        if quick_run:
-            issue.labels.append(FakeLabel(QUICK_RUN_LABEL))
         gh.add_issue(issue)
         state = dict(
             awaiting_human=True,
@@ -144,44 +140,38 @@ class HandleImplementingTimeoutRecoveryTest(
         # A descendant finished a clean commit after the timeout was recorded
         # (the #77 shape). With no human comment, the next tick must publish the
         # recovered commit and route to `validating`, persisting the PR/branch,
-        # clearing the park, and resetting the per-PR counters. The `quick_run`
-        # control label does not divert this to `in_review`: there is no
-        # implementing fast path, so a recovered quick-run commit still takes
-        # the reviewer path.
-        for quick_run in (False, True):
-            with self.subTest(quick_run=quick_run):
-                gh, issue = self._parked(
-                    quick_run=quick_run, review_round=4, retry_count=2,
-                )
-                with patch.object(
-                    workflow, "_worktree_path", return_value=Path("/tmp"),
-                ):
-                    mocks = self._run(
-                        lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
-                        run_agent=_agent(),
-                        head_shas=("sha-post",),  # HEAD advanced past pre_implement_sha.
-                        dirty_files=(),
-                        push_branch=True,
-                    )
+        # clearing the park, and resetting the per-PR counters. Recovery takes
+        # the reviewer path and never diverts to `in_review`.
+        gh, issue = self._parked(review_round=4, retry_count=2)
+        with patch.object(
+            workflow, "_worktree_path", return_value=Path("/tmp"),
+        ):
+            mocks = self._run(
+                lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+                run_agent=_agent(),
+                head_shas=("sha-post",),  # HEAD advanced past pre_implement_sha.
+                dirty_files=(),
+                push_branch=True,
+            )
 
-                # No agent spawned -- the commit was already on the branch.
-                mocks["run_agent"].assert_not_called()
-                mocks["_push_branch"].assert_called_once()
-                self.assertEqual(len(gh.opened_prs), 1)
-                self.assertIn((4, "validating"), gh.label_history)
-                self.assertNotIn((4, "in_review"), gh.label_history)
-                data = gh.pinned_data(4)
-                self.assertEqual(data["pr_number"], gh.opened_prs[0].number)
-                self.assertEqual(
-                    data["branch"],
-                    "orchestrator/geserdugarov__agent-orchestrator/issue-4",
-                )
-                self.assertFalse(data.get("awaiting_human"))
-                self.assertIsNone(data.get("park_reason"))
-                self.assertIsNone(data.get("pre_implement_sha"))
-                # Counters reset for any later bounce back into implementing.
-                self.assertEqual(data["review_round"], 0)
-                self.assertEqual(data["retry_count"], 0)
+        # No agent spawned -- the commit was already on the branch.
+        mocks["run_agent"].assert_not_called()
+        mocks["_push_branch"].assert_called_once()
+        self.assertEqual(len(gh.opened_prs), 1)
+        self.assertIn((4, "validating"), gh.label_history)
+        self.assertNotIn((4, "in_review"), gh.label_history)
+        data = gh.pinned_data(4)
+        self.assertEqual(data["pr_number"], gh.opened_prs[0].number)
+        self.assertEqual(
+            data["branch"],
+            "orchestrator/geserdugarov__agent-orchestrator/issue-4",
+        )
+        self.assertFalse(data.get("awaiting_human"))
+        self.assertIsNone(data.get("park_reason"))
+        self.assertIsNone(data.get("pre_implement_sha"))
+        # Counters reset for any later bounce back into implementing.
+        self.assertEqual(data["review_round"], 0)
+        self.assertEqual(data["retry_count"], 0)
 
     def test_outsider_only_comment_still_recovers(self) -> None:
         # A late clean commit landed on an `agent_timeout` park (the #77 shape).
