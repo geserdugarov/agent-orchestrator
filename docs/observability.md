@@ -114,19 +114,21 @@ any time without affecting workflow correctness.
 Project-local JSONL sink for raw metric records, separate from `EVENT_LOG_PATH`. Opts in or out independently via
 `ANALYTICS_LOG_PATH` / `ANALYTICS_RETENTION_DAYS` and the helpers in `orchestrator/analytics/`.
 
-**Module layout.** The recording implementation — sink configuration, the JSONL append primitives, the stage /
-repo-skill / agent-exit recorders, and the opt-in trajectory sink — lives in `orchestrator/analytics/_recording.py`;
-`orchestrator/analytics/__init__.py` is a facade that re-exports that surface and binds the sink knobs as package
-attributes. The read / sync submodules (`read`, `read_*`, `sync`, `connection`, `query`, `predicates`, `db_url`) are the
-separate Postgres-facing surfaces.
+**Module layout.** The event-recording implementation — sink configuration, the JSONL append primitives, and the stage /
+repo-skill / agent-exit recorders — lives in `orchestrator/analytics/_recording.py`; the opt-in trajectory sink's
+serialization, redaction / truncation, budgeting, and append / prune helpers live in the sibling
+`orchestrator/analytics/_trajectories.py` (which reuses `_recording`'s append / prune cores and reads its
+`_live_settings`). `orchestrator/analytics/__init__.py` is a facade that re-exports both surfaces and binds the sink
+knobs as package attributes. The read / sync submodules (`read`, `read_*`, `sync`, `connection`, `query`,
+`predicates`, `db_url`) are the separate Postgres-facing surfaces.
 
 **Settings ownership.** `ANALYTICS_LOG_PATH`, `ANALYTICS_RETENTION_DAYS`, and `ANALYTICS_DB_URL` (and the sibling
 trajectory-sink knobs `TRAJECTORY_LOG_PATH` / `TRAJECTORY_RETENTION_DAYS`) are parsed at import by
 `orchestrator/analytics/_recording.py` and bound as attributes of the `orchestrator/analytics` package — *not* in
 `orchestrator/config.py`. They are exposed as package attributes (`analytics.ANALYTICS_LOG_PATH`, etc.) that tests patch
-directly via `patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`; the recorders in `_recording` read them back off the
-package facade at call time, so a patch or a package reload takes effect. The audit event log (`config.EVENT_LOG_PATH`)
-stays in `config` because `GitHubClient.emit_event` is a general-purpose audit surface.
+directly via `patch.object(analytics, "ANALYTICS_LOG_PATH", ...)`; the recorders in `_recording` and `_trajectories`
+read them back off the package facade at call time, so a patch or a package reload takes effect. The audit event log
+(`config.EVENT_LOG_PATH`) stays in `config` because `GitHubClient.emit_event` is a general-purpose audit surface.
 
 **Filesystem only.** No PostgreSQL, Streamlit, or external services — the sink is one JSONL file under the project log
 area. Default path is `<LOG_DIR>/analytics.jsonl`, already covered by the `logs/` `.gitignore` rule. Set
@@ -1150,7 +1152,7 @@ backend's stream does not expose them (codex exposes neither); the analytics wri
 from `skill_catalog.discover_codex_tools()`. Malformed JSONL lines are skipped and a missing / renamed field
 yields an empty section rather than an exception. Unlike the skill extractor, this classifier records the **raw** stream
 payload — tool inputs, tool outputs, and the final text — verbatim: it deliberately does **not** redact, truncate,
-or write any file. Those concerns belong to its downstream writer, `analytics._recording._maybe_record_trajectory`
+or write any file. Those concerns belong to its downstream writer, `analytics._trajectories._maybe_record_trajectory`
 (called from `record_agent_exit`), which redacts every free-text field, applies the head/tail and total-record
 truncation caps, and appends the `agent_trajectory` record to the
 [trajectory sink](#trajectory-sink-trajectory_log_path) — only when `TRAJECTORY_LOG_PATH` is enabled and always behind
