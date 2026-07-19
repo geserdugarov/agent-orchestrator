@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from orchestrator.analytics import _sync_rows
+
 
 SAMPLE_TIMESTAMP = "2026-05-25T12:00:00+00:00"
 SAMPLE_NAIVE_TIMESTAMP = "2026-05-25T12:00:00"
@@ -350,7 +352,7 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
                 json_adapter=lambda v: v,
             )
             sql, params = fake.inserts[0]
-            promoted = analytics_sync._PROMOTED_COLUMNS
+            promoted = _sync_rows._PROMOTED_COLUMNS
             for column in (
                 "repo",
                 "issue",
@@ -392,7 +394,7 @@ class AnalyticsSyncInsertTest(unittest.TestCase):
                 json_adapter=lambda v: v,
             )
             _, params = fake.inserts[0]
-            ts_value = params[analytics_sync._PROMOTED_COLUMNS.index("ts")]
+            ts_value = params[_sync_rows._PROMOTED_COLUMNS.index("ts")]
             self.assertIsInstance(ts_value, datetime)
             self.assertIsNotNone(ts_value.tzinfo)
 
@@ -603,7 +605,7 @@ class AnalyticsSyncMalformedTest(unittest.TestCase):
             )
             self.assertEqual(result.inserted, 1)
             _, params = fake.inserts[0]
-            ts_value = params[analytics_sync._PROMOTED_COLUMNS.index("ts")]
+            ts_value = params[_sync_rows._PROMOTED_COLUMNS.index("ts")]
             self.assertEqual(ts_value.tzinfo, timezone.utc)
 
 
@@ -1001,7 +1003,7 @@ class AnalyticsSyncBatchTest(unittest.TestCase):
             fake.pre_check_hashes = set()
             racing_records = records[:2]
             for record in racing_records:
-                fake.seen_hashes.add(analytics_sync._content_hash(record))
+                fake.seen_hashes.add(_sync_rows._content_hash(record))
             with patch.object(analytics_sync, "_BATCH_SIZE", len(records)):
                 sync_result = analytics_sync.sync_jsonl_to_postgres(
                     connect=lambda url: fake,
@@ -1195,7 +1197,7 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
             fake = _FakeConnection()
             existing_records = records[:-1]
             for record in existing_records:
-                fake.seen_hashes.add(analytics_sync._content_hash(record))
+                fake.seen_hashes.add(_sync_rows._content_hash(record))
             result = analytics_sync.sync_jsonl_to_postgres(
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,
@@ -1207,7 +1209,7 @@ class AnalyticsSyncPreCheckTest(unittest.TestCase):
         # the two pre-skipped rows never enter the batch buffer.
         self.assertEqual(len(fake.batches), 1)
         self.assertEqual(len(fake.batches[0][1]), 1)
-        new_record_hash = analytics_sync._content_hash(records[-1])
+        new_record_hash = _sync_rows._content_hash(records[-1])
         batched_hashes = {params[-1] for params in fake.batches[0][1]}
         self.assertEqual(batched_hashes, {new_record_hash})
 
@@ -1454,7 +1456,7 @@ class AnalyticsSyncDailyRollupRefreshTest(unittest.TestCase):
             })
             fake = _FakeConnection()
             for record in records:
-                fake.seen_hashes.add(analytics_sync._content_hash(record))
+                fake.seen_hashes.add(_sync_rows._content_hash(record))
             result = analytics_sync.sync_jsonl_to_postgres(
                 connect=lambda url: fake,
                 json_adapter=lambda v: v,
@@ -1820,6 +1822,51 @@ class AnalyticsSyncLiveDdlTest(unittest.TestCase):
             timed_out_count, sum(run["timed_out"] for run in runs),
         )
         self.assertEqual(event_count, len(runs))
+
+
+class SyncRowMappingExtractionTest(unittest.TestCase):
+    """The record -> DB-row mapping (the promoted-column schema, the
+    canonical-JSON content hash, and the per-record validation) lives in
+    `orchestrator.analytics._sync_rows`; the ingest driver
+    `orchestrator.analytics.sync` imports the mapping helpers it drives from
+    there, so both resolve to the same object.
+    """
+
+    # Every mapping member of record, defined in `_sync_rows`.
+    _MAPPING_MEMBERS = (
+        "_build_insert_sql",
+        "_content_hash",
+        "_prepare_record",
+        "_row_values",
+        "_RowProvenance",
+    )
+
+    # The subset the ingest driver imports for its own use, so `sync.<name>`
+    # resolves to the same object. `_content_hash` / `_PROMOTED_COLUMNS` are
+    # reached only through `_sync_rows` (the driver does not use them), so the
+    # driver carries no alias for them.
+    _SYNC_DRIVEN_MEMBERS = (
+        "_build_insert_sql",
+        "_prepare_record",
+        "_row_values",
+        "_RowProvenance",
+    )
+
+    def test_mapping_members_defined_in_sync_rows(self) -> None:
+        for name in self._MAPPING_MEMBERS:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    getattr(_sync_rows, name).__module__,
+                    "orchestrator.analytics._sync_rows",
+                )
+
+    def test_sync_reaches_the_sync_rows_objects(self) -> None:
+        from orchestrator.analytics import sync
+        for name in self._SYNC_DRIVEN_MEMBERS:
+            with self.subTest(name=name):
+                self.assertIs(
+                    getattr(sync, name), getattr(_sync_rows, name)
+                )
 
 
 if __name__ == "__main__":

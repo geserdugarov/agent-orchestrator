@@ -597,7 +597,7 @@ considered.
 ### Public formatter and query-parser inputs
 
 - File and symbols: `orchestrator/dashboard_theme.py` (`fmt_money`, `fmt_money_exact`, `fmt_tokens`, `fmt_num`:
-  `value`), `orchestrator/dashboard_charts.py` (`cost_horizontal_bars`: `items`), and
+  `value`), `orchestrator/dashboard_charts_cost.py` (`cost_horizontal_bars`: `items`), and
   `orchestrator/dashboard_skill_matrix.py` (`parse_skill_matrix_sort`: `params`).
 - Rule: `WPS110`
 - Reason: These are public dashboard functions whose parameter name is a keyword-call contract -- a caller may pass
@@ -632,8 +632,8 @@ considered.
 
 ### Trajectory view content fields and record parser
 
-- File and symbols: `orchestrator/trajectory_reader.py`: `TrajectoryStepView.content` and `TimelineEntry.content`
-  (fields) plus `parse_record` (the `obj` parameter).
+- File and symbols: `orchestrator/_trajectory_records.py`: `TrajectoryStepView.content` and `TimelineEntry.content`
+  (fields) plus `parse_record` (the `obj` parameter). Re-exported through `orchestrator/trajectory_reader.py`.
 - Rule: `WPS110`
 - Reason: `content` is the public view-model field constructed and read as `.content` by the trajectory dashboard and
   tests (mirroring the serialized `"content"` key); `obj` is `parse_record`'s keyword-call contract. Renaming either
@@ -646,10 +646,11 @@ considered.
 
 - File and symbols: `orchestrator/analytics/read_models.py` (the `*_cost_usd` frozen-dataclass field
   defaults and the two `skill_trigger_rate` `else 0.0` returns), `orchestrator/analytics/sync.py`
-  (`duration_s` field default), `orchestrator/dashboard_charts.py` (`_empty_token_bucket` band seeds),
-  `orchestrator/dashboard_widgets.py` (`_topbar_html(spend_in_range=0.0)`, the `[0.0, 0.0]` daily
-  cost/token accumulator, and the rework-share `else 0.0`), `orchestrator/dashboard_html.py`
-  (`_relative_width_pct` / `_safe_ratio` zero returns), `orchestrator/dashboard_kpis.py` (the
+  (`duration_s` field default), `orchestrator/dashboard_charts_usage.py` (`_empty_token_bucket` band
+  seeds), `orchestrator/dashboard_kpi_strip.py` (the `[0.0, 0.0]` daily cost/token accumulator and the
+  rework-share `else 0.0`), `orchestrator/dashboard_widgets.py` (the `_topbar_html(spend_in_range=0.0)`
+  empty-window call), `orchestrator/dashboard_html.py` (`_relative_width_pct` zero return),
+  `orchestrator/dashboard_cards.py` (`_safe_ratio` zero return), `orchestrator/dashboard_kpis.py` (the
   success-rate `else 0.0`), and `orchestrator/trajectory_reader.py` (`total_cost_usd` default).
 - Rule: `WPS358`
 - Reason: Each is a genuine float zero -- a typed `float` field/keyword default, an accumulator seed,
@@ -695,8 +696,9 @@ considered.
 
 ### Axis-step ladder and one-off chart heights
 
-- File and symbols: `orchestrator/dashboard_charts.py`: the `2.5` rung of the nice-number tick ladder
-  in `_nice_axis_max`, and the one-off empty-state heights `330` and `150`.
+- File and symbols: `orchestrator/dashboard_charts_usage.py`: the `2.5` rung of the nice-number tick
+  ladder in `_nice_axis_max`, and the one-off empty-state height `330`; and the one-off empty-state
+  height `150` in `orchestrator/dashboard_charts_throughput.py`.
 - Rule: `WPS432`
 - Reason: `2.5` is one step of the standard `1 / 2 / 2.5 / 5 / 10` "nice tick" ladder, whose literal
   rungs read as the algorithm; wemake flags only `2.5` (the rest fall inside its allowlist). `330` and
@@ -720,25 +722,26 @@ considered.
 
 ### Plotly layout and trace dict keys
 
-- File and symbols: `orchestrator/dashboard_charts.py`: the plotly configuration keys `height`,
-  `paper`, `color`, `size`, `margin`, `text`, `yaxis`, and the single-character margin/size keys `t`,
-  `h`, `y`.
+- File and symbols: `orchestrator/dashboard_charts_usage.py`: the plotly trace key `color` (the
+  per-backend / per-band `usage_over_time` stack colors). The other plotly keys (`height`, `paper`,
+  `size`, `margin`, `text`, `yaxis`, and the single-character `t` / `h` / `y`) no longer repeat within a
+  single module now that the chart families live in separate leaves, so those findings are gone.
 - Rule: `WPS226`
-- Reason: These are plotly's own layout/trace dictionary vocabulary. Naming them -- especially the
-  single-character `t` / `h` / `y` -- forces a reader to dereference a constant to recover the plotly
-  attribute it stands for, which is less clear than the literal API key.
+- Reason: `color` is plotly's own trace-dictionary vocabulary. Naming it forces a reader to dereference a
+  constant to recover the plotly attribute it stands for, which is less clear than the literal API key.
 - Protected by: `tests/test_dashboard_charts.py`.
 - Reviewed: [ ]
 
 ### Dashboard KPI-tile and stack-mode dict keys
 
-- File and symbols: `orchestrator/dashboard_widgets.py`: the KPI-tile dict keys `label`, `value`,
-  `delta`, `sub`, `spark`; and the `type` / `backend` stack-mode option values.
+- File and symbols: `orchestrator/dashboard_kpi_strip.py`: the KPI-tile dict keys `label`, `value`,
+  `delta`, `sub`, `spark`; and `orchestrator/dashboard_widgets.py`: the `type` / `backend` stack-mode
+  option values.
 - Rule: `WPS226`
-- Reason: The KPI-tile keys are the contract between the KPI builder in `dashboard_widgets.py` and the
+- Reason: The KPI-tile keys are the contract between the KPI builder in `dashboard_kpi_strip.py` and the
   HTML renderer in `dashboard_html.py`; they read clearest as the same literal keys at both ends, and
   `value` additionally cannot become a constant without tripping `WPS110` (a blacklisted generic
-  name). `type` / `backend` are the two stack-mode radio option values.
+  name). `type` / `backend` are the two stack-mode radio option values in `dashboard_widgets.py`.
 - Protected by: `tests/test_dashboard.py`.
 - Reviewed: [ ]
 
@@ -757,11 +760,11 @@ considered.
 
 ### Numeric format-spec f-strings
 
-- File and symbols: the money `,.2f` specs in `orchestrator/dashboard_widgets.py` (`_cost_per_resolved`)
+- File and symbols: the money `,.2f` specs in `orchestrator/dashboard_kpi_strip.py` (`_cost_per_resolved`)
   and `orchestrator/dashboard_html.py` (`_money_or_dash`); the zero-pad `02d` hour label in
-  `orchestrator/dashboard_charts.py` (`hour_weekday_heatmap`); and the dynamic-precision `.{decimals}f` /
-  `,.{decimals}f` specs in `orchestrator/dashboard_theme.py` (`fmt_tokens`) and
-  `orchestrator/trajectory_dashboard.py` (`_fmt_cost_usd`).
+  `orchestrator/dashboard_charts_heatmap.py` (`hour_weekday_heatmap`); and the dynamic-precision
+  `.{decimals}f` / `,.{decimals}f` specs in `orchestrator/dashboard_theme.py` (`fmt_tokens`) and
+  `orchestrator/_trajectory_dashboard_html.py` (`_fmt_cost_usd`).
 - Rule: `WPS237`
 - Reason: `WPS237` accepts only a single simple format spec (e.g. `.2f`, `<10`, `x`, `,`); a combined
   or nested-placeholder spec such as `,.2f`, `02d`, or `.{decimals}f` trips the rule even when the
@@ -818,7 +821,7 @@ considered.
 
 ### Nice-number axis-tick float comparison
 
-- File and symbol: `orchestrator/dashboard_charts.py: _nice_axis_max`
+- File and symbol: `orchestrator/dashboard_charts_usage.py: _nice_axis_max`
 - Rule: `WPS459`
 - Reason: The `norm <= 2.5` rung buckets a normalized magnitude against the standard
   `1 / 2 / 2.5 / 5 / 10` "nice tick" ladder (the same `2.5` rung already recorded as a `WPS432`
@@ -878,6 +881,18 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-18 | 4.5/dashboard-reads | Complete | WPS202 93->63; leaf 31; WPS234 5->1 | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/dashboard-widgets | Complete | WPS202 63->21; leaf 42; WPS234 1->0 | Not committed | 4.5 rest |
 | 2026-07-18 | 4.5/dashboard-skill-matrix | Complete | WPS202 58->44; leaf 14; full gate | Not committed | 4.5 rest |
+| 2026-07-18 | 4.5/trajectory-reader | Complete | WPS202 36->19; leaf 17; full gate | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/analytics-sync | Complete | WPS202 40->27; leaf 13; WPS201 15->14 | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/dashboard-charts-cost | Complete | WPS202 59->35; leaf 24; full gate | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/dashboard-cards | Complete | WPS202 44->31; leaf 13; full gate | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/dashboard-kpi-strip | Complete | WPS202 42->30; leaf 12; full gate | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/trajectory-dashboard | Complete | WPS202 45->26; leaf 19; full gate | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/import-regroups | Complete | WPS235 read.py+dashboard.py ->0 | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/reader-reload | Complete | Reload A/B test; gate 2143 passed | Not committed | charts usage split |
+| 2026-07-19 | 4.5/review-r1 | Complete | Chart cycle/reload/logger fixes; gate 2152 | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/review-r2 | Complete | charts->hub; register+inventory; gate 2151 | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/review-r3 | Complete | inventory: import/metadata/collision families | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/review-r4 | Complete | traj-dashboard WPS201 12; sync test-alias cleanup | Not committed | 4.5 rest |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1321,3 +1336,137 @@ empty-state notice, and every consumer were preserved, so all 192 focused dashbo
 (3 skipped for live Postgres; the optional dashboard group installed so the plotly chart tests ran, and the
 `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact is unset for the run). Package 4.5 is not complete -- its
 remaining module-structure findings are untouched.
+
+The `trajectory-reader` slice split the record shapes and JSONL read side out of the 885-line
+`orchestrator/trajectory_reader.py` into a focused private `orchestrator/_trajectory_records.py`: the event / timeline /
+fixture constants and the `UNCONFIGURED_LOG_MESSAGE` banner, the five frozen record / view dataclasses (`TrajectoryRun`
+plus its `TrajectoryStepView` / `TimelineEntry` / `TurnUsageView` / `RunUsageView` sub-views), the log-path resolution
+(`resolve_log_path` / `log_unconfigured_message`), and the defensive coercion / parse / read pipeline (`_coerce_int` /
+`_coerce_float` / `_coerce_str` / `_coerce_str_tuple` / `_as_list` / `_parse_step` / `_parse_run_usage` /
+`_parse_turn` / `parse_record` / `_parse_trajectory_line` / `_read_trajectory_file` / `read_trajectories`).
+`orchestrator.trajectory_reader` stays the public module: it re-exports that read surface under its original names (two
+`from orchestrator._trajectory_records import ...` statements grouped at eight and five names so the split introduced no
+new `WPS235` too-many-names category) and keeps the free-text filtering plus the filter-option / summary aggregation
+(`FilterOptions` / `RunFilterOptions` / `_RunFilters` / `TrajectorySummary` and `filter_options` / `filter_runs` /
+`summarize` with their `_matches_*` / `_normalize_*` helpers), which read the parsed `TrajectoryRun` from the leaf. The
+new leaf depends one-directionally on `orchestrator.analytics` (for the live `TRAJECTORY_LOG_PATH` module attribute) and
+stays import-light so importing either half never pulls Streamlit onto the polling tick's import surface; the only
+consumer, `orchestrator.trajectory_dashboard`, and every test reach the models, constants, and read functions through
+`trajectory_reader` unchanged. The move cut the peak `WPS202` member count from 36 to 19 (`_trajectory_records`) + 17
+(`trajectory_reader`); every other finding travelled verbatim to whichever module now owns the code -- the two `WPS110`
+`content` view-field names and the `WPS110` `parse_record(obj)` keyword input moved to the leaf (their
+accepted-remainder register entry now names `_trajectory_records.py`), the `WPS214` twelve-method and `WPS338`
+method-order findings on `TrajectoryRun` moved with the class, and the `WPS358` `total_cost_usd` float zero stayed on
+`TrajectorySummary` in the facade -- so the tree-wide counts for those rules are unchanged and the split introduced no
+new rule category (the sole net change is the one extra `WPS202`, the inherent cost of splitting one over-limit module
+into two cohesive ones). Serialized `agent_trajectory` field names, newest-first ordering, the normalized timeline, run-
+and per-turn usage views, the synthetic-fixture predicate, malformed-line resilience, and every consumer were preserved,
+so all 91 focused trajectory-reader / trajectory-dashboard tests passed unchanged; a new `ModuleLayoutTest` pins each
+moved symbol's module of record, the re-export identity through `trajectory_reader`, and that the filter surface stays
+defined on the facade, and `docs/observability.md`'s read-model note names the new leaf. Ruff is clean and the full
+suite passed 2,107 tests (33 skipped for the optional dashboard / live Postgres; the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS`
+shell-export artifact is unset for the run). Package 4.5 is not complete.
+
+The `analytics-dashboard-trajectory-cleanup` slice (a PR-review follow-up on the trajectory-reader split) resolved the
+first-round cohesive splits and the two feasible import regroups the remaining-work note below previously listed, and
+closed the reload-isolation gap that split left. Five over-limit production modules each shed a cohesive leaf,
+re-exported through the owning facade with `__all__` byte-for-byte intact: `orchestrator/analytics/sync.py` -> the
+driver-free `orchestrator/analytics/_sync_rows.py` (record -> row mapping, the promoted-column / JSONB schema, and the
+canonical-JSON content hash; `WPS202` 40 -> 27, leaf 13, `WPS201` 15 -> 14), `orchestrator/dashboard_charts.py` -> the
+cost-bar `orchestrator/dashboard_charts_cost.py` and the shared-primitive `orchestrator/dashboard_charts_base.py`
+(59 -> 28, cost leaf 24, base 7), `orchestrator/dashboard_html.py` -> inline-HTML
+card family `orchestrator/dashboard_cards.py` (44 -> 31, leaf 13), `orchestrator/dashboard_widgets.py` -> the KPI-strip
+aggregations `orchestrator/dashboard_kpi_strip.py` (42 -> 30, leaf 12, `WPS201` 24 -> 25 for one import a re-imported
+leaf adds), and `orchestrator/trajectory_dashboard.py` -> the Streamlit-free HTML builders
+`orchestrator/_trajectory_dashboard_html.py` (45 -> 26, leaf 19). The two `WPS235` regroups split every over-eight
+re-export block into <= eight-name statements (the hub convention): `orchestrator/analytics/read.py`'s 18-name
+`read_models` block -> 0, and `orchestrator/dashboard.py`'s 31- / 12- / 11-name blocks -> 0 (12-name `dashboard_html`
+block dropped by the card split), clearing four `WPS235` findings (one on `read.py`, three on `dashboard.py`) at the
+cost of `WPS201` 27 -> 33 on the facade, whose import count is an already-accepted re-export-surface remainder. The
+reload fix: `trajectory_reader` now evicts its cached
+`_trajectory_records` leaf before re-importing, so an A/B reload of `orchestrator.analytics` +
+`orchestrator.trajectory_reader` binds the fresh reader to the fresh analytics instance and resolves its own world's
+`TRAJECTORY_LOG_PATH` (regression `test_reload_binds_reader_to_matching_analytics`). The facade-backed splits each got a
+module-of-record + facade-identity test (`CardHtmlExtractionTest` / `KpiStripExtractionTest`; the chart hub's
+`ChartHubExtractionTest` is described below), plus the reads / widgets extraction tests updated for the moved members;
+the private leaves got a module-of-record test (`SyncRowMappingExtractionTest`, `TrajectoryHtmlExtractionTest`); and
+`docs/observability.md` names every new module. A
+follow-up review round removed a leftover chart import cycle -- the cost leaf now takes the shared primitives from
+`dashboard_charts_base`, which neither chart module's builders import, so a direct `import dashboard_charts_cost` is
+cycle-free (`DirectLeafImportTest`) -- made the reload regression restore the `orchestrator` package's rebound submodule
+attributes (not just `sys.modules`), and kept `read_trajectories`'s unreadable-file warning on the historical
+`orchestrator.trajectory_reader` logger with a covering `test_unreadable_file_warns_and_returns_empty`. A third review
+round finished the deferred chart split and carried it to its end: the usage-over-time hero family (`usage_over_time` /
+`backend_per_day` plus the roll-up / trace / axis / layout helpers, 20 members), the weekday-hour heatmap
+(`hour_weekday_heatmap`, 4), and the per-day throughput bars (`done_per_day_bars`, 4) each moved to a focused
+`dashboard_charts_usage` / `dashboard_charts_heatmap` / `dashboard_charts_throughput` leaf, leaving
+`orchestrator/dashboard_charts.py` a pure re-export hub (0 defined members, its `WPS202` gone) over those leaves plus
+`_cost` and `_base` -- the same hub pattern as `dashboard` / `analytics.read`; a single looped `DirectLeafImportTest`
+and a `ChartHubExtractionTest` cover every chart leaf's clean-import and hub re-export identity, and the
+accepted-remainder register's cost / KPI / formatter / plotly-key entries were repointed at the modules that now own
+those findings. Every re-export, optional-dependency / Streamlit boundary, package reload isolation, persisted event /
+trajectory shape, and operator-visible output was preserved; ruff is clean and the full suite passed 2,151 tests (3
+skipped for live Postgres; the dashboard group installed so the plotly chart tests ran; the
+`CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact unset for the run). Package 4.5 is not complete.
+
+Exact remaining Package 4.5 work. Package 4.5 is "module and import structure" across the whole production codebase, so
+its scope is not limited to the analytics / dashboard / trajectory slice this issue covered. The outstanding production
+module-structure findings elsewhere are `WPS201` (imports), `WPS202` (members), `WPS203` (imported-name count),
+`WPS300` / `WPS301` (local-folder / dotted imports), `WPS402` (`noqa` overuse), `WPS410` / `WPS412` (package metadata /
+`__init__` logic), and `WPS458` (import collisions); `WPS235` (over-eight imported-name statements) is now clear
+tree-wide. Each next action is a cohesive split or a public-surface-preserving change (or, for a metadata / import-shape
+/ collision finding, a recorded accepted remainder).
+
+- Analytics / dashboard / trajectory (this issue's slice) is fully split: `orchestrator/dashboard_charts.py` is now a
+  pure re-export hub (0 defined members, no `WPS202`) over the per-family leaves `dashboard_charts_usage` (20),
+  `dashboard_charts_cost` (24), `dashboard_charts_heatmap` (4), `dashboard_charts_throughput` (4), and
+  `dashboard_charts_base` (7); every other extracted analytics / dashboard / trajectory module is a
+  single-responsibility cohesive leaf. What remains here is only the accepted-remainder register (below), not a further
+  split.
+- Rest of the codebase (future per-module slices, each the same triage: extract a cohesive leaf, or record an accepted
+  cohesive / compat remainder where a split would only fragment one cohesive unit). Compatibility re-export hubs,
+  accepted like `dashboard`: `orchestrator/workflow.py` (`WPS202` 57 / `WPS201` 128) and `orchestrator/worktrees.py`
+  (`WPS201` 52). Modules still carrying a member-count / import-count finding (members / imports): `base_sync.py`
+  (60 / 19), `stages/implementing.py` (68 / 48), `stages/validating.py` (59 / 43), `stages/decomposition.py` (54 / 41),
+  `workflow_messages.py` (51), `_usage_metrics.py` (45), `agents.py` (40 / 16), `stages/documenting.py` (36 / 36),
+  `stages/fixing.py` (33 / 26), `stages/conflicts.py` (32 / 33), `stages/in_review.py` (25 / 23), `main.py` (25 / 17),
+  `_usage_trajectory.py` (25), `worktree_lifecycle.py` (24), `stages/question.py` (22 / 20),
+  `branch_publication.py` (21 / 14), `config.py` (18),
+  `github.py` (17 / 15), `git_plumbing.py` (14), `skill_catalog.py` (12), `verify.py` (12), `_repo_config.py` (11),
+  `_usage_skills.py` (11), `state_machine.py` (10), and `workflow_drift.py` (9). Each is decided per slice.
+- Other outstanding module-structure families (record as future or accepted work, same triage):
+  - `WPS203` (module with too many imported names, > 50): `stages/implementing.py` (52) trims when that stage's import
+    fan-in is split, and the `workflow.py` (138) / `worktrees.py` (52) compatibility hubs are accepted like `dashboard`
+    (141, already recorded below) because re-exporting the historical surface is their whole role.
+  - `WPS300` (local-folder import): three `from . import ...` statements in `stages/implementing.py`, which convert to
+    absolute imports when that stage is sliced.
+  - `WPS301` (dotted raw import): one `import logging.handlers` in `main.py`, which converts to `from logging import
+    handlers` when `main.py` is sliced.
+  - `WPS402` (`noqa` overuse): 23 `noqa` on `orchestrator/dashboard.py` -- accepted; they mark the intentional
+    E402-below-`sys.path`-shim compatibility re-exports, joining the register entry below.
+  - `WPS410` (non-standard package metadata): the root `orchestrator/__init__.py` (`__version__` package version) and
+    the `workflow.py` / `worktrees.py` `__all__` inventories -- accepted, joining the already-recorded `dashboard` /
+    `analytics` / `analytics.read` `__all__` entries below.
+  - `WPS412` (logic in an `__init__.py`): the root `orchestrator/__init__.py` -- accepted package-init wiring, joining
+    the already-recorded `analytics/__init__.py` knob binding below.
+  - `WPS458` (import collision -- a submodule imported both as `from pkg import x` and `import pkg.x`): fourteen
+    findings, thirteen on `orchestrator.config` (`base_sync.py`, `branch_publication.py`, `git_plumbing.py`,
+    `workflow.py`, `workflow_messages.py`, `worktree_lifecycle.py`, and the seven `stages/*` handlers) plus one on
+    `logging` in `main.py`. Each resolves by choosing a single import form; recorded as future work.
+- Documented-accepted remainders (do not split -- record in the accepted-remainder register instead): the `dashboard`
+  and `analytics` / `analytics.read` compatibility facades carry `WPS410` (`__all__`), `WPS412` (package-init knob
+  binding), `WPS203` (re-exported-name count on `dashboard`), and `WPS402` (`noqa` count on `dashboard`) because their
+  whole role is to re-export the historical surface; `WPS201` import counts on `orchestrator/analytics/_recording.py`
+  (14), `orchestrator/analytics/sync.py` (14, whose imports are all used -- the two test-only `_sync_rows` aliases were
+  dropped without changing the statement count, since `WPS201` counts import statements, not names),
+  `orchestrator/dashboard.py` (33, raised by the hub-convention regroup), and `orchestrator/dashboard_widgets.py` (25)
+  trim only if a member split moves importers out (`trajectory_dashboard.py` was already cleared to 12 by dropping an
+  unused `logging` import, no split needed); and the cohesive leaf / driver / page modules within the accepted `WPS202`
+  magnitude --
+  `analytics/sync` 27, `_sync_rows` 13, `_recording` 27, `_retention` 13, `_trajectories` 16, `connection` 11,
+  `predicates` 10, `read_models` 18, `read_raw` 22, `read_rollup` 33, `read_dashboard` 31, `dashboard_reads` 31,
+  `dashboard` 21, `dashboard_html` 31, `dashboard_cards` 13, `dashboard_kpi_strip` 12, `dashboard_charts_usage` 20,
+  `dashboard_charts_cost` 24, `dashboard_widgets` 30, `dashboard_skill_matrix` 14, `dashboard_state` 15,
+  `trajectory_dashboard` 26, `_trajectory_dashboard_html` 19, and the trajectory-reader modules 19 / 17 -- carry the
+  accepted cohesive magnitude a further split would only fragment or move (`dashboard_charts` is a 0-member hub and
+  `dashboard_charts_base` / `_heatmap` / `_throughput` sit at or below the 7-member limit, so they carry no finding).

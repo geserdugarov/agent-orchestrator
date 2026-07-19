@@ -4,13 +4,14 @@
 
 The Streamlit page in `orchestrator.dashboard` delegates everything
 between "read-model rows in hand" and "cards on the page" to this
-module: the KPI-strip preparation and the cohesive widget-rendering
-pipeline.
+module: the cohesive widget-rendering pipeline.
 
-- KPI preparation -- the token / throughput / rework aggregations
+- The token / throughput / rework KPI-strip aggregations
   (`_summary_total_tokens` ... `_build_kpi_strip_data`) that turn a
   `Summary` aggregate plus the first-wave read rows into the four KPI
-  tiles and the resolved / rejected throughput totals.
+  tiles and the resolved / rejected throughput totals live in
+  `orchestrator.dashboard_kpi_strip`; this module builds the strip by
+  handing a `_KpiInputs` to `_build_kpi_strip_data` through the facade.
 - The two-wave render pipeline -- the first-wave topbar / filter-meta /
   insight / KPI paint (`_render_first_wave` and its `_render_*`
   helpers), the second-wave chart / table cards (`_render_chart_widgets`
@@ -37,17 +38,18 @@ import dashboard as _dashboard`), not as module-local names, so
 `patch.object(dashboard, ...)` on any of those re-exports intercepts the
 running pipeline (mirroring the `workflow.py` stage-handler facade). The
 module-private helpers, the read primitives (`_scoped_read` / `_filter_list`),
-and the pure `dashboard_html` / `dashboard_skill_matrix` / `dashboard_kpis` /
-`dashboard_state` builders are called directly.
+and the pure `dashboard_html` / `dashboard_cards` / `dashboard_skill_matrix` /
+`dashboard_kpis` / `dashboard_state` builders are called directly.
 
 Streamlit / Plotly / pandas are never imported here: every helper that
 needs `st`, a chart builder, the theme tokens, or a DataFrame takes the
 loaded handle as a plain parameter (bundled in `_DashboardModules`, or
 passed directly). Together with the stdlib-plus-`orchestrator` imports
 below (`analytics.read`, the import-light `dashboard_state` /
-`dashboard_kpis` / `dashboard_html` / `dashboard_skill_matrix` /
-`dashboard_reads` helpers), this keeps the module off the polling
-tick's dependency footprint; `tests/test_dashboard.py` asserts the invariant.
+`dashboard_kpis` / `dashboard_html` / `dashboard_cards` /
+`dashboard_kpi_strip` / `dashboard_skill_matrix` / `dashboard_reads`
+helpers), this keeps the module off the polling tick's dependency
+footprint; `tests/test_dashboard.py` asserts the invariant.
 """
 from __future__ import annotations
 
@@ -64,29 +66,28 @@ from orchestrator.analytics.read import (
     SkillTriggerRateRow,
     Summary,
 )
-from orchestrator.dashboard_html import (
+from orchestrator.dashboard_cards import (
     _backend_efficiency_card_html,
     _card_header_html,
     _cost_coverage_bar_html,
-    _filter_meta_html,
     _insights_html,
-    _issues_table_html,
+    _reliability_tiles_html,
 )
 from orchestrator.dashboard_html import (
+    _filter_meta_html,
+    _issues_table_html,
     _kpi_strip_html,
-    _reliability_tiles_html,
     _skill_triggers_html,
     _topbar_html,
 )
+from orchestrator.dashboard_kpi_strip import _KpiInputs
 from orchestrator.dashboard_skill_matrix import (
     _skill_matrix_html,
     parse_skill_matrix_sort,
 )
 from orchestrator.dashboard_kpis import (
     compute_insights,
-    kpi_delta,
     reliability_tile_data,
-    rework_totals,
     top_expensive_issues,
 )
 from orchestrator.dashboard_reads import (
@@ -100,12 +101,6 @@ from orchestrator.dashboard_state import (
     format_tz_offset,
     shift_ts,
 )
-
-# The KPI-strip payload: the four KPI-card dicts plus the resolved /
-# rejected throughput totals `_render_first_wave` folds into a
-# `_DashboardKpis`. Named so `_build_kpi_strip_data`'s return annotation
-# stays shallow.
-_KpiStripData = tuple[list[dict[str, Any]], int, int]
 
 # Plotly config passed to every `st.plotly_chart` call. Disabling
 # the modebar keeps the hover camera/zoom/pan toolbar off the cards
@@ -434,182 +429,6 @@ def _render_empty_window(
     )
     modules.st.info(EMPTY_WINDOW_MESSAGE)
     _dashboard._render_drilldown_view(modules, page.controls.filters)
-
-
-def _summary_total_tokens(summary: Summary) -> int:
-    """Return the dashboard token total used by KPIs and sparklines.
-
-    Cache read/write tokens are counted with input/output so the KPI
-    total matches the hero chart's Cache band. The cumulative
-    `cached_tokens` field is intentionally excluded to avoid double
-    counting reused prompt slices.
-    """
-    return int(
-        (summary.total_input_tokens or 0)
-        + (summary.total_output_tokens or 0)
-        + (summary.total_cache_read_tokens or 0)
-        + (summary.total_cache_write_tokens or 0)
-    )
-
-
-def _time_series_total_tokens(point: Any) -> float:
-    return float(
-        (point.input_tokens or 0)
-        + (point.output_tokens or 0)
-        + (point.cache_read_tokens or 0)
-        + (point.cache_write_tokens or 0)
-    )
-
-
-def _throughput_totals(throughput_rows: Sequence[Any]) -> tuple[int, int]:
-    resolved = sum(int(row.resolved or 0) for row in throughput_rows)
-    rejected = sum(int(row.rejected or 0) for row in throughput_rows)
-    return resolved, rejected
-
-
-def _daily_point_totals(
-    ts_points: Sequence[Any],
-) -> dict[date, list[float]]:
-    totals: dict[date, list[float]] = {}
-    for point in ts_points:
-        daily = totals.setdefault(point.day, [0.0, 0.0])
-        daily[0] += float(point.cost_usd or 0)
-        daily[1] += _time_series_total_tokens(point)
-    return totals
-
-
-@dataclass(frozen=True)
-class _DailyKpiSeries:
-    cost: Sequence[float]
-    tokens: Sequence[float]
-    done: Sequence[int]
-
-
-def _daily_kpi_series(
-    *, ts_points: Sequence[Any], throughput_rows: Sequence[Any]
-) -> _DailyKpiSeries:
-    """Return cost/token/resolved sparkline series for KPI cards.
-
-    One entry is emitted per day present in the time-series read. Daily
-    tokens use the same input + output + cache_read + cache_write
-    accounting as the headline token KPI.
-    """
-    totals = _daily_point_totals(ts_points)
-    days = sorted(totals)
-    done_index = {row.day: int(row.resolved or 0) for row in throughput_rows}
-    return _DailyKpiSeries(
-        cost=[totals[day][0] for day in days],
-        tokens=[totals[day][1] for day in days],
-        done=[done_index.get(day, 0) for day in days],
-    )
-
-
-@dataclass(frozen=True)
-class _KpiInputs:
-    theme: Any
-    summary: Summary
-    prev_summary: Summary
-    ts_points: Sequence[Any]
-    throughput_rows: Sequence[Any]
-    review_round_rows: Sequence[Any]
-    days_in_window: int
-
-
-@dataclass(frozen=True)
-class _KpiTotals:
-    cost: float
-    tokens: int
-    previous_cost: float
-    previous_tokens: int
-    resolved: int
-    rejected: int
-    review_cost: float
-    rework_cost: float
-
-
-def _kpi_totals(inputs: _KpiInputs) -> _KpiTotals:
-    throughput = _throughput_totals(inputs.throughput_rows)
-    review_costs = rework_totals(inputs.review_round_rows)
-    return _KpiTotals(
-        cost=float(inputs.summary.total_cost_usd or 0),
-        tokens=_summary_total_tokens(inputs.summary),
-        previous_cost=float(inputs.prev_summary.total_cost_usd or 0),
-        previous_tokens=_summary_total_tokens(inputs.prev_summary),
-        resolved=throughput[0],
-        rejected=throughput[1],
-        review_cost=review_costs[0],
-        rework_cost=review_costs[1],
-    )
-
-
-def _cost_per_resolved(totals: _KpiTotals) -> str:
-    if totals.resolved <= 0:
-        return "—"
-    avg_cost = totals.cost / totals.resolved
-    return f"${avg_cost:,.2f}"
-
-
-def _kpi_strip_entries(
-    inputs: _KpiInputs,
-    totals: _KpiTotals,
-    daily: _DailyKpiSeries,
-    rework_share: float,
-) -> list[dict[str, Any]]:
-    daily_cost = inputs.theme.fmt_money(totals.cost / inputs.days_in_window)
-    daily_tokens = inputs.theme.fmt_tokens(totals.tokens / inputs.days_in_window)
-    rework_pct = rework_share * 100
-    rework_cost = inputs.theme.fmt_money_exact(totals.rework_cost)
-    return [
-        {
-            "label": "Total spend",
-            "value": inputs.theme.fmt_money_exact(totals.cost),
-            "delta": kpi_delta(totals.cost, totals.previous_cost),
-            "sub": f"{daily_cost}/day",
-            "spark": daily.cost,
-            "spark_color": inputs.theme.ACCENT,
-        },
-        {
-            "label": "Total tokens",
-            "value": inputs.theme.fmt_tokens(totals.tokens),
-            "delta": kpi_delta(totals.tokens, totals.previous_tokens),
-            "sub": f"{daily_tokens}/day",
-            "spark": daily.tokens,
-            "spark_color": inputs.theme.TOKEN_TYPE_COLORS["Input"],
-        },
-        {
-            "label": "Cost / resolved issue",
-            "value": _cost_per_resolved(totals),
-            "delta": None,
-            "sub": f"{totals.resolved} resolved · {totals.rejected} rejected",
-            "spark": daily.done,
-            "spark_color": inputs.theme.TOKEN_TYPE_COLORS["Cache"],
-        },
-        {
-            "label": "Rework share",
-            "value": f"{rework_pct:.0f}%",
-            "delta": None,
-            "sub": f"{rework_cost} in review rounds >= 1",
-            "spark": None,
-        },
-    ]
-
-
-def _build_kpi_strip_data(
-    inputs: _KpiInputs,
-) -> _KpiStripData:
-    """Build the KPI-strip dictionaries plus throughput totals."""
-    totals = _kpi_totals(inputs)
-    rework_share = (
-        (totals.rework_cost / totals.review_cost)
-        if totals.review_cost > 0
-        else 0.0
-    )
-    daily = _daily_kpi_series(
-        ts_points=inputs.ts_points,
-        throughput_rows=inputs.throughput_rows,
-    )
-    kpis = _kpi_strip_entries(inputs, totals, daily, rework_share)
-    return kpis, totals.resolved, totals.rejected
 
 
 def _backend_tokens_by_day(
