@@ -32,7 +32,7 @@ ALL workflow-owned helpers (`_park_awaiting_human`, `_handle_dev_fix_result`,
 `_post_user_content_change_result`, `_resume_dev_with_text`, `_now_iso`,
 the worktree plumbing, the drift / manifest / messaging helpers
 re-exported into `workflow`) are reached through the parent module via
-`from .. import workflow as _wf` at call time. The compatibility surface
+`from orchestrator import workflow as _wf` at call time. The compatibility surface
 tests rely on -- `patch.object(workflow, "_foo")` -- has to keep working
 from inside the stage module too, so the handler must NOT direct-import
 these names from `workflow_drift` / `workflow_messages` / `worktrees`;
@@ -49,7 +49,6 @@ from github.Issue import Issue
 
 from orchestrator import config
 from orchestrator.comment_trust import filter_trusted
-from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import (
     GitHubClient,
@@ -70,7 +69,7 @@ class _InReviewContext:
     pinned PR number `_handle_in_review` already validated as present.
     """
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
     pr: Any
@@ -713,7 +712,7 @@ def _park_missing_pr_number(
     gh.write_pinned_state(issue, state)
 
 
-def _handle_in_review(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_in_review(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     """Drive an in_review issue toward done / rejected, or hand fresh PR
     feedback off to the `fixing` stage.
 

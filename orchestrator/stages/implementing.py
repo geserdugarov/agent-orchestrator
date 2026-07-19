@@ -17,7 +17,7 @@ drift. The command parser + classifier are shared via `workflow_messages`.
 ALL workflow-owned helpers (`_park_awaiting_human`, `_run_agent_tracked`,
 `_now_iso`, the worktree plumbing, the drift / manifest / messaging
 helpers re-exported into `workflow`) are reached through the parent
-module via `from .. import workflow as _wf` at call time. The
+module via `from orchestrator import workflow as _wf` at call time. The
 compatibility surface tests rely on -- `patch.object(workflow, "_foo")`
 -- has to keep working from inside the stage module too, so the
 handlers must NOT direct-import these names from `workflow_drift` /
@@ -35,7 +35,6 @@ from github.Issue import Issue
 from orchestrator import config
 from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import filter_trusted
-from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import (
     GitHubClient,
@@ -465,7 +464,7 @@ def _dev_session_retirement_reason(
 
 
 def _build_dev_spawn_prompt(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     followup_text: str,
     *,
@@ -525,7 +524,7 @@ def _persist_dev_session_after_run(
 @dataclass(frozen=True)
 class _DevResumeContext:
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
     followup_text: str
@@ -538,7 +537,7 @@ class _DevResumeContext:
     def build(
         cls,
         gh: GitHubClient,
-        spec: RepoSpec,
+        spec: config.RepoSpec,
         issue: Issue,
         resume_args: tuple,
         option_fields: dict,
@@ -564,7 +563,7 @@ class _DevResumeContext:
     def _run_attempt(
         self, *, fresh: bool, session_id: Optional[str],
     ) -> tuple[AgentResult, bool]:
-        from .. import workflow as _wf
+        from orchestrator import workflow as _wf
 
         session = self.plan.session
         agent_result = _wf._run_agent_tracked(
@@ -606,7 +605,7 @@ class _DevResumeContext:
         )
 
     def execute(self) -> Tuple[Path, AgentResult, bool]:
-        from .. import workflow as _wf
+        from orchestrator import workflow as _wf
 
         agent_result, paused = self._run_attempt(
             fresh=self.plan.fresh_spawn,
@@ -638,7 +637,7 @@ class _DevResumeContext:
 
 
 def _ensure_resume_worktree(
-    spec: RepoSpec, issue: Issue, state: PinnedState,
+    spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> Path:
     from orchestrator import workflow as _wf
 
@@ -654,7 +653,7 @@ def _ensure_resume_worktree(
 
 def _resume_dev_with_text(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     *resume_args,
     **option_fields,
@@ -716,7 +715,7 @@ def _resume_dev_with_text(
 
 
 def _resume_developer_on_human_reply(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
     *,
     pause_guard: bool = False,
 ) -> Optional[Tuple[Path, AgentResult, bool]]:
@@ -769,7 +768,7 @@ def _resume_developer_on_human_reply(
 
 def _publish_committed_work(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     work: _AgentWork,
@@ -817,7 +816,7 @@ def _park_agent_timeout(
 
 
 def _try_recover_implementing_timeout_park(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> str:
     """Quietly publish a clean commit stranded by an implementer timeout.
 
@@ -882,7 +881,7 @@ def _try_recover_implementing_timeout_park(
 
 
 def _handle_stale_question_park(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> bool:
     """Clear a stale question-stage park left by a `question` -> `implementing`
     relabel, or refuse the relabel when it would ship question-agent work.
@@ -946,7 +945,7 @@ class _QuestionRelabelHazard:
 
 
 def _question_relabel_hazard(
-    spec: RepoSpec, issue: Issue, state: PinnedState,
+    spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> Optional[_QuestionRelabelHazard]:
     from orchestrator import workflow as _wf
 
@@ -1011,7 +1010,7 @@ def _clear_stale_question_park(
 
 def _retry_parked_dev_session(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     new_comments: list,
@@ -1063,7 +1062,7 @@ def _retry_parked_dev_session(
 
 
 def _handle_parked_continue_command(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
     """Handle an operator `/orchestrator continue` on a parked `implementing`
     issue BEFORE generic user-content-drift / resume processing.
@@ -1087,7 +1086,7 @@ def _handle_parked_continue_command(
     if decision is None:
         return False
     if decision.action == "refuse":
-        from .. import workflow as _wf
+        from orchestrator import workflow as _wf
 
         _wf._refuse_parked_continue(gh, issue, state)
         gh.write_pinned_state(issue, state)
@@ -1128,7 +1127,7 @@ def _parked_continue_decision(
 
 def _handle_user_content_drift(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     new_hash: str,
@@ -1169,7 +1168,7 @@ class _ImplementingDriftRun:
 
 
 def _run_implementing_drift_resume(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> _ImplementingDriftRun:
     from orchestrator import workflow as _wf
 
@@ -1216,7 +1215,7 @@ def _post_implementing_drift_ack(
 
 def _dispose_implementing_drift(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     drift: _ImplementingDriftRun,
@@ -1247,7 +1246,7 @@ def _dispose_implementing_drift(
 
 
 def _resume_dev_on_implementing_drift(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> None:
     from orchestrator import workflow as _wf
 
@@ -1264,7 +1263,7 @@ def _resume_dev_on_implementing_drift(
 
 
 def _handle_pre_session_drift(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
     from orchestrator import workflow as _wf
 
@@ -1295,7 +1294,7 @@ def _handle_pre_session_drift(
 
 
 def _recover_quiet_implementer_timeout(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
     if state.get(_PARK_REASON) != _AGENT_TIMEOUT:
         return False
@@ -1310,7 +1309,7 @@ def _recover_quiet_implementer_timeout(
 
 
 def _prepare_awaiting_dev_run(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> Optional[_PreparedDevRun]:
     from orchestrator import workflow as _wf
 
@@ -1340,7 +1339,7 @@ def _recovered_dev_result(state: PinnedState) -> AgentResult:
 
 def _spawn_implementer(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     worktree: Path,
@@ -1378,7 +1377,7 @@ def _spawn_implementer(
 
 
 def _prepare_active_dev_run(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> Optional[_PreparedDevRun]:
     from orchestrator import workflow as _wf
 
@@ -1404,7 +1403,7 @@ def _prepare_active_dev_run(
 
 
 def _prepare_dev_run(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> Optional[_PreparedDevRun]:
     """Set up and run (or recover) the dev agent for one implementing tick.
 
@@ -1435,7 +1434,7 @@ def _prepare_dev_run(
 
 def _dispose_agent_result(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     prepared: _PreparedDevRun,
@@ -1485,7 +1484,7 @@ def _dispose_agent_result(
 
 
 def _implementing_preflight(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
     from orchestrator import workflow as _wf
 
@@ -1501,7 +1500,7 @@ def _implementing_preflight(
 
 
 def _handle_detected_implementing_drift(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
     from orchestrator import workflow as _wf
 
@@ -1511,7 +1510,7 @@ def _handle_detected_implementing_drift(
     )
 
 
-def _handle_implementing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_implementing(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
@@ -1590,7 +1589,7 @@ def _format_pr_agent_message(
     return f"{head}\n\n{_PR_BODY_TRUNCATION_MARKER}"
 
 
-def _derive_pr_title(spec: RepoSpec, issue: Issue, wt: Path) -> str:
+def _derive_pr_title(spec: config.RepoSpec, issue: Issue, wt: Path) -> str:
     """PR title for a freshly opened dev PR.
 
     Prefers the first commit's conventional subject; when that carries no
@@ -1628,7 +1627,7 @@ def _build_pr_body(
 
 def _reuse_or_open_pr(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     work: _PRWork,
@@ -1713,7 +1712,7 @@ def _reset_implementing_counters(state: PinnedState) -> None:
 
 def _on_commits(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     agent_result: AgentResult,

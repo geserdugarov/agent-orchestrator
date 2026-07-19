@@ -29,7 +29,7 @@ internal to this module and are reached directly, not through the facade.
 ALL workflow-owned helpers (`_park_awaiting_human`, `_run_agent_tracked`,
 `_now_iso`, the worktree plumbing, the drift / manifest / messaging
 helpers re-exported into `workflow`) are reached through the parent
-module via `from .. import workflow as _wf` at call time. The
+module via `from orchestrator import workflow as _wf` at call time. The
 compatibility surface tests rely on -- `patch.object(workflow, "_foo")`
 -- has to keep working from inside the stage module too, so the
 handlers must NOT direct-import these names from `workflow_drift` /
@@ -48,7 +48,6 @@ from github.Issue import Issue
 from orchestrator import config
 from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import filter_trusted
-from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import GitHubClient, PinnedState
 
@@ -97,7 +96,7 @@ class _DevFixRun:
 @dataclass(frozen=True)
 class _RequestedChanges:
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
     decision: _ReviewerDecision
@@ -184,7 +183,7 @@ _VALIDATING_TRANSIENT_PARK_REASONS = frozenset(
 
 
 def _stranded_fix_unpushed(
-    spec: RepoSpec, wt: Path, state: PinnedState, issue: Issue
+    spec: config.RepoSpec, wt: Path, state: PinnedState, issue: Issue
 ) -> bool:
     """True when a clean worktree HEAD is strictly ahead of the remote PR
     branch -- a fix an earlier parked run committed but never published.
@@ -232,7 +231,7 @@ def _park_dev_fix_timeout(
 
 
 def _dev_fix_is_publishable(
-    spec: RepoSpec, issue: Issue, state: PinnedState, run: _DevFixRun,
+    spec: config.RepoSpec, issue: Issue, state: PinnedState, run: _DevFixRun,
 ) -> bool:
     from orchestrator import workflow as _wf
 
@@ -248,7 +247,7 @@ def _dev_fix_is_publishable(
 
 def _publish_dev_fix(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     run: _DevFixRun,
@@ -274,7 +273,7 @@ def _publish_dev_fix(
 
 def _dispose_dev_fix_result(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     run: _DevFixRun,
@@ -294,7 +293,7 @@ def _dispose_dev_fix_result(
 
 def _handle_dev_fix_result(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     *context_args,
     **fields,
@@ -336,7 +335,7 @@ def _post_drift_ack(
 
 def _dispose_user_content_change_result(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     run: _DevFixRun,
@@ -365,7 +364,7 @@ def _dispose_user_content_change_result(
 
 def _post_user_content_change_result(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     *context_args,
 ) -> str:
@@ -417,7 +416,7 @@ def _bump_review_round(state: PinnedState) -> None:
 
 
 def _recover_failed_push(
-    spec: RepoSpec, issue: Issue, state: PinnedState,
+    spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> str:
     from orchestrator import workflow as _wf
 
@@ -432,7 +431,7 @@ def _recover_failed_push(
 
 
 def _recover_timed_out_fix(
-    spec: RepoSpec, issue: Issue, state: PinnedState,
+    spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> str:
     from orchestrator import workflow as _wf
 
@@ -455,7 +454,7 @@ def _recover_timed_out_fix(
 
 
 def _try_recover_validating_transient_park(
-    spec: RepoSpec, issue: Issue, state: PinnedState
+    spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> str:
     """Quietly attempt to clear a transient validating park.
 
@@ -769,7 +768,7 @@ def _ratchet_watermark(prev, seeded):
 
 
 def _finalize_validating_terminal(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> bool:
     """Terminal short-circuits checked before the reviewer runs; True when one
     fired and the caller must return.
@@ -801,7 +800,7 @@ class _ValidatingDriftRun:
 
 
 def _run_validating_drift(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> _ValidatingDriftRun:
     from orchestrator import workflow as _wf
 
@@ -832,7 +831,7 @@ def _defer_validating_drift(state: PinnedState) -> bool:
 
 def _finish_validating_drift(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     run: _ValidatingDriftRun,
@@ -854,7 +853,7 @@ def _finish_validating_drift(
 
 
 def _resume_dev_on_validating_drift(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> bool:
     """Resume the dev session when a human edited the issue title/body while the
     reviewer was running.
@@ -923,7 +922,7 @@ def _resume_dev_on_validating_drift(
 @dataclass(frozen=True)
 class _AwaitingValidation:
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
     park_reason: Any
@@ -931,7 +930,7 @@ class _AwaitingValidation:
 
     @classmethod
     def build(
-        cls, gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+        cls, gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
     ) -> _AwaitingValidation:
         return cls(
             gh,
@@ -1112,7 +1111,7 @@ def _resume_validating_awaiting_dev(context: _AwaitingValidation) -> str:
 
 
 def _handle_validating_awaiting_human(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> str:
     """Route an awaiting-human `validating` tick after a park.
 
@@ -1320,7 +1319,7 @@ def _park_squash_failure(
 
 def _squash_approved_work(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     reviewer_run: _ReviewerRun,
@@ -1343,7 +1342,7 @@ def _squash_approved_work(
 
 def _finalize_validating_approval(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     reviewer_run: _ReviewerRun,
@@ -1495,7 +1494,7 @@ def _finish_requested_fix(
 
 def _handle_validating_changes_requested(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     decision: _ReviewerDecision,
@@ -1559,7 +1558,7 @@ def _park_review_cap(
 
 def _run_reviewer_round(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     pr_number,
@@ -1636,7 +1635,7 @@ def _run_reviewer_round(
 
 def _dispatch_reviewer_result(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     reviewer_run: _ReviewerRun,
@@ -1693,7 +1692,7 @@ def _dispatch_reviewer_result(
     )
 
 
-def _handle_validating(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_validating(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     state = gh.read_pinned_state(issue)
     pr_number = state.get("pr_number")
 

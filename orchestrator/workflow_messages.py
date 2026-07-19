@@ -37,7 +37,6 @@ from github.Issue import Issue
 from orchestrator import config
 from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import is_trusted_author
-from orchestrator.config import RepoSpec
 from orchestrator.github import GitHubClient, PinnedState
 
 
@@ -102,7 +101,7 @@ _TRACKED_REPOS_CAP = 20
 
 
 def _build_tracked_repos_context(
-    current: RepoSpec, specs: list[RepoSpec]
+    current: config.RepoSpec, specs: list[config.RepoSpec]
 ) -> str:
     """Render the 'other tracked repos' awareness block, or '' when there is
     nothing useful to say.
@@ -889,10 +888,10 @@ def _recent_comments_text(issue: Issue, max_chars: int = 4000) -> str:
 
 
 def _build_implement_prompt(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     comments_text: str,
-    specs: list[RepoSpec],
+    specs: list[config.RepoSpec],
 ) -> str:
     body = issue.body or _NO_BODY
     convo = comments_text or _NO_PRIOR_COMMENTS
@@ -914,10 +913,10 @@ def _build_implement_prompt(
 
 
 def _build_fresh_respawn_preamble(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     comments_text: str,
-    specs: list[RepoSpec],
+    specs: list[config.RepoSpec],
 ) -> str:
     """Re-grounding header prepended to a FRESH dev spawn that REPLACES a
     retired or poisoned session mid-issue (proactive rotation, silent-park
@@ -952,10 +951,10 @@ def _build_fresh_respawn_preamble(
 
 
 def _build_review_prompt(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     comments_text: str,
-    specs: list[RepoSpec],
+    specs: list[config.RepoSpec],
     dev_backend: str = "agent",
 ) -> str:
     body = issue.body or _NO_BODY
@@ -986,10 +985,10 @@ def _build_review_prompt(
 
 
 def _build_documentation_prompt(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     comments_text: str,
-    specs: list[RepoSpec],
+    specs: list[config.RepoSpec],
 ) -> str:
     """Prompt for the documentation pass that runs as the final-docs
     handoff between reviewer approval and `in_review`.
@@ -1057,10 +1056,10 @@ def _build_fix_prompt(review_feedback: str) -> str:
 
 
 def _build_decompose_prompt(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     comments_text: str,
-    specs: list[RepoSpec],
+    specs: list[config.RepoSpec],
 ) -> str:
     body = issue.body or _NO_BODY
     convo = comments_text or _NO_PRIOR_COMMENTS
@@ -1205,10 +1204,10 @@ def _build_conflict_resolution_prompt(
 
 
 def _build_question_prompt(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     comments_text: str,
-    specs: list[RepoSpec],
+    specs: list[config.RepoSpec],
 ) -> str:
     """Compose the read-only prompt used by the `question` stage.
 

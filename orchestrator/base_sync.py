@@ -55,7 +55,6 @@ from github.PullRequest import PullRequest
 
 from orchestrator import config
 from orchestrator.comment_trust import filter_trusted
-from orchestrator.config import RepoSpec
 from orchestrator.branch_publication import _branch_ahead_behind
 from orchestrator.git_plumbing import (
     _authed_fetch,
@@ -80,7 +79,7 @@ log = logging.getLogger(__name__)
 
 
 def _rebase_base_into_worktree(
-    spec: RepoSpec, worktree: Path
+    spec: config.RepoSpec, worktree: Path
 ) -> Tuple[bool, list[str]]:
     """Run `git rebase origin/<base>` in the worktree.
 
@@ -114,7 +113,7 @@ def _rebase_base_into_worktree(
 
 
 def _merge_base_into_worktree(
-    spec: RepoSpec, worktree: Path
+    spec: config.RepoSpec, worktree: Path
 ) -> Tuple[bool, list[str]]:
     """Compatibility alias for older patches/imports.
 
@@ -160,7 +159,7 @@ def _issue_worktree_number(worktree: Path) -> Optional[int]:
 
 def _sync_discovered_worktree(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     worktree: Path,
     issue_number: int,
     scheduler: Optional[IssueScheduler],
@@ -185,7 +184,7 @@ def _sync_discovered_worktree(
 
 def _refresh_base_and_worktrees(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     *,
     scheduler: Optional[IssueScheduler] = None,
 ) -> None:
@@ -332,7 +331,7 @@ class _AutoRebaseContext:
     """Stable inputs for one refresh-time PR rebase attempt."""
 
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
     worktree: Path
@@ -347,7 +346,7 @@ class _AutoRebaseRecoveryContext:
     """Stable inputs for finalizing one interrupted auto-rebase."""
 
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
     worktree: Path
@@ -956,7 +955,7 @@ def _route_recovery_snapshot(
 
 def _recover_pending_auto_base_rebase(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     worktree: Path,
@@ -1023,7 +1022,7 @@ def _issue_skips_base_sync(issue: Issue, issue_number: int) -> bool:
 
 
 def _worktree_behind_base(
-    spec: RepoSpec, worktree: Path, issue_number: int,
+    spec: config.RepoSpec, worktree: Path, issue_number: int,
 ) -> Optional[int]:
     """Return the base lag, or None when the comparison cannot be read."""
     base_ref = f"{spec.remote_name}/{spec.base_branch}"
@@ -1044,7 +1043,7 @@ def _worktree_behind_base(
 
 
 def _sync_pre_pr_worktree(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     worktree: Path,
     issue_number: int,
     behind: int,
@@ -1083,7 +1082,7 @@ def _sync_pre_pr_worktree(
 
 
 def _sync_worktree_with_base(
-    gh: GitHubClient, spec: RepoSpec, worktree: Path, issue_number: int,
+    gh: GitHubClient, spec: config.RepoSpec, worktree: Path, issue_number: int,
 ) -> None:
     """Bring one per-issue worktree up to date with the configured base.
 
@@ -1596,7 +1595,7 @@ def _publish_auto_rebase(
 
 def _sync_pr_worktree_to_base(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     worktree: Path,
@@ -1730,7 +1729,7 @@ def _publish_auto_rebase_from_pr(
 
 def _route_pr_worktree_to_resolving_conflict(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     pr_number: int,

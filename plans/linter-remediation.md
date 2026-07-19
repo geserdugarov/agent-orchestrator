@@ -42,7 +42,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 1 | Concrete formatting and correctness cleanup | 9/9 | [x] |
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
-| 4 | Remaining production style and structure | 4/5 | [ ] |
+| 4 | Remaining production style and structure | 5/5 | [x] |
 | 5 | Test structure and complexity | 0/7 | [ ] |
 | 6 | Test literals and naming | 0/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
@@ -305,11 +305,11 @@ Goal: clear the production findings that are not covered by the complexity stage
 
 ### Package 4.5 — Module and import structure
 
-- [ ] Resolve production import-count, member-count, metadata, collision, and module-complexity findings where a
+- [x] Resolve production import-count, member-count, metadata, collision, and module-complexity findings where a
   cohesive split is possible.
-- [ ] Do not break `workflow.py`, `worktrees.py`, analytics re-exports, or package compatibility surfaces merely
+- [x] Do not break `workflow.py`, `worktrees.py`, analytics re-exports, or package compatibility surfaces merely
   to lower a count.
-- [ ] Search AGENTS.md and the architecture/workflow documentation after moving a helper or module.
+- [x] Search AGENTS.md and the architecture/workflow documentation after moving a helper or module.
 
 Completion gate: all feasible production findings are removed and every unavoidable compatibility-related remainder
 is documented.
@@ -831,6 +831,59 @@ considered.
 - Protected by: `tests/test_dashboard_charts.py`.
 - Reviewed: [ ]
 
+### Core workflow and worktree compatibility facades
+
+- File and symbols: `orchestrator/workflow.py` (`WPS201` imports 127, `WPS202` members 57, `WPS203` imported names 137,
+  `WPS410` `__all__`) and `orchestrator/worktrees.py` (`WPS201` 52, `WPS203` 52, `WPS410` `__all__`).
+- Rule: `WPS201`, `WPS202`, `WPS203`, `WPS410`
+- Reason: These two modules are the historical `workflow.<name>` / `worktrees.<name>` re-export surfaces -- the same
+  compatibility-hub role already accepted for `orchestrator.dashboard` and `orchestrator.analytics`. Live issues, the
+  stage handlers (which reach helpers through `from orchestrator import workflow as _wf` and call `_wf._foo`), and the
+  test suite bind against these names, so the import fan-in, member count, and re-exported-name count are the surface
+  itself; shrinking any of them is a migration of that surface, not a cleanup. The `__all__` inventory is what makes the
+  re-export surface auditable in one place and governs `from orchestrator.workflow import *`. The removable
+  import-collision (`WPS458` on `orchestrator.config`) was fixed on `workflow.py` by dropping the duplicate
+  `from orchestrator.config import RepoSpec` and qualifying uses as `config.RepoSpec`.
+- Protected by: `orchestrator/stages/`, `tests/test_reexport_surface.py`, and the `tests/test_workflow_*` families.
+- Reviewed: [x]
+
+### Root package initialization
+
+- File and symbol: `orchestrator/__init__.py` (`__version__` and package-init wiring).
+- Rule: `WPS410` (`__version__`) and `WPS412` (logic in `__init__.py`)
+- Reason: `__version__` is the standard distribution version metadata read by packaging tooling, and the `__init__.py`
+  performs ordinary package-level wiring. This is the same accepted package-init shape already recorded for
+  `orchestrator/analytics/__init__.py`; neither can move without changing the package's public metadata or import
+  behavior.
+- Protected by: package import and `orchestrator.__version__` consumers.
+- Reviewed: [x]
+
+### Cohesive core, orchestration, and stage-handler module magnitude
+
+- File and symbols: the git / worktree and shared-workflow modules `orchestrator/base_sync.py` (60 members / 18
+  imports), `orchestrator/workflow_messages.py` (51), `orchestrator/agents.py` (40 / 16), `orchestrator/main.py`
+  (25 / 17), `orchestrator/worktree_lifecycle.py` (24), `orchestrator/branch_publication.py` (21 / 13),
+  `orchestrator/config.py` (18), `orchestrator/github.py` (17 / 15), `orchestrator/git_plumbing.py` (14),
+  `orchestrator/skill_catalog.py` (12), `orchestrator/verify.py` (12), `orchestrator/_repo_config.py` (11),
+  `orchestrator/state_machine.py` (10), and `orchestrator/workflow_drift.py` (9); and the per-stage handlers
+  `orchestrator/stages/implementing.py` (68 / 47, plus `WPS203` imported names 51), `stages/validating.py` (59 / 42),
+  `stages/decomposition.py` (54 / 40), `stages/documenting.py` (36 / 35), `stages/fixing.py` (33 / 25),
+  `stages/conflicts.py` (32 / 32), `stages/in_review.py` (25 / 22), and `stages/question.py` (22 / 20).
+- Rule: `WPS201` (imports), `WPS202` (members), and `WPS203` (imported names, `stages/implementing.py`)
+- Reason: Each is a single-responsibility unit already reduced to its cohesive minimum by the Stage 2--3 complexity work
+  and the earlier 4.5 slices. The `WPS202` limit of 7 sits far below any real orchestration or stage module, and a
+  further member split would only fragment one cohesive concern -- or relocate it to a new leaf that carries the same
+  accepted member-count magnitude the analytics / dashboard cohesive leaves already establish -- while the constraint is
+  explicit that these surfaces must not be broken merely to lower a count. The `WPS201` / `WPS203` import fan-in is the
+  set of collaborators a per-tick coordinator or a stage handler inherently drives; trimming it would demand indirection
+  that hides the dependency rather than clarifying it, and `stages/implementing.py`'s 51 imported names fall to 50-and-
+  below only if that single stage is itself split. The findings that WERE removable across these modules -- the
+  `WPS458` `orchestrator.config` import collisions, the `WPS300` relative `from ..` imports in `stages/implementing.py`,
+  and the `WPS301` / `WPS458` `logging` collision in `main.py` -- are fixed.
+- Protected by: `tests/test_workflow_*`, `tests/test_main.py`, `tests/test_agents.py`, `tests/test_config.py`,
+  `tests/test_state_machine.py`, and the git / worktree suites.
+- Reviewed: [x]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -893,6 +946,8 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-19 | 4.5/review-r2 | Complete | charts->hub; register+inventory; gate 2151 | Not committed | 4.5 rest |
 | 2026-07-19 | 4.5/review-r3 | Complete | inventory: import/metadata/collision families | Not committed | 4.5 rest |
 | 2026-07-19 | 4.5/review-r4 | Complete | traj-dashboard WPS201 12; sync test-alias cleanup | Not committed | 4.5 rest |
+| 2026-07-19 | 4.5/core-structure | Complete | WPS458/300/301 findings ->0; full gate 2151 | Not committed | 4.5 close |
+| 2026-07-19 | 4.5 | Complete | Import-structure fixed; remainders documented | Not committed | Stage 4 [x] |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
 
@@ -1409,7 +1464,28 @@ trajectory shape, and operator-visible output was preserved; ruff is clean and t
 skipped for live Postgres; the dashboard group installed so the plotly chart tests ran; the
 `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact unset for the run). Package 4.5 is not complete.
 
-Exact remaining Package 4.5 work. Package 4.5 is "module and import structure" across the whole production codebase, so
+The `core-structure` slice closed Package 4.5 across the orchestrator core, git / worktree modules, workflow /
+worktrees facades, and stage handlers. The removable import-structure findings were fixed: the fourteen `WPS458` import
+collisions (thirteen `orchestrator.config` collisions on `base_sync`, `branch_publication`, `git_plumbing`,
+`workflow_messages`, `worktree_lifecycle`, `workflow`, and the seven `stages/*` handlers, resolved by dropping the
+duplicate `from orchestrator.config import RepoSpec` and qualifying uses as `config.RepoSpec`; plus the `logging`
+collision in `main.py`), the three `WPS300` relative `from .. import workflow as _wf` imports in
+`stages/implementing.py` (converted to the absolute `from orchestrator import workflow as _wf` every other stage already
+uses), and the `WPS301` dotted `import logging.handlers` in `main.py` (converted to `from logging.handlers import
+RotatingFileHandler`). No symbol moved, so no re-export surface, late-bound `_wf` call, state label, pinned-state key,
+marker, watermark, event, command order, lock, or provider payload changed; the architecture doc, the developer /
+review skills, and the `workflow.py` re-export comments were repointed from the relative to the absolute `_wf` import
+form to match the now-uniform convention. The remaining module-structure findings are the documented-accepted remainders
+below: the `workflow.py` / `worktrees.py` compatibility facades (`WPS201` / `WPS202` / `WPS203` / `WPS410`), the root
+`orchestrator/__init__.py` metadata / init logic (`WPS410` / `WPS412`), and the cohesive core / orchestration / stage
+modules whose `WPS202` member and `WPS201` / `WPS203` import counts a further split would only fragment (the same
+cohesive-leaf magnitude the analytics / dashboard leaves carry). Ruff is clean, `git diff --check` is clean, and the
+full suite passed 2,151 tests (3 skipped for live Postgres; the dashboard group installed so the plotly chart tests ran;
+the `CLOSED_ISSUE_SWEEP_EVERY_N_TICKS` shell-export artifact unset for the run). Package 4.5 and Stage 4 are complete.
+
+Package 4.5 module-structure inventory (the triage record, resolved by the `core-structure` slice above -- the
+collision and import-shape findings were fixed and the count findings were accepted in the register). Package 4.5 is
+"module and import structure" across the whole production codebase, so
 its scope is not limited to the analytics / dashboard / trajectory slice this issue covered. The outstanding production
 module-structure findings elsewhere are `WPS201` (imports), `WPS202` (members), `WPS203` (imported-name count),
 `WPS300` / `WPS301` (local-folder / dotted imports), `WPS402` (`noqa` overuse), `WPS410` / `WPS412` (package metadata /

@@ -48,7 +48,6 @@ from github.Issue import Issue
 
 from orchestrator import analytics, config
 from orchestrator.agents import AgentResult, run_agent
-from orchestrator.config import RepoSpec
 from orchestrator.usage import UsageMetrics
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import (
@@ -67,8 +66,8 @@ from orchestrator.scheduler import IssueScheduler
 # The re-export blocks below republish those names on `workflow.<name>` so two
 # call patterns keep working without touching the helper modules:
 #   1. Tests patch primitives as `patch.object(workflow, "_foo", ...)`.
-#   2. Stage modules reach back through `from .. import workflow as _wf` and
-#      call `_wf._foo(...)` so a patch on `workflow._foo` intercepts even when
+#   2. Stage modules reach back through `from orchestrator import workflow as _wf`
+#      and call `_wf._foo(...)` so a patch on `workflow._foo` intercepts even when
 #      the call site lives in `orchestrator.stages.<stage>`.
 # The redundant `as <name>` aliasing is the pyflakes/ruff convention marking
 # an intentional re-export so F401 does not flag the name as unused.
@@ -256,7 +255,7 @@ from orchestrator.stages.validating import (
 # plus every helper and stage handler re-exported above from the helper and
 # `orchestrator.stages` modules. The re-exports are what let two call patterns
 # keep working: tests that `patch.object(workflow, "_foo", ...)` and stage
-# modules that reach back through `from .. import workflow as _wf`. Listing
+# modules that reach back through `from orchestrator import workflow as _wf`. Listing
 # them here makes that large re-export surface auditable in one place and
 # governs `from orchestrator.workflow import *`; the `subprocess` entry is the
 # stdlib module re-exported so tests can patch `workflow.subprocess.run`.
@@ -843,7 +842,7 @@ def _community_contribution_for_pr(
 
 def _label_community_contribution(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     pr,
     contribution: _CommunityContribution,
 ) -> None:
@@ -863,7 +862,7 @@ def _label_community_contribution(
 
 
 def _sweep_pr_contribution(
-    gh: GitHubClient, spec: RepoSpec, pr, allowed_lower: set,
+    gh: GitHubClient, spec: config.RepoSpec, pr, allowed_lower: set,
 ) -> None:
     """Label one open PR when its author is an outside community contributor."""
     contribution = _community_contribution_for_pr(gh, pr, allowed_lower)
@@ -872,7 +871,7 @@ def _sweep_pr_contribution(
 
 
 def _sweep_community_contribution_prs(
-    gh: GitHubClient, spec: RepoSpec
+    gh: GitHubClient, spec: config.RepoSpec
 ) -> None:
     """Label open PRs from authors outside ALLOWED_ISSUE_AUTHORS and ping HITL.
 
@@ -955,7 +954,7 @@ class _PollablePartitionBuilder:
 
 
 def _read_issue_routing(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue,
 ) -> tuple[bool, Optional[str]]:
     """Return ``(skip, label)`` from the issue's control / workflow labels."""
     skip_label = hard_skip_control_label(issue)
@@ -969,7 +968,7 @@ def _read_issue_routing(
 
 
 def _classify_pollable_issue(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue,
 ) -> tuple[bool, Optional[str]]:
     """Read one pollable issue's workflow label for the family / fanout split.
 
@@ -998,7 +997,7 @@ def _classify_pollable_issue(
 
 
 def _partition_pollable_issues(
-    gh: GitHubClient, spec: RepoSpec,
+    gh: GitHubClient, spec: config.RepoSpec,
 ) -> _PollablePartition:
     """Split this tick's pollable issues into the family and fanout buckets.
 
@@ -1042,7 +1041,7 @@ def _family_bucket_cap_exempt(family_labels: list[Optional[str]]) -> bool:
 
 def _refetch_and_process(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue_number: int,
     *,
     semaphore_cm: Optional[contextlib.AbstractContextManager] = None,
@@ -1070,7 +1069,7 @@ def _refetch_and_process(
 
 def _run_sequential_tick(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     semaphore_cm: contextlib.AbstractContextManager,
 ) -> None:
     """Process this tick's pollable issues one at a time on the caller thread.
@@ -1097,7 +1096,7 @@ def _run_sequential_tick(
 
 def _drain_family_bucket(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     family_numbers: list[int],
     *,
     semaphore_cm: contextlib.AbstractContextManager,
@@ -1127,7 +1126,7 @@ def _drain_family_bucket(
 @dataclass(frozen=True)
 class _ParallelTickPlan:
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     partition: _PollablePartition
     semaphore_cm: contextlib.AbstractContextManager
 
@@ -1163,7 +1162,7 @@ class _ParallelTickPlan:
 
 
 def _drain_parallel_futures(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     futures: dict[Any, Any],
     family_sentinel: object,
 ) -> None:
@@ -1188,7 +1187,7 @@ def _drain_parallel_futures(
 
 def _run_parallel_tick(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     limit: int,
     semaphore_cm: contextlib.AbstractContextManager,
 ) -> None:
@@ -1233,7 +1232,7 @@ def _run_parallel_tick(
 
 def tick(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     *,
     global_semaphore: Optional[threading.BoundedSemaphore] = None,
     scheduler: Optional[IssueScheduler] = None,
@@ -1333,7 +1332,7 @@ def _issue_is_closed(issue) -> bool:
 
 def _drain_scheduler_family_bucket(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     scheduler: IssueScheduler,
     family_numbers: list[int],
 ) -> None:
@@ -1380,13 +1379,13 @@ def _drain_scheduler_family_bucket(
             )
 
 
-def _scheduler_per_repo_cap(spec: RepoSpec) -> int:
+def _scheduler_per_repo_cap(spec: config.RepoSpec) -> int:
     return max(1, int(getattr(spec, "parallel_limit", 1) or 1))
 
 
 def _submit_scheduler_family_bucket(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     scheduler: IssueScheduler,
     partition: _PollablePartition,
     per_repo_cap: int,
@@ -1422,7 +1421,7 @@ def _submit_scheduler_family_bucket(
 
 def _submit_scheduler_fanout_issues(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     scheduler: IssueScheduler,
     partition: _PollablePartition,
     per_repo_cap: int,
@@ -1445,7 +1444,7 @@ def _submit_scheduler_fanout_issues(
 
 
 def _dispatch_via_scheduler(
-    gh: GitHubClient, spec: RepoSpec, scheduler: IssueScheduler,
+    gh: GitHubClient, spec: config.RepoSpec, scheduler: IssueScheduler,
 ) -> None:
     """Enumerate pollable issues this tick and hand work to the scheduler.
 
@@ -1554,7 +1553,7 @@ _ISSUE_HANDLER_NAMES: dict[Optional[str], str] = {
 
 
 def _route_issue_to_handler(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, label: Optional[str],
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, label: Optional[str],
 ) -> None:
     """Dispatch one issue to its stage handler by workflow label.
 
@@ -1575,7 +1574,7 @@ def _route_issue_to_handler(
         )
 
 
-def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _process_issue(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     # Postponed-task hold: applying `backlog` (or `paused`) parks the issue
     # outside the state machine entirely until the label is removed. Checked
     # before reading the workflow label so the orchestrator never decomposes,
@@ -1617,7 +1616,7 @@ def _process_issue(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
         )
 
 
-def _pickup_author_allowed(spec: RepoSpec, issue: Issue) -> bool:
+def _pickup_author_allowed(spec: config.RepoSpec, issue: Issue) -> bool:
     # Author allowlist: when configured, silently skip unlabeled issues from
     # anyone outside the list so random users can't burn agent budget on a
     # public repo. Maintainers can still drive an outsider's issue manually
@@ -1645,7 +1644,7 @@ def _record_pickup_comment(state: PinnedState, pickup) -> None:
 
 
 def _start_decomposing(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> None:
     pickup = _post_issue_comment(
         gh, issue, state,
@@ -1662,7 +1661,7 @@ def _start_decomposing(
 
 
 def _start_implementing(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> None:
     # Legacy path with DECOMPOSE=off: skip decomposition entirely and route
     # the unlabeled issue straight to implementing, exactly as the
@@ -1689,7 +1688,7 @@ def _start_implementing(
     _handle_implementing(gh, spec, issue)
 
 
-def _handle_pickup(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_pickup(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     if not _pickup_author_allowed(spec, issue):
         return
     state = PinnedState()
@@ -1810,7 +1809,7 @@ def _park_awaiting_human(
 
 
 def _finalize_if_pr_merged(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
     """Flip the issue to `done` when its linked PR has already merged.
 
@@ -1858,7 +1857,7 @@ def _finalize_if_pr_merged(
 @dataclass(frozen=True)
 class _ReviewTerminalContext:
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
     pr: Any
@@ -2053,7 +2052,7 @@ def _emit_closed_pr_rejection(context: _ReviewTerminalContext) -> None:
 
 
 def _finalize_if_issue_closed(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
     """Flip a closed-but-not-merged issue to `rejected`.
 

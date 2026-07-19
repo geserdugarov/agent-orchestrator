@@ -31,7 +31,7 @@ stay on the compatibility surface.
 ALL workflow-owned helpers (`_park_awaiting_human`, `_run_agent_tracked`,
 `_now_iso`, `_handle_implementing`, the worktree plumbing, the drift /
 manifest / messaging helpers re-exported into `workflow`) are reached
-through the parent module via `from .. import workflow as _wf` at call
+through the parent module via `from orchestrator import workflow as _wf` at call
 time. The compatibility surface tests rely on -- `patch.object(workflow,
 "_foo")` -- has to keep working from inside the stage module too, so the
 handlers must NOT direct-import these names from `workflow_drift` /
@@ -48,7 +48,6 @@ from github.Issue import Issue
 from orchestrator import config
 from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import filter_trusted
-from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import (
     GitHubClient,
@@ -140,7 +139,7 @@ def _read_decomposer_session(
 
 
 def _resume_decomposer_on_human_reply(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> Optional[AgentResult]:
     """Resume the decomposer's locked-backend session with new comments.
 
@@ -407,7 +406,7 @@ def _recover_stale_manifest(
 
 
 def _route_disabled_to_implementing(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> bool:
     """DECOMPOSE kill-switch bailout.
 
@@ -466,7 +465,7 @@ def _route_disabled_to_implementing(
 
 
 def _spawn_fresh_decomposer(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState
 ) -> Optional[AgentResult]:
     """Consume a retry slot and spawn a fresh decomposer session.
 
@@ -891,7 +890,7 @@ def _dispatch_decomposer_manifest(
 
 def _prepare_decomposer_run(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
 ) -> _DecomposerRunPlan:
@@ -922,7 +921,7 @@ def _prepare_decomposer_run(
 
 def _process_decomposer_run(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     run_plan: _DecomposerRunPlan,
@@ -960,7 +959,7 @@ def _process_decomposer_run(
     _dispatch_decomposer_manifest(gh, issue, state, decomposer_result)
 
 
-def _handle_decomposing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_decomposing(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)
@@ -1067,7 +1066,7 @@ def _park_rejected_children(
 
 
 def _park_manually_closed_children(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
     scan: _ChildScan,
 ) -> bool:
     """Park the parent when a child was closed without reaching a terminal
@@ -1124,7 +1123,7 @@ def _manually_closed_children(scan: _ChildScan) -> list[int]:
 
 def _remaining_manually_closed(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     scan: _ChildScan,
     candidates: list[int],
 ) -> list[int]:
@@ -1236,7 +1235,7 @@ def _log_held_children(
     )
 
 
-def _handle_ready(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_ready(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     """`ready` is the entry point for an auto-created child or for a parent
     whose decomposer voted `single`. Both cases need the same pickup-state
     seeding the legacy `_handle_pickup` did before flipping to
@@ -1293,7 +1292,7 @@ def _handle_ready(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
 
 def _usable_child_scan(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue: Issue,
     state: PinnedState,
     children: list,
@@ -1339,7 +1338,7 @@ def _complete_blocked_parent(
     gh.write_pinned_state(issue, state)
 
 
-def _handle_blocked(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_blocked(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     """Poll children to decide whether the parent unblocks (or one of the
     children unblocks).
 
@@ -1416,7 +1415,7 @@ def _complete_umbrella(
         )
 
 
-def _handle_umbrella(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_umbrella(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     """Poll children on an umbrella parent that has no implementation of
     its own.
 

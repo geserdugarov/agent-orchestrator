@@ -68,7 +68,6 @@ from typing import List, Optional, Tuple
 from github.Issue import Issue
 
 from orchestrator import config
-from orchestrator.config import RepoSpec
 from orchestrator.git_plumbing import _GIT_NO_PROMPT_ENV, _git, _git_hardened, _push_branch
 from orchestrator.verify import _head_sha, _worktree_dirty_files
 
@@ -116,7 +115,7 @@ class _SquashPlan:
     message: str
 
 
-def _squash_base_sha(spec: RepoSpec, worktree: Path) -> str:
+def _squash_base_sha(spec: config.RepoSpec, worktree: Path) -> str:
     """Return the topic branch merge base or raise a preparation error."""
     base_ref = f"{spec.remote_name}/{spec.base_branch}"
     merge_base_result = _git("merge-base", base_ref, "HEAD", cwd=worktree)
@@ -146,7 +145,7 @@ def _squash_subjects(worktree: Path, base_sha: str) -> tuple[str, ...]:
 
 
 def _squash_message(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     worktree: Path,
     issue: Issue,
     subjects: tuple[str, ...],
@@ -163,7 +162,7 @@ def _squash_message(
 
 
 def _prepare_squash(
-    spec: RepoSpec, worktree: Path, issue: Issue,
+    spec: config.RepoSpec, worktree: Path, issue: Issue,
 ) -> _SquashPlan:
     """Collect every precondition before the branch rewrite begins."""
     base_sha = _squash_base_sha(spec, worktree)
@@ -246,7 +245,7 @@ def _create_squash_commit(
 
 
 def _rewrite_squash(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     worktree: Path,
     branch: str,
     issue: Issue,
@@ -303,7 +302,7 @@ def _parse_ahead_behind(parts: list[str]) -> Tuple[int, int]:
 
 
 def _branch_ahead_behind(
-    spec: RepoSpec, worktree: Path, branch: str
+    spec: config.RepoSpec, worktree: Path, branch: str
 ) -> Tuple[int, int]:
     """Return `(ahead, behind)` commit counts for HEAD relative to
     `<remote>/<branch>` in `worktree`.
@@ -335,7 +334,7 @@ def _branch_ahead_behind(
         return (0, 0)
 
 
-def _first_commit_subject(spec: RepoSpec, worktree: Path) -> str:
+def _first_commit_subject(spec: config.RepoSpec, worktree: Path) -> str:
     """Subject line of the oldest commit in `origin/<base>..HEAD`, or ''.
 
     Used by `_on_commits` to derive a PR title from what the agent actually
@@ -376,7 +375,7 @@ def _subject_prefix(subject: str) -> Optional[str]:
 
 
 def _recent_base_subjects(
-    spec: RepoSpec, worktree: Path, limit: int = 30
+    spec: config.RepoSpec, worktree: Path, limit: int = 30
 ) -> List[str]:
     """Subjects of the most recent non-merge base-branch commits (newest
     first), or `[]` on git error.
@@ -401,7 +400,7 @@ def _recent_base_subjects(
 
 
 def _infer_subject_prefix(
-    spec: RepoSpec, worktree: Path, issue: Issue
+    spec: config.RepoSpec, worktree: Path, issue: Issue
 ) -> str:
     """Fallback `<type>` prefix for an orchestrator-synthesized subject.
 
@@ -457,7 +456,7 @@ def _pr_title_from_commit_or_issue(
 
 
 def _squash_and_force_push(
-    spec: RepoSpec, worktree: Path, branch: str, issue: Issue,
+    spec: config.RepoSpec, worktree: Path, branch: str, issue: Issue,
 ) -> Tuple[bool, Optional[str], int, Optional[str]]:
     """Squash all commits since `origin/<base>` into one, force-push with lease.
 

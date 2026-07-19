@@ -45,7 +45,6 @@ from pathlib import Path
 from typing import Optional
 
 from orchestrator import config
-from orchestrator.config import RepoSpec
 from orchestrator.git_plumbing import _authed_target_fetch, _git, _target_root_lock
 from orchestrator.github import GitHubClient, PinnedState
 
@@ -166,7 +165,7 @@ def _sanitize_branch_segment(slug: str) -> str:
     return f"{sanitized_segment}__h{digest}"
 
 
-def _branch_name(spec: RepoSpec, issue_number: int) -> str:
+def _branch_name(spec: config.RepoSpec, issue_number: int) -> str:
     """Per-issue branch name namespaced by the spec's git-ref-safe slug.
 
     Two RepoSpecs that share the same `target_root` (a single local clone
@@ -190,7 +189,7 @@ def _branch_name(spec: RepoSpec, issue_number: int) -> str:
 
 
 def _resolve_branch_name(
-    state: PinnedState, spec: RepoSpec, issue_number: int,
+    state: PinnedState, spec: config.RepoSpec, issue_number: int,
 ) -> str:
     """Branch to use for this issue, preferring an already-pinned value.
 
@@ -235,7 +234,7 @@ def _resolve_branch_name(
     return _branch_name(spec, issue_number)
 
 
-def _repo_worktrees_root(spec: RepoSpec) -> Path:
+def _repo_worktrees_root(spec: config.RepoSpec) -> Path:
     """Per-repo subdirectory under WORKTREES_DIR for this spec.
 
     Two specs with the same issue number must not collide on disk, so the
@@ -245,12 +244,12 @@ def _repo_worktrees_root(spec: RepoSpec) -> Path:
     return config.WORKTREES_DIR / _sanitize_slug(spec.slug)
 
 
-def _worktree_path(spec: RepoSpec, issue_number: int) -> Path:
+def _worktree_path(spec: config.RepoSpec, issue_number: int) -> Path:
     return _repo_worktrees_root(spec) / f"issue-{issue_number}"
 
 
 def _ensure_worktree(
-    spec: RepoSpec, issue_number: int, *, branch: str | None = None,
+    spec: config.RepoSpec, issue_number: int, *, branch: str | None = None,
 ) -> Path:
     """Return a worktree on a per-issue branch, reusing one with unpushed work.
 
@@ -311,7 +310,7 @@ def _ensure_worktree(
 
 
 def _ensure_pr_worktree(
-    spec: RepoSpec, issue_number: int, *, branch: str | None = None,
+    spec: config.RepoSpec, issue_number: int, *, branch: str | None = None,
 ) -> Path:
     """Like `_ensure_worktree`, but restores the local branch from
     `origin/<branch>` when it is missing instead of branching from
@@ -398,7 +397,7 @@ def _commit_count_from_stdout(count_result: subprocess.CompletedProcess) -> int:
     return int((count_result.stdout or "0").strip() or "0")
 
 
-def _has_new_commits(spec: RepoSpec, worktree: Path) -> bool:
+def _has_new_commits(spec: config.RepoSpec, worktree: Path) -> bool:
     commit_count_result = _git(
         "rev-list", "--count",
         f"{spec.remote_name}/{spec.base_branch}..HEAD",
@@ -421,11 +420,11 @@ def _has_new_commits(spec: RepoSpec, worktree: Path) -> bool:
 # commit on the old base. A separate detached-HEAD checkout sidesteps the
 # problem entirely: the implementer's `_ensure_worktree` always sees a
 # fresh per-issue branch created from the current `origin/<base>`.
-def _decompose_worktree_path(spec: RepoSpec, issue_number: int) -> Path:
+def _decompose_worktree_path(spec: config.RepoSpec, issue_number: int) -> Path:
     return _repo_worktrees_root(spec) / f"decompose-{issue_number}"
 
 
-def _ensure_decompose_worktree(spec: RepoSpec, issue_number: int) -> Path:
+def _ensure_decompose_worktree(spec: config.RepoSpec, issue_number: int) -> Path:
     """Create the decomposer's worktree fresh from current origin/<base>.
 
     Force-removes any existing decomposer worktree first; the decomposer
@@ -456,7 +455,7 @@ def _ensure_decompose_worktree(spec: RepoSpec, issue_number: int) -> Path:
         return wt
 
 
-def _run_decompose_worktree_removal(spec: RepoSpec, issue_number: int) -> None:
+def _run_decompose_worktree_removal(spec: config.RepoSpec, issue_number: int) -> None:
     """Force-remove the decomposer worktree under the parent lock if present."""
     wt = _decompose_worktree_path(spec, issue_number)
     if wt.exists():
@@ -467,7 +466,7 @@ def _run_decompose_worktree_removal(spec: RepoSpec, issue_number: int) -> None:
             )
 
 
-def _cleanup_decompose_worktree(spec: RepoSpec, issue_number: int) -> None:
+def _cleanup_decompose_worktree(spec: config.RepoSpec, issue_number: int) -> None:
     """Remove the decomposer's worktree if it exists.
 
     Called at every `_handle_decomposing` exit except the dirty/commits
@@ -490,7 +489,7 @@ def _cleanup_decompose_worktree(spec: RepoSpec, issue_number: int) -> None:
 
 
 def _branch_has_unpushed_commits(
-    spec: RepoSpec, issue_number: int,
+    spec: config.RepoSpec, issue_number: int,
 ) -> Optional[str]:
     """Return the per-issue branch carrying unpushed commits, or None.
 
@@ -552,7 +551,7 @@ def _branch_has_unpushed_commits(
 
 
 def _candidate_issue_branches(
-    spec: RepoSpec, issue_number: int,
+    spec: config.RepoSpec, issue_number: int,
 ) -> tuple[str, ...]:
     """Return namespaced then legacy branch candidates without duplicates."""
     namespaced = _branch_name(spec, issue_number)
@@ -563,7 +562,7 @@ def _candidate_issue_branches(
 
 
 def _branch_commit_count(
-    spec: RepoSpec, branch: str, base_ref: str,
+    spec: config.RepoSpec, branch: str, base_ref: str,
 ) -> int:
     """Return commits unique to a local branch, or zero on probe failure."""
     local_ref = f"refs/heads/{branch}"
@@ -586,7 +585,7 @@ def _branch_commit_count(
 
 
 def _run_issue_worktree_removal(
-    spec: RepoSpec, issue_number: int, log_prefix: str,
+    spec: config.RepoSpec, issue_number: int, log_prefix: str,
 ) -> None:
     """Force-remove one issue worktree under the parent lock, logging a
     non-zero git result."""
@@ -608,7 +607,7 @@ def _run_issue_worktree_removal(
 
 
 def _remove_issue_worktree(
-    spec: RepoSpec, issue_number: int, *, log_prefix: str = "",
+    spec: config.RepoSpec, issue_number: int, *, log_prefix: str = "",
 ) -> None:
     """Best-effort removal of one issue worktree under the parent lock."""
     try:
@@ -620,7 +619,7 @@ def _remove_issue_worktree(
 
 
 def _run_local_branch_deletion(
-    spec: RepoSpec, issue_number: int, branch: str, log_prefix: str,
+    spec: config.RepoSpec, issue_number: int, branch: str, log_prefix: str,
 ) -> None:
     """Delete one local issue branch under the parent lock (no-op when the
     branch is absent), logging a non-zero git result."""
@@ -645,7 +644,7 @@ def _run_local_branch_deletion(
 
 
 def _delete_local_issue_branch(
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue_number: int,
     branch: str,
     *,
@@ -664,7 +663,7 @@ def _delete_local_issue_branch(
 
 
 def _cleanup_question_worktree(
-    spec: RepoSpec, issue_number: int, *, branch: str | None = None,
+    spec: config.RepoSpec, issue_number: int, *, branch: str | None = None,
 ) -> None:
     """Tear down the per-issue worktree and local branch after a
     `_handle_question` tick.
@@ -710,7 +709,7 @@ def _cleanup_question_worktree(
 
 def _cleanup_terminal_branch(
     gh: GitHubClient,
-    spec: RepoSpec,
+    spec: config.RepoSpec,
     issue_number: int,
     *,
     branch: str | None = None,
