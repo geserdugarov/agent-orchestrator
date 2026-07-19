@@ -60,15 +60,17 @@ def _reload(env: dict[str, str] | None = None):
     still reads `LOG_DIR` for the JSONL default).
 
     The extracted helper modules (`dashboard_state` / `dashboard_kpis`
-    / `dashboard_html` / `dashboard_skill_matrix` / `dashboard_reads` /
-    `dashboard_widgets`) are popped alongside `dashboard` so the
-    re-imported facade re-binds them too -- otherwise a cached
-    `dashboard_state` would keep its pre-patch `from orchestrator import
-    analytics` reference and its module-import parse of
-    `DASHBOARD_PARALLEL_READS`, a cached `dashboard_reads` /
-    `dashboard_widgets` would keep its pre-patch `from orchestrator.analytics
-    import read` reference (and, for `dashboard_widgets`, its pre-patch
-    `dashboard_reads` bindings), and a cached `dashboard_skill_matrix`
+    / `dashboard_html` / `dashboard_cards` / `dashboard_kpi_strip` /
+    `dashboard_skill_matrix` / `dashboard_reads` / `dashboard_widgets`)
+    are popped alongside `dashboard` so the re-imported facade re-binds
+    them too -- otherwise a cached `dashboard_state` would keep its
+    pre-patch `from orchestrator import analytics` reference and its
+    module-import parse of `DASHBOARD_PARALLEL_READS`, a cached
+    `dashboard_reads` / `dashboard_widgets` / `dashboard_cards` /
+    `dashboard_kpi_strip` would keep its pre-patch `from
+    orchestrator.analytics import read` reference (and, for
+    `dashboard_widgets`, its pre-patch `dashboard_reads` / `dashboard_cards`
+    / `dashboard_kpi_strip` bindings), and a cached `dashboard_skill_matrix`
     would keep its `_table_css` / `_table_html` / `_UNKNOWN` bound to the
     discarded `dashboard_html` module, defeating the hermetic reload.
     """
@@ -79,6 +81,8 @@ def _reload(env: dict[str, str] | None = None):
         sys.modules.pop("orchestrator.dashboard_state", None)
         sys.modules.pop("orchestrator.dashboard_kpis", None)
         sys.modules.pop("orchestrator.dashboard_html", None)
+        sys.modules.pop("orchestrator.dashboard_cards", None)
+        sys.modules.pop("orchestrator.dashboard_kpi_strip", None)
         sys.modules.pop("orchestrator.dashboard_skill_matrix", None)
         sys.modules.pop("orchestrator.dashboard_reads", None)
         sys.modules.pop("orchestrator.dashboard_widgets", None)
@@ -1867,13 +1871,14 @@ class ReadOrchestrationExtractionTest(unittest.TestCase):
 
 
 class WidgetRenderingExtractionTest(unittest.TestCase):
-    """The KPI-strip preparation and the widget-rendering pipeline -- the
-    two-wave render passes, the empty / no-data states, the per-issue
-    drill-down renderer, the page footer, and the page-state dataclasses
-    the pipeline threads -- live in `orchestrator.dashboard_widgets`, and
-    `orchestrator.dashboard` re-exports the members the page pipeline and
-    these tests reach under their original names so the historical
-    `dashboard.<name>` surface keeps resolving to the same object.
+    """The widget-rendering pipeline -- the two-wave render passes, the
+    empty / no-data states, the per-issue drill-down renderer, the page
+    footer, and the page-state dataclasses the pipeline threads -- lives in
+    `orchestrator.dashboard_widgets`, and `orchestrator.dashboard`
+    re-exports the members the page pipeline and these tests reach under
+    their original names so the historical `dashboard.<name>` surface keeps
+    resolving to the same object. The KPI-strip aggregations live in
+    `orchestrator.dashboard_kpi_strip` (`KpiStripExtractionTest`).
     """
 
     # The moved page-pipeline members the facade re-exports (functions +
@@ -1885,9 +1890,7 @@ class WidgetRenderingExtractionTest(unittest.TestCase):
         "_DashboardFilters",
         "_DashboardControls",
         "_DashboardPage",
-        "_KpiInputs",
         "_backend_tokens_by_day",
-        "_build_kpi_strip_data",
         "_load_dashboard_data",
         "_render_topbar_and_meta",
         "_render_first_wave",
@@ -1938,6 +1941,89 @@ class WidgetRenderingExtractionTest(unittest.TestCase):
                 self.assertIs(
                     getattr(dashboard, name), getattr(widgets, name)
                 )
+
+
+class CardHtmlExtractionTest(unittest.TestCase):
+    """The insight / backend-efficiency / cost-coverage / reliability-tile
+    inline-HTML card family lives in `orchestrator.dashboard_cards`, and
+    `orchestrator.dashboard` re-exports each builder under its original
+    name so the page pipeline and the historical `dashboard.<name>`
+    surface keep resolving to the same object.
+    """
+
+    _MOVED_CARD_MEMBERS = (
+        "_card_header_html",
+        "_insights_html",
+        "_backend_efficiency_card_html",
+        "_cost_coverage_bar_html",
+        "_reliability_tiles_html",
+    )
+
+    def test_card_members_defined_in_cards_module(self) -> None:
+        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        cards = sys.modules["orchestrator.dashboard_cards"]
+        for name in self._MOVED_CARD_MEMBERS:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    getattr(cards, name).__module__,
+                    "orchestrator.dashboard_cards",
+                )
+
+    def test_facade_reexports_share_the_cards_objects(self) -> None:
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        cards = sys.modules["orchestrator.dashboard_cards"]
+        for name in self._MOVED_CARD_MEMBERS:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    hasattr(dashboard, name),
+                    f"dashboard dropped the historical {name!r} alias",
+                )
+                self.assertIs(getattr(dashboard, name), getattr(cards, name))
+
+
+class KpiStripExtractionTest(unittest.TestCase):
+    """The KPI-strip aggregations -- the token / throughput / rework
+    helpers that turn a `Summary` aggregate plus the first-wave read rows
+    into the four KPI tiles and the resolved / rejected throughput totals
+    -- live in `orchestrator.dashboard_kpi_strip`. `orchestrator.dashboard`
+    re-exports the two members the page pipeline and these tests reach
+    (`_KpiInputs` / `_build_kpi_strip_data`) under their original names, and
+    `dashboard_widgets` imports `_KpiInputs` back from the leaf.
+    """
+
+    _MOVED_KPI_MEMBERS = (
+        "_KpiInputs",
+        "_build_kpi_strip_data",
+    )
+
+    def test_kpi_members_defined_in_kpi_strip_module(self) -> None:
+        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        kpi_strip = sys.modules["orchestrator.dashboard_kpi_strip"]
+        for name in self._MOVED_KPI_MEMBERS:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    getattr(kpi_strip, name).__module__,
+                    "orchestrator.dashboard_kpi_strip",
+                )
+
+    def test_facade_reexports_share_the_kpi_strip_objects(self) -> None:
+        _, dashboard = _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        kpi_strip = sys.modules["orchestrator.dashboard_kpi_strip"]
+        for name in self._MOVED_KPI_MEMBERS:
+            with self.subTest(name=name):
+                self.assertTrue(
+                    hasattr(dashboard, name),
+                    f"dashboard dropped the historical {name!r} alias",
+                )
+                self.assertIs(
+                    getattr(dashboard, name), getattr(kpi_strip, name)
+                )
+
+    def test_widgets_imports_kpi_inputs_from_the_leaf(self) -> None:
+        _reload({ANALYTICS_DB_URL_ENV: CONFIGURED_DB_URL})
+        widgets = sys.modules["orchestrator.dashboard_widgets"]
+        kpi_strip = sys.modules["orchestrator.dashboard_kpi_strip"]
+        self.assertIs(widgets._KpiInputs, kpi_strip._KpiInputs)
 
 
 class _NullContext:

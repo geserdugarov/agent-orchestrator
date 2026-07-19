@@ -32,10 +32,11 @@ file stays the Streamlit orchestration layer:
   insight banners, the reliability-tile triples, the top-cost issue
   ordering, and the rework-share aggregation.
 - `orchestrator.dashboard_html` -- the inline-HTML builders for the
-  topbar, filter meta, KPI strip, insight stack, per-card header,
-  sparkline / delta pill, the issues / skill-trigger tables, the
-  backend-efficiency card, the cost-coverage bar, and the
-  reliability-tile strip.
+  topbar, filter meta, KPI strip, sparkline / delta pill, and the
+  issues / skill-trigger tables.
+- `orchestrator.dashboard_cards` -- the inline-HTML card family: the
+  computed-insight stack, the per-card header, the backend-efficiency
+  cards, the cost-coverage bar, and the reliability-tile strip.
 - `orchestrator.dashboard_skill_matrix` -- the sort-param parser and
   the sortable inline-HTML table for the per-skill trigger matrix.
 - `orchestrator.dashboard_reads` -- the read-orchestration layer: the
@@ -44,13 +45,16 @@ file stays the Streamlit orchestration layer:
   parallel dispatch, the static-metadata load, and the single load-timing
   log. Cache keys / TTLs, read ordering, the parallel-read toggle, and the
   `AnalyticsReadError` -> one-banner-and-stop behavior live there.
+- `orchestrator.dashboard_kpi_strip` -- the KPI-strip aggregations: the
+  token / throughput / rework helpers that turn a `Summary` aggregate plus
+  the first-wave read rows into the four KPI tiles and the resolved /
+  rejected throughput totals (`_KpiInputs` / `_build_kpi_strip_data`).
 - `orchestrator.dashboard_widgets` -- the widget-rendering pipeline: the
-  KPI-strip preparation, the two-wave first / second render passes, the
-  empty / no-data states, the per-issue drill-down renderer, the page
-  footer, and the small immutable page-state dataclasses the pipeline
-  threads (`_DashboardModules` ... `_LoadedDashboard`). The exact widget
-  order, inline HTML/text, Plotly inputs, and drill-down behavior live
-  there.
+  two-wave first / second render passes, the empty / no-data states, the
+  per-issue drill-down renderer, the page footer, and the small immutable
+  page-state dataclasses the pipeline threads (`_DashboardModules` ...
+  `_LoadedDashboard`). The exact widget order, inline HTML/text, Plotly
+  inputs, and drill-down behavior live there.
 
 `main()` is the lazy Streamlit entrypoint. This facade keeps page
 startup, the sidebar / date-range controls, and the compatibility
@@ -60,19 +64,25 @@ to `orchestrator.dashboard_widgets` for the two-wave render.
 `_render_drilldown` keeps its historical signature on the export surface
 and delegates to the typed internal drill-down renderer.
 
-Every pure helper from `dashboard_state` / `dashboard_kpis` /
-`dashboard_html` / `dashboard_reads` is re-exported below under its
-original name; from `dashboard_skill_matrix` only its two public
-entry points (`_skill_matrix_html` and `parse_skill_matrix_sort`) are.
-Together with the `dashboard_widgets` KPI-strip / widget /
-page-state members the page pipeline and the existing dashboard tests
-reach through `orchestrator.dashboard.*`, each re-export is listed in
+The historical `orchestrator.dashboard.*` entry points that
+`dashboard_state` / `dashboard_kpis` / `dashboard_html` /
+`dashboard_cards` / `dashboard_kpi_strip` / `dashboard_reads` own are
+re-exported below under their original name; from
+`dashboard_skill_matrix` only its two public entry points
+(`_skill_matrix_html` and `parse_skill_matrix_sort`) are.
+Together with the `dashboard_widgets` widget / page-state members the
+page pipeline and the existing dashboard tests reach through
+`orchestrator.dashboard.*`, each re-export is listed in
 `__all__` (the inventory `tests/test_reexport_surface.py` keeps honest).
 So `streamlit run orchestrator/dashboard.py`, the historical helper
 surface, and the tests keep working without touching the extracted
-modules. The purely internal `dashboard_widgets` token / layout math
-helpers and the `dashboard_skill_matrix` sort / header / row helpers
-are not re-exported and stay private to their modules.
+modules. The leaf-private internal helpers are not re-exported and stay
+private to their modules: the `dashboard_cards` ratio / backend-efficiency
+math (`_safe_ratio` / `_backend_efficiency_metrics`), the
+`dashboard_kpi_strip` KPI-total aggregations (`_kpi_totals` and its
+siblings), the `dashboard_html` sparkline / table internals, the
+`dashboard_widgets` token / layout math helpers, and the
+`dashboard_skill_matrix` sort / header / row helpers.
 
 Reads go through `orchestrator.analytics.read` (which already
 handles unset DB, connection errors, and lazy psycopg import) and
@@ -101,10 +111,10 @@ the dashboard's dependency footprint. The module loads without
 `streamlit` or `plotly` installed -- only `streamlit run
 orchestrator/dashboard.py` (or a direct `main()` call) materializes
 the imports. The extracted helper modules (`dashboard_state` /
-`dashboard_kpis` / `dashboard_html` / `dashboard_skill_matrix` /
-`dashboard_reads` / `dashboard_widgets`) are import-light (stdlib plus
-`orchestrator.analytics`) so they preserve this invariant; it is asserted
-by `tests/test_dashboard.py`.
+`dashboard_kpis` / `dashboard_html` / `dashboard_cards` /
+`dashboard_kpi_strip` / `dashboard_skill_matrix` / `dashboard_reads` /
+`dashboard_widgets`) are import-light (stdlib plus `orchestrator.analytics`)
+so they preserve this invariant; it is asserted by `tests/test_dashboard.py`.
 
 Run:
     uv sync --group dashboard
@@ -148,7 +158,8 @@ from orchestrator.analytics.read import (  # noqa: E402
 
 # Compatibility re-exports. The pure helpers moved to the focused
 # `dashboard_state` / `dashboard_kpis` / `dashboard_html` /
-# `dashboard_skill_matrix` / `dashboard_reads` / `dashboard_widgets`
+# `dashboard_cards` / `dashboard_kpi_strip` / `dashboard_skill_matrix` /
+# `dashboard_reads` / `dashboard_widgets`
 # modules; we import each one back under its original name so `main()`
 # calls them as bare names, the historical `orchestrator.dashboard.*`
 # surface stays intact, and the existing tests (which reach the helpers
@@ -168,6 +179,8 @@ from orchestrator.dashboard_state import (  # noqa: E402
     PARALLEL_READS_ENV as PARALLEL_READS_ENV,
     PARALLEL_READS_MAX_WORKERS as PARALLEL_READS_MAX_WORKERS,
     PRESET_3D as PRESET_3D,
+)
+from orchestrator.dashboard_state import (  # noqa: E402
     PRESET_7D as PRESET_7D,
     PRESET_ALL as PRESET_ALL,
     PRESET_CUSTOM as PRESET_CUSTOM,
@@ -176,6 +189,8 @@ from orchestrator.dashboard_state import (  # noqa: E402
     PRESET_LABELS as PRESET_LABELS,
     PRESET_OPTIONS as PRESET_OPTIONS,
     TZ_OFFSET_OPTIONS as TZ_OFFSET_OPTIONS,
+)
+from orchestrator.dashboard_state import (  # noqa: E402
     UNCONFIGURED_DB_MESSAGE as UNCONFIGURED_DB_MESSAGE,
     _TRUTHY as _TRUTHY,
     _extent_dates as _extent_dates,
@@ -184,6 +199,8 @@ from orchestrator.dashboard_state import (  # noqa: E402
     cache_key as cache_key,
     dashboard_parallel_reads_enabled as dashboard_parallel_reads_enabled,
     db_unconfigured_message as db_unconfigured_message,
+)
+from orchestrator.dashboard_state import (  # noqa: E402
     default_date_range as default_date_range,
     format_tz_offset as format_tz_offset,
     parse_issue_number as parse_issue_number,
@@ -209,20 +226,29 @@ from orchestrator.dashboard_kpis import (  # noqa: E402
     InsightBanner as InsightBanner,
     compute_insights as compute_insights,
     kpi_delta as kpi_delta,
+)
+from orchestrator.dashboard_kpis import (  # noqa: E402
     reliability_tile_data as reliability_tile_data,
     rework_totals as rework_totals,
     top_expensive_issues as top_expensive_issues,
 )
-from orchestrator.dashboard_html import (  # noqa: E402
+# The insight / backend-efficiency / cost-coverage / reliability-tile
+# inline-HTML card family lives in `orchestrator.dashboard_cards`. Its
+# builders are re-exported below under their original names so the page
+# pipeline and the historical `orchestrator.dashboard.*` surface keep
+# resolving to the same objects.
+from orchestrator.dashboard_cards import (  # noqa: E402
     _backend_efficiency_card_html as _backend_efficiency_card_html,
     _card_header_html as _card_header_html,
     _cost_coverage_bar_html as _cost_coverage_bar_html,
+    _insights_html as _insights_html,
+    _reliability_tiles_html as _reliability_tiles_html,
+)
+from orchestrator.dashboard_html import (  # noqa: E402
     _delta_pill as _delta_pill,
     _filter_meta_html as _filter_meta_html,
-    _insights_html as _insights_html,
     _issues_table_html as _issues_table_html,
     _kpi_strip_html as _kpi_strip_html,
-    _reliability_tiles_html as _reliability_tiles_html,
     _skill_triggers_html as _skill_triggers_html,
     _sparkline_svg as _sparkline_svg,
     _topbar_html as _topbar_html,
@@ -291,15 +317,25 @@ from orchestrator.dashboard_reads import (  # noqa: E402
     _widget_task as _widget_task,
 )
 
-# The widget-rendering pipeline -- KPI-strip preparation, the two-wave
-# render passes, the empty / no-data states, the per-issue drill-down
-# renderer, the page footer, and the page-state dataclasses the pipeline
-# threads -- lives in `orchestrator.dashboard_widgets`. The KPI-strip /
-# widget / page-state members the facade calls and the tests reach through
-# `dashboard.<name>` are re-exported below (grouped <= 8 per statement,
-# redundant `as` alias marking the intentional re-export) and listed in
-# `__all__`. The purely internal token / layout math helpers are not
-# re-exported; they stay private to the module.
+# The KPI-strip aggregations -- the token / throughput / rework helpers --
+# live in `orchestrator.dashboard_kpi_strip`. The two members the facade
+# and tests reach through `dashboard.<name>` (`_KpiInputs` /
+# `_build_kpi_strip_data`) are re-exported below under their original names;
+# the internal aggregation helpers stay private to that module.
+from orchestrator.dashboard_kpi_strip import (  # noqa: E402
+    _KpiInputs as _KpiInputs,
+    _build_kpi_strip_data as _build_kpi_strip_data,
+)
+
+# The widget-rendering pipeline -- the two-wave render passes, the empty /
+# no-data states, the per-issue drill-down renderer, the page footer, and
+# the page-state dataclasses the pipeline threads -- lives in
+# `orchestrator.dashboard_widgets`. The widget / page-state members the
+# facade calls and the tests reach through `dashboard.<name>` are
+# re-exported below (grouped <= 8 per statement, redundant `as` alias
+# marking the intentional re-export) and listed in `__all__`. The purely
+# internal token / layout math helpers are not re-exported; they stay
+# private to the module.
 from orchestrator.dashboard_widgets import (  # noqa: E402
     EMPTY_WINDOW_MESSAGE as EMPTY_WINDOW_MESSAGE,
     NO_DATA_MESSAGE as NO_DATA_MESSAGE,
@@ -310,9 +346,7 @@ from orchestrator.dashboard_widgets import (  # noqa: E402
     _DashboardPage as _DashboardPage,
 )
 from orchestrator.dashboard_widgets import (  # noqa: E402
-    _KpiInputs as _KpiInputs,
     _backend_tokens_by_day as _backend_tokens_by_day,
-    _build_kpi_strip_data as _build_kpi_strip_data,
     _load_dashboard_data as _load_dashboard_data,
     _render_activity_heatmap as _render_activity_heatmap,
     _render_chart_widgets as _render_chart_widgets,
@@ -340,7 +374,8 @@ from orchestrator.dashboard_widgets import (  # noqa: E402
 # Canonical inventory of the `orchestrator.dashboard.*` surface: the page
 # entrypoint (`main`) and its drill-down helper, and every name re-exported
 # above from `dashboard_state` / `dashboard_kpis` / `dashboard_html` /
-# `dashboard_skill_matrix` / `dashboard_reads` / `dashboard_widgets` (plus
+# `dashboard_cards` / `dashboard_kpi_strip` / `dashboard_skill_matrix` /
+# `dashboard_reads` / `dashboard_widgets` (plus
 # the `analytics` / `analytics_read` module handles). Keeping the list explicit makes the
 # compatibility surface auditable in one place and governs
 # `from orchestrator.dashboard import *`; every `X as X` re-export above

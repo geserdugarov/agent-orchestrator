@@ -12,6 +12,8 @@ semantics, and the summary aggregation -- all without touching Streamlit.
 from __future__ import annotations
 
 import json
+import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +21,10 @@ from unittest.mock import patch
 
 import orchestrator.analytics as analytics
 import orchestrator.trajectory_reader as tr
+# Bind after `tr` so `records` is the leaf the facade re-exports: importing
+# `trajectory_reader` evicts and rebuilds `_trajectory_records`, so a binding
+# taken before it would point at the discarded pre-eviction leaf.
+import orchestrator._trajectory_records as records
 
 
 def _write_jsonl(path: Path, lines) -> None:
@@ -379,6 +385,26 @@ class ReadTrajectoriesTest(unittest.TestCase):
             with patch.object(analytics, "TRAJECTORY_LOG_PATH", path):
                 runs = tr.read_trajectories()
         self.assertEqual([r.issue for r in runs], [9])
+
+    def test_unreadable_file_warns_and_returns_empty(self) -> None:
+        # Pointing the reader at a directory raises IsADirectoryError -- an
+        # OSError that is not FileNotFoundError -- so the read takes the
+        # warn-and-empty branch instead of the silent missing-file one. The
+        # warning is emitted on the public `orchestrator.trajectory_reader`
+        # logger even though the read pipeline lives in the private
+        # `_trajectory_records` leaf, so an operator's log filter keyed on
+        # that name still sees it.
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertLogs(
+                "orchestrator.trajectory_reader", level="WARNING"
+            ) as captured:
+                runs = tr.read_trajectories(path=Path(d))
+        self.assertEqual(runs, [])
+        self.assertEqual(len(captured.records), 1)
+        self.assertEqual(
+            captured.records[0].name, "orchestrator.trajectory_reader"
+        )
+        self.assertIn("could not read trajectory log", captured.output[0])
 
 
 class ResolveLogPathTest(unittest.TestCase):
@@ -857,6 +883,133 @@ class FixtureIdentificationTest(unittest.TestCase):
             _record(user_input="real", session_id="abc123"), seq=0
         )
         self.assertFalse(run.is_fixture)
+
+
+class ModuleLayoutTest(unittest.TestCase):
+    """Pin the facade / read-leaf split so callers keep one import site.
+
+    The record and view dataclasses, the log-path resolution, and the JSONL
+    parsing / reading pipeline live in the private
+    `orchestrator._trajectory_records` leaf; `orchestrator.trajectory_reader`
+    re-exports them under their original names and owns the filtering and
+    summary aggregation. The dashboard and the tests reach everything through
+    `trajectory_reader`, so the re-exported names must stay the same objects
+    the leaf defines and the filter surface must stay defined on the facade.
+    """
+
+    def test_read_surface_reexported_from_leaf(self) -> None:
+        for name in (
+            "TrajectoryStepView",
+            "TimelineEntry",
+            "TurnUsageView",
+            "RunUsageView",
+            "TrajectoryRun",
+            "resolve_log_path",
+            "log_unconfigured_message",
+            "read_trajectories",
+            "parse_record",
+            "TRAJECTORY_EVENT",
+            "TIMELINE_PROMPT",
+            "TIMELINE_OUTPUT",
+            "UNCONFIGURED_LOG_MESSAGE",
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(tr, name), getattr(records, name))
+
+    def test_read_symbols_have_leaf_module_of_record(self) -> None:
+        for symbol in (
+            tr.TrajectoryRun,
+            tr.TrajectoryStepView,
+            tr.parse_record,
+            tr.read_trajectories,
+            tr.resolve_log_path,
+        ):
+            with self.subTest(symbol=symbol.__name__):
+                self.assertEqual(
+                    symbol.__module__, "orchestrator._trajectory_records"
+                )
+
+    def test_filter_surface_defined_on_facade(self) -> None:
+        for symbol in (
+            tr.FilterOptions,
+            tr.RunFilterOptions,
+            tr.TrajectorySummary,
+            tr.filter_options,
+            tr.filter_runs,
+            tr.summarize,
+        ):
+            with self.subTest(symbol=symbol.__name__):
+                self.assertEqual(
+                    symbol.__module__, "orchestrator.trajectory_reader"
+                )
+
+    def test_reload_binds_reader_to_matching_analytics(self) -> None:
+        """A reloaded reader resolves its own world's `TRAJECTORY_LOG_PATH`.
+
+        Reloading `orchestrator.analytics` and `orchestrator.trajectory_reader`
+        together must give the fresh reader a leaf bound to the fresh analytics
+        instance, and the earlier world's reader must keep resolving the earlier
+        world's path -- the A/B env isolation the single-module reader had.
+        Without the facade evicting its cached `_trajectory_records`, the fresh
+        reader would re-export the stale leaf and resolve the previous path.
+        """
+        hermetic = {
+            "ORCHESTRATOR_SKIP_DOTENV": "1",
+            "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
+        }
+
+        def _reload_reader(log_path: Path):
+            # Pop only the PUBLIC modules a caller would reload -- not the
+            # private `_trajectory_records` leaf -- so the test exercises the
+            # facade's own eviction rather than masking it.
+            reload_env = {**hermetic, "TRAJECTORY_LOG_PATH": str(log_path)}
+            with patch.dict(os.environ, reload_env, clear=True):
+                for name in (
+                    "orchestrator.trajectory_reader",
+                    "orchestrator.analytics",
+                    "orchestrator.config",
+                ):
+                    sys.modules.pop(name, None)
+                import orchestrator.analytics as fresh_analytics
+                import orchestrator.trajectory_reader as fresh_reader
+                return fresh_analytics, fresh_reader
+
+        saved = {
+            name: mod
+            for name, mod in sys.modules.items()
+            if name.startswith("orchestrator")
+        }
+        # Importing a submodule binds it as an attribute of its parent package,
+        # so the A/B reloads rebound `orchestrator.analytics` (and `.config` /
+        # `.trajectory_reader` / `._trajectory_records`) on the persistent
+        # `orchestrator` package object to world B. Snapshot that package's
+        # namespace so the cleanup can revert those attributes too -- restoring
+        # sys.modules alone would leave `from orchestrator import analytics`
+        # (how the reader leaf resolves `TRAJECTORY_LOG_PATH`) still pointing at
+        # the discarded world-B reload.
+        orchestrator_pkg = sys.modules["orchestrator"]
+        saved_pkg_attrs = dict(orchestrator_pkg.__dict__)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path_a = Path(tmp) / "a.jsonl"
+                path_b = Path(tmp) / "b.jsonl"
+                analytics_a, reader_a = _reload_reader(path_a)
+                self.assertEqual(reader_a.resolve_log_path(), path_a)
+                analytics_b, reader_b = _reload_reader(path_b)
+                self.assertEqual(reader_b.resolve_log_path(), path_b)
+                # Each reader's leaf is bound to its own analytics instance, so
+                # world A still resolves world A after world B has been loaded.
+                self.assertIsNot(reader_a, reader_b)
+                self.assertIsNot(analytics_a, analytics_b)
+                self.assertEqual(reader_a.resolve_log_path(), path_a)
+        finally:
+            for name in [
+                name for name in sys.modules if name.startswith("orchestrator")
+            ]:
+                del sys.modules[name]
+            sys.modules.update(saved)
+            orchestrator_pkg.__dict__.clear()
+            orchestrator_pkg.__dict__.update(saved_pkg_attrs)
 
 
 if __name__ == "__main__":

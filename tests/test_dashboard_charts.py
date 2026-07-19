@@ -18,8 +18,13 @@ extras pin does not silently make the suite skip too eagerly.
 """
 from __future__ import annotations
 
+import importlib
+import os
+import subprocess
+import sys
 import unittest
 from datetime import date
+from pathlib import Path
 
 try:
     from orchestrator import dashboard_charts
@@ -625,6 +630,89 @@ class ChartHeightsTest(unittest.TestCase):
         # cells need ~240px, not Plotly's default 450.
         fig = dashboard_charts.hour_weekday_heatmap([])
         self.assertEqual(fig.layout.height, 240)
+
+
+@unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
+class DirectLeafImportTest(unittest.TestCase):
+    """Every chart leaf imports cleanly in a fresh process, not only when
+    `dashboard_charts` is imported first.
+
+    `dashboard_charts` is a compatibility hub that re-exports each family's
+    builders, and every chart module takes its shared low-level primitives
+    from `dashboard_charts_base`. A direct `import` of any leaf must therefore
+    resolve without a partially-initialized-module circular import. A
+    subprocess gives the clean import graph the in-process test session --
+    which has already imported `dashboard_charts` at collection -- cannot.
+    """
+
+    _CHART_LEAVES = (
+        "orchestrator.dashboard_charts_base",
+        "orchestrator.dashboard_charts_cost",
+        "orchestrator.dashboard_charts_usage",
+        "orchestrator.dashboard_charts_heatmap",
+        "orchestrator.dashboard_charts_throughput",
+    )
+
+    _REPO_ROOT = str(Path(__file__).resolve().parents[1])
+
+    def _assert_imports_clean(self, module: str) -> None:
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {module}"],
+            cwd=self._REPO_ROOT,
+            env={
+                **os.environ,
+                "ORCHESTRATOR_SKIP_DOTENV": "1",
+                "ORCHESTRATOR_TOKEN_FILE": "/tmp/agent-orchestrator-token-missing",
+            },
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"clean-process `import {module}` failed:\n{result.stderr}",
+        )
+
+    def test_each_leaf_imports_standalone(self) -> None:
+        for module in self._CHART_LEAVES:
+            with self.subTest(module=module):
+                self._assert_imports_clean(module)
+
+
+@unittest.skipUnless(HAS_PLOTLY, _SKIP_REASON)
+class ChartHubExtractionTest(unittest.TestCase):
+    """Each chart family's public builders live in a focused leaf module, and
+    the `orchestrator.dashboard_charts` hub re-exports each under its original
+    name so `dashboard_charts.<builder>` (the widget pipeline and these tests
+    reach it) keeps resolving to the same object.
+    """
+
+    # public builder -> owning leaf module
+    _BUILDER_HOMES = {
+        "cost_horizontal_bars": "orchestrator.dashboard_charts_cost",
+        "cost_by_repo": "orchestrator.dashboard_charts_cost",
+        "cost_by_stage": "orchestrator.dashboard_charts_cost",
+        "cost_by_review_round": "orchestrator.dashboard_charts_cost",
+        "usage_over_time": "orchestrator.dashboard_charts_usage",
+        "backend_per_day": "orchestrator.dashboard_charts_usage",
+        "hour_weekday_heatmap": "orchestrator.dashboard_charts_heatmap",
+        "done_per_day_bars": "orchestrator.dashboard_charts_throughput",
+    }
+
+    def test_builders_defined_in_their_leaf(self) -> None:
+        for name, module_name in self._BUILDER_HOMES.items():
+            with self.subTest(builder=name):
+                leaf = importlib.import_module(module_name)
+                self.assertEqual(getattr(leaf, name).__module__, module_name)
+
+    def test_hub_reexports_the_leaf_objects(self) -> None:
+        from orchestrator import dashboard_charts
+        for name, module_name in self._BUILDER_HOMES.items():
+            with self.subTest(builder=name):
+                leaf = importlib.import_module(module_name)
+                self.assertIs(
+                    getattr(dashboard_charts, name), getattr(leaf, name)
+                )
 
 
 if __name__ == "__main__":

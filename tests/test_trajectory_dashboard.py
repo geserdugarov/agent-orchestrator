@@ -573,5 +573,43 @@ class CardHeaderHtmlTest(unittest.TestCase):
         self.assertIn("Sub &amp; more", html)
 
 
+class TrajectoryHtmlExtractionTest(unittest.TestCase):
+    """The trajectory viewer's pure inline-HTML builders live in the
+    Streamlit-free `orchestrator._trajectory_dashboard_html` leaf, and
+    `orchestrator.trajectory_dashboard` reaches each under its original name
+    so the page (and these tests) resolve to the same object.
+    """
+
+    _MOVED_MEMBERS = (
+        "_topbar_html",
+        "_kpi_strip_html",
+        "_card_header_html",
+        "_meta_html",
+        "_labeled_chips_html",
+        "_run_usage_html",
+        "_runs_table_html",
+        "_run_picker_label",
+        "_timeline_entry_html",
+        "_timeline_with_usage",
+        "_turn_usage_html",
+    )
+
+    def test_html_members_defined_in_leaf(self) -> None:
+        import orchestrator._trajectory_dashboard_html as leaf
+        for name in self._MOVED_MEMBERS:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    getattr(leaf, name).__module__,
+                    "orchestrator._trajectory_dashboard_html",
+                )
+
+    def test_page_reaches_the_leaf_objects(self) -> None:
+        import orchestrator._trajectory_dashboard_html as leaf
+        page = _td()
+        for name in self._MOVED_MEMBERS:
+            with self.subTest(name=name):
+                self.assertIs(getattr(page, name), getattr(leaf, name))
+
+
 if __name__ == "__main__":
     unittest.main()

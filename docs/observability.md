@@ -535,11 +535,15 @@ dashboard reads the numeric usage / cost rollup from Postgres, while the viewer 
 the file on disk (no database, no `analytics.sync`).
 
 **Read model (`orchestrator/trajectory_reader.py`).** A pure, import-light, Streamlit-free reader (the file-backed
-analogue of `orchestrator/analytics/read.py`): it reads `TRAJECTORY_LOG_PATH`, parses each `agent_trajectory` record
-into a frozen `TrajectoryRun` (with a normalised `TrajectoryStepView` per step), and exposes `read_trajectories` (newest
-first by `ts`, file order as the tie-break), `filter_options`, `filter_runs` (repo / backend / agent-role / stage /
-issue / free-text-search, every filter conjunctive and an empty multi-value meaning "no constraint", plus an opt-in
-`exclude_fixtures`), and `summarize`. Each run exposes a normalised, vintage-agnostic `timeline` — the leading
+analogue of `orchestrator/analytics/read.py`). The record and view dataclasses (`TrajectoryRun` and its
+`TrajectoryStepView` / `TimelineEntry` / `TurnUsageView` / `RunUsageView` sub-views), the log-path resolution, and the
+defensive JSONL parsing / reading pipeline live in the private `orchestrator/_trajectory_records.py` leaf and are
+re-exported from `trajectory_reader` under their original names; `trajectory_reader` itself owns the free-text filtering
+and the filter-option / summary aggregation. Together they read `TRAJECTORY_LOG_PATH`, parse each `agent_trajectory`
+record into a frozen `TrajectoryRun` (with a normalised `TrajectoryStepView` per step), and expose `read_trajectories`
+(newest first by `ts`, file order as the tie-break), `filter_options`, `filter_runs` (repo / backend / agent-role /
+stage / issue / free-text-search, every filter conjunctive and an empty multi-value meaning "no constraint", plus an
+opt-in `exclude_fixtures`), and `summarize`. Each run exposes a normalised, vintage-agnostic `timeline` — the leading
 `user_input` prompt, then the ordered `steps[]`, then the final `output`, as one ordered `TimelineEntry` sequence — so
 an old steps-only record (only `tool_call` / `tool_result` steps) and a new record whose steps interleave
 `assistant_message` / `user_message` text turns render the same way; `tool_calls` still counts only `tool_call` steps,
@@ -581,7 +585,12 @@ no usage, so the row and strips are absent and it renders exactly as before. The
 in the overview table and the run-level picker (the `[fixture]` prefix rides the run option; and the detail card carries
 a notice) so the operator can tell the inherited test-suite records from real runs even with the toggle off. When the
 sink is off it renders the opt-in banner and stops; an empty file or an empty filter set renders an explanatory notice
-rather than a blank page.
+rather than a blank page. The page's pure inline-HTML builders — the topbar, the five-tile KPI strip, the run cards,
+and the per-turn usage strips, each a string builder over plain values or `trajectory_reader` view objects that reuses
+the `dashboard_theme` chrome — live in the Streamlit-free `orchestrator/_trajectory_dashboard_html.py` leaf, so
+`trajectory_dashboard.py` holds the Streamlit `_render_*` calls, the sidebar / run-picker and page-load helpers, the
+page-state dataclasses, and `main()`, but none of the pure HTML string-building; the leaf never imports the page module
+back, keeping the dependency one-directional.
 
 ## Analytics database (`analytics-db/`)
 
@@ -699,6 +708,12 @@ defaults to `LOG_DIR/analytics.jsonl`, so only the empty value or `off` / `disab
 JSONL file is absent. The CLI is safe to schedule before the operator deploys Postgres. The driver is `psycopg[binary]`;
 the import is lazy inside the connect helper so the module load path remains driver-free for callers that only need
 `SyncResult`.
+
+**Row mapping.** The pure record → DB-row mapping — the promoted-column / JSONB / required-key schema, the
+canonical-JSON `content_hash` dedup key, and the per-record validation that promotes known columns, routes the rest to
+`extras`, and turns a validated record into the positional INSERT tuple — lives in the driver-free (stdlib + typing, no
+psycopg) `orchestrator/analytics/_sync_rows.py` leaf; `sync.py` owns the connection lifecycle, batching, rollup refresh,
+and CLI and imports the mapping layer one-directionally.
 
 ### Operator feedback
 
@@ -877,34 +892,42 @@ out of `sys.modules`.
 **Module layout.** `orchestrator/dashboard.py` keeps page startup, the sidebar / date-range controls, and the
 compatibility re-exports — `main()` is a thin orchestrator that delegates the static-metadata read
 (`_read_static_metadata`) and, once the controls resolve the filters and staged read plan (`_prepare_dashboard_page`),
-hands the page to `orchestrator/dashboard_widgets.py` for the two-wave render. The KPI-strip preparation and the
-widget-rendering pipeline — the two-wave data load (`_load_dashboard_data` → `_run_read_waves`, which owns the staged
+hands the page to `orchestrator/dashboard_widgets.py` for the two-wave render. The widget-rendering pipeline — the
+two-wave data load (`_load_dashboard_data` → `_run_read_waves`, which owns the staged
 `_dispatch_reads` fan-out, the between-wave short-circuit, and the `_log_dashboard_load` timing line), the empty /
 no-data states (`_render_no_data`, `_render_empty_window`), every filter / widget section (the `_render_*` helpers) plus
 the per-issue drill-down renderer, and the immutable page-state dataclasses the pipeline threads — live in
-`orchestrator/dashboard_widgets.py`. The `dashboard_state` / `dashboard_kpis` / `dashboard_html` / `dashboard_reads`
-pure helpers are each re-exported through the facade under their original names; from `dashboard_skill_matrix` only its
-two public entry points (`_skill_matrix_html` / `parse_skill_matrix_sort`) are re-exported, its internal sort / header /
-row helpers staying private. The `dashboard_widgets` KPI / widget /
-page-state members the pipeline and the dashboard tests reach through `dashboard.<name>` are re-exported (and listed in
-`__all__`) too, while the internal token / layout math helpers are not re-exported and stay private to the module. So
+`orchestrator/dashboard_widgets.py`, which builds the KPI strip by handing a `_KpiInputs` to the
+`orchestrator/dashboard_kpi_strip.py` aggregations through the facade. The historical `orchestrator.dashboard.*`
+entry points that `dashboard_state` / `dashboard_kpis` / `dashboard_html` / `dashboard_cards` / `dashboard_kpi_strip` /
+`dashboard_reads` own are each re-exported through the facade under their original names; from `dashboard_skill_matrix`
+only its two public entry points (`_skill_matrix_html` / `parse_skill_matrix_sort`) are re-exported, its internal sort /
+header / row helpers staying private. The `dashboard_widgets` widget / page-state members and the `dashboard_kpi_strip`
+KPI-strip entry points (`_KpiInputs` / `_build_kpi_strip_data`) the pipeline and the dashboard tests reach through
+`dashboard.<name>` are re-exported (and listed in
+`__all__`) too, while the leaf-private internal helpers stay private to their modules — the `dashboard_cards`
+`_safe_ratio` / `_backend_efficiency_metrics` math, the `dashboard_kpi_strip` `_kpi_totals` aggregations, the
+`dashboard_html` sparkline / table internals, and the `dashboard_widgets` token / layout math helpers. So
 `streamlit run orchestrator/dashboard.py` and the historical `orchestrator.dashboard.*` import surface (and its test
 patch points) are unchanged.
 The repo-root `sys.path` shim that lets `streamlit run` resolve the absolute `orchestrator.*` imports is factored
 into the shared import-light `orchestrator/script_launch.py` helper (`ensure_repo_root_on_path`), which
 `orchestrator/trajectory_dashboard.py` also calls.
-The extracted helpers live in six import-light modules (stdlib plus `orchestrator.analytics`, so they hold
+The extracted helpers live in eight import-light modules (stdlib plus `orchestrator.analytics`, so they hold
 the lazy-import invariant): `orchestrator/dashboard_state.py` (date / window math, preset and timezone vocabulary,
 stage-filter / cache-key resolution, the issue-number parser, the DB-config banner check, and the read fan-out switch),
 `orchestrator/dashboard_kpis.py` (KPI delta math, the computed insight banners, the reliability-tile triples, the
-top-cost issue ordering, and the rework-share aggregation), `orchestrator/dashboard_html.py` (the inline-HTML
-builders below), `orchestrator/dashboard_skill_matrix.py` (the per-skill trigger matrix: its `mtx_sort` / `mtx_dir`
-sort-param parser and the sortable inline-HTML table), `orchestrator/dashboard_reads.py` (the read orchestration: the
-filter-to-query adapters, the cached data-extent / filter-option and per-filter widget readers, the two-wave reader
-registries, the staged parallel dispatch, the static-metadata load, the two-wave data load, and the load-timing log —
-where the cache keys / TTLs, read
+top-cost issue ordering, and the rework-share aggregation), `orchestrator/dashboard_html.py` (the topbar / filter-meta /
+KPI-strip / sparkline / issues- and skill-trigger-table inline-HTML builders below),
+`orchestrator/dashboard_cards.py` (the insight / backend-efficiency / cost-coverage / reliability-tile inline-HTML card
+family), `orchestrator/dashboard_kpi_strip.py` (the KPI-strip aggregations: the token / throughput / rework helpers that
+feed the four KPI tiles), `orchestrator/dashboard_skill_matrix.py` (the per-skill trigger matrix: its `mtx_sort` /
+`mtx_dir` sort-param parser and the sortable inline-HTML table), `orchestrator/dashboard_reads.py` (the read
+orchestration: the filter-to-query adapters, the cached data-extent / filter-option and per-filter widget readers, the
+two-wave reader registries, the staged parallel dispatch, the static-metadata load, the two-wave data load, and the
+load-timing log — where the cache keys / TTLs, read
 ordering, parallel-read toggle, and one-banner-and-stop read-error behavior live), and
-`orchestrator/dashboard_widgets.py` (the KPI-strip preparation and the widget-rendering pipeline: the two-wave render
+`orchestrator/dashboard_widgets.py` (the widget-rendering pipeline: the two-wave render
 passes, the empty / no-data states, the per-issue drill-down renderer, the page footer, and the page-state dataclasses).
 Streamlit is never imported in any of them — `st` (with the chart / theme / pandas handles) is always passed in as a
 parameter.
@@ -1010,11 +1033,21 @@ no-cache + cache cost via `offsetgroup` + `barmode="relative"`; the cache segmen
 base color so the pair stays visibly tied to the role), `hour_weekday_heatmap` (faint-to-saturated accent gradient over
 per-cell token totals, Sunday-first, with a `tz_label` parameter that annotates the x-axis — the caller passes the
 matching offset to `get_hourly_heatmap` so cells already reflect that zone), and `done_per_day_bars` (resolved-per-day
-bars with explicit `window_start` / `window_end` for zero-day backfill). The topbar, filter meta, KPI strip, insight
-banners, per-card header, sparkline / delta pill, most-expensive-issues table, backend-efficiency card, cost-source
-coverage bar, reliability-tile strip, and skill-trigger-rates aggregate table are built by inline-HTML helpers in
-`orchestrator/dashboard_html.py`; the per-skill trigger matrix (its `mtx_sort` / `mtx_dir` sort-param parser and the
-sortable table) lives in `orchestrator/dashboard_skill_matrix.py` (both re-exported through `dashboard.py`).
+bars with explicit `window_start` / `window_end` for zero-day backfill). `orchestrator/dashboard_charts.py` is a pure
+re-export hub: each chart family lives in a focused leaf -- `usage_over_time` / `backend_per_day` in
+`orchestrator/dashboard_charts_usage.py`, the cost-bar family (`cost_horizontal_bars` / `cost_by_repo` / `cost_by_stage`
+/ `cost_by_review_round`) in `orchestrator/dashboard_charts_cost.py`, `hour_weekday_heatmap` in
+`orchestrator/dashboard_charts_heatmap.py`, and `done_per_day_bars` in `orchestrator/dashboard_charts_throughput.py` --
+and the hub re-imports each public builder under its original name. The shared low-level chart primitives
+(`_empty_figure`, the money / mono-textfont / two-line-tick and panel-height / legend helpers) live in
+`orchestrator/dashboard_charts_base.py`, which the usage / cost / throughput leaves import from (the heatmap leaf
+inlines its own empty-state and imports none) -- so the dependency runs one way and a direct import of any chart module
+is cycle-free. The topbar, filter meta, KPI strip,
+sparkline / delta pill, most-expensive-issues table, and skill-trigger-rates aggregate table are built by inline-HTML
+helpers in `orchestrator/dashboard_html.py`; the insight banners, per-card header, backend-efficiency cards,
+cost-source coverage bar, and reliability-tile strip live in `orchestrator/dashboard_cards.py`; the per-skill trigger
+matrix (its `mtx_sort` / `mtx_dir` sort-param parser and the sortable table) lives in
+`orchestrator/dashboard_skill_matrix.py` (all re-exported through `dashboard.py`).
 
 **Theme.** `orchestrator/dashboard_theme.py` is a plotly-free token module: palette (cool gray `#f4f5f8` page, white
 cards, indigo accent, muted ink tints), spacing tokens, the `1480px` content max-width, per-token-type / per-backend /
