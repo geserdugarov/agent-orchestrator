@@ -44,8 +44,8 @@ The compatibility surface on `orchestrator/workflow.py` is load-bearing. Confirm
   aliased `... as <name>`. Stage-private helpers (only used inside one stage module —
   `_bump_in_review_watermarks`, `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`,
   etc.) should **not** be re-exported.
-- Stage modules access cross-module helpers via `from .. import workflow as _wf` **at call time**,
-  not via top-level `from ..workflow import _foo` and not via direct imports from `workflow_drift` /
+- Stage modules access cross-module helpers via `from orchestrator import workflow as _wf` **at call
+  time**, not via top-level `from orchestrator.workflow import _foo` and not via direct imports from `workflow_drift` /
   `workflow_messages` / `worktrees`. The late-binding pattern preserves `patch.object(workflow, ...)`
   semantics in tests.
 - Test patches target the new module boundary after a move (or the facade alias, consistently). Flag

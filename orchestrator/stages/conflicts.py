@@ -35,7 +35,7 @@ ALL workflow-owned helpers (`_park_awaiting_human`, `_now_iso`, the worktree
 plumbing, the drift / messaging helpers re-exported into `workflow`, the
 validating-side `_post_user_content_change_result`, the implementing-side
 `_resume_dev_with_text` / `_on_question` / `_on_dirty_worktree`) are reached
-through the parent module via `from .. import workflow as _wf` at call time.
+through the parent module via `from orchestrator import workflow as _wf` at call time.
 The compatibility surface tests rely on -- `patch.object(workflow, "_foo")` --
 has to keep working from inside the stage module too, so the handler must NOT
 direct-import these names from `workflow_drift` / `workflow_messages` /
@@ -53,7 +53,6 @@ from github.Issue import Issue
 from orchestrator import config
 from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import filter_trusted
-from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import (
     GitHubClient,
@@ -72,7 +71,7 @@ class _ConflictContext:
     helpers thread them as a single value instead of four positional
     arguments (mirrors fixing's `_FixingContext`)."""
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
 
@@ -221,7 +220,7 @@ def _pr_head_orchestrator_produced(state: PinnedState, pr) -> bool:
     return bool(head) and head == state.get("docs_checked_sha")
 
 
-def _already_rebased_onto_base(spec: RepoSpec, wt: Path) -> bool:
+def _already_rebased_onto_base(spec: config.RepoSpec, wt: Path) -> bool:
     """True when the worktree HEAD already sits on top of `<remote>/<base>`.
 
     Re-fetches base first (the ahead/behind check that calls this runs
@@ -259,7 +258,7 @@ def _already_rebased_onto_base(spec: RepoSpec, wt: Path) -> bool:
 
 
 def _handle_resolving_conflict(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue
 ) -> None:
     """Drive an unmergeable PR back to mergeable.
 

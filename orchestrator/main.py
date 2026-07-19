@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
-import logging.handlers
 import os
 import signal
 import subprocess
@@ -21,6 +20,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 from orchestrator import agents, analytics, config, workflow
@@ -168,7 +168,7 @@ def _force_exit(signum: int) -> None:
 def _rotating_file_handler() -> logging.Handler:
     """Build the rotating file handler, creating `config.LOG_DIR` first."""
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
-    return logging.handlers.RotatingFileHandler(
+    return RotatingFileHandler(
         config.LOG_DIR / "orchestrator.log",
         maxBytes=10 * 1024 * 1024,
         backupCount=5,

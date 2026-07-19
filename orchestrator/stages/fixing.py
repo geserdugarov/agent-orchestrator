@@ -137,7 +137,7 @@ and `tick()` routes it through the fan-out bucket.
 ALL workflow-owned helpers (`_park_awaiting_human`, `_resume_dev_with_text`,
 `_handle_dev_fix_result`, `_comment_created_at`, `_now_iso`, the
 worktree plumbing, the messaging helpers re-exported into `workflow`)
-are reached through the parent module via `from .. import workflow as _wf`
+are reached through the parent module via `from orchestrator import workflow as _wf`
 at call time. Tests rely on `patch.object(workflow, "_foo", ...)`
 intercepting calls made from inside the stage handler, so the handler
 must NOT direct-import these names from `workflow_messages` / `worktrees`
@@ -156,7 +156,6 @@ from github.Issue import Issue
 from orchestrator import config
 from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import filter_trusted
-from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import GitHubClient, PinnedState
 
@@ -192,7 +191,7 @@ class _FixingContext:
     fetched this tick; not every consumer reads it.
     """
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
     pr: Any
@@ -233,7 +232,7 @@ def _park_fixing_without_pr(gh: GitHubClient, issue: Issue, state) -> None:
     gh.write_pinned_state(issue, state)
 
 
-def _fixing_preflight(gh: GitHubClient, spec: RepoSpec, issue: Issue, state):
+def _fixing_preflight(gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state):
     """Fetch the PR and run the pre-rescan guards shared with
     `_handle_in_review`: PR-state terminals, a closed issue with no
     resolvable PR, and a `fixing` label with no pinned `pr_number`.
@@ -810,7 +809,7 @@ def _resume_fixing_and_dispatch_result(
     ctx.gh.write_pinned_state(ctx.issue, ctx.state)
 
 
-def _handle_fixing(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_fixing(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     state = gh.read_pinned_state(issue)
 
     pr = _fixing_preflight(gh, spec, issue, state)

@@ -33,8 +33,9 @@ designed around that assumption.
 ## Top-level layout
 
 The `orchestrator/` package is split between a slim facade (`workflow.py`), per-stage handler modules under `stages/`,
-and a small set of supporting modules. Stage modules call back into the facade via `from .. import workflow as _wf` at
-call time so test patches against `workflow.<helper>` still intercept calls made from inside a stage handler.
+and a small set of supporting modules. Stage modules call back into the facade via
+`from orchestrator import workflow as _wf` at call time so test patches against `workflow.<helper>` still intercept
+calls made from inside a stage handler.
 
 ```
 orchestrator/

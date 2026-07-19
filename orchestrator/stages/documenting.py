@@ -69,7 +69,7 @@ are re-exported from `workflow.py`; they are private to this module.
 ALL workflow-owned helpers (`_park_awaiting_human`, `_run_agent_tracked`,
 `_now_iso`, the worktree plumbing, the docs prompt + verdict parser
 re-exported into `workflow`) are reached through the parent module via
-`from .. import workflow as _wf` at call time. Tests patch the
+`from orchestrator import workflow as _wf` at call time. Tests patch the
 compatibility surface as `patch.object(workflow, "_foo")`, so the
 handler must NOT direct-import those names from
 `workflow_messages` / `worktrees`; binding a stable reference would
@@ -85,7 +85,6 @@ from github.Issue import Issue
 from orchestrator import config
 from orchestrator.agents import AgentResult
 from orchestrator.comment_trust import filter_trusted
-from orchestrator.config import RepoSpec
 from orchestrator.state_machine import WorkflowLabel
 from orchestrator.github import GitHubClient, PinnedState
 
@@ -107,7 +106,7 @@ class _DocumentingContext:
     consumer downstream of the guards reads them off the context.
     """
     gh: GitHubClient
-    spec: RepoSpec
+    spec: config.RepoSpec
     issue: Issue
     state: PinnedState
     branch: str
@@ -238,7 +237,7 @@ def _advance_after_docs_no_change(
 
 
 def _finalize_documenting_terminal(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
 ) -> bool:
     """Terminal issue/PR short-circuits before the docs pass runs.
 
@@ -1068,7 +1067,7 @@ def _drive_documenting_pass(ctx: _DocumentingContext):
 
 
 def _documenting_preconditions_handled(
-    gh: GitHubClient, spec: RepoSpec, issue: Issue, state: PinnedState,
+    gh: GitHubClient, spec: config.RepoSpec, issue: Issue, state: PinnedState,
     pr_number,
 ) -> bool:
     """Run the pre-context guards; True when the tick is already resolved.
@@ -1087,7 +1086,7 @@ def _documenting_preconditions_handled(
     return _refuse_parked_continue_command(gh, issue, state)
 
 
-def _handle_documenting(gh: GitHubClient, spec: RepoSpec, issue: Issue) -> None:
+def _handle_documenting(gh: GitHubClient, spec: config.RepoSpec, issue: Issue) -> None:
     from orchestrator import workflow as _wf
 
     state = gh.read_pinned_state(issue)

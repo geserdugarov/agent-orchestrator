@@ -39,8 +39,8 @@ The facade pattern in `orchestrator/workflow.py` is load-bearing for tests. Get 
   aliased with `as <name>`** — bare `from .stages.implementing import _handle_implementing` will be
   stripped by ruff F401; `from .stages.implementing import _handle_implementing as _handle_implementing`
   survives.
-- Stage modules call back into the facade via `from .. import workflow as _wf` **at call time**, not
-  at module import. Top-level `from ..workflow import _foo` defeats
+- Stage modules call back into the facade via `from orchestrator import workflow as _wf` **at call
+  time**, not at module import. Top-level `from orchestrator.workflow import _foo` defeats
   `patch.object(workflow, "_foo", ...)` because the stage module captures the original reference.
 - Stage-private helpers (only used inside one stage module — e.g. `_bump_in_review_watermarks`,
   `_seed_legacy_in_review_watermarks`, `_emit_conflict_round_incremented`) stay private to that stage

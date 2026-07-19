@@ -60,7 +60,6 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from orchestrator import config
-from orchestrator.config import RepoSpec
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +89,7 @@ class _GitAuthSession:
     env: dict[str, str]
 
 
-def _resolved_git_token(spec: RepoSpec, operation: str) -> Optional[str]:
+def _resolved_git_token(spec: config.RepoSpec, operation: str) -> Optional[str]:
     """Resolve a per-repository token and log an operation-specific error."""
     token = config._resolve_github_token(spec.slug)
     if token:
@@ -128,7 +127,7 @@ def _git_auth_env(
 
 @contextmanager
 def _git_auth_session(
-    spec: RepoSpec, token: str, *, include_identity: bool = False,
+    spec: config.RepoSpec, token: str, *, include_identity: bool = False,
 ) -> Iterator[_GitAuthSession]:
     """Keep a hardened askpass script alive for one authenticated operation."""
     with tempfile.TemporaryDirectory(prefix="orch-askpass-") as temp_dir:
@@ -166,7 +165,7 @@ def _failed_fetch(stderr: str) -> subprocess.CompletedProcess:
 # Locks are keyed by the string form of `spec.target_root` so two
 # `RepoSpec` instances pointing at the same on-disk clone share a lock
 # (the case `_run_tick` produces when one Python process drives several
-# RepoSpec entries that happen to point at the same target_root for
+# `RepoSpec` entries that happen to point at the same target_root for
 # operator convenience). `_TARGET_ROOT_LOCKS_LOCK` only guards the dict
 # lookup/insert; the per-key lock is acquired outside that guard so a
 # slow git operation can't block lookup for other repos.
@@ -310,7 +309,7 @@ def _unsafe_local_transport_config(cwd: Path) -> str:
 
 
 def _authed_fetch(
-    spec: RepoSpec, refspec: str, *, cwd: Path
+    spec: config.RepoSpec, refspec: str, *, cwd: Path
 ) -> subprocess.CompletedProcess:
     """Authenticated, hardened `git fetch` -- the same security envelope as
     `_push_branch`.
@@ -391,7 +390,7 @@ def _authed_fetch(
 
 
 def _authed_target_fetch(
-    spec: RepoSpec, branch: str
+    spec: config.RepoSpec, branch: str
 ) -> subprocess.CompletedProcess:
     """Authed `git fetch` into `spec.target_root` using the per-spec token.
 
@@ -535,7 +534,7 @@ def _push_with_auth(
 
 
 def _push_branch(
-    spec: RepoSpec, worktree: Path, branch: str,
+    spec: config.RepoSpec, worktree: Path, branch: str,
     *,
     force_with_lease: Optional[str] = None,
 ) -> bool:
