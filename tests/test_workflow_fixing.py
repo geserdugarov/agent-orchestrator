@@ -50,6 +50,8 @@ from tests.fakes import (
     make_issue,
 )
 from tests.workflow_helpers import (
+    EVENT_AGENT_SPAWN,
+    ROLE_DEVELOPER,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
     _agent,
@@ -276,6 +278,16 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             call_args.kwargs.get("resume_session_id"), DEV_SESSION,
         )
         self.assertEqual(backend, DEV_AGENT)
+        # A fixing-stage retry attributes the developer run to `fixing`: the
+        # issue is genuinely labeled `fixing` on this fresh fetch, so the
+        # label-derived stage (no explicit override needed here) is correct.
+        dev_spawns = [
+            e for e in gh.recorded_events
+            if e["event"] == EVENT_AGENT_SPAWN
+            and e.get("agent_role") == ROLE_DEVELOPER
+        ]
+        self.assertEqual(len(dev_spawns), 1)
+        self.assertEqual(dev_spawns[0]["stage"], FIXING)
 
     # --- ACK fast path ----------------------------------------------------
 

@@ -1454,12 +1454,18 @@ def _run_requested_fix(context: _RequestedChanges) -> _AwaitingDevAttempt:
     from orchestrator import workflow as _wf
 
     before_sha = _wf._head_sha(context.decision.run.wt)
+    # The caller flipped the label validating -> fixing on the SAME `issue`
+    # object; PyGithub does not refresh its cached `labels` after
+    # `set_labels`, so pass `fixing` explicitly rather than let the resume
+    # helper read the stale `validating` back off the issue and attribute this
+    # developer run to the reviewer's stage.
     worktree, agent_result, paused = _wf._resume_dev_with_text(
         context.gh,
         context.spec,
         context.issue,
         context.state,
         _wf._build_fix_prompt(context.decision.feedback),
+        stage=WorkflowLabel.FIXING,
         pause_guard=True,
     )
     context.state.set("last_agent_action_at", _wf._now_iso())

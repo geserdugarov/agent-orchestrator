@@ -541,6 +541,8 @@ class _DevResumeContext:
         issue: Issue,
         resume_args: tuple,
         option_fields: dict,
+        *,
+        stage: Optional[str] = None,
     ) -> _DevResumeContext:
         if len(resume_args) != 2:
             raise TypeError("expected state and followup_text")
@@ -548,6 +550,11 @@ class _DevResumeContext:
         options = _DevResumeOptions.from_fields(option_fields)
         worktree = _ensure_resume_worktree(spec, issue, state)
         plan = _resolve_dev_session_for_resume(issue, state)
+        # An explicit `stage` wins over the label read off `issue`: a caller
+        # that just relabeled the issue (validating -> fixing on
+        # CHANGES_REQUESTED) holds an `Issue` whose cached `labels` PyGithub
+        # did not refresh after `set_labels`, so `gh.workflow_label(issue)`
+        # would still report the pre-flip stage and misattribute the run.
         return cls(
             gh=gh,
             spec=spec,
@@ -557,7 +564,7 @@ class _DevResumeContext:
             options=options,
             worktree=worktree,
             plan=plan,
-            stage=gh.workflow_label(issue) or _IMPLEMENTING_STAGE,
+            stage=stage or gh.workflow_label(issue) or _IMPLEMENTING_STAGE,
         )
 
     def _run_attempt(
@@ -656,9 +663,19 @@ def _resume_dev_with_text(
     spec: config.RepoSpec,
     issue: Issue,
     *resume_args,
+    stage: Optional[str] = None,
     **option_fields,
 ) -> Tuple[Path, AgentResult, bool]:
     """Resume the dev's locked-backend session with the given prompt text.
+
+    `stage` overrides the recorded stage for every audit / analytics /
+    trajectory record this run emits. It defaults to the label read off
+    `issue`, which is correct whenever the caller fetched the issue fresh this
+    tick. The CHANGES_REQUESTED fix path must pass it explicitly (`fixing`):
+    it relabels validating -> fixing and then resumes on the SAME `Issue`
+    object, whose cached `labels` PyGithub does not refresh after
+    `set_labels`, so the label read would still report `validating` and
+    attribute the developer run to the reviewer's stage.
 
     The backend is locked to whatever wrote `dev_session_id` (or the legacy
     `codex_session_id`) for this issue -- resuming across backends would need
@@ -710,7 +727,7 @@ def _resume_dev_with_text(
     the label differently than the helper did.
     """
     return _DevResumeContext.build(
-        gh, spec, issue, resume_args, option_fields,
+        gh, spec, issue, resume_args, option_fields, stage=stage,
     ).execute()
 
 
