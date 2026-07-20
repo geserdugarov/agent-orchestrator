@@ -79,12 +79,19 @@ _TRUNCATED = "truncated"
 _SKILLS_TRIGGERED = "skills_triggered"
 _SKILLS_TRIGGERED_COUNT = "skills_triggered_count"
 _SKILLS_AVAILABLE = "skills_available"
-# The three skill fields `record_agent_exit` folds in behind the switch;
-# several tests assert all three appear or are dropped together.
+_SKILLS_EVIDENCE = "skills_evidence"
+_SKILLS_INCIDENTAL = "skills_incidental"
+_SKILLS_INCIDENTAL_COUNT = "skills_incidental_count"
+# The skill fields `record_agent_exit` folds in behind the switch; several
+# tests assert they all appear or are dropped together (the backward-compatible
+# "absent opt-in -> today's record shape" guarantee).
 _SKILL_FIELD_KEYS = (
     _SKILLS_TRIGGERED,
     _SKILLS_TRIGGERED_COUNT,
     _SKILLS_AVAILABLE,
+    _SKILLS_EVIDENCE,
+    _SKILLS_INCIDENTAL,
+    _SKILLS_INCIDENTAL_COUNT,
 )
 
 
@@ -217,6 +224,42 @@ def _claude_stdout_with_skills(
         frames.insert(
             0, {"type": "system", "subtype": "init", "skills": list(offered)}
         )
+    return "\n".join(json.dumps(frame) for frame in frames)
+
+
+def _codex_command(item_id: str, command: str) -> dict:
+    return {"type": "item.completed", "item": {
+        "id": item_id, "type": "command_execution", "command": command,
+    }}
+
+
+def _codex_stdout_with_skills(
+    *,
+    read: str | None = None,
+    incidental: str | None = None,
+    input_tokens: int = SKILL_STREAM_INPUT_TOKENS,
+    output_tokens: int = SKILL_STREAM_OUTPUT_TOKENS,
+) -> str:
+    """A codex exec --json stdout that reports usage and, optionally, a direct
+    SKILL.md read (an inferred load) and/or a `git diff` inspection of one (an
+    incidental reference).
+
+    `read` / `incidental` are skill names: each becomes one `command_execution`
+    item -- a `cat .../SKILL.md` for the load, a `git diff -- .../SKILL.md` for
+    the reference -- so the recorder exercises the real `parse_codex_skills`
+    classifier end-to-end (no stub).
+    """
+    frames: list[dict] = []
+    if read is not None:
+        frames.append(_codex_command(
+            "read1", f"/bin/bash -lc 'cat skills/{read}/SKILL.md'"))
+    if incidental is not None:
+        frames.append(_codex_command(
+            "diff1",
+            f"/bin/bash -lc 'git diff -- .agents/skills/{incidental}/SKILL.md'"))
+    frames.append({"type": "turn.completed", "usage": {
+        _INPUT_TOKENS: input_tokens, _OUTPUT_TOKENS: output_tokens,
+    }})
     return "\n".join(json.dumps(frame) for frame in frames)
 
 
@@ -781,6 +824,13 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         rec = records[0]
         self.assertEqual(rec[_SKILLS_TRIGGERED], [_DEVELOP, _REVIEW])
         self.assertEqual(rec[_SKILLS_TRIGGERED_COUNT], 3)
+        # A claude `Skill` call is a confirmed load, so every triggered name
+        # carries `confirmed` evidence and there are no incidental references.
+        self.assertEqual(
+            rec[_SKILLS_EVIDENCE], {_DEVELOP: "confirmed", _REVIEW: "confirmed"},
+        )
+        self.assertNotIn(_SKILLS_INCIDENTAL, rec)
+        self.assertNotIn(_SKILLS_INCIDENTAL_COUNT, rec)
         self.assertNotIn(_SKILLS_AVAILABLE, rec)
         self.assertEqual(rec[_INPUT_TOKENS], SKILL_STREAM_INPUT_TOKENS)
 
@@ -928,6 +978,79 @@ class RecordAgentExitSkillTest(unittest.TestCase):
             )
         self.assertIsNone(triggered)
 
+    def test_codex_records_inferred_evidence_and_incidental(self) -> None:
+        # A codex run that directly reads review/SKILL.md (an inferred load)
+        # and runs `git diff` over a changed develop/SKILL.md (an incidental
+        # reference) records the load in `skills_triggered` with `inferred`
+        # evidence and the reference in the separate incidental bucket -- never
+        # in the triggered set or its count.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            records = self._emit(
+                analytics, Path(td) / "a.jsonl",
+                stdout=_codex_stdout_with_skills(
+                    read=_REVIEW, incidental=_DEVELOP,
+                ),
+                backend=_CODEX, track=True,
+            )
+        rec = records[0]
+        self.assertEqual(rec[_SKILLS_TRIGGERED], [_REVIEW])
+        self.assertEqual(rec[_SKILLS_TRIGGERED_COUNT], 1)
+        self.assertEqual(rec[_SKILLS_EVIDENCE], {_REVIEW: "inferred"})
+        self.assertEqual(rec[_SKILLS_INCIDENTAL], [_DEVELOP])
+        self.assertEqual(rec[_SKILLS_INCIDENTAL_COUNT], 1)
+
+    def test_codex_skill_loaded_and_inspected_records_both(self) -> None:
+        # A skill a codex run both reads and inspects persists in BOTH the
+        # triggered / evidence fields and the incidental fields: the buckets
+        # are independent, so a loaded skill keeps its incidental count while
+        # the trigger set still excludes the inspection.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            records = self._emit(
+                analytics, Path(td) / "a.jsonl",
+                stdout=_codex_stdout_with_skills(
+                    read=_REVIEW, incidental=_REVIEW,
+                ),
+                backend=_CODEX, track=True,
+            )
+        rec = records[0]
+        self.assertEqual(rec[_SKILLS_TRIGGERED], [_REVIEW])
+        self.assertEqual(rec[_SKILLS_TRIGGERED_COUNT], 1)
+        self.assertEqual(rec[_SKILLS_EVIDENCE], {_REVIEW: "inferred"})
+        self.assertEqual(rec[_SKILLS_INCIDENTAL], [_REVIEW])
+        self.assertEqual(rec[_SKILLS_INCIDENTAL_COUNT], 1)
+
+    def test_incidental_only_run_keeps_triggered_keys_absent(self) -> None:
+        # A run whose only SKILL.md reference is a `git diff` inspection records
+        # the incidental bucket but leaves every triggered / evidence key
+        # dropped, so the record cannot masquerade as a load.
+        _, analytics = _reload()
+        with tempfile.TemporaryDirectory() as td:
+            records = self._emit(
+                analytics, Path(td) / "a.jsonl",
+                stdout=_codex_stdout_with_skills(incidental=_DEVELOP),
+                backend=_CODEX, track=True,
+            )
+        rec = records[0]
+        self.assertEqual(rec[_SKILLS_INCIDENTAL], [_DEVELOP])
+        self.assertEqual(rec[_SKILLS_INCIDENTAL_COUNT], 1)
+        for key in (_SKILLS_TRIGGERED, _SKILLS_TRIGGERED_COUNT, _SKILLS_EVIDENCE):
+            self.assertNotIn(key, rec)
+
+    def test_returns_only_loaded_skills_not_incidental(self) -> None:
+        # The value `record_agent_exit` returns -- the list the `skill_triggered`
+        # audit emitter iterates -- carries only loaded skills, so an incidental
+        # `git diff` reference never produces an audit event.
+        _, analytics = _reload()
+        triggered = self._record(
+            analytics,
+            stdout=_codex_stdout_with_skills(read=_REVIEW, incidental=_DEVELOP),
+            track=True,
+            backend=_CODEX,
+        )
+        self.assertEqual(triggered, [_REVIEW])
+
     def _emit(
         self, analytics, path, *, stdout, backend=_CLAUDE, track=True,
     ) -> list[dict]:
@@ -956,7 +1079,7 @@ class RecordAgentExitSkillTest(unittest.TestCase):
         return _read_records(path)
 
     def _record(
-        self, analytics, *, stdout, track=True, parse=None,
+        self, analytics, *, stdout, track=True, parse=None, backend=_CLAUDE,
     ):
         """Call `record_agent_exit` with the sink disabled and return its
         value -- the de-duplicated triggered list the caller emits events
@@ -978,8 +1101,8 @@ class RecordAgentExitSkillTest(unittest.TestCase):
                 issue=AGENT_EXIT_ISSUE_NUMBER,
                 stage=_STAGE_IMPLEMENTING,
                 agent_role=_DEVELOPER,
-                backend=_CLAUDE,
-                agent_spec=_CLAUDE,
+                backend=backend,
+                agent_spec=backend,
                 resume_session_id=None,
                 result=analytics.AgentResult(
                     session_id="sess",

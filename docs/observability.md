@@ -200,7 +200,13 @@ carries:
   `cache_write_tokens`, the distinct `models` observed in the stream, `turns`, `cost_usd`, and `cost_source`.
 - **Skill triggers (opt-in)** — only when `TRACK_SKILL_TRIGGERS` is on (default off): `skills_triggered` (distinct
   skill names, first-seen order), `skills_triggered_count` (total trigger count, so three `develop` pulls read `3` while
-  the list carries `develop` once), and `skills_available` (the offered-skills set). On **claude** the offered set is
+  the list carries `develop` once), `skills_evidence` (name → the per-load evidence tier: `confirmed` for a claude
+  `Skill` tool call, `inferred` for a codex command that directly reads the skill's `SKILL.md` with a reader verb such
+  as `cat` / `sed`), the incidental pair `skills_incidental` / `skills_incidental_count` (path-only references a codex
+  run made to a `SKILL.md` without reading it — a `git diff` / `git status` / `rg`, an env-prefixed inspection, or any
+  non-reader command — kept out of `skills_triggered`, its count, and the `skill_triggered` audit events so a bystander
+  mention is never miscounted as a load, but recorded independently: a skill both read *and* inspected appears in both
+  buckets), and `skills_available` (the offered-skills set). On **claude** the offered set is
   read from the dedicated `skills` array in the `system`/`init` stream frame — confirmed against a real captured
   `--output-format stream-json` run — so `skills_available` is populated for tracked claude runs independently of what
   they triggered. Codex's `codex exec --json` stream carries no such offered-skills catalog, so for **codex** the set is
@@ -210,11 +216,12 @@ carries:
   runs only for codex, never overrides the claude stream-parsed set, and is fail-open (a missing root leaves the field
   empty). Each
   field is dropped (its key absent) when empty, so a claude run that was offered skills but triggered none records
-  `skills_available` while the two triggered keys drop — the "offered but unused" vs "never available" signal — and
-  a run with nothing to report keeps the record shape identical to the switch-off case. Parsed via
+  `skills_available` while the triggered / evidence keys drop — the "offered but unused" vs "never available" signal —
+  and a run with nothing to report keeps the record shape identical to the switch-off case. Parsed via
   `usage.parse_agent_skills` under its own fail-open guard inside `record_agent_exit`: a skill-parse failure logs and
-  still emits the baseline usage / cost record, and reads only the skill *name* — never the `Skill` tool's `args`.
-  With the switch off the extractor never runs and none of the three keys appear.
+  still emits the baseline usage / cost record, and reads only the skill *name* — never the `Skill` tool's `args`, the
+  surrounding codex command text, or a command's `aggregated_output` (the file's contents). With the switch off the
+  extractor never runs and none of the skill keys appear.
 
 The configured model is pulled out of the role's `extra_args` (via `_configured_model`; recognises `-m <model>` /
 `-m=<model>` for codex and `--model <model>` / `--model=<model>` for claude) and forwarded as the parser's
@@ -637,10 +644,12 @@ matching `ANALYTICS_LOG_PATH`.
 - **`analytics_events` table.** Columns mirror the JSONL record shape produced by `analytics.build_record`. `ts`,
   `repo`, `issue`, `event` are `NOT NULL`; everything else is nullable so any record across the three event kinds is a
   valid row. An `extras JSONB` column captures any field added to `build_record` before the DDL knows about it — the
-  opt-in `skills_triggered` / `skills_triggered_count` / `skills_available` fields are exactly such additions, so they
-  need **zero DDL**: an operator-deployed database ingests them the moment `TRACK_SKILL_TRIGGERS` is enabled, with no
-  migration and no schema reapply. `source_path` / `source_line` are forensic context; the authoritative dedup key is
-  `content_hash` — SHA-256 over the canonical (`sort_keys=True`) JSON form of the record.
+  opt-in skill fields (`skills_triggered` / `skills_triggered_count` / `skills_available`, the per-load
+  `skills_evidence` tier map, and the `skills_incidental` / `skills_incidental_count` path-only references) are exactly
+  such additions, so they need **zero DDL**: an operator-deployed database ingests them the moment
+  `TRACK_SKILL_TRIGGERS` is enabled, with no migration and no schema reapply. `source_path` / `source_line` are forensic
+  context; the authoritative dedup key is `content_hash` — SHA-256 over the canonical (`sort_keys=True`) JSON form of
+  the record.
 - **Indexes.** A plain (non-partial) unique index on `content_hash` plus `INSERT ... ON CONFLICT (content_hash) DO
   NOTHING` makes repeated sync runs idempotent. Additional indexes cover the expected query dimensions: `ts`; `(event,
   ts)`; `(repo, issue)`; a partial index on non-null `stage`; per-event-kind partial indexes on `(repo, ts DESC)` for
@@ -1155,23 +1164,39 @@ comment; the `umbrella` close comment appends it. It is a read-only summary — 
 skipped when no run was ever counted.
 
 **Skill-trigger extractor (opt-in).** A sibling trio mirrors the usage parsers' two-parsers-one-dispatcher shape and
-resilience contract to record which agent *skills* a run triggered, gated behind `TRACK_SKILL_TRIGGERS` (default off;
-see [`agent_exit` records](#agent_exit-records)). `parse_claude_skills(stdout)` reads the firm signal — `tool_use`
+resilience contract to record which agent *skills* a run loaded, gated behind `TRACK_SKILL_TRIGGERS` (default off;
+see [`agent_exit` records](#agent_exit-records)). The result is a names-only evidence model on `SkillTriggers`:
+`triggered` / `trigger_counts` are the loaded skills, `evidence` maps each to its tier (`confirmed` / `inferred`), and
+`incidental` / `incidental_counts` are path-only references that never become loads. The two buckets are independent —
+a skill both read and inspected is recorded in both — the only exclusion is structural: an incidental reference never
+enters `triggered` / `trigger_counts` or the `skill_triggered` audit events. `parse_claude_skills(stdout)` reads the
+firm **confirmed** signal — `tool_use`
 content blocks named `Skill` in the `assistant` stream — and returns `input.skill` in first-seen order, de-duplicating
 per invocation by the block `id`. (A captured real stream showed that under `--include-partial-messages` each completed
 content block lands in its own `assistant` frame — the content array is partitioned across frames, not a cumulative
 snapshot that repeats earlier blocks the way the `usage` sub-object does — so the parser walks every frame and de-dups
-by `id` rather than keeping the last frame per message id.) `parse_codex_skills(stdout)` recognizes the **confirmed**
-codex shape: codex has no dedicated `Skill` tool, so its file-based skill mechanism surfaces only as a
-`command_execution` item whose shell `command` opens a skill's `skills/<name>/SKILL.md` file (codex's own "open its
-SKILL.md" instruction). A captured reviewer run pinned this — codex both registered-under-`$CODEX_HOME/skills/` and
-project-local `.agents/skills/` reads match. Started/completed echo the same command, so the parser dedups by the shared
-`item.id` (last-frame-wins, as for usage). It reads only the `<name>` path segment — never the command text or its
-`aggregated_output` (the file's contents), both of which can echo user content (names-only Privacy). The signal is
-**heuristic**: opening a SKILL.md is the trigger codex prescribes, but a run that reads a SKILL.md for an unrelated
-reason (e.g. reviewing a PR that edits one) would also register. `parse_agent_skills(backend, stdout)` dispatches by
-backend exactly as `parse_agent_usage` does. The offered-skills set (`SkillTriggers.available`) is **confirmed on
-claude** — read from the dedicated `skills` array in the `system`/`init` frame, captured against a real stream — and
+by `id` rather than keeping the last frame per message id.) Claude has no dedicated file mechanism, so it produces no
+incidental references. `parse_codex_skills(stdout)` recognizes the codex shape: codex has no dedicated `Skill` tool, so
+its file-based skill mechanism surfaces only as a `command_execution` item whose shell `command` opens a skill's
+`skills/<name>/SKILL.md` file (codex's own "open its SKILL.md" instruction). A captured reviewer run pinned this — codex
+both registered-under-`$CODEX_HOME/skills/` and project-local `.agents/skills/` reads match. The command is first
+unwrapped (peeling the `bash -lc "…"` shell) and split into sub-commands on **unquoted, unescaped** operators —
+quote- and backslash-aware, so a metacharacter inside a quoted argument (`rg 'foo|bar' path`) or a backslash-escaped one
+(`rg foo\|cat path`) does not fabricate a spurious segment — then each `SKILL.md` match is routed by its sub-command's
+leading verb (skipping any `NAME=value` env prefix). Only a verb
+established as a **direct reader** (`cat` / `sed` / `head` / …) makes the reference an **inferred** load; every other
+verb — an inspection / search (`git diff` / `git status` / `rg`), an env-prefixed inspection (`GIT_PAGER=cat git
+diff …`), or a generic path-only command (`echo …`) — makes it an **incidental** reference. So a read chained after an
+inspection still counts, and a bystander `git diff` over a changed SKILL.md does not fabricate a load. Started/completed
+echo the same command, so the parser dedups by the shared `item.id` (last-frame-wins, as for usage) — for inferred
+loads and incidental references alike. It reads only the `<name>` path segment and the routing verb — never the command
+text or its `aggregated_output` (the file's contents), both of which can echo user content (names-only Privacy). The
+inferred signal stays **heuristic** within the reader allowlist: a reader that opens a SKILL.md for an unrelated reason
+would still register as an inferred load, while defaulting non-readers to incidental keeps an unrecognized command from
+fabricating a trigger. `parse_agent_skills(backend, stdout)` dispatches by backend exactly as `parse_agent_usage` does.
+The offered-skills set (`SkillTriggers.available`) is
+**confirmed on claude** — read from the dedicated `skills` array in the `system`/`init` frame, captured against a real
+stream — and
 stays **empty on codex** at the parser layer: a captured `codex exec --json` stream (v0.142.5) carries no offered-skills
 frame at all, so `record_agent_exit` backfills the codex offered set out-of-band from the filesystem via
 `skill_catalog.discover_local_skills(cwd)` instead. The *triggered* set does not

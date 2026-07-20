@@ -27,8 +27,11 @@ Event kinds written today:
   from `workflow._run_agent_tracked` with parsed usage / cost. When the
   opt-in `TRACK_SKILL_TRIGGERS` switch is on it additionally carries the
   agent's triggered skills (`skills_triggered` / `skills_triggered_count`
-  / `skills_available`); with the switch off (the default) those keys are
-  absent and the record shape is unchanged.
+  / `skills_available`), the per-load evidence tier (`skills_evidence`,
+  `confirmed` / `inferred`), and any path-only references the run made
+  without loading a skill (`skills_incidental` / `skills_incidental_count`);
+  with the switch off (the default) those keys are absent and the record
+  shape is unchanged.
 - `repo_skill_catalog` -- one repo-level record per tick per spec,
   written from `orchestrator.skill_catalog._emit_repo_skill_catalog`
   (driven by `workflow.tick`). Enumerates the `SKILL.md` definitions the
@@ -178,7 +181,8 @@ def _parse_track_skill_triggers() -> bool:
 
     Default off. When on, `record_agent_exit` runs the skill-trigger
     extractor (`usage.parse_agent_skills`) and folds `skills_triggered` /
-    `skills_triggered_count` / `skills_available` into the `agent_exit`
+    `skills_triggered_count` / `skills_available` / `skills_evidence` /
+    `skills_incidental` / `skills_incidental_count` into the `agent_exit`
     record. The switch defaults off *because* the sink itself is default-on
     (`ANALYTICS_LOG_PATH` -> `LOG_DIR/analytics.jsonl`): an on-by-default
     switch would silently add skill fields to every default install's
@@ -433,11 +437,21 @@ class _CodexCatalog:
 
 @dataclass(frozen=True)
 class _AgentExitSkillFields:
-    """Normalized optional skill fields for an `agent_exit` event."""
+    """Normalized optional skill fields for an `agent_exit` event.
+
+    `skills_evidence` maps each triggered name to why it counts as a load
+    (`confirmed` / `inferred`); `skills_incidental` / `skills_incidental_count`
+    carry the path-only references the run made without loading a skill. All
+    are dropped (their key absent) when empty, so a run with nothing to report
+    keeps today's record shape.
+    """
 
     skills_triggered: Optional[list[str]] = None
     skills_triggered_count: Optional[int] = None
     skills_available: Optional[list[str]] = None
+    skills_evidence: Optional[dict[str, str]] = None
+    skills_incidental: Optional[list[str]] = None
+    skills_incidental_count: Optional[int] = None
 
 
 def _parse_agent_exit_usage(
@@ -512,7 +526,13 @@ def _normalize_agent_exit_skills(
     parsed_skills: usage.SkillTriggers,
     codex_catalog: _CodexCatalog,
 ) -> _AgentExitSkillFields:
-    """Convert parser output into optional event fields."""
+    """Convert parser output into optional event fields.
+
+    Incidental references stay out of `skills_triggered` / the count (and thus
+    the `skill_triggered` audit events) -- they ride the separate
+    `skills_incidental` / `skills_incidental_count` keys. `skills_evidence`
+    persists the per-load tier the parser assigned.
+    """
     skills_triggered = list(parsed_skills.triggered) or None
     skills_triggered_count = (
         sum(parsed_skills.trigger_counts.values())
@@ -522,10 +542,19 @@ def _normalize_agent_exit_skills(
     skills_available = (
         list(parsed_skills.available) or codex_catalog.available_skills
     )
+    skills_incidental = list(parsed_skills.incidental) or None
+    skills_incidental_count = (
+        sum(parsed_skills.incidental_counts.values())
+        if skills_incidental
+        else None
+    )
     return _AgentExitSkillFields(
         skills_triggered=skills_triggered,
         skills_triggered_count=skills_triggered_count,
         skills_available=skills_available,
+        skills_evidence=dict(parsed_skills.evidence) or None,
+        skills_incidental=skills_incidental,
+        skills_incidental_count=skills_incidental_count,
     )
 
 
@@ -593,6 +622,9 @@ def _build_agent_exit_record(
         skills_triggered=skill_fields.skills_triggered,
         skills_triggered_count=skill_fields.skills_triggered_count,
         skills_available=skill_fields.skills_available,
+        skills_evidence=skill_fields.skills_evidence,
+        skills_incidental=skill_fields.skills_incidental,
+        skills_incidental_count=skill_fields.skills_incidental_count,
     )
 
 
