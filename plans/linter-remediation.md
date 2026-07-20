@@ -43,7 +43,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
-| 5 | Test structure and complexity | 1/7 | [ ] |
+| 5 | Test structure and complexity | 2/7 | [ ] |
 | 6 | Test literals and naming | 1/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
@@ -333,7 +333,7 @@ For every package:
 
 ### Package 5.2 — Agent, usage, main, and configuration tests
 
-- [ ] Refactor `test_agents.py`, `test_usage.py`, `test_main.py`, `test_config.py`, and related helper tests.
+- [x] Refactor `test_agents.py`, `test_usage.py`, `test_main.py`, `test_config.py`, and related helper tests.
 
 ### Package 5.3 — Scheduler, base-sync, git, and worktree tests
 
@@ -1001,8 +1001,49 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-19 | 5.1+6.1 | Partial | 4 modules 786->374; gate 2150p/3s | Not committed | Resolve residual; boxes open |
 | 2026-07-20 | 5.1+6.1 r2 | Partial | Restored read asserts; gate 2150p/3s | Not committed | Heavy-module residual |
 | 2026-07-20 | 5.1+6.1 | Complete | WPS 470->446; WPS118->0; gate 2150p/3s | Not committed | Stage 5/6 1/7 |
+| 2026-07-20 | 5.2 | Complete | WPS430 55->19, WPS338 16->1; gate 2116p/36s | Not committed | Start Package 5.3 |
 
 Package 3.1 retained 18 reviewed API findings and passed 2,099 tests, 3 skips, and 627 subtests.
+
+Package 5.2 refactored `test_agents.py`, `test_usage.py`, `test_main.py`, and `test_config.py` for
+structure and complexity. `test_main.py`'s `fake_client` / `fake_tick` closures were replaced by the
+`_ClientFactory` / `_TickRecorder` recorders (plus the `_raise_on_slug` tick hook and the `_build_clients`
+dispatch fixture) that collapse the 19 byte-identical `fake_client` closures and the pure-recording
+`fake_tick` closures into reusable callables exposing `.by_slug` / `.calls` / `.slugs` / `.schedulers` /
+`.threads`; the no-op `fake_tick` bodies became bare `patch.object(..., "tick")` mocks, dropping WPS430
+there from 49 to 17. Those four fixtures live in a new `tests/main_helpers.py` (the per-subsystem helper
+pattern already used by `tests/analytics_read_helpers.py`) rather than at `test_main.py` module scope:
+keeping them in-module would have raised `test_main.py` from 7 members to 10 and tripped a fresh WPS202,
+and hosting `_build_clients` there also clears the WPS338 it caused as a protected method above the
+`AsyncPollingDispatchTest` tests. The 17 retained WPS430 are the barrier, worker-submission, and
+signal-coordination ticks whose bodies are materially distinct (recording order across the barrier is
+itself the regression signal, so those must not route through the recorder), plus the two `tracking_init`
+closures that wrap `IssueScheduler.__init__` -- a callable class cannot receive the constructed instance
+because Python only prepends `self` when `__init__` is a plain function.
+`test_agents.py` lifted the four duplicated `killpg` side effects into module-level `_killpg_group_empty`
+/ `_killpg_group_alive`, merged the SIGTERM/SIGKILL interruption tests into one `subTest` loop, unpacked
+only the asserted tail of the 5-tuple returns with `*_` to clear WPS210, and moved the two protected
+helpers below the public tests to clear WPS338. `test_config.py` extracted the 11 byte-identical
+`_load_config` reload methods (and the Hitl variant) into a single module-level `_load_config(env=None)`,
+which cleared WPS338 for those 11 classes and removed the per-class duplication; the dotted
+`import orchestrator.config as config` after the `sys.modules.pop` is preserved so the reload is not
+skipped.
+
+`test_usage.py` was left structurally unchanged: it already builds records through module-level fixture
+builders (`_jsonl`, `_assistant`, `_claude_usage`, ...), has no nested callbacks or method-order
+findings, and its residual WPS214 / WPS221 / WPS213 / WPS210 are inherent -- the large parser classes
+each verify a materially different per-SKU pricing contract (tiered vs flat, pro vs base, cached-blocked)
+and the expression-heavy tests are single round-trips whose per-field assertions are their distinct
+coverage; collapsing either would merge different scenarios or hide assertions.
+
+The remaining structure findings are documented rather than forced: `test_main.py`'s residual WPS210 (12)
+and WPS213 (4) sit on the concurrency tests whose lock / event / barrier / recorder locals are the
+fixture's meaning; `test_config.py` keeps one WPS338 (`DotenvQuoteStrippingTest._reload_with_dotenv`, a
+single-class hermetic-reload helper that reads best next to the class it serves) and one WPS430 (a
+single-use raising `config_error` callback); and the WPS214 too-many-methods counts on the large cohesive
+parser / config classes stay, since splitting a class to satisfy a count harms organization. The
+WPS458 import-collision counts (the dual `from orchestrator import agents` + `from orchestrator.agents
+import ...` pattern) are the standard test module-plus-symbols import idiom and are left in place.
 
 Packages 5.1 and 6.1 were run as one subsystem pass and are now **complete**; the 5.1 and 6.1 checkboxes
 are checked. The pass covered `test_analytics*.py`, `test_dashboard*.py`, `test_trajectory*.py`, and the

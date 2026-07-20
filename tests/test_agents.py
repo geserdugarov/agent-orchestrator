@@ -44,6 +44,21 @@ def _completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> Magic
     return proc
 
 
+def _killpg_group_empty(pid: int, sig: int) -> None:
+    """`os.killpg` side_effect where the signal-0 liveness probe reports the
+    group already empty, so the SIGKILL escalation must be skipped.
+    """
+    if sig == 0:
+        raise ProcessLookupError
+
+
+def _killpg_group_alive(pid: int, sig: int) -> None:
+    """`os.killpg` side_effect where the signal-0 liveness probe succeeds, so
+    a descendant outlived the leader and the group must still be SIGKILLed.
+    """
+    return None
+
+
 class ParseSessionIdTest(unittest.TestCase):
     def test_codex_jsonl_session_id(self) -> None:
         # Codex's --json output has session_id at varied paths; the walker
@@ -475,24 +490,6 @@ class RunAgentExtraArgsTest(unittest.TestCase):
     safety/output flags and prompt where they already are.
     """
 
-    def _argv_for(
-        self,
-        backend: str,
-        *,
-        extra_args: tuple[str, ...],
-        resume_session_id=None,
-    ) -> list[str]:
-        with patch(
-            "orchestrator.agents.subprocess.Popen",
-            return_value=_completed(),
-        ) as run_mock:
-            run_agent(
-                backend, "p", _CWD,
-                resume_session_id=resume_session_id,
-                extra_args=extra_args,
-            )
-        return list(run_mock.call_args.args[0])
-
     def test_codex_fresh_adds_args_before_exec(self) -> None:
         # Codex global options (`-m`, `-c`) must appear BEFORE the `exec`
         # subcommand; the parser rejects them after the subcommand. The
@@ -560,6 +557,24 @@ class RunAgentExtraArgsTest(unittest.TestCase):
         claude_argv = self._argv_for("claude", extra_args=())
         self.assertEqual(claude_argv[1], "-p")
 
+    def _argv_for(
+        self,
+        backend: str,
+        *,
+        extra_args: tuple[str, ...],
+        resume_session_id=None,
+    ) -> list[str]:
+        with patch(
+            "orchestrator.agents.subprocess.Popen",
+            return_value=_completed(),
+        ) as run_mock:
+            run_agent(
+                backend, "p", _CWD,
+                resume_session_id=resume_session_id,
+                extra_args=extra_args,
+            )
+        return list(run_mock.call_args.args[0])
+
 
 class TerminateAllRunningTest(unittest.TestCase):
     """`terminate_all_running` is the shutdown hook that kills in-flight agent
@@ -585,12 +600,10 @@ class TerminateAllRunningTest(unittest.TestCase):
         agents._register_proc(proc1)
         agents._register_proc(proc2)
 
-        def killpg(pid: int, sig: int) -> None:
-            if sig == 0:  # liveness probe: group has no surviving member
-                raise ProcessLookupError
-
         try:
-            with patch.object(agents.os, "killpg", side_effect=killpg) as kp:
+            with patch.object(
+                agents.os, "killpg", side_effect=_killpg_group_empty,
+            ) as kp:
                 n = agents.terminate_all_running(grace=0.5)
         finally:
             agents._unregister_proc(proc1)
@@ -612,11 +625,10 @@ class TerminateAllRunningTest(unittest.TestCase):
         proc.wait.return_value = 0  # leader exits promptly on SIGTERM
         agents._register_proc(proc)
 
-        def killpg(pid: int, sig: int) -> None:
-            return None  # signal-0 probe succeeds: group still has a member
-
         try:
-            with patch.object(agents.os, "killpg", side_effect=killpg) as kp:
+            with patch.object(
+                agents.os, "killpg", side_effect=_killpg_group_alive,
+            ) as kp:
                 agents.terminate_all_running(grace=0.05)
         finally:
             agents._unregister_proc(proc)
@@ -693,10 +705,9 @@ class TerminateProcessGroupTest(unittest.TestCase):
         proc.pid = 777
         proc.wait.return_value = 0  # leader exits promptly on SIGTERM
 
-        def killpg(pid: int, sig: int) -> None:
-            return None  # signal-0 probe succeeds: group still has a member
-
-        with patch.object(agents.os, "killpg", side_effect=killpg) as kp:
+        with patch.object(
+            agents.os, "killpg", side_effect=_killpg_group_alive,
+        ) as kp:
             agents._terminate_process_group(proc)
         sent = [c.args for c in kp.call_args_list]
         self.assertIn((777, signal.SIGTERM), sent)
@@ -710,11 +721,9 @@ class TerminateProcessGroupTest(unittest.TestCase):
         proc.pid = 778
         proc.wait.return_value = 0
 
-        def killpg(pid: int, sig: int) -> None:
-            if sig == 0:  # liveness probe: group has no surviving member
-                raise ProcessLookupError
-
-        with patch.object(agents.os, "killpg", side_effect=killpg) as kp:
+        with patch.object(
+            agents.os, "killpg", side_effect=_killpg_group_empty,
+        ) as kp:
             agents._terminate_process_group(proc)
         sent = [c.args for c in kp.call_args_list]
         self.assertIn((778, signal.SIGTERM), sent)
@@ -801,37 +810,21 @@ class InterruptedClassificationTest(unittest.TestCase):
     a normal completion and from the orchestrator's own `timed_out` path.
     """
 
-    def _kill_self(self, sig: signal.Signals) -> tuple[str, str, int, bool, bool]:
-        # Drive a REAL child that signals itself, so the negative returncode is
-        # produced by the kernel + Popen exactly as it is when the shutdown
-        # sweep SIGTERMs/SIGKILLs the group, not synthesized by a mock.
-        cmd = [
-            sys.executable, "-c",
-            f"import os, signal; os.kill(os.getpid(), {int(sig)})",
-        ]
-        return agents._run_subprocess(cmd, _REAL_CWD, dict(os.environ), 30)
-
-    def test_sigterm_exit_marked_interrupted(self) -> None:
-        stdout, stderr, exit_code, timed_out, interrupted = self._kill_self(
-            signal.SIGTERM
-        )
-        self.assertEqual(exit_code, -signal.SIGTERM)
-        self.assertFalse(timed_out)
-        self.assertTrue(interrupted)
-
-    def test_sigkill_exit_marked_interrupted(self) -> None:
-        stdout, stderr, exit_code, timed_out, interrupted = self._kill_self(
-            signal.SIGKILL
-        )
-        self.assertEqual(exit_code, -signal.SIGKILL)
-        self.assertFalse(timed_out)
-        self.assertTrue(interrupted)
+    def test_signal_exit_marked_interrupted(self) -> None:
+        # Both shutdown-sweep signals produce a completed-but-interrupted run:
+        # negative returncode, `interrupted=True`, and `timed_out=False`.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(signal=sig):
+                *_, exit_code, timed_out, interrupted = self._kill_self(sig)
+                self.assertEqual(exit_code, -sig)
+                self.assertFalse(timed_out)
+                self.assertTrue(interrupted)
 
     def test_clean_exit_not_interrupted(self) -> None:
         # A normal non-zero failure (exit 3) is a completed run, NOT an
         # interruption -- the two must stay distinguishable downstream.
         cmd = [sys.executable, "-c", "import sys; sys.exit(3)"]
-        stdout, stderr, exit_code, timed_out, interrupted = agents._run_subprocess(
+        *_, exit_code, timed_out, interrupted = agents._run_subprocess(
             cmd, _REAL_CWD, dict(os.environ), 30
         )
         self.assertEqual(exit_code, 3)
@@ -845,7 +838,7 @@ class InterruptedClassificationTest(unittest.TestCase):
         # the shutdown-sweep interruption above even though both signal the
         # group. Real child + 1s timeout so the whole flatten path is exercised.
         cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
-        stdout, stderr, exit_code, timed_out, interrupted = agents._run_subprocess(
+        *_, exit_code, timed_out, interrupted = agents._run_subprocess(
             cmd, _REAL_CWD, dict(os.environ), 1
         )
         self.assertEqual(exit_code, -1)
@@ -891,6 +884,16 @@ class InterruptedClassificationTest(unittest.TestCase):
             stderr="",
         )
         self.assertFalse(result.interrupted)
+
+    def _kill_self(self, sig: signal.Signals) -> tuple[str, str, int, bool, bool]:
+        # Drive a REAL child that signals itself, so the negative returncode is
+        # produced by the kernel + Popen exactly as it is when the shutdown
+        # sweep SIGTERMs/SIGKILLs the group, not synthesized by a mock.
+        cmd = [
+            sys.executable, "-c",
+            f"import os, signal; os.kill(os.getpid(), {int(sig)})",
+        ]
+        return agents._run_subprocess(cmd, _REAL_CWD, dict(os.environ), 30)
 
 
 class ClaudeLastMessageGatingTest(unittest.TestCase):
