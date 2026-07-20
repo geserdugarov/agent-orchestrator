@@ -43,7 +43,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
-| 5 | Test structure and complexity | 4/7 | [ ] |
+| 5 | Test structure and complexity | 5/7 | [ ] |
 | 6 | Test literals and naming | 1/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
@@ -345,7 +345,7 @@ For every package:
 
 ### Package 5.5 — Implementing and fixing tests
 
-- [ ] Refactor implementing, fixing, PR-reuse, retry, timeout, drift, and terminal test modules.
+- [x] Refactor implementing, fixing, PR-reuse, retry, timeout, drift, and terminal test modules.
 
 ### Package 5.6 — Validating, in-review, and conflict tests
 
@@ -1019,6 +1019,31 @@ considered.
   visibility tests.
 - Reviewed: [x]
 
+### Implementing and fixing scenario density
+
+- File and symbols: scenario tests across `tests/test_workflow_implementing_*.py`, `tests/test_workflow_fixing.py`,
+  `tests/test_workflow_fixing_paused.py`, and `tests/test_workflow_fixing_routing.py`.
+- Rule: `WPS204`, `WPS210`, and `WPS213`.
+- Reason: Shared implementing/fixing stage runners, behavior fixtures, agent-call mocks, comment-injection recorders,
+  and patch-stack contexts remove the duplicated setup. The remaining expressions and locals describe distinct pinned
+  state, agent outcomes, PR feedback surfaces, ordered calls, or per-field assertions; further extraction would hide
+  the state-machine scenario or replace meaningful values with an opaque options mapping.
+- Protected by: the 234 focused Package 5.5 tests and their 38 subtests.
+- Reviewed: [x]
+
+### Cohesive implementing and fixing test shapes
+
+- File and symbols: `tests/test_workflow_fixing.py`, `tests/test_workflow_fixing_routing.py`,
+  `tests/test_workflow_implementing_full_spec.py`, `tests/test_workflow_implementing_pr_reuse.py`, and
+  `tests/test_workflow_implementing_retry.py`.
+- Rule: `WPS201`, `WPS202`, and `WPS235`.
+- Reason: Oversized test classes are split into behavior-focused groups while stage constants and fixtures remain
+  beside the scenarios that consume them. Splitting these cohesive modules at the seven-member threshold would
+  duplicate the shared state builders, and the direct workflow-helper imports keep backend, label, and prompt
+  contracts explicit at use sites.
+- Protected by: the 189 focused tests in these five modules.
+- Reviewed: [x]
+
 ## Session log
 
 Add one row for every implementation session, including partial sessions.
@@ -1090,6 +1115,29 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-20 | 5.2 | Complete | WPS430 55->19, WPS338 16->1; gate 2116p/36s | Not committed | Start Package 5.3 |
 | 2026-07-20 | 5.3 | Complete | WPS 681->363; 167 focused; gate 2150p/3s | Not committed | Start Package 5.4 |
 | 2026-07-20 | 5.4 | Complete | WPS 748->697; 225 focused; gate 2150p/3s | Not committed | Start Package 5.5 |
+| 2026-07-20 | 5.5 | Complete | WPS 680->560; 234 focused; gate 2149p/3s | Not committed | Start Package 5.6 |
+
+Package 5.5 is **complete**. The pass covered the implementing timeout, retry, PR-reuse, drift, fresh-run, paused,
+full-spec, and terminal suites plus fixing handling, paused behavior, and routing. Repeated stage lambdas moved into
+the shared `_run_implementing` / `_run_fixing` helpers; oversized classes were split by behavior; nested agent/git
+callbacks became inspectable mocks or callable recorders; and the six-patch drift tuple became an `ExitStack`-backed
+context. The collected set of 234 focused tests and 38 subtests is unchanged, and every scenario retains its original
+assertions.
+
+The scoped `--select=WPS` count over the eleven Package 5.5 modules fell from 680 to 560. The structural subset fell
+from 244 to 127: `WPS214` (11), `WPS338` (21), `WPS430` (30), `WPS236` (7), `WPS426` (6), and `WPS441` (8) were
+cleared, as were the smaller `WPS211`, `WPS219`, `WPS221`, `WPS227`, `WPS234`, `WPS407`, `WPS458`, `WPS501`, and
+`WPS602` families; `WPS204` fell from 54 to 44 and `WPS210` from 68 to 61. The 127 retained structural findings are
+`WPS201` (2), `WPS202` (3), `WPS204` (44), `WPS210` (61), `WPS213` (15), and `WPS235` (2), covered by the two
+reviewed remainder entries above. The other 433 findings are naming, repeated-string, numeric-literal, and long-tail
+format findings assigned to Package 6.5 or Stage 7: `WPS110` (20), `WPS111` (9), `WPS114` (1), `WPS115` (16),
+`WPS226` (94), `WPS336` (3), and `WPS432` (290).
+
+All 234 focused tests, 38 focused subtests, and Ruff pass. The complete tracked suite passes with 2,149 tests and 3
+live-Postgres skips; clean `HEAD` and the modified tree both collect exactly 2,152 tests. Both committed-range and
+working-tree diff checks are clean. A bare repository-root collection also sees the ignored, externally owned
+`analytics-db/data` volume and receives `PermissionError`; the complete tracked `tests/` tree is the recorded full
+gate for this session.
 
 Package 5.4 is **complete**. The pass covered the decomposition handler families, question handling and routing,
 documenting handling, paused/trust filtering, and documenting routing. Oversized stage-test classes were split into

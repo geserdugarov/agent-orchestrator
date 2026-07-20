@@ -22,6 +22,7 @@ are covered in `tests/test_workflow_fixing_routing.py`'s
 from __future__ import annotations
 
 import unittest
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -32,14 +33,6 @@ from orchestrator.stages.fixing import (
     _pending_fix_id_set,
     _reconstruct_pending_fix_batch,
 )
-# The `/orchestrator continue` parser lives in `workflow_messages` and is reached
-# through the `workflow` facade (`_wf._parse_orchestrator_continue`), so the
-# tests target the facade boundary rather than the stage module.
-from orchestrator.workflow import (
-    _is_bare_orchestrator_continue,
-    _parse_orchestrator_continue,
-)
-
 from tests.fakes import (
     FakeComment,
     FakeGitHubClient,
@@ -53,7 +46,6 @@ from tests.workflow_helpers import (
     EVENT_AGENT_SPAWN,
     ROLE_DEVELOPER,
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
@@ -111,9 +103,9 @@ BATCH_PR_CONVERSATION_ID = 2100
 BATCH_INLINE_ID = 40
 BATCH_INLINE_SECOND_ID = 41
 BATCH_SUMMARY_ID = 7
-BATCH_ISSUE_IDS = [BATCH_ISSUE_ID, BATCH_PR_CONVERSATION_ID]
-BATCH_INLINE_IDS = [BATCH_INLINE_ID, BATCH_INLINE_SECOND_ID]
-BATCH_SUMMARY_IDS = [BATCH_SUMMARY_ID]
+BATCH_ISSUE_IDS = (BATCH_ISSUE_ID, BATCH_PR_CONVERSATION_ID)
+BATCH_INLINE_IDS = (BATCH_INLINE_ID, BATCH_INLINE_SECOND_ID)
+BATCH_SUMMARY_IDS = (BATCH_SUMMARY_ID,)
 BATCH_LATER_ISSUE_ID = 9000
 BATCH_ORCHESTRATOR_NOTE_ID = 2300
 BATCH_INLINE_NOISE_ID = 99
@@ -161,7 +153,31 @@ RUN_AGENT = "run_agent"
 PUSH_BRANCH = "_push_branch"
 
 
-class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
+class _InjectCommentAfterCall:
+    def __init__(self, callback, issue, comment):
+        self.callback = callback
+        self.issue = issue
+        self.comment = comment
+
+    def __call__(self, *args, **kwargs):
+        fix_result = self.callback(*args, **kwargs)
+        self.issue.comments.append(self.comment)
+        return fix_result
+
+
+@dataclass(frozen=True)
+class _ContinueSeed:
+    park_reason: str | None
+    command_body: str = "/orchestrator continue"
+    command_id: int = COMMAND_COMMENT_ID
+    command_on_pr_conversation: bool = False
+    extra_issue_comments: tuple = ()
+    with_batch_ids: bool = True
+    pending_fix_at: str | None = PENDING_FIX_AT_TS
+    silent_park_count: int = 2
+
+
+class _FixingFixtureMixin(_PatchedWorkflowMixin):
     """Cover the fixing handler against debounce expiry, dev resume/push,
     watermark advancement, and comments arriving while already labeled
     `fixing`.
@@ -212,7 +228,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         defaults.update(kwargs)
         return FakePR(**defaults)
 
-    # --- debounce expiry --------------------------------------------------
+
+class FixingDebounceAndAckTest(unittest.TestCase, _FixingFixtureMixin):
 
     def test_debounce_window_does_not_resume(self) -> None:
         # Triggering comment is fresh (created `now`); IN_REVIEW_DEBOUNCE_SECONDS
@@ -227,8 +244,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -255,8 +272,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="pushed fix",
@@ -305,8 +322,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message=(
@@ -340,8 +357,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="Which trade-off do you prefer, A or B?",
@@ -368,8 +385,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     interrupted=True,
@@ -414,8 +431,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     interrupted=True,
@@ -471,8 +488,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -488,6 +505,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- newer comments extend the debounce window ------------------------
 
+class FixingFeedbackRoutingTest(unittest.TestCase, _FixingFixtureMixin):
     def test_newer_comment_extends_debounce_window(self) -> None:
         # First tick: an older triggering comment is past the window but a
         # newer comment just landed -- the freshest
@@ -509,8 +527,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -541,8 +559,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="pushed",
@@ -579,8 +597,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="fixed",
@@ -618,8 +636,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(timed_out=True),
                 head_shas=(SHA_BEFORE,),
             )
@@ -671,8 +689,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="pushed",
@@ -697,6 +715,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("add a test for this branch", prompt)
         self.assertIn("please update the doc string", prompt)
 
+class FixingContentHashAndConcurrencyTest(
+    unittest.TestCase, _FixingFixtureMixin,
+):
     def test_consumed_comment_refreshes_content_hash(
         self,
     ) -> None:
@@ -723,8 +744,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="pushed",
@@ -770,8 +791,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(timed_out=True),
                 head_shas=(SHA_BEFORE,),
             )
@@ -793,7 +814,6 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # could advertise the PR as ready for human merge over it. The
         # legacy in_review pushed-fix path had the same constraint and
         # advanced only to comments actually fed to the dev.
-        from unittest.mock import patch as _patch_mock
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         triggering = FakeComment(
             id=TRIGGER_ID, body="please fix the bug",
@@ -809,19 +829,16 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             id=CONCURRENT_COMMENT_ID, body="actually also rename helper",
             user=FakeUser(BOB), created_at=long_ago,
         )
-        original_handle_fix_result = workflow._handle_dev_fix_result
-
-        def push_then_inject(*args, **kwargs):
-            fix_result = original_handle_fix_result(*args, **kwargs)
-            issue.comments.append(concurrent)
-            return fix_result
+        fix_and_inject = _InjectCommentAfterCall(
+            workflow._handle_dev_fix_result, issue, concurrent,
+        )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
-             _patch_mock.object(
-                 workflow, "_handle_dev_fix_result", push_then_inject,
+             patch.object(
+                 workflow, "_handle_dev_fix_result", fix_and_inject,
              ):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="pushed",
@@ -850,7 +867,6 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # silently dropped. Verifies the "comments arriving while
         # already labeled `fixing`" contract on the timeout/dirty/push-
         # fail paths, mirroring the success-path guard above.
-        from unittest.mock import patch as _patch_mock
         long_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         triggering = FakeComment(
             id=TRIGGER_ID, body="please fix the bug",
@@ -863,23 +879,16 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             id=CONCURRENT_COMMENT_ID, body="actually also rename helper",
             user=FakeUser(BOB), created_at=long_ago,
         )
-        original_handle_fix_result = workflow._handle_dev_fix_result
-
-        def timeout_then_inject(*args, **kwargs):
-            # `_handle_dev_fix_result` on a timed-out agent posts the
-            # park comment and returns False. Splice the concurrent
-            # human comment in AFTER that post but BEFORE the handler
-            # advances the watermark.
-            fix_result = original_handle_fix_result(*args, **kwargs)
-            issue.comments.append(concurrent)
-            return fix_result
+        fail_and_inject = _InjectCommentAfterCall(
+            workflow._handle_dev_fix_result, issue, concurrent,
+        )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
-             _patch_mock.object(
-                 workflow, "_handle_dev_fix_result", timeout_then_inject,
+             patch.object(
+                 workflow, "_handle_dev_fix_result", fail_and_inject,
              ):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(timed_out=True),
                 head_shas=(SHA_BEFORE,),
             )
@@ -899,8 +908,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # successful agent result this time so the second tick
         # produces a push and we can assert the flow recovered.
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message="pushed",
                 ),
@@ -914,6 +923,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- awaiting-human gate (parked from prior failed resume) ----------
 
+class FixingAwaitingHumanResumeTest(unittest.TestCase, _FixingFixtureMixin):
     def test_no_new_feedback_is_noop(self) -> None:
         # After a prior failed tick parked the issue and bumped the
         # watermark past the original triggering comment, a poll with no
@@ -930,8 +940,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -960,8 +970,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="pushed",
@@ -1012,8 +1022,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="pushed",
@@ -1028,6 +1038,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # Flipped back to validating so the reviewer re-evaluates next tick.
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
+class FixingTransientParkRecoveryTest(
+    unittest.TestCase, _FixingFixtureMixin,
+):
     def test_push_failure_park_recovers_on_success(
         self,
     ) -> None:
@@ -1062,8 +1075,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         # does not matter because `_push_branch` is mocked.
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -1101,8 +1114,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=False,
             )
@@ -1143,8 +1156,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
                 head_shas=("aaa",),
             )
@@ -1182,8 +1195,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
                 # HEAD moved past pre-agent SHA -- the dev had committed.
                 head_shas=("bbb",),
@@ -1197,6 +1210,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(pinned_data.get(REVIEW_ROUND), 2)
         self.assertIn((ISSUE, VALIDATING), gh.label_history)
 
+class FixingParkIsolationTest(unittest.TestCase, _FixingFixtureMixin):
     def test_review_timeout_park_not_recovered(
         self,
     ) -> None:
@@ -1230,8 +1244,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
                 head_shas=("aaa",),
                 push_branch=True,
@@ -1278,8 +1292,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -1317,8 +1331,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
                 push_branch=True,
             )
@@ -1332,6 +1346,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(pinned_data.get(REVIEW_ROUND), 1)
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
 
+class FixingPostFeedbackRoutingTest(unittest.TestCase, _FixingFixtureMixin):
     def test_review_fix_resets_round_to_zero(self) -> None:
         # Companion to the test above: the in_review->fixing route
         # (which sets `pending_fix_at` when fresh PR feedback lands after
@@ -1353,8 +1368,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNotNone(gh.pinned_data(ISSUE).get(PENDING_FIX_AT))
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="fixed",
@@ -1386,8 +1401,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -1409,19 +1424,14 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr)
         # Replace `get_pr` so the call raises. PyGithub-side failures
         # (rate limit, 5xx, network blip) are typically transient.
-        original_get_pr = gh.get_pr
-
-        def boom(_pr_number):
-            raise RuntimeError("github api down")
-        gh.get_pr = boom  # type: ignore[assignment]
-        try:
-            with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-                mocks = self._run(
-                    lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+        with patch.object(gh, "get_pr", side_effect=RuntimeError("github api down")):
+            with patch.object(
+                config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS,
+            ):
+                mocks = self._run_fixing(
+                    gh, issue,
                     run_agent=_agent(),
                 )
-        finally:
-            gh.get_pr = original_get_pr  # type: ignore[assignment]
 
         # No agent spawn, no label change, no park comment -- just a
         # quiet bail so the next tick retries.
@@ -1465,8 +1475,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="pushed",
@@ -1509,8 +1519,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(),
             )
 
@@ -1521,6 +1531,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- crash/restart and failure-path coverage ------------------------
 
+class FixingFailureDispositionTest(unittest.TestCase, _FixingFixtureMixin):
     def test_missing_dev_session_spawns_fresh(self) -> None:
         # `dev_session_id` may be absent on a `fixing` issue whose prior
         # dev session was dropped by the silent-park fallback, or on
@@ -1543,8 +1554,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=FRESH_SESSION,
                     last_message="pushed fix",
@@ -1580,8 +1591,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message="fixed",
                 ),
@@ -1611,8 +1622,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message="WIP",
                 ),
@@ -1644,8 +1655,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="Should I prefer ruff or black for this?",
@@ -1666,6 +1677,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- stranded-fix deferred publish -----------------------------------
 
+class _StrandedFixingFixtureMixin(_FixingFixtureMixin):
     def _seed_stranded(self, *, reply_id: int = HUMAN_REPLY_ID):
         # Validating-route park (`pending_fix_at` unset) with a human
         # reply past the debounce window -- the live shape of a fix that
@@ -1690,6 +1702,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue
 
+class StrandedFixRecoveryTest(
+    unittest.TestCase, _StrandedFixingFixtureMixin,
+):
     def test_no_commit_with_stranded_fix_publishes_it(self) -> None:
         # The resume produced no new commit, but the clean worktree HEAD
         # is ahead of the remote PR branch: a prior parked run committed
@@ -1699,8 +1714,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed_stranded()
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="nothing new to commit; the fix is already on HEAD",
@@ -1722,8 +1737,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed_stranded()
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message="nothing to do",
                 ),
@@ -1743,8 +1758,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed_stranded()
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message="nothing to do",
                 ),
@@ -1764,8 +1779,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed_stranded()
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message="nothing to do",
                 ),
@@ -1784,8 +1799,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed_stranded()
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message="nothing to do",
                 ),
@@ -1819,8 +1834,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message=(
@@ -1858,8 +1873,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message=(
@@ -1876,6 +1891,9 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         self.assertFalse(gh.pinned_data(ISSUE).get(AWAITING_HUMAN))
 
+class FixingSilentSessionRecoveryTest(
+    unittest.TestCase, _StrandedFixingFixtureMixin,
+):
     def test_agent_silent_failure_parks_in_fixing(self) -> None:
         # Dev returned empty `last_message` and no commit. The handler
         # routes through `_on_question`'s silent-failure branch, parks
@@ -1891,8 +1909,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh, issue = self._seed(pr=pr, issue_comments=[comment])
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION,
                     last_message="",
@@ -1934,8 +1952,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         # --- Tick 1: the session-limit resume parks retryably -------------
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message=session_limit,
                 ),
@@ -1961,8 +1979,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
             ),
         )
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=FRESH_SESSION, last_message="pushed fix",
                 ),
@@ -2016,8 +2034,8 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message="pushed",
                 ),
@@ -2039,7 +2057,7 @@ class HandleFixingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIsNone(pinned_data.get(PENDING_FIX_ISSUE_MAX_ID))
 
 
-class ReconstructPendingFixBatchTest(unittest.TestCase):
+class _PendingFixBatchFixtureMixin:
     """`_reconstruct_pending_fix_batch` rebuilds the exact `in_review` ->
     `fixing` feedback batch from the persisted `pending_fix_*` metadata,
     working even after the in_review watermarks have advanced past the
@@ -2119,6 +2137,9 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh.add_pr(pr)
         return gh, issue, pr
 
+class ReconstructPendingFixBatchTest(
+    unittest.TestCase, _PendingFixBatchFixtureMixin,
+):
     def test_exact_batch_after_watermark_advance(self) -> None:
         gh, issue, pr = self._pr_with_feedback()
         # Watermarks advanced PAST the whole batch, as they would be after a
@@ -2128,11 +2149,11 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             pr_last_comment_id=ADVANCED_PR_COMMENT_WATERMARK,
             pr_last_review_comment_id=ADVANCED_REVIEW_COMMENT_WATERMARK,
             pr_last_review_summary_id=ADVANCED_REVIEW_SUMMARY_WATERMARK,
-            pending_fix_issue_ids=BATCH_ISSUE_IDS,
+            pending_fix_issue_ids=list(BATCH_ISSUE_IDS),
             pending_fix_issue_max_id=BATCH_PR_CONVERSATION_ID,
-            pending_fix_review_ids=BATCH_INLINE_IDS,
+            pending_fix_review_ids=list(BATCH_INLINE_IDS),
             pending_fix_review_max_id=BATCH_INLINE_SECOND_ID,
-            pending_fix_review_summary_ids=BATCH_SUMMARY_IDS,
+            pending_fix_review_summary_ids=list(BATCH_SUMMARY_IDS),
             pending_fix_review_summary_max_id=BATCH_SUMMARY_ID,
         )
         pinned_state = gh.read_pinned_state(issue)
@@ -2242,6 +2263,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         self.assertIn("trusted issue ask", prompt)
         self.assertNotIn(malicious_url, prompt)
 
+class _ReviewerAnchorFixtureMixin:
     def _pr_with_reviewer_anchor(
         self, *, anchor_id: int = BATCH_PR_CONVERSATION_ID,
     ):
@@ -2269,6 +2291,9 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
         gh.add_pr(pr)
         return gh, issue, pr
 
+class ReviewerAnchorReconstructionTest(
+    unittest.TestCase, _ReviewerAnchorFixtureMixin,
+):
     def test_validating_route_restores_anchor(self) -> None:
         # No id lists / no `pending_fix_at`; the lone anchor is the recorded
         # reviewer PR comment. Reconstruction must re-fetch it by id even
@@ -2364,9 +2389,9 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             PENDING_FIX_ISSUE_MAX_ID: BATCH_PR_CONVERSATION_ID,
             PENDING_FIX_REVIEW_MAX_ID: BATCH_INLINE_SECOND_ID,
             PENDING_FIX_REVIEW_SUMMARY_MAX_ID: BATCH_SUMMARY_ID,
-            PENDING_FIX_ISSUE_IDS: BATCH_ISSUE_IDS,
-            PENDING_FIX_REVIEW_IDS: BATCH_INLINE_IDS,
-            PENDING_FIX_REVIEW_SUMMARY_IDS: BATCH_SUMMARY_IDS,
+            PENDING_FIX_ISSUE_IDS: list(BATCH_ISSUE_IDS),
+            PENDING_FIX_REVIEW_IDS: list(BATCH_INLINE_IDS),
+            PENDING_FIX_REVIEW_SUMMARY_IDS: list(BATCH_SUMMARY_IDS),
             PENDING_FIX_REVIEWER_COMMENT_ID: BATCH_PR_CONVERSATION_ID,
         })
 
@@ -2385,7 +2410,7 @@ class ReconstructPendingFixBatchTest(unittest.TestCase):
             self.assertIsNone(state.get(key))
 
 
-class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
+class _ContinueCommandFixtureMixin(_PatchedWorkflowMixin):
     """`/orchestrator continue` retries a `fixing` park caused by a
     session-limit / session-failure reason (`agent_silent` / `agent_timeout`).
     On the in_review route it replays the PRESERVED review-feedback batch on a
@@ -2399,15 +2424,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     def _seed_parked_with_batch(
         self,
-        *,
-        park_reason,
-        command_body: str = "/orchestrator continue",
-        command_id: int = COMMAND_COMMENT_ID,
-        command_on_pr_conversation: bool = False,
-        extra_issue_comments=(),
-        with_batch_ids: bool = True,
-        pending_fix_at=PENDING_FIX_AT_TS,
-        silent_park_count: int = 2,
+        seed: _ContinueSeed,
     ):
         # Batch feedback spans all three surfaces and sits BELOW the advanced
         # watermarks -- the shape after a poisoned/timed-out resume already
@@ -2424,10 +2441,14 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 user=FakeUser(CAROL),
             ),
         )
-        command = FakeComment(id=command_id, body=command_body, user=FakeUser(DAVE))
-        if not command_on_pr_conversation:
+        command = FakeComment(
+            id=seed.command_id,
+            body=seed.command_body,
+            user=FakeUser(DAVE),
+        )
+        if not seed.command_on_pr_conversation:
             issue.comments.append(command)
-        for comment in extra_issue_comments:
+        for comment in seed.extra_issue_comments:
             issue.comments.append(comment)
         pr_conv = [
             FakeComment(
@@ -2436,7 +2457,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                 user=FakeUser(ALICE),
             ),
         ]
-        if command_on_pr_conversation:
+        if seed.command_on_pr_conversation:
             pr_conv.append(command)
         pr = FakePR(
             number=PR_NUMBER, head_branch=BRANCH,
@@ -2467,22 +2488,22 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
             "dev_session_id": POISONED_SESSION,
             REVIEW_ROUND: 1,
             AWAITING_HUMAN: True,
-            PARK_REASON: park_reason,
-            "silent_park_count": silent_park_count,
+            PARK_REASON: seed.park_reason,
+            "silent_park_count": seed.silent_park_count,
             # Watermarks advanced PAST the batch.
             PR_LAST_COMMENT_ID: ADVANCED_PR_COMMENT_WATERMARK,
             PR_LAST_REVIEW_COMMENT_ID: ADVANCED_REVIEW_COMMENT_WATERMARK,
             PR_LAST_REVIEW_SUMMARY_ID: ADVANCED_REVIEW_SUMMARY_WATERMARK,
         }
-        if pending_fix_at is not None:
-            state[PENDING_FIX_AT] = pending_fix_at
-        if with_batch_ids:
+        if seed.pending_fix_at is not None:
+            state[PENDING_FIX_AT] = seed.pending_fix_at
+        if seed.with_batch_ids:
             state.update({
-                PENDING_FIX_ISSUE_IDS: BATCH_ISSUE_IDS,
+                PENDING_FIX_ISSUE_IDS: list(BATCH_ISSUE_IDS),
                 PENDING_FIX_ISSUE_MAX_ID: BATCH_PR_CONVERSATION_ID,
                 PENDING_FIX_REVIEW_IDS: [BATCH_INLINE_ID],
                 PENDING_FIX_REVIEW_MAX_ID: BATCH_INLINE_ID,
-                PENDING_FIX_REVIEW_SUMMARY_IDS: BATCH_SUMMARY_IDS,
+                PENDING_FIX_REVIEW_SUMMARY_IDS: list(BATCH_SUMMARY_IDS),
                 PENDING_FIX_REVIEW_SUMMARY_MAX_ID: BATCH_SUMMARY_ID,
             })
         gh.seed_state(ISSUE, **state)
@@ -2493,16 +2514,22 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         "rename the temp var", "please address the review",
     )
 
+
+class OrchestratorContinueCommandTest(
+    unittest.TestCase, _ContinueCommandFixtureMixin,
+):
     def test_session_error_park_replays_saved_batch(self) -> None:
         # Both session-failure reasons: the command drops the poisoned session
         # and replays the FULL preserved batch on a fresh spawn, then the
         # pushed fix routes back to `validating` with the round reset.
         for reason in (PARK_AGENT_SILENT, PARK_AGENT_TIMEOUT):
             with self.subTest(reason=reason):
-                gh, issue, pr = self._seed_parked_with_batch(park_reason=reason)
+                gh, issue, pr = self._seed_parked_with_batch(
+                    _ContinueSeed(park_reason=reason),
+                )
 
-                mocks = self._run(
-                    lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                mocks = self._run_fixing(
+                    gh, issue,
                     run_agent=_agent(
                         session_id=FRESH_SESSION, last_message="pushed fix",
                     ),
@@ -2536,10 +2563,12 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         # A generic continue carries none of the answer, so refuse: stay
         # parked, consume the command so the refusal does not re-fire, and
         # leave the preserved batch intact for a genuine human reply.
-        gh, issue, pr = self._seed_parked_with_batch(park_reason=None)
+        gh, issue, pr = self._seed_parked_with_batch(
+            _ContinueSeed(park_reason=None),
+        )
 
-        mocks = self._run(
-            lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+        mocks = self._run_fixing(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -2548,7 +2577,9 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertTrue(pinned_data.get(AWAITING_HUMAN))
         self.assertNotIn((ISSUE, VALIDATING), gh.label_history)
         self.assertEqual(pinned_data.get(PR_LAST_COMMENT_ID), COMMAND_COMMENT_ID)
-        self.assertEqual(pinned_data.get(PENDING_FIX_ISSUE_IDS), BATCH_ISSUE_IDS)
+        self.assertEqual(
+            pinned_data.get(PENDING_FIX_ISSUE_IDS), list(BATCH_ISSUE_IDS),
+        )
         self.assertTrue(any(
             "/orchestrator continue" in body and "guidance" in body
             for _, body in gh.posted_comments
@@ -2559,11 +2590,14 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         # bare continue would strand the review feedback, so refuse rather
         # than resume on the command text.
         gh, issue, pr = self._seed_parked_with_batch(
-            park_reason=PARK_AGENT_SILENT, with_batch_ids=False,
+            _ContinueSeed(
+                park_reason=PARK_AGENT_SILENT,
+                with_batch_ids=False,
+            ),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+        mocks = self._run_fixing(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -2585,12 +2619,15 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
             id=9001, body="use option B, not A", user=FakeUser(DAVE),
         )
         gh, issue, pr = self._seed_parked_with_batch(
-            park_reason=None, extra_issue_comments=[genuine],
-            silent_park_count=0,
+            _ContinueSeed(
+                park_reason=None,
+                extra_issue_comments=(genuine,),
+                silent_park_count=0,
+            ),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+        mocks = self._run_fixing(
+            gh, issue,
             run_agent=_agent(
                 session_id=POISONED_SESSION, last_message="pushed fix",
             ),
@@ -2612,12 +2649,15 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         for reason in (PARK_AGENT_SILENT, PARK_AGENT_TIMEOUT):
             with self.subTest(reason=reason):
                 gh, issue, pr = self._seed_parked_with_batch(
-                    park_reason=reason,
-                    pending_fix_at=None, with_batch_ids=False,
+                    _ContinueSeed(
+                        park_reason=reason,
+                        pending_fix_at=None,
+                        with_batch_ids=False,
+                    ),
                 )
 
-                mocks = self._run(
-                    lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                mocks = self._run_fixing(
+                    gh, issue,
                     run_agent=_agent(),
                 )
 
@@ -2631,6 +2671,7 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                     "no preserved" in body for _, body in gh.posted_comments
                 ))
 
+class _ValidatingContinueFixtureMixin(_ContinueCommandFixtureMixin):
     def _seed_validating_route_anchored_park(
         self,
         *,
@@ -2690,6 +2731,9 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         return gh, issue, pr
 
+class ValidatingContinueCommandTest(
+    unittest.TestCase, _ValidatingContinueFixtureMixin,
+):
     def test_validating_anchor_replays_feedback(self) -> None:
         # #742: a validating-route park after a session limit, with the reviewer
         # feedback anchored in `pending_fix_reviewer_comment_id`. A bare
@@ -2701,8 +2745,8 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
                     park_reason=reason,
                 )
 
-                mocks = self._run(
-                    lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                mocks = self._run_fixing(
+                    gh, issue,
                     run_agent=_agent(
                         session_id=FRESH_SESSION, last_message="pushed fix",
                     ),
@@ -2742,13 +2786,17 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         # (reaching the dev directly, not just via the fresh-spawn preamble
         # that omits PR-conversation comments), so nothing is dropped.
         gh, issue, pr = self._seed_parked_with_batch(
-            park_reason=PARK_AGENT_SILENT,
-            command_body="please handle the PR conv case\n/orchestrator continue",
-            command_on_pr_conversation=True,
+            _ContinueSeed(
+                park_reason=PARK_AGENT_SILENT,
+                command_body=(
+                    "please handle the PR conv case\n/orchestrator continue"
+                ),
+                command_on_pr_conversation=True,
+            ),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+        mocks = self._run_fixing(
+            gh, issue,
             run_agent=_agent(
                 session_id=FRESH_SESSION, last_message="pushed fix",
             ),
@@ -2761,50 +2809,56 @@ class OrchestratorContinueCommandTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("please handle the PR conv case", prompt)
         # ... AND the preserved batch is replayed (the issue requirement the
         # bare-continue path would have missed).
-        for body in self._BATCH_BODIES:
-            self.assertIn(body, prompt)
+        for batch_body in self._BATCH_BODIES:
+            self.assertIn(batch_body, prompt)
         # Replayed on a fresh session (poisoned one dropped), no refusal note.
         self.assertIsNone(mocks[RUN_AGENT].call_args.kwargs.get("resume_session_id"))
         self.assertFalse(any(
-            "no preserved" in body or "needs your" in body
-            for _, body in gh.posted_comments
+            "no preserved" in comment_body or "needs your" in comment_body
+            for _, comment_body in gh.posted_comments
         ))
 
     def test_parser_matches_exact_continue_line(self) -> None:
-        cmd = FakeComment(id=1, body="/orchestrator continue")
-        cmd_ws = FakeComment(id=2, body="  /Orchestrator  Continue  ")
-        cmd_trailing = FakeComment(id=3, body="/orchestrator continue\n")
-        prose = FakeComment(id=4, body="please run `/orchestrator continue`")
-        mixed = FakeComment(id=5, body="please fix X\n/orchestrator continue")
-        trailing_prose = FakeComment(id=6, body="/orchestrator continue\nthanks")
-        other = FakeComment(id=7, body="/orchestrator add-review-rounds 2")
+        comments = [
+            FakeComment(id=1, body="/orchestrator continue"),
+            FakeComment(id=2, body="  /Orchestrator  Continue  "),
+            FakeComment(id=3, body="/orchestrator continue\n"),
+            FakeComment(id=4, body="please run `/orchestrator continue`"),
+            FakeComment(id=5, body="please fix X\n/orchestrator continue"),
+            FakeComment(id=6, body="/orchestrator continue\nthanks"),
+            FakeComment(id=7, body="/orchestrator add-review-rounds 2"),
+        ]
 
-        matched = _parse_orchestrator_continue(
-            [cmd, cmd_ws, cmd_trailing, prose, mixed, trailing_prose, other]
-        )
+        matched = workflow._parse_orchestrator_continue(comments)
 
         # Any comment carrying the command as an exact line matches -- including
         # one that also carries guidance (5, 6) -- so the command still fires
         # the replay. A prose mention in backticks (4) and a different command
         # (7) do not.
-        self.assertEqual([comment.id for comment in matched], [1, 2, 3, 5, 6])
+        matched_ids = [comment.id for comment in matched]
+        self.assertEqual(matched_ids, [1, 2, 3, 5, 6])
 
     def test_is_bare_orchestrator_continue(self) -> None:
         # `_is_bare_*` distinguishes a content-free nudge (whole body is the
         # command, whitespace ignored) from a comment that also carries
         # guidance -- the latter must not be refused/consumed as content-free.
-        for body in ("/orchestrator continue", "  /Orchestrator  Continue  ",
-                     "/orchestrator continue\n"):
-            self.assertTrue(_is_bare_orchestrator_continue(FakeComment(id=1, body=body)))
-        for body in ("please fix X\n/orchestrator continue",
-                     "/orchestrator continue\nthanks",
-                     "please run `/orchestrator continue`"):
-            self.assertFalse(_is_bare_orchestrator_continue(FakeComment(id=1, body=body)))
+        for bare_body in (
+            "/orchestrator continue",
+            "  /Orchestrator  Continue  ",
+            "/orchestrator continue\n",
+        ):
+            comment = FakeComment(id=1, body=bare_body)
+            self.assertTrue(workflow._is_bare_orchestrator_continue(comment))
+        for guided_body in (
+            "please fix X\n/orchestrator continue",
+            "/orchestrator continue\nthanks",
+            "please run `/orchestrator continue`",
+        ):
+            comment = FakeComment(id=1, body=guided_body)
+            self.assertFalse(workflow._is_bare_orchestrator_continue(comment))
 
 
-class FixingAllowlistFeedbackFilterTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
-):
+class _FixingAllowlistFixtureMixin(_PatchedWorkflowMixin):
     """With `ALLOWED_ISSUE_AUTHORS` set, PR feedback from an author outside the
     allowlist must not resume the dev or reach the `_build_pr_comment_followup`
     prompt, on any of the four feedback surfaces (issue thread, PR conversation,
@@ -2871,6 +2925,9 @@ class FixingAllowlistFeedbackFilterTest(
         )
         return gh, issue
 
+class FixingAllowlistFeedbackFilterTest(
+    unittest.TestCase, _FixingAllowlistFixtureMixin,
+):
     def test_outsider_feedback_never_resumes(self) -> None:
         for surface in self._SURFACES:
             with self.subTest(surface=surface):
@@ -2882,8 +2939,8 @@ class FixingAllowlistFeedbackFilterTest(
                 ), patch.object(
                     config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS
                 ):
-                    mocks = self._run(
-                        lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                    mocks = self._run_fixing(
+                        gh, issue,
                         run_agent=_agent(),
                     )
 
@@ -2903,8 +2960,8 @@ class FixingAllowlistFeedbackFilterTest(
                 ), patch.object(
                     config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS
                 ):
-                    mocks = self._run(
-                        lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+                    mocks = self._run_fixing(
+                        gh, issue,
                         run_agent=_agent(
                             session_id=DEV_SESSION, last_message="pushed",
                         ),

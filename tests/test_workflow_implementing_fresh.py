@@ -17,27 +17,27 @@ from tests.fakes import (
 )
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
 
 
+def _seed_fresh_issue(label="implementing"):
+    gh = FakeGitHubClient()
+    issue = make_issue(1, label=label)
+    gh.add_issue(issue)
+    return gh, issue
+
+
 class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def _seeded(self, label="implementing"):
-        gh = FakeGitHubClient()
-        issue = make_issue(1, label=label)
-        gh.add_issue(issue)
-        # No prior pinned state; simulate just-after-pickup.
-        return gh, issue
 
     def test_clean_commits_open_pr_and_flip_label(self) -> None:
         # After PR open, hand off straight to `validating`; the docs pass only
         # runs as the final-docs handoff after the reviewer agent approves, not
         # as a pre-review hop. Implementing routes to the reviewer path and
         # never straight to `in_review`.
-        gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        gh, issue = _seed_fresh_issue()
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="implemented"),
             # First call: not a recovered worktree -> codex runs.
             # Second call: codex produced commits -> push path.
@@ -66,10 +66,10 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(state["review_round"], 0)
 
     def test_dirty_commits_park_without_push(self) -> None:
-        gh, issue = self._seeded()
+        gh, issue = _seed_fresh_issue()
         dirty = [f"file_{i}.py" for i in range(15)]
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(last_message="commit done but more work pending"),
             has_new_commits=[False, True],
             dirty_files=dirty,
@@ -86,9 +86,9 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("… (5 more)", last_comment)
 
     def test_no_commits_message_parks_as_question(self) -> None:
-        gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        gh, issue = _seed_fresh_issue()
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(last_message="What database should I use?"),
             has_new_commits=False,
         )
@@ -110,9 +110,9 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # The park must surface as a silent failure (distinct
         # `park_reason`, distinct HITL message) instead of impersonating a
         # real "agent has a content question" park.
-        gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        gh, issue = _seed_fresh_issue()
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(last_message=""),
             has_new_commits=False,
         )
@@ -133,10 +133,10 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         # something on stderr (e.g. a Cloudflare blob, an auth error).
         # The park comment must surface that tail and the exit code so
         # the operator can triage without reading ~/.codex/log/.
-        gh, issue = self._seeded()
+        gh, issue = _seed_fresh_issue()
         with self.assertLogs("orchestrator.workflow", level="WARNING") as logs:
-            self._run(
-                lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            self._run_implementing(
+                gh, issue,
                 run_agent=_agent(
                     last_message="",
                     stderr="401 Unauthorized: token expired",
@@ -144,6 +144,7 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
                 ),
                 has_new_commits=False,
             )
+            log_messages = [record.getMessage() for record in logs.records]
 
         last_comment = gh.posted_comments[-1][1]
         self.assertIn("agent produced no output", last_comment)
@@ -151,15 +152,15 @@ class HandleImplementingFreshRunTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("401 Unauthorized", last_comment)
         self.assertIn("_Agent exit code:_ 1", last_comment)
         self.assertTrue(any(
-            "agent produced no output" in record.getMessage()
-            and "exit_code=1" in record.getMessage()
-            for record in logs.records
+            "agent produced no output" in message
+            and "exit_code=1" in message
+            for message in log_messages
         ))
 
     def test_push_failure_parks_without_opening_pr(self) -> None:
-        gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        gh, issue = _seed_fresh_issue()
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -193,8 +194,8 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
         )
         before = gh.write_state_calls
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -219,8 +220,8 @@ class HandleImplementingAwaitingHumanTest(unittest.TestCase, _PatchedWorkflowMix
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-2",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-old", last_message="ok"),
             # awaiting_human path skips the recovered-worktree probe; only
             # the post-codex commit check runs.
@@ -273,8 +274,8 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
         )
         before_writes = gh.write_state_calls
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-old", interrupted=True),
         )
 
@@ -308,8 +309,8 @@ class HandleImplementingInterruptedTest(unittest.TestCase, _PatchedWorkflowMixin
         )
         before_writes = gh.write_state_calls
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-new", interrupted=True),
             # First probe: not a recovered worktree -> the dev runs and is
             # then seen to be interrupted; the post-agent commit check must
@@ -334,8 +335,8 @@ class HandleImplementingRecoveredWorktreeTest(unittest.TestCase, _PatchedWorkflo
         gh.add_issue(issue)
         gh.seed_state(3, codex_session_id="sess-prev")
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
             has_new_commits=True,
             dirty_files=(),

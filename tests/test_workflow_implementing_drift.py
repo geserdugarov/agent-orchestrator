@@ -18,9 +18,39 @@ from tests.fakes import (
 )
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
+
+
+def _seed_parked_implementing(
+    number: int,
+    *,
+    park_reason,
+    command_body="/orchestrator continue",
+    drift_neutral=False,
+):
+    gh = FakeGitHubClient()
+    issue = make_issue(number, label="implementing", body="the requirements")
+    issue.comments.append(
+        FakeComment(id=9000, body=command_body, user=FakeUser("dave"))
+    )
+    gh.add_issue(issue)
+    content_hash = (
+        workflow._compute_user_content_hash(issue, set())
+        if drift_neutral else "stale-hash"
+    )
+    gh.seed_state(
+        number,
+        user_content_hash=content_hash,
+        dev_agent="claude",
+        dev_session_id="dev-sess",
+        awaiting_human=True,
+        park_reason=park_reason,
+        silent_park_count=1,
+        last_action_comment_id=8000,
+        branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}",
+    )
+    return gh, issue
 
 
 class HandleImplementingResumeOnHashChangeTest(
@@ -44,8 +74,8 @@ class HandleImplementingResumeOnHashChangeTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-60",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess", last_message="addressed it"
             ),
@@ -93,8 +123,8 @@ class HandleImplementingResumeOnHashChangeTest(
             pickup_comment_id=900,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(
                 session_id="new-sess", last_message="implemented"
             ),
@@ -147,8 +177,8 @@ class ImplementingDriftInterruptedResumeTest(
         )
         before_writes = gh.write_state_calls
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", interrupted=True),
             # before_sha + after_sha probes around the resume.
             head_shas=["before-resume", "after-resume"],
@@ -209,8 +239,8 @@ class ImplementingDriftHeadShaDeltaTest(
         # carrying pre-existing unpushed commits from a prior tick: the
         # old SHA-agnostic `_has_new_commits` check would have returned
         # True (commits ahead of origin/base) and pushed a PR.
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(
                 session_id="dev-sess", last_message=""
             ),
@@ -258,8 +288,8 @@ class NoSessionRecoveredCommitsDriftTest(
             branch="orchestrator/geserdugarov__agent-orchestrator/issue-860",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
             # Recovered worktree has unpushed commits ahead of base.
             has_new_commits=True,
@@ -295,8 +325,8 @@ class NoSessionRecoveredCommitsDriftTest(
             pickup_comment_id=900,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(
                 session_id="new-sess", last_message="implemented"
             ),
@@ -348,8 +378,8 @@ class AwaitingHumanNoSessionDriftTest(
             last_action_comment_id=100,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(
                 session_id="new-sess", last_message="implemented"
             ),
@@ -399,8 +429,8 @@ class AwaitingHumanNoSessionDriftTest(
             last_action_comment_id=100,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(
                 session_id="new-sess", last_message="implemented"
             ),
@@ -433,37 +463,6 @@ class ImplementingContinueCommandTest(
     guidance falls through to the normal drift resume so the guidance drives
     the dev."""
 
-    def _seed_parked(
-        self, number: int, *, park_reason, command_body="/orchestrator continue",
-        drift_neutral=False,
-    ):
-        gh = FakeGitHubClient()
-        issue = make_issue(number, label="implementing", body="the requirements")
-        issue.comments.append(
-            FakeComment(id=9000, body=command_body, user=FakeUser("dave"))
-        )
-        gh.add_issue(issue)
-        # `drift_neutral` seeds the CURRENT content hash so drift is out of the
-        # picture (the refuse path, not a drift no-op, is what's under test);
-        # otherwise a stale hash proves the command handler intercepts BEFORE
-        # drift detection would fire.
-        content_hash = (
-            workflow._compute_user_content_hash(issue, set())
-            if drift_neutral else "stale-hash"
-        )
-        gh.seed_state(
-            number,
-            user_content_hash=content_hash,
-            dev_agent="claude",
-            dev_session_id="dev-sess",
-            awaiting_human=True,
-            park_reason=park_reason,
-            silent_park_count=1,
-            last_action_comment_id=8000,
-            branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}",
-        )
-        return gh, issue
-
     def test_bare_continue_retries_without_notice(
         self,
     ) -> None:
@@ -471,10 +470,10 @@ class ImplementingContinueCommandTest(
         # exactly `/orchestrator continue`. The dev session is resumed
         # intentionally -- no "issue body changed" / "issue content changed"
         # notice, and the bare command is NOT fed as the dev prompt.
-        gh, issue = self._seed_parked(730, park_reason="agent_silent")
+        gh, issue = _seed_parked_implementing(730, park_reason="agent_silent")
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", last_message="finished it"),
             has_new_commits=True,
             dirty_files=(),
@@ -509,15 +508,17 @@ class ImplementingContinueCommandTest(
         # A real agent question parks with `park_reason=None`. A content-free
         # continue carries no answer, so refuse and stay parked -- and the
         # refusal must not re-post every tick.
-        gh, issue = self._seed_parked(731, park_reason=None, drift_neutral=True)
+        gh, issue = _seed_parked_implementing(
+            731, park_reason=None, drift_neutral=True,
+        )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
         )
         # Second tick with no new human comment must not re-refuse or resume.
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -539,13 +540,13 @@ class ImplementingContinueCommandTest(
         # A `/orchestrator continue` posted ALONGSIDE real guidance is not a
         # bare command: it falls through to the normal drift resume, which
         # feeds the guidance to the dev (it must not be dropped).
-        gh, issue = self._seed_parked(
+        gh, issue = _seed_parked_implementing(
             732, park_reason="agent_silent",
             command_body="/orchestrator continue\nrename the flag to --strict",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", last_message="done"),
             has_new_commits=True,
             dirty_files=(),
