@@ -7,9 +7,24 @@ from datetime import datetime, timezone
 
 from tests.analytics_read_helpers import (
     _FakeConnection,
-    _connector,
-    _reload,
+    _reload_read,
 )
+
+# Reused data-extent bounds; the year is pinned so the fixture
+# timestamps stay stable, the day components are incidental.
+_YEAR = 2026
+_EXTENT_MIN = datetime(_YEAR, 5, 1, tzinfo=timezone.utc)
+_EXTENT_MAX = datetime(_YEAR, 5, 28, tzinfo=timezone.utc)
+
+
+def _raise_network_error(_url: str) -> None:
+    """Stand in for a `connect` that never reaches the database."""
+    raise RuntimeError("network unreachable")
+
+
+def _raise_on_close() -> None:
+    """Stand in for a driver whose `close()` fails after the query."""
+    raise RuntimeError("close failed")
 
 
 class ErrorHandlingTest(unittest.TestCase):
@@ -19,21 +34,20 @@ class ErrorHandlingTest(unittest.TestCase):
     """
 
     def test_connect_failure_wraps(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
-
-        def _bad_connect(_url: str):
-            raise RuntimeError("network unreachable")
-
-        with self.assertRaises(analytics_read.AnalyticsReadError) as ctx:
-            analytics_read.get_summary(connect=_bad_connect)
-        self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
+        analytics_read = _reload_read()
+        try:
+            analytics_read.get_summary(connect=_raise_network_error)
+        except analytics_read.AnalyticsReadError as read_error:
+            self.assertIsInstance(read_error.__cause__, RuntimeError)
+        else:
+            self.fail("expected AnalyticsReadError")
 
     def test_query_failure_wraps_and_closes_conn(self) -> None:
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.raise_on_execute = RuntimeError("syntax error at or near")
         with self.assertRaises(analytics_read.AnalyticsReadError):
-            analytics_read.get_time_series(connect=_connector(conn))
+            analytics_read.get_time_series(connect=conn.as_connect)
         # `finally` closed the descriptor even though execute raised.
         self.assertEqual(conn.close_called, 1)
 
@@ -42,7 +56,7 @@ class ErrorHandlingTest(unittest.TestCase):
         # open-per-call path does, but must NOT close the caller-owned
         # connection -- its lifetime belongs to the `analytics_connection`
         # scope, not to this single query.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
         conn.raise_on_execute = RuntimeError("syntax error at or near")
         with self.assertRaises(analytics_read.AnalyticsReadError):
@@ -54,19 +68,13 @@ class ErrorHandlingTest(unittest.TestCase):
         # must not surface that to the dashboard -- the data already
         # came back. `get_data_extent` is the simplest single-query
         # reader to drive this path.
-        _, analytics_read = _reload({"ANALYTICS_DB_URL": "postgresql://h/db"})
+        analytics_read = _reload_read()
         conn = _FakeConnection()
-        t0 = datetime(2026, 5, 1, tzinfo=timezone.utc)
-        t1 = datetime(2026, 5, 28, tzinfo=timezone.utc)
-        conn.rows_for = {"data_min_ts": [(t0, t1)]}
-
-        def _bad_close():
-            raise RuntimeError("close failed")
-
-        conn.close = _bad_close  # type: ignore[method-assign]
-        result = analytics_read.get_data_extent(connect=_connector(conn))
-        self.assertEqual(result.min_ts, t0)
-        self.assertEqual(result.max_ts, t1)
+        conn.rows_for = {"data_min_ts": [(_EXTENT_MIN, _EXTENT_MAX)]}
+        conn.close = _raise_on_close  # type: ignore[method-assign]
+        extent = analytics_read.get_data_extent(connect=conn.as_connect)
+        self.assertEqual(extent.min_ts, _EXTENT_MIN)
+        self.assertEqual(extent.max_ts, _EXTENT_MAX)
 
 
 if __name__ == "__main__":

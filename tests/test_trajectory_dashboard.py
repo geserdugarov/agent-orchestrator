@@ -13,21 +13,119 @@ script-launch `sys.path` shape resolves the absolute imports.
 """
 from __future__ import annotations
 
+import importlib
+import runpy
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+
+from orchestrator import trajectory_reader as tr
+
+# Trajectory step / turn JSON field keys and step kinds asserted in the
+# inline-HTML fixtures.
+_KIND = "kind"
+_TOOL_ID = "tool_id"
+_TOOL_CALL = "tool_call"
+_TOOL_RESULT = "tool_result"
+_INPUT_TOKENS = "input_tokens"
+_OUTPUT_TOKENS = "output_tokens"
+_CACHE_READ = "cache_read_tokens"
+_CACHE_WRITE = "cache_write_tokens"
+_COST_USD = "cost_usd"
+_COST_SOURCE = "cost_source"
+_TURN = "turn"
+_ESTIMATED = "estimated"
+
+_MODEL_CLAUDE = "claude-opus-4-8"
+_TOOL_BASH = "Bash"
+_T1 = "t1"
+_REPO_UNSAFE = "o/<r&>"
+
+_ISSUE = 42
+_TURN_INPUT = 12
+_TURN_OUTPUT = 340
+_TURN_CACHE_READ = 18240
+_TURN_CACHE_WRITE = 512
+_TURN_COST = 0.0123
+
+# Module / package names the script-launch guards resolve.
+_ORCH = "orchestrator"
+_ORCH_PREFIX = "orchestrator."
+_SCRIPT_LAUNCH = "script_launch"
+_DASHBOARD_MODULE = "orchestrator.trajectory_dashboard"
+_SCRIPT_LAUNCH_MODULE = "orchestrator.script_launch"
+_READER_MODULE = "orchestrator.trajectory_reader"
+
+
+def _is_orchestrator_module(name):
+    return name == _ORCH or name.startswith(_ORCH_PREFIX)
+
+
+def _is_orch_or_script_launch(name):
+    return _is_orchestrator_module(name) or name == _SCRIPT_LAUNCH
+
+
+def _is_stray_launch_module(name):
+    return name in (_DASHBOARD_MODULE, _SCRIPT_LAUNCH_MODULE, _SCRIPT_LAUNCH)
+
+
+def _snapshot_modules(predicate):
+    return {
+        name: module
+        for name, module in sys.modules.items()
+        if predicate(name)
+    }
+
+
+def _drop_modules(predicate):
+    stale = [name for name in sys.modules if predicate(name)]
+    for name in stale:
+        sys.modules.pop(name, None)
+
+
+def _strip_repo_root(repo_root):
+    resolved_root = repo_root.resolve()
+    kept = [
+        entry for entry in sys.path
+        if not entry or Path(entry).resolve() != resolved_root
+    ]
+    sys.path.clear()
+    sys.path.extend(kept)
+
+
+def _restore_launch_state(original_path, saved_modules, predicate):
+    sys.path.clear()
+    sys.path.extend(original_path)
+    _drop_modules(predicate)
+    sys.modules.update(saved_modules)
+
+
+def _arm_launch_cleanup(test, predicate):
+    """Snapshot `sys.path` + the matching modules and register their restore.
+
+    A `runpy` script-launch strips the repo root and evicts `orchestrator.*`;
+    capturing the pre-launch state here undoes it after the test, whatever it
+    asserts.
+    """
+    test.addCleanup(
+        _restore_launch_state,
+        list(sys.path),
+        _snapshot_modules(predicate),
+        predicate,
+    )
 
 
 def _td():
-    import orchestrator.trajectory_dashboard as td
+    from orchestrator import trajectory_dashboard as td
     return td
 
 
 def _run(**overrides):
-    import orchestrator.trajectory_reader as tr
     record = {
         "ts": "2026-06-20T10:00:00+00:00",
         "repo": "acme/widgets",
-        "issue": 42,
+        "issue": _ISSUE,
         "event": "agent_trajectory",
         "stage": "implementing",
         "agent_role": "developer",
@@ -52,7 +150,10 @@ class LazyImportTest(unittest.TestCase):
             "plotly",
         ):
             sys.modules.pop(mod, None)
-        import orchestrator.trajectory_dashboard  # noqa: F401
+        # `import_module` re-executes off the popped `sys.modules`, so the
+        # load is real; a `from orchestrator import ...` could bind a stale
+        # package attribute and pass without importing the module at all.
+        importlib.import_module(_DASHBOARD_MODULE)
         self.assertNotIn("streamlit", sys.modules)
         self.assertNotIn("pandas", sys.modules)
         self.assertNotIn("plotly", sys.modules)
@@ -72,38 +173,18 @@ class ScriptPathLaunchTest(unittest.TestCase):
     """
 
     def test_runs_without_repo_root_on_syspath(self) -> None:
-        import runpy
-        from pathlib import Path
-
         repo_root = Path(__file__).resolve().parent.parent
-        script = repo_root / "orchestrator" / "trajectory_dashboard.py"
-        script_dir = script.parent
+        script = repo_root / _ORCH / "trajectory_dashboard.py"
 
-        original_path = list(sys.path)
-        saved_modules = {
-            module_name: module for module_name, module in sys.modules.items()
-            if module_name == "orchestrator" or module_name.startswith("orchestrator.")
-        }
-        try:
-            resolved_root = repo_root.resolve()
-            sys.path[:] = [
-                p for p in sys.path
-                if not p or Path(p).resolve() != resolved_root
-            ]
-            sys.path.insert(0, str(script_dir))
-            for module_name in list(sys.modules):
-                if module_name == "orchestrator" or module_name.startswith("orchestrator."):
-                    del sys.modules[module_name]
+        _arm_launch_cleanup(self, _is_orchestrator_module)
 
-            namespace = runpy.run_path(str(script), run_name="not_main")
-            self.assertIn("main", namespace)
-            self.assertIn("trajectory_reader", namespace)
-        finally:
-            sys.path[:] = original_path
-            for module_name in list(sys.modules):
-                if module_name == "orchestrator" or module_name.startswith("orchestrator."):
-                    del sys.modules[module_name]
-            sys.modules.update(saved_modules)
+        _strip_repo_root(repo_root)
+        sys.path.insert(0, str(script.parent))
+        _drop_modules(_is_orchestrator_module)
+
+        namespace = runpy.run_path(str(script), run_name="not_main")
+        self.assertIn("main", namespace)
+        self.assertIn("trajectory_reader", namespace)
 
     def test_stale_parent_cannot_shadow_repo(self) -> None:
         # With only `orchestrator/` on `sys.path`, importing `orchestrator.<x>`
@@ -112,58 +193,29 @@ class ScriptPathLaunchTest(unittest.TestCase):
         # every later absolute import through it. The shim adds the repo root
         # without importing `orchestrator.*` first, so the real package
         # resolves even with a decoy parent behind the script dir on the path.
-        import runpy
-        import tempfile
-        from pathlib import Path
-
         repo_root = Path(__file__).resolve().parent.parent
-        script = repo_root / "orchestrator" / "trajectory_dashboard.py"
-        script_dir = script.parent
+        script = repo_root / _ORCH / "trajectory_dashboard.py"
 
-        def _is_launch_module(name: str) -> bool:
-            return (
-                name == "orchestrator"
-                or name.startswith("orchestrator.")
-                or name == "script_launch"
-            )
-
-        original_path = list(sys.path)
-        saved_modules = {
-            name: module for name, module in sys.modules.items()
-            if _is_launch_module(name)
-        }
+        _arm_launch_cleanup(self, _is_orch_or_script_launch)
         with tempfile.TemporaryDirectory() as decoy_root:
             # A bare `orchestrator` package with none of the real submodules,
             # standing in for a stale install that shadows the repo root.
-            decoy_pkg = Path(decoy_root) / "orchestrator"
+            decoy_pkg = Path(decoy_root) / _ORCH
             decoy_pkg.mkdir()
             (decoy_pkg / "__init__.py").write_text("")
-            try:
-                resolved_root = repo_root.resolve()
-                sys.path[:] = [
-                    p for p in sys.path
-                    if not p or Path(p).resolve() != resolved_root
-                ]
-                sys.path.insert(0, decoy_root)
-                sys.path.insert(0, str(script_dir))
-                for name in list(sys.modules):
-                    if _is_launch_module(name):
-                        del sys.modules[name]
+            _strip_repo_root(repo_root)
+            sys.path.insert(0, decoy_root)
+            sys.path.insert(0, str(script.parent))
+            _drop_modules(_is_orch_or_script_launch)
 
-                namespace = runpy.run_path(str(script), run_name="not_main")
-                self.assertIn("main", namespace)
-                # The real reader landed -- not the decoy package (which has no
-                # `trajectory_reader` submodule and would raise on import).
-                self.assertEqual(
-                    namespace["trajectory_reader"].__name__,
-                    "orchestrator.trajectory_reader",
-                )
-            finally:
-                sys.path[:] = original_path
-                for name in list(sys.modules):
-                    if _is_launch_module(name):
-                        del sys.modules[name]
-                sys.modules.update(saved_modules)
+            namespace = runpy.run_path(str(script), run_name="not_main")
+            self.assertIn("main", namespace)
+            # The real reader landed -- not the decoy package (which has no
+            # `trajectory_reader` submodule and would raise on import).
+            self.assertEqual(
+                namespace["trajectory_reader"].__name__,
+                _READER_MODULE,
+            )
 
     def test_package_import_ignores_stray_script(self) -> None:
         # A package import (`import orchestrator.trajectory_dashboard`) must
@@ -171,22 +223,7 @@ class ScriptPathLaunchTest(unittest.TestCase):
         # `import script_launch`. An unrelated top-level `script_launch.py`
         # earlier on `sys.path` would otherwise shadow the helper or fail the
         # import outright, so the package path must not probe the bare name.
-        import importlib
-        import tempfile
-        from pathlib import Path
-
-        def _is_launch_module(name: str) -> bool:
-            return name in (
-                "orchestrator.trajectory_dashboard",
-                "orchestrator.script_launch",
-                "script_launch",
-            )
-
-        original_path = list(sys.path)
-        saved_modules = {
-            name: module for name, module in sys.modules.items()
-            if _is_launch_module(name)
-        }
+        _arm_launch_cleanup(self, _is_stray_launch_module)
         with tempfile.TemporaryDirectory() as stray_dir:
             # A stray top-level `script_launch` that detonates on import, so a
             # bare `import script_launch` during the package import would fail
@@ -194,24 +231,13 @@ class ScriptPathLaunchTest(unittest.TestCase):
             (Path(stray_dir) / "script_launch.py").write_text(
                 "raise RuntimeError('stray script_launch must not be imported')\n"
             )
-            try:
-                sys.path.insert(0, stray_dir)
-                for name in list(sys.modules):
-                    if _is_launch_module(name):
-                        del sys.modules[name]
-                module = importlib.import_module(
-                    "orchestrator.trajectory_dashboard"
-                )
-                self.assertTrue(hasattr(module, "main"))
-                # The package path used `orchestrator.script_launch` and never
-                # probed the bare name, so the stray stayed unimported.
-                self.assertNotIn("script_launch", sys.modules)
-            finally:
-                sys.path[:] = original_path
-                for name in list(sys.modules):
-                    if _is_launch_module(name):
-                        del sys.modules[name]
-                sys.modules.update(saved_modules)
+            sys.path.insert(0, stray_dir)
+            _drop_modules(_is_stray_launch_module)
+            module = importlib.import_module(_DASHBOARD_MODULE)
+            self.assertTrue(hasattr(module, "main"))
+            # The package path used `orchestrator.script_launch` and never
+            # probed the bare name, so the stray stayed unimported.
+            self.assertNotIn(_SCRIPT_LAUNCH, sys.modules)
 
 
 class TopbarHtmlTest(unittest.TestCase):
@@ -227,7 +253,6 @@ class TopbarHtmlTest(unittest.TestCase):
 class KpiStripHtmlTest(unittest.TestCase):
 
     def test_tiles_truncated_foot_and_cost(self) -> None:
-        import orchestrator.trajectory_reader as tr
         summary = tr.TrajectorySummary(
             total_runs=5, distinct_issues=3, distinct_repos=2,
             total_tool_calls=11, truncated_runs=1, total_cost_usd=12.5,
@@ -235,14 +260,13 @@ class KpiStripHtmlTest(unittest.TestCase):
         html = _td()._kpi_strip_html(summary)
         self.assertIn("orch-kpis", html)
         for label in ("Runs", "Issues", "Repos", "Tool calls", "Total cost"):
-            self.assertIn(f">{label}</span>", html)
+            self.assertIn(">{0}</span>".format(label), html)
         self.assertIn("1 truncated", html)
         # Exact cents even above $10 -- the compact `fmt_money` would read
         # `$12`, dropping the authoritative figure's cents.
         self.assertIn(">$12.50</div>", html)
 
     def test_no_truncated_reads_none_and_zero_cost(self) -> None:
-        import orchestrator.trajectory_reader as tr
         html = _td()._kpi_strip_html(tr.TrajectorySummary(total_runs=2))
         self.assertIn("none truncated", html)
         self.assertIn(">$0.00</div>", html)
@@ -261,16 +285,16 @@ class MetaHtmlTest(unittest.TestCase):
         self.assertNotIn(">Retry count</div>", html)
 
     def test_html_escaped(self) -> None:
-        run = _run(repo="o/<r&>")
+        run = _run(repo=_REPO_UNSAFE)
         html = _td()._meta_html(run)
         self.assertIn("o/&lt;r&amp;&gt;", html)
-        self.assertNotIn("o/<r&>", html)
+        self.assertNotIn(_REPO_UNSAFE, html)
 
 
 class ChipsHtmlTest(unittest.TestCase):
 
     def test_label_and_pills(self) -> None:
-        html = _td()._labeled_chips_html("Tools offered", ["Bash", "Edit"])
+        html = _td()._labeled_chips_html("Tools offered", [_TOOL_BASH, "Edit"])
         self.assertIn("Tools offered", html)
         self.assertIn(">Bash</span>", html)
         self.assertIn(">Edit</span>", html)
@@ -288,14 +312,14 @@ class RunsTableHtmlTest(unittest.TestCase):
 
     def test_headers_and_row_cells(self) -> None:
         run = _run(
-            issue=42, review_round=1,
-            steps=[{"kind": "tool_call", "name": "Bash"},
-                   {"kind": "tool_result", "tool_id": "t"}],
+            issue=_ISSUE, review_round=1,
+            steps=[{_KIND: _TOOL_CALL, "name": _TOOL_BASH},
+                   {_KIND: _TOOL_RESULT, _TOOL_ID: "t"}],
         )
         html = _td()._runs_table_html([run])
         for header in ("Issue", "Repo", "Stage", "Role", "Backend",
                        "Round", "Steps", "Tool calls", "Recorded"):
-            self.assertIn(f">{header}</th>", html)
+            self.assertIn(">{0}</th>".format(header), html)
         self.assertIn("#42", html)
         self.assertIn(">acme/widgets</td>", html)
         # 2 steps, 1 of which is a tool call.
@@ -303,9 +327,9 @@ class RunsTableHtmlTest(unittest.TestCase):
         self.assertIn(">1</td>", html)
 
     def test_repo_escaped(self) -> None:
-        html = _td()._runs_table_html([_run(repo="o/<r&>")])
+        html = _td()._runs_table_html([_run(repo=_REPO_UNSAFE)])
         self.assertIn("o/&lt;r&amp;&gt;", html)
-        self.assertNotIn("o/<r&>", html)
+        self.assertNotIn(_REPO_UNSAFE, html)
 
     def test_fixture_row_flagged(self) -> None:
         # `ignored` is the sentinel prompt that marks a synthetic fixture.
@@ -327,7 +351,6 @@ class RunsTableHtmlTest(unittest.TestCase):
 class TimelineEntryHtmlTest(unittest.TestCase):
 
     def test_prompt_bracket_badge(self) -> None:
-        import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind=tr.TIMELINE_PROMPT, content="do x")
         html = _td()._timeline_entry_html(entry, 0)
         self.assertIn("orch-traj-badge prompt", html)
@@ -336,7 +359,6 @@ class TimelineEntryHtmlTest(unittest.TestCase):
         self.assertIn(">1</span>", html)
 
     def test_output_bracket_badge(self) -> None:
-        import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind=tr.TIMELINE_OUTPUT, content="done")
         html = _td()._timeline_entry_html(entry, 4)
         self.assertIn("orch-traj-badge output", html)
@@ -344,45 +366,39 @@ class TimelineEntryHtmlTest(unittest.TestCase):
         self.assertIn(">5</span>", html)
 
     def test_tool_call_badge_name_and_id(self) -> None:
-        import orchestrator.trajectory_reader as tr
-        entry = tr.TimelineEntry(kind="tool_call", name="Bash", tool_id="t1")
+        entry = tr.TimelineEntry(kind=_TOOL_CALL, name=_TOOL_BASH, tool_id=_T1)
         html = _td()._timeline_entry_html(entry, 1)
         self.assertIn("orch-traj-badge call", html)
         self.assertIn(">tool call</span>", html)
         self.assertIn(">Bash</span>", html)
-        self.assertIn("t1", html)
+        self.assertIn(_T1, html)
 
     def test_tool_result_badge(self) -> None:
-        import orchestrator.trajectory_reader as tr
-        entry = tr.TimelineEntry(kind="tool_result", tool_id="t1")
+        entry = tr.TimelineEntry(kind=_TOOL_RESULT, tool_id=_T1)
         html = _td()._timeline_entry_html(entry, 2)
         self.assertIn("orch-traj-badge result", html)
         self.assertIn(">tool result</span>", html)
 
     def test_assistant_turn_badge(self) -> None:
-        import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind="assistant_message", content="hi")
         html = _td()._timeline_entry_html(entry, 0)
         self.assertIn("orch-traj-badge assistant", html)
         self.assertIn(">assistant</span>", html)
 
     def test_user_turn_badge(self) -> None:
-        import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind="user_message", content="more")
         html = _td()._timeline_entry_html(entry, 0)
         self.assertIn("orch-traj-badge user", html)
         self.assertIn(">user turn</span>", html)
 
     def test_unknown_kind_falls_through(self) -> None:
-        import orchestrator.trajectory_reader as tr
         entry = tr.TimelineEntry(kind="weird")
         html = _td()._timeline_entry_html(entry, 0)
         self.assertIn("orch-traj-badge result", html)
         self.assertIn(">weird</span>", html)
 
     def test_name_escaped(self) -> None:
-        import orchestrator.trajectory_reader as tr
-        entry = tr.TimelineEntry(kind="tool_call", name="<x>")
+        entry = tr.TimelineEntry(kind=_TOOL_CALL, name="<x>")
         html = _td()._timeline_entry_html(entry, 0)
         self.assertIn("&lt;x&gt;", html)
         self.assertNotIn("<x></span>", html)
@@ -405,20 +421,22 @@ class RunPickerLabelTest(unittest.TestCase):
         self.assertNotIn(run.repo, _td()._run_picker_label(run))
 
 
-_CLAUDE_RUN_USAGE = {
-    "models": ["claude-opus-4-8"],
-    "input_tokens": 41230, "output_tokens": 5120, "cached_tokens": 0,
-    "cache_read_tokens": 812440, "cache_write_tokens": 20110,
-    "turns": 9, "cost_usd": 0.83, "cost_source": "reported",
-}
+def _claude_run_usage():
+    """Run-summary usage payload for the claude per-turn HTML path."""
+    return {
+        "models": [_MODEL_CLAUDE],
+        _INPUT_TOKENS: 41230, _OUTPUT_TOKENS: 5120, "cached_tokens": 0,
+        _CACHE_READ: 812440, _CACHE_WRITE: 20110,
+        "turns": 9, _COST_USD: 0.83, _COST_SOURCE: "reported",
+    }
 
 
 def _turn(**overrides):
-    import orchestrator.trajectory_reader as tr
     base = dict(
-        turn=0, model="claude-opus-4-8", input_tokens=12, output_tokens=340,
-        cache_read_tokens=18240, cache_write_tokens=512,
-        cost_usd=0.0123, cost_source="estimated",
+        turn=0, model=_MODEL_CLAUDE,
+        input_tokens=_TURN_INPUT, output_tokens=_TURN_OUTPUT,
+        cache_read_tokens=_TURN_CACHE_READ, cache_write_tokens=_TURN_CACHE_WRITE,
+        cost_usd=_TURN_COST, cost_source=_ESTIMATED,
     )
     base.update(overrides)
     return tr.TurnUsageView(**base)
@@ -428,15 +446,15 @@ class RunUsageHtmlTest(unittest.TestCase):
 
     def test_claude_summary_chips_and_estimate_note(self) -> None:
         run = _run(
-            run_usage=_CLAUDE_RUN_USAGE,
-            turns=[{"turn": 0, "model": "claude-opus-4-8",
-                    "input_tokens": 12, "output_tokens": 340,
-                    "cache_read_tokens": 18240, "cache_write_tokens": 512,
-                    "cost_usd": 0.0123, "cost_source": "estimated"}],
+            run_usage=_claude_run_usage(),
+            turns=[{_TURN: 0, "model": _MODEL_CLAUDE,
+                    _INPUT_TOKENS: _TURN_INPUT, _OUTPUT_TOKENS: _TURN_OUTPUT,
+                    _CACHE_READ: _TURN_CACHE_READ, _CACHE_WRITE: _TURN_CACHE_WRITE,
+                    _COST_USD: _TURN_COST, _COST_SOURCE: _ESTIMATED}],
         )
         html = _td()._run_usage_html(run)
         self.assertIn(">Run usage</span>", html)
-        self.assertIn("claude-opus-4-8", html)
+        self.assertIn(_MODEL_CLAUDE, html)
         self.assertIn("9 turns", html)
         self.assertIn("cache-read 812,440", html)
         self.assertIn("cache-write 20,110", html)
@@ -453,10 +471,10 @@ class RunUsageHtmlTest(unittest.TestCase):
     def test_codex_summary_shows_not_available_note(self) -> None:
         run = _run(
             backend="codex",
-            run_usage={"models": ["gpt-5-codex"], "input_tokens": 1000,
-                       "output_tokens": 200, "cached_tokens": 500,
-                       "turns": 3, "cost_usd": 0.05,
-                       "cost_source": "estimated"},
+            run_usage={"models": ["gpt-5-codex"], _INPUT_TOKENS: 1000,
+                       _OUTPUT_TOKENS: 200, "cached_tokens": 500,
+                       "turns": 3, _COST_USD: 0.05,
+                       _COST_SOURCE: _ESTIMATED},
             turns=[],
         )
         html = _td()._run_usage_html(run)
@@ -474,7 +492,7 @@ class RunUsageHtmlTest(unittest.TestCase):
         self.assertEqual(_td()._run_usage_html(_run()), "")
 
     def test_unpriced_run_names_source_without_cost(self) -> None:
-        run = _run(run_usage={"models": [], "cost_source": "no-usage"})
+        run = _run(run_usage={"models": [], _COST_SOURCE: "no-usage"})
         html = _td()._run_usage_html(run)
         # Unpriced -> the cost chip names the source, no dollar figure.
         self.assertIn(">no-usage</span>", html)
@@ -486,7 +504,7 @@ class TurnUsageHtmlTest(unittest.TestCase):
     def test_strip_carries_model_tokens_and_est_cost(self) -> None:
         html = _td()._turn_usage_html(_turn())
         self.assertIn("orch-traj-turn", html)
-        self.assertIn("claude-opus-4-8", html)
+        self.assertIn(_MODEL_CLAUDE, html)
         self.assertIn("in 12 tok", html)
         self.assertIn("out 340 tok", html)
         self.assertIn("cache-read 18,240", html)
@@ -518,30 +536,9 @@ class TimelineUsageBoundaryTest(unittest.TestCase):
     else -- turn inputs and later entries of the same turn included.
     """
 
-    def _run_with_turns(self):
-        return _run(
-            steps=[
-                {"kind": "assistant_message", "content": "a", "turn": 0},
-                {"kind": "tool_call", "name": "Edit", "tool_id": "t1",
-                 "turn": 0},
-                {"kind": "tool_result", "tool_id": "t1"},
-                {"kind": "assistant_message", "content": "b", "turn": 1},
-            ],
-            turns=[
-                {"turn": 0, "model": "m", "input_tokens": 1,
-                 "output_tokens": 2, "cache_read_tokens": 3,
-                 "cache_write_tokens": 4, "cost_usd": 0.01,
-                 "cost_source": "estimated"},
-                {"turn": 1, "model": "m", "input_tokens": 5,
-                 "output_tokens": 6, "cache_read_tokens": 0,
-                 "cache_write_tokens": 0, "cost_usd": 0.02,
-                 "cost_source": "estimated"},
-            ],
-        )
-
     def test_strip_only_at_first_entry_of_each_turn(self) -> None:
         paired = _td()._timeline_with_usage(self._run_with_turns())
-        strips = [s for s, _ in paired]
+        strips = [strip for strip, _ in paired]
         self.assertEqual(len(strips), 4)
         self.assertIsNotNone(strips[0])
         self.assertEqual(strips[0].turn, 0)
@@ -557,11 +554,32 @@ class TimelineUsageBoundaryTest(unittest.TestCase):
                 self.assertIsNone(strip)
 
     def test_pre_usage_run_pairs_entries_with_none(self) -> None:
-        run = _run(steps=[{"kind": "tool_call", "name": "Bash"},
-                          {"kind": "tool_result", "tool_id": "t"}])
+        run = _run(steps=[{_KIND: _TOOL_CALL, "name": _TOOL_BASH},
+                          {_KIND: _TOOL_RESULT, _TOOL_ID: "t"}])
         paired = _td()._timeline_with_usage(run)
         self.assertTrue(paired)
         self.assertTrue(all(strip is None for strip, _ in paired))
+
+    def _run_with_turns(self):
+        return _run(
+            steps=[
+                {_KIND: "assistant_message", "content": "a", _TURN: 0},
+                {_KIND: _TOOL_CALL, "name": "Edit", _TOOL_ID: _T1,
+                 _TURN: 0},
+                {_KIND: _TOOL_RESULT, _TOOL_ID: _T1},
+                {_KIND: "assistant_message", "content": "b", _TURN: 1},
+            ],
+            turns=[
+                {_TURN: 0, "model": "m", _INPUT_TOKENS: 1,
+                 _OUTPUT_TOKENS: 2, _CACHE_READ: 3,
+                 _CACHE_WRITE: 4, _COST_USD: 0.01,
+                 _COST_SOURCE: _ESTIMATED},
+                {_TURN: 1, "model": "m", _INPUT_TOKENS: 5,
+                 _OUTPUT_TOKENS: 6, _CACHE_READ: 0,
+                 _CACHE_WRITE: 0, _COST_USD: 0.02,
+                 _COST_SOURCE: _ESTIMATED},
+            ],
+        )
 
 
 class CardHeaderHtmlTest(unittest.TestCase):
@@ -573,30 +591,33 @@ class CardHeaderHtmlTest(unittest.TestCase):
         self.assertIn("Sub &amp; more", html)
 
 
+# The pure inline-HTML builders defined in the Streamlit-free leaf that the
+# page module exposes under the same name.
+_LEAF_HTML_MEMBERS = (
+    "_topbar_html",
+    "_kpi_strip_html",
+    "_card_header_html",
+    "_meta_html",
+    "_labeled_chips_html",
+    "_run_usage_html",
+    "_runs_table_html",
+    "_run_picker_label",
+    "_timeline_entry_html",
+    "_timeline_with_usage",
+    "_turn_usage_html",
+)
+
+
 class TrajectoryHtmlExtractionTest(unittest.TestCase):
     """The trajectory viewer's pure inline-HTML builders live in the
     Streamlit-free `orchestrator._trajectory_dashboard_html` leaf, and
-    `orchestrator.trajectory_dashboard` reaches each under its original name
+    `orchestrator.trajectory_dashboard` exposes each under the same name
     so the page (and these tests) resolve to the same object.
     """
 
-    _MOVED_MEMBERS = (
-        "_topbar_html",
-        "_kpi_strip_html",
-        "_card_header_html",
-        "_meta_html",
-        "_labeled_chips_html",
-        "_run_usage_html",
-        "_runs_table_html",
-        "_run_picker_label",
-        "_timeline_entry_html",
-        "_timeline_with_usage",
-        "_turn_usage_html",
-    )
-
     def test_html_members_defined_in_leaf(self) -> None:
-        import orchestrator._trajectory_dashboard_html as leaf
-        for name in self._MOVED_MEMBERS:
+        from orchestrator import _trajectory_dashboard_html as leaf
+        for name in _LEAF_HTML_MEMBERS:
             with self.subTest(name=name):
                 self.assertEqual(
                     getattr(leaf, name).__module__,
@@ -604,9 +625,9 @@ class TrajectoryHtmlExtractionTest(unittest.TestCase):
                 )
 
     def test_page_reaches_the_leaf_objects(self) -> None:
-        import orchestrator._trajectory_dashboard_html as leaf
+        from orchestrator import _trajectory_dashboard_html as leaf
         page = _td()
-        for name in self._MOVED_MEMBERS:
+        for name in _LEAF_HTML_MEMBERS:
             with self.subTest(name=name):
                 self.assertIs(getattr(page, name), getattr(leaf, name))
 
