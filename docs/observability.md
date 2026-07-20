@@ -203,8 +203,9 @@ carries:
   the list carries `develop` once), `skills_evidence` (name → the per-load evidence tier: `confirmed` for a claude
   `Skill` tool call, `inferred` for a codex command that directly reads the skill's `SKILL.md` with a reader verb such
   as `cat` / `sed`), the incidental pair `skills_incidental` / `skills_incidental_count` (path-only references a codex
-  run made to a `SKILL.md` without reading it — a `git diff` / `git status` / `rg`, an env-prefixed inspection, or any
-  non-reader command — kept out of `skills_triggered`, its count, and the `skill_triggered` audit events so a bystander
+  run made to a `SKILL.md` without reading it — a `git diff` / `git status` / `rg`, an env-prefixed inspection, a write
+  to the file (`>` redirect or `sed -i`), or any other non-reader command — kept out of `skills_triggered`, its count,
+  and the `skill_triggered` audit events so a bystander
   mention is never miscounted as a load, but recorded independently: a skill both read *and* inspected appears in both
   buckets), and `skills_available` (the offered-skills set). On **claude** the offered set is
   read from the dedicated `skills` array in the `system`/`init` stream frame — confirmed against a real captured
@@ -1186,8 +1187,11 @@ quote- and backslash-aware, so a metacharacter inside a quoted argument (`rg 'fo
 leading verb (skipping any `NAME=value` env prefix). Only a verb
 established as a **direct reader** (`cat` / `sed` / `head` / …) makes the reference an **inferred** load; every other
 verb — an inspection / search (`git diff` / `git status` / `rg`), an env-prefixed inspection (`GIT_PAGER=cat git
-diff …`), or a generic path-only command (`echo …`) — makes it an **incidental** reference. So a read chained after an
-inspection still counts, and a bystander `git diff` over a changed SKILL.md does not fabricate a load. Started/completed
+diff …`), or a generic path-only command (`echo …`) — makes it an **incidental** reference. Even a reader verb is
+demoted to incidental when the `SKILL.md` is *written* rather than read: an output-redirect target
+(`cat t > .agents/skills/x/SKILL.md`) or a non-reading mode (`sed -i` / `--in-place`) is an incidental reference, so a
+skill file a run only writes is never miscounted as a load. So a read chained after an inspection still counts, and a
+bystander `git diff` over a changed SKILL.md does not fabricate a load. Started/completed
 echo the same command, so the parser dedups by the shared `item.id` (last-frame-wins, as for usage) — for inferred
 loads and incidental references alike. It reads only the `<name>` path segment and the routing verb — never the command
 text or its `aggregated_output` (the file's contents), both of which can echo user content (names-only Privacy). The
