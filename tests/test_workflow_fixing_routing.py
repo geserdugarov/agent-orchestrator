@@ -10,6 +10,7 @@ leaves conflicted files -> `resolving_conflict`). The quiet-window /
 dev-resume tests live in `tests/test_workflow_fixing.py`."""
 from __future__ import annotations
 
+import contextlib
 import shutil
 import subprocess
 import tempfile
@@ -32,7 +33,7 @@ from tests.workflow_helpers import (
 )
 
 
-class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
+class FixingLabelDefinitionTest(unittest.TestCase, _PatchedWorkflowMixin):
     """`fixing` is registered as a workflow label that sits between
     `in_review` and `validating` in the PR-feedback fix loop. The dispatcher
     must route the label to `_handle_fixing` instead of falling through to
@@ -97,12 +98,13 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
              patch.object(workflow, "_handle_implementing") as impl, \
              patch.object(workflow, "_handle_in_review") as in_review:
             workflow._process_issue(gh, _TEST_SPEC, issue)
+            handler.assert_called_once_with(gh, _TEST_SPEC, issue)
+            pickup.assert_not_called()
+            impl.assert_not_called()
+            in_review.assert_not_called()
 
-        handler.assert_called_once_with(gh, _TEST_SPEC, issue)
-        pickup.assert_not_called()
-        impl.assert_not_called()
-        in_review.assert_not_called()
 
+class FixingTerminalRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_missing_pr_parks_awaiting_human(self) -> None:
         # A manual relabel directly to `fixing` without a recorded
         # `pr_number` cannot drive the dev-resume path (no PR to push
@@ -238,8 +240,8 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         open_impl = make_issue(710, label="implementing")
         closed_fixing = make_issue(711, label="fixing")
         closed_fixing.closed = True
-        for issue in (open_impl, closed_fixing):
-            gh.add_issue(issue)
+        for pollable_issue in (open_impl, closed_fixing):
+            gh.add_issue(pollable_issue)
 
         numbers = {issue.number for issue in gh.list_pollable_issues()}
         self.assertEqual(numbers, {710, 711})
@@ -287,7 +289,7 @@ class FixingLabelRoutingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn((720, "done"), gh.label_history)
 
 
-class FixingConflictDetourTest(unittest.TestCase):
+class _FixingConflictFixtureMixin:
     """A behind-base `fixing` worktree goes through the pre-tick base
     rebase. Both exits (clean rebase -> `validating`, conflicted rebase
     -> `resolving_conflict`) must PRESERVE the `pending_fix_*`
@@ -350,6 +352,10 @@ class FixingConflictDetourTest(unittest.TestCase):
         self.assertEqual(data.get("pr_last_review_comment_id"), 0)
         self.assertEqual(data.get("pr_last_review_summary_id"), 0)
 
+
+class FixingConflictDetourTest(
+    _FixingConflictFixtureMixin, unittest.TestCase,
+):
     def test_clean_rebase_keeps_pending_feedback(self) -> None:
         # A clean refresh-time rebase now routes the `fixing` issue to
         # `validating` (no longer to `resolving_conflict`). Either way
@@ -407,7 +413,7 @@ class FixingConflictDetourTest(unittest.TestCase):
         self._assert_pending_feedback_intact()
 
 
-class FixingWorktreeDriftRoutingTest(unittest.TestCase):
+class _FixingWorktreeDriftFixtureMixin:
     """A stuck validating-route transient can route through conflict handling.
 
     When a validating-route transient park (e.g. `push_failed`) cannot
@@ -471,6 +477,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         )
         gh.seed_state(number, **state)
 
+    @contextlib.contextmanager
     def _drift_patches(
         self,
         behind: int,
@@ -482,24 +489,28 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         wt_path = Path(self._wt_dir)
         self.post = MagicMock()
         self.recover = MagicMock(return_value=recovery)
-        return (
-            patch.object(
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(
                 workflow, "_worktree_path", MagicMock(return_value=wt_path),
-            ),
-            patch.object(
+            ))
+            stack.enter_context(patch.object(
                 workflow, "_worktree_dirty_files",
                 MagicMock(return_value=list(dirty)),
-            ),
-            patch.object(workflow, "_git", self._git_behind(behind)),
-            patch.object(
+            ))
+            stack.enter_context(patch.object(
+                workflow, "_git", self._git_behind(behind),
+            ))
+            stack.enter_context(patch.object(
                 workflow, "_head_sha", MagicMock(return_value=local_head),
-            ),
-            patch.object(workflow, "_post_pr_comment", self.post),
-            patch.object(
+            ))
+            stack.enter_context(patch.object(
+                workflow, "_post_pr_comment", self.post,
+            ))
+            stack.enter_context(patch.object(
                 workflow, "_try_recover_validating_transient_park",
                 self.recover,
-            ),
-        )
+            ))
+            yield
 
     def _assert_routed(self, gh, number) -> None:
         self.assertIn((number, "resolving_conflict"), gh.label_history)
@@ -519,13 +530,16 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         self.assertEqual(len(entered), 1)
         self.assertEqual(entered[0].get("stage"), "fixing")
 
+
+class FixingWorktreeDriftRoutingTest(
+    _FixingWorktreeDriftFixtureMixin, unittest.TestCase,
+):
     def test_stuck_push_failed_behind_base_routes(self) -> None:
         # Variant 1: stuck `push_failed` + worktree behind base ->
         # resolving_conflict rebases.
         gh = FakeGitHubClient()
         self._seed_parked_fixing(gh, 30)
-        p1, p2, p3, p4, p5, p6 = self._drift_patches(2)
-        with p1, p2, p3, p4, p5, p6:
+        with self._drift_patches(2):
             workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(30))
         self._assert_routed(gh, 30)
         self.recover.assert_called_once()
@@ -536,8 +550,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         # recognises the already-rebased worktree and republishes it.
         gh = FakeGitHubClient()
         self._seed_parked_fixing(gh, 34)
-        p1, p2, p3, p4, p5, p6 = self._drift_patches(0, local_head="079210cabc")
-        with p1, p2, p3, p4, p5, p6:
+        with self._drift_patches(0, local_head="079210cabc"):
             workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(34))
         self._assert_routed(gh, 34)
 
@@ -547,8 +560,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         # so the human can investigate, do not re-post any comment.
         gh = FakeGitHubClient()
         self._seed_parked_fixing(gh, 31)
-        p1, p2, p3, p4, p5, p6 = self._drift_patches(0, local_head=self.PR_HEAD)
-        with p1, p2, p3, p4, p5, p6:
+        with self._drift_patches(0, local_head=self.PR_HEAD):
             workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(31))
 
         self.assertNotIn((31, "resolving_conflict"), gh.label_history)
@@ -560,8 +572,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         # `resolving_conflict` would reset it to the remote, so leave it.
         gh = FakeGitHubClient()
         self._seed_parked_fixing(gh, 33)
-        p1, p2, p3, p4, p5, p6 = self._drift_patches(5, dirty=("src/x.py",))
-        with p1, p2, p3, p4, p5, p6:
+        with self._drift_patches(5, dirty=("src/x.py",)):
             workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(33))
 
         self.assertNotIn((33, "resolving_conflict"), gh.label_history)
@@ -573,8 +584,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         # question or a "nothing to fix" remark; route neither by inspection.
         gh = FakeGitHubClient()
         self._seed_parked_fixing(gh, 35, park_reason=None)
-        p1, p2, p3, p4, p5, p6 = self._drift_patches(7)
-        with p1, p2, p3, p4, p5, p6:
+        with self._drift_patches(7):
             workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(35))
 
         self.assertNotIn((35, "resolving_conflict"), gh.label_history)
@@ -590,8 +600,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         self._seed_parked_fixing(
             gh, 36, pending_fix_at="2026-05-23T00:00:00+00:00",
         )
-        p1, p2, p3, p4, p5, p6 = self._drift_patches(4)
-        with p1, p2, p3, p4, p5, p6:
+        with self._drift_patches(4):
             workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(36))
 
         self.assertNotIn((36, "resolving_conflict"), gh.label_history)
@@ -605,8 +614,7 @@ class FixingWorktreeDriftRoutingTest(unittest.TestCase):
         # so even with `pending_fix_at` unset the issue must stay parked.
         gh = FakeGitHubClient()
         self._seed_parked_fixing(gh, 37, park_reason="agent_silent")
-        p1, p2, p3, p4, p5, p6 = self._drift_patches(3)
-        with p1, p2, p3, p4, p5, p6:
+        with self._drift_patches(3):
             workflow._handle_fixing(gh, _TEST_SPEC, gh.get_issue(37))
 
         self.assertNotIn((37, "resolving_conflict"), gh.label_history)

@@ -24,9 +24,34 @@ from tests.fakes import (
 )
 from tests.workflow_helpers import (
     _PatchedWorkflowMixin,
-    _TEST_SPEC,
     _agent,
 )
+
+
+def _seed_timeout_issue():
+    gh = FakeGitHubClient()
+    issue = make_issue(1, label="implementing")
+    gh.add_issue(issue)
+    return gh, issue
+
+
+def _seed_timeout_park(**overrides):
+    gh = FakeGitHubClient()
+    issue = make_issue(4, label="implementing")
+    gh.add_issue(issue)
+    state = dict(
+        awaiting_human=True,
+        park_reason="agent_timeout",
+        pre_implement_sha="sha-pre",
+        last_action_comment_id=900,
+        dev_agent="codex",
+        dev_session_id="sess-x",
+        branch="orchestrator/geserdugarov__agent-orchestrator/issue-4",
+        user_content_hash=workflow._compute_user_content_hash(issue, set()),
+    )
+    state.update(overrides)
+    gh.seed_state(4, **state)
+    return gh, issue
 
 
 class HandleImplementingTimeoutDispositionTest(
@@ -34,20 +59,14 @@ class HandleImplementingTimeoutDispositionTest(
 ):
     """Inline disposition when the fresh implementer spawn times out."""
 
-    def _seeded(self):
-        gh = FakeGitHubClient()
-        issue = make_issue(1, label="implementing")
-        gh.add_issue(issue)
-        return gh, issue
-
     def test_no_commit_parks_as_timeout(self) -> None:
         # HEAD did not advance past the pre-agent SHA: the timeout produced no
         # commit. Park awaiting human, no push, no PR -- but tag the park
         # `agent_timeout` and persist `pre_implement_sha` for next-tick
         # recovery (the old path left `park_reason=None`).
-        gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        gh, issue = _seed_timeout_issue()
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(timed_out=True),
             # before_sha then after_sha: identical -> no new commit.
             head_shas=("sha-pre", "sha-pre"),
@@ -67,9 +86,9 @@ class HandleImplementingTimeoutDispositionTest(
         # HEAD advanced and the tree is clean: the agent committed clean work
         # before the timeout killed it. Publish exactly like a normal
         # completion -- push, open PR, route to validating.
-        gh, issue = self._seeded()
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        gh, issue = _seed_timeout_issue()
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(
                 session_id="sess-1", timed_out=True,
                 last_message="partial trace before the kill",
@@ -96,9 +115,9 @@ class HandleImplementingTimeoutDispositionTest(
     def test_dirty_commit_parks_without_push(self) -> None:
         # HEAD advanced but the tree carries uncommitted edits. Pushing would
         # publish an incomplete branch, so park for inspection instead.
-        gh, issue = self._seeded()
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        gh, issue = _seed_timeout_issue()
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(timed_out=True, last_message="committed then died"),
             head_shas=("sha-pre", "sha-post"),  # HEAD advanced.
             dirty_files=["leftover.py"],
@@ -118,36 +137,18 @@ class HandleImplementingTimeoutRecoveryTest(
 ):
     """Next-tick recovery of a commit stranded by an `agent_timeout` park."""
 
-    def _parked(self, **overrides):
-        gh = FakeGitHubClient()
-        issue = make_issue(4, label="implementing")
-        gh.add_issue(issue)
-        state = dict(
-            awaiting_human=True,
-            park_reason="agent_timeout",
-            pre_implement_sha="sha-pre",
-            last_action_comment_id=900,
-            dev_agent="codex",
-            dev_session_id="sess-x",
-            branch="orchestrator/geserdugarov__agent-orchestrator/issue-4",
-            user_content_hash=workflow._compute_user_content_hash(issue, set()),
-        )
-        state.update(overrides)
-        gh.seed_state(4, **state)
-        return gh, issue
-
     def test_parked_timeout_recovers_clean_commit(self) -> None:
         # A descendant finished a clean commit after the timeout was recorded
         # (the #77 shape). With no human comment, the next tick must publish the
         # recovered commit and route to `validating`, persisting the PR/branch,
         # clearing the park, and resetting the per-PR counters. Recovery takes
         # the reviewer path and never diverts to `in_review`.
-        gh, issue = self._parked(review_round=4, retry_count=2)
+        gh, issue = _seed_timeout_park(review_round=4, retry_count=2)
         with patch.object(
             workflow, "_worktree_path", return_value=Path("/tmp"),
         ):
-            mocks = self._run(
-                lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            mocks = self._run_implementing(
+                gh, issue,
                 run_agent=_agent(),
                 head_shas=("sha-post",),  # HEAD advanced past pre_implement_sha.
                 dirty_files=(),
@@ -205,8 +206,8 @@ class HandleImplementingTimeoutRecoveryTest(
             with patch.object(
                 workflow, "_worktree_path", return_value=Path("/tmp")
             ):
-                mocks = self._run(
-                    lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+                mocks = self._run_implementing(
+                    gh, issue,
                     run_agent=_agent(),
                     head_shas=("sha-post",),  # HEAD advanced past pre_implement_sha.
                     dirty_files=(),
@@ -226,12 +227,12 @@ class HandleImplementingTimeoutRecoveryTest(
         # HEAD is unchanged from the pre-timeout SHA: nothing recoverable.
         # Stay parked with zero churn -- no push, no PR, no relabel, and no
         # second park comment.
-        gh, issue = self._parked()
+        gh, issue = _seed_timeout_park()
         before_writes = gh.write_state_calls
         before_comments = len(gh.posted_comments)
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            mocks = self._run_implementing(
+                gh, issue,
                 run_agent=_agent(),
                 head_shas=("sha-pre",),  # HEAD == pre_implement_sha: no commit.
                 dirty_files=(),
@@ -250,10 +251,10 @@ class HandleImplementingTimeoutRecoveryTest(
     def test_parked_timeout_dirty_tree_stays_parked(self) -> None:
         # HEAD advanced but a descendant left uncommitted edits -- publishing
         # would ship an incomplete branch, so stay parked for inspection.
-        gh, issue = self._parked()
+        gh, issue = _seed_timeout_park()
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            mocks = self._run_implementing(
+                gh, issue,
                 run_agent=_agent(),
                 dirty_files=["half-written.py"],
             )
@@ -289,8 +290,8 @@ class HandleImplementingTimeoutRecoveryTest(
             user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
         with patch.object(workflow, "_worktree_path", return_value=Path("/tmp")):
-            mocks = self._run(
-                lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+            mocks = self._run_implementing(
+                gh, issue,
                 run_agent=_agent(session_id="sess-x", last_message="done"),
                 head_shas=("sha-pre",),  # before_sha snapshot for the resume.
                 has_new_commits=[True],
@@ -341,8 +342,8 @@ class HandleImplementingTimeoutRecoveryTest(
             with patch.object(
                 workflow, "_worktree_path", return_value=Path("/tmp")
             ):
-                mocks = self._run(
-                    lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+                mocks = self._run_implementing(
+                    gh, issue,
                     run_agent=_agent(session_id="sess-x", last_message="done"),
                     head_shas=("sha-pre",),
                     has_new_commits=[True],

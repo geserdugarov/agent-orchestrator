@@ -7,7 +7,7 @@ preserve the recorded spec across config flips."""
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import config, workflow
 
@@ -30,7 +30,7 @@ from tests.workflow_helpers import (
 )
 
 
-class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
+class _FullSpecFixtureMixin(_PatchedWorkflowMixin):
     """Issue #67: the pinned `dev_agent`/`decomposer_agent`/`review_agent`
     fields must store the full configured agent command (backend + CLI
     args), not just the parsed backend. This protects in-flight issues
@@ -48,24 +48,27 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
 
     # --- helpers ---------------------------------------------------------
 
-    @staticmethod
-    def _patch_dev_config(spec: str, backend: str, args: tuple[str, ...]):
+    def _patch_dev_config(
+        self, spec: str, backend: str, args: tuple[str, ...],
+    ):
         return [
             patch.object(config, "DEV_AGENT_SPEC", spec),
             patch.object(config, "DEV_AGENT", backend),
             patch.object(config, "DEV_AGENT_ARGS", args),
         ]
 
-    @staticmethod
-    def _patch_review_config(spec: str, backend: str, args: tuple[str, ...]):
+    def _patch_review_config(
+        self, spec: str, backend: str, args: tuple[str, ...],
+    ):
         return [
             patch.object(config, "REVIEW_AGENT_SPEC", spec),
             patch.object(config, "REVIEW_AGENT", backend),
             patch.object(config, "REVIEW_AGENT_ARGS", args),
         ]
 
-    @staticmethod
-    def _patch_decompose_config(spec: str, backend: str, args: tuple[str, ...]):
+    def _patch_decompose_config(
+        self, spec: str, backend: str, args: tuple[str, ...],
+    ):
         return [
             patch.object(config, "DECOMPOSE_AGENT_SPEC", spec),
             patch.object(config, "DECOMPOSE_AGENT", backend),
@@ -77,7 +80,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             p.start()
             self.addCleanup(p.stop)
 
-    # --- dev role --------------------------------------------------------
+
+class FullSpecDevPersistenceTest(unittest.TestCase, _FullSpecFixtureMixin):
 
     def test_fresh_spawn_stores_spec_with_args(self) -> None:
         gh = FakeGitHubClient()
@@ -88,8 +92,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             self._CODEX_SPEC, "codex", self._CODEX_ARGS,
         ))
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-67001", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -175,8 +179,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             self._CLAUDE_SPEC, "claude", self._CLAUDE_ARGS,
         ))
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="dev-legacy-spec", last_message="ok"),
             has_new_commits=[True],
             dirty_files=(),
@@ -212,8 +216,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             self._CLAUDE_SPEC, "claude", self._CLAUDE_ARGS,
         ))
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-legacy-67004", last_message="ok"),
             has_new_commits=[True],
             dirty_files=(),
@@ -242,22 +246,19 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         state = gh.read_pinned_state(issue)
 
-        captured: dict = {}
-
-        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
-            captured["agent"] = agent
-            captured["resume_session_id"] = resume_session_id
-            captured["extra_args"] = extra_args
-            return _agent(session_id="fresh-67005", last_message="ok")
+        run_agent = MagicMock(
+            return_value=_agent(session_id="fresh-67005", last_message="ok")
+        )
 
         with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+             patch.object(workflow, "run_agent", run_agent):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
-        self.assertEqual(captured["agent"], "codex")
-        self.assertIsNone(captured["resume_session_id"])
+        call = run_agent.call_args
+        self.assertEqual(call.args[0], "codex")
+        self.assertIsNone(call.kwargs.get("resume_session_id"))
         # Critical: the args from the stored spec survived the drop.
-        self.assertEqual(captured["extra_args"], self._CODEX_ARGS)
+        self.assertEqual(call.kwargs.get("extra_args"), self._CODEX_ARGS)
         # Stored spec is untouched -- not overwritten with the bare backend.
         self.assertEqual(state.get("dev_agent"), self._CODEX_SPEC)
         self.assertEqual(state.get("dev_session_id"), "fresh-67005")
@@ -281,27 +282,30 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             self._CLAUDE_SPEC, "claude", self._CLAUDE_ARGS,
         ))
 
-        captured: dict = {}
-
-        def fake_run(agent, prompt, wt, *, resume_session_id=None, extra_args=()):
-            captured["agent"] = agent
-            captured["extra_args"] = extra_args
-            return _agent(session_id="fresh-legacy-67006", last_message="ok")
+        run_agent = MagicMock(
+            return_value=_agent(
+                session_id="fresh-legacy-67006", last_message="ok",
+            )
+        )
 
         with patch.object(workflow, "_ensure_worktree", lambda spec, n, **_: _FAKE_WT), \
-             patch.object(workflow, "run_agent", fake_run):
+             patch.object(workflow, "run_agent", run_agent):
             workflow._resume_dev_with_text(gh, _TEST_SPEC, issue, state, "go")
 
         # Backend stays locked to codex (the legacy implicit spec).
-        self.assertEqual(captured["agent"], "codex")
-        self.assertEqual(captured["extra_args"], ())
+        call = run_agent.call_args
+        self.assertEqual(call.args[0], "codex")
+        self.assertEqual(call.kwargs.get("extra_args"), ())
         # Migrated to the new key with the legacy backend pinned, legacy
         # field cleared.
         self.assertEqual(state.get("dev_agent"), "codex")
         self.assertEqual(state.get("dev_session_id"), "fresh-legacy-67006")
         self.assertIsNone(state.get("codex_session_id"))
 
-    # --- reviewer role ---------------------------------------------------
+
+class FullSpecReviewerPersistenceTest(
+    unittest.TestCase, _FullSpecFixtureMixin,
+):
 
     def test_fresh_reviewer_spawn_stores_full_spec(self) -> None:
         gh = FakeGitHubClient()
@@ -422,7 +426,10 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertIn("A separate claude session", prompt)
         self.assertNotIn("A separate codex session", prompt)
 
-    # --- decomposer role -------------------------------------------------
+
+class FullSpecDecomposerPersistenceTest(
+    unittest.TestCase, _FullSpecFixtureMixin,
+):
 
     def test_fresh_decomposer_spawn_stores_full_spec(self) -> None:
         gh = FakeGitHubClient()
@@ -511,7 +518,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(args, ())
         self.assertEqual(sid, "sid-x")
 
-    # --- read-helper round-trip ------------------------------------------
+
+class FullSpecSessionReaderTest(unittest.TestCase, _FullSpecFixtureMixin):
 
     def test_read_dev_session_round_trips_full_spec(self) -> None:
         spec, backend, args, sid = workflow._read_dev_session(
@@ -553,7 +561,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertEqual(args, self._CLAUDE_ARGS)
         self.assertIsNone(sid)
 
-    # --- no-session-id regression (reviewer-flagged) ----------------------
+
+class FullSpecDevNoSessionTest(unittest.TestCase, _FullSpecFixtureMixin):
 
     def test_dev_spec_pinned_without_session_id(self) -> None:
         # A fresh dev spawn that produces commits but no session id (a
@@ -571,8 +580,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         ))
 
         # Empty session_id: backend hiccup, but the worktree got commits.
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -602,8 +611,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
         self._enter(self._patch_dev_config(
             self._CODEX_SPEC, "codex", self._CODEX_ARGS,
         ))
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="", last_message="need input"),
             has_new_commits=False,
         )
@@ -625,8 +634,8 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             p.start()
             self.addCleanup(p.stop)
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-67031", last_message="done"),
             has_new_commits=[True],
             dirty_files=(),
@@ -653,6 +662,11 @@ class FullSpecPersistenceTest(unittest.TestCase, _PatchedWorkflowMixin):
             "stored codex args must survive across the config flip",
         )
 
+
+
+class FullSpecDecomposerNoSessionTest(
+    unittest.TestCase, _FullSpecFixtureMixin,
+):
     def test_decomposer_spec_pinned_no_session(self) -> None:
         # Same reviewer concern, decomposer side: a fresh decomposer
         # that emits a manifest without surfacing a session id (or

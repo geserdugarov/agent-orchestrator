@@ -8,6 +8,7 @@ before its pinned-state write."""
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock
 
 from orchestrator import workflow
 
@@ -50,8 +51,8 @@ class HandleImplementingExternalMergeTest(
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -80,8 +81,8 @@ class HandleImplementingClosedIssueTest(
         gh.add_issue(issue)
         gh.seed_state(151, dev_agent="claude", dev_session_id="dev-sess")
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -109,8 +110,8 @@ class HandleImplementingClosedIssueTest(
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -139,8 +140,8 @@ class HandleImplementingClosedIssueTest(
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -180,8 +181,8 @@ class HandleImplementingClosedIssueTest(
             dev_agent="claude", dev_session_id="dev-sess",
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
         )
 
@@ -221,19 +222,15 @@ class HandleImplementingClosedIssueTest(
         # `gh.get_pr`: raise on the FIRST call (the merge helper) so
         # it returns False, succeed on the SECOND call (the closed
         # helper's own fetch).
-        real_get_pr = gh.get_pr
-        call_count = {"n": 0}
+        gh.get_pr = MagicMock(  # type: ignore[assignment]
+            side_effect=[
+                RuntimeError("simulated transient GitHub failure"),
+                pr,
+            ]
+        )
 
-        def flaky_get_pr(pr_number):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                raise RuntimeError("simulated transient GitHub failure")
-            return real_get_pr(pr_number)
-
-        gh.get_pr = flaky_get_pr  # type: ignore[assignment]
-
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(),
         )
 

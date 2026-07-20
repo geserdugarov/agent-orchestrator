@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchestrator import branch_publication, config, workflow, worktree_lifecycle
 from orchestrator.stages import implementing
@@ -27,6 +27,63 @@ from tests.workflow_helpers import (
 )
 
 
+class _GitRecorder:
+    def __init__(self, stdout: str = "", *, returncode: int = 0, stderr: str = ""):
+        self.calls: list[tuple] = []
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = stderr
+
+    def __call__(self, *args, cwd):
+        self.calls.append((args, cwd))
+        return MagicMock(
+            returncode=self.returncode,
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+
+
+class _RepoLocalStyleAssertions:
+    _HARDCODED_LIST = ("feat:", "chore:", "refactor:", "test:")
+
+    def _assert_repo_local_style(self, prompt: str) -> None:
+        self.assertIn("git log", prompt)
+        self.assertIn("repository-local", prompt)
+        self.assertIn("event:", prompt)
+        self.assertIn("career:", prompt)
+        self.assertNotIn("Conventional", prompt)
+        for prefix in self._HARDCODED_LIST:
+            self.assertNotIn(prefix, prompt)
+        self.assertIn("subject line only", prompt)
+        self.assertIn("Co-Authored-By", prompt)
+
+
+class _ConventionalTitleFixtureMixin(_PatchedWorkflowMixin):
+    def _seeded(self, *, issue_number: int = 30, label_name: str = "") -> tuple:
+        gh = FakeGitHubClient()
+        issue = make_issue(
+            issue_number,
+            label="implementing",
+            title="add a sparkly thing",
+        )
+        if label_name:
+            issue.labels.append(FakeLabel(label_name))
+        gh.add_issue(issue)
+        return gh, issue
+
+
+class _SubjectPrefixFixtureMixin:
+    def _infer(self, stdout: str, *, bug: bool = False) -> str:
+        issue = make_issue(50, title="do a thing")
+        if bug:
+            issue.labels.append(FakeLabel("bug"))
+        git = _GitRecorder(stdout)
+        with patch.object(branch_publication, "_git", git):
+            return workflow._infer_subject_prefix(
+                _TEST_SPEC, Path("/tmp/wt-not-real"), issue
+            )
+
+
 class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_existing_open_pr_is_reused(self) -> None:
         gh = FakeGitHubClient()
@@ -35,8 +92,8 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         existing = FakePR(number=42, head_branch="orchestrator/geserdugarov__agent-orchestrator/issue-4")
         gh.existing_open_pr["orchestrator/geserdugarov__agent-orchestrator/issue-4"] = existing
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -68,8 +125,8 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # change would carry.
         gh.seed_state(4, branch=LEGACY)
 
-        mocks = self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        mocks = self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -119,8 +176,8 @@ class OnCommitsPRReuseTest(unittest.TestCase, _PatchedWorkflowMixin):
             last_action_comment_id=2000,
         )
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="dev-sess", last_message="done"),
             # Resume path: no recovered-worktree shortcut, post-agent
             # check sees the new commit.
@@ -208,8 +265,8 @@ class OnCommitsBodyTruncationTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         long_message = "This is a long closing note. " * 5000  # ~145k chars
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message=long_message),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -229,8 +286,8 @@ class OnCommitsBodyTruncationTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(61, label="implementing", title="add a thing")
         gh.add_issue(issue)
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="all done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -243,31 +300,15 @@ class OnCommitsBodyTruncationTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn(implementing._PR_BODY_TRUNCATION_MARKER, body)
 
 
-class RepoLocalCommitStylePromptTest(unittest.TestCase):
+class RepoLocalCommitStylePromptTest(
+    unittest.TestCase, _RepoLocalStyleAssertions,
+):
     """Every commit-producing prompt teaches the agent to mirror the repo's
     OWN recent commit history (`git log`) rather than a hardcoded
     Conventional-Commits prefix list. The orchestrator runs against
     arbitrary configured repos, so a project-specific subject prefix such as
     `event:` or `career:` must be permitted by the instruction; the closed
     `feat:`/`chore:`/`refactor:`/`test:` enumeration is removed."""
-
-    # Prefixes the prompt must NOT present as a fixed/closed set of choices.
-    _HARDCODED_LIST = ("feat:", "chore:", "refactor:", "test:")
-
-    def _assert_repo_local_style(self, prompt: str) -> None:
-        # Learn the convention from recent history.
-        self.assertIn("git log", prompt)
-        self.assertIn("repository-local", prompt)
-        # Custom, project-specific prefixes are explicitly allowed by example.
-        self.assertIn("event:", prompt)
-        self.assertIn("career:", prompt)
-        # The old hardcoded Conventional-Commits teaching is gone.
-        self.assertNotIn("Conventional", prompt)
-        for prefix in self._HARDCODED_LIST:
-            self.assertNotIn(prefix, prompt)
-        # Subject-only commits, no extended body and no Co-Authored-By trailer.
-        self.assertIn("subject line only", prompt)
-        self.assertIn("Co-Authored-By", prompt)
 
     def test_implement_prompt_teaches_local_style(self) -> None:
         issue = make_issue(7, title="add a thing", body="please add a thing")
@@ -332,28 +373,18 @@ class ForegroundOnlyPromptTest(unittest.TestCase):
                 self.assertIn(self.MARKER, prompt)
 
 
-class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
+class ConventionalPrTitleTest(
+    unittest.TestCase, _ConventionalTitleFixtureMixin,
+):
     """`_on_commits` derives the PR title from the agent's first commit
     subject when it already follows the Conventional-Commits convention,
     and falls back to a `<type>: <issue title>` form otherwise."""
 
-    def _seeded(self, *, issue_number: int = 30, label_name: str = "") -> tuple:
-        gh = FakeGitHubClient()
-        issue = make_issue(
-            issue_number,
-            label="implementing",
-            title="add a sparkly thing",
-        )
-        if label_name:
-            issue.labels.append(FakeLabel(label_name))
-        gh.add_issue(issue)
-        return gh, issue
-
     def test_uses_conventional_commit_subject(self) -> None:
         gh, issue = self._seeded(issue_number=30)
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -371,8 +402,8 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_uses_scoped_conventional_subject(self) -> None:
         gh, issue = self._seeded(issue_number=31)
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -387,8 +418,8 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_unconventional_falls_back_to_feat(self) -> None:
         gh, issue = self._seeded(issue_number=32)
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -404,8 +435,8 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_bug_label_falls_back_to_fix(self) -> None:
         gh, issue = self._seeded(issue_number=33, label_name="bug")
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -419,8 +450,8 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
     def test_pr_title_fallback_when_no_commit_subject(self) -> None:
         gh, issue = self._seeded(issue_number=34)
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -430,6 +461,10 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
 
         self.assertEqual(gh.opened_prs[0].title, "feat: add a sparkly thing")
 
+
+class ConventionalPrTitleFallbackTest(
+    unittest.TestCase, _ConventionalTitleFixtureMixin,
+):
     def test_fallback_uses_conventional_issue_title(self) -> None:
         # Issue title already conventional -> use it directly so we don't
         # produce a doubled `feat: feat: ...` form.
@@ -439,8 +474,8 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         gh.add_issue(issue)
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -456,8 +491,8 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
         # with a synthesized `feat:`.
         gh, issue = self._seeded(issue_number=36)
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -473,8 +508,8 @@ class ConventionalPrTitleTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `_infer_subject_prefix` reads from base history instead of `feat:`.
         gh, issue = self._seeded(issue_number=37)
 
-        self._run(
-            lambda: workflow._handle_implementing(gh, _TEST_SPEC, issue),
+        self._run_implementing(
+            gh, issue,
             run_agent=_agent(session_id="sess-1", last_message="done"),
             has_new_commits=[False, True],
             dirty_files=(),
@@ -562,35 +597,10 @@ class PrefixedSubjectHelperTest(unittest.TestCase):
             )
 
 
-class InferSubjectPrefixTest(unittest.TestCase):
+class InferSubjectPrefixTest(unittest.TestCase, _SubjectPrefixFixtureMixin):
     """`_infer_subject_prefix` reads recent base-branch history and reuses a
     dominant repo-local prefix; otherwise it falls back to `fix` for
     bug-labelled issues and `feat` everywhere else."""
-
-    def _capture_git(self, stdout: str):
-        from unittest.mock import MagicMock
-
-        captured: list[tuple] = []
-
-        def fake_git(*args, cwd):
-            captured.append((args, cwd))
-            run = MagicMock()
-            run.returncode = 0
-            run.stdout = stdout
-            run.stderr = ""
-            return run
-
-        return fake_git, captured
-
-    def _infer(self, stdout: str, *, bug: bool = False) -> str:
-        issue = make_issue(50, title="do a thing")
-        if bug:
-            issue.labels.append(FakeLabel("bug"))
-        fake_git, _ = self._capture_git(stdout)
-        with patch.object(branch_publication, "_git", fake_git):
-            return workflow._infer_subject_prefix(
-                _TEST_SPEC, Path("/tmp/wt-not-real"), issue
-            )
 
     def test_dominant_repo_local_prefix_is_reused(self) -> None:
         # Events repo: `event:` dominates, so the fallback honors it.
@@ -622,18 +632,14 @@ class InferSubjectPrefixTest(unittest.TestCase):
         # History with no `<prefix>:` subjects yields no dominant prefix.
         self.assertEqual(self._infer("initial commit\nmore work\n"), "feat")
 
+
+class InferSubjectPrefixGitRoutingTest(
+    unittest.TestCase, _SubjectPrefixFixtureMixin,
+):
     def test_git_error_falls_back_without_crashing(self) -> None:
-        from unittest.mock import MagicMock
-
-        def failing_git(*args, cwd):
-            run = MagicMock()
-            run.returncode = 1
-            run.stdout = ""
-            run.stderr = "fatal: bad revision"
-            return run
-
         issue = make_issue(51, title="do a thing")
-        with patch.object(branch_publication, "_git", failing_git):
+        git = _GitRecorder(returncode=1, stderr="fatal: bad revision")
+        with patch.object(branch_publication, "_git", git):
             prefix = workflow._infer_subject_prefix(
                 _TEST_SPEC, Path("/tmp/wt-not-real"), issue
             )
@@ -646,12 +652,12 @@ class InferSubjectPrefixTest(unittest.TestCase):
             base_branch="master",
             remote_name="private",
         )
-        fake_git, captured = self._capture_git("event: x\n")
-        with patch.object(branch_publication, "_git", fake_git):
+        git = _GitRecorder("event: x\n")
+        with patch.object(branch_publication, "_git", git):
             workflow._infer_subject_prefix(
                 private_spec, Path("/tmp/wt-not-real"), make_issue(52)
             )
-        args, _cwd = captured[0]
+        args, _cwd = git.calls[0]
         # The history log targets `<remote>/<base>`, honoring the spec.
         self.assertIn("private/master", args)
         self.assertNotIn("origin/main", args)
@@ -663,35 +669,20 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
     legacy `BASE_BRANCH=main`, the global default would point at the wrong
     remote and either fail or include unrelated commits."""
 
-    def _capture_git(self, stdout: str = "feat: x\n"):
-        from unittest.mock import MagicMock
-
-        captured: list[tuple] = []
-
-        def fake_git(*args, cwd):
-            captured.append((args, cwd))
-            run = MagicMock()
-            run.returncode = 0
-            run.stdout = stdout
-            run.stderr = ""
-            return run
-
-        return fake_git, captured
-
     def test_uses_per_spec_base_branch(self) -> None:
         master_spec = config.RepoSpec(
             slug="acme/legacy",
             target_root=Path("/tmp/orchestrator-test-target-root"),
             base_branch="master",
         )
-        fake_git, captured = self._capture_git("feat: hello\n")
-        with patch.object(branch_publication, "_git", fake_git):
+        git = _GitRecorder("feat: hello\n")
+        with patch.object(branch_publication, "_git", git):
             subj = workflow._first_commit_subject(
                 master_spec, Path("/tmp/wt-not-real")
             )
         self.assertEqual(subj, "feat: hello")
-        self.assertEqual(len(captured), 1)
-        args, _cwd = captured[0]
+        self.assertEqual(len(git.calls), 1)
+        args, _cwd = git.calls[0]
         # The third positional arg to _git is the rev range; it must
         # reference master (the spec's base_branch), not the cached `main`.
         self.assertIn("origin/master..HEAD", args)
@@ -700,10 +691,10 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
     def test_default_spec_still_uses_main(self) -> None:
         # Sanity check: legacy single-repo deployments keep using `main`
         # because `_TEST_SPEC.base_branch` is `main`.
-        fake_git, captured = self._capture_git("")
-        with patch.object(branch_publication, "_git", fake_git):
+        git = _GitRecorder()
+        with patch.object(branch_publication, "_git", git):
             workflow._first_commit_subject(_TEST_SPEC, Path("/tmp/wt-not-real"))
-        args, _cwd = captured[0]
+        args, _cwd = git.calls[0]
         self.assertIn("origin/main..HEAD", args)
 
     def test_uses_per_spec_remote_name(self) -> None:
@@ -715,12 +706,12 @@ class FirstCommitSubjectBaseBranchTest(unittest.TestCase):
             base_branch="main",
             remote_name="private",
         )
-        fake_git, captured = self._capture_git("feat: hi\n")
-        with patch.object(branch_publication, "_git", fake_git):
+        git = _GitRecorder("feat: hi\n")
+        with patch.object(branch_publication, "_git", git):
             workflow._first_commit_subject(
                 private_spec, Path("/tmp/wt-not-real")
             )
-        args, _cwd = captured[0]
+        args, _cwd = git.calls[0]
         self.assertIn("private/main..HEAD", args)
         self.assertNotIn("origin/main..HEAD", args)
 
@@ -732,26 +723,15 @@ class HasNewCommitsRemoteNameTest(unittest.TestCase):
     handler will read stale commits from the wrong upstream."""
 
     def test_rev_list_references_per_spec_remote(self) -> None:
-        from unittest.mock import MagicMock
-
-        captured: list[tuple] = []
-
-        def fake_git(*args, cwd):
-            captured.append((args, cwd))
-            run = MagicMock()
-            run.returncode = 0
-            run.stdout = "0\n"
-            run.stderr = ""
-            return run
-
+        git = _GitRecorder("0\n")
         private_spec = config.RepoSpec(
             slug="acme/widget",
             target_root=Path("/tmp/orchestrator-test-target-root"),
             base_branch="main",
             remote_name="private",
         )
-        with patch.object(worktree_lifecycle, "_git", fake_git):
+        with patch.object(worktree_lifecycle, "_git", git):
             workflow._has_new_commits(private_spec, Path("/tmp/wt-not-real"))
-        args, _cwd = captured[0]
+        args, _cwd = git.calls[0]
         self.assertIn("private/main..HEAD", args)
         self.assertNotIn("origin/main..HEAD", args)

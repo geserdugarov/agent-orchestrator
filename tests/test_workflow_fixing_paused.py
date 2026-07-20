@@ -14,7 +14,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-from orchestrator import config, workflow
+from orchestrator import config
 from orchestrator.github import PAUSED_LABEL
 
 from tests.fakes import (
@@ -26,7 +26,7 @@ from tests.fakes import (
     FakeUser,
     make_issue,
 )
-from tests.workflow_helpers import _PatchedWorkflowMixin, _TEST_SPEC, _agent
+from tests.workflow_helpers import _PatchedWorkflowMixin, _agent
 
 ISSUE = 880
 PR_NUMBER = 880
@@ -46,38 +46,38 @@ def _paused_view(number: int) -> object:
     return view
 
 
+def _seed_fixing_pause(gh: FakeGitHubClient) -> object:
+    old = datetime.now(timezone.utc) - timedelta(hours=1)
+    issue = make_issue(ISSUE, label="fixing")
+    issue.comments.append(
+        FakeComment(
+            id=TRIGGER_ID, body="rename foo to bar",
+            user=FakeUser("alice"), created_at=old,
+        )
+    )
+    gh.add_issue(issue)
+    gh.add_pr(FakePR(
+        number=PR_NUMBER, head_branch=BRANCH,
+        head=FakePRRef(sha=PR_HEAD_SHA), mergeable=True,
+        check_state="success",
+    ))
+    gh.seed_state(
+        ISSUE,
+        pr_number=PR_NUMBER,
+        branch=BRANCH,
+        dev_agent=DEV_AGENT,
+        dev_session_id=DEV_SESSION,
+        review_round=1,
+        pr_last_comment_id=1999,
+        pr_last_review_comment_id=0,
+        pr_last_review_summary_id=0,
+        pending_fix_at="2026-05-24T00:00:00+00:00",
+        pending_fix_issue_max_id=TRIGGER_ID,
+    )
+    return issue
+
+
 class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
-    def _seed(self, gh: FakeGitHubClient) -> object:
-        # Triggering PR feedback older than the debounce window so the quiet
-        # gate passes and the handler reaches the dev resume this tick.
-        old = datetime.now(timezone.utc) - timedelta(hours=1)
-        issue = make_issue(ISSUE, label="fixing")
-        issue.comments.append(
-            FakeComment(
-                id=TRIGGER_ID, body="rename foo to bar",
-                user=FakeUser("alice"), created_at=old,
-            )
-        )
-        gh.add_issue(issue)
-        gh.add_pr(FakePR(
-            number=PR_NUMBER, head_branch=BRANCH,
-            head=FakePRRef(sha=PR_HEAD_SHA), mergeable=True,
-            check_state="success",
-        ))
-        gh.seed_state(
-            ISSUE,
-            pr_number=PR_NUMBER,
-            branch=BRANCH,
-            dev_agent=DEV_AGENT,
-            dev_session_id=DEV_SESSION,
-            review_round=1,
-            pr_last_comment_id=1999,
-            pr_last_review_comment_id=0,
-            pr_last_review_summary_id=0,
-            pending_fix_at="2026-05-24T00:00:00+00:00",
-            pending_fix_issue_max_id=TRIGGER_ID,
-        )
-        return issue
 
     def test_resume_pause_blocks_publish_and_relabel(
         self,
@@ -89,14 +89,14 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # flip to `validating`. Asserting no push / no relabel proves the guard
         # reads `gh.get_issue` and honors it.
         gh = FakeGitHubClient()
-        issue = self._seed(gh)
+        issue = _seed_fixing_pause(gh)
         before_writes = gh.write_state_calls
 
         get_issue_mock = MagicMock(return_value=_paused_view(ISSUE))
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(gh, "get_issue", get_issue_mock):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(session_id=DEV_SESSION, last_message="pushed fix"),
                 head_shas=("sha-before", "sha-after"),
                 push_branch=True,
@@ -125,12 +125,12 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         # `validating` -- proving the pause preserved exactly enough state to
         # resume cleanly.
         gh = FakeGitHubClient()
-        issue = self._seed(gh)
+        issue = _seed_fixing_pause(gh)
 
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(gh, "get_issue", MagicMock(return_value=_paused_view(ISSUE))):
-            self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            self._run_fixing(
+                gh, issue,
                 run_agent=_agent(session_id=DEV_SESSION, last_message="pushed fix"),
                 head_shas=("sha-before", "sha-after"),
                 push_branch=True,
@@ -142,8 +142,8 @@ class FixingLivePauseTest(unittest.TestCase, _PatchedWorkflowMixin):
         unpaused = make_issue(ISSUE, label="fixing")
         with patch.object(config, "IN_REVIEW_DEBOUNCE_SECONDS", DEBOUNCE_SECONDS), \
              patch.object(gh, "get_issue", MagicMock(return_value=unpaused)):
-            mocks = self._run(
-                lambda: workflow._handle_fixing(gh, _TEST_SPEC, issue),
+            mocks = self._run_fixing(
+                gh, issue,
                 run_agent=_agent(session_id=DEV_SESSION, last_message="pushed fix"),
                 head_shas=("sha-before", "sha-after"),
                 push_branch=True,

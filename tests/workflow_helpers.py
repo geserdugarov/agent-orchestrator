@@ -13,6 +13,7 @@ import contextlib
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -166,6 +167,20 @@ def _as_mock(value_or_seq):
 
 class _PatchedWorkflowMixin:
     """Helper that wires standard patches around a single test body."""
+
+    def _run_implementing(self, gh, issue, *, run_agent, **run_options):
+        return self._run(
+            partial(workflow._handle_implementing, gh, _TEST_SPEC, issue),
+            run_agent=run_agent,
+            **run_options,
+        )
+
+    def _run_fixing(self, gh, issue, *, run_agent, **run_options):
+        return self._run(
+            partial(workflow._handle_fixing, gh, _TEST_SPEC, issue),
+            run_agent=run_agent,
+            **run_options,
+        )
 
     def _run(
         self,
