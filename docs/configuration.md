@@ -376,11 +376,15 @@ an unmergeable PR.
   the trajectory cron examples in [`observability.md`](observability.md#trajectory-operator-workflow).
 - `TRACK_SKILL_TRIGGERS` — default _(unset, off)_. opt-in switch for skill-trigger tracking. `1` / `true` / `on` /
   `yes` (case-insensitive) makes `record_agent_exit` parse the agent's triggered skills and fold `skills_triggered` /
-  `skills_triggered_count` / `skills_available` into each `agent_exit` record. It also makes `_run_agent_tracked` emit
-  one `skill_triggered` audit event per distinct triggered skill to `EVENT_LOG_PATH` (when that sink is set). Default
-  off so a default install's records and audit log stay shape-compatible with today's, and needs no Postgres DDL — the
-  `extras JSONB` column absorbs the new fields. Both backends' triggered-skill shapes are now pinned against captured
-  streams (claude `Skill` tool-use blocks; codex `skills/<name>/SKILL.md` reads, a heuristic file-open signal — see
+  `skills_triggered_count` / `skills_available`, the per-load evidence tier `skills_evidence` (`confirmed` for a claude
+  `Skill` call, `inferred` for a codex direct `SKILL.md` read), and the incidental pair `skills_incidental` /
+  `skills_incidental_count` (path-only codex references — `git diff` / `git status` / `rg`, a redirect target, any
+  non-reader command — recorded independently of loads and kept out of the trigger fields/events) into each
+  `agent_exit` record. It also makes `_run_agent_tracked` emit one `skill_triggered` audit event per distinct triggered
+  skill to `EVENT_LOG_PATH` (when that sink is set); incidental references never emit one. Default off so a default
+  install's records and audit log stay shape-compatible with today's, and needs no Postgres DDL — the `extras JSONB`
+  column absorbs the new fields. Both backends' triggered-skill shapes are now pinned against captured streams (claude
+  `Skill` tool-use blocks; codex `skills/<name>/SKILL.md` reads, a heuristic file-open signal — see
   [`observability.md`](observability.md#usage-parser-orchestratorusagepy)). The offered-skills set (`skills_available`)
   is read from claude's `system`/`init` frame `skills` array (confirmed against a real stream capture); codex's stream
   carries no such frame, so it is backfilled out-of-band from the filesystem via

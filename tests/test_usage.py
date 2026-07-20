@@ -825,6 +825,14 @@ class ClaudeSkillTriggerTest(unittest.TestCase):
         self.assertEqual(skills.triggered, (DEVELOP, REVIEW))
         # `develop` fired twice (across two messages), `review` once.
         self.assertEqual(skills.trigger_counts, {DEVELOP: 2, REVIEW: 1})
+        # Every `Skill` call is a confirmed load, so the triggered set carries
+        # `confirmed` evidence and claude never produces incidental references
+        # (its loads go through the tool, not the shell).
+        self.assertEqual(
+            skills.evidence, {DEVELOP: "confirmed", REVIEW: "confirmed"},
+        )
+        self.assertEqual(skills.incidental, ())
+        self.assertEqual(skills.incidental_counts, {})
         # This `init` frame carries no `skills` array, so the offered set is
         # empty (the `available` source is read from `system/init.skills`
         # when present -- see `test_available_from_init_skills`).
@@ -1003,11 +1011,14 @@ class CodexSkillTriggerTest(unittest.TestCase):
     """``parse_codex_skills`` over the confirmed ``codex exec --json`` shape.
 
     Codex has no dedicated ``Skill`` tool: a captured reviewer run pinned the
-    only observable trigger as a ``command_execution`` whose ``command`` opens a
+    only observable load as a ``command_execution`` whose ``command`` opens a
     ``skills/<name>/SKILL.md`` file. The parser reads only the ``<name>`` path
     segment, dedups the started/completed pair codex emits per command by its
     shared ``item.id``, keeps first-seen order, and returns empty -- never an
-    exception -- on a stream that opens no SKILL.md.
+    exception -- on a stream that opens no SKILL.md. A command that only
+    *inspects* a SKILL.md path (``git diff`` / ``rg``) is classified as an
+    incidental reference rather than an inferred load, kept out of the trigger
+    set.
     """
 
     def test_extracts_skill_from_skill_md_read(self) -> None:
@@ -1029,6 +1040,11 @@ class CodexSkillTriggerTest(unittest.TestCase):
         self.assertEqual(skills.triggered, ("review",))
         # started + completed echo the same command; the shared id counts once.
         self.assertEqual(skills.trigger_counts, {"review": 1})
+        # A direct `sed`/`cat` read is an inferred load and makes no incidental
+        # reference; the chained `git diff` names no SKILL.md path.
+        self.assertEqual(skills.evidence, {"review": "inferred"})
+        self.assertEqual(skills.incidental, ())
+        self.assertEqual(skills.incidental_counts, {})
         self.assertEqual(skills.available, ())
 
     def test_started_and_completed_not_double_counted(self) -> None:
@@ -1146,6 +1162,140 @@ class CodexSkillTriggerTest(unittest.TestCase):
         self.assertEqual(skills.triggered, ("review",))
         self.assertNotIn(secret, repr(skills))
         self.assertNotIn("sk-deadbeef", repr(skills))
+
+    def test_non_reader_commands_are_incidental(self) -> None:
+        # A command that names a `SKILL.md` path without being a direct read is
+        # an incidental reference, kept out of `triggered` (and the audit
+        # events) and folded into the separate incidental bucket. This covers
+        # inspection / search (`git diff` / `git status` / `rg`), a search whose
+        # quoted argument holds a shell metacharacter (must not split into a
+        # bogus reader segment), an env-prefixed inspection (the `GIT_PAGER=cat`
+        # prefix must not read as the verb), and a generic path-only command
+        # (`echo`) — none of which establish a read of the file's contents.
+        for command in (
+            "/bin/bash -lc 'git diff -- .agents/skills/develop/SKILL.md'",
+            "/bin/bash -lc 'git status skills/develop/SKILL.md'",
+            "/bin/bash -lc 'rg TODO skills/develop/SKILL.md'",
+            "/bin/bash -lc \"rg 'foo|bar' .agents/skills/develop/SKILL.md\"",
+            "/bin/bash -lc 'GIT_PAGER=cat git diff -- "
+            ".agents/skills/develop/SKILL.md'",
+            "/bin/bash -lc 'echo .agents/skills/develop/SKILL.md'",
+        ):
+            with self.subTest(command=command):
+                skills = parse_codex_skills(_jsonl(_codex_cmd("item_1", command)))
+                self.assertEqual(skills.triggered, ())
+                self.assertEqual(skills.trigger_counts, {})
+                self.assertEqual(skills.evidence, {})
+                self.assertEqual(skills.incidental, ("develop",))
+                self.assertEqual(skills.incidental_counts, {"develop": 1})
+
+    def test_quoted_metacharacters_do_not_split_a_reader(self) -> None:
+        # A reader whose quoted argument carries `|` / `;` must stay one
+        # sub-command: quote-aware segmentation keeps the `cat` verb attached to
+        # the SKILL.md read, so it registers as an inferred load rather than
+        # splitting into a spurious non-reader segment.
+        stdout = _jsonl(_codex_cmd(
+            "item_1", "/bin/bash -lc \"cat 'a|b;c' skills/review/SKILL.md\""))
+        skills = parse_codex_skills(stdout)
+        self.assertEqual(skills.triggered, ("review",))
+        self.assertEqual(skills.evidence, {"review": "inferred"})
+        self.assertEqual(skills.incidental, ())
+
+    def test_backslash_escaped_operator_does_not_split(self) -> None:
+        # A backslash-escaped operator is a literal argument char, not a
+        # sub-command boundary: `rg foo\|cat ... SKILL.md` is one `rg` search,
+        # so `develop` stays an incidental reference -- the `\|` must not split
+        # off a bogus `cat` reader segment that would fabricate an inferred load
+        # and a spurious `skill_triggered` audit event.
+        stdout = _jsonl(_codex_cmd(
+            "item_1", r"rg foo\|cat .agents/skills/develop/SKILL.md"))
+        skills = parse_codex_skills(stdout)
+        self.assertEqual(skills.triggered, ())
+        self.assertEqual(skills.trigger_counts, {})
+        self.assertEqual(skills.evidence, {})
+        self.assertEqual(skills.incidental, ("develop",))
+        self.assertEqual(skills.incidental_counts, {"develop": 1})
+
+    def test_wrapper_decodes_inner_escaped_quotes(self) -> None:
+        # The `bash -lc "…"` wrapper is decoded, not blindly stripped: an inner
+        # escaped double-quote (`\"`) re-opens a real quote in the script bash
+        # runs, so the `|` inside `rg "foo|cat …/SKILL.md"` stays quoted and the
+        # search stays one `rg` command -- `develop` is an incidental reference,
+        # not a bogus `cat` reader load and audit event.
+        cmd = ('/bin/bash -lc "rg \\"foo|cat '
+               'skills/develop/SKILL.md\\" README.md"')
+        skills = parse_codex_skills(_jsonl(_codex_cmd("item_1", cmd)))
+        self.assertEqual(skills.triggered, ())
+        self.assertEqual(skills.evidence, {})
+        self.assertEqual(skills.incidental, ("develop",))
+        self.assertEqual(skills.incidental_counts, {"develop": 1})
+
+    def test_reader_writing_the_skill_is_incidental(self) -> None:
+        # A reader verb whose SKILL.md is a *write* target, not an argument it
+        # dumps, is an incidental reference -- an output redirection
+        # (`cat t > …/SKILL.md`) or a non-reading mode (`sed -i` edits in place)
+        # must not fabricate an inferred load.
+        for command in (
+            "/bin/bash -lc 'cat /tmp/template > "
+            ".agents/skills/develop/SKILL.md'",
+            "/bin/bash -lc \"sed -i 's/a/b/' .agents/skills/develop/SKILL.md\"",
+        ):
+            with self.subTest(command=command):
+                skills = parse_codex_skills(_jsonl(_codex_cmd("item_1", command)))
+                self.assertEqual(skills.triggered, ())
+                self.assertEqual(skills.evidence, {})
+                self.assertEqual(skills.incidental, ("develop",))
+                self.assertEqual(skills.incidental_counts, {"develop": 1})
+
+    def test_inferred_read_and_incidental_reference_coexist(self) -> None:
+        # The issue's combined shape: one run that both directly reads
+        # review/SKILL.md (an inferred load) and runs `git diff` over a changed
+        # develop/SKILL.md (an incidental reference). The two land in separate
+        # buckets, and the git-diff item's started/completed pair dedups to one
+        # incidental reference by its shared item.id.
+        diff = "/bin/bash -lc 'git diff -- .agents/skills/develop/SKILL.md'"
+        stdout = _jsonl(
+            _codex_cmd("item_1", "/bin/bash -lc 'cat skills/review/SKILL.md'"),
+            _codex_cmd("item_2", diff, started=True, status="in_progress"),
+            _codex_cmd("item_2", diff, status="completed", exit_code=0),
+        )
+        skills = parse_codex_skills(stdout)
+        self.assertEqual(skills.triggered, ("review",))
+        self.assertEqual(skills.trigger_counts, {"review": 1})
+        self.assertEqual(skills.evidence, {"review": "inferred"})
+        self.assertEqual(skills.incidental, ("develop",))
+        self.assertEqual(skills.incidental_counts, {"develop": 1})
+
+    def test_incidental_recorded_even_when_skill_loaded(self) -> None:
+        # A skill that is both directly read and separately inspected keeps
+        # both records: it stays a trigger (evidence `inferred`, trigger count
+        # from the read alone) AND retains its incidental count from the two
+        # inspections — the buckets are independent, only the structural
+        # exclusion (incidental never enters the trigger set) applies.
+        stdout = _jsonl(
+            _codex_cmd("item_1", "/bin/bash -lc 'cat skills/develop/SKILL.md'"),
+            _codex_cmd("item_2",
+                       "/bin/bash -lc 'git diff -- skills/develop/SKILL.md'"),
+            _codex_cmd("item_3",
+                       "/bin/bash -lc 'git status skills/develop/SKILL.md'"),
+        )
+        skills = parse_codex_skills(stdout)
+        self.assertEqual(skills.triggered, ("develop",))
+        self.assertEqual(skills.trigger_counts, {"develop": 1})
+        self.assertEqual(skills.evidence, {"develop": "inferred"})
+        self.assertEqual(skills.incidental, ("develop",))
+        self.assertEqual(skills.incidental_counts, {"develop": 2})
+
+    def test_read_chained_after_inspection_is_inferred(self) -> None:
+        # A single command can chain an inspection and a read; each sub-command
+        # is classified on its own leading verb, so the `sed` read is an
+        # inferred load even though a `git diff` precedes it in the same command.
+        cmd = ("/bin/bash -lc \"git diff -- calc.py && sed -n '1,80p' "
+               "skills/review/SKILL.md\"")
+        skills = parse_codex_skills(_jsonl(_codex_cmd("item_1", cmd)))
+        self.assertEqual(skills.triggered, ("review",))
+        self.assertEqual(skills.evidence, {"review": "inferred"})
+        self.assertEqual(skills.incidental, ())
 
     def test_malformed_lines_are_skipped(self) -> None:
         good = json.dumps(
