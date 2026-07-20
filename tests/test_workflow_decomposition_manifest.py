@@ -10,7 +10,7 @@ from tests.fakes import make_issue
 from tests.workflow_helpers import _TEST_SPEC, _manifest
 
 
-class ParseManifestTest(unittest.TestCase):
+class ParseManifestDecisionTest(unittest.TestCase):
     def test_single_decision(self) -> None:
         msg = "I think this fits.\n\n" + _manifest(
             '{"decision": "single", "rationale": "small change"}'
@@ -57,6 +57,7 @@ class ParseManifestTest(unittest.TestCase):
         self.assertIsNone(manifest)
         self.assertIn("non-empty", error)
 
+class ParseManifestChildValidationTest(unittest.TestCase):
     def test_child_missing_title_rejected(self) -> None:
         manifest, error = workflow._parse_manifest(_manifest(
             '{"decision": "split", "children": ['
@@ -121,6 +122,7 @@ class ParseManifestTest(unittest.TestCase):
         self.assertIsNone(manifest)
         self.assertIn("title or body", error)
 
+class ParseManifestEnvelopeTest(unittest.TestCase):
     def test_multiple_manifest_blocks_rejected(self) -> None:
         # The decompose prompt requires exactly one manifest. If the
         # decomposer quotes a sample/template manifest and then emits its
@@ -178,6 +180,7 @@ class ParseManifestTest(unittest.TestCase):
                 self.assertIsNone(manifest)
                 self.assertIn("must be a list", error)
 
+class ParseManifestOptionsTest(unittest.TestCase):
     def test_null_depends_on_treated_as_empty(self) -> None:
         # Explicit JSON null is treated the same as a missing key:
         # both signal "no dependencies". Only a non-list, non-null

@@ -20,33 +20,37 @@ from tests.workflow_helpers import (
 )
 
 
+def _seed_child_with_merged_pr(
+    gh: FakeGitHubClient,
+    *,
+    number: int,
+    label: str,
+    pr_number: int,
+) -> FakeIssue:
+    child = make_issue(number, label=label)
+    child.closed = True
+    gh.add_issue(child)
+    pr = FakePR(
+        number=pr_number,
+        head_branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}",
+        head=FakePRRef(sha="cafe1234"),
+        merged=True,
+        state="closed",
+    )
+    gh.add_pr(pr)
+    gh.seed_state(number, pr_number=pr_number)
+    return child
+
+
 class ChildMergedPrAutoFinalizeTest(
     unittest.TestCase, _PatchedWorkflowMixin
 ):
     """A child whose linked PR was merged externally but whose workflow
     label was never advanced past an in-flight stage (e.g. `validating`)
-    used to look like a `manually_closed` child to `_handle_blocked` /
-    `_handle_umbrella` and park the parent for human adjudication. The
+    looks like a manually closed child to the parent aggregation. The
     finalize helper detects the merge during the parent's poll and flips
     the child to `done`, so the parent's aggregation can proceed.
     """
-
-    def _seed_child_with_merged_pr(
-        self, gh: FakeGitHubClient, *, number: int, label: str, pr_number: int,
-    ) -> FakeIssue:
-        child = make_issue(number, label=label)
-        child.closed = True
-        gh.add_issue(child)
-        pr = FakePR(
-            number=pr_number,
-            head_branch=f"orchestrator/geserdugarov__agent-orchestrator/issue-{number}",
-            head=FakePRRef(sha="cafe1234"),
-            merged=True,
-            state="closed",
-        )
-        gh.add_pr(pr)
-        gh.seed_state(number, pr_number=pr_number)
-        return child
 
     def test_blocked_recovers_child_with_merged_pr(self) -> None:
         gh = FakeGitHubClient()
@@ -59,7 +63,7 @@ class ChildMergedPrAutoFinalizeTest(
         # (the human clicked Merge before the reviewer agent finished).
         # Used to park the parent on "manually closed"; must now be
         # finalized in-line and counted toward the all-done aggregation.
-        self._seed_child_with_merged_pr(
+        _seed_child_with_merged_pr(
             gh, number=702, label="validating", pr_number=7020,
         )
         gh.seed_state(70, children=[701, 702])
@@ -86,7 +90,7 @@ class ChildMergedPrAutoFinalizeTest(
         done_child = make_issue(801, label="done")
         done_child.closed = True
         gh.add_issue(done_child)
-        self._seed_child_with_merged_pr(
+        _seed_child_with_merged_pr(
             gh, number=802, label="implementing", pr_number=8020,
         )
         gh.seed_state(80, children=[801, 802], umbrella=True)

@@ -22,6 +22,8 @@ from tests.workflow_helpers import (
     KEY_ISSUE_TOTAL_TOKENS,
     KEY_LAST_ACTION_COMMENT_ID,
     KEY_PARENT_NUMBER,
+)
+from tests.workflow_helpers import (
     LABEL_BLOCKED,
     LABEL_DECOMPOSING,
     LABEL_IMPLEMENTING,
@@ -29,6 +31,8 @@ from tests.workflow_helpers import (
     LABEL_UMBRELLA,
     _PatchedWorkflowMixin,
     _TEST_SPEC,
+)
+from tests.workflow_helpers import (
     _agent,
     _iso_hours_ago,
     _manifest,
@@ -56,7 +60,58 @@ READ_ONLY_FRAGMENT = "read-only"
 IMPLEMENTED_MESSAGE = "implemented"
 
 
-class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
+class _DecomposingWorkflowMixin(_PatchedWorkflowMixin):
+    def _run_decomposing(self, gh, issue, **run_options):
+        return self._run(
+            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            **run_options,
+        )
+
+
+class _ChildCreationSnapshotRecorder:
+    def __init__(self, gh: FakeGitHubClient, parent_number: int) -> None:
+        self.snapshots: list[list] = []
+        self._gh = gh
+        self._parent_number = parent_number
+        self._create_child = gh.create_child_issue
+
+    def __call__(self, **kwargs):
+        recorded = self._gh.pinned_data(self._parent_number).get(KEY_CHILDREN)
+        self.snapshots.append(list(recorded or []))
+        return self._create_child(**kwargs)
+
+
+class _ExpectedChildCountRecorder:
+    def __init__(self, gh: FakeGitHubClient, parent_number: int) -> None:
+        self.expected_counts: list[Optional[int]] = []
+        self._gh = gh
+        self._parent_number = parent_number
+        self._create_child = gh.create_child_issue
+
+    def __call__(self, **kwargs):
+        parent_state = self._gh.pinned_data(self._parent_number)
+        self.expected_counts.append(parent_state.get("expected_children_count"))
+        return self._create_child(**kwargs)
+
+
+class _ChildSeedOrderRecorder:
+    def __init__(self, gh: FakeGitHubClient, parent_number: int) -> None:
+        self.snapshots: list[list] = []
+        self._gh = gh
+        self._parent_number = parent_number
+        self._write_state = gh.write_pinned_state
+
+    def __call__(self, target_issue, state):
+        if target_issue.number != self._parent_number:
+            parent_state = self._gh.pinned_data(self._parent_number)
+            self.snapshots.append(list(parent_state.get(KEY_CHILDREN) or []))
+        return self._write_state(target_issue, state)
+
+
+class HandleDecomposingDecisionTest(
+    unittest.TestCase,
+    _DecomposingWorkflowMixin,
+):
     """The decomposer drives the (no-label / `decomposing`) -> ready/blocked
     transitions. Single decision routes the parent to `ready`; split creates
     children with `ready`/`blocked` labels and parks the parent on `blocked`.
@@ -96,8 +151,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             '{"decision": "single", "rationale": "fits in one context"}'
         )
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
@@ -128,8 +184,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             '"notes": "Bump the default and cover it in fakes."}'
         )
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
@@ -157,8 +214,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             ']}'
         )
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
@@ -205,8 +263,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             ']}'
         )
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
@@ -247,8 +306,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             ']}'
         )
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
@@ -272,8 +332,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             ']}'
         )
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
@@ -295,6 +356,10 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
                 gh.pinned_data(child.number).get(KEY_PARENT_NUMBER), 13,
             )
 
+class HandleDecomposingParkTest(
+    unittest.TestCase,
+    _DecomposingWorkflowMixin,
+):
     def test_commits_left_by_decomposer_park(self) -> None:
         # The decomposer is supposed to be read-only. If it commits in the
         # parent's worktree, the implementer recovery path in
@@ -306,8 +371,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         manifest = _manifest(SINGLE_MANIFEST_PAYLOAD)
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
             has_new_commits=True,
         )
@@ -325,8 +391,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         manifest = _manifest(SINGLE_MANIFEST_PAYLOAD)
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
             dirty_files=("foo.py",),
         )
@@ -343,8 +410,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         bad = _manifest("{not really json")
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=bad),
         )
 
@@ -364,8 +432,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         issue = make_issue(15, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DECOMPOSER_SESSION,
                 last_message="Should the new commands accept a --json flag?",
@@ -391,8 +460,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
 
         with self.assertLogs("orchestrator.workflow", level="WARNING") as logs:
-            self._run(
-                lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            self._run_decomposing(
+                gh,
+                issue,
                 run_agent=_agent(
                     session_id=DECOMPOSER_SESSION,
                     last_message="",
@@ -412,6 +482,10 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             for r in logs.records
         ))
 
+class HandleDecomposingResumeTest(
+    unittest.TestCase,
+    _DecomposingWorkflowMixin,
+):
     def test_decompose_resume_on_human_reply(self) -> None:
         gh = FakeGitHubClient()
         issue = make_issue(16, label=LABEL_DECOMPOSING)
@@ -428,8 +502,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         manifest = SPLIT_MANIFEST
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DECOMPOSER_SESSION, last_message=manifest
             ),
@@ -473,8 +548,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
         manifest = SPLIT_MANIFEST
         with patch.object(config, "ALLOWED_ISSUE_AUTHORS", ("geserdugarov",)):
-            mocks = self._run(
-                lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            mocks = self._run_decomposing(
+                gh,
+                issue,
                 run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
             )
         prompt = mocks[RUN_AGENT].call_args.args[1]
@@ -504,8 +580,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "DECOMPOSE_AGENT", BACKEND_CODEX):
-            mocks = self._run(
-                lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            mocks = self._run_decomposing(
+                gh,
+                issue,
                 run_agent=_agent(
                     session_id=DECOMPOSER_SESSION, last_message=manifest
                 ),
@@ -527,8 +604,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             retry_window_start=_iso_hours_ago(1),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
@@ -540,6 +618,10 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             last_comment,
         )
 
+class DecompositionDisabledTest(
+    unittest.TestCase,
+    _DecomposingWorkflowMixin,
+):
     def test_off_falls_back_to_legacy_pickup(self) -> None:
         # End-to-end: with DECOMPOSE=off, the unlabeled issue must skip
         # the decomposer entirely and route straight to implementing
@@ -592,8 +674,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "DECOMPOSE", False):
-            mocks = self._run(
-                lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            mocks = self._run_decomposing(
+                gh,
+                issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message=IMPLEMENTED_MESSAGE
                 ),
@@ -664,8 +747,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "DECOMPOSE", False):
-            self._run(
-                lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            self._run_decomposing(
+                gh,
+                issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message=IMPLEMENTED_MESSAGE
                 ),
@@ -700,8 +784,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "DECOMPOSE", False):
-            self._run(
-                lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+            self._run_decomposing(
+                gh,
+                issue,
                 run_agent=_agent(
                     session_id=DEV_SESSION, last_message=IMPLEMENTED_MESSAGE
                 ),
@@ -740,8 +825,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         )
 
         with patch.object(config, "DECOMPOSE", False):
-            mocks = self._run(
-                lambda: workflow._handle_decomposing(gh, _TEST_SPEC, parent),
+            mocks = self._run_decomposing(
+                gh,
+                parent,
                 run_agent=_agent(),
             )
 
@@ -751,6 +837,10 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         self.assertNotIn(LABEL_IMPLEMENTING, labels)
         self.assertEqual(gh.created_child_issues, [])
 
+class DecompositionChildPersistenceTest(
+    unittest.TestCase,
+    _DecomposingWorkflowMixin,
+):
     def test_persists_children_incrementally(self) -> None:
         # Each successful child creation must flush the parent's
         # `children` list before the next iteration starts. Without this,
@@ -770,30 +860,29 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             ']}'
         )
 
-        snapshots: list[list] = []
-        real_create = gh.create_child_issue
+        recorder = _ChildCreationSnapshotRecorder(gh, issue.number)
+        gh.create_child_issue = recorder
 
-        def spy_create(**kwargs):
-            snapshots.append(list(gh.pinned_data(80).get(KEY_CHILDREN) or []))
-            return real_create(**kwargs)
-
-        gh.create_child_issue = spy_create
-
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
         # iter 0: no children yet. iter 1: child[0] already persisted.
         # iter 2: child[0] + child[1] already persisted.
-        self.assertEqual(len(snapshots), 3)
-        self.assertEqual(snapshots[0], [])
-        self.assertEqual(len(snapshots[1]), 1)
-        self.assertEqual(len(snapshots[2]), 2)
+        self.assertEqual(len(recorder.snapshots), 3)
+        self.assertEqual(recorder.snapshots[0], [])
+        self.assertEqual(len(recorder.snapshots[1]), 1)
+        self.assertEqual(len(recorder.snapshots[2]), 2)
         self.assertEqual(
             len(gh.pinned_data(80).get(KEY_CHILDREN) or []), 3,
         )
 
+class DecompositionRecoveryTest(
+    unittest.TestCase,
+    _DecomposingWorkflowMixin,
+):
     def test_half_finished_recovery_flips_to_blocked(self) -> None:
         # Simulate: a prior tick created+persisted children but crashed
         # before flipping the parent label from `decomposing` to
@@ -822,8 +911,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             decomposer_session_id=DECOMPOSER_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
@@ -850,8 +940,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             decomposer_session_id=DECOMPOSER_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
@@ -880,8 +971,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             decomposer_session_id=DECOMPOSER_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
@@ -916,8 +1008,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             decomposer_session_id=DECOMPOSER_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
@@ -967,8 +1060,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             decomposer_session_id=DECOMPOSER_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, parent),
+        mocks = self._run_decomposing(
+            gh,
+            parent,
             run_agent=_agent(),
         )
 
@@ -983,6 +1077,10 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         healthy_state = gh.pinned_data(601)
         self.assertEqual(healthy_state.get(KEY_PARENT_NUMBER), 60)
 
+class DecompositionWriteOrderingTest(
+    unittest.TestCase,
+    _DecomposingWorkflowMixin,
+):
     def test_split_persists_expected_count_first(self) -> None:
         # `expected_children_count` MUST be on the parent before any
         # child is created on GitHub. Otherwise a SIGKILL after the
@@ -994,23 +1092,16 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         manifest = SPLIT_MANIFEST
 
-        seen_expected: list[Optional[int]] = []
-        real_create = gh.create_child_issue
+        recorder = _ExpectedChildCountRecorder(gh, issue.number)
+        gh.create_child_issue = recorder
 
-        def spy_create(**kwargs):
-            seen_expected.append(
-                gh.pinned_data(82).get("expected_children_count")
-            )
-            return real_create(**kwargs)
-
-        gh.create_child_issue = spy_create
-
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
-        self.assertEqual(seen_expected[0], 2)
+        self.assertEqual(recorder.expected_counts[0], 2)
         self.assertEqual(gh.pinned_data(82).get("expected_children_count"), 2)
 
     def test_parent_records_child_before_child_state(self) -> None:
@@ -1028,36 +1119,28 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             ']}'
         )
 
-        # Wrap write_pinned_state so we can observe the order of writes
-        # against parent vs child.
-        seen_children_before_child_seed: list[list] = []
-        real_write = gh.write_pinned_state
+        recorder = _ChildSeedOrderRecorder(gh, issue.number)
+        gh.write_pinned_state = recorder
 
-        def spy_write(target_issue, state):
-            if target_issue.number != 83:
-                # Child write -- parent state should already have the
-                # child number recorded by now.
-                seen_children_before_child_seed.append(
-                    list(gh.pinned_data(83).get(KEY_CHILDREN) or [])
-                )
-            return real_write(target_issue, state)
-
-        gh.write_pinned_state = spy_write
-
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
         # Exactly one child was created and its pinned state was seeded
         # AFTER the parent recorded the child number.
-        self.assertEqual(len(seen_children_before_child_seed), 1)
+        self.assertEqual(len(recorder.snapshots), 1)
         self.assertEqual(
-            len(seen_children_before_child_seed[0]), 1,
+            len(recorder.snapshots[0]), 1,
             "parent must record the child number before the child's "
             "pinned state is seeded",
         )
 
+class DecompositionWorktreeTest(
+    unittest.TestCase,
+    _DecomposingWorkflowMixin,
+):
     def test_uses_separate_implementer_worktree(self) -> None:
         # The decomposer must NOT taint the implementer's per-issue branch.
         # If it shared `_ensure_worktree`, a `split` decision would leave
@@ -1072,8 +1155,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             SINGLE_MANIFEST_PAYLOAD
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
@@ -1092,8 +1176,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
         gh.add_issue(issue)
         manifest = _manifest(SINGLE_MANIFEST_PAYLOAD)
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
             has_new_commits=True,
         )
@@ -1118,8 +1203,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             decomposer_session_id=DECOMPOSER_SESSION,
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
@@ -1137,8 +1223,9 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
             '{"decision": "single", "rationale": [1, 2, 3]}'
         )
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
@@ -1152,7 +1239,7 @@ class HandleDecomposingTest(unittest.TestCase, _PatchedWorkflowMixin):
 
 
 class DecomposerRunUsageAccumulationTest(
-    unittest.TestCase, _PatchedWorkflowMixin,
+    unittest.TestCase, _DecomposingWorkflowMixin,
 ):
     """`_handle_decomposing` folds each real decomposer exit into the
     per-issue usage counters, at both the fresh-spawn and awaiting-human
@@ -1167,8 +1254,9 @@ class DecomposerRunUsageAccumulationTest(
         gh.add_issue(issue)
         manifest = _manifest(SINGLE_MANIFEST_PAYLOAD)
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(session_id=DECOMPOSER_SESSION, last_message=manifest),
         )
 
@@ -1192,8 +1280,9 @@ class DecomposerRunUsageAccumulationTest(
             decomposer_session_id=DECOMPOSER_SESSION,
         )
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DECOMPOSER_SESSION,
                 last_message=_manifest(
@@ -1218,8 +1307,9 @@ class DecomposerRunUsageAccumulationTest(
             user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(),
         )
 
@@ -1242,8 +1332,9 @@ class DecomposerRunUsageAccumulationTest(
             user_content_hash=workflow._compute_user_content_hash(issue, set()),
         )
 
-        self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id="", last_message="", exit_code=1, interrupted=True,
             ),
@@ -1271,8 +1362,9 @@ class DecomposerRunUsageAccumulationTest(
         issue = make_issue(624, label=LABEL_DECOMPOSING)
         gh.add_issue(issue)
 
-        mocks = self._run(
-            lambda: workflow._handle_decomposing(gh, _TEST_SPEC, issue),
+        mocks = self._run_decomposing(
+            gh,
+            issue,
             run_agent=_agent(
                 session_id=DECOMPOSER_SESSION, last_message="", interrupted=True,
             ),

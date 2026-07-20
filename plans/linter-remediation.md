@@ -43,7 +43,7 @@ Do not mark a stage complete until its completion gate is satisfied.
 | 2 | Extreme production complexity hotspots | 8/8 | [x] |
 | 3 | Remaining production complexity | 5/6 | [ ] |
 | 4 | Remaining production style and structure | 5/5 | [x] |
-| 5 | Test structure and complexity | 3/7 | [ ] |
+| 5 | Test structure and complexity | 4/7 | [ ] |
 | 6 | Test literals and naming | 1/7 | [ ] |
 | 7 | Long-tail cleanup and final verification | 0/5 | [ ] |
 
@@ -341,7 +341,7 @@ For every package:
 
 ### Package 5.4 — Decomposition, question, and documenting tests
 
-- [ ] Refactor decomposition, question, documenting, and their routing/paused/drift test modules.
+- [x] Refactor decomposition, question, documenting, and their routing/paused/drift test modules.
 
 ### Package 5.5 — Implementing and fixing tests
 
@@ -980,14 +980,43 @@ considered.
 - Protected by: the 167 focused Package 5.3 tests.
 - Reviewed: [x]
 
-### Unittest log-capture variables
+### Decomposition, question, and documenting scenario density
 
-- File and symbols: `assertLogs` captures in `tests/test_scheduler.py`,
-  `tests/test_workflow_scheduler_routing.py`, and `tests/test_workflow_branch_publication.py`.
+- File and symbols: scenario tests across `tests/test_workflow_decomposition_*.py`,
+  `tests/test_workflow_question*.py`, and `tests/test_workflow_documenting*.py`.
+- Rule: `WPS204`, `WPS210`, and `WPS213`.
+- Reason: Shared stage runners, issue-family seeds, documenting fixtures, question-round assertions, and ordered-write
+  recorders were extracted. The remaining expressions and locals describe distinct pinned-state inputs, mock outcomes,
+  trust-filter comments, git unwind commands, and per-branch assertions. Further extraction would hide the state-machine
+  scenario or replace meaningful local names with an opaque options mapping.
+- Protected by: the 225 focused Package 5.4 tests.
+- Reviewed: [x]
+
+### Cohesive decomposition, question, and documenting test shapes
+
+- File and symbols: `tests/test_workflow_decomposition_decomposing.py`, `tests/test_workflow_question.py`, and
+  `tests/test_workflow_documenting.py`.
+- Rule: `WPS201` and `WPS202`.
+- Reason: Oversized test classes are split into behavior-focused classes while their stage constants and fixtures stay
+  beside the scenarios that consume them. Splitting the three modules at the seven-member threshold would duplicate
+  those fixtures and make related state transitions harder to follow; the question module's imports are the direct
+  collaborators used by its handler and real-git regression scenarios.
+- Protected by: the 143 focused tests in these three modules.
+- Reviewed: [x]
+
+### Unittest context-manager capture variables
+
+- File and symbols: `assertLogs` and `patch` captures in `tests/test_scheduler.py`,
+  `tests/test_workflow_scheduler_routing.py`, `tests/test_workflow_branch_publication.py`,
+  `tests/test_workflow_decomposition_blocked.py`, `tests/test_workflow_decomposition_decomposing.py`,
+  `tests/test_workflow_decomposition_umbrella.py`, `tests/test_workflow_question.py`,
+  `tests/test_workflow_question_routing.py`, and `tests/test_workflow_documenting_routing.py`.
 - Rule: `WPS441`.
-- Reason: `unittest` populates each capture's `output` only when the context exits. Reading the capture afterward is
-  the standard assertion boundary; wrapping it in a helper would hide the log level and operation under test.
-- Protected by: scheduler failure/skip logging and unsafe-transport refusal tests.
+- Reason: `unittest` populates log captures on context exit, and patch mocks are asserted after restoration. Reading
+  each capture afterward is the standard assertion boundary; wrapping it in a helper would hide the patched operation,
+  log level, or non-call assertion under test.
+- Protected by: scheduler failure/skip logging, unsafe-transport refusal, stage routing, retry-budget, and dependency
+  visibility tests.
 - Reviewed: [x]
 
 ## Session log
@@ -1059,7 +1088,28 @@ Add one row for every implementation session, including partial sessions.
 | 2026-07-20 | 5.1+6.1 r2 | Partial | Restored read asserts; gate 2150p/3s | Not committed | Heavy-module residual |
 | 2026-07-20 | 5.1+6.1 | Complete | WPS 470->446; WPS118->0; gate 2150p/3s | Not committed | Stage 5/6 1/7 |
 | 2026-07-20 | 5.2 | Complete | WPS430 55->19, WPS338 16->1; gate 2116p/36s | Not committed | Start Package 5.3 |
-| 2026-07-20 | 5.3 | Complete | WPS 681->363; 167 focused; gate 2150p/3s | Not committed | Start Package 5.2 |
+| 2026-07-20 | 5.3 | Complete | WPS 681->363; 167 focused; gate 2150p/3s | Not committed | Start Package 5.4 |
+| 2026-07-20 | 5.4 | Complete | WPS 748->697; 225 focused; gate 2150p/3s | Not committed | Start Package 5.5 |
+
+Package 5.4 is **complete**. The pass covered the decomposition handler families, question handling and routing,
+documenting handling, paused/trust filtering, and documenting routing. Oversized stage-test classes were split into
+behavior-focused groups; repeated stage invocation and fixture setup moved into small mixins and module helpers; and
+the three nested child-write observers plus the question relabel callback family moved into narrowly scoped callable
+recorders. The collected set of 225 test methods is unchanged, and every scenario retains its original assertions.
+
+The scoped `--select=WPS` count over the fourteen modules fell from 748 to 697, removing 51 findings. `WPS214` fell
+from 7 to 0, `WPS338` from 17 to 0, `WPS430` from 8 to 0, `WPS235` from 2 to 0, and `WPS221` from 1 to 0; `WPS204`
+fell from 51 to 43. The 137 retained structural findings are `WPS201` (1), `WPS202` (3), `WPS204` (43), `WPS210`
+(55), `WPS213` (19), and `WPS441` (16), covered by the reviewed scenario-density, cohesive-module, and
+context-capture entries above. The other 560 findings are naming, repeated-string, numeric-literal, and long-tail
+format findings assigned to Package 6.4 or Stage 7: `WPS110` (4), `WPS111` (22), `WPS115` (14), `WPS226` (48),
+`WPS237` (2), `WPS336` (3), and `WPS432` (467).
+
+All 225 focused tests and Ruff pass. The complete tracked suite passes with 2,150 tests and 3 live-Postgres skips,
+and both committed-range and working-tree diff checks are clean. The test-method redundancy audit confirms that the
+same 225 named behaviors remain collected after the class splits. A bare repository-root collection also sees the
+ignored, externally owned `analytics-db/data` volume and receives `PermissionError`; the tracked `tests/` tree is the
+recorded full gate for this session.
 
 Package 5.3 is **complete**. The pass covered scheduler execution and routing, base-sync unit and real-git
 scenarios, branch publication, cleanup, worktree path resolution, and worktree serialization. Repeated event-gate
